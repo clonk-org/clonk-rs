@@ -88,7 +88,9 @@ pub fn compose_initial_network_dynamic(
     }
 
     let mut group = MutableGroup::new(spec.group_filename);
-    group.set_maker_bytes(spec.maker);
+    if !spec.maker.is_empty() {
+        group.set_maker_bytes(spec.maker);
+    }
 
     // SaveCore writes Parameters before Scenario; SaveData follows with Game.
     // Preserve that timestamp-producing sequence even though Close later sorts

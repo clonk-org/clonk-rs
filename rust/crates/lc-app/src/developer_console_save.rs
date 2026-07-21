@@ -8,12 +8,140 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
-use lc_engine::{LiveC4CrewProfileCleanup, LiveC4SaveComponents, LiveC4SavePolicy};
+use lc_engine::{
+    LiveC4CrewProfileCleanup, LiveC4SaveComponentMutation, LiveC4SaveComponents,
+    LiveC4SaveLandscapeMutation, LiveC4SavePolicy, LiveC4SavePreLandscapeComponents,
+    LiveC4SaveScenarioSectionMutation,
+};
 use lc_resources::{Group, GroupEntry, MutableGroup, MutableGroupChildMut};
 
 use crate::runtime_join_save::SerializedRuntimeJoinPlayerGroup;
 
 const C4FLS_PLAYER: &str = "Player.txt|Portrait.png|Portrait.bmp|*.c4i";
+
+/// Whether a failed physical add aborts a folder-backed live save.
+///
+/// Packed C4Groups defer every add to `Close`; folder groups execute it at
+/// the call site.  The journal retains the caller's treatment of that return
+/// value so direct folder replay can stop at the same component boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderSaveAddFailure {
+    Fatal,
+    Ignore,
+}
+
+/// One physical mutation performed immediately by a native `GRPF_Folder`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderSaveMutation {
+    /// `C4Group::Delete`, including wildcard and segmented file specs.
+    DeletePattern { pattern: Vec<u8> },
+    /// `C4Group::DeleteEntry`, which uses the literal child path for folders.
+    DeleteEntry { name: Vec<u8> },
+    /// `C4Group::Add`/`Move` of an ordinary component buffer.
+    PutFile {
+        name: Vec<u8>,
+        payload: Vec<u8>,
+        failure: FolderSaveAddFailure,
+    },
+    /// `C4Group::Add`/`Move` of a packed child-group image.
+    PutChild {
+        name: Vec<u8>,
+        raw_image: Vec<u8>,
+        failure: FolderSaveAddFailure,
+    },
+    /// `C4Landscape::SaveTextures`' in-place Material.c4g update.
+    MergeMaterialGroup { raw_patch: Vec<u8> },
+}
+
+/// Ordered folder mutations accumulated alongside the packed-group mirror.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderSaveJournal {
+    enabled: bool,
+    mutations: Vec<FolderSaveMutation>,
+}
+
+impl Default for FolderSaveJournal {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mutations: Vec::new(),
+        }
+    }
+}
+
+impl FolderSaveJournal {
+    /// A zero-copy sink for packed targets, whose mutations remain virtual
+    /// until C4Group close and therefore need no folder replay.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            mutations: Vec::new(),
+        }
+    }
+
+    pub fn mutations(&self) -> &[FolderSaveMutation] {
+        &self.mutations
+    }
+
+    pub fn delete_pattern(&mut self, pattern: impl AsRef<[u8]>) {
+        if !self.enabled {
+            return;
+        }
+        self.mutations.push(FolderSaveMutation::DeletePattern {
+            pattern: pattern.as_ref().to_vec(),
+        });
+    }
+
+    pub fn delete_entry(&mut self, name: impl AsRef<[u8]>) {
+        if !self.enabled {
+            return;
+        }
+        self.mutations.push(FolderSaveMutation::DeleteEntry {
+            name: name.as_ref().to_vec(),
+        });
+    }
+
+    pub fn put_file(
+        &mut self,
+        name: impl AsRef<[u8]>,
+        payload: impl AsRef<[u8]>,
+        failure: FolderSaveAddFailure,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        self.mutations.push(FolderSaveMutation::PutFile {
+            name: name.as_ref().to_vec(),
+            payload: payload.as_ref().to_vec(),
+            failure,
+        });
+    }
+
+    pub fn put_child(
+        &mut self,
+        name: impl AsRef<[u8]>,
+        raw_image: impl AsRef<[u8]>,
+        failure: FolderSaveAddFailure,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        self.mutations.push(FolderSaveMutation::PutChild {
+            name: name.as_ref().to_vec(),
+            raw_image: raw_image.as_ref().to_vec(),
+            failure,
+        });
+    }
+
+    pub fn merge_material_group(&mut self, raw_patch: impl AsRef<[u8]>) {
+        if !self.enabled {
+            return;
+        }
+        self.mutations.push(FolderSaveMutation::MergeMaterialGroup {
+            raw_patch: raw_patch.as_ref().to_vec(),
+        });
+    }
+}
 
 /// Overlay a freshly serialized live player onto a copy of its local profile.
 ///
@@ -166,7 +294,7 @@ fn open_child_entry_exact(group: &Group, entry: &GroupEntry) -> Result<Group> {
 pub fn serialize_savegame_description(
     title: &[u8],
     charset_code: u8,
-    lines: &[Vec<u8>],
+    lines: &[(Vec<u8>, bool)],
 ) -> Vec<u8> {
     let mut description = format!(
         "{{\\rtf1\\ansi\\ansicpg1252\\deff0\\deflang1031{{\\fonttbl {{\\f0\\fnil\\fcharset{charset_code} Times New Roman;}}}}\r\n\\uc1\\pard\\ulnone\\b\\f0\\fs20 "
@@ -174,9 +302,11 @@ pub fn serialize_savegame_description(
     .into_bytes();
     append_rtf_escaped(&mut description, title);
     description.extend_from_slice(b"\\par\r\n\\b0\\fs16\\par\r\n");
-    for line in lines {
+    for (line, terminate_paragraph) in lines {
         append_rtf_escaped(&mut description, line);
-        description.extend_from_slice(b"\\par\r\n");
+        if *terminate_paragraph {
+            description.extend_from_slice(b"\\par\r\n");
+        }
     }
     // `EndOfFile` is spelled `"\\x020"` by C4Strings.h. C/C++ consumes all
     // three hexadecimal digits, so the terminating byte is a space (0x20).
@@ -240,6 +370,41 @@ pub fn format_resource_integers(template: &[u8], arguments: &[i32]) -> Vec<u8> {
     output
 }
 
+/// Substitute byte-string `%s` fields without transcoding the localized
+/// resource or its arguments.
+pub fn format_resource_strings(template: &[u8], arguments: &[&[u8]]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(template.len());
+    let mut cursor = 0;
+    let mut argument = 0;
+    while cursor < template.len() {
+        if template[cursor] != b'%' {
+            output.push(template[cursor]);
+            cursor += 1;
+            continue;
+        }
+        match template.get(cursor + 1).copied() {
+            Some(b'%') => {
+                output.push(b'%');
+                cursor += 2;
+            }
+            Some(b's') if argument < arguments.len() => {
+                output.extend_from_slice(arguments[argument]);
+                argument += 1;
+                cursor += 2;
+            }
+            Some(_) => {
+                output.extend_from_slice(&template[cursor..cursor + 2]);
+                cursor += 2;
+            }
+            None => {
+                output.push(b'%');
+                cursor += 1;
+            }
+        }
+    }
+    output
+}
+
 fn append_rtf_escaped(output: &mut Vec<u8>, input: &[u8]) {
     for byte in input.iter().copied() {
         if matches!(byte, b'\\' | b'{' | b'}') {
@@ -251,11 +416,6 @@ fn append_rtf_escaped(output: &mut Vec<u8>, input: &[u8]) {
 
 /// Apply the app-owned half of a non-initial live C4 save to a copied group.
 ///
-/// `current_section_entry` is the final root entry name (for example,
-/// `SectMain.c4g`), not merely the logical section name. C++ deletes that
-/// entry for exact saves because the current section is represented by the
-/// root runtime components.
-///
 /// `landscape_is_static` is supplied separately because an unchanged static
 /// landscape and a dynamic landscape both produce no landscape component,
 /// but only the static path deletes a copied legacy `Landscape.bmp`.
@@ -265,41 +425,283 @@ pub fn apply_live_save_to_group(
     save: &LiveC4SaveComponents,
     save_player_infos: &[u8],
     player_groups: Vec<SerializedRuntimeJoinPlayerGroup>,
-    current_section_entry: Option<&str>,
     landscape_is_static: bool,
 ) -> Result<()> {
-    // Keep callers from observing a half-applied group if a serialized child
-    // is malformed or a copied Material.c4g is an ordinary file.
-    let mut rewritten = group.clone();
-    apply_live_save_to_group_inner(
-        &mut rewritten,
-        policy,
-        save,
-        save_player_infos,
-        player_groups,
-        current_section_entry,
-        landscape_is_static,
-    )?;
-    *group = rewritten;
+    // C4GameSave mutates its open destination component-by-component. A late
+    // failure deliberately leaves all earlier writes and deletions visible.
+    apply_live_save_runtime_components_to_group(group, policy, save, landscape_is_static)?;
+    apply_live_save_player_infos_to_group(group, save_player_infos)?;
+    for player in player_groups {
+        add_live_save_player_group(group, player)?;
+    }
     Ok(())
 }
 
-fn apply_live_save_to_group_inner(
+/// Commit the exact destination prefix which precedes a fallible landscape
+/// save. This preserves C4GameSave's observable partial-write behavior while
+/// the engine still stops its object enumeration at the native failure point.
+pub fn apply_live_save_pre_landscape_to_group(
+    group: &mut MutableGroup,
+    policy: LiveC4SavePolicy<'_>,
+    save: &LiveC4SavePreLandscapeComponents,
+) -> Result<()> {
+    let mut journal = FolderSaveJournal::disabled();
+    apply_live_save_pre_landscape_to_group_recorded(group, policy, save, &mut journal)
+}
+
+pub fn apply_live_save_pre_landscape_to_group_recorded(
+    group: &mut MutableGroup,
+    policy: LiveC4SavePolicy<'_>,
+    save: &LiveC4SavePreLandscapeComponents,
+    journal: &mut FolderSaveJournal,
+) -> Result<()> {
+    apply_pre_landscape_components(
+        group,
+        policy,
+        &save.scenario_txt,
+        save.game_txt.as_deref(),
+        &save.scenario_section_mutations,
+        journal,
+    )?;
+    apply_landscape_mutations(group, &save.landscape_mutations, journal)
+}
+
+pub fn apply_live_save_runtime_components_to_group(
     group: &mut MutableGroup,
     policy: LiveC4SavePolicy<'_>,
     save: &LiveC4SaveComponents,
-    save_player_infos: &[u8],
-    player_groups: Vec<SerializedRuntimeJoinPlayerGroup>,
-    current_section_entry: Option<&str>,
     landscape_is_static: bool,
 ) -> Result<()> {
+    let mut journal = FolderSaveJournal::disabled();
+    apply_live_save_runtime_components_to_group_recorded(
+        group,
+        policy,
+        save,
+        landscape_is_static,
+        &mut journal,
+    )
+}
+
+pub fn apply_live_save_runtime_components_to_group_recorded(
+    group: &mut MutableGroup,
+    policy: LiveC4SavePolicy<'_>,
+    save: &LiveC4SaveComponents,
+    landscape_is_static: bool,
+    journal: &mut FolderSaveJournal,
+) -> Result<()> {
+    apply_pre_landscape_components(
+        group,
+        policy,
+        &save.scenario_txt,
+        Some(&save.game_txt),
+        &save.scenario_section_mutations,
+        journal,
+    )?;
+
+    // SaveEnumeration runs only for an exact/forced landscape. The presence
+    // of MatMap.txt is therefore also the delete gate for empty PXS and
+    // MassMover components. Without that gate, ordinary scenario saves leave
+    // all three copied entries untouched.
+    let saves_auxiliary_landscape = !save.mat_map_txt.is_empty();
+    let exact_landscape =
+        save.landscape_bmp.is_some() || save.landscape_png.is_some() || save.delete_sky_entry;
+    if exact_landscape {
+        if save.delete_sky_entry {
+            // C4CFN_Sky is the extensionless literal `Sky`. C4Group::Delete
+            // does not expand that name to Sky.bmp/Sky.png.
+            delete_pattern(group, journal, "Sky");
+        }
+        put_optional_file_recorded(
+            group,
+            journal,
+            "Landscape.bmp",
+            save.landscape_bmp.as_deref(),
+        )?;
+        put_optional_file_recorded(
+            group,
+            journal,
+            "Landscape.png",
+            save.landscape_png.as_deref(),
+        )?;
+        put_optional_file_recorded(group, journal, "Map.bmp", save.map_bmp.as_deref())?;
+        if let Some(material_patch) = save.material_group.as_deref() {
+            merge_material_patch_recorded(group, journal, material_patch)?;
+        }
+    } else if saves_auxiliary_landscape {
+        // Forced non-exact saves write DiffLandscape, changed Map, and
+        // textures before the auxiliary systems.
+        put_optional_file_recorded(
+            group,
+            journal,
+            "DiffLandscape.bmp",
+            save.diff_landscape_bmp.as_deref(),
+        )?;
+        put_optional_file_recorded(group, journal, "Map.bmp", save.map_bmp.as_deref())?;
+        if let Some(material_patch) = save.material_group.as_deref() {
+            merge_material_patch_recorded(group, journal, material_patch)?;
+        }
+    } else if landscape_is_static {
+        // The ordinary static branch starts by removing the obsolete full
+        // landscape, then writes Map and any changed textures.
+        delete_entry(group, journal, "Landscape.bmp");
+        put_optional_file_recorded(group, journal, "Map.bmp", save.map_bmp.as_deref())?;
+        if let Some(material_patch) = save.material_group.as_deref() {
+            merge_material_patch_recorded(group, journal, material_patch)?;
+        }
+    }
+
+    if saves_auxiliary_landscape {
+        // PXS and MassMover precede the material-number enumeration.
+        put_or_delete_generated_file(group, journal, "PXS.c4b", save.pxs_c4b.as_deref())?;
+        put_or_delete_generated_file(
+            group,
+            journal,
+            "MassMover.c4b",
+            save.mass_mover_c4b.as_deref(),
+        )?;
+        put_file_recorded(
+            group,
+            journal,
+            "MatMap.txt",
+            &save.mat_map_txt,
+            FolderSaveAddFailure::Fatal,
+        )?;
+    }
+    if landscape_is_static && saves_auxiliary_landscape {
+        // A forced exact save of a static landscape reaches this native
+        // cleanup only after the complete exact block succeeds.
+        delete_entry(group, journal, "Landscape.bmp");
+    }
+
+    // C4StringTable::Save is a no-op for an empty enumeration; it does not
+    // delete a copied Strings.txt. Objects.txt is always rewritten.
+    put_optional_file_recorded(group, journal, "Strings.txt", save.strings_txt.as_deref())?;
+    put_component_nofail_recorded(group, journal, "Objects.txt", &save.objects_txt);
+
+    // RoundResults::Save runs only when user restore infos are enabled. It
+    // deletes a stale component before omitting an empty decompilation.
+    if policy.player_policy().save_user_players {
+        replace_optional_file_recorded(
+            group,
+            journal,
+            "RoundResults.txt",
+            save.round_results_txt.as_deref(),
+        )?;
+    }
+
+    // Teams follow RoundResults. C4TeamList::Save deletes first, but ignores
+    // the C4Group Add return just like the optional component hosts below.
+    delete_entry(group, journal, "Teams.txt");
+    if let Some(teams) = save.teams_txt.as_deref() {
+        put_component_nofail_recorded(group, journal, "Teams.txt", teams);
+    }
+
+    // Modified Script/Title/Info hosts run atomically in this order and are
+    // nonfatal. Unmodified copied components remain untouched.
+    for mutation in &save.component_host_mutations {
+        match mutation {
+            LiveC4SaveComponentMutation::Delete { name } => {
+                delete_pattern(group, journal, name);
+            }
+            LiveC4SaveComponentMutation::Replace(component) => {
+                put_component_nofail_recorded(group, journal, &component.name, &component.payload);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn apply_live_save_player_infos_to_group(
+    group: &mut MutableGroup,
+    save_player_infos: &[u8],
+) -> Result<()> {
+    let mut journal = FolderSaveJournal::disabled();
+    apply_live_save_player_infos_to_group_recorded(group, save_player_infos, &mut journal)
+}
+
+pub fn apply_live_save_player_infos_to_group_recorded(
+    group: &mut MutableGroup,
+    save_player_infos: &[u8],
+    journal: &mut FolderSaveJournal,
+) -> Result<()> {
+    // C4PlayerInfoList::Save deletes before checking emptiness or compiling.
+    delete_entry(group, journal, "SavePlayerInfos.txt");
+    add_live_save_player_infos_after_delete_to_group_recorded(group, save_player_infos, journal)
+}
+
+pub fn add_live_save_player_infos_after_delete_to_group_recorded(
+    group: &mut MutableGroup,
+    save_player_infos: &[u8],
+    journal: &mut FolderSaveJournal,
+) -> Result<()> {
+    if !save_player_infos.is_empty() {
+        // Its C4Group::Add result is ignored. Decompilation failures remain
+        // fatal in the engine serializer before this mutating phase begins.
+        put_component_nofail_recorded(group, journal, "SavePlayerInfos.txt", save_player_infos);
+    }
+    Ok(())
+}
+
+pub fn add_live_save_player_group(
+    group: &mut MutableGroup,
+    player: SerializedRuntimeJoinPlayerGroup,
+) -> Result<()> {
+    let mut journal = FolderSaveJournal::disabled();
+    add_live_save_player_group_recorded(group, player, &mut journal)
+}
+
+pub fn add_live_save_player_group_recorded(
+    group: &mut MutableGroup,
+    player: SerializedRuntimeJoinPlayerGroup,
+    journal: &mut FolderSaveJournal,
+) -> Result<()> {
+    if journal.enabled {
+        let raw_image = player
+            .group
+            .pack_raw()
+            .context("compose serialized player child group")?;
+        journal.put_child(
+            player.filename.as_bytes(),
+            raw_image,
+            FolderSaveAddFailure::Fatal,
+        );
+    }
+    group
+        .add_child_bytes(player.filename.as_bytes().to_vec(), player.group)
+        .context("add serialized player child group")
+}
+
+fn apply_pre_landscape_components(
+    group: &mut MutableGroup,
+    policy: LiveC4SavePolicy<'_>,
+    scenario_txt: &[u8],
+    game_txt: Option<&[u8]>,
+    scenario_section_mutations: &[LiveC4SaveScenarioSectionMutation],
+    journal: &mut FolderSaveJournal,
+) -> Result<()> {
+    // SaveCore precedes every cleanup and runtime component write.
+    put_file_recorded(
+        group,
+        journal,
+        "Scenario.txt",
+        scenario_txt,
+        FolderSaveAddFailure::Fatal,
+    )?;
+
     // C4GameSave::Save always removes every previously embedded player file
     // before SetAsRestoreInfos selects the new children.
+    journal.delete_pattern("*.c4p");
     remove_matching_entries(group, |name| ascii_ends_with(name, ".c4p"));
 
     // Preserve the native cleanup set exactly. In particular, current C++
     // removes Title.bmp and Icon.bmp but not their PNG counterparts.
     if !policy.keeps_title_components() {
+        journal.delete_pattern("Title.bmp");
+        journal.delete_pattern("Icon.bmp");
+        journal.delete_pattern("Desc*.rtf");
+        journal.delete_pattern("Title*.txt|Title.txt");
+        journal.delete_pattern("Info.txt");
         remove_matching_entries(group, |name| {
             name.eq_ignore_ascii_case("Title.bmp")
                 || name.eq_ignore_ascii_case("Icon.bmp")
@@ -308,118 +710,152 @@ fn apply_live_save_to_group_inner(
                 || (ascii_starts_with(name, "Desc") && ascii_ends_with(name, ".rtf"))
         });
     }
-
-    put_file(group, "Scenario.txt", &save.scenario_txt)?;
-    if policy.keeps_title_components() {
-        if let Some(title) = save.title_txt.as_ref() {
-            put_file(group, &title.name, &title.payload)?;
-        }
-    }
-    if let Some(info) = save.info_txt.as_deref() {
-        put_file(group, "Info.txt", info)?;
-    }
-
+    let Some(game_txt) = game_txt else {
+        // SaveData failed before it could replace Game.txt. SaveCore and the
+        // cleanup above are nevertheless retained when the owned group closes.
+        return Ok(());
+    };
     // C4Game::SaveData explicitly deletes an empty Game.txt, including for a
     // non-exact scenario save with no Script or global Effects state.
-    if save.game_txt.is_empty() {
-        group.remove_entry("Game.txt");
+    if game_txt.is_empty() {
+        delete_pattern(group, journal, "Game.txt");
     } else {
-        put_file(group, "Game.txt", &save.game_txt)?;
+        put_file_recorded(
+            group,
+            journal,
+            "Game.txt",
+            game_txt,
+            FolderSaveAddFailure::Fatal,
+        )?;
     }
 
-    // C4TeamList::Save always deletes and recreates Teams.txt. Its valid
-    // all-default representation is a zero-byte file.
-    group.remove_entry("Teams.txt");
-    if let Some(teams) = save.teams_txt.as_deref() {
-        put_file(group, "Teams.txt", teams)?;
-    }
-
-    if policy.is_exact() {
-        if let Some(current_section_entry) = current_section_entry {
-            group.remove_entry(current_section_entry);
+    for mutation in scenario_section_mutations {
+        match mutation {
+            LiveC4SaveScenarioSectionMutation::Delete { name } => {
+                delete_entry(group, journal, name);
+            }
+            LiveC4SaveScenarioSectionMutation::Replace(section) => {
+                // SaveScenarioSections deletes before Add and ignores Add's
+                // result for each section in linked-list traversal order.
+                delete_entry(group, journal, &section.name);
+                if let Err(error) =
+                    put_raw_child_recorded(group, journal, &section.name, &section.payload)
+                {
+                    tracing::warn!(
+                        %error,
+                        section = section.name,
+                        "failed to write modified live scenario section"
+                    );
+                }
+            }
         }
     }
-    for section in &save.scenario_sections {
-        put_raw_child(group, &section.name, &section.payload)?;
-    }
-
-    if let Some(material_patch) = save.material_group.as_deref() {
-        merge_material_patch(group, material_patch)?;
-    }
-
-    // SaveEnumeration runs only for an exact/forced landscape. The presence
-    // of MatMap.txt is therefore also the delete gate for empty PXS and
-    // MassMover components. Without that gate, ordinary scenario saves leave
-    // all three copied entries untouched.
-    let saves_auxiliary_landscape = !save.mat_map_txt.is_empty();
-    if saves_auxiliary_landscape {
-        put_file(group, "MatMap.txt", &save.mat_map_txt)?;
-    }
-
-    if landscape_is_static {
-        group.remove_entry("Landscape.bmp");
-    }
-    put_optional_file(group, "Landscape.bmp", save.landscape_bmp.as_deref())?;
-    put_optional_file(group, "Landscape.png", save.landscape_png.as_deref())?;
-    put_optional_file(
-        group,
-        "DiffLandscape.bmp",
-        save.diff_landscape_bmp.as_deref(),
-    )?;
-    put_optional_file(group, "Map.bmp", save.map_bmp.as_deref())?;
-
-    if saves_auxiliary_landscape {
-        replace_optional_file(group, "PXS.c4b", save.pxs_c4b.as_deref())?;
-        replace_optional_file(group, "MassMover.c4b", save.mass_mover_c4b.as_deref())?;
-    }
-
-    // C4StringTable::Save is a no-op for an empty enumeration; it does not
-    // delete a copied Strings.txt. Objects.txt is always rewritten.
-    put_optional_file(group, "Strings.txt", save.strings_txt.as_deref())?;
-    put_file(group, "Objects.txt", &save.objects_txt)?;
-
-    // RoundResults::Save runs only when user restore infos are enabled. It
-    // deletes a stale component before omitting an empty decompilation.
-    if policy.player_policy().save_user_players {
-        replace_optional_file(group, "RoundResults.txt", save.round_results_txt.as_deref())?;
-    }
-
-    // C4ComponentHost::Save leaves an unmodified copied Script.c alone.
-    put_optional_file(group, "Script.c", save.script_c.as_deref())?;
-
-    put_file(group, "SavePlayerInfos.txt", save_player_infos)?;
-    for player in player_groups {
-        group
-            .add_child_bytes(player.filename.as_bytes().to_vec(), player.group)
-            .context("add serialized player child group")?;
-    }
-
     Ok(())
 }
 
-fn put_file(group: &mut MutableGroup, name: &str, payload: &[u8]) -> Result<()> {
+fn apply_landscape_mutations(
+    group: &mut MutableGroup,
+    mutations: &[LiveC4SaveLandscapeMutation],
+    journal: &mut FolderSaveJournal,
+) -> Result<()> {
+    for mutation in mutations {
+        match mutation {
+            LiveC4SaveLandscapeMutation::DeleteEntry { name } => {
+                delete_entry(group, journal, name);
+            }
+            LiveC4SaveLandscapeMutation::PutFile { name, payload } => {
+                put_file_recorded(group, journal, name, payload, FolderSaveAddFailure::Fatal)?;
+            }
+            LiveC4SaveLandscapeMutation::MergeMaterialGroup { payload } => {
+                merge_material_patch_recorded(group, journal, payload)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn delete_pattern(group: &mut MutableGroup, journal: &mut FolderSaveJournal, pattern: &str) {
+    journal.delete_pattern(pattern);
+    group.remove_entry(pattern);
+}
+
+fn delete_entry(group: &mut MutableGroup, journal: &mut FolderSaveJournal, name: &str) {
+    journal.delete_entry(name);
+    group.remove_entry(name);
+}
+
+fn put_file_recorded(
+    group: &mut MutableGroup,
+    journal: &mut FolderSaveJournal,
+    name: &str,
+    payload: &[u8],
+    failure: FolderSaveAddFailure,
+) -> Result<()> {
+    journal.put_file(name, payload, failure);
     group
         .add_file(name, payload.to_vec())
         .with_context(|| format!("write live save component {name}"))
 }
 
-fn put_optional_file(group: &mut MutableGroup, name: &str, payload: Option<&[u8]>) -> Result<()> {
+fn put_component_nofail_recorded(
+    group: &mut MutableGroup,
+    journal: &mut FolderSaveJournal,
+    name: &str,
+    payload: &[u8],
+) {
+    if let Err(error) =
+        put_file_recorded(group, journal, name, payload, FolderSaveAddFailure::Ignore)
+    {
+        // Several native callers deliberately ignore the group result,
+        // including Objects, Teams, player infos and component hosts.
+        tracing::warn!(%error, component = name, "failed to write nonfatal live component");
+    }
+}
+
+fn put_optional_file_recorded(
+    group: &mut MutableGroup,
+    journal: &mut FolderSaveJournal,
+    name: &str,
+    payload: Option<&[u8]>,
+) -> Result<()> {
     if let Some(payload) = payload {
-        put_file(group, name, payload)?;
+        put_file_recorded(group, journal, name, payload, FolderSaveAddFailure::Fatal)?;
     }
     Ok(())
 }
 
-fn replace_optional_file(
+fn replace_optional_file_recorded(
     group: &mut MutableGroup,
+    journal: &mut FolderSaveJournal,
     name: &str,
     payload: Option<&[u8]>,
 ) -> Result<()> {
-    group.remove_entry(name);
-    put_optional_file(group, name, payload)
+    delete_entry(group, journal, name);
+    put_optional_file_recorded(group, journal, name, payload)
 }
 
-fn put_raw_child(group: &mut MutableGroup, name: &str, payload: &[u8]) -> Result<()> {
+fn put_or_delete_generated_file(
+    group: &mut MutableGroup,
+    journal: &mut FolderSaveJournal,
+    name: &str,
+    payload: Option<&[u8]>,
+) -> Result<()> {
+    if let Some(payload) = payload {
+        put_file_recorded(group, journal, name, payload, FolderSaveAddFailure::Fatal)
+    } else {
+        delete_pattern(group, journal, name);
+        Ok(())
+    }
+}
+
+fn put_raw_child_recorded(
+    group: &mut MutableGroup,
+    journal: &mut FolderSaveJournal,
+    name: &str,
+    payload: &[u8],
+) -> Result<()> {
+    // SaveScenarioSections ignores Add's return after deleting the old child.
+    journal.put_child(name, payload, FolderSaveAddFailure::Ignore);
     let source = Group::from_raw_memory(PathBuf::from(name), payload.to_vec())
         .with_context(|| format!("open serialized live child {name}"))?;
     let contents_crc = source
@@ -436,7 +872,12 @@ fn put_raw_child(group: &mut MutableGroup, name: &str, payload: &[u8]) -> Result
         .with_context(|| format!("write serialized live child {name}"))
 }
 
-fn merge_material_patch(group: &mut MutableGroup, payload: &[u8]) -> Result<()> {
+fn merge_material_patch_recorded(
+    group: &mut MutableGroup,
+    journal: &mut FolderSaveJournal,
+    payload: &[u8],
+) -> Result<()> {
+    journal.merge_material_group(payload);
     let patch = Group::from_raw_memory(PathBuf::from("Material.c4g"), payload.to_vec())
         .context("open serialized Material.c4g patch")?;
     let has_material = group
@@ -585,14 +1026,27 @@ mod tests {
             mat_map_txt: b"new matmap".to_vec(),
             pxs_c4b: None,
             mass_mover_c4b: None,
+            delete_sky_entry: false,
             teams_txt: Some(Vec::new()),
             round_results_txt: None,
             info_txt: None,
             script_c: None,
+            deleted_components: Vec::new(),
+            component_host_mutations: Vec::new(),
             scenario_sections: vec![LiveC4SaveNamedComponent {
                 name: "SectOther.c4g".to_owned(),
                 payload: raw_child("SectOther.c4g", "Objects.txt", b"other section"),
             }],
+            deleted_scenario_sections: Vec::new(),
+            scenario_section_mutations: vec![
+                LiveC4SaveScenarioSectionMutation::Delete {
+                    name: "SectMain.c4g".to_owned(),
+                },
+                LiveC4SaveScenarioSectionMutation::Replace(LiveC4SaveNamedComponent {
+                    name: "SectOther.c4g".to_owned(),
+                    payload: raw_child("SectOther.c4g", "Objects.txt", b"other section"),
+                }),
+            ],
         }
     }
 
@@ -609,7 +1063,7 @@ mod tests {
         let description = serialize_savegame_description(
             br"A {saved}\game",
             204,
-            &[b"Game saved 20.7.2026 01:02.".to_vec()],
+            &[(b"Game saved 20.7.2026 01:02.".to_vec(), true)],
         );
 
         assert_eq!(
@@ -627,6 +1081,10 @@ mod tests {
         assert_eq!(
             format_resource_integers(b"Playing time: %02d:%02d:%02d.", &[3, 4, 5]),
             b"Playing time: 03:04:05."
+        );
+        assert_eq!(
+            format_resource_strings(b"Engine %s: %% %s", &[b"362", b"League"]),
+            b"Engine 362: % League"
         );
     }
 
@@ -688,7 +1146,6 @@ mod tests {
             &save_components(),
             b"new restore infos",
             vec![player(b"New.c4p", b"new player")],
-            Some("SectMain.c4g"),
             true,
         )
         .expect("exact save mutates copied group");
@@ -762,13 +1219,16 @@ mod tests {
             .expect("fixture old player");
 
         let mut save = save_components();
-        save.title_txt = Some(LiveC4SaveNamedComponent {
+        let title = LiveC4SaveNamedComponent {
             name: "TitleUS.txt".to_owned(),
             payload: b"new title".to_vec(),
-        });
+        };
+        save.title_txt = Some(title.clone());
+        save.component_host_mutations = vec![LiveC4SaveComponentMutation::Replace(title)];
         save.material_group = None;
         save.mat_map_txt.clear();
         save.scenario_sections.clear();
+        save.scenario_section_mutations.clear();
 
         apply_live_save_to_group(
             &mut group,
@@ -778,7 +1238,6 @@ mod tests {
             &save,
             b"script restore infos",
             vec![player(b"ScriptPlr-1.c4p", b"script player")],
-            Some("SectMain.c4g"),
             true,
         )
         .expect("scenario save mutates copied group");
@@ -795,6 +1254,120 @@ mod tests {
         assert!(!saved.exists("Old.c4p"));
         assert!(saved.open_child("ScriptPlr-1.c4p").is_ok());
         assert!(saved.open_child("SectMain.c4g").is_ok());
+    }
+
+    #[test]
+    fn exact_save_preserves_stale_section_child_without_serialized_delete_mutation() {
+        let mut group = MutableGroup::new("Saved.c4s");
+        group
+            .add_child(
+                "SectMain.c4g",
+                child("SectMain.c4g", "Objects.txt", b"stale child"),
+            )
+            .expect("fixture stale section child");
+        let mut save = save_components();
+        save.scenario_section_mutations.retain(|mutation| {
+            !matches!(
+                mutation,
+                LiveC4SaveScenarioSectionMutation::Delete { name }
+                    if name.eq_ignore_ascii_case("SectMain.c4g")
+            )
+        });
+
+        apply_live_save_to_group(
+            &mut group,
+            LiveC4SavePolicy::Savegame {
+                target_group_name: "Saved.c4s",
+            },
+            &save,
+            b"restore infos",
+            Vec::new(),
+            false,
+        )
+        .expect("exact save without section registry");
+
+        assert!(reopen(&group).open_child("SectMain.c4g").is_ok());
+    }
+
+    #[test]
+    fn empty_restore_roster_deletes_copied_save_player_infos() {
+        let mut group = MutableGroup::new("Saved.c4s");
+        group
+            .add_file("SavePlayerInfos.txt", b"stale roster".to_vec())
+            .expect("fixture restore roster");
+
+        apply_live_save_to_group(
+            &mut group,
+            LiveC4SavePolicy::Savegame {
+                target_group_name: "Saved.c4s",
+            },
+            &save_components(),
+            &[],
+            Vec::new(),
+            false,
+        )
+        .expect("empty restore roster is applied");
+
+        assert!(!reopen(&group).exists("SavePlayerInfos.txt"));
+    }
+
+    #[test]
+    fn invalid_modified_scenario_section_is_deleted_and_nonfatal() {
+        let mut group = MutableGroup::new("Saved.c4s");
+        group
+            .add_child(
+                "SectBroken.c4g",
+                child("SectBroken.c4g", "Objects.txt", b"stale section"),
+            )
+            .expect("fixture stale section child");
+        let mut save = save_components();
+        let broken = LiveC4SaveNamedComponent {
+            name: "SectBroken.c4g".to_owned(),
+            payload: b"not a packed group".to_vec(),
+        };
+        save.scenario_sections = vec![broken.clone()];
+        save.scenario_section_mutations = vec![LiveC4SaveScenarioSectionMutation::Replace(broken)];
+
+        apply_live_save_to_group(
+            &mut group,
+            LiveC4SavePolicy::Savegame {
+                target_group_name: "Saved.c4s",
+            },
+            &save,
+            b"restore infos",
+            Vec::new(),
+            false,
+        )
+        .expect("unchecked native section Add remains nonfatal");
+
+        let saved = reopen(&group);
+        assert!(!saved.exists("SectBroken.c4g"));
+        assert_eq!(saved.read_file("Objects.txt").unwrap(), b"new objects");
+    }
+
+    #[test]
+    fn no_sky_exact_save_deletes_only_the_extensionless_entry() {
+        let mut group = MutableGroup::new("Saved.c4s");
+        group.add_file("Sky", b"legacy sky".to_vec()).unwrap();
+        group.add_file("Sky.png", b"image sky".to_vec()).unwrap();
+        let mut save = save_components();
+        save.delete_sky_entry = true;
+
+        apply_live_save_to_group(
+            &mut group,
+            LiveC4SavePolicy::Savegame {
+                target_group_name: "Saved.c4s",
+            },
+            &save,
+            b"restore infos",
+            Vec::new(),
+            false,
+        )
+        .unwrap();
+
+        let saved = reopen(&group);
+        assert!(!saved.exists("Sky"));
+        assert_eq!(saved.read_file("Sky.png").unwrap(), b"image sky");
     }
 
     #[test]
@@ -1075,13 +1648,11 @@ mod tests {
     }
 
     #[test]
-    fn material_file_error_leaves_original_group_unchanged() {
+    fn material_file_error_retains_native_prefix_mutations() {
         let mut group = MutableGroup::new("Scenario.c4s");
         group
             .add_file("Material.c4g", b"not a group".to_vec())
             .expect("fixture material file");
-        let original = group.clone();
-
         let error = apply_live_save_to_group(
             &mut group,
             LiveC4SavePolicy::Savegame {
@@ -1090,12 +1661,142 @@ mod tests {
             &save_components(),
             b"restore infos",
             Vec::new(),
-            None,
             false,
         )
         .expect_err("ordinary Material.c4g file must reject the patch");
 
         assert!(error.to_string().contains("ordinary file"));
-        assert_eq!(group, original);
+        let group = reopen(&group);
+        assert_eq!(group.read_file("Scenario.txt").unwrap(), b"new scenario");
+        assert!(!group.exists("Game.txt"));
+        assert!(group.exists("SectOther.c4g"));
+        assert_eq!(group.read_file("Material.c4g").unwrap(), b"not a group");
+        assert!(!group.exists("MatMap.txt"));
+        assert!(!group.exists("Objects.txt"));
+        assert!(!group.exists("Teams.txt"));
+    }
+
+    #[test]
+    fn failed_static_texture_save_replays_landscape_prefix_in_native_order() {
+        let mut group = MutableGroup::new("Scenario.c4s");
+        group
+            .add_file("Landscape.bmp", b"stale exact landscape".to_vec())
+            .unwrap();
+        group.add_file("Map.bmp", b"stale map".to_vec()).unwrap();
+        group
+            .add_file("Material.c4g", b"not a group".to_vec())
+            .unwrap();
+        let partial = LiveC4SavePreLandscapeComponents {
+            scenario_txt: b"new scenario".to_vec(),
+            game_txt: Some(Vec::new()),
+            scenario_sections: Vec::new(),
+            landscape_mutations: vec![
+                LiveC4SaveLandscapeMutation::DeleteEntry {
+                    name: "Landscape.bmp".to_owned(),
+                },
+                LiveC4SaveLandscapeMutation::PutFile {
+                    name: "Map.bmp".to_owned(),
+                    payload: b"new map".to_vec(),
+                },
+            ],
+            deleted_scenario_sections: Vec::new(),
+            scenario_section_mutations: Vec::new(),
+        };
+
+        apply_live_save_pre_landscape_to_group(
+            &mut group,
+            LiveC4SavePolicy::Scenario {
+                force_exact_landscape: false,
+            },
+            &partial,
+        )
+        .expect("native failure prefix applies");
+
+        let group = reopen(&group);
+        assert!(!group.exists("Landscape.bmp"));
+        assert_eq!(group.read_file("Map.bmp").unwrap(), b"new map");
+        assert_eq!(group.read_file("Material.c4g").unwrap(), b"not a group");
+        assert!(!group.exists("Objects.txt"));
+    }
+
+    #[test]
+    fn folder_journal_keeps_native_scenario_section_interleaving() {
+        let mut save = save_components();
+        save.material_group = None;
+        save.mat_map_txt.clear();
+        save.scenario_section_mutations = vec![
+            LiveC4SaveScenarioSectionMutation::Replace(LiveC4SaveNamedComponent {
+                name: "SectZulu.c4g".to_owned(),
+                payload: raw_child("SectZulu.c4g", "Objects.txt", b"zulu"),
+            }),
+            LiveC4SaveScenarioSectionMutation::Delete {
+                name: "SectMain.c4g".to_owned(),
+            },
+            LiveC4SaveScenarioSectionMutation::Replace(LiveC4SaveNamedComponent {
+                name: "SectAlpha.c4g".to_owned(),
+                payload: raw_child("SectAlpha.c4g", "Objects.txt", b"alpha"),
+            }),
+        ];
+        let mut group = MutableGroup::new("Scenario.c4s");
+        let mut journal = FolderSaveJournal::default();
+
+        apply_live_save_runtime_components_to_group_recorded(
+            &mut group,
+            LiveC4SavePolicy::Record,
+            &save,
+            false,
+            &mut journal,
+        )
+        .expect("record ordered section mutations");
+
+        let section_actions = journal
+            .mutations()
+            .iter()
+            .filter_map(|mutation| match mutation {
+                FolderSaveMutation::DeleteEntry { name } if name.starts_with(b"Sect") => {
+                    Some(format!("delete:{}", String::from_utf8_lossy(name)))
+                }
+                FolderSaveMutation::PutChild { name, .. } if name.starts_with(b"Sect") => {
+                    Some(format!("put:{}", String::from_utf8_lossy(name)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            section_actions,
+            [
+                "delete:SectZulu.c4g",
+                "put:SectZulu.c4g",
+                "delete:SectMain.c4g",
+                "delete:SectAlpha.c4g",
+                "put:SectAlpha.c4g",
+            ]
+        );
+        let objects_index = journal
+            .mutations()
+            .iter()
+            .position(|mutation| {
+                matches!(
+                    mutation,
+                    FolderSaveMutation::PutFile {
+                        name,
+                        failure: FolderSaveAddFailure::Ignore,
+                        ..
+                    } if name.as_slice() == b"Objects.txt"
+                )
+            })
+            .expect("Objects.txt add is nonfatal");
+        let teams_index = journal
+            .mutations()
+            .iter()
+            .position(|mutation| {
+                matches!(
+                    mutation,
+                    FolderSaveMutation::DeleteEntry { name }
+                        if name.as_slice() == b"Teams.txt"
+                )
+            })
+            .expect("later Teams mutation remains queued");
+        assert!(objects_index < teams_index);
     }
 }

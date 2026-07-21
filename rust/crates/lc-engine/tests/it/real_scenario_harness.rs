@@ -1167,7 +1167,7 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
                     .player_mut(owner)
                     .expect("Alchemy player remains live")
                     .control;
-                control.last_com = COM_RIGHT;
+                control.last_com = i32::from(COM_RIGHT);
                 control.last_com_delay = 17;
                 control.last_com_down_double = 4;
             }

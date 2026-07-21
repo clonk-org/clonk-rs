@@ -1493,7 +1493,7 @@ pub enum CommandOverlayIcon {
 
 /// `Com2Control` (src/C4ObjectCom.cpp:857-877) plus the COM_Double bit:
 /// the fctCommand sheet phase (x = control index, y = double row).
-fn com_control_index(com: u8) -> (i32, bool) {
+fn com_control_index(com: i32) -> (i32, bool) {
     let double = com & 128 != 0; // COM_Double
     let control = match com & !(64 | 128) {
         12 => 0,     // COM_CursorLeft   -> CON_CursorLeft
@@ -1682,7 +1682,7 @@ fn draw_command_key_cell(
             cell,
             gamma,
         );
-        let (control_index, double) = com_control_index(com);
+        let (control_index, double) = com_control_index(i32::from(com));
         draw_scaled_region(
             surface,
             control,
@@ -2403,7 +2403,7 @@ pub fn draw_player_controls(
     viewport: SurfaceRect,
     show_control: i32,
     show_control_position: i32,
-    last_com: u8,
+    last_com: i32,
     key_labels: &[String],
     frame: u64,
 ) {
@@ -2431,7 +2431,7 @@ pub(crate) fn draw_player_controls_with_gamma(
     viewport: SurfaceRect,
     show_control: i32,
     show_control_position: i32,
-    last_com: u8,
+    last_com: i32,
     key_labels: &[String],
     frame: u64,
     gamma: Option<&GammaRamp>,
@@ -3177,6 +3177,15 @@ mod tests {
         assert_eq!(target.get_pixel(45, 90), Some(Color::opaque(200, 10, 10)));
         assert_eq!(target.get_pixel(45, 107), Some(Color::opaque(10, 10, 200)));
         assert_eq!(target.get_pixel(70, 90), Some(Color::opaque(0, 0, 0)));
+    }
+
+    #[test]
+    fn player_control_hint_does_not_truncate_full_width_last_com() {
+        // Com2Control accepts C4Player::LastCom as int32_t. High bits must
+        // therefore keep an otherwise-valid low byte in the default Menu
+        // bucket instead of being narrowed to a visible movement control.
+        assert_eq!(com_control_index(0x101), (9, false));
+        assert_eq!(com_control_index(1), (6, false));
     }
 
     #[test]

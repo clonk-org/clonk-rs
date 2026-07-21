@@ -20092,7 +20092,28 @@ impl CommandStack {
                     *value = crate::denumerate_script_value(value, object_numbers);
                 }
             }
-            entry.state.denumerate_object_references(object_numbers);
+            entry
+                .state
+                .denumerate_object_references(object_numbers, true);
+        }
+    }
+
+    /// Save-time C4Command::EnumeratePointers/DenumeratePointers clears
+    /// Target and Target2 wrappers which are outside Game.Objects, but Tx is
+    /// an ordinary C4Value and is only compiled through ObjectNumber without
+    /// mutating the live value.
+    pub(crate) fn denumerate_compiled_pointer_fields(
+        &mut self,
+        object_numbers: &HashSet<u64>,
+    ) {
+        for entry in &mut self.entries {
+            if let Some(request) = &mut entry.request {
+                denumerate_object_reference(&mut request.target, object_numbers);
+                denumerate_object_reference(&mut request.target2, object_numbers);
+            }
+            entry
+                .state
+                .denumerate_object_references(object_numbers, false);
         }
     }
 
@@ -28510,7 +28531,11 @@ impl CommandState {
     /// absent because command execution resolves them through the same live
     /// object table before use; the creating request above is the canonical
     /// FnGetCommand field view.
-    fn denumerate_object_references(&mut self, object_numbers: &HashSet<u64>) {
+    fn denumerate_object_references(
+        &mut self,
+        object_numbers: &HashSet<u64>,
+        denumerate_values: bool,
+    ) {
         match self {
             CommandState::Follow(state) => {
                 denumerate_object_reference(&mut state.target, object_numbers);
@@ -28521,7 +28546,7 @@ impl CommandState {
             CommandState::Enter(state) => {
                 denumerate_object_reference(&mut state.target, object_numbers);
             }
-            CommandState::Transfer(state) => {
+            CommandState::Transfer(state) if denumerate_values => {
                 if let Some(value) = &mut state.tx_value {
                     *value = crate::denumerate_script_value(value, object_numbers);
                 }
@@ -28556,8 +28581,10 @@ impl CommandState {
             CommandState::Call(state) => {
                 denumerate_object_reference(&mut state.target, object_numbers);
                 denumerate_object_reference(&mut state.target2, object_numbers);
-                if let Some(value) = &mut state.tx_value {
-                    *value = crate::denumerate_script_value(value, object_numbers);
+                if denumerate_values {
+                    if let Some(value) = &mut state.tx_value {
+                        *value = crate::denumerate_script_value(value, object_numbers);
+                    }
                 }
             }
             CommandState::Acquire(state) => {

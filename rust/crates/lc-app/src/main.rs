@@ -185,8 +185,8 @@ use lc_resources::{
     load_endeavour_font, scenario as resource_scenario, DefCore as ResourceDefCore,
     DefinitionError as ResourceDefinitionError, FontCatalog, FontRole, GraphicsError,
     GraphicsImage, GraphicsResource, Group, GroupEntry, GroupError, LanguagePacks, MutableGroup,
-    MutableGroupChildMut, ParticleDefinition as ResourceParticleDefinition, ResolvedFontSpec,
-    ResourceDefinition as ResourceDefinitionData,
+    MutableGroupChildMut, MutableGroupEntryKind, ParticleDefinition as ResourceParticleDefinition,
+    ResolvedFontSpec, ResourceDefinition as ResourceDefinitionData,
 };
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
 use menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event};
@@ -3404,6 +3404,11 @@ struct RuntimeLanguageTable {
     entries: HashMap<String, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeLanguageBytesTable {
+    entries: HashMap<String, Vec<u8>>,
+}
+
 fn generated_team_name_template(table: &RuntimeLanguageTable) -> LegacyCString {
     table
         .entries
@@ -4204,6 +4209,87 @@ fn load_runtime_language_table(paths: Option<&AppPaths>) -> Result<RuntimeLangua
     anyhow::bail!(
         "loading the classic US language fallback for F1 help: LanguageUS.txt is unavailable"
     )
+}
+
+fn parse_runtime_language_bytes_table(
+    bytes: &[u8],
+    source: &str,
+) -> Result<RuntimeLanguageBytesTable> {
+    anyhow::ensure!(
+        !bytes.contains(&0),
+        "classic language table {source} contains an embedded NUL"
+    );
+    let mut entries = HashMap::new();
+    let mut remaining = bytes;
+    while let Some(equals) = remaining.iter().position(|byte| *byte == b'=') {
+        let key = &remaining[..equals];
+        remaining = &remaining[equals + 1..];
+        let value_end = remaining
+            .iter()
+            .position(|byte| matches!(*byte, b'\r' | b'\n'))
+            .and_then(|line_end| {
+                remaining[line_end..]
+                    .iter()
+                    .position(|byte| !matches!(*byte, b'\r' | b'\n'))
+                    .map(|offset| line_end + offset)
+            })
+            .unwrap_or(remaining.len());
+        let value_with_line_end = &remaining[..value_end];
+        remaining = &remaining[value_end..];
+        let value_end = value_with_line_end
+            .iter()
+            .rposition(|byte| !matches!(*byte, b'\r' | b'\n'))
+            .map_or(0, |index| index + 1);
+        let Ok(key) = std::str::from_utf8(key) else {
+            continue;
+        };
+        entries.entry(key.to_string()).or_insert_with(|| {
+            let value = &value_with_line_end[..value_end];
+            let mut decoded = Vec::with_capacity(value.len());
+            let mut cursor = 0;
+            while cursor < value.len() {
+                if value.get(cursor..cursor + 2) == Some(b"\\n") {
+                    decoded.extend_from_slice(b"\r\n");
+                    cursor += 2;
+                } else {
+                    decoded.push(value[cursor]);
+                    cursor += 1;
+                }
+            }
+            decoded
+        });
+    }
+    Ok(RuntimeLanguageBytesTable { entries })
+}
+
+fn load_runtime_language_bytes_table(
+    paths: Option<&AppPaths>,
+) -> Result<RuntimeLanguageBytesTable> {
+    const EMBEDDED_US: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../planet/System.c4g/LanguageUS.txt"
+    ));
+
+    let Some(paths) = paths else {
+        return parse_runtime_language_bytes_table(EMBEDDED_US, "embedded LanguageUS.txt");
+    };
+    let system = Group::open(paths.system_group_path()).ok();
+    let language_packs = classic_language_packs(paths);
+    let system_groups = language_packs.system_groups_with_optional_local(system.as_ref());
+    for code in classic_runtime_language_sequence(paths)? {
+        let filename = format!("Language{code}.txt");
+        for group in system_groups.groups() {
+            if let Some(bytes) = read_runtime_help_language_file(group, &filename) {
+                return parse_runtime_language_bytes_table(&bytes, &filename);
+            }
+        }
+    }
+    for group in system_groups.groups() {
+        if let Some(bytes) = read_runtime_help_language_file(group, "LanguageUS.txt") {
+            return parse_runtime_language_bytes_table(&bytes, "LanguageUS.txt");
+        }
+    }
+    anyhow::bail!("Language string table not loaded.")
 }
 
 fn startup_resource_string(paths: Option<&AppPaths>, key: &str, fallback: &str) -> String {
@@ -14426,6 +14512,13 @@ struct GameApp {
     /// Process-global C4Group maker captured from `Config.General.Name` once
     /// during application initialization, like `C4Group_SetMaker`.
     process_group_maker: LegacyCString,
+    /// Byte-exact process-global resource table used by LoadResStr. Unlike a
+    /// file reload at save time, this changes only when Options reloads the
+    /// application language.
+    save_description_language_table: Option<RuntimeLanguageBytesTable>,
+    /// First two bytes of the materialized Config.General.Language used for
+    /// C4GameSave's Desc??.rtf entry name.
+    save_description_language: Vec<u8>,
     /// `Config.Graphics.ShowFolderMaps`, default-on like C4ConfigGraphics.
     show_folder_maps: bool,
     /// Process-local Config.Graphics.ShowCommands enable requests shared
@@ -14604,6 +14697,10 @@ struct GameApp {
     /// Effective definition vector from the active game. C++ backs this up
     /// across Restart/Next Mission and restores it as FixedDefinitions.
     active_definition_load: Option<ScenarioDefinitionLoad>,
+    /// Byte-exact `Game.DefinitionFilenames` projection used only by
+    /// C4GameSave::WriteDescDefinitions. The String-based load vector cannot
+    /// retain native Unix path bytes that are not valid UTF-8.
+    active_description_definition_modules: Vec<Vec<u8>>,
     /// C4GraphicsResource's game-local HUD, cursor and palette selection.
     /// `None` means the process-startup Graphics.c4g bundle is active.
     active_game_graphics: Option<GameGraphicsResources>,
@@ -15166,6 +15263,8 @@ struct RecordingTemplate {
     output_path: PathBuf,
     initial_stream_chunk: Vec<u8>,
     runtime_seed: Option<RuntimeRecordingSeed>,
+    description_title: Vec<u8>,
+    description_definition_modules: Vec<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -15179,17 +15278,36 @@ struct RuntimeRecordingSeed {
     scenario_identifier: String,
     scenario_title: LegacyCString,
     definition_modules: Vec<String>,
+    description_definition_modules: Vec<Vec<u8>>,
     scenario_origin: String,
     parameters: lc_network::JoinGameParametersEnvelope,
     scenario_defaults: lc_network::InitialNetworkScenarioDefaults,
 }
 
+#[derive(Clone, Copy)]
+enum InitialRecordingSource<'a> {
+    /// Fresh startup already captured this projection before
+    /// `Script.Initialize`.
+    Fresh(&'a lc_engine::InitialNetworkGameData),
+    /// A restored savegame must first materialize its virtual C4 save source,
+    /// then capture the fInitial projection after native string/pointer
+    /// enumeration has run.
+    Loaded {
+        music_enabled: bool,
+        source_save_player_infos: Option<&'a [u8]>,
+        source_title_png: Option<&'a [u8]>,
+    },
+}
+
 struct RecordingSession {
     writer: ControlRecordWriter,
-    group: MutableGroup,
+    ctrl_rec: File,
     output_path: PathBuf,
     league_streaming: bool,
     stream_writer_pos: usize,
+    disk_writer_pos: usize,
+    description_title: Vec<u8>,
+    description_definition_modules: Vec<Vec<u8>>,
 }
 
 struct StartupNetworkConnection {
@@ -15211,14 +15329,36 @@ struct ClassicDirectReferenceQuery {
 }
 
 impl RecordingSession {
-    fn new(template: RecordingTemplate, league_streaming: bool) -> Self {
+    fn new(template: RecordingTemplate, league_streaming: bool, ctrl_rec: File) -> Self {
         Self {
             writer: ControlRecordWriter::new(),
-            group: template.group,
+            ctrl_rec,
             output_path: template.output_path,
             league_streaming,
             stream_writer_pos: 0,
+            disk_writer_pos: 0,
+            description_title: template.description_title,
+            description_definition_modules: template.description_definition_modules,
         }
+    }
+
+    fn flush_control_delta(&mut self) -> io::Result<()> {
+        let bytes = self.writer.bytes();
+        debug_assert!(self.disk_writer_pos <= bytes.len());
+        while self.disk_writer_pos < bytes.len() {
+            match self.ctrl_rec.write(&bytes[self.disk_writer_pos..]) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to advance live CtrlRec",
+                    ));
+                }
+                Ok(written) => self.disk_writer_pos += written,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        self.ctrl_rec.flush()
     }
 
     fn take_stream_delta(&mut self) -> Option<Vec<u8>> {
@@ -15256,6 +15396,58 @@ fn record_scenario_origin(
         fallback.to_string()
     } else {
         origin
+    }
+}
+
+fn clean_initial_record_group(group: &mut MutableGroup) {
+    let stale_entries = group
+        .entry_names()
+        .into_iter()
+        .filter(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.ends_with(".c4p")
+                || lower == "title.bmp"
+                || lower == "icon.bmp"
+                || lower == "info.txt"
+                || (lower.starts_with("title") && lower.ends_with(".txt"))
+                || (lower.starts_with("desc") && lower.ends_with(".rtf"))
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for entry in stale_entries {
+        group.remove_entry(&entry);
+    }
+}
+
+/// Close the destination image after a failed record save, preserving every
+/// component mutation completed before the failure. `C4GameSave` owns its
+/// group while saving, so its destructor closes the partially written group
+/// even when `Save` returns false.
+fn persist_partial_recording_group(
+    group: &MutableGroup,
+    output_path: &Path,
+    maker: &[u8],
+) -> std::result::Result<(), String> {
+    let mut partial = group.clone();
+    if !maker.is_empty() {
+        partial.set_maker_bytes_recursively(maker);
+    }
+    let packed = partial.pack().map_err(|error| error.to_string())?;
+    replace_file_from_same_directory(output_path, &packed).map_err(|error| error.to_string())
+}
+
+fn partial_recording_failure(
+    group: &MutableGroup,
+    output_path: &Path,
+    maker: &[u8],
+    failure: String,
+) -> String {
+    match persist_partial_recording_group(group, output_path, maker) {
+        Ok(()) => failure,
+        Err(persist_error) => format!(
+            "{failure}; additionally failed to close partial record {}: {persist_error}",
+            output_path.display()
+        ),
     }
 }
 
@@ -15303,6 +15495,13 @@ fn path_to_legacy_bytes(path: &Path) -> Vec<u8> {
 #[cfg(not(unix))]
 fn path_to_legacy_bytes(path: &Path) -> Vec<u8> {
     path.to_string_lossy().as_bytes().to_vec()
+}
+
+fn raw_definition_description_modules(paths: &[PathBuf]) -> Vec<Vec<u8>> {
+    paths
+        .iter()
+        .map(|path| path_to_legacy_bytes(path))
+        .collect()
 }
 
 #[cfg(unix)]
@@ -20137,16 +20336,26 @@ fn open_group_path_for_folder_map(path: &Path) -> std::result::Result<Group, Gro
     Ok(group)
 }
 
-fn packed_group_bytes(path: &Path) -> std::result::Result<Vec<u8>, String> {
-    let group = open_group_path_for_folder_map(path).map_err(|error| error.to_string())?;
-    match group.raw_image() {
-        Ok(bytes) => Ok(bytes),
-        Err(_) if group.is_directory() => MutableGroup::from_group(&group)
-            .map_err(|error| error.to_string())?
-            .pack()
-            .map_err(|error| error.to_string()),
-        Err(error) => Err(error.to_string()),
+fn packed_group_bytes(path: &Path, maker: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    // A packed top-level group is copied byte-for-byte. C4Group::raw_image is
+    // the uncompressed nested image and therefore is not a standalone file.
+    if path.is_file() {
+        return fs::read(path).map_err(|error| error.to_string());
     }
+    if path.is_dir() {
+        let group = Group::open(path).map_err(|error| error.to_string())?;
+        let mut group = MutableGroup::from_group(&group).map_err(|error| error.to_string())?;
+        if !maker.is_empty() {
+            group.set_maker_bytes_recursively(maker);
+        }
+        return group.pack().map_err(|error| error.to_string());
+    }
+
+    // A logical child below a packed ancestor has no physical path. Re-wrap
+    // its exact raw image in C4Group's standalone gzip envelope.
+    let group = open_group_path_for_folder_map(path).map_err(|error| error.to_string())?;
+    let image = group.raw_image().map_err(|error| error.to_string())?;
+    lc_resources::compress_c4group_image(&image).map_err(|error| error.to_string())
 }
 
 impl MainMenuState {
@@ -21528,6 +21737,20 @@ struct SavedGameFile {
     /// preserves backward compatibility with Rust saves predating the field.
     #[serde(default)]
     runtime_music_enabled: Option<bool>,
+    /// Byte-exact C4 `SavePlayerInfos.txt` projection belonging to the saved
+    /// source image. `Some([])` means the native component was absent; `None`
+    /// identifies older Rust saves that must reconstruct it from the current
+    /// takeover roster.
+    #[serde(default)]
+    source_save_player_infos: Option<Vec<u8>>,
+    /// Exact `Strings.txt` enumeration produced when this virtual savegame
+    /// was written. `None` identifies older Rust saves.
+    #[serde(default)]
+    source_string_table: Option<Vec<Vec<u8>>>,
+    /// Raw sidecar thumbnail loaded with this JSON save. Native stores the
+    /// same frame>0 image inside the exact savegame as `Title.png`.
+    #[serde(skip, default)]
+    source_title_png: Option<Vec<u8>>,
     engine_state: EngineState,
 }
 
@@ -22284,6 +22507,12 @@ struct ClassicCalendarTime {
     minute: i32,
 }
 
+#[derive(Clone, Copy)]
+enum ClassicSaveDescriptionKind {
+    Savegame,
+    Record,
+}
+
 fn utc_calendar_time_now() -> ClassicCalendarTime {
     let now = OffsetDateTime::now_utc();
     ClassicCalendarTime {
@@ -22397,23 +22626,36 @@ fn classic_rtf_charset_code(charset: &str) -> u8 {
 }
 
 fn developer_console_definition_description_path(
-    module: &str,
+    module: &[u8],
     paths: Option<&AppPaths>,
-) -> String {
-    let module_path = Path::new(module);
-    if module_path.is_absolute() {
-        if let Some(paths) = paths {
-            for root in [paths.content_dir(), Some(paths.install_root())]
-                .into_iter()
-                .flatten()
-            {
-                if let Ok(relative) = module_path.strip_prefix(root) {
-                    return relative.to_string_lossy().into_owned();
-                }
-            }
-        }
+) -> Vec<u8> {
+    let Some(paths) = paths else {
+        return module.to_vec();
+    };
+    // Config.AtExeRelativePath is a raw prefix comparison against exactly
+    // General.ExePath (content_dir when present, otherwise install_root). It
+    // intentionally does not require a path-component boundary.
+    let root = paths.content_dir().unwrap_or(paths.install_root());
+    let mut root = path_to_legacy_bytes(root);
+    let separator = std::path::MAIN_SEPARATOR as u8;
+    if !root.ends_with(&[separator]) {
+        root.push(separator);
     }
-    module.to_string()
+    let matches = module.get(..root.len()).is_some_and(|prefix| {
+        if cfg!(windows) {
+            prefix.eq_ignore_ascii_case(&root)
+        } else {
+            prefix == root
+        }
+    });
+    if matches {
+        let mut offset = root.len();
+        if module.get(offset) == Some(&separator) {
+            offset += 1;
+        }
+        return module[offset..].to_vec();
+    }
+    module.to_vec()
 }
 
 fn append_description_player_names(
@@ -22424,7 +22666,7 @@ fn append_description_player_names(
         if index != 0 {
             output.extend_from_slice(b", ");
         }
-        output.extend_from_slice(player.name.as_bytes());
+        output.extend_from_slice(control_player_effective_name(player));
     }
 }
 
@@ -23714,6 +23956,29 @@ fn load_native_config_bytes(paths: Option<&AppPaths>) -> Vec<u8> {
     paths
         .and_then(|paths| fs::read(paths.config_file()).ok())
         .unwrap_or_default()
+}
+
+fn materialized_save_description_language(config: &[u8]) -> Vec<u8> {
+    match lc_app::configured_native_value(config, "General", "Language") {
+        Some(value) => {
+            value
+                .as_bytes()
+                .iter()
+                .copied()
+                .take_while(|byte| *byte != b',')
+                .take(2)
+                .collect::<Vec<_>>()
+        }
+        // C4Config materializes its system-language default only when the
+        // field is absent. An explicitly stored empty first segment (for
+        // example `Language=,DE`) survives through SCopyUntil unchanged.
+        None => {
+            classic_loader_system_language()
+                .unwrap_or("US")
+                .as_bytes()
+                .to_vec()
+        }
+    }
 }
 
 fn configured_process_group_maker(config: &[u8]) -> LegacyCString {
@@ -26234,6 +26499,8 @@ impl GameApp {
         let gamepads_enabled = configured_gamepads_enabled(&native_config);
         let allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
         let process_group_maker = configured_process_group_maker(&native_config);
+        let save_description_language_table = load_runtime_language_bytes_table(paths).ok();
+        let save_description_language = materialized_save_description_language(&native_config);
         // A real installation must establish C4GUI's process-global bundle
         // before any controller, discovery worker, renderer, or app-owned UI
         // state is constructed. Asset-less test apps install their explicit
@@ -26559,6 +26826,8 @@ impl GameApp {
             startup_tooltip_resources,
             mission_access,
             process_group_maker,
+            save_description_language_table,
+            save_description_language,
             show_folder_maps,
             show_commands_requests,
             allow_scripting_in_replays,
@@ -26654,6 +26923,7 @@ impl GameApp {
             scenario_entry_enabled: HashMap::new(),
             active_scenario: None,
             active_definition_load: None,
+            active_description_definition_modules: Vec::new(),
             active_game_graphics: None,
             audio,
             #[cfg(test)]
@@ -27222,37 +27492,13 @@ impl GameApp {
         Ok(())
     }
 
-    fn developer_console_save_maker(&self) -> Vec<u8> {
-        match self.network_mode.as_ref() {
-            Some(NetworkMode::Host(HostSettings {
-                prepared: Some(prepared),
-                ..
-            })) => prepared.host_config().group_maker.as_bytes().to_vec(),
-            Some(NetworkMode::Client(settings)) => settings.group_maker.as_bytes().to_vec(),
-            Some(NetworkMode::Host(_)) | None => self
-                .configured_client_player_selection
-                .as_ref()
-                .map(|selection| selection.group_maker().as_bytes().to_vec())
-                .unwrap_or_else(|| lc_script::c4_string_bytes(&self.player_name)),
-        }
-    }
-
     fn developer_console_player_save_options(&self) -> (bool, bool, String) {
         let graphics = load_options_graphics_state(self.app_paths.as_ref());
-        let rank_name = load_runtime_language_table(self.app_paths.as_ref())
-            .ok()
-            .and_then(|table| {
-                let value = table.entries.get("IDS_MSG_RANK")?;
-                let bytes = match table.charset {
-                    RuntimeHelpCharset::Windows1252 => value
-                        .chars()
-                        .map(runtime_cp1252_byte)
-                        .collect::<Result<Vec<_>>>()
-                        .ok()?,
-                    RuntimeHelpCharset::Utf8 => value.as_bytes().to_vec(),
-                };
-                Some(lc_script::c4_string_from_bytes(&bytes))
-            })
+        let rank_name = self
+            .save_description_language_table
+            .as_ref()
+            .and_then(|table| table.entries.get("IDS_MSG_RANK"))
+            .map(|value| lc_script::c4_string_from_bytes(value))
             .unwrap_or_else(|| "Rank".to_string());
         (
             graphics.add_new_crew_portraits,
@@ -27327,11 +27573,12 @@ impl GameApp {
                 )
             })
             .collect::<Vec<_>>();
-        let maker = self.developer_console_save_maker();
+        let maker = self.process_group_maker.as_bytes().to_vec();
         let (add_new_crew_portraits, save_default_portraits, player_rank_name_default) =
             self.developer_console_player_save_options();
         let options = lc_engine::LiveC4PlayerSaveOptions {
             savegame: false,
+            store_tiny: false,
             add_new_crew_portraits,
             save_default_portraits,
             player_rank_name_default: &player_rank_name_default,
@@ -27394,7 +27641,7 @@ impl GameApp {
                     options,
                 )
                 .with_context(|| format!("serialize player profile {}", path.display()))?;
-                let group = if let Some(original) = original.as_ref() {
+                let mut group = if let Some(original) = original.as_ref() {
                     developer_console_save::overlay_live_player_group_with_cleanup(
                         original,
                         &synchronized.group,
@@ -27406,6 +27653,9 @@ impl GameApp {
                     // fStoreTiny=true; local saves retain the full payload.
                     synchronized.group
                 };
+                if !self.process_group_maker.as_bytes().is_empty() {
+                    group.set_maker_bytes_recursively(self.process_group_maker.as_bytes());
+                }
                 // Native snapshots fOfficial after serializing and before
                 // Derive, then consults that same value after the move.
                 let official_derivation = self.engine.is_control_host();
@@ -27506,74 +27756,56 @@ impl GameApp {
             .context("serialize live save Parameters.txt")
     }
 
-    fn developer_console_savegame_description(
+    fn classic_save_description(
         &self,
-        title: &str,
-        definition_modules: &[String],
-    ) -> (String, Vec<u8>) {
-        let table = load_runtime_language_table(self.app_paths.as_ref()).ok();
-        let resource_bytes = |key: &str, fallback: &str| {
-            let Some((value, charset)) = table
-                .as_ref()
-                .and_then(|table| table.entries.get(key).map(|value| (value, table.charset)))
-            else {
-                return fallback.as_bytes().to_vec();
+        title: &[u8],
+        definition_modules: &[Vec<u8>],
+        kind: ClassicSaveDescriptionKind,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let table = self.save_description_language_table.as_ref();
+        let resource_bytes = |key: &str, _fallback: &str| {
+            let Some(table) = table else {
+                return b"Language string table not loaded.".to_vec();
             };
-            match charset {
-                RuntimeHelpCharset::Windows1252 => value
-                    .chars()
-                    .map(runtime_cp1252_byte)
-                    .collect::<Result<Vec<_>>>()
-                    .unwrap_or_else(|_| fallback.as_bytes().to_vec()),
-                RuntimeHelpCharset::Utf8 => value.as_bytes().to_vec(),
-            }
+            let Some(value) = table.entries.get(key) else {
+                return format!("[Undefined: {key}]").into_bytes();
+            };
+            value.clone()
         };
 
-        let native_config = load_native_config_bytes(self.app_paths.as_ref());
-        let charset_name =
-            lc_app::configured_native_value(&native_config, "General", "LanguageCharset")
-                .map(|value| value.to_string_lossy().into_owned())
-                .unwrap_or_default();
+        // C4Language::Init overwrites Config.General.LanguageCharset from the
+        // active resource table. Keep legacy code-page bytes opaque; only the
+        // ASCII charset identifier is interpreted here.
+        let charset_name = table
+            .and_then(|table| table.entries.get("IDS_LANG_CHARSET"))
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .unwrap_or_default();
         let charset_code = classic_rtf_charset_code(&charset_name);
-        let language = lc_app::configured_native_value(&native_config, "General", "Language")
-            .map(|value| {
-                value
-                    .as_bytes()
-                    .iter()
-                    .copied()
-                    .take_while(|byte| *byte != b',')
-                    .take(2)
-                    .collect::<Vec<_>>()
-            })
-            .filter(|language| !language.is_empty())
-            .unwrap_or_else(|| {
-                startup_language_sequence(self.app_paths.as_ref())
-                    .into_iter()
-                    .next()
-                    .unwrap_or_else(|| "US".to_string())
-                    .into_bytes()
-            });
-        let language = String::from_utf8_lossy(&language).into_owned();
-
-        let mut title = title.to_owned();
+        let language = self.save_description_language.clone();
+        let mut title = lc_script::c4_string_from_bytes(title);
         Markup::strip_markup(&mut title);
         let title = lc_script::c4_string_bytes(&title);
         let now = classic_calendar_time_now();
-        let date_template = resource_bytes(
-            if self.network.is_some() {
-                "IDS_DESC_DATENET"
-            } else {
-                "IDS_DESC_DATE"
-            },
-            if self.network.is_some() {
-                "Network game from %i.%i.%i %02d:%02d."
-            } else {
-                "Game saved %i.%i.%i %02d:%02d."
-            },
-        );
-        let mut lines = vec![developer_console_save::format_resource_integers(
-            &date_template,
-            &[now.day, now.month, now.year, now.hour, now.minute],
+        let (date_key, date_fallback) = match kind {
+            ClassicSaveDescriptionKind::Record => (
+                "IDS_DESC_DATEREC",
+                "Recording from %i.%i.%i %02d:%02d.",
+            ),
+            ClassicSaveDescriptionKind::Savegame if self.network.is_some() => (
+                "IDS_DESC_DATENET",
+                "Network game from %i.%i.%i %02d:%02d.",
+            ),
+            ClassicSaveDescriptionKind::Savegame => {
+                ("IDS_DESC_DATE", "Game saved %i.%i.%i %02d:%02d.")
+            }
+        };
+        let date_template = resource_bytes(date_key, date_fallback);
+        let mut lines = vec![(
+            developer_console_save::format_resource_integers(
+                &date_template,
+                &[now.day, now.month, now.year, now.hour, now.minute],
+            ),
+            true,
         )];
 
         let game_time = self.engine.game_time();
@@ -27582,13 +27814,28 @@ impl GameApp {
                 "IDS_DESC_DURATION",
                 "Playing time: %02d:%02d:%02d.",
             );
-            lines.push(developer_console_save::format_resource_integers(
-                &duration,
-                &[
-                    game_time / 3_600,
-                    (game_time % 3_600) / 60,
-                    game_time % 60,
-                ],
+            lines.push((
+                developer_console_save::format_resource_integers(
+                    &duration,
+                    &[
+                        game_time / 3_600,
+                        (game_time % 3_600) / 60,
+                        game_time % 60,
+                    ],
+                ),
+                true,
+            ));
+        }
+
+        if matches!(kind, ClassicSaveDescriptionKind::Record) {
+            let build = format!("{CLASSIC_ENGINE_BUILD:03}");
+            let version = resource_bytes("IDS_DESC_VERSION", "Engine version: %s");
+            lines.push((
+                developer_console_save::format_resource_strings(
+                    &version,
+                    &[build.as_bytes()],
+                ),
+                true,
             ));
         }
 
@@ -27602,14 +27849,25 @@ impl GameApp {
                     module,
                     self.app_paths.as_ref(),
                 );
-                for byte in lc_script::c4_string_bytes(&relative) {
+                for byte in relative {
                     if byte == b'\\' {
                         definitions.push(b'\\');
                     }
                     definitions.push(byte);
                 }
             }
-            lines.push(definitions);
+            lines.push((definitions, true));
+        }
+
+        if matches!(kind, ClassicSaveDescriptionKind::Record) && self.network_is_league {
+            let league = resource_bytes("IDS_PRC_LEAGUE", "Using league '%s'");
+            lines.push((
+                developer_console_save::format_resource_strings(
+                    &league,
+                    &[self.network_league_name.as_slice()],
+                ),
+                true,
+            ));
         }
 
         if self.network.is_some() {
@@ -27620,10 +27878,11 @@ impl GameApp {
                 }
                 clients.extend_from_slice(client.name.as_bytes());
             }
-            lines.push(clients);
+            lines.push((clients, true));
         }
 
         let (_, packets) = self.control_player_infos.retained_rows_snapshot();
+        let has_retained_players = packets.iter().any(|(_, _, players)| !players.is_empty());
         let players = packets
             .iter()
             .flat_map(|(_, _, players)| players)
@@ -27632,11 +27891,11 @@ impl GameApp {
                     && player.flags & lc_engine::PLAYER_INFO_FLAG_INVISIBLE == 0
             })
             .collect::<Vec<_>>();
-        if !players.is_empty() {
+        if has_retained_players {
             let label = resource_bytes("IDS_DESC_PLRS", "Players: ");
             let team_configuration = self.engine.team_configuration();
             if team_configuration.active && !team_configuration.auto_generate_teams {
-                lines.push(label);
+                lines.push((label, true));
                 let mut known_team_ids = HashSet::new();
                 for team in self.engine.teams() {
                     known_team_ids.insert(team.id);
@@ -27651,7 +27910,7 @@ impl GameApp {
                     let mut line = lc_script::c4_string_bytes(&team.name);
                     line.extend_from_slice(b": ");
                     append_description_player_names(&mut line, &members);
-                    lines.push(line);
+                    lines.push((line, true));
                 }
                 let unassigned = players
                     .iter()
@@ -27661,22 +27920,37 @@ impl GameApp {
                 if !unassigned.is_empty() {
                     let mut line = Vec::new();
                     append_description_player_names(&mut line, &unassigned);
-                    lines.push(line);
+                    lines.push((line, true));
                 }
             } else {
                 let mut line = label;
                 append_description_player_names(&mut line, &players);
-                lines.push(line);
+                lines.push((line, !players.is_empty()));
             }
         }
 
+        let mut filename = b"Desc".to_vec();
+        filename.extend_from_slice(&language);
+        filename.extend_from_slice(b".rtf");
         (
-            format!("Desc{language}.rtf"),
+            filename,
             developer_console_save::serialize_savegame_description(
                 &title,
                 charset_code,
                 &lines,
             ),
+        )
+    }
+
+    fn developer_console_savegame_description(
+        &self,
+        title: &str,
+        definition_modules: &[Vec<u8>],
+    ) -> (Vec<u8>, Vec<u8>) {
+        self.classic_save_description(
+            &lc_script::c4_string_bytes(title),
+            definition_modules,
+            ClassicSaveDescriptionKind::Savegame,
         )
     }
 
@@ -27799,13 +28073,32 @@ impl GameApp {
             .with_context(|| format!("open source scenario {}", source_path.display()))?;
         let mut group = MutableGroup::from_group(&source)
             .with_context(|| format!("copy source scenario {}", source_path.display()))?;
+        let preserve_folder_group = source_path.is_dir();
+        let mut folder_save_journal = if preserve_folder_group {
+            developer_console_save::FolderSaveJournal::default()
+        } else {
+            developer_console_save::FolderSaveJournal::disabled()
+        };
+        if !self.process_group_maker.is_empty() {
+            // Closing an owned C4Group stamps the process-global maker on
+            // the root header even when the save later reports failure.
+            group.set_maker_bytes(self.process_group_maker.as_bytes());
+        }
+        let copied_material_group_is_file = matches!(
+            group.entry_kind("Material.c4g"),
+            Some(
+                MutableGroupEntryKind::File | MutableGroupEntryKind::UnopenableChildGroup
+            )
+        );
 
         if kind == ConsoleSaveKind::Savegame {
             if let Some(network) = self.network.as_ref() {
                 network
                     .submit_queued_synchronize(self.local_control_submission_tick(), true, false)
                     .context("queue savegame player synchronization")?;
-            } else if self.control_playback.is_none() {
+            } else {
+                // C4GameSaveSavegame::OnSaving synchronizes offline players
+                // even when the running game is a replay.
                 self.engine.checkpoint_local_player_files_for_save();
                 // Native ignores this aggregate result and proceeds with the
                 // savegame even if one profile could not be synchronized.
@@ -27817,6 +28110,21 @@ impl GameApp {
             Some(ScenarioDefinitionLoad::Seed { modules, .. })
             | Some(ScenarioDefinitionLoad::Fixed { modules, .. }) => modules.clone(),
             None => Vec::new(),
+        };
+        let description_definition_modules = if self
+            .active_description_definition_modules
+            .is_empty()
+            && !definition_modules.is_empty()
+        {
+            // State-only embedders may seed the historical String vector
+            // directly. Its C4 byte projection remains the exact fallback
+            // whenever no filesystem-derived byte cache exists.
+            definition_modules
+                .iter()
+                .map(|module| lc_script::c4_string_bytes(module))
+                .collect()
+        } else {
+            self.active_description_definition_modules.clone()
         };
         let native_config = load_native_config_bytes(self.app_paths.as_ref());
         let (definition_executable_path, definition_path) =
@@ -27845,7 +28153,19 @@ impl GameApp {
                 target_group_name: &destination_name,
             },
         };
-        let save = self
+        // Exact SaveCore writes Parameters.txt before Scenario.txt.
+        if kind == ConsoleSaveKind::Savegame {
+            let parameters = self.developer_console_save_parameters()?;
+            folder_save_journal.put_file(
+                "Parameters.txt",
+                &parameters,
+                developer_console_save::FolderSaveAddFailure::Fatal,
+            );
+            group
+                .add_file("Parameters.txt", parameters)
+                .context("write live save Parameters.txt")?;
+        }
+        let save = match self
             .engine
             .serialize_live_c4_save_with_policy(
                 lc_engine::LiveC4SaveSpec {
@@ -27855,99 +28175,167 @@ impl GameApp {
                     definition_path: &definition_path,
                     origin: &origin,
                     music_enabled: self.runtime_music_enabled,
-                    modified_title: None,
-                    modified_info_txt: None,
-                    modified_script_c: None,
+                    copied_material_group_is_file,
+                    title_component: lc_engine::LiveC4ComponentHost::Unmodified,
+                    info_component: lc_engine::LiveC4ComponentHost::Unmodified,
+                    script_component: lc_engine::LiveC4ComponentHost::Unmodified,
                 },
                 policy,
             )
-            .context("serialize live C4 scenario state")?;
-
-        let clients = self.control_clients.snapshot();
-        let player_infos = self.recording_player_info_snapshot();
-        let restore_plan = runtime_join_save::set_as_live_save_restore_infos(
-            &clients,
-            &player_infos,
-            policy.player_policy(),
-        );
-        let save_player_infos =
-            lc_network::encode_player_info_list_ini(&restore_plan.restore_infos)
-                .context("serialize SavePlayerInfos.txt")?;
-        let maker = self.developer_console_save_maker();
-        let (add_new_crew_portraits, save_default_portraits, player_rank_name_default) =
-            self.developer_console_player_save_options();
-        let player_options = lc_engine::LiveC4PlayerSaveOptions {
-            savegame: true,
-            add_new_crew_portraits,
-            save_default_portraits,
-            player_rank_name_default: &player_rank_name_default,
+        {
+            Ok(save) => save,
+            Err(error) => {
+                if let Some(partial) = error.pre_landscape_components() {
+                    let apply_result =
+                        developer_console_save::apply_live_save_pre_landscape_to_group_recorded(
+                            &mut group,
+                            policy,
+                            partial,
+                            &mut folder_save_journal,
+                        );
+                    if !self.process_group_maker.is_empty() {
+                        group.set_maker_bytes_recursively(self.process_group_maker.as_bytes());
+                    }
+                    let persist_result = persist_live_console_save_group(
+                        &group,
+                        &destination,
+                        preserve_folder_group,
+                        &folder_save_journal,
+                        self.process_group_maker.as_bytes(),
+                    );
+                    apply_result?;
+                    persist_result?;
+                }
+                return Err(error).context("serialize live C4 scenario state");
+            }
         };
-        let runtime_players = self
-            .engine
-            .players()
-            .map(|player| (player.id(), player.player_info_id()))
-            .collect::<Vec<_>>();
-        let mut remaining_targets = restore_plan.player_groups;
-        let mut player_groups = Vec::with_capacity(remaining_targets.len());
-        for (game_number, player_info_id) in runtime_players {
-            let Some(index) = remaining_targets
-                .iter()
-                .position(|target| target.player_info_id == player_info_id)
-            else {
-                continue;
+
+        let mutation_result = (|| -> Result<()> {
+            developer_console_save::apply_live_save_runtime_components_to_group_recorded(
+                &mut group,
+                policy,
+                &save,
+                landscape_is_static,
+                &mut folder_save_journal,
+            )?;
+
+            let clients = self.control_clients.snapshot();
+            let player_infos = self.recording_player_info_snapshot();
+            let restore_plan = runtime_join_save::set_as_live_save_restore_infos(
+                &clients,
+                &player_infos,
+                self.network.is_some(),
+                policy.player_policy(),
+            );
+            // C4PlayerInfoList::Save deletes the old entry before compiling.
+            group.remove_entry("SavePlayerInfos.txt");
+            folder_save_journal.delete_entry("SavePlayerInfos.txt");
+            if !restore_plan.restore_infos.clients.is_empty() {
+                let save_player_infos =
+                    lc_network::encode_player_info_list_ini(&restore_plan.restore_infos)
+                        .context("serialize SavePlayerInfos.txt")?;
+                developer_console_save::add_live_save_player_infos_after_delete_to_group_recorded(
+                    &mut group,
+                    &save_player_infos,
+                    &mut folder_save_journal,
+                )?;
+            }
+
+            let maker = self.process_group_maker.as_bytes().to_vec();
+            let (add_new_crew_portraits, save_default_portraits, player_rank_name_default) =
+                self.developer_console_player_save_options();
+            let player_options = lc_engine::LiveC4PlayerSaveOptions {
+                savegame: true,
+                // C4PlayerList converts GetCreateSmallFile into
+                // fStoreOnOriginal before calling C4Player::Save. Every
+                // embedded player type therefore passes false.
+                store_tiny: false,
+                add_new_crew_portraits,
+                save_default_portraits,
+                player_rank_name_default: &player_rank_name_default,
             };
-            let target = remaining_targets.remove(index);
-            let player_group = lc_engine::serialize_live_c4_player_with_options_and_enumeration(
-                &self.engine,
-                game_number,
-                target.filename.as_bytes(),
-                &maker,
-                player_options,
-                &save.value_enumeration,
+            let runtime_players = self
+                .engine
+                .players()
+                .map(|player| (player.id(), player.player_info_id()))
+                .collect::<Vec<_>>();
+            let mut remaining_targets = restore_plan.player_groups;
+            for (game_number, player_info_id) in runtime_players {
+                let Some(index) = remaining_targets
+                    .iter()
+                    .position(|target| target.player_info_id == player_info_id)
+                else {
+                    continue;
+                };
+                let target = remaining_targets.remove(index);
+                let player_group =
+                    lc_engine::serialize_live_c4_player_with_options_and_enumeration(
+                        &self.engine,
+                        game_number,
+                        target.filename.as_bytes(),
+                        &maker,
+                        player_options,
+                        &save.value_enumeration,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "serialize player info {} (game player {})",
+                            target.player_info_id, game_number
+                        )
+                    })?;
+                developer_console_save::add_live_save_player_group_recorded(
+                    &mut group,
+                    runtime_join_save::SerializedRuntimeJoinPlayerGroup {
+                        filename: target.filename,
+                        group: player_group,
+                    },
+                    &mut folder_save_journal,
+                )?;
+            }
+            // C4PlayerList::Save ignores stale restore rows without a live
+            // player, then SaveDesc runs after all player children.
+            if kind == ConsoleSaveKind::Savegame {
+                let (description_name, description) = self
+                    .developer_console_savegame_description(
+                        &title,
+                        &description_definition_modules,
+                    );
+                folder_save_journal.put_file(
+                    &description_name,
+                    &description,
+                    developer_console_save::FolderSaveAddFailure::Ignore,
+                );
+                if let Err(error) = group.add_file_bytes(description_name, description) {
+                    // C4GameSave::Save deliberately ignores SaveDesc failure
+                    // and continues with the remaining save components.
+                    tracing::warn!(%error, "failed to write live save description");
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = mutation_result {
+            if !self.process_group_maker.is_empty() {
+                group.set_maker_bytes_recursively(self.process_group_maker.as_bytes());
+            }
+            persist_live_console_save_group(
+                &group,
+                &destination,
+                preserve_folder_group,
+                &folder_save_journal,
+                self.process_group_maker.as_bytes(),
             )
-            .with_context(|| {
-                format!(
-                    "serialize player info {} (game player {})",
-                    target.player_info_id, game_number
-                )
-            })?;
-            player_groups.push(runtime_join_save::SerializedRuntimeJoinPlayerGroup {
-                filename: target.filename,
-                group: player_group,
-            });
+                .context("persist partially completed live save")?;
+            return Err(error);
         }
-        anyhow::ensure!(
-            remaining_targets.is_empty(),
-            "{} save-player rows have no live player",
-            remaining_targets.len()
-        );
-        let current_section = format!("Sect{}.c4g", self.engine.debug_current_scenario_section());
-        developer_console_save::apply_live_save_to_group(
-            &mut group,
-            policy,
-            &save,
-            &save_player_infos,
-            player_groups,
-            Some(&current_section),
-            landscape_is_static,
-        )?;
-        if kind == ConsoleSaveKind::Savegame {
-            group
-                .add_file(
-                    "Parameters.txt",
-                    self.developer_console_save_parameters()?,
-                )
-                .context("write live save Parameters.txt")?;
-            let (description_name, description) = self
-                .developer_console_savegame_description(&title, &definition_modules);
-            group
-                .add_file(description_name, description)
-                .context("write live save description")?;
+        if !self.process_group_maker.is_empty() {
+            group.set_maker_bytes_recursively(self.process_group_maker.as_bytes());
         }
-        persist_console_save_group(
+        persist_live_console_save_group(
             &group,
             &destination,
-            source_path.is_dir(),
+            preserve_folder_group,
+            &folder_save_journal,
+            self.process_group_maker.as_bytes(),
         )?;
         let success = match kind {
             ConsoleSaveKind::Scenario => {
@@ -41981,6 +42369,24 @@ impl GameApp {
             .active_scenario
             .clone()
             .unwrap_or_else(FrontendScenario::fallback);
+        let savegame_player_policy = lc_engine::LiveC4SavePolicy::Savegame {
+            target_group_name: "",
+        }
+        .player_policy();
+        let source_restore_plan = runtime_join_save::set_as_live_save_restore_infos(
+            &self.control_clients.snapshot(),
+            &self.recording_player_info_snapshot(),
+            self.network.is_some(),
+            savegame_player_policy,
+        );
+        let source_save_player_infos =
+            Some(if source_restore_plan.restore_infos.clients.is_empty() {
+                Vec::new()
+            } else {
+                lc_network::encode_player_info_list_ini(&source_restore_plan.restore_infos)
+                    .context("serialize saved source SavePlayerInfos.txt")?
+            });
+        let source_string_table = Some(self.engine.enumerate_live_c4_string_table_for_save());
         let engine_state = self.engine.capture_state();
         let stored_label = if preserve_label {
             label.to_string()
@@ -42002,6 +42408,9 @@ impl GameApp {
             focus_id: self.focus_id,
             user_label: Some(stored_label.clone()),
             runtime_music_enabled: Some(self.runtime_music_enabled),
+            source_save_player_infos,
+            source_string_table,
+            source_title_png: None,
             engine_state,
         };
 
@@ -42145,8 +42554,9 @@ impl GameApp {
     fn load_saved_game_from_path(&mut self, path: &Path) -> Result<()> {
         let contents = fs::read_to_string(path)
             .with_context(|| format!("failed to read save from {}", path.display()))?;
-        let save: SavedGameFile = serde_json::from_str(&contents)
+        let mut save: SavedGameFile = serde_json::from_str(&contents)
             .with_context(|| format!("failed to parse save data from {}", path.display()))?;
+        save.source_title_png = fs::read(path.with_extension("png")).ok();
         let save = migrate_save_file(save)?;
         self.apply_loaded_game(save)?;
         self.last_save_path = Some(path.to_path_buf());
@@ -57997,6 +58407,7 @@ impl GameApp {
         self.clear_lobby_preload();
         self.active_scenario = None;
         self.active_definition_load = Some(self.scenario_seed_definition_load());
+        self.active_description_definition_modules.clear();
     }
 
     fn launch_pending_network_join(&mut self) -> Result<(), EngineError> {
@@ -58849,6 +59260,7 @@ impl GameApp {
         self.client_material_resource_groups = None;
         self.active_scenario = None;
         self.active_definition_load = None;
+        self.active_description_definition_modules.clear();
         self.mode = AppMode::Menu;
         self.status_text.clear();
 
@@ -69581,7 +69993,12 @@ impl GameApp {
     }
 
     fn reload_application_language_resources(&mut self) -> Result<String> {
+        let bytes_table = load_runtime_language_bytes_table(self.app_paths.as_ref())?;
         let table = load_runtime_language_table(self.app_paths.as_ref())?;
+        self.save_description_language_table = Some(bytes_table);
+        self.save_description_language = materialized_save_description_language(
+            &load_native_config_bytes(self.app_paths.as_ref()),
+        );
         let generated_team_name_template = generated_team_name_template(&table);
         self.generated_team_name_template = generated_team_name_template.clone();
         if let Some(assignment) = self.network_team_assignment.as_mut() {
@@ -70683,7 +71100,7 @@ impl GameApp {
         // Unicode and cannot safely recreate every native byte sequence.
         let title = native_bytes_as_legacy_text(parameters.title.as_bytes());
         let origin = prepared.scenario_origin().to_string();
-        let maker = prepared.host_config().group_maker.as_bytes().to_vec();
+        let maker = self.process_group_maker.as_bytes().to_vec();
         let group_filename = std::str::from_utf8(prepared.dynamic_wire_name().as_bytes())
             .map_err(|_| "prepared runtime dynamic filename is not ASCII".to_string())?
             .to_string();
@@ -70702,37 +71119,25 @@ impl GameApp {
                 definition_path: &definition_path,
                 origin: &origin,
                 music_enabled: self.runtime_music_enabled,
+                copied_material_group_is_file: false,
                 // The app has no mutable C4ComponentHost counterparts yet;
                 // native Save is a no-op while these hosts are unmodified.
-                modified_title: None,
-                modified_info_txt: None,
-                modified_script_c: None,
+                title_component: lc_engine::LiveC4ComponentHost::Unmodified,
+                info_component: lc_engine::LiveC4ComponentHost::Unmodified,
+                script_component: lc_engine::LiveC4ComponentHost::Unmodified,
             })
             .map_err(|error| format!("serialize synchronized runtime game: {error}"))?;
 
         // C4PlayerList::Save walks live players in link order and looks each
         // one up in RestoreInfos by stable PlayerInfo ID. Do not inherit the
         // client/player-info list order used to build RestoreInfos.
-        let graphics_options = load_options_graphics_state(self.app_paths.as_ref());
-        let player_rank_name_default = load_runtime_language_table(self.app_paths.as_ref())
-            .ok()
-            .and_then(|table| {
-                let value = table.entries.get("IDS_MSG_RANK")?;
-                let bytes = match table.charset {
-                    RuntimeHelpCharset::Windows1252 => value
-                        .chars()
-                        .map(runtime_cp1252_byte)
-                        .collect::<Result<Vec<_>>>()
-                        .ok()?,
-                    RuntimeHelpCharset::Utf8 => value.as_bytes().to_vec(),
-                };
-                Some(lc_script::c4_string_from_bytes(&bytes))
-            })
-            .unwrap_or_else(|| "Rank".to_string());
+        let (add_new_crew_portraits, save_default_portraits, player_rank_name_default) =
+            self.developer_console_player_save_options();
         let player_save_options = lc_engine::LiveC4PlayerSaveOptions {
             savegame: true,
-            add_new_crew_portraits: graphics_options.add_new_crew_portraits,
-            save_default_portraits: graphics_options.save_default_portraits,
+            store_tiny: false,
+            add_new_crew_portraits,
+            save_default_portraits,
             player_rank_name_default: &player_rank_name_default,
         };
         let runtime_players = self
@@ -71490,7 +71895,10 @@ impl GameApp {
                                     let path = PathBuf::from(
                                         join.filename.to_string_lossy().into_owned(),
                                     );
-                                    match packed_group_bytes(&path) {
+                                    match packed_group_bytes(
+                                        &path,
+                                        self.process_group_maker.as_bytes(),
+                                    ) {
                                         Ok(player_data) => {
                                             recorded_join.source =
                                                 lc_engine::JoinPlayerSource::Embedded(player_data);
@@ -81606,6 +82014,7 @@ impl GameApp {
         &mut self,
         scenario: &FrontendScenario,
         scenario_data: &Scenario,
+        initial_source: Option<InitialRecordingSource<'_>>,
     ) -> std::result::Result<(), String> {
         self.runtime_record_requested = false;
         self.live_save_seed = None;
@@ -81622,6 +82031,8 @@ impl GameApp {
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        let description_definition_modules =
+            raw_definition_description_modules(scenario_data.definition_resource_paths());
         let scenario_origin =
             record_scenario_origin(scenario_path, self.app_paths.as_ref(), &scenario.identifier);
         let (recording_parameters, scenario_defaults) =
@@ -81632,11 +82043,21 @@ impl GameApp {
             scenario_identifier: scenario.identifier.clone(),
             scenario_title: recording_parameters.title.clone(),
             definition_modules: definition_modules.clone(),
+            description_definition_modules: description_definition_modules.clone(),
             scenario_origin: scenario_origin.clone(),
             parameters: recording_parameters.clone(),
             scenario_defaults: scenario_defaults.clone(),
         };
         self.live_save_seed = Some(runtime_seed.clone());
+        // Runtime recording still needs the seed above. The initial SaveData
+        // projection and its pointer denumeration, however, exist only when
+        // Config.General.Record (or league recording) actually starts a
+        // C4Record from InitControl.
+        let Some(initial_source) = initial_source else {
+            return Ok(());
+        };
+        let reconstruct_loaded_runtime =
+            matches!(initial_source, InitialRecordingSource::Loaded { .. });
         let Some(dir) = self.recordings_dir.as_ref() else {
             return Ok(());
         };
@@ -81650,47 +82071,311 @@ impl GameApp {
             "{index:03}-{}.c4s",
             sanitize_record_name(raw_base_name)
         ));
+        let synchronized_title =
+            native_bytes_as_legacy_text(recording_parameters.title.as_bytes());
         let mut record_title = lc_script::c4_string_bytes(&format!(
-            "{index:03} {} [{CLASSIC_ENGINE_BUILD}]",
-            scenario.title
+            "{index:03} {synchronized_title} [{CLASSIC_ENGINE_BUILD}]"
         ));
         record_title.truncate(512);
         let record_title = lc_script::c4_string_from_bytes(&record_title);
         let native_config = load_native_config_bytes(self.app_paths.as_ref());
         let (definition_executable_path, definition_path) =
             game_save_definition_paths(self.app_paths.as_ref(), &native_config);
-        let scenario_core = scenario_data
-            .serialize_initial_record_scenario(
+        let source =
+            open_group_path_for_folder_map(scenario_path).map_err(|error| error.to_string())?;
+        let mut group = MutableGroup::from_group(&source).map_err(|error| error.to_string())?;
+        let record_maker = self.process_group_maker.as_bytes().to_vec();
+        let parameters = match lc_network::serialize_initial_network_parameters(
+            &recording_parameters,
+            &scenario_defaults,
+        ) {
+            Ok(parameters) => parameters,
+            Err(error) => {
+                return Err(partial_recording_failure(
+                    &group,
+                    &output_path,
+                    &record_maker,
+                    error.to_string(),
+                ));
+            }
+        };
+        if let Err(error) = group.add_file("Parameters.txt", parameters.clone()) {
+            return Err(partial_recording_failure(
+                &group,
+                &output_path,
+                &record_maker,
+                format!("write initial record Parameters.txt: {error}"),
+            ));
+        }
+        let scenario_core = if reconstruct_loaded_runtime {
+            self.engine
+                .serialize_initial_record_scenario_from_runtime_savegame(
+                    &record_title,
+                    &definition_modules,
+                    &definition_executable_path,
+                    &definition_path,
+                    &scenario_origin,
+                )
+        } else {
+            match scenario_data.serialize_initial_record_scenario(
                 &record_title,
                 &definition_modules,
                 &definition_executable_path,
                 &definition_path,
                 &scenario_origin,
+            ) {
+                Ok(scenario_core) => scenario_core,
+                Err(error) => {
+                    return Err(partial_recording_failure(
+                        &group,
+                        &output_path,
+                        &record_maker,
+                        error.to_string(),
+                    ));
+                }
+            }
+        };
+        let copied_material_group_is_file = matches!(
+            group.entry_kind("Material.c4g"),
+            Some(
+                MutableGroupEntryKind::File | MutableGroupEntryKind::UnopenableChildGroup
             )
-            .map_err(|error| error.to_string())?;
-        let source =
-            open_group_path_for_folder_map(scenario_path).map_err(|error| error.to_string())?;
-        let parameters = lc_network::serialize_initial_network_parameters(
-            &recording_parameters,
-            &scenario_defaults,
-        )
-                .map_err(|error| error.to_string())?;
-        let original_game = source.read_file("Game.txt").ok();
-        let game = lc_engine::serialize_initial_network_game(
-            &lc_engine::InitialNetworkGameData::for_initial_record(&self.engine),
-            original_game.as_deref(),
-        )
-        .map_err(|error| error.to_string())?;
-        let player_infos = lc_network::encode_player_info_list_ini(
-            &self.recording_player_info_snapshot(),
-        )
-        .map_err(|error| error.to_string())?;
-
-        let initial_stream_chunk = if self
-            .network
-            .as_ref()
-            .is_some_and(NetworkManager::league_record_stream_available)
+        );
+        let reconstructed_save = if let InitialRecordingSource::Loaded { music_enabled, .. } =
+            initial_source
         {
+            // Native initial recording copies the currently loaded savegame
+            // group, whose exact runtime components already exist. Rust's
+            // JSON save points back to the original scenario, so reconstruct
+            // that copied image from the restored pre-Recreate state first.
+            // SaveData's enumeration and pointer-denumeration side effects
+            // deliberately remain live, just as they do in C++.
+            let landscape_is_static = self
+                .engine
+                .landscape()
+                .is_some_and(|landscape| landscape.mode() == lc_engine::LANDSCAPE_MODE_STATIC);
+            let reconstruction_target = output_path.to_string_lossy();
+            let save = match self.engine.serialize_live_c4_save_with_policy(
+                    lc_engine::LiveC4SaveSpec {
+                        title: &record_title,
+                        definition_modules: &definition_modules,
+                        definition_executable_path: &definition_executable_path,
+                        definition_path: &definition_path,
+                        origin: &scenario_origin,
+                        music_enabled,
+                        copied_material_group_is_file,
+                        title_component: lc_engine::LiveC4ComponentHost::Unmodified,
+                        info_component: lc_engine::LiveC4ComponentHost::Unmodified,
+                        script_component: lc_engine::LiveC4ComponentHost::Unmodified,
+                    },
+                    lc_engine::LiveC4SavePolicy::Savegame {
+                        target_group_name: &reconstruction_target,
+                    },
+                ) {
+                Ok(save) => save,
+                Err(error) => {
+                    let mut failure =
+                        format!("reconstruct loaded save for initial record: {error}");
+                    if let Some(partial) = error.pre_landscape_components() {
+                        let policy = lc_engine::LiveC4SavePolicy::Savegame {
+                            target_group_name: &reconstruction_target,
+                        };
+                        if let Err(apply_error) =
+                            developer_console_save::apply_live_save_pre_landscape_to_group(
+                                &mut group,
+                                policy,
+                                partial,
+                            )
+                        {
+                            failure.push_str(&format!(
+                                "; additionally failed to apply partial loaded-save reconstruction: {apply_error}"
+                            ));
+                        }
+                    }
+                    return Err(partial_recording_failure(
+                        &group,
+                        &output_path,
+                        &record_maker,
+                        failure,
+                    ));
+                }
+            };
+            Some((save, landscape_is_static))
+        } else {
+            None
+        };
+
+        if let Some((save, landscape_is_static)) = reconstructed_save.as_ref() {
+            let reconstruction_target = output_path.to_string_lossy();
+            let reconstruction_policy = lc_engine::LiveC4SavePolicy::Savegame {
+                target_group_name: &reconstruction_target,
+            };
+            let reconstruction_result = (|| -> std::result::Result<(), String> {
+                developer_console_save::apply_live_save_runtime_components_to_group(
+                    &mut group,
+                    reconstruction_policy,
+                    save,
+                    *landscape_is_static,
+                )
+                .map_err(|error| error.to_string())?;
+
+                // C4PlayerInfoList::Save deletes the old component before it
+                // compiles the replacement. Preserve that deletion if the
+                // legacy compiler rejects the fallback roster.
+                group.remove_entry("SavePlayerInfos.txt");
+                let persisted_restore_infos = match initial_source {
+                    InitialRecordingSource::Loaded {
+                        source_save_player_infos,
+                        ..
+                    } => source_save_player_infos,
+                    InitialRecordingSource::Fresh(_) => None,
+                };
+                let restore_infos = if let Some(bytes) = persisted_restore_infos {
+                    bytes.to_vec()
+                } else {
+                    // Backward compatibility for JSON saves written before
+                    // the source component was retained.
+                    let restore_plan = runtime_join_save::set_as_live_save_restore_infos(
+                        &recording_parameters.clients.clients,
+                        &recording_parameters.player_infos,
+                        self.network.is_some(),
+                        reconstruction_policy.player_policy(),
+                    );
+                    if restore_plan.restore_infos.clients.is_empty() {
+                        Vec::new()
+                    } else {
+                        lc_network::encode_player_info_list_ini(&restore_plan.restore_infos)
+                            .map_err(|error| error.to_string())?
+                    }
+                };
+                if !restore_infos.is_empty() {
+                    developer_console_save::apply_live_save_player_infos_to_group(
+                        &mut group,
+                        &restore_infos,
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = reconstruction_result {
+                return Err(partial_recording_failure(
+                    &group,
+                    &output_path,
+                    &record_maker,
+                    format!("apply loaded-save reconstruction: {error}"),
+                ));
+            }
+            if self.engine.frame() != 0 {
+                let source_title_png = match initial_source {
+                    InitialRecordingSource::Loaded {
+                        source_title_png, ..
+                    } => source_title_png,
+                    InitialRecordingSource::Fresh(_) => None,
+                };
+                if let Some(source_title_png) = source_title_png {
+                    if let Err(error) = group.add_file("Title.png", source_title_png.to_vec()) {
+                        tracing::warn!(%error, "failed to install loaded savegame title image");
+                    }
+                }
+            }
+        }
+
+        // C4GameSaveRecord::SaveCore writes Scenario after Parameters, then
+        // the base Save method removes stale player/title components before
+        // C4Game::SaveData writes Game.txt.
+        if let Err(error) = group.add_file("Scenario.txt", scenario_core.clone()) {
+            return Err(partial_recording_failure(
+                &group,
+                &output_path,
+                &record_maker,
+                format!("write initial record Scenario.txt: {error}"),
+            ));
+        }
+        clean_initial_record_group(&mut group);
+
+        let loaded_initial_game_data;
+        let initial_game_data = match initial_source {
+            InitialRecordingSource::Fresh(game_data) => game_data,
+            InitialRecordingSource::Loaded { music_enabled, .. } => {
+                // InitControl creates fInitial only after the copied savegame
+                // source has run EnumStrings and pointer enumeration.
+                loaded_initial_game_data = match self
+                    .engine
+                    .capture_initial_record_game_data(music_enabled)
+                {
+                    Ok(game_data) => game_data,
+                    Err(error) => {
+                        return Err(partial_recording_failure(
+                            &group,
+                            &output_path,
+                            &record_maker,
+                            error.to_string(),
+                        ));
+                    }
+                };
+                &loaded_initial_game_data
+            }
+        };
+        let original_game = source.read_file("Game.txt").ok();
+        let original_game = reconstructed_save
+            .as_ref()
+            .map(|(save, _)| save.game_txt.as_slice())
+            .or(original_game.as_deref());
+        let game = match lc_engine::serialize_initial_network_game(initial_game_data, original_game)
+        {
+            Ok(game) => game,
+            Err(error) => {
+                return Err(partial_recording_failure(
+                    &group,
+                    &output_path,
+                    &record_maker,
+                    error.to_string(),
+                ));
+            }
+        };
+        if let Some(game) = game.as_ref() {
+            if let Err(error) = group.add_file("Game.txt", game.clone()) {
+                return Err(partial_recording_failure(
+                    &group,
+                    &output_path,
+                    &record_maker,
+                    format!("write initial record Game.txt: {error}"),
+                ));
+            }
+        } else {
+            group.remove_entry("Game.txt");
+        }
+        let player_info_snapshot = self.recording_player_info_snapshot();
+        let player_infos = if player_info_snapshot.clients.is_empty() {
+            Ok(None)
+        } else {
+            lc_network::encode_player_info_list_ini(&player_info_snapshot).map(Some)
+        };
+
+        // SaveComponents runs after the initial core/Game writes. It ignores
+        // both compiler and group-add failure, but always deletes a copied
+        // PlayerInfos.txt before installing the current roster.
+        group.remove_entry("PlayerInfos.txt");
+        match player_infos.as_ref() {
+            Ok(Some(player_infos)) => {
+                if let Err(error) = group.add_file("PlayerInfos.txt", player_infos.clone()) {
+                    tracing::warn!(%error, "failed to install initial record player infos");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "failed to serialize initial record player infos");
+            }
+        }
+
+        let initial_stream_chunk_result = (|| -> std::result::Result<Vec<u8>, String> {
+            if !self
+                .network
+                .as_ref()
+                .is_some_and(NetworkManager::league_record_stream_available)
+            {
+                return Ok(Vec::new());
+            }
             // C4Record::StartStreaming saves a second, no-copy record group
             // and inserts that packed image as the leading RCT_File. The
             // original scenario is recovered from Scenario.Head.Origin.
@@ -81699,6 +82384,9 @@ impl GameApp {
                 .map(|name| path_to_legacy_bytes(Path::new(name)))
                 .unwrap_or_else(|| b"Record.c4s".to_vec());
             let mut stream_initial_group = MutableGroup::new_bytes(stream_group_name);
+            if !self.process_group_maker.as_bytes().is_empty() {
+                stream_initial_group.set_maker_bytes(self.process_group_maker.as_bytes());
+            }
             stream_initial_group
                 .add_file("Parameters.txt", parameters.clone())
                 .map_err(|error| error.to_string())?;
@@ -81710,9 +82398,21 @@ impl GameApp {
                     .add_file("Game.txt", game.clone())
                     .map_err(|error| error.to_string())?;
             }
-            stream_initial_group
-                .add_file("PlayerInfos.txt", player_infos.clone())
-                .map_err(|error| error.to_string())?;
+            match player_infos.as_ref() {
+                Ok(Some(player_infos)) => {
+                    if let Err(error) =
+                        stream_initial_group.add_file("PlayerInfos.txt", player_infos.clone())
+                    {
+                        tracing::warn!(%error, "failed to install initial streamed player infos");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    // C4GameSaveRecord::SaveComponents ignores the result of
+                    // C4PlayerInfoList::Save for an initial recording.
+                    tracing::warn!(%error, "failed to serialize initial streamed player infos");
+                }
+            }
             let stream_initial_file = stream_initial_group
                 .pack()
                 .map_err(|error| error.to_string())?;
@@ -81722,56 +82422,31 @@ impl GameApp {
                 &stream_record_name,
                 &stream_initial_file,
             )
-            .map_err(|error| error.to_string())?
-        } else {
-            Vec::new()
+            .map_err(|error| error.to_string())
+        })();
+        let initial_stream_chunk = match initial_stream_chunk_result {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                return Err(partial_recording_failure(
+                    &group,
+                    &output_path,
+                    &record_maker,
+                    format!("prepare initial record stream: {error}"),
+                ));
+            }
         };
 
-        let mut group = MutableGroup::from_group(&source).map_err(|error| error.to_string())?;
-        let stale_presentation_entries = group
-            .entry_names()
-            .into_iter()
-            .filter(|name| {
-                let lower = name.to_ascii_lowercase();
-                lower == "title.bmp"
-                    || lower == "title.png"
-                    || lower == "icon.bmp"
-                    || lower == "icon.png"
-                    || lower == "info.txt"
-                    || (lower.starts_with("title") && lower.ends_with(".txt"))
-                    || (lower.starts_with("desc") && lower.ends_with(".rtf"))
-            })
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        for entry in stale_presentation_entries {
-            group.remove_entry(&entry);
-        }
-        group
-            .add_file("Parameters.txt", parameters)
-            .map_err(|error| error.to_string())?;
-        group
-            .add_file("Scenario.txt", scenario_core)
-            .map_err(|error| error.to_string())?;
-        if let Some(game) = game {
-            group
-                .add_file("Game.txt", game)
-                .map_err(|error| error.to_string())?;
-        } else {
-            group.remove_entry("Game.txt");
-        }
-        group
-            .add_file("PlayerInfos.txt", player_infos)
-            .map_err(|error| error.to_string())?;
         // A source replay may already contain a stream. A fresh record owns
-        // exactly one CtrlRec, installed only when it is closed.
+        // a fresh binary CtrlRec, while native leaves copied CtrlRec.txt and
+        // RecPlayerInfos.txt alone until playback/Stop handles them.
         group.remove_entry("CtrlRec.c4b");
-        group.remove_entry("CtrlRec.txt");
-        group.remove_entry("RecPlayerInfos.txt");
         self.recording_template = Some(RecordingTemplate {
             group,
             output_path,
             initial_stream_chunk,
             runtime_seed: Some(runtime_seed),
+            description_title: recording_parameters.title.as_bytes().to_vec(),
+            description_definition_modules,
         });
         Ok(())
     }
@@ -81813,24 +82488,10 @@ impl GameApp {
         let native_config = load_native_config_bytes(self.app_paths.as_ref());
         let (definition_executable_path, definition_path) =
             game_save_definition_paths(self.app_paths.as_ref(), &native_config);
-        let save = self
-            .engine
-            .serialize_live_c4_save_with_policy(
-                lc_engine::LiveC4SaveSpec {
-                    title: &record_title,
-                    definition_modules: &seed.definition_modules,
-                    definition_executable_path: &definition_executable_path,
-                    definition_path: &definition_path,
-                    origin: &seed.scenario_origin,
-                    music_enabled: self.runtime_music_enabled,
-                    modified_title: None,
-                    modified_info_txt: None,
-                    modified_script_c: None,
-                },
-                lc_engine::LiveC4SavePolicy::Record,
-            )
-            .map_err(|error| format!("serialize runtime record: {error}"))?;
-
+        let source = open_group_path_for_folder_map(&seed.scenario_source_path)
+            .map_err(|error| error.to_string())?;
+        let mut group = MutableGroup::from_group(&source).map_err(|error| error.to_string())?;
+        let record_maker = self.process_group_maker.as_bytes().to_vec();
         let mut parameters = seed.parameters;
         parameters.random_seed = (self.engine.random_seed() as u32) as i32;
         parameters.startup_player_count = self.engine.startup_player_count().unwrap_or_else(|| {
@@ -81853,94 +82514,173 @@ impl GameApp {
         let restore_plan = runtime_join_save::set_as_live_save_restore_infos(
             &parameters.clients.clients,
             &parameters.player_infos,
+            self.network.is_some(),
             lc_engine::LiveC4SavePolicy::Record.player_policy(),
         );
-        let parameter_bytes =
-            lc_network::serialize_initial_network_parameters(&parameters, &seed.scenario_defaults)
-                .map_err(|error| error.to_string())?;
-        let restore_info_bytes =
-            lc_network::encode_player_info_list_ini(&restore_plan.restore_infos)
-                .map_err(|error| error.to_string())?;
-
-        let (add_new_crew_portraits, save_default_portraits, player_rank_name_default) =
-            self.developer_console_player_save_options();
-        let player_save_options = lc_engine::LiveC4PlayerSaveOptions {
-            savegame: true,
-            add_new_crew_portraits,
-            save_default_portraits,
-            player_rank_name_default: &player_rank_name_default,
+        let parameter_bytes = match lc_network::serialize_initial_network_parameters(
+            &parameters,
+            &seed.scenario_defaults,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Err(partial_recording_failure(
+                    &group,
+                    &output_path,
+                    &record_maker,
+                    error.to_string(),
+                ));
+            }
         };
-        let group_maker = self.developer_console_save_maker();
-        let runtime_players = self
-            .engine
-            .players()
-            .map(|player| (player.id(), player.player_info_id()))
-            .collect::<Vec<_>>();
-        let mut remaining_targets = restore_plan.player_groups;
-        let mut player_groups = Vec::with_capacity(remaining_targets.len());
-        for (game_number, player_info_id) in runtime_players {
-            let Some(target_index) = remaining_targets
-                .iter()
-                .position(|target| target.player_info_id == player_info_id)
-            else {
-                continue;
-            };
-            let target = remaining_targets.remove(target_index);
-            let group = lc_engine::serialize_live_c4_player_with_options_and_enumeration(
-                &self.engine,
-                game_number,
-                target.filename.as_bytes(),
-                &group_maker,
-                player_save_options,
-                &save.value_enumeration,
-            )
-            .map_err(|error| {
-                format!(
-                    "serialize runtime record player info {} (game player {}): {error}",
-                    target.player_info_id, game_number
-                )
-            })?;
-            player_groups.push(runtime_join_save::SerializedRuntimeJoinPlayerGroup {
-                filename: target.filename,
-                group,
-            });
-        }
-        if !remaining_targets.is_empty() {
-            return Err(format!(
-                "{} runtime record player rows have no live player",
-                remaining_targets.len()
+        if let Err(error) = group.add_file("Parameters.txt", parameter_bytes) {
+            return Err(partial_recording_failure(
+                &group,
+                &output_path,
+                &record_maker,
+                format!("write runtime record Parameters.txt: {error}"),
             ));
         }
 
-        let source = open_group_path_for_folder_map(&seed.scenario_source_path)
-            .map_err(|error| error.to_string())?;
-        let mut group = MutableGroup::from_group(&source).map_err(|error| error.to_string())?;
-        let current_section = format!("Sect{}.c4g", self.engine.debug_current_scenario_section());
         let landscape_is_static = self
             .engine
             .landscape()
             .is_some_and(|landscape| landscape.mode() == lc_engine::LANDSCAPE_MODE_STATIC);
-        developer_console_save::apply_live_save_to_group(
-            &mut group,
+        let copied_material_group_is_file = matches!(
+            group.entry_kind("Material.c4g"),
+            Some(
+                MutableGroupEntryKind::File | MutableGroupEntryKind::UnopenableChildGroup
+            )
+        );
+        let save = match self.engine.serialize_live_c4_save_with_policy(
+            lc_engine::LiveC4SaveSpec {
+                title: &record_title,
+                definition_modules: &seed.definition_modules,
+                definition_executable_path: &definition_executable_path,
+                definition_path: &definition_path,
+                origin: &seed.scenario_origin,
+                music_enabled: self.runtime_music_enabled,
+                copied_material_group_is_file,
+                title_component: lc_engine::LiveC4ComponentHost::Unmodified,
+                info_component: lc_engine::LiveC4ComponentHost::Unmodified,
+                script_component: lc_engine::LiveC4ComponentHost::Unmodified,
+            },
             lc_engine::LiveC4SavePolicy::Record,
-            &save,
-            &restore_info_bytes,
-            player_groups,
-            Some(&current_section),
-            landscape_is_static,
-        )
-        .map_err(|error| error.to_string())?;
-        group
-            .add_file("Parameters.txt", parameter_bytes)
+        ) {
+            Ok(save) => save,
+            Err(error) => {
+                let mut failure = format!("serialize runtime record: {error}");
+                if let Some(partial) = error.pre_landscape_components() {
+                    if let Err(apply_error) =
+                        developer_console_save::apply_live_save_pre_landscape_to_group(
+                            &mut group,
+                            lc_engine::LiveC4SavePolicy::Record,
+                            partial,
+                        )
+                    {
+                        failure.push_str(&format!(
+                            "; additionally failed to apply partial runtime record: {apply_error}"
+                        ));
+                    }
+                }
+                return Err(partial_recording_failure(
+                    &group,
+                    &output_path,
+                    &record_maker,
+                    failure,
+                ));
+            }
+        };
+
+        let mutation_result = (|| -> std::result::Result<(), String> {
+            developer_console_save::apply_live_save_runtime_components_to_group(
+                &mut group,
+                lc_engine::LiveC4SavePolicy::Record,
+                &save,
+                landscape_is_static,
+            )
             .map_err(|error| error.to_string())?;
+
+            // SaveRuntimeData writes SavePlayerInfos before it begins walking
+            // live players. Keep both the delete-before-compile behavior and
+            // every already-added player child visible on a later failure.
+            group.remove_entry("SavePlayerInfos.txt");
+            if !restore_plan.restore_infos.clients.is_empty() {
+                let restore_info_bytes =
+                    lc_network::encode_player_info_list_ini(&restore_plan.restore_infos)
+                        .map_err(|error| error.to_string())?;
+                developer_console_save::apply_live_save_player_infos_to_group(
+                    &mut group,
+                    &restore_info_bytes,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+
+            let (add_new_crew_portraits, save_default_portraits, player_rank_name_default) =
+                self.developer_console_player_save_options();
+            let player_save_options = lc_engine::LiveC4PlayerSaveOptions {
+                savegame: true,
+                store_tiny: false,
+                add_new_crew_portraits,
+                save_default_portraits,
+                player_rank_name_default: &player_rank_name_default,
+            };
+            let runtime_players = self
+                .engine
+                .players()
+                .map(|player| (player.id(), player.player_info_id()))
+                .collect::<Vec<_>>();
+            let mut remaining_targets = restore_plan.player_groups;
+            for (game_number, player_info_id) in runtime_players {
+                let Some(target_index) = remaining_targets
+                    .iter()
+                    .position(|target| target.player_info_id == player_info_id)
+                else {
+                    continue;
+                };
+                let target = remaining_targets.remove(target_index);
+                let player_group =
+                    lc_engine::serialize_live_c4_player_with_options_and_enumeration(
+                        &self.engine,
+                        game_number,
+                        target.filename.as_bytes(),
+                        &record_maker,
+                        player_save_options,
+                        &save.value_enumeration,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "serialize runtime record player info {} (game player {}): {error}",
+                            target.player_info_id, game_number
+                        )
+                    })?;
+                developer_console_save::add_live_save_player_group(
+                    &mut group,
+                    runtime_join_save::SerializedRuntimeJoinPlayerGroup {
+                        filename: target.filename,
+                        group: player_group,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            // C4PlayerList::Save ignores stale restore rows without a live
+            // player. No later player can roll back an earlier child.
+            Ok(())
+        })();
+        if let Err(error) = mutation_result {
+            return Err(partial_recording_failure(
+                &group,
+                &output_path,
+                &record_maker,
+                error,
+            ));
+        }
         group.remove_entry("CtrlRec.c4b");
-        group.remove_entry("CtrlRec.txt");
-        group.remove_entry("RecPlayerInfos.txt");
         self.recording_template = Some(RecordingTemplate {
             group,
             output_path,
             initial_stream_chunk: Vec::new(),
             runtime_seed: None,
+            description_title: seed.scenario_title.as_bytes().to_vec(),
+            description_definition_modules: seed.description_definition_modules,
         });
         Ok(())
     }
@@ -81958,17 +82698,29 @@ impl GameApp {
         // C++ creates and unpacks the record group before it opens CtrlRec.
         // Persist the initial group now so a league start cannot succeed with
         // an unwritable destination and a crash still leaves the initial save.
-        template
-            .group
-            .add_file("CtrlRec.c4b", Vec::new())
-            .map_err(|error| error.to_string())?;
+        if !self.process_group_maker.as_bytes().is_empty() {
+            template
+                .group
+                .set_maker_bytes_recursively(self.process_group_maker.as_bytes());
+        }
         let initial_group = template.group.pack().map_err(|error| error.to_string())?;
-        fs::write(&template.output_path, initial_group).map_err(|error| {
-            format!(
-                "failed to create {}: {error}",
-                template.output_path.display()
-            )
-        })?;
+        replace_file_from_same_directory(&template.output_path, &initial_group)
+            .map_err(|error| {
+                format!(
+                    "failed to create {}: {error}",
+                    template.output_path.display()
+                )
+            })?;
+        let packed = Group::open(&template.output_path).map_err(|error| error.to_string())?;
+        unpack_recording_group(&packed, &template.output_path)
+            .map_err(|error| format!("failed to unpack record group: {error}"))?;
+        let ctrl_rec_path = template.output_path.join("CtrlRec.c4b");
+        let ctrl_rec = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&ctrl_rec_path)
+            .map_err(|error| format!("failed to create {}: {error}", ctrl_rec_path.display()))?;
         // Only initial league records call C4GameControl::StartRecord with
         // streaming enabled. FileRecord's non-initial StartRecord(false,
         // false) remains a local record even during a league session.
@@ -81990,7 +82742,7 @@ impl GameApp {
                 .append_league_record_bytes(&template.initial_stream_chunk)
                 .map_err(|error| error.to_string())?;
         }
-        self.recording = Some(RecordingSession::new(template, league_streaming));
+        self.recording = Some(RecordingSession::new(template, league_streaming, ctrl_rec));
         self.engine.set_recording_active(true);
         Ok(true)
     }
@@ -82003,6 +82755,9 @@ impl GameApp {
                 tracing::warn!(%error, "failed to append immediate CtrlRec packet");
                 None
             } else {
+                if let Err(error) = session.flush_control_delta() {
+                    tracing::warn!(%error, "failed to flush immediate CtrlRec packet");
+                }
                 session.take_stream_delta()
             }
         } else {
@@ -82021,6 +82776,9 @@ impl GameApp {
                 tracing::warn!(%error, "failed to append CtrlRec control list");
                 None
             } else {
+                if let Err(error) = session.flush_control_delta() {
+                    tracing::warn!(%error, "failed to flush CtrlRec control list");
+                }
                 session.take_stream_delta()
             }
         } else {
@@ -82064,13 +82822,12 @@ impl GameApp {
         let prepared = Group::open(&path)
             .map_err(|error| error.to_string())
             .and_then(|group| {
-                let child =
-                    MutableGroup::from_group(&group).map_err(|error| error.to_string())?;
+                let local_file = packed_group_bytes(&path, self.process_group_maker.as_bytes())?;
                 let stream_chunk = if league_streaming {
                     let packed = if has_player_group_extension(&target) {
                         self.pack_stripped_stream_player(&group, &target)?
                     } else {
-                        child.pack().map_err(|error| error.to_string())?
+                        local_file.clone()
                     };
                     let stream_name = LegacyCString::from_bytes(target.clone()).ok_or_else(|| {
                         "streamed player filename contains an interior NUL".to_string()
@@ -82082,25 +82839,33 @@ impl GameApp {
                 } else {
                     None
                 };
-                Ok((child, stream_chunk))
+                Ok((local_file, stream_chunk))
             });
+        let (local_file, stream_chunk) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                tracing::warn!(resource_id = core.id, path = %path.display(), %error, "failed to prepare player resource for record");
+                return;
+            }
+        };
+        // C4Record::AddFile streams first. A stream failure prevents the local
+        // add, while a later local-disk failure cannot retract streamed data.
+        if let Some(stream_chunk) = stream_chunk {
+            let Some(network) = self.network.as_ref() else {
+                tracing::warn!(resource_id = core.id, "league record stream disappeared before player resource append");
+                return;
+            };
+            if let Err(error) = network.append_league_record_bytes(&stream_chunk) {
+                tracing::warn!(resource_id = core.id, %error, "failed to stream player resource into record");
+                return;
+            }
+        }
         let Some(session) = self.recording.as_mut() else {
             return;
         };
-        let stream_chunk = match prepared.and_then(|(child, stream_chunk)| {
-            session
-                .group
-                .add_child_bytes(target, child)
-                .map_err(|error| error.to_string())?;
-            Ok(stream_chunk)
-        }) {
-            Ok(stream_chunk) => stream_chunk,
-            Err(error) => {
-                tracing::warn!(resource_id = core.id, path = %path.display(), %error, "failed to copy player resource into record");
-                None
-            }
-        };
-        self.append_league_record_stream_bytes(stream_chunk);
+        if let Err(error) = write_folder_save_entry(&session.output_path, &target, &local_file) {
+            tracing::warn!(resource_id = core.id, path = %path.display(), %error, "failed to copy player resource into record");
+        }
     }
 
     /// `C4Record::AddFile` strips a temporary `.c4p` copy before streaming;
@@ -82125,6 +82890,9 @@ impl GameApp {
         }
 
         let mut stripped = MutableGroup::new_bytes(target.to_vec());
+        if !self.process_group_maker.as_bytes().is_empty() {
+            stripped.set_maker_bytes(self.process_group_maker.as_bytes());
+        }
         let player_core = source
             .read_file("Player.txt")
             .map_err(|error| error.to_string())?;
@@ -82136,6 +82904,9 @@ impl GameApp {
                 continue;
             }
             let mut child = MutableGroup::new_bytes(name.clone());
+            if !self.process_group_maker.as_bytes().is_empty() {
+                child.set_maker_bytes(self.process_group_maker.as_bytes());
+            }
             child
                 .add_file("ObjectInfo.txt", object_info)
                 .map_err(|error| error.to_string())?;
@@ -82169,7 +82940,8 @@ impl GameApp {
         let target = recorded_player_resource_name(core);
         let player_group = self.replay_record_player_group(core)?;
         let bytes = match player_group.raw_image() {
-            Ok(bytes) => bytes,
+            Ok(bytes) => lc_resources::compress_c4group_image(&bytes)
+                .map_err(|error| error.to_string())?,
             Err(_) if player_group.is_directory() => MutableGroup::from_group(&player_group)
                 .map_err(|error| error.to_string())?
                 .pack()
@@ -82199,31 +82971,84 @@ impl GameApp {
                 }
             }
         }
-        let final_player_infos = match lc_network::encode_player_info_list_ini(
-            &self.recording_player_info_snapshot(),
-        ) {
-            Ok(player_infos) => player_infos,
-            Err(error) => {
-                tracing::warn!(%error, "failed to serialize final record player infos");
-                self.recording = None;
-                return None;
-            }
-        };
+        let (description_title, description_definition_modules) = self
+            .recording
+            .as_ref()
+            .map(|session| {
+                (
+                    session.description_title.clone(),
+                    session.description_definition_modules.clone(),
+                )
+            })
+            .expect("recording checked above");
+        let (description_name, description) = self.classic_save_description(
+            &description_title,
+            &description_definition_modules,
+            ClassicSaveDescriptionKind::Record,
+        );
+        let final_player_info_snapshot = self.recording_player_info_snapshot();
         let session = self.recording.take().expect("recording checked above");
         let RecordingSession {
             writer,
-            mut group,
+            mut ctrl_rec,
             output_path,
+            disk_writer_pos,
             ..
         } = session;
-        let stream = writer.finish(u32::try_from(self.engine.frame()).unwrap_or(u32::MAX));
-        if let Err(error) = group.add_file("CtrlRec.c4b", stream) {
-            tracing::warn!(%error, "failed to install CtrlRec in record group");
-            return None;
+        if let Err(error) =
+            write_folder_save_entry(&output_path, &description_name, &description)
+        {
+            // C4Record::Stop deliberately ignores SaveDesc's return value.
+            tracing::warn!(%error, "failed to install final record description");
         }
-        if let Err(error) = group.add_file("RecPlayerInfos.txt", final_player_infos) {
-            tracing::warn!(%error, "failed to install final player infos in record group");
-            return None;
+        // C4PlayerInfoList::Save deletes the prior entry before it tests for
+        // an empty list or invokes the compiler. A compiler failure must not
+        // leave stale copied final-player data behind.
+        if let Err(error) = delete_folder_save_entry(&output_path, b"RecPlayerInfos.txt") {
+            tracing::warn!(%error, "failed to remove stale final player infos");
+        }
+        if !final_player_info_snapshot.clients.is_empty() {
+            match lc_network::encode_player_info_list_ini(&final_player_info_snapshot) {
+                Ok(final_player_infos) => {
+                    if let Err(error) = write_folder_save_entry(
+                        &output_path,
+                        b"RecPlayerInfos.txt",
+                        &final_player_infos,
+                    ) {
+                        tracing::warn!(%error, "failed to install final player infos in record group");
+                    }
+                }
+                Err(error) => {
+                    // Native ignores this failure and still closes/packs the
+                    // recording directory.
+                    tracing::warn!(%error, "failed to serialize final record player infos");
+                }
+            }
+        }
+        let stream = writer.finish(u32::try_from(self.engine.frame()).unwrap_or(u32::MAX));
+        if let Err(error) = ctrl_rec
+            .write_all(&stream[disk_writer_pos.min(stream.len())..])
+            .and_then(|()| ctrl_rec.flush())
+        {
+            tracing::warn!(%error, "failed to append final CtrlRec marker");
+        }
+        drop(ctrl_rec);
+        let group = match Group::open(&output_path) {
+            Ok(group) => group,
+            Err(error) => {
+                tracing::warn!(%error, "failed to reopen recording directory");
+                return None;
+            }
+        };
+        let mut group = match MutableGroup::from_group(&group) {
+            Ok(group) => group,
+            Err(error) => {
+                tracing::warn!(%error, "failed to read recording directory");
+                return None;
+            }
+        };
+        if !self.process_group_maker.as_bytes().is_empty() {
+            group.set_maker_bytes_recursively(self.process_group_maker.as_bytes());
         }
         let packed = match group.pack() {
             Ok(packed) => packed,
@@ -82232,8 +83057,14 @@ impl GameApp {
                 return None;
             }
         };
-        if let Err(error) = fs::write(&output_path, &packed) {
+        if let Err(error) = replace_file_from_same_directory(&output_path, &packed) {
             tracing::warn!(%error, path = %output_path.display(), "failed to write scenario recording");
+            return None;
+        }
+        tracing::info!(path = %output_path.display(), "saved scenario recording");
+        if !self.network_is_league {
+            // C4Game::Evaluate passes a null SHA destination outside league
+            // play, so C4Record::Stop never rereads or hashes the packed file.
             return None;
         }
         let on_disk = match fs::read(&output_path) {
@@ -82243,8 +83074,7 @@ impl GameApp {
                 return None;
             }
         };
-        tracing::info!(path = %output_path.display(), "saved scenario recording");
-        let name = LegacyCString::from_bytes(output_path.to_string_lossy().as_bytes().to_vec())?;
+        let name = LegacyCString::from_bytes(path_to_legacy_bytes(&output_path))?;
         Some(LeagueEndRecord {
             name,
             sha1: Sha1::digest(&on_disk).into(),
@@ -82499,6 +83329,7 @@ impl GameApp {
         self.energy_fraction = 0.0;
         self.active_scenario = None;
         self.active_definition_load = None;
+        self.active_description_definition_modules.clear();
         self.loading_state = None;
         self.runtime_music_enabled = false;
         self.reconstruct_music_system_at_preinit();
@@ -83400,6 +84231,8 @@ impl GameApp {
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        let effective_description_definition_modules =
+            raw_definition_description_modules(scenario_data.definition_resource_paths());
         let effective_definition_load = ScenarioDefinitionLoad::Fixed {
             modules: effective_definition_paths.clone(),
             // The vector already contains the rooted and original blocks
@@ -83747,49 +84580,32 @@ impl GameApp {
         engine.configure_sound_samples(sound_samples);
         engine.configure_music_tracks(music_tracks);
 
-        let apply_result = match (
+        let initial_record_music_enabled = (!replay
+            && (self.recording_enabled || self.network_is_league))
+            .then_some(initial_game_data.is_some_and(|game_data| game_data.music_enabled));
+        let initial_record_game_data = match scenario_data.apply_before_players_for_game_start(
+            &mut engine,
             network_game,
             initial_game_data,
             prepared_team_configuration,
             prepared_team_registry,
+            initial_record_music_enabled,
         ) {
-            (true, Some(game_data), configuration, teams) => scenario_data
-                .apply_before_network_final_init_with_game_data(
-                    &mut engine,
-                    game_data,
-                    configuration,
-                    teams,
-                ),
-            (true, None, Some(configuration), Some(teams)) => scenario_data
-                .apply_before_network_final_init_with_team_registry(
-                    &mut engine,
-                    teams,
-                    configuration,
-                ),
-            (true, None, Some(configuration), None) => scenario_data
-                .apply_before_network_final_init_with_team_configuration(
-                    &mut engine,
-                    configuration,
-                ),
-            (true, None, None, _) => scenario_data.apply_before_network_final_init(&mut engine),
-            (false, Some(game_data), configuration, _) => scenario_data
-                .apply_before_players_with_game_data(&mut engine, game_data, configuration),
-            (false, _, Some(configuration), _) => scenario_data
-                .apply_before_players_with_team_configuration(&mut engine, configuration),
-            (false, _, None, _) => scenario_data.apply_before_players(&mut engine),
+            Ok((_, initial_record)) => {
+                initial_record.map(|result| result.map_err(|error| error.to_string()))
+            }
+            Err(err) => {
+                tracing::error!(
+                    scenario = %scenario.title,
+                    path = %path.display(),
+                    error = %err,
+                    error_debug = ?err,
+                    "failed to apply scenario"
+                );
+                return Err(scenario_activation_scenario_error(&scenario.title, err));
+            }
         };
-        if let Err(err) = apply_result {
-            tracing::error!(
-                scenario = %scenario.title,
-                path = %path.display(),
-                error = %err,
-                error_debug = ?err,
-                "failed to apply scenario"
-            );
-            return Err(scenario_activation_scenario_error(&scenario.title, err));
-        }
         self.advance_scenario_loader(94, "Definitions, scripts, landscape, and objects activated");
-
         let restored_music_enabled = initial_game_data
             .map(|game_data| engine.reconcile_music_after_restore(game_data.music_enabled));
 
@@ -83843,7 +84659,16 @@ impl GameApp {
         self.runtime_player_big_icons.clear();
         self.runtime_player_big_icon_misses.clear();
         if !replay {
-            if let Err(error) = self.prepare_recording_for(&scenario, &scenario_data) {
+            let prepare_result = match initial_record_game_data.as_ref() {
+                Some(Ok(game_data)) => self.prepare_recording_for(
+                    &scenario,
+                    &scenario_data,
+                    Some(InitialRecordingSource::Fresh(game_data)),
+                ),
+                Some(Err(error)) => Err(error.clone()),
+                None => self.prepare_recording_for(&scenario, &scenario_data, None),
+            };
+            if let Err(error) = prepare_result {
                 let league_host = self.network_is_league
                     && matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
                 if league_host {
@@ -83972,7 +84797,10 @@ impl GameApp {
                         }
                     };
                     if self.recording.is_some() {
-                        match packed_group_bytes(selected.source_path()) {
+                        match packed_group_bytes(
+                            selected.source_path(),
+                            self.process_group_maker.as_bytes(),
+                        ) {
                             Ok(player_data) => {
                                 let mut recorded_join = join.clone();
                                 recorded_join.source =
@@ -84191,6 +85019,8 @@ impl GameApp {
         self.refresh_focus();
         self.active_scenario = Some(scenario.clone());
         self.active_definition_load = Some(effective_definition_load);
+        self.active_description_definition_modules =
+            effective_description_definition_modules;
         self.control_playback = control_playback;
         self.play_scenario_audio(&path);
         if initial_game_data.is_some() {
@@ -84569,6 +85399,7 @@ impl GameApp {
         self.mouse_control_allowed = true;
         self.mouse_control = true;
         self.active_definition_load = None;
+        self.active_description_definition_modules.clear();
         self.sky = None;
 
         arm_configured_engine_debug_mode(
@@ -84945,6 +85776,7 @@ impl GameApp {
         self.mouse_control_allowed = true;
         self.mouse_control = true;
         self.active_definition_load = None;
+        self.active_description_definition_modules.clear();
         let mut recording_scenario_data = None;
 
         if scenario_info.sandbox {
@@ -85054,6 +85886,8 @@ impl GameApp {
                     path.display()
                 )
             })?;
+            self.active_description_definition_modules =
+                raw_definition_description_modules(scenario_data.definition_resource_paths());
             self.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
                 modules: scenario_data
                     .definition_resource_paths()
@@ -85067,6 +85901,10 @@ impl GameApp {
 
         self.rebuild_definition_sprites();
 
+        if let Some(source_string_table) = save.source_string_table.as_deref() {
+            self.engine
+                .adopt_loaded_c4_string_table(source_string_table);
+        }
         self.engine
             .restore_state(&save.engine_state)
             .context("failed to restore saved engine state")?;
@@ -85078,6 +85916,18 @@ impl GameApp {
             self.app_paths.as_ref(),
             self.console_mode,
         );
+        // InitControl starts fInitial before InitPlayers mutates current
+        // takeover rows through SetSavegameResume.
+        let loaded_record_prepare_result = recording_scenario_data.as_ref().map(|scenario_data| {
+            let initial_source = self
+                .recording_enabled
+                .then_some(InitialRecordingSource::Loaded {
+                    music_enabled: save.runtime_music_enabled.unwrap_or(false),
+                    source_save_player_infos: save.source_save_player_infos.as_deref(),
+                    source_title_png: save.source_title_png.as_deref(),
+                });
+            self.prepare_recording_for(&frontend, scenario_data, initial_source)
+        });
         if let Some(clock) = self.network_control_clock.as_mut() {
             clock.set_control_rate(self.engine.control_rate());
         }
@@ -85386,8 +86236,8 @@ impl GameApp {
         }
         self.refresh_focus();
 
-        if let Some(scenario_data) = recording_scenario_data.as_ref() {
-            if let Err(error) = self.prepare_recording_for(&frontend, scenario_data) {
+        if let Some(prepare_result) = loaded_record_prepare_result {
+            if let Err(error) = prepare_result {
                 tracing::warn!(%error, "failed to prepare loaded-game recording");
             } else if let Err(error) = self.start_recording(false) {
                 tracing::warn!(%error, "failed to start loaded-game recording");
@@ -90889,7 +91739,7 @@ fn sync_console_save_group_directory(source: &Group, destination: &Path) -> Resu
             let payload = source.read_entry_bytes_exact(&entry)?;
             replace_file_from_same_directory(&target, &payload)?;
             #[cfg(unix)]
-            if entry.executable {
+            if entry.executable && !entry.is_directory {
                 use std::os::unix::fs::PermissionsExt;
 
                 let mut permissions = fs::metadata(&target)?.permissions();
@@ -90899,6 +91749,290 @@ fn sync_console_save_group_directory(source: &Group, destination: &Path) -> Resu
         }
     }
     Ok(())
+}
+
+/// Replay the operations which `C4Group` performs immediately for an open
+/// `GRPF_Folder`. Unlike packed groups, a folder save has no close-time
+/// transaction: a late failure leaves every earlier truncate and deletion on
+/// disk, and child buffers are gzip-wrapped files rather than subdirectories.
+fn replay_folder_save_journal(
+    journal: &developer_console_save::FolderSaveJournal,
+    destination: &Path,
+    maker: &[u8],
+) -> Result<()> {
+    anyhow::ensure!(
+        destination.is_dir(),
+        "folder save target is not a directory: {}",
+        destination.display()
+    );
+    for mutation in journal.mutations() {
+        use developer_console_save::{FolderSaveAddFailure, FolderSaveMutation};
+
+        let (result, failure) = match mutation {
+            FolderSaveMutation::DeletePattern { pattern } => {
+                if let Err(error) = delete_folder_save_pattern(destination, pattern) {
+                    // All live-save Delete results are either explicitly
+                    // ignored or flow through a no-fail component host.
+                    tracing::warn!(
+                        %error,
+                        pattern = %String::from_utf8_lossy(pattern),
+                        "folder-backed live-save deletion failed"
+                    );
+                }
+                continue;
+            }
+            FolderSaveMutation::DeleteEntry { name } => {
+                if let Err(error) = delete_folder_save_entry(destination, name) {
+                    tracing::warn!(
+                        %error,
+                        entry = %String::from_utf8_lossy(name),
+                        "folder-backed live-save entry deletion failed"
+                    );
+                }
+                continue;
+            }
+            FolderSaveMutation::PutFile {
+                name,
+                payload,
+                failure,
+            } => (
+                write_folder_save_entry(destination, name, payload),
+                *failure,
+            ),
+            FolderSaveMutation::PutChild {
+                name,
+                raw_image,
+                failure,
+            } => (
+                pack_folder_save_child(raw_image, maker)
+                    .and_then(|packed| write_folder_save_entry(destination, name, &packed)),
+                *failure,
+            ),
+            FolderSaveMutation::MergeMaterialGroup { raw_patch } => (
+                merge_folder_save_material(destination, raw_patch, maker),
+                FolderSaveAddFailure::Fatal,
+            ),
+        };
+        if let Err(error) = result {
+            match failure {
+                FolderSaveAddFailure::Fatal => return Err(error),
+                FolderSaveAddFailure::Ignore => {
+                    tracing::warn!(%error, "ignored folder-backed live-save add failure");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn folder_save_entry_path(root: &Path, name: &[u8]) -> Result<PathBuf> {
+    let relative = path_from_group_name_bytes(name);
+    anyhow::ensure!(
+        relative.components().count() == 1
+            && relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_))),
+        "unsafe folder-group entry name: {}",
+        String::from_utf8_lossy(name)
+    );
+    Ok(root.join(relative))
+}
+
+fn write_folder_save_entry(root: &Path, name: &[u8], payload: &[u8]) -> Result<()> {
+    let path = folder_save_entry_path(root, name)?;
+    write_folder_save_path(&path, payload)
+}
+
+fn write_folder_save_path(path: &Path, payload: &[u8]) -> Result<()> {
+    // CStdFile::Create opens the final folder path with truncation. Do not use
+    // a sibling temporary: a short write must leave its physical prefix.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .with_context(|| format!("create folder-group entry {}", path.display()))?;
+    file.write_all(payload)
+        .with_context(|| format!("write folder-group entry {}", path.display()))?;
+    Ok(())
+}
+
+fn delete_folder_save_entry(root: &Path, name: &[u8]) -> Result<()> {
+    let path = folder_save_entry_path(root, name)?;
+    match remove_file_or_directory(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("delete folder-group entry {}", path.display())),
+    }
+}
+
+fn delete_folder_save_pattern(root: &Path, pattern: &[u8]) -> Result<()> {
+    let separator = if pattern.contains(&b';') {
+        Some(b';')
+    } else if pattern.contains(&b'|') {
+        Some(b'|')
+    } else {
+        None
+    };
+    if let Some(separator) = separator {
+        for segment in pattern.split(|byte| *byte == separator) {
+            if let Err(error) = delete_folder_save_pattern_segment(root, segment) {
+                tracing::warn!(
+                    %error,
+                    pattern = %String::from_utf8_lossy(segment),
+                    "folder-group deletion segment failed"
+                );
+            }
+        }
+        return Ok(());
+    }
+    delete_folder_save_pattern_segment(root, pattern)
+}
+
+fn delete_folder_save_pattern_segment(root: &Path, pattern: &[u8]) -> Result<()> {
+    let entries = fs::read_dir(root)
+        .with_context(|| format!("enumerate folder-group target {}", root.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for entry in entries {
+        let name = path_to_legacy_bytes(Path::new(&entry.file_name()));
+        if console_save_ignored_directory_entry(&name)
+            || !classic_wildcard_match(pattern, &name)
+        {
+            continue;
+        }
+        // Native Delete stops this wildcard scan at its first failed erase.
+        remove_file_or_directory(&entry.path()).with_context(|| {
+            format!("delete folder-group entry {}", entry.path().display())
+        })?;
+    }
+    Ok(())
+}
+
+fn pack_folder_save_child(raw_image: &[u8], maker: &[u8]) -> Result<Vec<u8>> {
+    let source = Group::from_raw_memory(PathBuf::from("FolderSaveChild.c4g"), raw_image.to_vec())
+        .context("open folder-save child image")?;
+    let mut child = MutableGroup::from_group(&source).context("copy folder-save child image")?;
+    if !maker.is_empty() {
+        child.set_maker_bytes(maker);
+    }
+    child.pack().context("pack folder-save child image")
+}
+
+fn find_folder_save_entry(root: &Path, pattern: &[u8]) -> Result<Option<PathBuf>> {
+    for entry in fs::read_dir(root)
+        .with_context(|| format!("enumerate folder-group target {}", root.display()))?
+    {
+        let entry = entry?;
+        let name = path_to_legacy_bytes(Path::new(&entry.file_name()));
+        if !console_save_ignored_directory_entry(&name)
+            && classic_wildcard_match(pattern, &name)
+        {
+            return Ok(Some(entry.path()));
+        }
+    }
+    Ok(None)
+}
+
+fn merge_folder_save_material(root: &Path, raw_patch: &[u8], maker: &[u8]) -> Result<()> {
+    let patch = Group::from_raw_memory(PathBuf::from("Material.c4g"), raw_patch.to_vec())
+        .context("open live Material.c4g patch")?;
+    let Some(target_path) = find_folder_save_entry(root, b"Material.c4g")? else {
+        let packed = pack_folder_save_child(raw_patch, maker)
+            .context("close new live Material.c4g")?;
+        return write_folder_save_entry(root, b"Material.c4g", &packed)
+            .context("move new live Material.c4g into folder group");
+    };
+
+    if target_path.is_dir() {
+        return merge_folder_save_patch_into_directory(&target_path, &patch, maker);
+    }
+
+    let target = Group::open(&target_path)
+        .with_context(|| format!("open copied Material.c4g {}", target_path.display()))?;
+    let mut target = MutableGroup::from_group(&target)
+        .with_context(|| format!("copy Material.c4g {}", target_path.display()))?;
+    merge_folder_save_patch_into_group(&mut target, &patch)?;
+    if !maker.is_empty() {
+        target.set_maker_bytes(maker);
+    }
+    // OpenAsChild reports SaveMap's in-memory Add result, then ignores Close.
+    // Preserve that asymmetry: a failed packed-child truncate/write is
+    // nonfatal even though its physical prefix may already have changed.
+    let close_result = target
+        .pack()
+        .context("close copied packed Material.c4g")
+        .and_then(|packed| write_folder_save_path(&target_path, &packed));
+    if let Err(error) = close_result {
+        tracing::warn!(%error, "ignored packed Material.c4g close failure");
+    }
+    Ok(())
+}
+
+fn merge_folder_save_patch_into_directory(
+    target: &Path,
+    patch: &Group,
+    maker: &[u8],
+) -> Result<()> {
+    for entry in patch.entries().context("enumerate live Material.c4g patch")? {
+        let payload = patch
+            .read_entry_bytes_exact(&entry)
+            .context("read live Material.c4g patch entry")?;
+        let payload = if entry.is_directory {
+            pack_folder_save_child(&payload, maker)?
+        } else {
+            payload
+        };
+        write_folder_save_entry(target, &entry.name_bytes, &payload)?;
+    }
+    Ok(())
+}
+
+fn merge_folder_save_patch_into_group(target: &mut MutableGroup, patch: &Group) -> Result<()> {
+    for entry in patch.entries().context("enumerate live Material.c4g patch")? {
+        if entry.is_directory {
+            let child = patch
+                .open_child(&entry.relative_path)
+                .context("open live Material.c4g patch child")?;
+            let child = MutableGroup::from_group(&child)
+                .context("copy live Material.c4g patch child")?;
+            target
+                .add_child_bytes_with_metadata(
+                    entry.name_bytes,
+                    child,
+                    entry.time,
+                    entry.executable,
+                )
+                .context("merge live Material.c4g child")?;
+        } else {
+            let payload = patch
+                .read_entry_bytes_exact(&entry)
+                .context("read live Material.c4g patch entry")?;
+            target
+                .add_file_bytes_with_metadata(
+                    entry.name_bytes,
+                    payload,
+                    entry.time,
+                    entry.executable,
+                )
+                .context("merge live Material.c4g file")?;
+        }
+    }
+    Ok(())
+}
+
+fn persist_live_console_save_group(
+    group: &MutableGroup,
+    destination: &Path,
+    preserve_folder_group: bool,
+    folder_journal: &developer_console_save::FolderSaveJournal,
+    maker: &[u8],
+) -> Result<()> {
+    if preserve_folder_group {
+        replay_folder_save_journal(folder_journal, destination, maker)
+    } else {
+        persist_console_save_group(group, destination, false)
+    }
 }
 
 fn persist_console_save_group(
@@ -90925,6 +92059,64 @@ fn persist_console_save_group(
             .with_context(|| format!("create save parent {}", parent.display()))?;
     }
     replace_file_from_same_directory(destination, &packed)
+}
+
+/// C4Record::Start unpacks only the record's top-level group. Nested group
+/// entries remain compressed physical files so AddFile and replay lookup can
+/// use the directory as an open C4Group throughout recording.
+fn unpack_recording_group(source: &Group, destination: &Path) -> Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("record target has no parent: {}", destination.display()))?;
+    fs::create_dir_all(parent)?;
+    let filename = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("record");
+    let staged = create_sibling_rewrite_directory(parent, filename)?;
+    let extracted = (|| -> Result<()> {
+        for entry in source.entries()? {
+            let relative = path_from_group_name_bytes(&entry.name_bytes);
+            anyhow::ensure!(
+                relative.components().all(|component| matches!(component, Component::Normal(_))),
+                "record entry has an unsafe name: {}",
+                relative.display()
+            );
+            let target = staged.join(relative);
+            let raw = source.read_entry_bytes_exact(&entry)?;
+            let payload = if entry.is_directory {
+                lc_resources::compress_c4group_image(&raw)?
+            } else {
+                raw
+            };
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            if entry.executable && !entry.is_directory {
+                use std::os::unix::fs::OpenOptionsExt;
+
+                options.mode(0o777);
+            }
+            let mut file = options.open(&target)?;
+            file.write_all(&payload)?;
+            let stamp = UNIX_EPOCH + Duration::from_secs(u64::from(entry.time));
+            let _ = file.set_times(
+                fs::FileTimes::new()
+                    .set_accessed(stamp)
+                    .set_modified(stamp),
+            );
+        }
+        Ok(())
+    })();
+    if let Err(error) = extracted {
+        let _ = remove_file_or_directory(&staged);
+        return Err(error);
+    }
+    let committed = commit_staged_path_with_backup(&staged, destination, || Ok(()));
+    if committed.is_err() {
+        let _ = remove_file_or_directory(&staged);
+    }
+    committed
 }
 
 fn rewrite_directory_scenario_title(
@@ -92422,6 +93614,307 @@ mod tests {
     }
 
     #[test]
+    fn initial_record_cleanup_matches_native_component_patterns() {
+        let mut group = MutableGroup::new("Record.c4s");
+        for name in [
+            "Alice.C4P",
+            "Title.bmp",
+            "ICON.BMP",
+            "Info.txt",
+            "TitleUS.txt",
+            "DescDE.rtf",
+            "Title.png",
+            "Icon.png",
+            "Keep.bin",
+        ] {
+            group.add_file(name, name.as_bytes().to_vec()).unwrap();
+        }
+
+        clean_initial_record_group(&mut group);
+
+        let names = group.entry_names();
+        assert_eq!(names.len(), 3);
+        assert!(names.contains(&"Title.png"));
+        assert!(names.contains(&"Icon.png"));
+        assert!(names.contains(&"Keep.bin"));
+    }
+
+    fn install_record_test_definitions(root: &Path) {
+        let definition = root.join("Objects.c4d").join("Record.c4d");
+        fs::create_dir_all(&definition).expect("create record fixture definition");
+        fs::write(
+            definition.join("DefCore.txt"),
+            b"[DefCore]\nid=RECD\nName=Record fixture\nCategory=1\n",
+        )
+        .expect("write record fixture definition core");
+        write_test_definition_graphics(&definition);
+    }
+
+    #[test]
+    fn initial_record_uses_the_preinitialize_game_snapshot() {
+        let directory = tempdir().expect("initial record fixture");
+        let scenario_path = directory.path().join("Snapshot.c4s");
+        fs::create_dir(&scenario_path).expect("create scenario group");
+        install_record_test_definitions(directory.path());
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Snapshot\n\n[Definitions]\nDefinition1=Objects.c4d\n",
+        )
+        .expect("write scenario core");
+        fs::write(
+            scenario_path.join("PlayerInfos.txt"),
+            b"stale initial roster",
+        )
+        .expect("write stale initial roster");
+        fs::write(scenario_path.join("CtrlRec.txt"), b"copied text stream")
+            .expect("write copied text stream");
+        fs::write(
+            scenario_path.join("RecPlayerInfos.txt"),
+            b"copied final roster",
+        )
+        .expect("write copied final roster");
+        let scenario_data =
+            Scenario::load_from_path_with(&scenario_path, &InstallDefinitionResolver::new(None))
+                .expect("load record scenario");
+        let scenario = FrontendScenario::from_command_line(&scenario_path);
+        let mut app = new_state_only_menu_app(320, 200);
+        app.recordings_dir = Some(directory.path().join("Records.c4f"));
+
+        let mut initial_game_data = lc_engine::InitialNetworkGameData::default();
+        initial_game_data.frame = 41;
+        initial_game_data.control_tick = 17;
+        initial_game_data.script_go = true;
+        initial_game_data.script_counter = 9;
+        initial_game_data.music_enabled = true;
+
+        app.prepare_recording_for(
+            &scenario,
+            &scenario_data,
+            Some(InitialRecordingSource::Fresh(&initial_game_data)),
+        )
+        .expect("prepare initial record");
+        let packed = app
+            .recording_template
+            .as_ref()
+            .expect("recording template")
+            .group
+            .pack()
+            .expect("pack recording template");
+        let record = Group::from_memory(PathBuf::from("Snapshot.c4s"), packed)
+            .expect("open recording template");
+        let game = String::from_utf8(record.read_file("Game.txt").expect("record Game.txt"))
+            .expect("Game.txt is ASCII");
+
+        assert!(!record.exists("PlayerInfos.txt"));
+        assert_eq!(record.read_file("CtrlRec.txt").unwrap(), b"copied text stream");
+        assert_eq!(
+            record.read_file("RecPlayerInfos.txt").unwrap(),
+            b"copied final roster"
+        );
+        assert!(game.contains("Frame=41\r\n"));
+        assert!(game.contains("ControlTick=17\r\n"));
+        assert!(game.contains("Go=true\r\n"));
+        assert!(game.contains("Counter=9\r\n"));
+        assert!(game.contains("MusicEnabled=true\r\n"));
+        assert_eq!(
+            app.engine.frame(),
+            0,
+            "live engine remains post-menu default"
+        );
+    }
+
+    #[test]
+    fn loaded_initial_record_reconstructs_exact_source_before_finitial_game_splice() {
+        let directory = tempdir().expect("loaded initial record fixture");
+        let scenario_path = directory.path().join("Loaded.c4s");
+        let section_path = scenario_path.join("SectArchive.c4g");
+        fs::create_dir_all(&section_path).expect("create scenario section");
+        install_record_test_definitions(directory.path());
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Loaded record\n\n[Definitions]\nDefinition1=Objects.c4d\n",
+        )
+        .expect("write scenario core");
+        fs::write(
+            scenario_path.join("Game.txt"),
+            "[Game]\nTime=999\n\n[Player999]\nWealth=777\n",
+        )
+        .expect("write stale source game");
+        fs::write(scenario_path.join("Title.png"), b"original scenario title")
+            .expect("write original scenario title");
+        fs::write(section_path.join("Archive.bin"), b"section payload")
+            .expect("write scenario section payload");
+        let scenario_data =
+            Scenario::load_from_path_with(&scenario_path, &InstallDefinitionResolver::new(None))
+                .expect("load record scenario");
+        let scenario = FrontendScenario::from_command_line(&scenario_path);
+        let mut app = new_state_only_menu_app(320, 200);
+        app.recordings_dir = Some(directory.path().join("Records.c4f"));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 117,
+                    savegame_player: 17,
+                    name: LegacyCString::from_bytes(b"Current takeover".to_vec()).unwrap(),
+                    flags: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+
+        app.engine
+            .register_definition(
+                lc_engine::Definition::from_script(
+                    "TST1",
+                    "Recorded object",
+                    "static PostMaterialization;",
+                )
+                .expect("compile object definition"),
+            )
+            .expect("register object definition");
+        app.engine
+            .spawn_object(lc_engine::SpawnConfig::new("TST1").with_id(ObjectId::new(41)))
+            .expect("spawn recorded object");
+        let mut landscape = lc_engine::Landscape::flat(2, 1);
+        assert!(landscape.set_mode(lc_engine::LANDSCAPE_MODE_EXACT));
+        landscape.set_pixel_grid(lc_engine::landscape::PixelGrid::new(
+            2,
+            1,
+            vec![0, 1],
+            vec![0; 256],
+            vec![None; 256],
+            vec![None; 256],
+        ));
+        app.engine.set_landscape(landscape);
+
+        let mut restored = app.engine.capture_state();
+        restored.frame = 73;
+        restored.script_globals.named.insert(
+            "PostMaterialization".to_owned(),
+            Value::String("materialized string".to_owned().into()),
+        );
+        restored.players = vec![PlayerState {
+            id: 2,
+            player_info_id: 17,
+            name: "Loaded player".to_owned(),
+            status: PlayerStatus::Active,
+            wealth: 99,
+            ..PlayerState::default()
+        }];
+        restored.last_player_info_id = 17;
+        app.engine
+            .restore_state(&restored)
+            .expect("restore loaded runtime fixture");
+
+        app.prepare_recording_for(
+            &scenario,
+            &scenario_data,
+            Some(InitialRecordingSource::Loaded {
+                music_enabled: false,
+                source_save_player_infos: Some(b"original saved roster"),
+                source_title_png: Some(b"saved game screenshot"),
+            }),
+        )
+        .expect("prepare loaded initial record");
+        // InitPlayers performs this only after InitControl has snapshotted
+        // the initial record's current roster.
+        app.control_player_infos
+            .resume_joined_savegame_player(17, 0, false);
+        let packed = app
+            .recording_template
+            .as_ref()
+            .expect("recording template")
+            .group
+            .pack()
+            .expect("pack recording template");
+        let record = Group::from_memory(PathBuf::from("Loaded.c4s"), packed)
+            .expect("open recording template");
+        assert_eq!(
+            record
+                .read_file("SavePlayerInfos.txt")
+                .expect("original restore roster"),
+            b"original saved roster"
+        );
+        assert_eq!(
+            record.read_file("Title.png").expect("loaded save title"),
+            b"saved game screenshot"
+        );
+        let initial_players = lc_network::decode_player_info_list_ini(
+            &record
+                .read_file("PlayerInfos.txt")
+                .expect("pre-resume current roster"),
+        )
+        .expect("decode pre-resume current roster");
+        assert_eq!(initial_players.clients[0].players[0].id, 117);
+        assert_eq!(initial_players.clients[0].players[0].flags, 0);
+        assert_eq!(
+            app.control_player_infos.recreation_info_ids(),
+            vec![17],
+            "live takeover rows resume only after fInitial"
+        );
+
+        let objects =
+            String::from_utf8(record.read_file("Objects.txt").expect("record Objects.txt"))
+                .expect("Objects.txt is ASCII");
+        assert!(objects.contains("id=TST1\r\n"));
+        assert!(objects.contains("Number=41\r\n"));
+        let landscape = lc_resources::bitmap::IndexedBitmap::decode(
+            &record
+                .read_file("Landscape.bmp")
+                .expect("record Landscape.bmp"),
+        )
+        .expect("decode exact record landscape");
+        assert_eq!((landscape.width, landscape.height), (2, 1));
+        assert_eq!(landscape.indices, [0, 1]);
+        assert!(record.exists("Landscape.png"));
+        let strings = record.read_file("Strings.txt").expect("record Strings.txt");
+        assert!(strings
+            .windows(b"materialized string".len())
+            .any(|window| window == b"materialized string"));
+        let section = record
+            .open_child("SectArchive.c4g")
+            .expect("record scenario section");
+        assert_eq!(
+            section.read_file("Archive.bin").expect("section payload"),
+            b"section payload"
+        );
+
+        let scenario_core = String::from_utf8(
+            record
+                .read_file("Scenario.txt")
+                .expect("record Scenario.txt"),
+        )
+        .expect("Scenario.txt is ASCII");
+        for expected in ["SaveGame=1", "NoInitialize=1", "Replay=1"] {
+            assert!(scenario_core.contains(expected), "missing {expected}");
+        }
+
+        let game = String::from_utf8(record.read_file("Game.txt").expect("record Game.txt"))
+            .expect("Game.txt is ASCII");
+        let player_start = game.find("[Player17]").expect("reconstructed player tail");
+        assert!(!game.contains("[Player999]"));
+        assert!(game[player_start..].contains("Wealth=99\r\n"));
+        assert_eq!(game.matches("[Player").count(), 1);
+
+        let post_materialization = app
+            .engine
+            .capture_initial_record_game_data(false)
+            .expect("capture post-materialization initial projection");
+        let expected_game = lc_engine::serialize_initial_network_game(&post_materialization, None)
+            .expect("serialize post-materialization initial projection")
+            .expect("initial projection emits Game.txt");
+        let expected_game = String::from_utf8(expected_game).expect("expected Game.txt is ASCII");
+        assert_eq!(
+            game[..player_start].trim_end(),
+            expected_game.trim_end(),
+            "the non-player prefix must be the post-materialization fInitial projection",
+        );
+        assert!(game[..player_start].contains("Frame=73\r\n"));
+        assert!(game[..player_start].contains("GlobalNamed="));
+    }
+
+    #[test]
     fn runtime_join_dynamic_requests_coalesce_until_a_newer_tick() {
         let mut pending = PendingRuntimeDynamicRequest::new(7, 23);
         assert!(pending.needs_synchronize());
@@ -93579,6 +95072,54 @@ mod tests {
             .apply_ready_controls(0, vec![packet()])
             .expect("active console executes non-host script");
         assert_eq!(active.engine.physics().gravity, 77);
+    }
+
+    #[test]
+    fn l042_save_description_language_preserves_an_explicit_empty_first_segment() {
+        let _lock = env_lock().lock();
+        assert_eq!(
+            materialized_save_description_language(b"[General]\nLanguage=,DE\n"),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            materialized_save_description_language(b"[General]\nLanguage=DE,US\n"),
+            b"DE"
+        );
+        assert_eq!(
+            materialized_save_description_language(b"[General]\nLanguageEx=DE,US\n"),
+            classic_loader_system_language()
+                .unwrap_or("US")
+                .as_bytes()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn l042_save_description_preserves_native_definition_path_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let native_path_bytes = b"Defs-\xff.c4f\\Pack.c4d".to_vec();
+        let native_path = PathBuf::from(OsString::from_vec(native_path_bytes.clone()));
+        assert_eq!(
+            raw_definition_description_modules(&[native_path]),
+            [native_path_bytes.clone()]
+        );
+        let relative =
+            developer_console_definition_description_path(&native_path_bytes, None);
+        assert_eq!(relative.as_slice(), native_path_bytes.as_slice());
+
+        let app = new_state_only_menu_app(320, 200);
+        let (_, description) = app.classic_save_description(
+            b"Raw definition path",
+            &[native_path_bytes],
+            ClassicSaveDescriptionKind::Savegame,
+        );
+        let mut escaped_path = b"Defs-\xff.c4f".to_vec();
+        escaped_path.extend_from_slice(&[b'\\'; 4]);
+        escaped_path.extend_from_slice(b"Pack.c4d");
+        assert!(description
+            .windows(escaped_path.len())
+            .any(|window| window == escaped_path.as_slice()));
     }
 
     #[test]
@@ -108057,6 +109598,9 @@ func Award()
             focus_id: None,
             user_label: None,
             runtime_music_enabled: None,
+            source_save_player_infos: None,
+            source_string_table: None,
+            source_title_png: None,
             engine_state,
         };
 
@@ -148456,6 +150000,8 @@ ScenInfoArea=70,5,25,90
             output_path,
             initial_stream_chunk: Vec::new(),
             runtime_seed: None,
+            description_title: b"Recorded".to_vec(),
+            description_definition_modules: Vec::new(),
         });
     }
 
@@ -148515,9 +150061,48 @@ ScenInfoArea=70,5,25,90
         let directory = tempdir().expect("record directory");
         let output_path = directory.path().join("001-Scenario.c4s");
         let mut app = new_state_only_running_sandbox_app();
+        app.network_is_league = true;
+        let game_number = app.local_owner;
+        app.control_player_infos.replace_snapshot(
+            17,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 17,
+                    game_number,
+                    name: LegacyCString::from_bytes(b"Recorded player".to_vec())
+                        .expect("recorded player name"),
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
         install_test_recording_template(&mut app, output_path.clone());
+        let mut nested = MutableGroup::new("Nested.c4g");
+        nested
+            .add_file("Nested.txt", b"nested".to_vec())
+            .expect("nested component");
+        app.recording_template
+            .as_mut()
+            .unwrap()
+            .group
+            .add_child("Nested.c4g", nested)
+            .expect("nested group");
 
         app.start_recording(true).unwrap();
+        assert!(output_path.is_dir(), "active record must be unpacked");
+        assert!(
+            output_path.join("Nested.c4g").is_file(),
+            "top-level unpack keeps child groups as packed physical files"
+        );
+        assert_eq!(
+            Group::open(output_path.join("Nested.c4g"))
+                .expect("physical child group opens")
+                .read_file("Nested.txt")
+                .expect("nested file"),
+            b"nested"
+        );
         let initial = Group::open(&output_path).expect("initial record is durable at start");
         assert_eq!(
             initial.read_file("Sentinel.txt").expect("copied component"),
@@ -148534,6 +150119,15 @@ ScenInfoArea=70,5,25,90
                 .expect("supported control")],
         )
         .expect("execute and record control");
+        assert_eq!(
+            fs::read(output_path.join("CtrlRec.c4b")).expect("live CtrlRec is durable"),
+            app.recording
+                .as_ref()
+                .expect("recording remains active")
+                .writer
+                .bytes(),
+            "IMMEDIATEREC flushes each control chunk before Stop"
+        );
         let metadata = app.finish_recording().expect("league record metadata");
 
         let packed = fs::read(&output_path).expect("packed record group");
@@ -148550,10 +150144,44 @@ ScenInfoArea=70,5,25,90
         let scenario = String::from_utf8(group.read_file("Scenario.txt").unwrap()).unwrap();
         assert!(scenario.contains("Replay=1"));
         assert!(scenario.contains("Icon=29"));
-        assert!(group.exists("RecPlayerInfos.txt"));
+        assert!(group.exists("DescUS.rtf"));
+        let description = group.read_file("DescUS.rtf").expect("record description");
+        assert!(description
+            .windows(b"Engine version: 362".len())
+            .any(|window| window == b"Engine version: 362"));
+        let final_player_infos = lc_network::decode_player_info_list_ini(
+            &group
+                .read_file("RecPlayerInfos.txt")
+                .expect("final player infos"),
+        )
+        .expect("decode final player infos");
+        assert_eq!(final_player_infos.clients[0].players[0].id, 17);
         let stream = group.read_file("CtrlRec.c4b").expect("binary CtrlRec");
         let mut playback = ControlRecordPlayback::from_bytes(&stream).expect("CtrlRec opens");
         assert_eq!(playback.take_controls(0), vec![packet]);
+    }
+
+    #[test]
+    fn finishing_recording_deletes_stale_final_infos_for_an_empty_roster() {
+        let directory = tempdir().expect("record directory");
+        let output_path = directory.path().join("001-Empty.c4s");
+        let mut app = new_state_only_running_sandbox_app();
+        app.control_player_infos = ControlPlayerInfoRegistry::default();
+        install_test_recording_template(&mut app, output_path.clone());
+        app.recording_template
+            .as_mut()
+            .unwrap()
+            .group
+            .add_file("RecPlayerInfos.txt", b"stale final roster".to_vec())
+            .unwrap();
+
+        assert!(app
+            .start_recording(true)
+            .expect("start empty recording"));
+        assert!(app.finish_recording().is_none());
+
+        let group = Group::open(&output_path).expect("open finished record");
+        assert!(!group.exists("RecPlayerInfos.txt"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -148575,6 +150203,7 @@ ScenInfoArea=70,5,25,90
             .initial_stream_chunk = initial_chunk.clone();
         let (network, _events) = NetworkManager::test_stub_with_league_record_stream(endpoint);
         app.network = Some(network);
+        app.network_is_league = true;
         assert!(app.engine.definition_name("CLNK").is_some());
 
         let player_path = directory.path().join("Alice.c4p");
@@ -148632,6 +150261,15 @@ ScenInfoArea=70,5,25,90
         app.start_recording(true).unwrap();
         let frame = u32::try_from(app.engine.frame()).unwrap();
         app.record_control_packet(&packet);
+        let live_local_player_path = output_path.join("17-Alice.c4p");
+        assert!(
+            live_local_player_path.is_file(),
+            "PreRec copies the local player resource before the control chunk"
+        );
+        let live_local_player = Group::open(&live_local_player_path)
+            .expect("live unstripped player resource opens");
+        assert!(live_local_player.exists("Private.bin"));
+        assert!(live_local_player.exists("Missing.c4i"));
 
         let mut expected_writer = ControlRecordWriter::new();
         expected_writer.record_packet(frame, &packet).unwrap();
@@ -148862,7 +150500,7 @@ ScenInfoArea=70,5,25,90
         });
 
         app.record_control_packet(&packet);
-        app.finish_recording().expect("resource record metadata");
+        assert!(app.finish_recording().is_none());
 
         let record = Group::open(&output_path).expect("record group");
         let copied = record
@@ -148906,7 +150544,7 @@ ScenInfoArea=70,5,25,90
         )
         .expect("execute runtime record synchronize");
         assert!(app.recording.is_some(), "the sync request arms recording");
-        app.finish_recording().expect("runtime record is written");
+        assert!(app.finish_recording().is_none());
 
         let group = Group::open(output_path).expect("runtime record group");
         let stream = group.read_file("CtrlRec.c4b").expect("runtime CtrlRec");
@@ -149637,6 +151275,100 @@ ScenInfoArea=70,5,25,90
         assert_eq!(
             fs::read(destination.join("Scenario.txt")).unwrap(),
             b"[Head]\nTitle=Copy\n"
+        );
+    }
+
+    #[test]
+    fn folder_live_save_replays_native_prefix_and_writes_packed_children() {
+        let directory = tempdir().expect("folder live-save root");
+        let destination = directory.path().join("Live.c4s");
+        fs::create_dir(&destination).expect("create folder scenario");
+        fs::write(destination.join("Remove.txt"), b"remove me").expect("write removed entry");
+        fs::write(destination.join("Untouched.dat"), b"keep me").expect("write unrelated entry");
+        fs::create_dir(destination.join("Blocked.txt")).expect("create failing add target");
+
+        let mut child = MutableGroup::new("SectNight.c4g");
+        child
+            .add_file("Scenario.txt", b"[Head]\nTitle=Night\n".to_vec())
+            .expect("add child core");
+        let child = child.pack_raw().expect("compose raw child");
+        let mut journal = developer_console_save::FolderSaveJournal::default();
+        journal.put_file(
+            "Prefix.txt",
+            b"committed prefix",
+            developer_console_save::FolderSaveAddFailure::Fatal,
+        );
+        journal.delete_entry("Remove.txt");
+        journal.put_child(
+            "SectNight.c4g",
+            child,
+            developer_console_save::FolderSaveAddFailure::Fatal,
+        );
+        journal.put_file(
+            "Blocked.txt",
+            b"cannot replace a directory by truncating it",
+            developer_console_save::FolderSaveAddFailure::Fatal,
+        );
+        journal.put_file(
+            "After.txt",
+            b"must not run",
+            developer_console_save::FolderSaveAddFailure::Fatal,
+        );
+
+        replay_folder_save_journal(&journal, &destination, b"Folder maker")
+            .expect_err("directory target makes the fourth mutation fail");
+
+        assert_eq!(
+            fs::read(destination.join("Prefix.txt")).unwrap(),
+            b"committed prefix"
+        );
+        assert!(!destination.join("Remove.txt").exists());
+        assert_eq!(
+            fs::read(destination.join("Untouched.dat")).unwrap(),
+            b"keep me"
+        );
+        assert!(!destination.join("After.txt").exists());
+        let child_path = destination.join("SectNight.c4g");
+        assert!(child_path.is_file(), "folder children stay packed files");
+        let child = Group::open(&child_path).expect("open packed section child");
+        assert_eq!(child.maker(), Some("Folder maker"));
+        assert_eq!(
+            child.read_file("Scenario.txt").unwrap(),
+            b"[Head]\nTitle=Night\n"
+        );
+        assert!(fs::read_dir(directory.path())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("lc-rewrite")));
+    }
+
+    #[test]
+    fn folder_live_save_material_respects_existing_directory_representation() {
+        let directory = tempdir().expect("folder Material root");
+        let destination = directory.path().join("Live.c4s");
+        let material = destination.join("Material.c4g");
+        fs::create_dir_all(&material).expect("create unpacked material group");
+        fs::write(material.join("Keep.dat"), b"keep").expect("write material sibling");
+        fs::write(material.join("TexMap.txt"), b"old").expect("write old texture map");
+
+        let mut patch = MutableGroup::new("Material.c4g");
+        patch
+            .add_file("TexMap.txt", b"new texture map".to_vec())
+            .expect("add texture patch");
+        let mut journal = developer_console_save::FolderSaveJournal::default();
+        journal.merge_material_group(patch.pack_raw().expect("compose material patch"));
+
+        replay_folder_save_journal(&journal, &destination, b"Folder maker")
+            .expect("merge unpacked Material.c4g");
+
+        assert!(material.is_dir());
+        assert_eq!(fs::read(material.join("Keep.dat")).unwrap(), b"keep");
+        assert_eq!(
+            fs::read(material.join("TexMap.txt")).unwrap(),
+            b"new texture map"
         );
     }
 
@@ -160910,8 +162642,7 @@ ScenInfoArea=70,5,25,90
                     != MenuAction::JoinPlayer(player_path.to_string_lossy().into_owned())
             }));
 
-        app.finish_recording()
-            .expect("finish offline runtime recording");
+        assert!(app.finish_recording().is_none());
         let recording = Group::open(&recording_path).expect("open offline runtime recording");
         let mut playback = ControlRecordPlayback::from_bytes(
             &recording
@@ -189252,6 +190983,9 @@ func ControlDig() { dig_count = 1; return(1); }
             focus_id: app.focus_id,
             user_label: Some("restored music level".to_string()),
             runtime_music_enabled: Some(false),
+            source_save_player_infos: None,
+            source_string_table: None,
+            source_title_png: None,
             engine_state,
         };
         let save: SavedGameFile = serde_json::from_str(
@@ -189301,6 +191035,9 @@ func ControlDig() { dig_count = 1; return(1); }
             focus_id: app.focus_id,
             user_label: Some("restored playlist".to_string()),
             runtime_music_enabled: Some(false),
+            source_save_player_infos: None,
+            source_string_table: None,
+            source_title_png: None,
             engine_state,
         };
         app.audio
@@ -189371,6 +191108,9 @@ func ControlDig() { dig_count = 1; return(1); }
             focus_id: app.focus_id,
             user_label: Some("runtime music state".to_string()),
             runtime_music_enabled: Some(false),
+            source_save_player_infos: None,
+            source_string_table: None,
+            source_title_png: None,
             engine_state: app.engine.capture_state(),
         };
         app.audio
@@ -189417,7 +191157,7 @@ func ControlDig() { dig_count = 1; return(1); }
         saved_player.mouse_control = 0;
         saved_player.control.control_style = true;
         saved_player.control.auto_context_menu = true;
-        saved_player.control.last_com = lc_engine::COM_RIGHT;
+        saved_player.control.last_com = i32::from(lc_engine::COM_RIGHT);
         saved_player.control.last_com_down_double = 2;
         saved_player.control.pressed_coms = 0x3ff;
         saved_player.message_status = 2;
@@ -189435,6 +191175,9 @@ func ControlDig() { dig_count = 1; return(1); }
             focus_id: app.focus_id,
             user_label: Some("local control restore".to_string()),
             runtime_music_enabled: Some(app.runtime_music_enabled),
+            source_save_player_infos: None,
+            source_string_table: None,
+            source_title_png: None,
             engine_state,
         };
 
@@ -189512,6 +191255,9 @@ func ControlDig() { dig_count = 1; return(1); }
             focus_id: app.focus_id,
             user_label: Some("current player info wins".to_string()),
             runtime_music_enabled: Some(app.runtime_music_enabled),
+            source_save_player_infos: None,
+            source_string_table: None,
+            source_title_png: None,
             engine_state,
         };
 
@@ -189576,6 +191322,9 @@ func ControlDig() { dig_count = 1; return(1); }
             focus_id: app.focus_id,
             user_label: Some("unjoined takeover restore".to_string()),
             runtime_music_enabled: Some(app.runtime_music_enabled),
+            source_save_player_infos: None,
+            source_string_table: None,
+            source_title_png: None,
             engine_state,
         };
 
@@ -190024,6 +191773,9 @@ func ControlDig() { dig_count = 1; return(1); }
             focus_id: app.focus_id,
             user_label: Some("removed player skipped".to_string()),
             runtime_music_enabled: Some(app.runtime_music_enabled),
+            source_save_player_infos: None,
+            source_string_table: None,
+            source_title_png: None,
             engine_state: app.engine.capture_state(),
         };
 
@@ -190071,6 +191823,9 @@ func ControlDig() { dig_count = 1; return(1); }
             focus_id: app.focus_id,
             user_label: Some("loaded mouse survives InitControl gate".to_string()),
             runtime_music_enabled: Some(app.runtime_music_enabled),
+            source_save_player_infos: None,
+            source_string_table: None,
+            source_title_png: None,
             engine_state,
         };
 
@@ -191512,6 +193267,20 @@ func ControlDig() { dig_count = 1; return(1); }
         )
         .expect("default classic charset is CP1252");
         assert_eq!(cp1252.get("IDS_CON_HELP").map(String::as_str), Some("€"));
+
+        let raw = parse_runtime_language_bytes_table(
+            b"IDS_LANG_CHARSET=RUSSIAN\r\nIDS_DESC_DATEREC=\xcf\xf0\xe8\xe2\xe5\xf2\\n%s\r\n",
+            "raw CP1251 fixture",
+        )
+        .expect("save descriptions keep legacy code-page bytes opaque");
+        assert_eq!(
+            raw.entries.get("IDS_LANG_CHARSET").map(Vec::as_slice),
+            Some(b"RUSSIAN".as_slice())
+        );
+        assert_eq!(
+            raw.entries.get("IDS_DESC_DATEREC").map(Vec::as_slice),
+            Some(b"\xcf\xf0\xe8\xe2\xe5\xf2\r\n%s".as_slice())
+        );
 
         let utf8 = parse_runtime_help_language_table(
             "IDS_LANG_CHARSET=UTF-8\nIDS_CON_HELP=Hilfe ä\n".as_bytes(),

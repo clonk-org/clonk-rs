@@ -282,6 +282,11 @@ pub struct PlayerState {
     pub name: String,
     #[serde(default)]
     pub status: PlayerStatus,
+    /// Exact persisted `C4Player::Status` compiler word. The semantic status
+    /// above folds elimination/surrender into Rust variants, while C++ stores
+    /// this independent signed integer verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_value: Option<i32>,
     #[serde(default)]
     pub team: Option<i32>,
     #[serde(default)]
@@ -291,6 +296,11 @@ pub struct PlayerState {
     /// nonzero values when writing Game.txt again.
     #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub surrendered_value: i32,
+    /// Exact persisted `C4Player::Eliminated` integer. Gameplay uses the
+    /// folded `status` projection, but the compiler preserves any nonzero
+    /// signed value independently of `Status` and `Surrendered`.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub eliminated_value: i32,
     /// Result flag projected from the linked `C4PlayerInfo::PIF_Won` state
     /// (`C4PlayerInfo.h:63,219-237`).
     #[serde(default, skip_serializing_if = "is_false")]
@@ -403,6 +413,12 @@ pub struct PlayerState {
     pub production_unit: u32,
     #[serde(default)]
     pub color: Option<RgbColor>,
+    /// Exact persisted `C4Player::ColorDw`. The RGB projection above is used
+    /// by render code, but C++ compiles the complete unsigned 32-bit word and
+    /// does not discard its high byte. `None` marks older Rust snapshots that
+    /// only retained the RGB projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_dw_raw: Option<u32>,
     /// Old-gfx palette index (`C4Player::Color`), distinct from RGB
     /// `ColorDw`. `None` represents the live C++ sentinel -1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -485,6 +501,34 @@ pub struct PlayerState {
 }
 
 impl PlayerState {
+    pub(crate) fn exact_status_value(&self) -> i32 {
+        self.status_value
+            .unwrap_or_else(|| player_status_compiler_value(self.status))
+    }
+
+    pub(crate) fn exact_eliminated_value(&self) -> i32 {
+        retained_runtime_flag_value(
+            self.eliminated_value,
+            matches!(
+                self.status,
+                PlayerStatus::Eliminated | PlayerStatus::Surrendered
+            ),
+        )
+    }
+
+    pub(crate) fn exact_color_dw(&self) -> u32 {
+        exact_player_color_dw(self.color_dw_raw, self.color)
+    }
+
+    pub(crate) fn set_color_dw(&mut self, color: u32) {
+        self.color = Some(RgbColor::new(
+            ((color >> 16) & 0xff) as u8,
+            ((color >> 8) & 0xff) as u8,
+            (color & 0xff) as u8,
+        ));
+        self.color_dw_raw = Some(color);
+    }
+
     pub(crate) fn exact_surrendered_value(&self) -> i32 {
         retained_runtime_flag_value(self.surrendered_value, self.surrendered)
     }
@@ -716,10 +760,11 @@ impl PlayerState {
 /// for Jump'n'Run control, and the cursor/select flash timers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PlayerControlState {
-    /// `LastCom` — the com buffered for COM_Single/COM_Double synthesis
-    /// (C4Player::InCom, C4Player.cpp:1522-1536).
+    /// `LastCom` — the full signed compiler word buffered for
+    /// COM_Single/COM_Double synthesis (`int32_t` in C4Player.h:121;
+    /// C4Player::InCom, C4Player.cpp:1522-1536).
     #[serde(default)]
-    pub last_com: u8,
+    pub last_com: i32,
     /// `LastComDelay` — frames since LastCom was buffered; > C4DoubleClick
     /// flushes the COM_Single (C4Player::Execute, C4Player.cpp:1215-1229).
     #[serde(default)]
@@ -811,9 +856,11 @@ pub struct Player {
     no_elimination_check: bool,
     name: String,
     status: PlayerStatus,
+    status_value: Option<i32>,
     team: Option<i32>,
     surrendered: bool,
     surrendered_value: i32,
+    eliminated_value: i32,
     won: bool,
     evaluated: bool,
     wealth: i32,
@@ -866,6 +913,9 @@ pub struct Player {
     production_delay: u32,
     production_unit: u32,
     color: Option<RgbColor>,
+    /// Exact `C4Player::ColorDw` compiler word. `None` retains the migration
+    /// distinction for old Rust state whose RGB projection is authoritative.
+    color_dw_raw: Option<u32>,
     fog_of_war: bool,
     force_fog_of_war: bool,
     pub(crate) show_control_position: i32,
@@ -917,9 +967,11 @@ impl Player {
             no_elimination_check: false,
             name: name.into(),
             status: PlayerStatus::Active,
+            status_value: None,
             team: None,
             surrendered: false,
             surrendered_value: 0,
+            eliminated_value: 0,
             won: false,
             evaluated: false,
             wealth: 0,
@@ -962,6 +1014,7 @@ impl Player {
             production_delay: 0,
             production_unit: 0,
             color: None,
+            color_dw_raw: None,
             fog_of_war: false,
             force_fog_of_war: false,
             show_control_position: 0,
@@ -1229,9 +1282,14 @@ impl Player {
             no_elimination_check: false,
             name,
             status,
+            status_value: None,
             team,
             surrendered,
             surrendered_value: i32::from(surrendered),
+            eliminated_value: i32::from(matches!(
+                status,
+                PlayerStatus::Eliminated | PlayerStatus::Surrendered
+            )),
             won: false,
             evaluated: false,
             wealth,
@@ -1274,6 +1332,7 @@ impl Player {
             production_delay,
             production_unit,
             color,
+            color_dw_raw: None,
             fog_of_war: false,
             force_fog_of_war: false,
             show_control_position: 0,
@@ -1312,9 +1371,11 @@ impl Player {
             no_elimination_check,
             name,
             status,
+            status_value,
             team,
             surrendered,
             surrendered_value,
+            eliminated_value,
             won,
             evaluated,
             wealth,
@@ -1354,6 +1415,7 @@ impl Player {
             production_delay,
             production_unit,
             color,
+            color_dw_raw,
             color_index,
             position_index,
             control_set,
@@ -1377,6 +1439,10 @@ impl Player {
             extra_data,
         } = state;
         let surrendered_value = retained_runtime_flag_value(surrendered_value, surrendered);
+        let eliminated_value = retained_runtime_flag_value(
+            eliminated_value,
+            matches!(status, PlayerStatus::Eliminated | PlayerStatus::Surrendered),
+        );
         control.reconcile_integer_flags();
         let knowledge_entries = if knowledge_entries.is_empty() && !knowledge.is_empty() {
             knowledge.into_iter().map(|id| (id, 1)).collect()
@@ -1426,9 +1492,11 @@ impl Player {
             no_elimination_check,
             name,
             status,
+            status_value,
             team,
             surrendered,
             surrendered_value,
+            eliminated_value,
             won,
             evaluated,
             wealth,
@@ -1471,6 +1539,7 @@ impl Player {
             production_delay,
             production_unit,
             color,
+            color_dw_raw,
             fog_of_war,
             force_fog_of_war,
             show_control_position,
@@ -1509,9 +1578,11 @@ impl Player {
             no_elimination_check: self.no_elimination_check,
             name: self.name.clone(),
             status: self.status,
+            status_value: self.status_value,
             team: self.team,
             surrendered: self.surrendered,
             surrendered_value: self.surrendered_value,
+            eliminated_value: self.eliminated_value,
             won: self.won,
             evaluated: self.evaluated,
             wealth: self.wealth,
@@ -1551,6 +1622,7 @@ impl Player {
             production_delay: self.production_delay,
             production_unit: self.production_unit,
             color: self.color,
+            color_dw_raw: self.color_dw_raw,
             color_index: (self.color_index != -1).then_some(self.color_index),
             position_index: (self.position_index != -1).then_some(self.position_index),
             control_set: self.control_set,
@@ -1667,6 +1739,11 @@ impl Player {
             self.surrendered_value = 0;
         }
         self.status = status;
+        self.status_value = None;
+        self.eliminated_value = i32::from(matches!(
+            status,
+            PlayerStatus::Eliminated | PlayerStatus::Surrendered
+        ));
     }
 
     /// C4Player::Eliminate's one-way state transition and 60-frame retire
@@ -1675,8 +1752,13 @@ impl Player {
         if self.status == PlayerStatus::Eliminated {
             return false;
         }
+        self.status_value = Some(
+            self.status_value
+                .unwrap_or_else(|| player_status_compiler_value(self.status)),
+        );
         self.surrendered = false;
         self.surrendered_value = 0;
+        self.eliminated_value = 1;
         self.status = PlayerStatus::Eliminated;
         self.retire_delay = 60;
         true
@@ -1708,6 +1790,20 @@ impl Player {
 
     pub fn set_color(&mut self, color: Option<RgbColor>) {
         self.color = color;
+        self.color_dw_raw = None;
+    }
+
+    pub(crate) fn color_dw(&self) -> u32 {
+        exact_player_color_dw(self.color_dw_raw, self.color)
+    }
+
+    pub(crate) fn set_color_dw(&mut self, color: u32) {
+        self.color = Some(RgbColor::new(
+            ((color >> 16) & 0xff) as u8,
+            ((color >> 8) & 0xff) as u8,
+            (color & 0xff) as u8,
+        ));
+        self.color_dw_raw = Some(color);
     }
 
     pub fn fog_of_war(&self) -> bool {
@@ -1827,10 +1923,17 @@ impl Player {
         self.surrendered = surrendered;
         self.surrendered_value = i32::from(surrendered);
         if surrendered {
+            self.status_value = Some(
+                self.status_value
+                    .unwrap_or_else(|| player_status_compiler_value(self.status)),
+            );
+            self.eliminated_value = 1;
             self.status = PlayerStatus::Surrendered;
             self.retire_delay = 60;
         } else if self.status == PlayerStatus::Surrendered {
             self.status = PlayerStatus::Active;
+            self.status_value = None;
+            self.eliminated_value = 0;
             self.retire_delay = 0;
         }
     }
@@ -2173,6 +2276,29 @@ impl Player {
         self.sync_viewport_focus();
     }
 
+    /// Apply the destructive DenumeratePointers half of C4Player save
+    /// preparation. Explicit object-pointer adaptors become null when their
+    /// target is not in C4GameObjects; list/value fields use separate compiler
+    /// paths and deliberately remain untouched.
+    pub(crate) fn denumerate_live_save_pointer_fields(&mut self, object_numbers: &HashSet<u64>) {
+        let absent = |object: ObjectId| !object_numbers.contains(&object.as_u64());
+        if self.cursor.is_some_and(absent) {
+            self.cursor = None;
+        }
+        if self.view_cursor.is_some_and(absent) {
+            self.view_cursor = None;
+        }
+        if self.captain.is_some_and(absent) {
+            self.captain = None;
+        }
+        for query in &mut self.message_board_queries {
+            if query.target.is_some_and(absent) {
+                query.target = None;
+            }
+        }
+        self.sync_viewport_focus();
+    }
+
     fn sync_viewport_focus(&mut self) {
         let focus = self.view_cursor.or(self.cursor);
         for viewport in &mut self.viewports {
@@ -2440,6 +2566,28 @@ fn retained_runtime_flag_value(raw: i32, enabled: bool) -> i32 {
     }
 }
 
+fn player_status_compiler_value(status: PlayerStatus) -> i32 {
+    match status {
+        PlayerStatus::Inactive => 0,
+        PlayerStatus::Active | PlayerStatus::Eliminated | PlayerStatus::Surrendered => 1,
+        PlayerStatus::TeamSelection => 2,
+        PlayerStatus::TeamSelectionPending => 3,
+    }
+}
+
+fn rgb_color_dw(color: RgbColor) -> u32 {
+    (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+}
+
+fn exact_player_color_dw(raw: Option<u32>, color: Option<RgbColor>) -> u32 {
+    match (raw, color) {
+        (Some(raw), Some(color)) if raw & 0x00ff_ffff == rgb_color_dw(color) => raw,
+        (_, Some(color)) => rgb_color_dw(color),
+        (Some(raw), None) => raw,
+        (None, None) => 0,
+    }
+}
+
 fn is_zero_vector(value: &Vector2) -> bool {
     *value == Vector2::ZERO
 }
@@ -2645,6 +2793,47 @@ impl PlayerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_compiler_words_preserve_full_last_com_and_color_dw() {
+        let state = PlayerState {
+            id: 2,
+            color: Some(RgbColor::new(0x12, 0x34, 0x56)),
+            color_dw_raw: Some(0xff12_3456),
+            control: PlayerControlState {
+                last_com: -2_147_483_630,
+                ..PlayerControlState::default()
+            },
+            ..PlayerState::default()
+        };
+
+        assert_eq!(state.exact_color_dw(), 0xff12_3456);
+        let restored = Player::from_state(state.clone()).to_state();
+        assert_eq!(restored, state);
+        assert_eq!(restored.control.last_com, -2_147_483_630);
+
+        let encoded = serde_json::to_string(&restored).expect("player state serializes");
+        let decoded: PlayerState =
+            serde_json::from_str(&encoded).expect("player state deserializes");
+        assert_eq!(decoded.exact_color_dw(), 0xff12_3456);
+        assert_eq!(decoded.control.last_com, -2_147_483_630);
+    }
+
+    #[test]
+    fn legacy_rgb_projection_supersedes_a_stale_raw_color_companion() {
+        let state = PlayerState {
+            color: Some(RgbColor::new(0xab, 0xcd, 0xef)),
+            color_dw_raw: Some(0xff12_3456),
+            ..PlayerState::default()
+        };
+
+        assert_eq!(state.exact_color_dw(), 0x00ab_cdef);
+        let mut player = Player::from_state(state);
+        player.set_color(Some(RgbColor::new(1, 2, 3)));
+        let updated = player.to_state();
+        assert_eq!(updated.color_dw_raw, None);
+        assert_eq!(updated.exact_color_dw(), 0x0001_0203);
+    }
 
     #[test]
     fn set_fog_of_war_forces_override_and_persists_both_flags() {
@@ -3059,6 +3248,50 @@ mod tests {
 
         player.clear_object_pointers(captain);
         assert_eq!(player.captain(), None);
+    }
+
+    #[test]
+    fn live_save_denumeration_clears_only_explicit_off_list_pointer_fields() {
+        let listed = ObjectId::new(7);
+        let missing = ObjectId::new(8);
+        let view_target = ObjectId::new(9);
+        let mut player = Player::from_state(PlayerState {
+            cursor: Some(missing),
+            view_cursor: Some(listed),
+            captain: Some(missing),
+            view_target: Some(view_target),
+            crew: vec![missing],
+            viewports: vec![PlayerViewport::new(Vector2::ZERO).with_focus(Some(missing))],
+            message_board_queries: vec![
+                MessageBoardQuery::new(Some(missing), "missing".into(), false),
+                MessageBoardQuery::new(Some(listed), "listed".into(), false),
+            ],
+            extra_data: vec![("object".into(), lc_script::Value::Object(missing.as_u64()))],
+            ..PlayerState::default()
+        });
+        player.set_view_target(Some(view_target));
+
+        player.denumerate_live_save_pointer_fields(&HashSet::from([listed.as_u64()]));
+        let state = player.to_state();
+
+        assert_eq!(state.cursor, None);
+        assert_eq!(state.view_cursor, Some(listed));
+        assert_eq!(state.captain, None);
+        assert_eq!(state.view_target, Some(view_target));
+        assert_eq!(state.crew, [missing]);
+        assert_eq!(
+            state
+                .message_board_queries
+                .iter()
+                .map(|query| query.target)
+                .collect::<Vec<_>>(),
+            [None, Some(listed)]
+        );
+        assert_eq!(
+            state.extra_data,
+            [("object".into(), lc_script::Value::Object(missing.as_u64()))]
+        );
+        assert_eq!(state.viewports[0].focus, Some(listed));
     }
 
     #[test]

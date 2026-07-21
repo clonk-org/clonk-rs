@@ -110,6 +110,16 @@ pub enum MutableGroupChildMut<'a> {
     Child(&'a mut MutableGroup),
 }
 
+/// Non-mutating classification of an entry in a writable group image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutableGroupEntryKind {
+    File,
+    ChildGroup,
+    /// The source core marks this entry as a child group, but its complete
+    /// payload cannot be opened as one. C4Group::OpenAsChild fails for it.
+    UnopenableChildGroup,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutableGroup {
     pub(crate) filename: Vec<u8>,
@@ -171,6 +181,21 @@ impl MutableGroup {
         data: Vec<u8>,
     ) -> Result<(), MutableGroupError> {
         self.add_entry(
+            name.into(),
+            MutableGroupEntryData::File(data),
+            unix_time_now(),
+            false,
+        )
+    }
+
+    /// Byte-preserving form of [`Self::add_file`] for legacy entry names that
+    /// are not valid UTF-8.
+    pub fn add_file_bytes(
+        &mut self,
+        name: impl Into<Vec<u8>>,
+        data: Vec<u8>,
+    ) -> Result<(), MutableGroupError> {
+        self.add_entry_bytes(
             name.into(),
             MutableGroupEntryData::File(data),
             unix_time_now(),
@@ -454,6 +479,19 @@ impl MutableGroup {
         self.maker[length] = 0;
     }
 
+    /// Apply C4Group's process-global maker to a group created from a physical
+    /// directory and every recursively materialized directory child. Opaque
+    /// packed children retain their original headers because native does not
+    /// reopen them while packing the parent.
+    pub fn set_maker_bytes_recursively(&mut self, bytes: &[u8]) {
+        self.set_maker_bytes(bytes);
+        for entry in &mut self.entries {
+            if let MutableGroupEntryData::Child(child) = &mut entry.data {
+                child.set_maker_bytes_recursively(bytes);
+            }
+        }
+    }
+
     pub fn set_maker_field(&mut self, field: &[u8; GROUP_MAKER_FIELD_BYTES]) {
         self.maker = *field;
     }
@@ -552,6 +590,28 @@ impl MutableGroup {
             .iter()
             .map(|entry| entry.name.as_str())
             .collect()
+    }
+
+    /// Classifies an entry without opening or marking an imported packed
+    /// child as rewritten.
+    pub fn entry_kind(&self, name: &str) -> Option<MutableGroupEntryKind> {
+        self.entries
+            .iter()
+            .find(|entry| entry.name_bytes.eq_ignore_ascii_case(name.as_bytes()))
+            .map(|entry| match &entry.data {
+                MutableGroupEntryData::File(_) | MutableGroupEntryData::ExistingFile { .. } => {
+                    MutableGroupEntryKind::File
+                }
+                MutableGroupEntryData::Child(_) => MutableGroupEntryKind::ChildGroup,
+                MutableGroupEntryData::PackedChild {
+                    child_contents_crc: Some(_),
+                    ..
+                } => MutableGroupEntryKind::ChildGroup,
+                MutableGroupEntryData::PackedChild {
+                    child_contents_crc: None,
+                    ..
+                } => MutableGroupEntryKind::UnopenableChildGroup,
+            })
     }
 
     /// Deletes every entry with the same ASCII-case-insensitive name, like

@@ -50,15 +50,18 @@ pub fn set_as_runtime_join_restore_infos(
     set_as_live_save_restore_infos(
         live_clients,
         player_infos,
+        true,
         lc_engine::LiveC4SavePolicy::RuntimeNetwork.player_policy(),
     )
 }
 
 /// General `C4PlayerInfoList::SetAsRestoreInfos` projection for scenario,
-/// savegame, and runtime-network saves.
+/// savegame, record, and runtime-network saves. `network_enabled` selects the
+/// native user-player filename branch after the copied filename is cleared.
 pub fn set_as_live_save_restore_infos(
     live_clients: &[ClientCoreControlData],
     player_infos: &PlayerInfoListSnapshot,
+    network_enabled: bool,
     policy: LiveC4SavePlayerPolicy,
 ) -> RuntimeJoinRestorePlan {
     let mut restore_infos = player_infos.clone();
@@ -78,14 +81,20 @@ pub fn set_as_live_save_restore_infos(
             }
 
             let (keep, embed, filename) = match player.player_type {
-                PLAYER_INFO_TYPE_USER => (
-                    policy.save_user_players,
-                    policy.embed_user_player_files,
-                    policy
-                        .embed_user_player_files
-                        .then(|| runtime_user_player_filename(client_name, player))
-                        .unwrap_or_default(),
-                ),
+                PLAYER_INFO_TYPE_USER => {
+                    // SetAsRestoreInfos clears Filename before this branch.
+                    // Offline C++ then derives the basename from that already
+                    // empty field, so no user child is written. Network saves
+                    // instead use the published resource and client prefix.
+                    let embed = policy.embed_user_player_files && network_enabled;
+                    (
+                        policy.save_user_players,
+                        embed,
+                        embed
+                            .then(|| runtime_user_player_filename(client_name, player))
+                            .unwrap_or_default(),
+                    )
+                }
                 PLAYER_INFO_TYPE_SCRIPT => (
                     policy.save_script_players,
                     policy.embed_script_player_files,
@@ -104,13 +113,13 @@ pub fn set_as_live_save_restore_infos(
             player.flags &= !PLAYER_INFO_FLAG_HAS_RESOURCE;
             player.resource = None;
             if embed {
-            player_groups.push(RuntimeJoinPlayerGroupTarget {
-                client_id,
-                player_info_id: player.id,
-                player_type: player.player_type,
-                game_number: player.game_number,
-                filename,
-            });
+                player_groups.push(RuntimeJoinPlayerGroupTarget {
+                    client_id,
+                    player_info_id: player.id,
+                    player_type: player.player_type,
+                    game_number: player.game_number,
+                    filename,
+                });
             }
             true
         });
@@ -153,16 +162,25 @@ pub fn compose_runtime_join_dynamic(
         mat_map_txt,
         pxs_c4b,
         mass_mover_c4b,
+        delete_sky_entry: _,
         teams_txt,
         round_results_txt,
         info_txt,
         script_c,
+        deleted_components: _,
+        component_host_mutations: _,
         scenario_sections,
+        deleted_scenario_sections: _,
+        scenario_section_mutations: _,
     } = save;
 
     let mut components = Vec::new();
-    push_optional_file(&mut components, "Info.txt", info_txt);
-    push_file(&mut components, "Game.txt", game_txt);
+    if let Some(info) = info_txt {
+        push_file(&mut components, &info.name, info.payload);
+    }
+    if !game_txt.is_empty() {
+        push_file(&mut components, "Game.txt", game_txt);
+    }
     push_optional_file(&mut components, "Teams.txt", teams_txt);
     for section in scenario_sections {
         push_raw_child(&mut components, section.name, section.payload)?;
@@ -180,11 +198,15 @@ pub fn compose_runtime_join_dynamic(
     push_optional_file(&mut components, "Strings.txt", strings_txt);
     push_file(&mut components, "Objects.txt", objects_txt);
     push_optional_file(&mut components, "RoundResults.txt", round_results_txt);
-    push_optional_file(&mut components, "Script.c", script_c);
+    if let Some(script) = script_c {
+        push_file(&mut components, &script.name, script.payload);
+    }
 
-    let restore_infos = lc_network::encode_player_info_list_ini(restore_infos)
-        .context("serialize runtime SavePlayerInfos.txt")?;
-    push_file(&mut components, "SavePlayerInfos.txt", restore_infos);
+    if !restore_infos.clients.is_empty() {
+        let restore_infos = lc_network::encode_player_info_list_ini(restore_infos)
+            .context("serialize runtime SavePlayerInfos.txt")?;
+        push_file(&mut components, "SavePlayerInfos.txt", restore_infos);
+    }
     for player in player_groups {
         let name = std::str::from_utf8(player.filename.as_bytes())
             .context("runtime player group filename is not ASCII-safe")?
@@ -359,18 +381,33 @@ mod tests {
             mat_map_txt: b"matmap".to_vec(),
             pxs_c4b: None,
             mass_mover_c4b: None,
+            delete_sky_entry: false,
             teams_txt: Some(b"teams".to_vec()),
             round_results_txt: Some(b"round".to_vec()),
-            info_txt: modified_components.then(|| b"info".to_vec()),
-            script_c: modified_components.then(|| b"script".to_vec()),
+            info_txt: modified_components.then(|| LiveC4SaveNamedComponent {
+                name: "Info.txt".to_owned(),
+                payload: b"info".to_vec(),
+            }),
+            script_c: modified_components.then(|| LiveC4SaveNamedComponent {
+                name: "Script.c".to_owned(),
+                payload: b"script".to_vec(),
+            }),
+            deleted_components: Vec::new(),
+            component_host_mutations: Vec::new(),
             scenario_sections: vec![LiveC4SaveNamedComponent {
                 name: "SectNext.c4g".to_string(),
                 payload: scenario_section,
             }],
+            deleted_scenario_sections: Vec::new(),
+            scenario_section_mutations: Vec::new(),
         }
     }
 
-    fn packed_runtime_dynamic(modified_components: bool) -> Group {
+    fn packed_runtime_dynamic_with_game(
+        modified_components: bool,
+        game_txt: Vec<u8>,
+        include_restore_infos: bool,
+    ) -> Group {
         let mut material = MutableGroup::new("Material.c4g");
         material
             .add_file("TexMap.txt", b"material".to_vec())
@@ -379,28 +416,52 @@ mod tests {
         section
             .add_file("Objects.txt", b"section".to_vec())
             .expect("section entry");
-        let mut player = MutableGroup::new("Host-Alice.c4p");
-        player
+        let mut player_group = MutableGroup::new("Host-Alice.c4p");
+        player_group
             .add_file("Player.txt", b"player".to_vec())
             .expect("player entry");
+        let mut save = live_save_components(
+            modified_components,
+            material.pack_raw().expect("raw material group"),
+            section.pack_raw().expect("raw scenario section"),
+        );
+        save.game_txt = game_txt;
+        let restore_infos = if include_restore_infos {
+            snapshot(vec![ClientPlayerInfosSnapshot {
+                client_id: 1,
+                flags: 0,
+                players: vec![player(
+                    1,
+                    PLAYER_INFO_TYPE_USER,
+                    PLAYER_INFO_FLAG_JOINED,
+                    b"Host-Alice.c4p",
+                )],
+            }])
+        } else {
+            snapshot(Vec::new())
+        };
+        let player_groups = include_restore_infos
+            .then_some(SerializedRuntimeJoinPlayerGroup {
+                filename: legacy(b"Host-Alice.c4p"),
+                group: player_group,
+            })
+            .into_iter()
+            .collect();
         let dynamic = compose_runtime_join_dynamic(
             "Network/DynScenario.c4s".to_string(),
             b"Maker".to_vec(),
             b"parameters".to_vec(),
-            live_save_components(
-                modified_components,
-                material.pack_raw().expect("raw material group"),
-                section.pack_raw().expect("raw scenario section"),
-            ),
-            &snapshot(Vec::new()),
-            vec![SerializedRuntimeJoinPlayerGroup {
-                filename: legacy(b"Host-Alice.c4p"),
-                group: player,
-            }],
+            save,
+            &restore_infos,
+            player_groups,
         )
         .expect("runtime dynamic");
         Group::from_memory(PathBuf::from("DynScenario.c4s"), dynamic.packed_bytes)
             .expect("open runtime dynamic")
+    }
+
+    fn packed_runtime_dynamic(modified_components: bool) -> Group {
+        packed_runtime_dynamic_with_game(modified_components, b"game".to_vec(), true)
     }
 
     #[test]
@@ -446,6 +507,20 @@ mod tests {
         assert!(!dynamic.exists("TitleUS.txt"));
         assert!(!dynamic.exists("Info.txt"));
         assert!(!dynamic.exists("Script.c"));
+    }
+
+    #[test]
+    fn runtime_dynamic_omits_empty_game_component() {
+        let dynamic = packed_runtime_dynamic_with_game(false, Vec::new(), true);
+
+        assert!(!dynamic.exists("Game.txt"));
+    }
+
+    #[test]
+    fn runtime_dynamic_omits_empty_restore_info_component() {
+        let dynamic = packed_runtime_dynamic_with_game(false, b"game".to_vec(), false);
+
+        assert!(!dynamic.exists("SavePlayerInfos.txt"));
     }
 
     #[test]
@@ -595,6 +670,38 @@ mod tests {
             b"Unknown-"
         );
         assert_eq!(plan.player_groups[0].filename.as_bytes(), b"Unknown-");
+    }
+
+    #[test]
+    fn offline_record_user_restore_keeps_empty_filename_without_player_child() {
+        let mut joined = player(
+            9,
+            PLAYER_INFO_TYPE_USER,
+            PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_HAS_RESOURCE,
+            b"/players/Original.c4p",
+        );
+        joined.resource = Some(NetworkResourceCore {
+            id: 91,
+            filename: legacy(b"/network/Published.c4p"),
+            ..Default::default()
+        });
+
+        let plan = set_as_live_save_restore_infos(
+            &[client_core(4, b"Client")],
+            &snapshot(vec![ClientPlayerInfosSnapshot {
+                client_id: 4,
+                flags: 0,
+                players: vec![joined],
+            }]),
+            false,
+            lc_engine::LiveC4SavePolicy::Record.player_policy(),
+        );
+
+        let restored = &plan.restore_infos.clients[0].players[0];
+        assert!(restored.filename.as_bytes().is_empty());
+        assert_eq!(restored.flags & PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+        assert_eq!(restored.resource, None);
+        assert!(plan.player_groups.is_empty());
     }
 
     #[test]

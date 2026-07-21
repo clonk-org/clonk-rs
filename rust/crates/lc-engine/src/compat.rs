@@ -5574,14 +5574,7 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
             )),
             "Evaluated" => Value::Bool(player.evaluated),
             "Color" => Value::Int(player.color_index.unwrap_or(-1)),
-            "ColorDw" => Value::Int(
-                player
-                    .color
-                    .map(|color| {
-                        ((color.r as i32) << 16) | ((color.g as i32) << 8) | color.b as i32
-                    })
-                    .unwrap_or(0),
-            ),
+            "ColorDw" => Value::Int(player.exact_color_dw() as i32),
             "Control" => Value::Int(player.control_set),
             "MouseControl" => Value::Int(player.mouse_control),
             "AutoContextMenu" => Value::Int(i32::from(player.control.auto_context_menu)),
@@ -5611,7 +5604,7 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "Cursor" => Value::Int(object_number(player.cursor)),
             "ViewCursor" => Value::Int(object_number(player.view_cursor)),
             "Captain" => Value::Int(object_number(player.captain)),
-            "LastCom" => Value::Int(i32::from(player.control.last_com)),
+            "LastCom" => Value::Int(player.control.last_com),
             "LastComDel" => Value::Int(player.control.last_com_delay),
             "PressedComs" => Value::Int(player.control.pressed_coms),
             "LastComDownDouble" => Value::Int(player.control.last_com_down_double),
@@ -24503,12 +24496,7 @@ fn get_plr_color_dw(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
-        Ok(Value::Int(
-            player
-                .color
-                .map(|color| ((color.r as i32) << 16) | ((color.g as i32) << 8) | color.b as i32)
-                .unwrap_or(0),
-        ))
+        Ok(Value::Int(player.exact_color_dw() as i32))
     })
 }
 
@@ -50314,18 +50302,13 @@ impl EffectHostContext {
     fn set_player_color_preview(&mut self, player_id: i32, color: u32) {
         let old_color = self
             .player_state(player_id)
-            .and_then(|player| player.color)
-            .map(|color| u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b))
+            .map(PlayerState::exact_color_dw)
             .unwrap_or(0);
         if old_color == color {
             return;
         }
         if let Some(player) = self.player_state_mut(player_id) {
-            player.color = Some(crate::RgbColor::new(
-                ((color >> 16) & 0xff) as u8,
-                ((color >> 8) & 0xff) as u8,
-                (color & 0xff) as u8,
-            ));
+            player.set_color_dw(color);
         }
 
         let recolor = self
@@ -66440,6 +66423,7 @@ func ProbeDrawDefMap() {
             view_cursor: Some(view_cursor),
             captain: Some(captain),
             color: Some(crate::RgbColor::new(0x12, 0x34, 0x56)),
+            color_dw_raw: Some(0xff12_3456),
             control_set: 3,
             mouse_control: 2,
             view_wealth: 21,
@@ -66457,7 +66441,7 @@ func ProbeDrawDefMap() {
             .viewports
             .push(PlayerViewport::new(Vector2::ZERO).with_focus(Some(view_cursor)));
         player.control = crate::PlayerControlState {
-            last_com: 5,
+            last_com: -2_147_483_630,
             last_com_delay: 7,
             last_com_down_double: 9,
             pressed_coms: 11,
@@ -66521,7 +66505,7 @@ func ProbeDrawDefMap() {
                 Value::Int(7),
                 Value::Int(71),
                 Value::Int(1),
-                Value::Int(0x12_34_56),
+                Value::Int(0xff12_3456_u32 as i32),
                 Value::Int(3),
                 Value::Int(2),
                 Value::Int(1),
@@ -66534,7 +66518,7 @@ func ProbeDrawDefMap() {
                 Value::Int(42),
                 Value::Int(43),
                 Value::Int(44),
-                Value::Int(5),
+                Value::Int(-2_147_483_630),
                 Value::Int(7),
                 Value::Int(11),
                 Value::Int(9),

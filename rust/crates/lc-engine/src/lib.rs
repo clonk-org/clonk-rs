@@ -134,9 +134,11 @@ pub use live_c4_player::{
     strip_unresolved_remote_crew_for_synchronization,
 };
 pub use live_c4_save::{
-    LiveC4SaveComponentRef, LiveC4SaveComponents, LiveC4SaveEntry, LiveC4SaveEntryKind,
-    LiveC4SaveError, LiveC4SaveNamedComponent, LiveC4SavePlayerPolicy, LiveC4SavePolicy,
-    LiveC4SaveSpec, LiveC4ValueEncodeError, LiveC4ValueEnumeration,
+    LiveC4ComponentHost, LiveC4SaveComponentMutation, LiveC4SaveComponentRef, LiveC4SaveComponents,
+    LiveC4SaveEntry, LiveC4SaveEntryKind, LiveC4SaveError, LiveC4SaveLandscapeMutation,
+    LiveC4SaveNamedComponent, LiveC4SavePlayerPolicy, LiveC4SavePolicy,
+    LiveC4SavePreLandscapeComponents, LiveC4SaveScenarioSectionMutation, LiveC4SaveSpec,
+    LiveC4ValueEncodeError, LiveC4ValueEnumeration,
 };
 pub use material::{Material, MaterialId, MaterialSet};
 pub use message::{
@@ -18371,6 +18373,14 @@ pub struct Engine {
     /// Keys are ASCII-lowercase because C4ScenarioSection lookup is
     /// case-insensitive (C4Game.cpp:4101-4104).
     scenario_sections: HashMap<String, RuntimeScenarioSection>,
+    /// `Game.pScenarioSections` linked-list traversal order. Each discovered
+    /// named section is prepended; the implicit current node joins only when
+    /// the first LoadScenarioSection call prepends it.
+    scenario_section_order: Vec<String>,
+    /// Whether C++ has materialized `pCurrentScenarioSection`. Compiling
+    /// CurrentScenarioSection from Game.txt does not create this pointer; the
+    /// first LoadScenarioSection call does and prepends it to the list.
+    scenario_current_section_registered: bool,
     current_scenario_section: String,
     last_scenario_section_flags: Option<i32>,
     /// Per-player crew info lists (C4Player::CrewInfoList): the roster
@@ -20578,6 +20588,8 @@ impl Engine {
             map_zoom: scenario::LegacyC4SVal::new(10, 0, 5, 15),
             scenario_values: Rc::new(scenario::ScenarioValueStore::default()),
             scenario_sections: HashMap::new(),
+            scenario_section_order: Vec::new(),
+            scenario_current_section_registered: false,
             current_scenario_section: "main".to_string(),
             last_scenario_section_flags: None,
             crew_rosters: HashMap::new(),
@@ -21174,6 +21186,13 @@ impl Engine {
             .first()
             .map(|section| section.name.clone())
             .unwrap_or_else(|| "main".to_string());
+        self.scenario_section_order = sections
+            .iter()
+            .skip(1)
+            .rev()
+            .map(|section| section.name.to_ascii_lowercase())
+            .collect();
+        self.scenario_current_section_registered = false;
         self.scenario_sections = sections
             .iter()
             .enumerate()
@@ -21235,6 +21254,14 @@ impl Engine {
     #[doc(hidden)]
     pub fn debug_current_scenario_section(&self) -> &str {
         &self.current_scenario_section
+    }
+
+    #[doc(hidden)]
+    pub fn debug_current_scenario_section_exists(&self) -> bool {
+        self.scenario_current_section_registered
+            && self
+                .scenario_sections
+                .contains_key(&self.current_scenario_section.to_ascii_lowercase())
     }
 
     #[doc(hidden)]
@@ -21625,16 +21652,15 @@ impl Engine {
     /// live owned object that still carries the old player-color RGB while
     /// preserving its alpha byte (C4Player.cpp:2263-2281).
     fn set_player_color(&mut self, number: i32, color: u32) -> Result<(), EngineError> {
-        let old_color = self.player(number).and_then(Player::color);
-        let new_color = RgbColor::new(
-            ((color >> 16) & 0xff) as u8,
-            ((color >> 8) & 0xff) as u8,
-            (color & 0xff) as u8,
-        );
-        if old_color == Some(new_color) {
+        let player = self
+            .player(number)
+            .ok_or(EngineError::UnknownPlayer(number))?;
+        let old_color_dw = player.color_dw();
+        let old_color = player.color();
+        if old_color_dw == color {
             return Ok(());
         }
-        self.player_mut(number)?.set_color(Some(new_color));
+        self.player_mut(number)?.set_color_dw(color);
         if let Some(old_color) = old_color {
             let old_color = (u32::from(old_color.r) << 16)
                 | (u32::from(old_color.g) << 8)
@@ -21697,6 +21723,7 @@ impl Engine {
             player_config = player_config.with_team(config.team);
         }
         let mut player = player_config.with_color(Some(color)).build();
+        player.set_color_dw(config.color_dw);
         player.set_at_client(at_client);
         player.set_at_client_name(at_client_name);
         player.set_no_elimination_check(no_elimination_check);
@@ -21916,7 +21943,7 @@ impl Engine {
                 .unwrap_or(preferred_auto_context_menu_value);
             let changed = player.control.control_style != control_style;
             if changed {
-                player.control.last_com = crate::control::COM_NONE;
+                player.control.last_com = i32::from(crate::control::COM_NONE);
             }
             player.control.set_control_style_value(control_style_value);
             player
@@ -35775,9 +35802,13 @@ impl Engine {
                     .and_then(|selection| selection.cursor())
                     .or(state.cursor);
                 if self.eliminated_crew_owners.contains(&owner) {
+                    state.status_value = Some(state.exact_status_value());
+                    state.eliminated_value = 1;
                     state.status = PlayerStatus::Eliminated;
                 } else if state.status == PlayerStatus::Eliminated {
                     state.status = PlayerStatus::Active;
+                    state.status_value = None;
+                    state.eliminated_value = 0;
                 }
                 if state.viewports.is_empty() {
                     let focus_id = state
@@ -38490,6 +38521,18 @@ impl Engine {
         flags: i32,
         preserve_ids: Vec<ObjectId>,
     ) -> Result<bool, EngineError> {
+        if !self.scenario_current_section_registered {
+            // C4Game::LoadScenarioSection creates the implicit current/root
+            // node before it even looks up the requested target. Its
+            // constructor prepends the node to Game.pScenarioSections.
+            let current = self.current_scenario_section.to_ascii_lowercase();
+            if self.scenario_sections.contains_key(&current) {
+                self.scenario_section_order
+                    .retain(|section| section != &current);
+                self.scenario_section_order.insert(0, current);
+            }
+            self.scenario_current_section_registered = true;
+        }
         let key = name.to_ascii_lowercase();
         let Some(target) = self.scenario_sections.get(&key) else {
             return Ok(false);
@@ -67708,7 +67751,7 @@ mod internal_player_script_control_parity {
     #[test]
     fn admitted_joined_player_team_update_applies_add_player_side_effects_only() {
         let old_color = RgbColor::new(0x12, 0x34, 0x56);
-        let new_color = 0x0000_c800;
+        let new_color = 0xff00_c800;
         let mut engine = Engine::new();
         engine.set_teams(vec![
             TeamInfo::new(1, "One", 0x0012_3456).with_player_ids(vec![41]),
@@ -67744,6 +67787,7 @@ mod internal_player_script_control_parity {
 
         assert_eq!(engine.player(4).unwrap().team(), Some(2));
         assert_eq!(engine.player(4).unwrap().color(), Some(RgbColor::new(0, 0xc8, 0)));
+        assert_eq!(engine.player(4).unwrap().color_dw(), new_color);
         assert!(engine.teams()[0].player_ids.is_empty());
         assert_eq!(engine.teams()[1].player_ids, vec![41]);
         let owned_index = engine.find_object_index(owned).expect("owned object remains live");

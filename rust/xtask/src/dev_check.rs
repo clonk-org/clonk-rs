@@ -1596,9 +1596,7 @@ mod tests {
     fn git_collection_unions_staged_unstaged_untracked_and_rename_ends() {
         let root = test_dir("git-union");
         fs::create_dir_all(root.join("rust")).unwrap();
-        git(&root, &["init"]);
-        git(&root, &["config", "user.email", "test@example.invalid"]);
-        git(&root, &["config", "user.name", "Dev Check"]);
+        init_test_git_repository(&root);
         fs::write(root.join("unstaged.txt"), "one\n").unwrap();
         fs::write(root.join("rename-me.txt"), "rename\n").unwrap();
         git(&root, &["add", "."]);
@@ -1634,9 +1632,7 @@ mod tests {
     fn base_collection_includes_committed_and_worktree_changes() {
         let root = test_dir("git-base");
         fs::create_dir_all(root.join("rust")).unwrap();
-        git(&root, &["init"]);
-        git(&root, &["config", "user.email", "test@example.invalid"]);
-        git(&root, &["config", "user.name", "Dev Check"]);
+        init_test_git_repository(&root);
         fs::write(root.join("tracked.txt"), "base\n").unwrap();
         git(&root, &["add", "."]);
         git(&root, &["commit", "-m", "base"]);
@@ -2130,6 +2126,15 @@ mod tests {
             "lc-dev-check-{label}-{}-{next}",
             std::process::id()
         ))
+    }
+
+    fn init_test_git_repository(root: &Path) {
+        git(root, &["init"]);
+        git(root, &["config", "user.email", "test@example.invalid"]);
+        git(root, &["config", "user.name", "Dev Check"]);
+        // Temporary fixture commits must not inherit a developer's global
+        // signing policy: nextest has no interactive pinentry by design.
+        git(root, &["config", "commit.gpgsign", "false"]);
     }
 
     fn git(root: &Path, args: &[&str]) {

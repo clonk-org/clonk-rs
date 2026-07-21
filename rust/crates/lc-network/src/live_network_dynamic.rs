@@ -130,7 +130,9 @@ pub fn compose_live_network_dynamic(
     validate_component_names(&spec.components)?;
 
     let mut group = MutableGroup::new(spec.group_filename.clone());
-    group.set_maker_bytes(&spec.maker);
+    if !spec.maker.is_empty() {
+        group.set_maker_bytes(&spec.maker);
+    }
     group.add_file(PARAMETERS_ENTRY, spec.parameters)?;
     group.add_file(SCENARIO_ENTRY, spec.scenario)?;
     for component in spec.components {

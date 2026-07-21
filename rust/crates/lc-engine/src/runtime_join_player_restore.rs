@@ -315,16 +315,15 @@ fn parse_player_state(
         1 => PlayerStatus::Active,
         2 => PlayerStatus::TeamSelection,
         3 => PlayerStatus::TeamSelectionPending,
-        status => {
-            return Err(RuntimeJoinPlayerRestoreError::UnsupportedStatus {
-                player_info_id: source_info_id,
-                status,
-            });
-        }
+        // C4Player::Status is an unconstrained int32 compiler word. Preserve
+        // unknown nonzero values verbatim and use the truthy active projection
+        // for Rust gameplay until a native transition replaces it.
+        _ => PlayerStatus::Active,
     };
     let surrendered_value = section.i32("Surrendered", 0);
     let surrendered = surrendered_value != 0;
-    if section.i32("Eliminated", 0) != 0 {
+    let eliminated_value = section.i32("Eliminated", 0);
+    if eliminated_value != 0 {
         status = if surrendered {
             PlayerStatus::Surrendered
         } else {
@@ -347,8 +346,10 @@ fn parse_player_state(
         at_client: PlayerAtClient::new(section.i32("AtClient", -1)),
         at_client_name: section.value("AtClientName").map(ToOwned::to_owned),
         status,
+        status_value: Some(raw_status),
         surrendered,
         surrendered_value,
+        eliminated_value,
         evaluated: section.boolean("Evaluated", false),
         wealth: section.i32("Wealth", 0),
         points: section.i32("Points", 0),
@@ -380,6 +381,7 @@ fn parse_player_state(
             ((color >> 8) & 0xff) as u8,
             (color & 0xff) as u8,
         )),
+        color_dw_raw: Some(color),
         color_index: (color_index != -1).then_some(color_index),
         position_index: (position_index != -1).then_some(position_index),
         control_set: section.i32("Control", 0),
@@ -395,7 +397,7 @@ fn parse_player_state(
         show_control: section.i32("ShowControl", 0),
         hostility_entries: parse_hostility_entries(section.value("Hostile")),
         control: PlayerControlState {
-            last_com: section.i32("LastCom", 0) as u8,
+            last_com: section.i32("LastCom", 0),
             last_com_delay: section.i32("LastComDel", 0),
             last_com_down_double: section.i32("LastComDownDouble", 0),
             pressed_coms: section.i32("PressedComs", 0),
@@ -667,12 +669,12 @@ mod tests {
     fn parser_applies_every_field_emitted_by_live_player_serializer() {
         let objects = [41_u64, 42, 43].into_iter().collect::<HashSet<_>>();
         let source = br#"[Player7]
-Status=1
+Status=-4
 AtClient=5
 AtClientName=stale
 Index=3
 ID=7
-Eliminated=1
+Eliminated=-6
 Surrendered=2
 Evaluated=true
 Color=4
@@ -730,6 +732,8 @@ MsgBoardQueries=(43,"Ask\nnow\341",1)
         assert_eq!(state.at_client, PlayerAtClient::new(5));
         assert_eq!(state.at_client_name.as_deref(), Some("stale"));
         assert_eq!(state.status, PlayerStatus::Surrendered);
+        assert_eq!(state.status_value, Some(-4));
+        assert_eq!(state.eliminated_value, -6);
         assert_eq!((state.surrendered, state.surrendered_value), (true, 2));
         assert!(state.evaluated);
         assert_eq!(state.color_index, Some(4));
@@ -795,5 +799,18 @@ MsgBoardQueries=(43,"Ask\nnow\341",1)
         assert_eq!(query.target, Some(ObjectId::new(43)));
         assert_eq!(lc_script::c4_string_bytes(&query.prompt), b"Ask\nnow\xe1");
         assert!(query.uppercase);
+    }
+
+    #[test]
+    fn parser_retains_full_cpp_compiler_words_for_color_and_last_com() {
+        let sections =
+            runtime_sections(b"[Player7]\nID=7\nColorDw=4279383126\nLastCom=-2147483630\n");
+        let state = parse_player_state(&sections[0], 7, &HashSet::new())
+            .expect("parse full-width runtime player words");
+
+        assert_eq!(state.color, Some(RgbColor::new(0x12, 0x34, 0x56)));
+        assert_eq!(state.color_dw_raw, Some(0xff12_3456));
+        assert_eq!(state.exact_color_dw(), 0xff12_3456);
+        assert_eq!(state.control.last_com, -2_147_483_630);
     }
 }

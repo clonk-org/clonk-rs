@@ -28,7 +28,7 @@ use crate::landscape::{
 };
 use crate::network_game_data::{
     decode_legacy_game_string, parse_landscape_game_data, InitialNetworkGameApplyError,
-    InitialNetworkGameData, LandscapeGameData,
+    InitialNetworkGameData, InitialNetworkGameError, LandscapeGameData,
 };
 use crate::{
     action::ActionSpec, ActionState, CommandDirection, Definition, DefinitionActionFacet,
@@ -3231,7 +3231,7 @@ impl Scenario {
         &self,
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
-        self.apply_before_players_with_final_synchronize(engine, true, None, None, None, true)
+        self.apply_before_players_with_final_synchronize(engine, true, None, None, None, true, None)
     }
 
     /// Applies a fresh or restored scenario after installing the authoritative
@@ -3250,6 +3250,7 @@ impl Scenario {
             None,
             None,
             true,
+            None,
         )
     }
 
@@ -3272,6 +3273,7 @@ impl Scenario {
             None,
             Some(game_data),
             true,
+            None,
         )
     }
 
@@ -3284,7 +3286,9 @@ impl Scenario {
         &self,
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
-        self.apply_before_players_with_final_synchronize(engine, true, None, None, None, false)
+        self.apply_before_players_with_final_synchronize(
+            engine, true, None, None, None, false, None,
+        )
     }
 
     #[doc(hidden)]
@@ -3300,6 +3304,7 @@ impl Scenario {
             None,
             None,
             false,
+            None,
         )
     }
 
@@ -3310,7 +3315,9 @@ impl Scenario {
         &self,
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
-        self.apply_before_players_with_final_synchronize(engine, false, None, None, None, true)
+        self.apply_before_players_with_final_synchronize(
+            engine, false, None, None, None, true, None,
+        )
     }
 
     /// Network variant of
@@ -3328,6 +3335,7 @@ impl Scenario {
             None,
             None,
             true,
+            None,
         )
     }
 
@@ -3348,6 +3356,7 @@ impl Scenario {
             Some(teams),
             None,
             true,
+            None,
         )
     }
 
@@ -3370,7 +3379,43 @@ impl Scenario {
             team_registry,
             Some(game_data),
             true,
+            None,
         )
+    }
+
+    /// App startup projection of C4Game::InitGame. When requested, capture
+    /// the initial-record Game.txt at InitControl's native seam: objects and
+    /// loaded runtime blocks exist, but InitializeDef, environment placement,
+    /// Weather.Init and Script.Initialize have not executed yet.
+    #[doc(hidden)]
+    pub fn apply_before_players_for_game_start(
+        &self,
+        engine: &mut Engine,
+        network_game: bool,
+        game_data: Option<&InitialNetworkGameData>,
+        team_configuration: Option<crate::TeamConfiguration>,
+        team_registry: Option<Vec<TeamInfo>>,
+        initial_record_music_enabled: Option<bool>,
+    ) -> Result<
+        (
+            Vec<ObjectId>,
+            Option<Result<InitialNetworkGameData, InitialNetworkGameError>>,
+        ),
+        ScenarioError,
+    > {
+        let mut initial_record = None;
+        let capture =
+            initial_record_music_enabled.map(|music_enabled| (music_enabled, &mut initial_record));
+        let created = self.apply_before_players_with_final_synchronize(
+            engine,
+            !network_game,
+            team_configuration,
+            network_game.then_some(team_registry).flatten(),
+            game_data,
+            true,
+            capture,
+        )?;
+        Ok((created, initial_record))
     }
 
     /// Validate every compiled runtime block while host preparation is still
@@ -3489,6 +3534,10 @@ impl Scenario {
         team_registry_override: Option<Vec<TeamInfo>>,
         initial_network_game: Option<&InitialNetworkGameData>,
         execute_post_init_map_callbacks: bool,
+        initial_record_capture: Option<(
+            bool,
+            &mut Option<Result<InitialNetworkGameData, InitialNetworkGameError>>,
+        )>,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
         let mut live_post_init_map_callbacks = self.post_init_map_callbacks.clone();
         let mut initial_network_runtime = initial_network_game
@@ -4057,6 +4106,19 @@ impl Scenario {
         // result structure contains no object pointers of its own; installing
         // the compiled state here preserves that exact lifetime boundary.
         engine.round_results = self.round_results.clone();
+
+        if let Some((music_enabled, output)) = initial_record_capture {
+            let mut captured = engine.capture_initial_record_game_data(music_enabled);
+            if let (Ok(captured), Some(loaded)) = (&mut captured, initial_network_game) {
+                // InitControl saves before ScriptEngine/global-effect pointer
+                // denumeration. Retain the canonical pre-resolution blocks so
+                // dangling numeric wrappers are written exactly as loaded.
+                captured.compiled_sections.script_engine =
+                    loaded.compiled_sections.script_engine.clone();
+                captured.compiled_sections.effects = loaded.compiled_sections.effects.clone();
+            }
+            *output = Some(captured);
+        }
 
         if let Some(runtime) = initial_network_runtime.take() {
             let object_numbers = engine
@@ -5051,6 +5113,35 @@ impl ScenarioValueStore {
     ) -> Vec<u8> {
         self.core
             .runtime_record_save(
+                record_title,
+                definition_modules,
+                definition_executable_path,
+                definition_path,
+                scenario_origin,
+            )
+            .serialize()
+    }
+
+    /// Initial-record projection of an already-restored exact savegame.
+    /// The runtime store, rather than the source `Scenario`, owns mutations
+    /// made before the JSON save was written.
+    pub(crate) fn serialize_initial_record_from_runtime_savegame(
+        &self,
+        record_title: &str,
+        definition_modules: &[String],
+        definition_executable_path: &str,
+        definition_path: &str,
+        scenario_origin: &str,
+    ) -> Vec<u8> {
+        self.core
+            .runtime_exact_save_core(
+                record_title,
+                definition_modules,
+                definition_executable_path,
+                definition_path,
+                scenario_origin,
+            )
+            .initial_record_save(
                 record_title,
                 definition_modules,
                 definition_executable_path,
@@ -29567,7 +29658,9 @@ public func ActualizePhase(pClonk)
             scenario_dir.join("Objects.txt"),
             // XDir/YDir are float-bit C4Fixed like real saves write them
             // (Fixed.h:247-266): f-1063256064 = -5.0, f1077936128 = 3.0.
-            "[Object]\nid=BOX1\nNumber=100\nName=Scroll: Alchemist's bag\nStatus=1\nCategory=0\nOwner=1\nController=2\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nName=\"ScriptWipf\"\nStatus=1\nCategory=0\nLayer=100\nVisibility=13\nBlitMode=132\nColorDw=1122867\nColorMod=1146447479\nPicture=-5,6,70,80\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nNeedEnergy=1\nSelected=1\nMagicEnergy=192000\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
+            // BOX1 must not be StaticBack: C4GameObjects::Load deliberately
+            // zeroes loaded velocity for that category after denumeration.
+            "[Object]\nid=BOX1\nNumber=100\nName=Scroll: Alchemist's bag\nStatus=1\nCategory=16\nOwner=1\nController=2\nX=10\nY=20\nXDir=F45875\nYDir=F-78643\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nName=\"ScriptWipf\"\nStatus=1\nCategory=0\nLayer=100\nVisibility=13\nBlitMode=132\nColorDw=1122867\nColorMod=1146447479\nPicture=-5,6,70,80\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nNeedEnergy=1\nSelected=1\nMagicEnergy=192000\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
         )
         .expect("write objects");
 
@@ -29587,6 +29680,9 @@ public func ActualizePhase(pClonk)
         // Controller compiles verbatim (C4Object.cpp:2739).
         assert_eq!(first.config.controller, Some(2));
         assert_eq!(first.config.position, Vector2::new(10, 20));
+        let first_fixed_velocity = first.config.fixed_velocity.expect("loaded fixed velocity");
+        assert_eq!(first_fixed_velocity.x.val(), 45_875);
+        assert_eq!(first_fixed_velocity.y.val(), -78_643);
         assert_eq!(first.config.id, Some(ObjectId::new(100)));
         assert_eq!(
             first.config.custom_name.as_deref(),
@@ -29635,8 +29731,8 @@ public func ActualizePhase(pClonk)
             .expect("legacy scenario applies");
         assert_eq!(
             engine.debug_exec_order(),
-            [ObjectId::new(100), ObjectId::new(101)],
-            "Objects.txt file order is the native Last-to-Prev execution order"
+            [ObjectId::new(101), ObjectId::new(100)],
+            "FixObjectOrder category-sorts the native execution order"
         );
 
         let box_snapshot = engine
@@ -29646,6 +29742,11 @@ public func ActualizePhase(pClonk)
         assert_eq!(box_snapshot.owner, 1);
         assert_eq!(box_snapshot.controller, 2, "loaded Controller= sticks");
         assert_eq!(box_snapshot.position, Vector2::new(10, 20));
+        let box_index = engine
+            .find_object_index(ObjectId::new(100))
+            .expect("box object index");
+        assert_eq!(engine.objects[box_index].fixed_velocity.x.val(), 45_875);
+        assert_eq!(engine.objects[box_index].fixed_velocity.y.val(), -78_643);
         assert_eq!(
             box_snapshot.custom_name.as_deref(),
             Some("Scroll: Alchemist's bag")
@@ -29713,6 +29814,29 @@ public func ActualizePhase(pClonk)
         assert_eq!(gem_snapshot.action.time, 6);
         assert_eq!(gem_snapshot.action.data, 5);
         assert_eq!(gem_snapshot.action.target, Some(ObjectId::new(100)));
+
+        let saved = engine
+            .serialize_live_c4_save_with_policy(
+                crate::LiveC4SaveSpec {
+                    title: "Loaded velocity",
+                    definition_modules: &[],
+                    definition_executable_path: "",
+                    definition_path: "",
+                    origin: "LegacyObjects.c4s",
+                    music_enabled: false,
+                    copied_material_group_is_file: false,
+                    title_component: crate::LiveC4ComponentHost::Unmodified,
+                    info_component: crate::LiveC4ComponentHost::Unmodified,
+                    script_component: crate::LiveC4ComponentHost::Unmodified,
+                },
+                crate::LiveC4SavePolicy::Scenario {
+                    force_exact_landscape: false,
+                },
+            )
+            .expect("loaded object state serializes");
+        let objects_txt = String::from_utf8(saved.objects_txt).unwrap();
+        assert!(objects_txt.contains("XDir=F45875\r\n"));
+        assert!(objects_txt.contains("YDir=F-78643\r\n"));
 
         engine
             .restore_state(&captured)

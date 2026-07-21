@@ -145,7 +145,7 @@ fn route_checkpoint_reset_changes_only_the_physical_input_ledger() -> Result<(),
     let (mut engine, _) = fixture()?;
     {
         let control = &mut engine.player_mut(1)?.control;
-        control.last_com = COM_RIGHT;
+        control.last_com = i32::from(COM_RIGHT);
         control.last_com_delay = 7;
         control.last_com_down_double = 3;
         control.pressed_coms = 1 << COM_RIGHT;

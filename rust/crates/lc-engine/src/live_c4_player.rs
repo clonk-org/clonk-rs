@@ -52,6 +52,11 @@ pub struct LiveC4PlayerSaveOptions<'a> {
     /// files pass false and omit crew whose loaded definition sets
     /// `TemporaryCrew`; embedded savegame/record/network groups pass true.
     pub savegame: bool,
+    /// Native `C4ObjectInfo::Save`'s `fStoreTiny` flag. Despite the name,
+    /// embedded saves receive `C4PlayerList`'s `fStoreOnOriginal`: every
+    /// reachable embedded scenario/savegame/record/network path passes false.
+    /// Ordinary external remote-profile synchronization passes true.
+    pub store_tiny: bool,
     pub add_new_crew_portraits: bool,
     pub save_default_portraits: bool,
     pub player_rank_name_default: &'a str,
@@ -86,6 +91,7 @@ impl<'a> Default for LiveC4PlayerSaveOptions<'a> {
     fn default() -> Self {
         Self {
             savegame: true,
+            store_tiny: false,
             add_new_crew_portraits: true,
             save_default_portraits: true,
             player_rank_name_default: "Rank",
@@ -257,10 +263,7 @@ pub fn serialize_live_c4_player_for_synchronization(
 /// profiles, so their owning runtime roster permanently drops entries whose
 /// definitions are not loaded before the save snapshot is taken.
 #[doc(hidden)]
-pub fn strip_unresolved_remote_crew_for_synchronization(
-    engine: &mut Engine,
-    player_number: i32,
-) {
+pub fn strip_unresolved_remote_crew_for_synchronization(engine: &mut Engine, player_number: i32) {
     let Some(roster) = engine.crew_rosters.get(&player_number) else {
         return;
     };
@@ -399,7 +402,9 @@ fn serialize_live_c4_player_with_options_and_value_encoding(
         value_encoding,
         |info| should_serialize_crew_definition(engine, &info.id, options.savegame),
         |info| {
-            materialize_live_portrait(engine, info, options)?;
+            if !options.store_tiny {
+                materialize_live_portrait(engine, info, options)?;
+            }
             if let Some(definition) = engine.definition(&info.id) {
                 crate::update_custom_rank_fields(
                     &mut info.rank_name,
@@ -408,10 +413,14 @@ fn serialize_live_c4_player_with_options_and_value_encoding(
                     definition.rank_names(),
                     definition.rank_base(),
                 );
-                info.core.rank_png =
-                    render_live_rank_symbol(engine, &info.id, info.rank)?.unwrap_or_default();
+                if !options.store_tiny {
+                    info.core.rank_png =
+                        render_live_rank_symbol(engine, &info.id, info.rank)?.unwrap_or_default();
+                }
             } else {
-                info.core.rank_png.clear();
+                if !options.store_tiny {
+                    info.core.rank_png.clear();
+                }
             }
             Ok(())
         },
@@ -503,7 +512,7 @@ fn serialize_player_group(
         options,
         value_encoding,
         include_crew,
-        false,
+        options.store_tiny,
         retained_or_unique_crew_filename,
         |info| {
             refresh_rank(info)?;
@@ -534,7 +543,9 @@ fn serialize_player_group_with_profile_policy(
     mut refresh_crew: impl FnMut(&mut CrewInfo) -> Result<ProfileCrewMutation, LiveC4PlayerError>,
 ) -> Result<LiveC4SynchronizedPlayerGroup, LiveC4PlayerError> {
     let mut group = MutableGroup::new_bytes(filename.to_vec());
-    group.set_maker_bytes(maker);
+    if !maker.is_empty() {
+        group.set_maker_bytes(maker);
+    }
     group.add_file(
         "Player.txt",
         serialize_player_core(player, options.player_rank_name_default, value_encoding)?,
@@ -560,7 +571,9 @@ fn serialize_player_group_with_profile_policy(
         let mutation = refresh_crew(&mut info)?;
         let child_name = resolve_filename(&info, &used_filenames);
         let mut child = MutableGroup::new_bytes(child_name.clone());
-        child.set_maker_bytes(maker);
+        if !maker.is_empty() {
+            child.set_maker_bytes(maker);
+        }
         child.add_file(
             "ObjectInfo.txt",
             serialize_object_info(&info, value_encoding)?,
@@ -1440,6 +1453,57 @@ mod tests {
             extra_data: Vec::new(),
             portraits: crate::CrewPortraitState::default(),
         }
+    }
+
+    #[test]
+    fn explicit_tiny_flag_preserves_portrait_core_without_materializing_assets() {
+        let mut engine = Engine::new();
+        engine
+            .register_player(crate::PlayerConfig::new(1, "Embedded"))
+            .expect("player registers");
+        let mut crew = synchronized_crew("MISS", "Crew.c4i");
+        crew.core.portrait_file = "RetainedPortrait".to_string();
+        crew.core.portrait_png.clear();
+        crew.core.portrait_overlay_png.clear();
+        crew.core.rank_png.clear();
+        crew.portraits.permanent = crate::CrewPermanentPortrait::Assigned(crate::CrewPortrait {
+            source: None,
+            name: "custom".to_string(),
+        });
+        engine.crew_rosters.insert(1, vec![crew]);
+
+        let tiny = serialize_live_c4_player_with_options(
+            &engine,
+            1,
+            b"Embedded.c4p",
+            b"Maker",
+            LiveC4PlayerSaveOptions {
+                store_tiny: true,
+                ..LiveC4PlayerSaveOptions::default()
+            },
+        )
+        .expect("tiny save must not materialize the pending custom portrait");
+        let tiny = Group::from_raw_memory(
+            std::path::PathBuf::from("Embedded.c4p"),
+            tiny.pack_raw().expect("tiny player packs"),
+        )
+        .expect("tiny player opens");
+        let crew = tiny.open_child("Crew.c4i").expect("crew group opens");
+        let core = crew.read_file("ObjectInfo.txt").expect("crew core exists");
+        assert!(core
+            .windows(b"PortraitFile=RetainedPortrait".len())
+            .any(|window| window == b"PortraitFile=RetainedPortrait"));
+        assert!(!crew.exists("Portrait.png"));
+        assert!(!crew.exists("PortraitOverlay.png"));
+        assert!(!crew.exists("Rank.png"));
+
+        assert!(
+            matches!(
+                serialize_live_c4_player(&engine, 1, b"Embedded.c4p", b"Maker"),
+                Err(LiveC4PlayerError::UnreconstructablePortrait { .. })
+            ),
+            "embedded C4GameSave groups pass the non-tiny object-info flag"
+        );
     }
 
     fn synchronized_object_info(info: &CrewInfo) -> crate::CrewObjectInfo {

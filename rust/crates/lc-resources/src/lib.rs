@@ -28,7 +28,7 @@ pub use graphics::{GraphicsError, GraphicsImage, GraphicsResource};
 pub use group::{Group, GroupEntry, GroupError};
 pub use group_writer::{
     c4group_file_crc, compress_c4group_image, MutableGroup, MutableGroupChildMut,
-    MutableGroupError,
+    MutableGroupEntryKind, MutableGroupError,
 };
 pub use language::{ComponentGroups, LanguageInfo, LanguagePacks, LoadedComponent};
 pub use material::{MaterialDefinition, MaterialError, MaterialLibrary};

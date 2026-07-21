@@ -3349,7 +3349,7 @@ pub struct PlayerOverlay {
     pub show_control: i32,
     pub show_control_position: i32,
     /// Raw `C4Player::LastCom`; `Com2Control` selects the pressed hint.
-    pub last_com: u8,
+    pub last_com: i32,
     /// Short `PlrControlKeyName` values in CON_* order.
     pub control_key_labels: Vec<String>,
     /// Actual player crew count; `crew` may additionally carry a non-roster

@@ -37256,7 +37256,7 @@ global func InitializePlayer(int player)
         engine.register_player(PlayerConfig::new(1, "Saved"))?;
         {
             let player = engine.player_mut(1)?;
-            player.control.last_com = COM_RIGHT;
+            player.control.last_com = i32::from(COM_RIGHT);
             player.control.pressed_coms = 0x3ff;
         }
 
@@ -37695,7 +37695,7 @@ func ControlUpSingle()
         engine.set_crew_cursor(1, Some(crew))?;
         {
             let player = engine.player_mut(1)?;
-            player.control.last_com = COM_UP;
+            player.control.last_com = i32::from(COM_UP);
             player.control.last_com_delay = 100;
         }
 

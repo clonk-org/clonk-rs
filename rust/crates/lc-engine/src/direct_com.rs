@@ -1579,7 +1579,7 @@ impl Engine {
         if com == COM_CLEAR_PRESSED_COMS {
             let player = self.player_mut(owner)?;
             player.control.pressed_coms = 0;
-            player.control.last_com = COM_NONE;
+            player.control.last_com = i32::from(COM_NONE);
             return Ok(());
         }
         // Cursor menu ConvertCom (C4Player.cpp:1502-1508;
@@ -1626,21 +1626,24 @@ impl Engine {
                 let player = self.player_mut(owner)?;
                 (player.control.last_com, player.control.control_style)
             };
-            if last_com != COM_NONE && last_com != com {
-                self.player_direct_com(owner, last_com | COM_SINGLE, data)?;
+            if last_com != i32::from(COM_NONE) && last_com != i32::from(com) {
+                // C++ stores LastCom as int32_t but DirectCom accepts uint8_t.
+                // Preserve the full compiler word for comparisons and apply
+                // the language-defined low-byte conversion only at dispatch.
+                self.player_direct_com(owner, (last_com | i32::from(COM_SINGLE)) as u8, data)?;
                 // AutoStopControl uses a single COM_Down instead of COM_Down_D
                 // for drop (C4Player.cpp:1527-1530).
-                if control_style && last_com == COM_DOWN {
+                if control_style && last_com == i32::from(COM_DOWN) {
                     self.player_mut(owner)?.control.last_com_down_double = C4_DOUBLE_CLICK;
                 }
             }
             // Check LastCom buffer for COM_Double (C4Player.cpp:1532-1533).
             let player = self.player_mut(owner)?;
-            if player.control.last_com == com {
+            if player.control.last_com == i32::from(com) {
                 com |= COM_DOUBLE;
             }
             // Set before the DirectCom so scripts may clear it (:1534-1536).
-            player.control.last_com = com;
+            player.control.last_com = i32::from(com);
             player.control.last_com_delay = 0;
         } else {
             // KeyRelease: only when the press was registered (:1540-1548).
@@ -1695,7 +1698,7 @@ impl Engine {
                 return Ok(());
             }
             // LastCom timeout (C4Player.cpp:1215-1229).
-            if player.control.last_com != COM_NONE {
+            if player.control.last_com != i32::from(COM_NONE) {
                 player.control.last_com_delay += 1;
                 if player.control.last_com_delay > C4_DOUBLE_CLICK {
                     Some(player.control.last_com)
@@ -1709,11 +1712,11 @@ impl Engine {
         if let Some(last_com) = timed_out_last_com {
             // C++ keeps LastCom visible during the synchronous COM_Single
             // callback and clears it only after DirectCom returns.
-            if last_com & COM_SINGLE == 0 {
-                self.player_direct_com(owner, last_com | COM_SINGLE, 0)?;
+            if last_com & i32::from(COM_SINGLE) == 0 {
+                self.player_direct_com(owner, (last_com | i32::from(COM_SINGLE)) as u8, 0)?;
             }
             if let Some(player) = self.players.get_mut(&owner) {
-                player.control.last_com = COM_NONE;
+                player.control.last_com = i32::from(COM_NONE);
                 player.control.last_com_delay = 0;
             }
         }
@@ -4493,7 +4496,7 @@ impl Engine {
                     // (:3569-3573).
                     if self.object_com_down_double(index)? {
                         if let Some(player) = self.players.get_mut(&controller) {
-                            player.control.last_com = COM_NONE;
+                            player.control.last_com = i32::from(COM_NONE);
                         }
                     }
                 }
@@ -7098,7 +7101,7 @@ impl Engine {
             // Drop on down-down-throw (classic, :1024-1033).
             if player.control.last_com_down_double > 0 {
                 convert_to_drop = true;
-                player.control.last_com = COM_DOWN | COM_DOUBLE;
+                player.control.last_com = i32::from(COM_DOWN | COM_DOUBLE);
                 player.control.last_com_down_double = C4_DOUBLE_CLICK;
             }
             // Jump'n'Run: drop on combined Down+Throw (:1034-1035).
@@ -20105,6 +20108,36 @@ protected func ControlLeftReleased() { SetComDir(COMD_Right()); return(1); }
             CommandDirection::Right,
             "a registered release dispatches ControlLeftReleased"
         );
+    }
+
+    #[test]
+    fn full_width_saved_last_com_narrows_only_when_direct_com_dispatches() {
+        // C4Player::LastCom is int32_t, while DirectCom accepts uint8_t
+        // (C4Player.h:121; C4Player.cpp:1215-1229,1490-1554). A compiler
+        // word whose low byte equals the new com is still unequal as an int,
+        // so native dispatches the old Single com before replacing it.
+        let script = r#"
+#strict
+protected func ControlRightSingle() { DoDamage(1); return(1); }
+protected func ControlRightDouble() { DoDamage(10); return(1); }
+"#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", script);
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        engine
+            .players
+            .get_mut(&1)
+            .expect("player exists")
+            .control
+            .last_com = 0x102;
+
+        engine.player_in_com(1, COM_RIGHT, 0).expect("in_com");
+
+        assert_eq!(engine.object_snapshot(crew).expect("crew").damage, 1);
+        assert_eq!(control_state(&engine, 1).last_com, i32::from(COM_RIGHT));
     }
 
     #[test]
