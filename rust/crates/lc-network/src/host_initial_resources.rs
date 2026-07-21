@@ -19,7 +19,15 @@ const MAX_TEMP_SUFFIX: u32 = 999;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostInitialResourceSource {
     pub path: PathBuf,
+    /// Exact filename passed to `C4Network2ResList::AddByFile` for lookup.
+    pub lookup_name: LegacyCString,
+    /// Filename retained by the opened group and compared with later lookup
+    /// names. This can differ by absoluteness, case, or wildcard expansion.
+    pub opened_name: LegacyCString,
     pub wire_name: LegacyCString,
+    /// Exact packed image for a group whose stable path is virtual inside a
+    /// packed parent. Publication materializes it into the network directory.
+    pub virtual_group_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,10 +82,10 @@ pub enum HostInitialResourcePublicationError {
     },
     #[error("could not create network resource directory: {0}")]
     NetworkDirectory(#[source] io::Error),
-    #[error("could not materialize initial dynamic: {0}")]
-    DynamicIo(#[source] io::Error),
-    #[error("no free dynamic resource filename from 1 through 999")]
-    NoDynamicFilename,
+    #[error("could not materialize initial resource: {0}")]
+    ResourceIo(#[source] io::Error),
+    #[error("no free initial resource filename from 1 through 999")]
+    NoResourceFilename,
     #[error(
         "materialized dynamic metadata differs: expected size/crc/contents {expected_size}/{expected_crc:08x}/{expected_contents_crc:08x}, got {actual_size}/{actual_crc:08x}/{actual_contents_crc:08x}"
     )]
@@ -133,15 +141,19 @@ pub fn publish_host_initial_resources(
         game_resources.push(core);
     }
 
-    let dynamic_path = materialize_dynamic(
+    let dynamic_path = materialize_resource(
         &spec.network_directory,
-        &spec.dynamic.group_filename,
+        spec.dynamic.group_filename.as_bytes(),
         &spec.dynamic.packed_bytes,
     )?;
     publications.temporary_files.track(dynamic_path.clone());
+    let dynamic_wire_name = resolved_dynamic_wire_name(&spec.dynamic_wire_name, &dynamic_path);
     let dynamic_source = HostInitialResourceSource {
-        wire_name: resolved_dynamic_wire_name(&spec.dynamic_wire_name, &dynamic_path),
+        lookup_name: dynamic_wire_name.clone(),
+        opened_name: dynamic_wire_name.clone(),
+        wire_name: dynamic_wire_name,
         path: dynamic_path,
+        virtual_group_bytes: None,
     };
     let dynamic = publish_source(
         &dynamic_source,
@@ -151,7 +163,12 @@ pub fn publish_host_initial_resources(
         &mut publications.temporary_files,
     )?;
     validate_dynamic_metadata(&spec.dynamic, &dynamic.core)?;
+    let dynamic_retained_name =
+        retained_file_name(&dynamic_source, &dynamic, &spec.dynamic_wire_name);
     let dynamic_core = dynamic.core.clone();
+    publications
+        .published_sources
+        .insert(dynamic_retained_name, dynamic_core.clone());
     push_publication(
         dynamic,
         &mut publications.registrations,
@@ -162,20 +179,18 @@ pub fn publish_host_initial_resources(
     let mut player_cores = Vec::with_capacity(spec.players.len());
     let mut player_resource_sources = Vec::with_capacity(spec.players.len());
     for player in &spec.players {
+        let temporary_checkpoint = publications.temporary_files.checkpoint();
         match publications.publish_or_reuse(player, HostResourceType::Player, &spec) {
             Ok(core) => {
                 player_resource_sources.push((player.path.clone(), core.clone()));
                 player_cores.push(core);
             }
-            Err(HostInitialResourcePublicationError::ResourceCore {
-                resource_type: HostResourceType::Player,
-                ..
-            }) => {
+            Err(_) => {
+                publications.temporary_files.rollback(temporary_checkpoint);
                 // C4ClientPlayerInfos drops only the module whose
                 // ResList.AddByFile failed and continues the participant
                 // list. Required game resources remain all-or-error.
             }
-            Err(error) => return Err(error),
         }
     }
 
@@ -203,7 +218,7 @@ fn resolved_dynamic_wire_name(template: &LegacyCString, path: &Path) -> LegacyCS
     let basename = path
         .file_name()
         .and_then(|name| name.to_str())
-        .expect("materialize_dynamic creates an ASCII basename");
+        .expect("materialize_resource creates an ASCII basename");
     let prefix_len = template
         .as_bytes()
         .iter()
@@ -223,23 +238,44 @@ fn publish_source(
     spec: &HostInitialResourcePublicationSpec,
     temporary_files: &mut TemporaryFiles,
 ) -> Result<HostResourcePublication, HostInitialResourcePublicationError> {
+    let (source_path, source_ownership) = if let Some(bytes) = source.virtual_group_bytes.as_deref()
+    {
+        let path = materialize_resource(
+            &spec.network_directory,
+            source.opened_name.as_bytes(),
+            bytes,
+        )?;
+        temporary_files.track(path.clone());
+        (path, ResourceFileOwnership::Temporary)
+    } else if resource_type == HostResourceType::Dynamic {
+        (source.path.clone(), ResourceFileOwnership::Temporary)
+    } else {
+        (source.path.clone(), ResourceFileOwnership::Persistent)
+    };
     let mut core_spec = HostResourceCoreSpec::new_with_raw_group_maker(
         resource_type,
         resource_id,
         source.wire_name.clone(),
         spec.group_maker.clone(),
-    );
+    )
+    .with_source_ownership(source_ownership)
+    .with_standalone_name(source.opened_name.clone());
     if resource_type == HostResourceType::Definitions {
         core_spec = core_spec.with_max_load_file_size(spec.max_load_file_size);
     }
     let mut publication =
-        build_host_resource_core(&source.path, &spec.network_directory, core_spec).map_err(
+        build_host_resource_core(&source_path, &spec.network_directory, core_spec).map_err(
             |error| HostInitialResourcePublicationError::ResourceCore {
                 resource_type,
                 path: source.path.clone(),
                 source: error,
             },
         )?;
+    if source_ownership == ResourceFileOwnership::Temporary && publication.standalone_path.is_none()
+    {
+        publication.standalone_path = Some(publication.source_path.clone());
+        publication.standalone_ownership = Some(ResourceFileOwnership::Temporary);
+    }
     if !spec.parameters.league_address.is_empty()
         && matches!(
             resource_type,
@@ -264,7 +300,7 @@ fn publish_source(
 struct SourcePublications {
     next_id: i32,
     temporary_files: TemporaryFiles,
-    published_sources: HashMap<PathBuf, NetworkResourceCore>,
+    published_sources: HashMap<LegacyCString, NetworkResourceCore>,
     registrations: Vec<ResourceRegistration>,
     resource_files: Vec<HostedResourceFile>,
 }
@@ -286,7 +322,11 @@ impl SourcePublications {
         resource_type: HostResourceType,
         spec: &HostInitialResourcePublicationSpec,
     ) -> Result<NetworkResourceCore, HostInitialResourcePublicationError> {
-        if let Some(core) = self.published_sources.get(&source.path) {
+        // AddByFile searches the incoming source filename against the name
+        // retained after each earlier group open. That comparison is
+        // deliberately asymmetric for absolute, case-corrected and wildcard
+        // aliases (src/C4Network2Res.cpp:373-424,1397-1405,1443-1449).
+        if let Some(core) = self.published_sources.get(&source.lookup_name) {
             return Ok(core.clone());
         }
 
@@ -302,15 +342,41 @@ impl SourcePublications {
             spec,
             &mut self.temporary_files,
         )?;
+        let retained_name = retained_file_name(source, &publication, &spec.dynamic_wire_name);
         let core = publication.core.clone();
-        self.published_sources
-            .insert(source.path.clone(), core.clone());
+        self.published_sources.insert(retained_name, core.clone());
         push_publication(
             publication,
             &mut self.registrations,
             &mut self.resource_files,
         );
         Ok(core)
+    }
+}
+
+/// `GetStandalone` rewrites `C4Network2Res::szFile` only when it packs a
+/// physical directory. Packed files, virtual children of packed parents and
+/// unloadable directories retain the name produced by the original group
+/// open, which is the key later `AddByFile` calls compare against.
+fn retained_file_name(
+    source: &HostInitialResourceSource,
+    publication: &HostResourcePublication,
+    network_path_template: &LegacyCString,
+) -> LegacyCString {
+    let packed_physical_directory = source.virtual_group_bytes.is_none()
+        && fs::metadata(&source.path).is_ok_and(|metadata| metadata.is_dir())
+        && publication.standalone_path.is_some();
+    if packed_physical_directory {
+        let path = publication
+            .standalone_path
+            .as_deref()
+            .expect("a packed physical directory has a standalone path");
+        // The cache directory used by the Rust host is an implementation
+        // detail. Native rewrites szFile through Config.Network.WorkPath, and
+        // later AddByFile compares that logical lexical string exactly.
+        resolved_dynamic_wire_name(network_path_template, path)
+    } else {
+        source.opened_name.clone()
     }
 }
 
@@ -361,50 +427,29 @@ fn validate_dynamic_metadata(
     )
 }
 
-fn materialize_dynamic(
+fn materialize_resource(
     directory: &Path,
-    group_filename: &str,
+    group_filename: &[u8],
     data: &[u8],
 ) -> Result<PathBuf, HostInitialResourcePublicationError> {
-    let filename = sanitized_basename(group_filename);
-    let (stem, extension) = filename
-        .rfind('.')
-        .map(|dot| (&filename[..dot], &filename[dot..]))
-        .unwrap_or((&filename, ""));
+    let basename = crate::host_resource_core::network_temp_basename(group_filename);
     for suffix in 1..=MAX_TEMP_SUFFIX {
-        let candidate = if suffix == 1 {
-            filename.clone()
-        } else {
-            format!("{stem}_{suffix}{extension}")
-        };
+        let candidate = crate::host_resource_core::network_temp_candidate(&basename, suffix);
+        let candidate = String::from_utf8(candidate).expect("FindTempResFileName produces ASCII");
         let path = directory.join(candidate);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
                 if let Err(error) = file.write_all(data) {
                     let _ = fs::remove_file(&path);
-                    return Err(HostInitialResourcePublicationError::DynamicIo(error));
+                    return Err(HostInitialResourcePublicationError::ResourceIo(error));
                 }
                 return Ok(path);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(HostInitialResourcePublicationError::DynamicIo(error)),
+            Err(error) => return Err(HostInitialResourcePublicationError::ResourceIo(error)),
         }
     }
-    Err(HostInitialResourcePublicationError::NoDynamicFilename)
-}
-
-fn sanitized_basename(filename: &str) -> String {
-    let safe = filename
-        .bytes()
-        .map(|byte| match byte {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'/' => char::from(byte),
-            _ => '_',
-        })
-        .collect::<String>();
-    safe.rsplit('/')
-        .next()
-        .filter(|name| !name.is_empty())
-        .map_or_else(|| "Resource".to_owned(), ToOwned::to_owned)
+    Err(HostInitialResourcePublicationError::NoResourceFilename)
 }
 
 #[derive(Default)]
@@ -414,6 +459,10 @@ struct TemporaryFiles {
 }
 
 impl TemporaryFiles {
+    fn checkpoint(&self) -> usize {
+        self.paths.len()
+    }
+
     fn track(&mut self, path: PathBuf) {
         self.armed = true;
         self.paths.push(path);
@@ -421,6 +470,12 @@ impl TemporaryFiles {
 
     fn disarm(&mut self) {
         self.armed = false;
+    }
+
+    fn rollback(&mut self, checkpoint: usize) {
+        for path in self.paths.drain(checkpoint..) {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 

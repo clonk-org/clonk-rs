@@ -56,11 +56,7 @@ pub fn localize_script_source<S: AsRef<str>>(
     source: &str,
     languages: &[S],
 ) -> Result<String, GroupError> {
-    localize_script_source_with_components(
-        &ComponentGroups::local(group),
-        source,
-        languages,
-    )
+    localize_script_source_with_components(&ComponentGroups::local(group), source, languages)
 }
 
 /// Applies a script string table using the local group followed by the
@@ -144,10 +140,7 @@ fn replace_localization_keys(
     let mut copied_through = 0;
     let mut search_from = 0;
 
-    while let Some(open_offset) = source[search_from..]
-        .iter()
-        .position(|byte| *byte == b'$')
-    {
+    while let Some(open_offset) = source[search_from..].iter().position(|byte| *byte == b'$') {
         let open = search_from + open_offset;
         let key_start = open + 1;
         // C++ copies at most C4MaxName bytes, then checks the following byte.
@@ -167,9 +160,10 @@ fn replace_localization_keys(
         }
 
         let key = &source[key_start..close];
-        let valid = key.iter().copied().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'~' | b'+' | b'-')
-        });
+        let valid = key
+            .iter()
+            .copied()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'~' | b'+' | b'-'));
         if !valid {
             continue;
         }
@@ -229,11 +223,7 @@ mod tests {
         let entries = HashMap::from([(b"Key".as_slice(), b"V".as_slice())]);
 
         assert_eq!(
-            replace_localization_keys(
-                &source,
-                &entries,
-                std::path::Path::new("StringTbl.txt"),
-            ),
+            replace_localization_keys(&source, &entries, std::path::Path::new("StringTbl.txt"),),
             expected
         );
     }
@@ -257,11 +247,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            replace_localization_keys(
-                &source,
-                &entries,
-                std::path::Path::new("StringTbl.txt"),
-            ),
+            replace_localization_keys(&source, &entries, std::path::Path::new("StringTbl.txt"),),
             expected
         );
     }

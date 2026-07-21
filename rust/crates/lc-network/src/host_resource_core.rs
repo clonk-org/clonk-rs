@@ -39,6 +39,7 @@ pub struct HostResourceCoreSpec {
     source_ownership: ResourceFileOwnership,
     group_maker: LegacyCString,
     max_load_file_size: u32,
+    standalone_name: Option<LegacyCString>,
 }
 
 impl HostResourceCoreSpec {
@@ -77,6 +78,7 @@ impl HostResourceCoreSpec {
             source_ownership,
             group_maker,
             max_load_file_size: DEFAULT_MAX_LOAD_FILE_SIZE,
+            standalone_name: None,
         }
     }
 
@@ -87,6 +89,11 @@ impl HostResourceCoreSpec {
 
     pub fn with_max_load_file_size(mut self, size: u32) -> Self {
         self.max_load_file_size = size;
+        self
+    }
+
+    pub fn with_standalone_name(mut self, name: LegacyCString) -> Self {
+        self.standalone_name = Some(name);
         self
     }
 }
@@ -154,6 +161,11 @@ pub fn build_host_resource_core(
 ) -> Result<HostResourcePublication, HostResourceCoreError> {
     let source_path = source_path.as_ref().to_path_buf();
     let metadata = fs::metadata(&source_path)?;
+    let standalone_name = spec
+        .standalone_name
+        .as_ref()
+        .map(|name| name.as_bytes().to_vec())
+        .unwrap_or_else(|| lc_resources::path_to_legacy_bytes(&source_path));
     let group = Group::open(&source_path).ok();
     if spec.resource_type == HostResourceType::Player && group.is_none() {
         return Err(HostResourceCoreError::PlayerGroupRequired(source_path));
@@ -198,14 +210,28 @@ pub fn build_host_resource_core(
         });
     }
 
-    if spec.resource_type == HostResourceType::Definitions
-        && metadata.is_dir()
-        && directory_size_exceeds(&source_path, u64::from(spec.max_load_file_size))?
-    {
-        return Ok(unloadable_publication(core, source_path));
+    if spec.resource_type == HostResourceType::Definitions && metadata.is_dir() {
+        match directory_size_exceeds(&source_path, u64::from(spec.max_load_file_size)) {
+            Ok(true) | Err(_) => return Ok(unloadable_publication(core, source_path)),
+            Ok(false) => {}
+        }
     }
 
-    let (standalone_path, standalone_ownership, standalone_created) = if metadata.is_dir() {
+    let standalone = (|| -> Result<_, HostResourceCoreError> {
+        if !metadata.is_dir() {
+            if spec.resource_type == HostResourceType::Player
+                && spec.source_ownership == ResourceFileOwnership::Persistent
+            {
+                // OptimizeStandalone never edits a persistent player in place.
+                let path = write_standalone(
+                    _standalone_directory.as_ref(),
+                    &standalone_name,
+                    &fs::read(&source_path)?,
+                )?;
+                return Ok((path, ResourceFileOwnership::Temporary, true));
+            }
+            return Ok((source_path.clone(), spec.source_ownership, false));
+        }
         if spec.source_ownership == ResourceFileOwnership::Temporary
             && spec.resource_type != HostResourceType::Player
         {
@@ -220,24 +246,19 @@ pub fn build_host_resource_core(
         } else {
             write_standalone(
                 _standalone_directory.as_ref(),
-                &source_path,
+                &standalone_name,
                 packed.as_slice(),
             )?
         };
         let created = spec.source_ownership != ResourceFileOwnership::Temporary;
-        (path, ResourceFileOwnership::Temporary, created)
-    } else if spec.resource_type == HostResourceType::Player
-        && spec.source_ownership == ResourceFileOwnership::Persistent
-    {
-        // OptimizeStandalone never edits a persistent player in place.
-        let path = write_standalone(
-            _standalone_directory.as_ref(),
-            &source_path,
-            &fs::read(&source_path)?,
-        )?;
-        (path, ResourceFileOwnership::Temporary, true)
-    } else {
-        (source_path.clone(), spec.source_ownership, false)
+        Ok((path, ResourceFileOwnership::Temporary, created))
+    })();
+    let (standalone_path, standalone_ownership, standalone_created) = match standalone {
+        Ok(standalone) => standalone,
+        Err(_) if spec.resource_type == HostResourceType::Definitions => {
+            return Ok(unloadable_publication(core, source_path));
+        }
+        Err(error) => return Err(error),
     };
 
     let finalized = (|| -> Result<(u64, u32), HostResourceCoreError> {
@@ -251,6 +272,17 @@ pub fn build_host_resource_core(
     })();
     let (physical_size, physical_crc) = match finalized {
         Ok(physical) => physical,
+        Err(_) if spec.resource_type == HostResourceType::Definitions => {
+            if standalone_created {
+                return Ok(HostResourcePublication {
+                    core,
+                    source_path,
+                    standalone_path: Some(standalone_path),
+                    standalone_ownership: Some(standalone_ownership),
+                });
+            }
+            return Ok(unloadable_publication(core, source_path));
+        }
         Err(error) => {
             if standalone_created {
                 let _ = fs::remove_file(&standalone_path);
@@ -262,6 +294,21 @@ pub fn build_host_resource_core(
     if spec.resource_type == HostResourceType::Definitions
         && physical_size > u64::from(spec.max_load_file_size)
     {
+        if metadata.is_dir() {
+            // GetStandalone has already rewritten C4Network2Res::szFile to
+            // this temporary packed path before the post-pack limit check
+            // clears only szStandalone. Retain the file for AddByFile
+            // identity and lifetime cleanup even though the synchronized
+            // core stays unloadable.
+            return Ok(HostResourcePublication {
+                core,
+                source_path,
+                standalone_path: Some(standalone_path),
+                standalone_ownership: Some(standalone_ownership),
+            });
+        }
+        // For an ordinary physical file, szFile is never rewritten and the
+        // failed standalone is simply cleared.
         return Ok(unloadable_publication(core, source_path));
     }
 
@@ -288,9 +335,9 @@ pub(crate) fn optimize_player_standalone(
     let group = Group::open(standalone_path)?;
     let filename = standalone_path
         .file_name()
-        .map(|filename| filename.as_encoded_bytes())
+        .map(|filename| lc_resources::path_to_legacy_bytes(Path::new(filename)))
         .ok_or_else(|| HostResourceCoreError::NonUtf8EntryName(standalone_path.to_path_buf()))?;
-    let optimized = optimize_player_group(&group, filename, group_maker, true, Path::new(""))?;
+    let optimized = optimize_player_group(&group, &filename, group_maker, true, Path::new(""))?;
     if optimized.changed {
         install_staged_file(standalone_path, &optimized.group.pack()?, false)?;
     }
@@ -500,7 +547,7 @@ pub(crate) fn pack_directory_standalone(
 ) -> Result<Vec<u8>, HostResourceCoreError> {
     let filename = path
         .file_name()
-        .map(|filename| filename.as_encoded_bytes().to_vec())
+        .map(|filename| lc_resources::path_to_legacy_bytes(Path::new(filename)))
         .ok_or_else(|| HostResourceCoreError::NonUtf8EntryName(path.to_path_buf()))?;
     mutable_directory(path, filename, group_maker)?
         .pack()
@@ -519,7 +566,7 @@ fn mutable_directory(
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let entry_path = entry.path();
-        let name = entry.file_name().as_encoded_bytes().to_vec();
+        let name = lc_resources::path_to_legacy_bytes(Path::new(&entry.file_name()));
         if ignored_group_entry(&name) {
             continue;
         }
@@ -674,33 +721,14 @@ fn next_staged_path(parent: &Path, purpose: &str) -> PathBuf {
 
 fn write_standalone(
     directory: &Path,
-    source: &Path,
+    source_name: &[u8],
     data: &[u8],
 ) -> Result<PathBuf, HostResourceCoreError> {
     fs::create_dir_all(directory)?;
-    let filename = source
-        .file_name()
-        .map(|name| {
-            name.as_encoded_bytes()
-                .iter()
-                .map(|byte| match byte {
-                    b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'/' => char::from(*byte),
-                    _ => '_',
-                })
-                .collect::<String>()
-        })
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "Resource".to_owned());
-    let (stem, extension) = filename
-        .rfind('.')
-        .map(|dot| (&filename[..dot], &filename[dot..]))
-        .unwrap_or((&filename, ""));
+    let basename = network_temp_basename(source_name);
     for suffix in 1..=999 {
-        let filename = if suffix == 1 {
-            filename.clone()
-        } else {
-            format!("{stem}_{suffix}{extension}")
-        };
+        let filename = network_temp_candidate(&basename, suffix);
+        let filename = String::from_utf8(filename).expect("FindTempResFileName produces ASCII");
         let path = directory.join(filename);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
@@ -715,6 +743,48 @@ fn write_standalone(
         }
     }
     Err(HostResourceCoreError::NoStandaloneFilename)
+}
+
+/// C4Network2ResList::FindTempResFileName sanitizes the complete native
+/// spelling before GetFilename. Win32 backslashes therefore flatten into the
+/// basename, while forward slashes survive until the final split.
+pub(crate) fn network_temp_basename(source_name: &[u8]) -> Vec<u8> {
+    let safe = source_name
+        .iter()
+        .copied()
+        .map(|byte| match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'/' => byte,
+            _ => b'_',
+        })
+        .collect::<Vec<_>>();
+    let basename = safe
+        .rsplit(|byte| *byte == b'/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(b"Resource");
+    if basename.is_empty() || basename == b"." || basename == b".." {
+        b"Resource".to_vec()
+    } else {
+        basename.to_vec()
+    }
+}
+
+pub(crate) fn network_temp_candidate(basename: &[u8], suffix: u32) -> Vec<u8> {
+    if suffix <= 1 {
+        return basename.to_vec();
+    }
+    let split = basename
+        .iter()
+        .rposition(|byte| *byte == b'.')
+        // GetExtension returns the trailing NUL when there is no dot, then
+        // FindTempResFileName subtracts one and retains that final byte after
+        // the numeric suffix (for example `foo` -> `fo_2o`).
+        .unwrap_or_else(|| basename.len().saturating_sub(1));
+    let mut candidate = basename[..split].to_vec();
+    candidate.push(b'_');
+    candidate.extend(suffix.to_string().as_bytes());
+    candidate.extend_from_slice(&basename[split..]);
+    candidate
 }
 
 fn file_crc(path: &Path) -> Result<u32, io::Error> {
@@ -740,4 +810,20 @@ fn crc32(initial: u32, data: &[u8]) -> u32 {
         }
     }
     crc ^ u32::MAX
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{network_temp_basename, network_temp_candidate};
+
+    #[test]
+    fn cpp_temp_names_sanitize_before_splitting_and_retain_extensionless_tail() {
+        assert_eq!(
+            network_temp_basename(b"C:\\LC\\Obj?cts.c4d"),
+            b"C__LC_Obj_cts.c4d"
+        );
+        assert_eq!(network_temp_basename(b"Defs/Objects.c4d"), b"Objects.c4d");
+        assert_eq!(network_temp_candidate(b"Objects.c4d", 2), b"Objects_2.c4d");
+        assert_eq!(network_temp_candidate(b"plain", 2), b"plai_2n");
+    }
 }

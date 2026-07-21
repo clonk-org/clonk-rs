@@ -2,7 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lc_network::{HostInitialResourceSource, NetworkAddress, NetworkProtocol, NETWORK_STATE_LOBBY};
-use lc_resources::{Group, LanguagePacks};
+use lc_resources::{Group, LanguagePacks, MutableGroup};
+
+use crate::host_game_resource_sources::freeze_host_definition_resource_sources;
 
 #[path = "../src/prepared_host_bootstrap.rs"]
 pub mod prepared_host_bootstrap;
@@ -28,6 +30,18 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     let scenario_path = content.join("Tutorial.c4f/Tutorial01.c4s");
     let network = tempfile::tempdir().unwrap();
     fs::write(network.path().join("DynTutorial01.c4s"), b"collision").unwrap();
+    let definition_resource_paths = vec![content.join("Objects.c4d"), content.join("Tutorial.c4f")];
+    let effective_definition_modules = vec!["Objects.c4d".to_owned()];
+    let definition_resources = freeze_host_definition_resource_sources(
+        &definition_resource_paths,
+        &scenario_path,
+        &effective_definition_modules,
+        false,
+        &content,
+        "",
+    )
+    .unwrap();
+    let definition_executable_path = format!("{}{}", content.display(), std::path::MAIN_SEPARATOR);
     let install_roots = vec![content, planet];
     let languages = vec!["US".to_owned(), "DE".to_owned()];
     let language_packs = LanguagePacks::default();
@@ -36,7 +50,12 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     let prepared = prepare_host_bootstrap(PreparedHostBootstrapSpec {
         scenario_path: &scenario_path,
         install_roots: &install_roots,
-        definition_executable_path: "",
+        definition_resources: &definition_resources,
+        effective_definition_modules: &effective_definition_modules,
+        initial_definition_modules: &[],
+        fixed_definition_modules: None,
+        selector_definition_root: None,
+        definition_executable_path: &definition_executable_path,
         definition_path: "",
         languages: &languages,
         language_packs: &language_packs,
@@ -183,8 +202,17 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     );
     assert_eq!(prepared.scenario_origin(), "Tutorial.c4f/Tutorial01.c4s");
     assert_eq!(
+        prepared.dynamic_filename_seed(),
+        format!("Network{}DynTutorial01.c4s", std::path::MAIN_SEPARATOR)
+    );
+    let expected_dynamic_wire = if cfg!(windows) {
+        b"Network\\Network_DynTutorial01.c4s".as_slice()
+    } else {
+        b"Network/DynTutorial01_2.c4s".as_slice()
+    };
+    assert_eq!(
         prepared.dynamic_wire_name().as_bytes(),
-        b"Network/DynTutorial01_2.c4s"
+        expected_dynamic_wire
     );
     assert_eq!(
         host.resource_files
@@ -203,7 +231,7 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
             (2, 4, b"Tutorial.c4f".to_vec()),
             (3, 5, b"System.c4g".to_vec()),
             (4, 6, b"Material.c4g".to_vec()),
-            (5, 2, b"Network/DynTutorial01_2.c4s".to_vec()),
+            (5, 2, expected_dynamic_wire.to_vec()),
         ]
     );
     assert_eq!(snapshot.dynamic.id, 5);
@@ -437,6 +465,24 @@ LastPlayerID=9\n\
         next.players[0].id, 10,
         "restore LastPlayerID seeds allocation"
     );
+}
+
+#[test]
+fn old_save_definition_files_override_remains_a_typed_host_boundary() {
+    let fixture = minimal_install(Some(b"[DefinitionFiles]\nDefinition1=Historical.c4d\n"));
+    fs::write(
+        fixture.scenario_path.join("Scenario.txt"),
+        fixture
+            .scenario_text
+            .replacen("[Head]\n", "[Head]\nSaveGame=1\n", 1),
+    )
+    .unwrap();
+
+    let error = prepare(&fixture, &[]).expect_err("old DefinitionFiles must not publish raw defs");
+    assert!(matches!(
+        error,
+        PrepareHostBootstrapError::SavegameDefinitionOverrideUnsupported
+    ));
 }
 
 #[test]
@@ -990,11 +1036,32 @@ fn native_host_metadata_and_player_filename_prepare_as_c4_bytes() {
     ))];
     let languages = vec!["US".to_owned(), "DE".to_owned()];
     let language_packs = LanguagePacks::default();
+    let definition_resource_paths = vec![fixture.install_roots[0].join("Defs.c4d")];
+    let effective_definition_modules = vec![lc_script::c4_string_from_bytes(b"D\xe4fs.c4d")];
+    let definition_resources = freeze_host_definition_resource_sources(
+        &definition_resource_paths,
+        &fixture.scenario_path,
+        &effective_definition_modules,
+        false,
+        &fixture.install_roots[0],
+        "",
+    )
+    .unwrap();
+    let definition_executable_path = format!(
+        "{}{}",
+        fixture.install_roots[0].display(),
+        std::path::MAIN_SEPARATOR
+    );
 
     let prepared = prepare_host_bootstrap(PreparedHostBootstrapSpec {
         scenario_path: &fixture.scenario_path,
         install_roots: &fixture.install_roots,
-        definition_executable_path: "",
+        definition_resources: &definition_resources,
+        effective_definition_modules: &effective_definition_modules,
+        initial_definition_modules: &[],
+        fixed_definition_modules: Some(&effective_definition_modules),
+        selector_definition_root: None,
+        definition_executable_path: &definition_executable_path,
         definition_path: "",
         languages: &languages,
         language_packs: &language_packs,
@@ -1045,16 +1112,33 @@ fn native_host_metadata_and_player_filename_prepare_as_c4_bytes() {
         .initial_host_game_reference(true, &[])
         .expect("native reference");
     assert_eq!(reference.metadata().comment.as_bytes(), b"Gr\xfc\xdfe");
-    let dynamic = Group::open(
-        &prepared
+    let dynamic_resource = prepared
+        .host_config()
+        .resource_files
+        .iter()
+        .find(|resource| resource.core.resource_type == lc_network::HostResourceType::Dynamic as u8)
+        .expect("dynamic resource");
+    let dynamic = Group::open(&dynamic_resource.path).expect("open native-maker dynamic");
+    assert_eq!(dynamic.maker_bytes(), Some(b"M\xe4ker".as_slice()));
+    assert!(dynamic
+        .read_file("Scenario.txt")
+        .unwrap()
+        .windows(b"Definitions=\"D\xe4fs.c4d\"".len())
+        .any(|window| window == b"Definitions=\"D\xe4fs.c4d\""));
+    assert_eq!(
+        prepared
             .host_config()
             .resource_files
-            .last()
-            .expect("dynamic resource")
-            .path,
-    )
-    .expect("open native-maker dynamic");
-    assert_eq!(dynamic.maker_bytes(), Some(b"M\xe4ker".as_slice()));
+            .iter()
+            .find(|resource| {
+                resource.core.resource_type == lc_network::HostResourceType::Definitions as u8
+            })
+            .unwrap()
+            .core
+            .filename
+            .as_bytes(),
+        b"D\xe4fs.c4d"
+    );
 }
 
 #[test]
@@ -1168,6 +1252,65 @@ fn one_selected_player_is_published_after_dynamic_and_installed_before_admission
         admitted.players[0].id, 2,
         "runtime assignment must continue after the installed host player"
     );
+}
+
+#[test]
+fn packed_parent_player_child_is_snapshotted_and_published() {
+    let fixture = minimal_install(None);
+    let mut player = MutableGroup::new("Alice.c4p");
+    player
+        .add_file(
+            "Player.txt",
+            b"[Player]\nName=Packed Alice\n\n[Preferences]\nColor=3\nColorDw=0\n".to_vec(),
+        )
+        .unwrap();
+    let mut parent = MutableGroup::new("Players.c4f");
+    parent.add_child("Alice.c4p", player).unwrap();
+    let parent_path = fixture.install_roots[0].join("Players.c4f");
+    fs::write(&parent_path, parent.pack().unwrap()).unwrap();
+    let virtual_player_path = parent_path.join("Alice.c4p");
+    assert!(!virtual_player_path.exists());
+
+    let prepared = prepare(
+        &fixture,
+        &[player_source(
+            virtual_player_path.clone(),
+            b"Players.c4f/Alice.c4p",
+        )],
+    )
+    .expect("packed player child prepares");
+
+    let player_info = &prepared.initial_host_player_info_control().players[0];
+    assert_eq!(player_info.name.as_bytes(), b"Packed Alice");
+    let core = player_info
+        .resource
+        .as_ref()
+        .expect("published player core");
+    assert_eq!(
+        core.resource_type,
+        lc_network::HostResourceType::Player as u8
+    );
+    let hosted = prepared
+        .host_config()
+        .resource_files
+        .iter()
+        .find(|resource| resource.core.id == core.id)
+        .expect("materialized packed child");
+    assert!(hosted.path.exists());
+    assert_ne!(hosted.path, virtual_player_path);
+    assert!(hosted.binary_compatible);
+    let hosted_path = hosted.path.clone();
+    let mut installed = Vec::new();
+    let mut registry = lc_engine::ControlPlayerInfoRegistry::default();
+    let _ready = prepared
+        .install_initial_host_player_state(&mut registry, |core, path| {
+            installed.push((core.id, path.to_path_buf()));
+        })
+        .expect("install packed child resource and player info");
+    assert_eq!(installed, [(core.id, hosted_path.clone())]);
+    assert!(hosted_path.exists());
+    Group::open(&hosted_path).expect("installed packed child is loadable");
+    assert_eq!(registry.player_count(), 1);
 }
 
 #[test]
@@ -1322,6 +1465,22 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
     let content = repository.join("content");
     let planet = repository.join("planet");
     let scenario_path = content.join("Knights.c4f/Regicide.c4s");
+    let definition_resource_paths = vec![
+        content.join("Objects.c4d"),
+        content.join("Knights.c4d"),
+        content.join("Knights.c4f"),
+    ];
+    let effective_definition_modules = vec!["Objects.c4d".to_owned(), "Knights.c4d".to_owned()];
+    let definition_resources = freeze_host_definition_resource_sources(
+        &definition_resource_paths,
+        &scenario_path,
+        &effective_definition_modules,
+        false,
+        &content,
+        "",
+    )
+    .unwrap();
+    let definition_executable_path = format!("{}{}", content.display(), std::path::MAIN_SEPARATOR);
     let install_roots = vec![content, planet];
     let languages = vec!["US".to_owned(), "DE".to_owned()];
     let language_packs = LanguagePacks::default();
@@ -1344,7 +1503,12 @@ fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
         PreparedHostBootstrapSpec {
             scenario_path: &scenario_path,
             install_roots: &install_roots,
-            definition_executable_path: "",
+            definition_resources: &definition_resources,
+            effective_definition_modules: &effective_definition_modules,
+            initial_definition_modules: &[],
+            fixed_definition_modules: None,
+            selector_definition_root: None,
+            definition_executable_path: &definition_executable_path,
             definition_path: "",
             languages: &languages,
             language_packs: &language_packs,
@@ -1412,9 +1576,7 @@ fn selected_players_are_published_and_admitted_in_module_order() {
     let sources = players
         .iter()
         .map(|(name, wire_name)| {
-            let path = fixture
-                .install_roots[0]
-                .join(String::from_utf8_lossy(wire_name).as_ref());
+            let path = fixture.install_roots[0].join(String::from_utf8_lossy(wire_name).as_ref());
             fs::create_dir_all(&path).unwrap();
             fs::write(
                 path.join("Player.txt"),
@@ -1789,10 +1951,31 @@ fn prepare_typed_with_names_and_league_impl(
 ) -> Result<prepared_host_bootstrap::PreparedHostBootstrap, PrepareHostBootstrapError> {
     let languages = vec!["US".to_owned(), "DE".to_owned()];
     let language_packs = LanguagePacks::default();
+    let definition_resource_paths = vec![fixture.install_roots[0].join("Defs.c4d")];
+    let effective_definition_modules = vec!["Defs.c4d".to_owned()];
+    let definition_resources = freeze_host_definition_resource_sources(
+        &definition_resource_paths,
+        &fixture.scenario_path,
+        &effective_definition_modules,
+        false,
+        &fixture.install_roots[0],
+        "",
+    )
+    .unwrap();
+    let definition_executable_path = format!(
+        "{}{}",
+        fixture.install_roots[0].display(),
+        std::path::MAIN_SEPARATOR
+    );
     prepare_host_bootstrap(PreparedHostBootstrapSpec {
         scenario_path: &fixture.scenario_path,
         install_roots: &fixture.install_roots,
-        definition_executable_path: "",
+        definition_resources: &definition_resources,
+        effective_definition_modules: &effective_definition_modules,
+        initial_definition_modules: &[],
+        fixed_definition_modules: None,
+        selector_definition_root: None,
+        definition_executable_path: &definition_executable_path,
         definition_path: "",
         languages: &languages,
         language_packs: &language_packs,
@@ -1827,7 +2010,10 @@ fn prepare_typed_with_names_and_league_impl(
 fn player_source(path: PathBuf, wire_name: &[u8]) -> HostInitialResourceSource {
     HostInitialResourceSource {
         path,
+        lookup_name: lc_engine::LegacyCString::from_bytes(wire_name.to_vec()).unwrap(),
+        opened_name: lc_engine::LegacyCString::from_bytes(wire_name.to_vec()).unwrap(),
         wire_name: lc_engine::LegacyCString::from_bytes(wire_name.to_vec()).unwrap(),
+        virtual_group_bytes: None,
     }
 }
 

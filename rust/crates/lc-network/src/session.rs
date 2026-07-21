@@ -5182,17 +5182,13 @@ fn materialize_runtime_dynamic(
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(directory)
         .map_err(|error| format!("could not create network resource directory: {error}"))?;
-    let filename = sanitized_runtime_dynamic_basename(&dynamic.group_filename);
-    let (stem, extension) = filename
-        .rfind('.')
-        .map(|dot| (&filename[..dot], &filename[dot..]))
-        .unwrap_or((&filename, ""));
+    let basename = crate::host_resource_core::network_temp_basename(
+        dynamic.group_filename.as_bytes(),
+    );
     for suffix in 1..=MAX_RUNTIME_DYNAMIC_SUFFIX {
-        let candidate = if suffix == 1 {
-            filename.clone()
-        } else {
-            format!("{stem}_{suffix}{extension}")
-        };
+        let candidate = crate::host_resource_core::network_temp_candidate(&basename, suffix);
+        let candidate =
+            String::from_utf8(candidate).expect("FindTempResFileName produces ASCII");
         let path = directory.join(candidate);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
@@ -5209,27 +5205,6 @@ fn materialize_runtime_dynamic(
         }
     }
     Err("no free runtime dynamic filename from 1 through 999".to_string())
-}
-
-fn sanitized_runtime_dynamic_basename(filename: &str) -> String {
-    filename
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|name| !name.is_empty())
-        .map(|name| {
-            name.bytes()
-                .map(|byte| match byte {
-                    b'a'..=b'z'
-                    | b'A'..=b'Z'
-                    | b'0'..=b'9'
-                    | b'.'
-                    | b'-'
-                    | b'_' => char::from(byte),
-                    _ => '_',
-                })
-                .collect()
-        })
-        .unwrap_or_else(|| "Dynamic.c4s".to_string())
 }
 
 fn runtime_dynamic_wire_name(

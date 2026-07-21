@@ -3,10 +3,17 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lc_engine::{InitialNetworkScenarioMetadata, LegacyCString};
+use lc_engine::LegacyCString;
 use lc_network::HostInitialResourceSource;
-use lc_resources::{Group, GroupError};
+use lc_resources::{compress_c4group_image, Group, GroupError, MutableGroupError};
 use thiserror::Error;
+
+pub(crate) use crate::resource_path_identity::{
+    executable_relative_group_name, open_group_path, opened_physical_group_name,
+};
+use crate::resource_path_identity::{
+    executable_relative_wire_name, opened_group_name, path_wire_bytes,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostGameResourceSources {
@@ -17,9 +24,11 @@ pub struct HostGameResourceSources {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostGameResourceSourceKind {
+    Scenario,
     Definition,
     System,
     Material,
+    Player,
 }
 
 #[derive(Debug, Error)]
@@ -56,51 +65,155 @@ pub enum HostGameResourceSourceError {
         #[source]
         source: GroupError,
     },
-    #[error("resource wire path is not UTF-8: {path}")]
-    NonUtf8WirePath { path: PathBuf },
     #[error("resource wire path contains an interior NUL: {path}")]
     InvalidWirePath { path: PathBuf },
-    #[error("packed ancestor material cannot yet be represented as a physical source: {path}")]
-    PackedAncestorMaterialUnsupported { path: PathBuf },
+    #[error(
+        "effective definition vector has {actual} resources, fewer than the {expected} selected external entries"
+    )]
+    DefinitionResourceCountMismatch { actual: usize, expected: usize },
+    #[error("could not recover the selected folder-local spelling for {}", path.display())]
+    FolderDefinitionSpellingMissing { path: PathBuf },
+    #[error("{kind:?} resource group could not be snapshotted at {}: {source}", path.display())]
+    ResourceGroupSnapshot {
+        kind: HostGameResourceSourceKind,
+        path: PathBuf,
+        #[source]
+        source: MutableGroupError,
+    },
+}
+
+/// Freezes the staged physical definition vector together with the filename
+/// spelling C++ publishes. Explicit entries retain their selected module
+/// spelling; folder-local entries use their executable-relative physical path.
+pub fn freeze_host_definition_resource_sources(
+    definition_resource_paths: &[PathBuf],
+    scenario_path: &Path,
+    effective_modules: &[String],
+    definition_root_applied: bool,
+    definition_executable_root: &Path,
+    definition_path: &str,
+) -> Result<Vec<HostInitialResourceSource>, HostGameResourceSourceError> {
+    let block_count = 1 + usize::from(definition_root_applied);
+    let external_count = effective_modules.len().saturating_mul(block_count);
+    if definition_resource_paths.len() < external_count {
+        return Err(
+            HostGameResourceSourceError::DefinitionResourceCountMismatch {
+                actual: definition_resource_paths.len(),
+                expected: external_count,
+            },
+        );
+    }
+
+    let mut lookup_names = Vec::with_capacity(definition_resource_paths.len());
+    if definition_root_applied {
+        let definition_path = lc_script::c4_string_bytes(definition_path);
+        lookup_names.extend(effective_modules.iter().map(|module| {
+            let mut lookup_name = definition_path.clone();
+            lookup_name.extend(lc_script::c4_string_bytes(module));
+            lookup_name
+        }));
+    }
+    lookup_names.extend(
+        effective_modules
+            .iter()
+            .map(|module| lc_script::c4_string_bytes(module)),
+    );
+    lookup_names.extend(folder_local_lookup_names(
+        scenario_path,
+        &definition_resource_paths[external_count..],
+        definition_executable_root,
+    )?);
+
+    definition_resource_paths
+        .iter()
+        .zip(lookup_names)
+        .map(|(path, lookup_name)| {
+            let opened_name = opened_group_name(path, &lookup_name, definition_executable_root);
+            let wire_name =
+                executable_relative_wire_name(lookup_name.clone(), definition_executable_root);
+            source_from_names(path.clone(), lookup_name, opened_name, wire_name, path)
+        })
+        .collect()
+}
+
+fn folder_local_lookup_names(
+    scenario_path: &Path,
+    folder_resources: &[PathBuf],
+    executable_root: &Path,
+) -> Result<Vec<Vec<u8>>, HostGameResourceSourceError> {
+    let mut candidates = scenario_path
+        .ancestors()
+        .skip(1)
+        .filter(|path| has_extension(path, "c4f"))
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    candidates.reverse();
+    let mut candidate_start = 0;
+
+    folder_resources
+        .iter()
+        .map(|resource| {
+            let matched =
+                candidates[candidate_start..]
+                    .iter()
+                    .enumerate()
+                    .find_map(|(offset, candidate)| {
+                        open_group_path(candidate)
+                            .ok()
+                            .filter(|group| group.root() == resource)
+                            .map(|_| (candidate_start + offset, candidate))
+                    });
+            if let Some((index, candidate)) = matched {
+                candidate_start = index + 1;
+                Ok(executable_relative_wire_name(
+                    path_wire_bytes(candidate),
+                    executable_root,
+                ))
+            } else {
+                Err(
+                    HostGameResourceSourceError::FolderDefinitionSpellingMissing {
+                        path: resource.clone(),
+                    },
+                )
+            }
+        })
+        .collect()
 }
 
 /// Resolves the C4GameRes sources without consulting process-global app state.
 pub fn resolve_host_game_resource_sources(
     scenario_path: impl AsRef<Path>,
     install_roots: &[PathBuf],
-    metadata: &InitialNetworkScenarioMetadata,
+    definition_resources: &[HostInitialResourceSource],
+    executable_root: &Path,
 ) -> Result<HostGameResourceSources, HostGameResourceSourceError> {
     let scenario_path = scenario_path.as_ref();
     validate_install_roots(install_roots)?;
-    Group::open(scenario_path).map_err(|source| HostGameResourceSourceError::ScenarioGroup {
-        path: scenario_path.to_path_buf(),
-        source,
+    open_group_path(scenario_path).map_err(|source| {
+        HostGameResourceSourceError::ScenarioGroup {
+            path: scenario_path.to_path_buf(),
+            source,
+        }
     })?;
     let (scenario_root, scenario_relative) = scenario_install_root(scenario_path, install_roots)?;
 
-    let mut definitions = metadata
-        .definition_modules
+    let definitions = definition_resources
         .iter()
-        .map(|module| {
-            resolve_installed_group(
-                HostGameResourceSourceKind::Definition,
-                module,
-                install_roots,
-            )
-        })
+        .map(resolve_effective_definition)
         .collect::<Result<Vec<_>, _>>()?;
-    definitions.extend(folder_local_definitions(scenario_root, scenario_relative)?);
 
     let system = resolve_installed_group(
         HostGameResourceSourceKind::System,
         "System.c4g",
         install_roots,
+        executable_root,
     )?;
-    let mut materials = folder_materials(scenario_root, scenario_relative)?;
+    let mut materials = folder_materials(scenario_root, scenario_relative, executable_root)?;
     materials.push(resolve_installed_group(
         HostGameResourceSourceKind::Material,
         "Material.c4g",
         install_roots,
+        executable_root,
     )?);
 
     Ok(HostGameResourceSources {
@@ -108,6 +221,12 @@ pub fn resolve_host_game_resource_sources(
         system,
         materials,
     })
+}
+
+fn resolve_effective_definition(
+    resource: &HostInitialResourceSource,
+) -> Result<HostInitialResourceSource, HostGameResourceSourceError> {
+    validate_host_group_resource_source(HostGameResourceSourceKind::Definition, resource.clone())
 }
 
 fn validate_install_roots(install_roots: &[PathBuf]) -> Result<(), HostGameResourceSourceError> {
@@ -156,6 +275,7 @@ fn resolve_installed_group(
     kind: HostGameResourceSourceKind,
     logical_name: &str,
     install_roots: &[PathBuf],
+    executable_root: &Path,
 ) -> Result<HostInitialResourceSource, HostGameResourceSourceError> {
     let normalized_name = logical_name.replace('\\', "/");
     let logical_path = Path::new(&normalized_name);
@@ -167,55 +287,24 @@ fn resolve_installed_group(
             kind,
             wire_name: normalized_name.clone(),
         })?;
-    Group::open(&path).map_err(|source| HostGameResourceSourceError::ResourceGroup {
-        kind,
-        path: path.clone(),
-        source,
-    })?;
-    source(path, logical_path)
-}
-
-fn folder_local_definitions(
-    scenario_root: &Path,
-    scenario_relative: &Path,
-) -> Result<Vec<HostInitialResourceSource>, HostGameResourceSourceError> {
-    let mut relative = PathBuf::new();
-    let mut definitions = Vec::new();
-    for component in scenario_relative
-        .parent()
-        .into_iter()
-        .flat_map(Path::components)
-    {
-        relative.push(component.as_os_str());
-        if !has_extension(&relative, "c4f") {
-            continue;
-        }
-        let path = scenario_root.join(&relative);
-        let group =
-            Group::open(&path).map_err(|source| HostGameResourceSourceError::ResourceGroup {
-                kind: HostGameResourceSourceKind::Definition,
-                path: path.clone(),
-                source,
-            })?;
-        let contains_definitions = group
-            .entries()
-            .map_err(|source| HostGameResourceSourceError::ResourceGroup {
-                kind: HostGameResourceSourceKind::Definition,
-                path: path.clone(),
-                source,
-            })?
-            .iter()
-            .any(|entry| matches_definition_entry(&entry.relative_path));
-        if contains_definitions {
-            definitions.push(source(path, &relative)?);
-        }
-    }
-    Ok(definitions)
+    let group =
+        open_group_path(&path).map_err(|source| group_source_error(kind, path.clone(), source))?;
+    let lookup_name = lc_script::c4_string_bytes(&normalized_name);
+    let opened_name = opened_group_name(group.root(), &lookup_name, executable_root);
+    let resource = source_from_names(
+        path,
+        lookup_name.clone(),
+        opened_name,
+        lookup_name,
+        logical_path,
+    )?;
+    validate_open_group_resource_source(kind, resource, group)
 }
 
 fn folder_materials(
     scenario_root: &Path,
     scenario_relative: &Path,
+    executable_root: &Path,
 ) -> Result<Vec<HostInitialResourceSource>, HostGameResourceSourceError> {
     let mut relative = PathBuf::new();
     let mut folder_prefixes = Vec::new();
@@ -235,7 +324,7 @@ fn folder_materials(
         .take_while(|relative| has_extension(relative, "c4f"))
     {
         let folder_path = scenario_root.join(&relative);
-        let group = Group::open(&folder_path).map_err(|source| {
+        let group = open_group_path(&folder_path).map_err(|source| {
             HostGameResourceSourceError::ResourceGroup {
                 kind: HostGameResourceSourceKind::Material,
                 path: folder_path.clone(),
@@ -255,65 +344,130 @@ fn folder_materials(
             continue;
         };
         let material_path = folder_path.join(&material_entry.relative_path);
-        if !group.is_directory() {
-            return Err(
-                HostGameResourceSourceError::PackedAncestorMaterialUnsupported {
-                    path: material_path,
-                },
-            );
-        }
-        Group::open(&material_path).map_err(|source| {
-            HostGameResourceSourceError::ResourceGroup {
+        let material_group = group
+            .open_child_entry_exact(&material_entry)
+            .map_err(|source| HostGameResourceSourceError::ResourceGroup {
                 kind: HostGameResourceSourceKind::Material,
                 path: material_path.clone(),
                 source,
-            }
-        })?;
-        let wire_path = relative.join("Material.c4g");
-        materials.push(source(material_path, &wire_path)?);
+            })?;
+        // C4GameParameters passes the already-opened parent group's full name
+        // plus the literal child name to AddByFile. SetByFile freezes
+        // AtExeRelativePath of that lookup spelling before C4Group corrects
+        // the retained opened filename used only for later reuse searches.
+        let lookup_path = group.root().join("Material.c4g");
+        let lookup_name = path_wire_bytes(&lookup_path);
+        let opened_name = opened_group_name(material_group.root(), &lookup_name, executable_root);
+        let wire_name = executable_relative_wire_name(lookup_name.clone(), executable_root);
+        let resource = source_from_names(
+            material_path,
+            lookup_name,
+            opened_name,
+            wire_name,
+            &lookup_path,
+        )?;
+        materials.push(validate_open_group_resource_source(
+            HostGameResourceSourceKind::Material,
+            resource,
+            material_group,
+        )?);
     }
     Ok(materials)
+}
+
+/// Validates an initial group source and freezes a standalone packed image
+/// when its stable source path exists only virtually inside a packed parent.
+pub(crate) fn validate_host_group_resource_source(
+    kind: HostGameResourceSourceKind,
+    resource: HostInitialResourceSource,
+) -> Result<HostInitialResourceSource, HostGameResourceSourceError> {
+    let group = match resource.virtual_group_bytes.as_deref() {
+        Some(bytes) => Group::from_memory(resource.path.clone(), bytes.to_vec()),
+        None => open_group_path(&resource.path),
+    }
+    .map_err(|source| group_source_error(kind, resource.path.clone(), source))?;
+    validate_open_group_resource_source(kind, resource, group)
+}
+
+fn validate_open_group_resource_source(
+    kind: HostGameResourceSourceKind,
+    mut resource: HostInitialResourceSource,
+    group: Group,
+) -> Result<HostInitialResourceSource, HostGameResourceSourceError> {
+    resource.path = group.root().to_path_buf();
+    if resource.path.exists() || resource.virtual_group_bytes.is_some() {
+        return Ok(resource);
+    }
+
+    let raw_image = group
+        .raw_image()
+        .map_err(|source| group_source_error(kind, resource.path.clone(), source))?;
+    let packed = compress_c4group_image(&raw_image).map_err(|source| {
+        HostGameResourceSourceError::ResourceGroupSnapshot {
+            kind,
+            path: resource.path.clone(),
+            source,
+        }
+    })?;
+    resource.virtual_group_bytes = Some(packed);
+    Ok(resource)
+}
+
+fn group_source_error(
+    kind: HostGameResourceSourceKind,
+    path: PathBuf,
+    source: GroupError,
+) -> HostGameResourceSourceError {
+    if kind == HostGameResourceSourceKind::Scenario {
+        HostGameResourceSourceError::ScenarioGroup { path, source }
+    } else {
+        HostGameResourceSourceError::ResourceGroup { kind, path, source }
+    }
 }
 
 fn source(
     path: PathBuf,
     wire_path: &Path,
 ) -> Result<HostInitialResourceSource, HostGameResourceSourceError> {
-    let wire_name = wire_path
-        .to_str()
-        .ok_or_else(|| HostGameResourceSourceError::NonUtf8WirePath {
-            path: wire_path.to_path_buf(),
-        })?
-        .replace('\\', "/");
-    let wire_name = LegacyCString::from_bytes(wire_name.into_bytes()).ok_or_else(|| {
-        HostGameResourceSourceError::InvalidWirePath {
-            path: wire_path.to_path_buf(),
-        }
-    })?;
-    Ok(HostInitialResourceSource { path, wire_name })
+    let name = path_wire_bytes(wire_path);
+    source_from_names(path, name.clone(), name.clone(), name, wire_path)
+}
+
+fn source_from_names(
+    path: PathBuf,
+    lookup_name: Vec<u8>,
+    opened_name: Vec<u8>,
+    wire_name: Vec<u8>,
+    wire_path: &Path,
+) -> Result<HostInitialResourceSource, HostGameResourceSourceError> {
+    let lookup_name = legacy_wire_name(lookup_name, wire_path)?;
+    let opened_name = legacy_wire_name(opened_name, wire_path)?;
+    let wire_name = legacy_wire_name(wire_name, wire_path)?;
+    Ok(HostInitialResourceSource {
+        path,
+        lookup_name,
+        opened_name,
+        wire_name,
+        virtual_group_bytes: None,
+    })
+}
+
+fn legacy_wire_name(
+    bytes: Vec<u8>,
+    path: &Path,
+) -> Result<LegacyCString, HostGameResourceSourceError> {
+    LegacyCString::from_bytes(bytes).ok_or_else(|| HostGameResourceSourceError::InvalidWirePath {
+        path: path.to_path_buf(),
+    })
 }
 
 fn has_extension(path: &Path, extension: &str) -> bool {
     path.extension().is_some_and(|value| {
-        value
-            .as_encoded_bytes()
-            .eq_ignore_ascii_case(extension.as_bytes())
-    })
-}
-
-fn matches_definition_entry(path: &Path) -> bool {
-    // C4GroupSet::CheckGroupContents calls FindEntry(C4CFN_DefFiles), where
-    // C4CFN_DefFiles is the case-insensitive direct-entry wildcard `*.c4d`
-    // (src/C4GroupSet.cpp:112-132; src/C4Components.h:125;
-    // src/StdFile.cpp:337-367). Group::entries is direct-only for both packed
-    // and directory groups.
-    path.file_name().is_some_and(|name| {
-        let bytes = name.as_encoded_bytes();
-        bytes.len() >= 4 && bytes[bytes.len() - 4..].eq_ignore_ascii_case(b".c4d")
+        path_wire_bytes(Path::new(value)).eq_ignore_ascii_case(extension.as_bytes())
     })
 }
 
 fn matches_ascii_name(path: &Path, expected: &[u8]) -> bool {
     path.file_name()
-        .is_some_and(|name| name.as_encoded_bytes().eq_ignore_ascii_case(expected))
+        .is_some_and(|name| path_wire_bytes(Path::new(name)).eq_ignore_ascii_case(expected))
 }

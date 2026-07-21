@@ -20,6 +20,31 @@ pub struct LocalResourceMatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalResourceCandidate {
+    path: PathBuf,
+    lookup_name: Vec<u8>,
+}
+
+impl LocalResourceCandidate {
+    pub(crate) fn exact(path: PathBuf) -> Self {
+        let lookup_name = lc_resources::path_to_legacy_bytes(&path);
+        Self { path, lookup_name }
+    }
+
+    pub(crate) fn with_lookup_name(path: PathBuf, lookup_name: Vec<u8>) -> Self {
+        Self { path, lookup_name }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn lookup_name(&self) -> &[u8] {
+        &self.lookup_name
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum LocalResourceStandalone {
     BinaryCompatible {
         path: PathBuf,
@@ -132,11 +157,33 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
+    let candidates = candidates
+        .into_iter()
+        .map(|candidate| LocalResourceCandidate::exact(candidate.as_ref().to_path_buf()))
+        .collect::<Vec<_>>();
+    resolve_local_resource_candidates_with_group_maker(
+        core,
+        &candidates,
+        standalone_directory,
+        group_maker,
+    )
+}
+
+pub(crate) fn resolve_local_resource_candidates_with_group_maker(
+    core: &NetworkResourceCore,
+    candidates: &[LocalResourceCandidate],
+    standalone_directory: impl AsRef<Path>,
+    group_maker: &[u8],
+) -> Result<LocalResourceResolution, LocalResourceResolutionError> {
     let standalone_directory = standalone_directory.as_ref();
     for candidate in candidates {
-        let path = candidate.as_ref();
+        let path = candidate.path.as_path();
         let metadata = fs::metadata(path).ok();
         let opened_group = open_group_candidate(path);
+        let standalone_name = opened_group
+            .as_ref()
+            .map(|group| opened_local_group_name(candidate, group))
+            .unwrap_or_else(|| candidate.lookup_name.clone());
         let contents_crc = if let Some(group) = opened_group.as_ref() {
             group.contents_crc_or_zero()
         } else if metadata.as_ref().is_some_and(fs::Metadata::is_file) {
@@ -155,7 +202,7 @@ where
             crate::host_resource_core::pack_directory_standalone(path, group_maker)
                 .ok()
                 .and_then(|packed| {
-                    write_standalone(standalone_directory, path, &packed)
+                    write_standalone(standalone_directory, &standalone_name, &packed)
                         .map(|path| (path, ResourceFileOwnership::Temporary))
                         .ok()
                 })
@@ -165,17 +212,12 @@ where
             group
                 .raw_image()
                 .map_err(LocalResourceResolutionError::from)
-                .and_then(|image| {
-                    // ExtractEntry wraps child groups in the on-disk gzip
-                    // envelope before OptimizeStandalone opens them.
-                    if core.resource_type == HostResourceType::Player as u8 {
-                        compress_c4group_image(&image).map_err(Into::into)
-                    } else {
-                        Ok(image)
-                    }
-                })
+                // ExtractEntry wraps every child group in the on-disk gzip
+                // envelope. Player resources are optimized afterward, but
+                // the extraction itself is type-independent.
+                .and_then(|image| compress_c4group_image(&image).map_err(Into::into))
                 .and_then(|packed| {
-                    write_standalone(standalone_directory, path, &packed)
+                    write_standalone(standalone_directory, &standalone_name, &packed)
                         .map(|path| (path, ResourceFileOwnership::Temporary))
                 })
                 .ok()
@@ -186,7 +228,7 @@ where
             standalone_result.and_then(|(standalone, ownership)| {
                 optimize_local_player_standalone(
                     standalone_directory,
-                    path,
+                    &standalone_name,
                     standalone,
                     ownership,
                     group_maker,
@@ -227,14 +269,15 @@ where
 
 fn optimize_local_player_standalone(
     standalone_directory: &Path,
-    source_path: &Path,
+    standalone_name: &[u8],
     standalone_path: PathBuf,
     ownership: ResourceFileOwnership,
     group_maker: &[u8],
 ) -> Option<(PathBuf, ResourceFileOwnership)> {
     let (standalone_path, ownership) = if ownership == ResourceFileOwnership::Persistent {
         let source = fs::read(&standalone_path).ok()?;
-        let standalone_path = write_standalone(standalone_directory, source_path, &source).ok()?;
+        let standalone_path =
+            write_standalone(standalone_directory, standalone_name, &source).ok()?;
         (standalone_path, ResourceFileOwnership::Temporary)
     } else {
         (standalone_path, ownership)
@@ -261,28 +304,142 @@ fn open_group_candidate(path: &Path) -> Option<Group> {
     })
 }
 
+fn opened_local_group_name(candidate: &LocalResourceCandidate, group: &Group) -> Vec<u8> {
+    let separator = std::path::MAIN_SEPARATOR as u8;
+    let mut opened_name = candidate
+        .lookup_name
+        .iter()
+        .map(|byte| if *byte == b'\\' { separator } else { *byte })
+        .collect::<Vec<_>>();
+
+    let mut lookup_physical = candidate.path.clone();
+    let mut selected_child_count = 0;
+    while !lookup_physical.exists() {
+        if !lookup_physical.pop() {
+            break;
+        }
+        selected_child_count += 1;
+    }
+    if selected_child_count != 0 {
+        for _ in 0..selected_child_count {
+            truncate_last_legacy_component(&mut opened_name);
+        }
+        let mut selected_components = group
+            .root()
+            .components()
+            .rev()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(name) => {
+                    Some(lc_resources::path_to_legacy_bytes(Path::new(name)))
+                }
+                _ => None,
+            })
+            .take(selected_child_count)
+            .collect::<Vec<_>>();
+        selected_components.reverse();
+        for component in selected_components {
+            if !opened_name.is_empty()
+                && !opened_name
+                    .last()
+                    .is_some_and(|byte| matches!(byte, b'/' | b'\\'))
+            {
+                opened_name.push(separator);
+            }
+            opened_name.extend(component);
+        }
+    }
+
+    #[cfg(windows)]
+    if let Some(actual_basename) = original_local_basename_bytes(group.root()) {
+        let basename_start = opened_name
+            .iter()
+            .rposition(|byte| matches!(byte, b'/' | b'\\'))
+            .map_or(0, |index| index + 1);
+        opened_name.truncate(basename_start);
+        opened_name.extend(actual_basename);
+    }
+
+    opened_name
+}
+
+fn truncate_last_legacy_component(path: &mut Vec<u8>) {
+    while path.last().is_some_and(|byte| matches!(byte, b'/' | b'\\')) && path.len() > 1 {
+        path.pop();
+    }
+    match path.iter().rposition(|byte| matches!(byte, b'/' | b'\\')) {
+        Some(0) => path.truncate(1),
+        Some(separator) => path.truncate(separator),
+        None => path.clear(),
+    }
+}
+
+#[cfg(windows)]
+fn original_local_basename_bytes(path: &Path) -> Option<Vec<u8>> {
+    let requested = lc_resources::path_to_legacy_bytes(Path::new(path.file_name()?));
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::read_dir(parent).ok()?.find_map(|entry| {
+        let entry = entry.ok()?;
+        let name = lc_resources::path_to_legacy_bytes(Path::new(&entry.file_name()));
+        wildcard_match_legacy(&requested, &name).then_some(name)
+    })
+}
+
+#[cfg(windows)]
+fn wildcard_match_legacy(pattern: &[u8], value: &[u8]) -> bool {
+    let (mut pattern_index, mut value_index) = (0usize, 0usize);
+    let (mut backtrack_pattern, mut backtrack_value) = (None, None);
+    while pattern_index < pattern.len() || backtrack_pattern.is_some() {
+        if pattern.get(pattern_index) == Some(&b'*') {
+            pattern_index += 1;
+            backtrack_pattern = Some(pattern_index);
+            backtrack_value = Some(value_index);
+        } else if pattern.get(pattern_index) == Some(&b'?')
+            || pattern
+                .get(pattern_index)
+                .zip(value.get(value_index))
+                .is_some_and(|(left, right)| {
+                    legacy_byte_capital(*left) == legacy_byte_capital(*right)
+                })
+        {
+            pattern_index += 1;
+            value_index += 1;
+        } else if let (Some(saved_pattern), Some(saved_value)) =
+            (backtrack_pattern, backtrack_value)
+        {
+            pattern_index = saved_pattern;
+            value_index = saved_value + 1;
+            backtrack_value = Some(value_index);
+        } else {
+            return false;
+        }
+        if value_index > value.len() {
+            return false;
+        }
+    }
+    pattern_index == pattern.len() && value_index == value.len()
+}
+
+#[cfg(windows)]
+fn legacy_byte_capital(byte: u8) -> u8 {
+    match byte {
+        b'a'..=b'z' => byte - 32,
+        0xe4 => 0xc4,
+        0xf6 => 0xd6,
+        0xfc => 0xdc,
+        _ => byte,
+    }
+}
+
 fn write_standalone(
     directory: &Path,
-    candidate: &Path,
+    candidate_name: &[u8],
     data: &[u8],
 ) -> Result<PathBuf, LocalResourceResolutionError> {
     fs::create_dir_all(directory)?;
-    let filename = candidate
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "Resource".to_owned());
-    let (stem, extension) = filename
-        .rfind('.')
-        .map(|dot| (&filename[..dot], &filename[dot..]))
-        .unwrap_or((&filename, ""));
+    let filename = crate::host_resource_core::network_temp_basename(candidate_name);
     for suffix in 1..=999 {
-        let filename = if suffix == 1 {
-            filename.clone()
-        } else {
-            format!("{stem}_{suffix}{extension}")
-        };
-        let path = directory.join(filename);
+        let filename = crate::host_resource_core::network_temp_candidate(&filename, suffix);
+        let path = directory.join(lc_resources::path_from_legacy_bytes(&filename));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
                 if let Err(error) = file.write_all(data) {

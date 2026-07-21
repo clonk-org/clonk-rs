@@ -5,12 +5,12 @@
 //! admission after control and the initial local player packet are ready
 //! (`src/C4Network2.cpp:222-278`; `src/C4Game.cpp:3847-3876`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::os::raw::c_int;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::{
@@ -29,14 +29,15 @@ use lc_network::{
     compose_initial_network_dynamic, fill_scenario_derived_join_parameters,
     join_team_list_snapshot, publish_host_initial_resources, ClientPlayerInfosSnapshot, HostConfig,
     HostGameReference, HostGameReferenceError, HostGameReferenceMetadata,
-    HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
-    HostInitialResourceSource, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
-    InitialNetworkMetadataError, InitialNetworkScenarioDefaults, JoinClientRegistrySnapshot,
-    JoinDataC4Id, JoinDataIdListEntry, JoinGameParametersEnvelope, JoinTeamListSnapshot,
-    LeagueHttpTransportConfig, LeagueStartResponse, NetworkAddress, NetworkGameReference,
-    NetworkProtocol, NetworkStatus, PlayerInfoListSnapshot, ResourceFileOwnership,
-    CURRENT_GAME_BUILD, CURRENT_GAME_VERSION, NETWORK_STATE_GO, NETWORK_STATE_INIT,
-    NETWORK_STATE_LOBBY, NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
+    HostInitialResourcePublication, HostInitialResourcePublicationError,
+    HostInitialResourcePublicationSpec, HostInitialResourceSource, HostResourceType,
+    InitialNetworkDynamicError, InitialNetworkDynamicSpec, InitialNetworkMetadataError,
+    InitialNetworkScenarioDefaults, JoinClientRegistrySnapshot, JoinDataC4Id, JoinDataIdListEntry,
+    JoinGameParametersEnvelope, JoinTeamListSnapshot, LeagueHttpTransportConfig,
+    LeagueStartResponse, NetworkAddress, NetworkGameReference, NetworkProtocol, NetworkStatus,
+    PlayerInfoListSnapshot, ResourceFileOwnership, CURRENT_GAME_BUILD, CURRENT_GAME_VERSION,
+    NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
+    NETWORK_STATE_PAUSE,
 };
 use lc_resources::{decode_legacy_script_text, localize_script_source_with_components};
 use lc_resources::{Group, GroupError, LanguagePacks};
@@ -44,7 +45,9 @@ use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::host_game_resource_sources::{
-    HostGameResourceSourceError, resolve_host_game_resource_sources,
+    executable_relative_group_name, freeze_host_definition_resource_sources, open_group_path,
+    opened_physical_group_name, resolve_host_game_resource_sources,
+    validate_host_group_resource_source, HostGameResourceSourceError, HostGameResourceSourceKind,
 };
 
 /// Configuration values C++ reads while loading parameters and initializing
@@ -111,6 +114,15 @@ pub struct PreparedHostBootstrapSpec<'a> {
     pub scenario_path: &'a Path,
     /// Ordered assembled install roots. Earlier roots shadow later roots.
     pub install_roots: &'a [PathBuf],
+    /// Exact ordered external and folder-local definition resources already
+    /// resolved by the OpenScenario-equivalent staging pass.
+    pub definition_resources: &'a [HostInitialResourceSource],
+    /// Effective selected module spellings before DefinitionPath expansion
+    /// and folder-local discovery.
+    pub effective_definition_modules: &'a [String],
+    pub initial_definition_modules: &'a [String],
+    pub fixed_definition_modules: Option<&'a [String]>,
+    pub selector_definition_root: Option<&'a Path>,
     /// Native `Config.General.ExePath`, including its trailing separator.
     pub definition_executable_path: &'a str,
     /// Native `Config.General.DefinitionPath` (relative or absolute).
@@ -267,7 +279,22 @@ pub struct PreparedHostBootstrap {
     runtime_team_metadata: InitialNetworkTeamMetadata,
     scenario_wire_name: LegacyCString,
     scenario_origin: String,
+    /// Unsuffixed `WorkPath + "Dyn" + scenario basename` passed to every
+    /// C++ FindTempResFileName call, distinct from the allocated core name.
+    dynamic_filename_seed: String,
     dynamic_wire_name: LegacyCString,
+    /// Exact pre-publication `Game.DefinitionFilenames` vector. Resource-core
+    /// type reuse may change which groups InitDefs opens, but never mutates
+    /// this separately retained save/runtime-join identity.
+    definition_modules: Vec<String>,
+    /// Process-loaded path strings used by C4SDefinitions::SetModules. Keep
+    /// the staged values beside DefinitionFilenames so later runtime dynamics
+    /// cannot observe an unrelated on-disk config rewrite.
+    definition_executable_path: String,
+    definition_path: String,
+    /// Final post-AddByFile NRT_Material rows used by both the host simulation
+    /// and its process-local material renderer.
+    material_resource_groups: Vec<Group>,
     reference_icon: i32,
     reference_comment: LegacyCString,
     netpuncher_address: LegacyCString,
@@ -334,6 +361,18 @@ impl PreparedHostBootstrap {
 
     pub fn scenario_defaults(&self) -> &InitialNetworkScenarioDefaults {
         &self.scenario_defaults
+    }
+
+    pub fn definition_modules(&self) -> &[String] {
+        &self.definition_modules
+    }
+
+    pub fn definition_save_paths(&self) -> (&str, &str) {
+        (&self.definition_executable_path, &self.definition_path)
+    }
+
+    pub fn material_resource_groups(&self) -> &[Group] {
+        &self.material_resource_groups
     }
 
     /// Whether host preparation found a readable, nonempty `Game.txt` in the
@@ -428,9 +467,7 @@ impl PreparedHostBootstrap {
 
     /// Mirrors `C4Network2::DeinitLeague`: clear the synchronized league
     /// identity while retaining Start's seed, capacity and stream address.
-    pub fn clear_live_league_registration(
-        &mut self,
-    ) -> Result<(), PrepareHostBootstrapError> {
+    pub fn clear_live_league_registration(&mut self) -> Result<(), PrepareHostBootstrapError> {
         let parameters = &mut self
             .host_config
             .initial_join_snapshot
@@ -667,6 +704,10 @@ impl PreparedHostBootstrap {
     pub fn dynamic_wire_name(&self) -> &LegacyCString {
         &self.dynamic_wire_name
     }
+
+    pub fn dynamic_filename_seed(&self) -> &str {
+        &self.dynamic_filename_seed
+    }
 }
 
 #[cfg(test)]
@@ -709,7 +750,12 @@ impl PreparedHostBootstrap {
             },
             scenario_wire_name: LegacyCString::default(),
             scenario_origin: String::new(),
+            dynamic_filename_seed: String::new(),
             dynamic_wire_name: LegacyCString::default(),
+            definition_modules: Vec::new(),
+            definition_executable_path: String::new(),
+            definition_path: String::new(),
+            material_resource_groups: Vec::new(),
             reference_icon: 0,
             reference_comment: LegacyCString::default(),
             netpuncher_address: LegacyCString::default(),
@@ -738,6 +784,41 @@ pub enum PrepareHostBootstrapError {
     ReplayUnsupported,
     #[error("a scenario already marked NetworkGame cannot be direct-started as a host")]
     NetworkGameScenarioUnsupported,
+    #[error("old-save Game.txt DefinitionFiles overrides are not yet supported for network hosts")]
+    SavegameDefinitionOverrideUnsupported,
+    #[error(
+        "staged definition resources changed before host preparation: staged {staged:?}, prepared {prepared:?}"
+    )]
+    StagedDefinitionResourcesChanged {
+        staged: Vec<PathBuf>,
+        prepared: Vec<PathBuf>,
+    },
+    #[error(
+        "staged definition selection changed before host preparation: staged {staged:?}, prepared {prepared:?}"
+    )]
+    StagedDefinitionSelectionChanged {
+        staged: Vec<String>,
+        prepared: Vec<String>,
+    },
+    #[error(
+        "staged definition publication names changed before host preparation: staged {staged:?}, prepared {prepared:?}"
+    )]
+    StagedDefinitionPublicationChanged {
+        staged: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+        prepared: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    },
+    #[error("published game resource {resource_id} has no retained local file")]
+    PublishedResourceFileMissing { resource_id: i32 },
+    #[error(
+        "published game resource {resource_id} could not be reopened at {}: {source}",
+        path.display()
+    )]
+    PublishedResourceGroup {
+        resource_id: i32,
+        path: PathBuf,
+        #[source]
+        source: GroupError,
+    },
     #[error("scenario flag `{key}` has unsupported value `{value}`")]
     InvalidScenarioFlag { key: &'static str, value: String },
     #[error("scenario group could not be opened at {}: {source}", path.display())]
@@ -764,8 +845,6 @@ pub enum PrepareHostBootstrapError {
     InvalidScenarioBasename(PathBuf),
     #[error("network work path is not a supported relative legacy path: {0}")]
     InvalidNetworkWorkPath(String),
-    #[error("resolved definition resource {index} has no UTF-8 Scenario.txt spelling")]
-    DefinitionWireNameEncoding { index: usize },
     #[error("{field} is outside the exact ASCII input subset")]
     UnsupportedText { field: &'static str },
     #[error("{field} Unix time {value} does not fit the C++ signed 32-bit field")]
@@ -931,10 +1010,7 @@ fn finalize_initial_host_player_info(
     mut team_metadata: InitialNetworkTeamMetadata,
     team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
     mut check: impl FnMut(&mut ControlPlayerInfoEntry) -> bool,
-) -> Result<
-    (PlayerInfoControlData, InitialNetworkTeamMetadata, i32),
-    PrepareHostBootstrapError,
-> {
+) -> Result<(PlayerInfoControlData, InitialNetworkTeamMetadata, i32), PrepareHostBootstrapError> {
     let mut player_allocator = lc_engine::ControlPlayerInfoRegistry::default();
     player_allocator.replace_snapshot(
         restore_last_player_id,
@@ -1059,7 +1135,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
 ) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
     validate_inputs(&spec)?;
-    let scenario_group = Group::open(spec.scenario_path).map_err(|source| {
+    let scenario_group = open_group_path(spec.scenario_path).map_err(|source| {
         PrepareHostBootstrapError::ScenarioGroup {
             path: spec.scenario_path.to_path_buf(),
             source,
@@ -1078,20 +1154,101 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         LegacyCString::from_bytes(loader_head.scenario_title_bytes().to_vec())
             .expect("a resolved scenario title contains no interior NUL");
     let scenario_title_c4 = lc_script::c4_string_from_bytes(scenario_title_native.as_bytes());
+    if !matches!(
+        loader_head.savegame_definition_override(),
+        lc_engine::scenario::ScenarioSavegameDefinitionOverride::None
+    ) {
+        return Err(PrepareHostBootstrapError::SavegameDefinitionOverrideUnsupported);
+    }
     let original_game_text = validate_scenario_group(&scenario_group)?;
     let has_embedded_parameters = read_direct_entry(&scenario_group, "Parameters.txt")?
         .is_some_and(|source| !source.is_empty());
-    let scenario = Scenario::load_from_group_with_languages(
-        &scenario_group,
-        &InstallRootDefinitionResolver {
-            roots: spec.install_roots,
-            language_packs: spec.language_packs,
-        },
-        spec.languages,
-    )?;
+    let definition_resolver = InstallRootDefinitionResolver::new(
+        spec.install_roots,
+        spec.language_packs,
+        spec.effective_definition_modules,
+        spec.definition_resources,
+        spec.selector_definition_root.is_some(),
+    );
+    let mut scenario =
+        Scenario::load_from_group_with_languages_and_definition_selection_and_prefix(
+            &scenario_group,
+            &definition_resolver,
+            spec.languages,
+            spec.initial_definition_modules,
+            spec.fixed_definition_modules,
+            spec.selector_definition_root,
+        )?;
     let lobby_metadata = scenario
         .lobby_metadata()
         .ok_or(ScenarioError::InitialNetworkScenarioUnsupported)?;
+    let prepared_definition_modules = lobby_metadata
+        .definitions()
+        .effective_modules()
+        .ok_or(PrepareHostBootstrapError::SavegameDefinitionOverrideUnsupported)?;
+    if prepared_definition_modules != spec.effective_definition_modules {
+        return Err(
+            PrepareHostBootstrapError::StagedDefinitionSelectionChanged {
+                staged: spec.effective_definition_modules.to_vec(),
+                prepared: prepared_definition_modules.to_vec(),
+            },
+        );
+    }
+    let effective_definition_resource_paths = lobby_metadata
+        .definitions()
+        .resolved_load_resources()
+        .ok_or(PrepareHostBootstrapError::SavegameDefinitionOverrideUnsupported)?;
+    let staged_definition_resource_paths = spec
+        .definition_resources
+        .iter()
+        .map(|resource| resource.path.clone())
+        .collect::<Vec<_>>();
+    if effective_definition_resource_paths != staged_definition_resource_paths {
+        return Err(
+            PrepareHostBootstrapError::StagedDefinitionResourcesChanged {
+                staged: staged_definition_resource_paths,
+                prepared: effective_definition_resource_paths.to_vec(),
+            },
+        );
+    }
+    let prepared_definition_spellings = lobby_metadata.definitions().requested_module_spellings();
+    let definition_executable_root = path_from_legacy_text(spec.definition_executable_path);
+    let prepared_definition_resources = freeze_host_definition_resource_sources(
+        effective_definition_resource_paths,
+        spec.scenario_path,
+        prepared_definition_spellings,
+        lobby_metadata.definitions().definition_root_applied(),
+        &definition_executable_root,
+        spec.definition_path,
+    )?;
+    let publication_names = |resources: &[HostInitialResourceSource]| {
+        resources
+            .iter()
+            .map(|resource| {
+                (
+                    resource.lookup_name.as_bytes().to_vec(),
+                    resource.opened_name.as_bytes().to_vec(),
+                    resource.wire_name.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let staged_publication_names = publication_names(spec.definition_resources);
+    let prepared_publication_names = publication_names(&prepared_definition_resources);
+    if staged_publication_names != prepared_publication_names {
+        return Err(
+            PrepareHostBootstrapError::StagedDefinitionPublicationChanged {
+                staged: staged_publication_names,
+                prepared: prepared_publication_names,
+            },
+        );
+    }
+    let resource_sources = resolve_host_game_resource_sources(
+        spec.scenario_path,
+        spec.install_roots,
+        spec.definition_resources,
+        &definition_executable_root,
+    )?;
     let embedded_parameters = has_embedded_parameters
         .then(|| lobby_metadata.embedded_game_parameter_values())
         .flatten();
@@ -1109,12 +1266,21 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         .iter()
         .flat_map(|client| client.players.iter().cloned())
         .collect::<Vec<_>>();
-    let (scenario_origin, scenario_wire_name, dynamic_group_filename, dynamic_wire_name) =
-        network_names(
-            spec.scenario_path,
-            spec.install_roots,
-            spec.network_work_path,
-        )?;
+    let (scenario_origin, _, dynamic_group_filename, dynamic_wire_name) = network_names(
+        spec.scenario_path,
+        spec.install_roots,
+        spec.network_work_path,
+    )?;
+    let scenario_wire_name = LegacyCString::from_bytes(executable_relative_group_name(
+        scenario_group.root(),
+        &definition_executable_root,
+    ))
+    .expect("an OS path cannot contain an interior NUL");
+    let scenario_opened_name = LegacyCString::from_bytes(opened_physical_group_name(
+        scenario_group.root(),
+        &definition_executable_root,
+    ))
+    .expect("an OS path cannot contain an interior NUL");
     let scenario_metadata = scenario.initial_network_scenario_metadata()?;
 
     let mut team_metadata = scenario.initial_network_team_metadata()?;
@@ -1124,7 +1290,10 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         .filter_map(|selected| {
             let identity = match selected.identity.as_ref() {
                 Some(identity) => PreparedLocalPlayerIdentity::Configured(identity.clone()),
-                None => match PlayerFile::load_from_path(&selected.resource.path) {
+                None => match open_group_path(&selected.resource.path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|group| PlayerFile::load(&group).map_err(|error| error.to_string()))
+                {
                     Ok(player) => PreparedLocalPlayerIdentity::Generic(player),
                     Err(error) => {
                         // Generic callers have not already loaded a classic
@@ -1140,7 +1309,21 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
                     }
                 },
             };
-            Some((selected.resource.clone(), identity))
+            let source = match validate_host_group_resource_source(
+                HostGameResourceSourceKind::Player,
+                selected.resource.clone(),
+            ) {
+                Ok(source) => source,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %selected.resource.path.display(),
+                        %error,
+                        "skipping unpublishable initial host player"
+                    );
+                    return None;
+                }
+            };
+            Some((source, identity))
         })
         .map(|(source, identity)| {
             match &identity {
@@ -1156,24 +1339,14 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             Ok::<_, PrepareHostBootstrapError>((source, identity))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let resource_sources = resolve_host_game_resource_sources(
-        spec.scenario_path,
-        spec.install_roots,
-        &scenario_metadata,
-    )?;
     // SaveCore writes Game.DefinitionFilenames, not the unmodified scenario
     // module list. OpenScenario appends every folder-local definitions group
     // before this save (src/C4Game.cpp:179-213; C4GameSave.cpp:89-92).
     let definition_modules = resource_sources
         .definitions
         .iter()
-        .enumerate()
-        .map(|(index, source)| {
-            std::str::from_utf8(source.wire_name.as_bytes())
-                .map(str::to_owned)
-                .map_err(|_| PrepareHostBootstrapError::DefinitionWireNameEncoding { index })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|source| lc_script::c4_string_from_bytes(source.lookup_name.as_bytes()))
+        .collect::<Vec<_>>();
     let group_maker = legacy_string(spec.group_maker);
     let host_name = legacy_string(spec.host_name);
     let host_nick = legacy_string(spec.host_nick);
@@ -1294,14 +1467,21 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     let max_players = usize::try_from(parameters.max_players)
         .map_err(|_| PrepareHostBootstrapError::MaxPlayersOutOfRange(parameters.max_players))?;
 
+    let scenario_resource = validate_host_group_resource_source(
+        HostGameResourceSourceKind::Scenario,
+        HostInitialResourceSource {
+            path: spec.scenario_path.to_path_buf(),
+            lookup_name: scenario_opened_name.clone(),
+            opened_name: scenario_opened_name,
+            wire_name: scenario_wire_name.clone(),
+            virtual_group_bytes: None,
+        },
+    )?;
     let mut publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
         network_directory: spec.network_directory.to_path_buf(),
         group_maker: group_maker.clone(),
         max_load_file_size: spec.config.max_load_file_size,
-        scenario: HostInitialResourceSource {
-            path: spec.scenario_path.to_path_buf(),
-            wire_name: scenario_wire_name.clone(),
-        },
+        scenario: scenario_resource,
         definitions: resource_sources.definitions,
         system: resource_sources.system,
         materials: resource_sources.materials,
@@ -1314,6 +1494,8 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         parameters,
         dynamic_tick,
     })?;
+    // Publication has transferred ownership of generated standalones. Arm
+    // their cleanup before any post-publication reopen/reload can fail.
     let temporary_files = publication
         .resource_files
         .iter()
@@ -1321,13 +1503,35 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         .map(|resource| resource.path.clone())
         .collect();
     let temporary_files = PreparedTemporaryFiles::new(temporary_files);
+    // C++'s pre-publication OpenScenario only establishes metadata and probes
+    // the definition groups. InitDefs/InitMaterialTexture run after every
+    // AddByFile/SetNetRes row is final and after Parameters.RandomSeed is
+    // frozen. Rebuild unconditionally from those exact rows, even when no
+    // cross-type reuse occurred, so the host and clients consume identical
+    // bytes and random landscape seed.
+    let definition_groups =
+        published_game_resource_groups(&publication, HostResourceType::Definitions)?;
+    let material_resource_groups =
+        published_game_resource_groups(&publication, HostResourceType::Material)?;
+    let graphics_groups = definition_resolver
+        .resolve_graphics_groups_with_definition_roots(&scenario_group, &definition_groups)?;
+    let random_seed = u64::from(publication.join_snapshot.parameters.random_seed as u32);
+    scenario = Scenario::load_network_from_group_with_languages_and_seed_and_packs(
+        &scenario_group,
+        &definition_groups,
+        &material_resource_groups,
+        &graphics_groups,
+        spec.languages,
+        random_seed,
+        spec.language_packs,
+    )?;
     let mut published_index = 0;
     let published_local_players = local_players
         .iter()
         .filter_map(|(source, player)| {
             let (published_path, core) =
                 publication.player_resource_sources.get(published_index)?;
-            if published_path != &source.path || core.filename != source.wire_name {
+            if published_path != &source.path {
                 return None;
             }
             published_index += 1;
@@ -1337,11 +1541,11 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     debug_assert_eq!(published_index, publication.player_resource_sources.len());
     let initial_players = published_local_players
         .iter()
-        .map(|(source, identity, core)| {
+        .map(|(_, identity, core)| {
             let color = identity.network_color();
             ControlPlayerInfoEntry {
                 name: identity.player_name(),
-                filename: source.wire_name.clone(),
+                filename: core.filename.clone(),
                 flags: PLAYER_INFO_FLAG_HAS_RESOURCE,
                 color,
                 original_color: color,
@@ -1414,7 +1618,19 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         join_team_list_snapshot(runtime_team_metadata.clone());
     let local_player_resources = published_local_players
         .iter()
-        .map(|(source, _, core)| ((**core).clone(), source.path.clone()))
+        .map(|(source, _, core)| {
+            let path = if source.path.exists() {
+                source.path.clone()
+            } else {
+                publication
+                    .resource_files
+                    .iter()
+                    .find(|resource| resource.core.id == core.id)
+                    .map(|resource| resource.path.clone())
+                    .unwrap_or_else(|| source.path.clone())
+            };
+            ((**core).clone(), path)
+        })
         .collect();
     let resolved_dynamic_wire_name = publication.join_snapshot.dynamic.filename.clone();
     let mut host_config = HostConfig {
@@ -1454,7 +1670,12 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         runtime_team_metadata,
         scenario_wire_name,
         scenario_origin,
+        dynamic_filename_seed: dynamic_group_filename,
         dynamic_wire_name: resolved_dynamic_wire_name,
+        definition_modules,
+        definition_executable_path: spec.definition_executable_path.to_owned(),
+        definition_path: spec.definition_path.to_owned(),
+        material_resource_groups,
         reference_icon: scenario_metadata.icon,
         reference_comment: legacy_string(spec.network_comment),
         netpuncher_address: legacy_string(spec.netpuncher_address),
@@ -1472,9 +1693,77 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     })
 }
 
+fn path_from_legacy_text(value: &str) -> PathBuf {
+    lc_resources::path_from_legacy_bytes(&lc_script::c4_string_bytes(value))
+}
+
+fn published_game_resource_groups(
+    publication: &HostInitialResourcePublication,
+    resource_type: HostResourceType,
+) -> Result<Vec<Group>, PrepareHostBootstrapError> {
+    publication
+        .join_snapshot
+        .parameters
+        .game_resources
+        .iter()
+        .filter(|core| core.resource_type == resource_type as u8)
+        .map(|core| {
+            let resource = publication
+                .resource_files
+                .iter()
+                .find(|resource| resource.core.id == core.id)
+                .ok_or(PrepareHostBootstrapError::PublishedResourceFileMissing {
+                    resource_id: core.id,
+                })?;
+            open_group_path(&resource.path).map_err(|source| {
+                PrepareHostBootstrapError::PublishedResourceGroup {
+                    resource_id: core.id,
+                    path: resource.path.clone(),
+                    source,
+                }
+            })
+        })
+        .collect()
+}
+
 struct InstallRootDefinitionResolver<'a> {
     roots: &'a [PathBuf],
     language_packs: &'a LanguagePacks,
+    staged_definitions: Mutex<HashMap<String, VecDeque<PathBuf>>>,
+}
+
+impl<'a> InstallRootDefinitionResolver<'a> {
+    fn new(
+        roots: &'a [PathBuf],
+        language_packs: &'a LanguagePacks,
+        effective_modules: &[String],
+        definition_resources: &[HostInitialResourceSource],
+        definition_root_applied: bool,
+    ) -> Self {
+        let original_start =
+            usize::from(definition_root_applied).saturating_mul(effective_modules.len());
+        let mut staged_definitions: HashMap<String, VecDeque<PathBuf>> = HashMap::new();
+        for (module, resource) in effective_modules.iter().zip(
+            definition_resources
+                .iter()
+                .skip(original_start)
+                .take(effective_modules.len()),
+        ) {
+            let normalized = module.replace('\\', "/");
+            if Path::new(&normalized).is_absolute() {
+                continue;
+            }
+            staged_definitions
+                .entry(normalized.to_ascii_lowercase())
+                .or_default()
+                .push_back(resource.path.clone());
+        }
+        Self {
+            roots,
+            language_packs,
+            staged_definitions: Mutex::new(staged_definitions),
+        }
+    }
 }
 
 impl LegacyDefinitionResolver for InstallRootDefinitionResolver<'_> {
@@ -1484,12 +1773,27 @@ impl LegacyDefinitionResolver for InstallRootDefinitionResolver<'_> {
         identifier: &str,
     ) -> Result<Vec<Group>, ScenarioError> {
         let normalized = identifier.replace('\\', "/");
+        let staged_path = self
+            .staged_definitions
+            .lock()
+            .get_mut(&normalized.to_ascii_lowercase())
+            .and_then(VecDeque::pop_front);
+        if let Some(path) = staged_path {
+            return open_group_path(&path)
+                .map(|group| vec![group])
+                .map_err(ScenarioError::Resources);
+        }
         let relative = Path::new(&normalized);
         for root in self.roots {
             let candidate = root.join(relative);
-            match Group::open(&candidate) {
+            match open_group_path(&candidate) {
                 Ok(group) => return Ok(vec![group]),
-                Err(GroupError::Missing(_)) => {}
+                Err(
+                    GroupError::Missing(_)
+                    | GroupError::NotDirectory(_)
+                    | GroupError::EntryNotFound(_),
+                ) => {}
+                Err(GroupError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(source) => return Err(ScenarioError::Resources(source)),
             }
         }
@@ -1563,7 +1867,12 @@ mod definition_root_graphics_tests {
             },
             scenario_wire_name: LegacyCString::default(),
             scenario_origin: String::new(),
+            dynamic_filename_seed: String::new(),
             dynamic_wire_name: LegacyCString::default(),
+            definition_modules: Vec::new(),
+            definition_executable_path: String::new(),
+            definition_path: String::new(),
+            material_resource_groups: Vec::new(),
             reference_icon: 0,
             reference_comment: LegacyCString::default(),
             netpuncher_address: LegacyCString::default(),
@@ -1618,7 +1927,10 @@ mod definition_root_graphics_tests {
             .expect("prepared JoinData")
             .parameters;
         assert_eq!(parameters.league.as_bytes(), b"Gold League");
-        assert_eq!(parameters.random_seed, 77, "absent Seed retains the old value");
+        assert_eq!(
+            parameters.random_seed, 77,
+            "absent Seed retains the old value"
+        );
         assert_eq!(parameters.max_players, 8, "zero MaxPlayers is no override");
         assert_eq!(prepared.admission().max_players(), 8);
         assert_eq!(prepared.host_config().initial_status.control_mode, 1);
@@ -1690,14 +2002,12 @@ mod definition_root_graphics_tests {
         let mut checked = Vec::new();
         let mut oracle = ProcessInitialHostTeamAssignmentOracle::with_shipped_team_name();
 
-        assert!(
-            prepared
-                .finalize_initial_league_players(vec![c, b], &mut oracle, |player| {
-                    checked.push((player.name.clone(), player.id));
-                    true
-                })
-                .expect("finalize authenticated initial players")
-        );
+        assert!(prepared
+            .finalize_initial_league_players(vec![c, b], &mut oracle, |player| {
+                checked.push((player.name.clone(), player.id));
+                true
+            })
+            .expect("finalize authenticated initial players"));
 
         assert_eq!(
             prepared
@@ -1859,10 +2169,8 @@ mod definition_root_graphics_tests {
 
     #[test]
     fn generated_team_name_formats_resource_percent_and_c4_name_limit() {
-        let template = LegacyCString::from_bytes(
-            b"Very long %% localized team %d suffix".to_vec(),
-        )
-        .unwrap();
+        let template =
+            LegacyCString::from_bytes(b"Very long %% localized team %d suffix".to_vec()).unwrap();
         let formatted = format_generated_team_name(&template, 12);
         assert_eq!(formatted.as_bytes().len(), 30);
         assert_eq!(formatted.as_bytes(), b"Very long % localized team 12 ");
@@ -1881,10 +2189,7 @@ mod definition_root_graphics_tests {
 
         let roots = [dir.path().to_path_buf()];
         let language_packs = LanguagePacks::default();
-        let resolver = InstallRootDefinitionResolver {
-            roots: &roots,
-            language_packs: &language_packs,
-        };
+        let resolver = InstallRootDefinitionResolver::new(&roots, &language_packs, &[], &[], false);
         let graphics = resolver
             .resolve_graphics_groups_with_definition_roots(
                 &Group::open(&scenario).expect("scenario root"),
@@ -1944,9 +2249,7 @@ fn load_restore_player_infos(
     }
 
     Ok(old_style_game_text
-        .map(|source| {
-            load_old_style_restore_player_infos(group, spec.scenario_path, source)
-        })
+        .map(|source| load_old_style_restore_player_infos(group, spec.scenario_path, source))
         .unwrap_or_else(empty_player_info_list))
 }
 
@@ -1966,9 +2269,7 @@ pub(crate) fn load_offline_savegame_restore_player_infos(
     match load_save_player_infos_entry(group, languages, language_packs) {
         Ok(Some(restore_infos)) => restore_infos,
         Ok(None) => old_style_game_text
-            .map(|source| {
-                load_old_style_restore_player_infos(group, scenario_path, source)
-            })
+            .map(|source| load_old_style_restore_player_infos(group, scenario_path, source))
             .unwrap_or_else(empty_player_info_list),
         Err(error) => {
             tracing::warn!(%error, "ignoring unreadable SavePlayerInfos.txt");
@@ -2132,7 +2433,7 @@ fn load_old_style_restore_player_infos(
             .saturating_add(1);
         players.push(ControlPlayerInfoEntry {
             name: legacy_c4_string(&player.name),
-            filename: LegacyCString::from_bytes(full_path.as_os_str().as_encoded_bytes().to_vec())
+            filename: LegacyCString::from_bytes(lc_resources::path_to_legacy_bytes(&full_path))
                 .unwrap_or_default(),
             flags: PLAYER_INFO_FLAG_JOINED,
             id,
@@ -2318,7 +2619,7 @@ fn direct_entry_path(
                     !entry.is_directory
                         && entry.relative_path.components().count() == 1
                         && entry.relative_path.file_name().is_some_and(|name| {
-                            name.as_encoded_bytes()
+                            lc_resources::path_to_legacy_bytes(Path::new(name))
                                 .eq_ignore_ascii_case(expected.as_bytes())
                         })
                 })
@@ -2407,7 +2708,7 @@ fn network_names(
         })?;
     let dynamic_group_filename = format!("Dyn{basename}");
     let network_work_path = normalize_network_work_path(network_work_path)?;
-    let dynamic_group_filename = format!("{network_work_path}/{dynamic_group_filename}");
+    let dynamic_group_filename = format!("{network_work_path}{dynamic_group_filename}");
     let dynamic_wire_name = LegacyCString::from_bytes(dynamic_group_filename.as_bytes().to_vec())
         .expect("validated ASCII legacy paths are NUL-free");
     Ok((
@@ -2419,21 +2720,16 @@ fn network_names(
 }
 
 fn normalize_network_work_path(value: &str) -> Result<String, PrepareHostBootstrapError> {
-    let normalized = value.trim_end_matches(['/', '\\']).replace('\\', "/");
-    let path = Path::new(&normalized);
-    if normalized.is_empty()
-        || !normalized.is_ascii()
-        || normalized.as_bytes().contains(&0)
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
+    if value.is_empty() || !value.is_ascii() || value.as_bytes().contains(&0) {
         return Err(PrepareHostBootstrapError::InvalidNetworkWorkPath(
             value.to_owned(),
         ));
     }
-    Ok(normalized)
+    let mut work_path = value.to_owned();
+    if !work_path.ends_with(std::path::MAIN_SEPARATOR) {
+        work_path.push(std::path::MAIN_SEPARATOR);
+    }
+    Ok(work_path)
 }
 
 fn legacy_string(value: &str) -> LegacyCString {

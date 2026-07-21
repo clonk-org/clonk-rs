@@ -591,6 +591,7 @@ fn cpp_set_by_core_extracts_a_loadable_nested_child_to_a_real_standalone() {
         .unwrap();
     let child_contents_crc = child.contents_crc();
     let child_raw = child.pack_raw().unwrap();
+    let child_standalone = compress_c4group_image(&child_raw).unwrap();
     let mut mother = MutableGroup::new("Easy.c4f");
     mother
         .add_child_with_metadata("Castle.c4s", child, 1, false)
@@ -599,8 +600,8 @@ fn cpp_set_by_core_extracts_a_loadable_nested_child_to_a_real_standalone() {
     let candidate = mother_path.join("Castle.c4s");
     let core = core(
         b"Easy.c4f/Castle.c4s",
-        child_raw.len() as u32,
-        c4group_file_crc(&child_raw),
+        child_standalone.len() as u32,
+        c4group_file_crc(&child_standalone),
         child_contents_crc,
         true,
     );
@@ -615,7 +616,7 @@ fn cpp_set_by_core_extracts_a_loadable_nested_child_to_a_real_standalone() {
         .standalone_path()
         .expect("loadable packed child must have a physical standalone");
     assert!(standalone.is_file());
-    assert_eq!(fs::read(standalone).unwrap(), child_raw);
+    assert_eq!(fs::read(standalone).unwrap(), child_standalone);
 }
 
 #[test]

@@ -193,6 +193,48 @@ fn cpp_keeps_an_oversize_definition_logical_but_unloadable() {
 }
 
 #[test]
+fn cpp_keeps_a_definition_when_standalone_packing_fails() {
+    // AddByFile retains NRT_Definitions when any GetStandalone step fails and
+    // fAllowUnloadable is set. Occupy every FindTempResFileName candidate so
+    // temporary standalone creation fails deterministically on every platform
+    // (src/C4Network2Res.cpp:610-616,1457-1467,1741-1793).
+    let directory = TestDirectory::new();
+    let definitions = directory.path().join("Objects.c4d");
+    fs::create_dir(&definitions).unwrap();
+    fs::write(definitions.join("DefCore.txt"), b"[DefCore]\n").unwrap();
+    let network = directory.path().join("Network");
+    fs::create_dir(&network).unwrap();
+    for suffix in 1..=999 {
+        let filename = if suffix == 1 {
+            "Objects.c4d".to_owned()
+        } else {
+            format!("Objects_{suffix}.c4d")
+        };
+        fs::write(network.join(filename), b"occupied").unwrap();
+    }
+
+    let publication = build_host_resource_core(
+        &definitions,
+        &network,
+        HostResourceCoreSpec::new(
+            HostResourceType::Definitions,
+            10,
+            LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap(),
+            "Host Player",
+        )
+        .with_standalone_name(
+            LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap(),
+        ),
+    )
+    .expect("fAllowUnloadable retains definitions after GetStandalone failure");
+
+    assert!(!publication.core.loadable);
+    assert_eq!(publication.core.file_size, u32::MAX);
+    assert_eq!(publication.standalone_path, None);
+    assert_eq!(publication.source_path, definitions);
+}
+
+#[test]
 fn cpp_definition_directory_size_limit_counts_files_group_packing_would_ignore() {
     // DirSizeHelper runs before C4Group_PackDirectoryTo and walks physical
     // files directly, so even a dotfile later excluded by C4Group_TestIgnore

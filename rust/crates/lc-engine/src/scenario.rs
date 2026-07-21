@@ -824,6 +824,7 @@ pub struct ScenarioLoaderHead {
     mission_access: String,
     origin: Option<String>,
     definition_modules: Vec<String>,
+    definition_module_spellings: Vec<String>,
     local_only: bool,
     effective_min_players: i32,
     max_players: i32,
@@ -909,6 +910,13 @@ impl ScenarioLoaderHead {
         scenario_title: String,
         scenario_title_native: LegacyCString,
     ) -> Self {
+        let definition_module_spellings = manifest
+            .core
+            .definitions
+            .reflected_definitions
+            .clone()
+            .filter(|spellings| spellings.len() == manifest.definition_specs.len())
+            .unwrap_or_else(|| manifest.definition_specs.clone());
         Self {
             loader: ScenarioLoaderMetadata {
                 configured_specification: manifest.core.head.loader.clone(),
@@ -917,6 +925,7 @@ impl ScenarioLoaderHead {
             mission_access: manifest.core.head.mission_access.clone(),
             origin: manifest.core.head.origin.clone(),
             definition_modules: manifest.definition_specs,
+            definition_module_spellings,
             local_only: manifest.core.definitions.local_only,
             effective_min_players: legacy_effective_min_players(&manifest.core),
             max_players: manifest.core.head.max_player,
@@ -950,6 +959,10 @@ impl ScenarioLoaderHead {
 
     pub fn configured_definition_modules(&self) -> &[String] {
         &self.definition_modules
+    }
+
+    pub fn configured_definition_module_spellings(&self) -> &[String] {
+        &self.definition_module_spellings
     }
 
     pub fn local_only(&self) -> bool {
@@ -1075,13 +1088,21 @@ pub enum ScenarioDefinitionSelectionSource {
     FixedCallerSelection,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum DefinitionPathExpansion<'a> {
+    DirectoryRoot(&'a Path),
+    LiteralPrefix(&'a Path),
+}
+
 /// Scenario definition settings and the immutable effective selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScenarioLobbyDefinitions {
     local_only: bool,
     allow_user_change: bool,
     configured_modules: Vec<String>,
+    configured_module_spellings: Vec<String>,
     requested_modules: Vec<String>,
+    requested_module_spellings: Vec<String>,
     selection_source: ScenarioDefinitionSelectionSource,
     definition_root_applied: bool,
     resolved_load_resources: Vec<PathBuf>,
@@ -1102,10 +1123,22 @@ impl ScenarioLobbyDefinitions {
         &self.configured_modules
     }
 
+    /// Exact native strings compiled from `[Definitions]`, before the Rust
+    /// resolver normalizes separators or redundant relative components.
+    pub fn configured_module_spellings(&self) -> &[String] {
+        &self.configured_module_spellings
+    }
+
     /// Ordered external modules selected from Scenario.txt/caller state,
     /// before DefinitionPath expansion or an old-save Game.txt override.
     pub fn requested_modules(&self) -> &[String] {
         &self.requested_modules
+    }
+
+    /// Exact native strings selected for this round before `DefinitionPath`
+    /// is concatenated. C++ retains redundant relative components here.
+    pub fn requested_module_spellings(&self) -> &[String] {
+        &self.requested_module_spellings
     }
 
     pub fn selection_source(&self) -> ScenarioDefinitionSelectionSource {
@@ -2148,6 +2181,33 @@ impl Scenario {
         S: AsRef<str>,
     {
         let group = Group::open(path)?;
+        Self::load_network_from_group_with_languages_and_seed_and_packs(
+            &group,
+            definition_groups,
+            material_groups,
+            graphics_groups,
+            languages,
+            random_seed,
+            language_packs,
+        )
+    }
+
+    /// Group-backed counterpart used when the synchronized scenario is a
+    /// logical child of a packed parent, or when a host must re-apply the
+    /// post-publication `C4GameRes` types before `InitDefs`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_network_from_group_with_languages_and_seed_and_packs<S>(
+        group: &Group,
+        definition_groups: &[Group],
+        material_groups: &[Group],
+        graphics_groups: &[Group],
+        languages: &[S],
+        random_seed: u64,
+        language_packs: &LanguagePacks,
+    ) -> Result<Self, ScenarioError>
+    where
+        S: AsRef<str>,
+    {
         let languages = languages.iter().map(AsRef::as_ref).collect::<Vec<_>>();
         let definition_modules = (0..definition_groups.len())
             .map(|index| format!("__NetworkDefinition{index}.c4d"))
@@ -2161,7 +2221,7 @@ impl Scenario {
         };
         let mut ignore_progress = |_: i32, _: &'static str| {};
         Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
-            &group,
+            group,
             &resolver,
             &languages,
             random_seed,
@@ -2275,6 +2335,34 @@ impl Scenario {
         )
     }
 
+    /// C++ `DefinitionPath` is a literal filename prefix, not a directory.
+    /// This variant preserves exact caller spellings while prepending that
+    /// prefix to the selected vector.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_from_group_with_languages_and_definition_selection_and_prefix<R, S, M>(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        initial_modules: &[M],
+        fixed_modules: Option<&[M]>,
+        definition_prefix: Option<&Path>,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+    {
+        Self::load_from_group_with_languages_and_definition_selection_and_prefix_and_progress(
+            group,
+            resolver,
+            languages,
+            initial_modules,
+            fixed_modules,
+            definition_prefix,
+            |_, _| {},
+        )
+    }
+
     /// Loads an already-opened scenario group and reports coarse legacy-load
     /// milestones. JSON fixtures do not have C4Game loading milestones and
     /// therefore do not invoke the callback.
@@ -2302,6 +2390,40 @@ impl Scenario {
             initial_modules,
             fixed_modules,
             definition_root,
+            legacy_startup_player_count(),
+            report_progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_from_group_with_languages_and_definition_selection_and_prefix_and_progress<
+        R,
+        S,
+        M,
+        F,
+    >(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        initial_modules: &[M],
+        fixed_modules: Option<&[M]>,
+        definition_prefix: Option<&Path>,
+        report_progress: F,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+        F: FnMut(i32, &'static str),
+    {
+        Self::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_prefix_and_progress(
+            group,
+            resolver,
+            languages,
+            0,
+            initial_modules,
+            fixed_modules,
+            definition_prefix,
             legacy_startup_player_count(),
             report_progress,
         )
@@ -2370,25 +2492,98 @@ impl Scenario {
         M: AsRef<str>,
         F: FnMut(i32, &'static str),
     {
+        let initial_spellings = initial_modules
+            .iter()
+            .map(|module| module.as_ref().to_owned())
+            .collect::<Vec<_>>();
         let initial_modules = initial_modules
             .iter()
             .map(|module| normalize_definition_path(module.as_ref()))
             .collect::<Vec<_>>();
+        let fixed_spellings = fixed_modules.map(|modules| {
+            modules
+                .iter()
+                .map(|module| module.as_ref().to_owned())
+                .collect::<Vec<_>>()
+        });
         let fixed_modules = fixed_modules.map(|modules| {
             modules
                 .iter()
                 .map(|module| normalize_definition_path(module.as_ref()))
                 .collect::<Vec<_>>()
         });
-        Self::load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count_and_progress(
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_inner_with_expansion(
             group,
             resolver,
-            languages,
+            &languages.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
             random_seed,
             &initial_modules,
+            Some(&initial_spellings),
             fixed_modules.as_deref(),
-            definition_root,
+            fixed_spellings.as_deref(),
+            definition_root.map(DefinitionPathExpansion::DirectoryRoot),
             startup_player_count,
+            true,
+            &mut report_progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_prefix_and_progress<
+        R,
+        S,
+        M,
+        F,
+    >(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        initial_modules: &[M],
+        fixed_modules: Option<&[M]>,
+        definition_prefix: Option<&Path>,
+        startup_player_count: i32,
+        mut report_progress: F,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+        F: FnMut(i32, &'static str),
+    {
+        let initial_spellings = initial_modules
+            .iter()
+            .map(|module| module.as_ref().to_owned())
+            .collect::<Vec<_>>();
+        let initial_modules = initial_spellings
+            .iter()
+            .map(|module| normalize_definition_path(module))
+            .collect::<Vec<_>>();
+        let fixed_spellings = fixed_modules.map(|modules| {
+            modules
+                .iter()
+                .map(|module| module.as_ref().to_owned())
+                .collect::<Vec<_>>()
+        });
+        let fixed_modules = fixed_spellings.as_ref().map(|modules| {
+            modules
+                .iter()
+                .map(|module| normalize_definition_path(module))
+                .collect::<Vec<_>>()
+        });
+        let languages = languages.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_inner_with_expansion(
+            group,
+            resolver,
+            &languages,
+            random_seed,
+            &initial_modules,
+            Some(&initial_spellings),
+            fixed_modules.as_deref(),
+            fixed_spellings.as_deref(),
+            definition_prefix.map(DefinitionPathExpansion::LiteralPrefix),
+            startup_player_count,
+            true,
             &mut report_progress,
         )
     }
@@ -2470,14 +2665,16 @@ impl Scenario {
         S: AsRef<str>,
     {
         let languages = languages.iter().map(AsRef::as_ref).collect::<Vec<_>>();
-        Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_inner_with_expansion(
             group,
             resolver,
             &languages,
             random_seed,
             initial_definition_modules,
+            None,
             definition_modules,
-            selector_definition_root,
+            None,
+            selector_definition_root.map(DefinitionPathExpansion::DirectoryRoot),
             startup_player_count,
             true,
             report_progress,
@@ -2499,6 +2696,37 @@ impl Scenario {
         discover_folder_definitions: bool,
         report_progress: &mut dyn FnMut(i32, &'static str),
     ) -> Result<Self, ScenarioError> {
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_inner_with_expansion(
+            group,
+            resolver,
+            languages,
+            random_seed,
+            initial_definition_modules,
+            None,
+            definition_modules,
+            None,
+            selector_definition_root.map(DefinitionPathExpansion::DirectoryRoot),
+            startup_player_count,
+            discover_folder_definitions,
+            report_progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_from_group_with_languages_and_seed_and_definition_modules_inner_with_expansion(
+        group: &Group,
+        resolver: &dyn LegacyDefinitionResolver,
+        languages: &[&str],
+        random_seed: u64,
+        initial_definition_modules: &[String],
+        initial_definition_spellings: Option<&[String]>,
+        definition_modules: Option<&[String]>,
+        definition_spellings: Option<&[String]>,
+        definition_path_expansion: Option<DefinitionPathExpansion<'_>>,
+        startup_player_count: i32,
+        discover_folder_definitions: bool,
+        report_progress: &mut dyn FnMut(i32, &'static str),
+    ) -> Result<Self, ScenarioError> {
         match Self::load_from_group(group) {
             Ok(scenario) => Ok(scenario),
             Err(ScenarioError::ManifestMissing) => Self::load_legacy_from_group(
@@ -2507,8 +2735,10 @@ impl Scenario {
                 languages,
                 random_seed,
                 initial_definition_modules,
+                initial_definition_spellings,
                 definition_modules,
-                selector_definition_root,
+                definition_spellings,
+                definition_path_expansion,
                 startup_player_count,
                 discover_folder_definitions,
                 report_progress,
@@ -2661,8 +2891,10 @@ impl Scenario {
         languages: &[&str],
         random_seed: u64,
         initial_definition_modules: &[String],
+        initial_definition_spellings: Option<&[String]>,
         definition_modules: Option<&[String]>,
-        selector_definition_root: Option<&Path>,
+        definition_spellings: Option<&[String]>,
+        definition_path_expansion: Option<DefinitionPathExpansion<'_>>,
         startup_player_count: i32,
         discover_folder_definitions: bool,
         report_progress: &mut dyn FnMut(i32, &'static str),
@@ -2701,9 +2933,20 @@ impl Scenario {
         // C4Game::InitDefs loads explicit definition resources first, then
         // folder-local resources from outermost to innermost, and finally the
         // scenario group itself (C4Game.cpp:81-103, 210-213, 3961-3994).
-        let (definition_specs, definition_selection_source) = match definition_modules {
+        let configured_definition_spellings = manifest
+            .core
+            .definitions
+            .reflected_definitions
+            .clone()
+            .filter(|spellings| spellings.len() == manifest.definition_specs.len())
+            .unwrap_or_else(|| manifest.definition_specs.clone());
+        let (definition_specs, selected_definition_spellings, definition_selection_source) =
+            match definition_modules {
             Some(modules) => (
                 modules,
+                definition_spellings
+                    .filter(|spellings| spellings.len() == modules.len())
+                    .unwrap_or(modules),
                 ScenarioDefinitionSelectionSource::FixedCallerSelection,
             ),
             None if !manifest.core.definitions.local_only
@@ -2711,28 +2954,48 @@ impl Scenario {
             {
                 (
                     manifest.definition_specs.as_slice(),
+                    configured_definition_spellings.as_slice(),
                     ScenarioDefinitionSelectionSource::ScenarioPreset,
                 )
             }
             None => (
                 initial_definition_modules,
+                initial_definition_spellings
+                    .filter(|spellings| spellings.len() == initial_definition_modules.len())
+                    .unwrap_or(initial_definition_modules),
                 ScenarioDefinitionSelectionSource::CallerDefaults,
             ),
         };
         let requested_definition_modules = definition_specs.to_vec();
+        let requested_definition_spellings = selected_definition_spellings.to_vec();
         report_progress(8, "Definition selection resolved");
         let definition_specs_to_resolve = if has_unresolved_savegame_definitions {
             &[][..]
         } else {
             definition_specs
         };
-        if let Some(definition_root) = selector_definition_root {
-            // C4Game::OpenScenario inserts a rooted copy of every selected
+        let definition_spellings_to_resolve = if has_unresolved_savegame_definitions {
+            &[][..]
+        } else {
+            selected_definition_spellings
+        };
+        if let Some(expansion) = definition_path_expansion {
+            // C4Game::OpenScenario inserts an expanded copy of every selected
             // module at the vector's beginning, preserving the original
             // vector afterward. Resolve the two blocks independently so a
-            // missing rooted copy can never be hidden by a search-root match.
-            for spec in definition_specs_to_resolve {
-                let definition_group = resolve_rooted_definition_group(definition_root, spec)?;
+            // missing expanded copy can never be hidden by a search-root match.
+            for (spec, spelling) in definition_specs_to_resolve
+                .iter()
+                .zip(definition_spellings_to_resolve)
+            {
+                let definition_group = match expansion {
+                    DefinitionPathExpansion::DirectoryRoot(root) => {
+                        resolve_rooted_definition_group(root, spec)?
+                    }
+                    DefinitionPathExpansion::LiteralPrefix(prefix) => {
+                        resolve_prefixed_definition_group(prefix, spelling)?
+                    }
+                };
                 definition_resource_paths.push(definition_group.root().to_path_buf());
                 definition_root_groups.push(definition_group.clone());
                 collect_definitions_from_group(
@@ -3006,9 +3269,11 @@ impl Scenario {
                 local_only: manifest.core.definitions.local_only,
                 allow_user_change: manifest.core.definitions.allow_user_change,
                 configured_modules: manifest.definition_specs.clone(),
+                configured_module_spellings: configured_definition_spellings,
                 requested_modules: requested_definition_modules,
+                requested_module_spellings: requested_definition_spellings,
                 selection_source: definition_selection_source,
-                definition_root_applied: selector_definition_root.is_some(),
+                definition_root_applied: definition_path_expansion.is_some(),
                 resolved_load_resources: definition_resource_paths.clone(),
                 savegame_override,
             },
@@ -6704,6 +6969,7 @@ impl LegacyScenarioCore {
             definition_executable_path,
             definition_path,
         );
+        saved.definitions.reflected_definitions = None;
         saved.definitions.local_only = definition_modules.is_empty();
 
         // GetSaveOrigin retains an existing origin; only an empty origin is
@@ -7484,40 +7750,44 @@ fn format_base_functionality(value: i32) -> Option<String> {
 }
 
 fn escape_cpp_ini_string(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len() + 2);
-    escaped.push('"');
+    let value = lc_script::c4_string_bytes(value);
+    let mut escaped = Vec::with_capacity(value.len() + 2);
+    escaped.push(b'"');
     let mut previous_was_numeric_escape = false;
-    for byte in value.bytes() {
-        let printable = byte.is_ascii_graphic() || byte == b' ';
+    for byte in value {
+        // StdCompilerINIWrite applies `isprint` to unsigned native bytes.
+        // The legacy single-byte locale treats the upper printable block as
+        // text too; preserving it here is what keeps C4 filenames byte-exact.
+        let printable = byte.is_ascii_graphic() || byte == b' ' || byte >= 0xa0;
         if printable
             && byte != b'\\'
             && byte != b'"'
             && !(previous_was_numeric_escape && byte.is_ascii_digit())
         {
-            escaped.push(char::from(byte));
+            escaped.push(byte);
             previous_was_numeric_escape = false;
             continue;
         }
         previous_was_numeric_escape = false;
         match byte {
-            b'\x07' => escaped.push_str("\\a"),
-            b'\x08' => escaped.push_str("\\b"),
-            b'\x0c' => escaped.push_str("\\f"),
-            b'\n' => escaped.push_str("\\n"),
-            b'\r' => escaped.push_str("\\r"),
-            b'\t' => escaped.push_str("\\t"),
-            b'\x0b' => escaped.push_str("\\v"),
-            b'"' => escaped.push_str("\\\""),
-            b'\\' => escaped.push_str("\\\\"),
+            b'\x07' => escaped.extend_from_slice(b"\\a"),
+            b'\x08' => escaped.extend_from_slice(b"\\b"),
+            b'\x0c' => escaped.extend_from_slice(b"\\f"),
+            b'\n' => escaped.extend_from_slice(b"\\n"),
+            b'\r' => escaped.extend_from_slice(b"\\r"),
+            b'\t' => escaped.extend_from_slice(b"\\t"),
+            b'\x0b' => escaped.extend_from_slice(b"\\v"),
+            b'"' => escaped.extend_from_slice(b"\\\""),
+            b'\\' => escaped.extend_from_slice(b"\\\\"),
             byte => {
-                escaped.push('\\');
-                escaped.push_str(&format!("{byte:o}"));
+                escaped.push(b'\\');
+                escaped.extend_from_slice(format!("{byte:o}").as_bytes());
                 previous_was_numeric_escape = true;
             }
         }
     }
-    escaped.push('"');
-    escaped
+    escaped.push(b'"');
+    lc_script::c4_string_from_bytes(&escaped)
 }
 
 fn normalize_legacy_path(path: &str) -> String {
@@ -7528,8 +7798,8 @@ fn normalize_legacy_path(path: &str) -> String {
     }
 }
 
-/// `C4SDefinitions::SetModules`: normalize the platform spelling used by the
-/// active process, then strip ExePath and DefinitionPath in that exact order.
+/// `C4SDefinitions::SetModules`: preserve every separator and redundant path
+/// component, then strip ExePath and DefinitionPath in that exact order.
 /// Native compares the requested prefix length case-insensitively and does
 /// not require a component boundary (C4Scenario.cpp:461-478).
 fn set_legacy_definition_modules(
@@ -7537,21 +7807,22 @@ fn set_legacy_definition_modules(
     executable_path: &str,
     definition_path: &str,
 ) -> Vec<String> {
-    let executable_path = lc_script::c4_string_bytes(&normalize_legacy_path(executable_path));
-    let definition_path = lc_script::c4_string_bytes(&normalize_legacy_path(definition_path));
+    let executable_path = lc_script::c4_string_bytes(executable_path);
+    let definition_path = lc_script::c4_string_bytes(definition_path);
 
     modules
         .iter()
         .map(|module| {
-            let normalized = normalize_legacy_path(module);
-            let mut bytes = lc_script::c4_string_bytes(&normalized);
+            let mut bytes = lc_script::c4_string_bytes(module);
             for prefix in [&executable_path, &definition_path] {
                 if !prefix.is_empty()
                     && bytes.len() >= prefix.len()
                     && bytes[..prefix.len()]
                         .iter()
                         .zip(prefix.iter())
-                        .all(|(left, right)| left.eq_ignore_ascii_case(right))
+                        .all(|(left, right)| {
+                            legacy_byte_capital(*left) == legacy_byte_capital(*right)
+                        })
                 {
                     bytes.drain(..prefix.len());
                 }
@@ -7559,6 +7830,16 @@ fn set_legacy_definition_modules(
             lc_script::c4_string_from_bytes(&bytes)
         })
         .collect()
+}
+
+fn legacy_byte_capital(byte: u8) -> u8 {
+    match byte {
+        b'a'..=b'z' => byte - 32,
+        0xe4 => 0xc4,
+        0xf6 => 0xd6,
+        0xfc => 0xdc,
+        _ => byte,
+    }
 }
 
 impl LegacyScenarioCore {
@@ -15665,9 +15946,9 @@ fn resolve_one_definition_group(
         });
     }
 
-    let normalized_path = Path::new(&normalized);
+    let normalized_path = legacy_definition_path(&normalized);
     if normalized_path.is_absolute() {
-        return match open_group_path(normalized_path) {
+        return match open_group_path(&normalized_path) {
             Ok(group) => Ok(group),
             Err(error) if is_missing_group_error(&error) => {
                 Err(ScenarioError::LegacyDefinitionNotFound { path: normalized })
@@ -15684,6 +15965,10 @@ fn resolve_one_definition_group(
         .into_iter()
         .next()
         .ok_or_else(|| ScenarioError::LegacyDefinitionNotFound { path: normalized })
+}
+
+fn legacy_definition_path(value: &str) -> PathBuf {
+    lc_resources::path_from_legacy_bytes(&lc_script::c4_string_bytes(value))
 }
 
 fn open_group_relative_case_insensitive(
@@ -15708,14 +15993,8 @@ fn open_group_relative_case_insensitive(
     Ok(group)
 }
 
-#[cfg(unix)]
 fn legacy_group_path_component_bytes(name: &OsStr) -> Vec<u8> {
-    name.as_encoded_bytes().to_vec()
-}
-
-#[cfg(not(unix))]
-fn legacy_group_path_component_bytes(name: &OsStr) -> Vec<u8> {
-    lc_script::c4_string_bytes(name.to_string_lossy().as_ref())
+    lc_resources::path_to_legacy_bytes(Path::new(name))
 }
 
 /// Opens physical groups and virtual paths nested inside packed groups. A
@@ -15747,7 +16026,8 @@ fn open_group_path(path: &Path) -> Result<Group, GroupError> {
 /// packed child groups; host `Path::join` alone cannot model either property.
 fn resolve_rooted_definition_group(root: &Path, spec: &str) -> Result<Group, ScenarioError> {
     let normalized = spec.replace('\\', "/");
-    let candidate = root.join(&normalized);
+    let normalized_path = legacy_definition_path(&normalized);
+    let candidate = root.join(&normalized_path);
     let not_found = || ScenarioError::LegacyDefinitionNotFound {
         path: candidate.display().to_string(),
     };
@@ -15757,11 +16037,42 @@ fn resolve_rooted_definition_group(root: &Path, spec: &str) -> Result<Group, Sce
         Err(error) => return Err(ScenarioError::Resources(error)),
     };
 
-    match open_group_relative_case_insensitive(group, Path::new(&normalized)) {
+    match open_group_relative_case_insensitive(group, &normalized_path) {
         Ok(group) => Ok(group),
         Err(error) if is_missing_group_error(&error) => Err(not_found()),
         Err(error) => Err(ScenarioError::Resources(error)),
     }
+}
+
+/// Applies C4Game's exact `DefinitionPath + module` operation. Unlike
+/// `Path::join`, this neither inserts a separator nor lets an absolute module
+/// replace the configured prefix.
+fn resolve_prefixed_definition_group(prefix: &Path, spelling: &str) -> Result<Group, ScenarioError> {
+    let mut candidate = legacy_path_bytes(prefix);
+    candidate.extend(lc_script::c4_string_bytes(spelling));
+    for byte in &mut candidate {
+        if *byte == b'\\' {
+            *byte = std::path::MAIN_SEPARATOR as u8;
+        }
+    }
+    let candidate = legacy_path_from_bytes(candidate);
+    match open_group_path(&candidate) {
+        Ok(group) => Ok(group),
+        Err(error) if is_missing_group_error(&error) => {
+            Err(ScenarioError::LegacyDefinitionNotFound {
+                path: candidate.display().to_string(),
+            })
+        }
+        Err(error) => Err(ScenarioError::Resources(error)),
+    }
+}
+
+fn legacy_path_bytes(path: &Path) -> Vec<u8> {
+    lc_resources::path_to_legacy_bytes(path)
+}
+
+fn legacy_path_from_bytes(bytes: Vec<u8>) -> PathBuf {
+    lc_resources::path_from_legacy_bytes(&bytes)
 }
 
 fn folder_local_definition_groups(scenario: &Group) -> Result<Vec<Group>, ScenarioError> {
@@ -17789,7 +18100,7 @@ global func Step(state, frame, random)
     }
 
     #[test]
-    fn game_save_set_modules_strips_cpp_paths_in_order() {
+    fn game_save_set_modules_strips_cpp_paths_without_normalizing_separators() {
         let core = LegacyScenarioCore::default();
         let modules = vec![
             "/OPT/GAME/Objects.c4d".to_owned(),
@@ -17797,12 +18108,11 @@ global func Step(state, frame, random)
             "definitions\\Already.c4d".to_owned(),
             "Relative\\Keep.c4d".to_owned(),
         ];
-        let separator = std::path::MAIN_SEPARATOR;
         let expected = vec![
             "Objects.c4d".to_owned(),
             "Pack.c4d".to_owned(),
-            "Already.c4d".to_owned(),
-            format!("Relative{separator}Keep.c4d"),
+            "definitions\\Already.c4d".to_owned(),
+            "Relative\\Keep.c4d".to_owned(),
         ];
 
         for saved in [
@@ -17822,6 +18132,37 @@ global func Step(state, frame, random)
             vec!["Outside.c4d".to_owned()],
             "an absolute DefinitionPath is still checked after ExePath"
         );
+
+        let lower_umlaut_prefix = lc_script::c4_string_from_bytes(b"/g\xe4me/");
+        let upper_umlaut_module = lc_script::c4_string_from_bytes(b"/G\xc4ME/Pack.c4d");
+        assert_eq!(
+            set_legacy_definition_modules(
+                &[upper_umlaut_module],
+                &lower_umlaut_prefix,
+                "",
+            ),
+            vec!["Pack.c4d".to_owned()],
+            "SEqualNoCase applies the C++ CharCapital umlaut folding"
+        );
+    }
+
+    #[test]
+    fn initial_game_save_serializes_the_effective_modules_not_the_authored_reflection() {
+        let core = parse_legacy_scenario_text(
+            "[Definitions]\nDefinitions=Old.c4d\n",
+        )
+        .expect("legacy core parses")
+        .core;
+        let modules = vec!["Effective.c4d".to_owned()];
+
+        for saved in [
+            core.initial_network_save("Title", &modules, "", "", ""),
+            core.initial_record_save("Title", &modules, "", "", ""),
+        ] {
+            let serialized = String::from_utf8(saved.serialize()).expect("Scenario.txt is UTF-8");
+            assert!(serialized.contains("Definitions=\"Effective.c4d\"\r\n"));
+            assert!(!serialized.contains("Old.c4d"));
+        }
     }
 
     #[test]
@@ -22476,11 +22817,16 @@ global func Step(state, frame, random)
                 b"Alpha.c".as_slice(),
             ]
         );
-        assert_ne!(
-            entries[2].relative_path.as_os_str().as_encoded_bytes(),
-            NATIVE_SCRIPT_NAME,
-            "the fixture must lose identity when projected through its display path"
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+
+            assert_eq!(
+                entries[2].relative_path.as_os_str().as_bytes(),
+                NATIVE_SCRIPT_NAME,
+                "packed names retain their native bytes in Unix path labels"
+            );
+        }
 
         let scripts = load_system_scripts(&group).expect("load exact native-byte scripts");
         assert_eq!(
@@ -26079,7 +26425,7 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
-    fn child_definition_enumeration_preserves_lossy_colliding_native_names_in_group_order() {
+    fn child_definition_enumeration_preserves_distinct_native_names_in_group_order() {
         const U_CHILD_NAME: &[u8] = b"Gr\xfcn.C4D";
         const O_CHILD_NAME: &[u8] = b"Gr\xf6n.C4D";
 
@@ -26119,10 +26465,14 @@ public func ActualizePhase(pClonk)
         assert_eq!(entries[0].name_bytes, U_CHILD_NAME);
         assert_eq!(entries[1].name_bytes, O_CHILD_NAME);
         assert_ne!(entries[0].name_bytes, entries[1].name_bytes);
-        assert_eq!(
-            entries[0].relative_path, entries[1].relative_path,
-            "both legacy names must collide under lossy UTF-8 projection"
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+
+            assert_eq!(entries[0].relative_path.as_os_str().as_bytes(), U_CHILD_NAME);
+            assert_eq!(entries[1].relative_path.as_os_str().as_bytes(), O_CHILD_NAME);
+            assert_ne!(entries[0].relative_path, entries[1].relative_path);
+        }
 
         let mut sound_effect_groups = Vec::new();
         let mut collected = Vec::new();
@@ -27978,6 +28328,106 @@ public func ActualizePhase(pClonk)
         let selected = resolve_one_definition_group(&scenario, &resolver, "Objects.c4d")
             .expect("global collision resolves");
         assert_eq!(selected.root(), global.root());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn definition_group_paths_restore_projected_non_ascii_bytes() {
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+        let dir = tempdir().expect("tempdir");
+        let scenario_path = dir.path().join("Scenario.c4s");
+        std::fs::create_dir_all(&scenario_path).expect("scenario directory");
+        let scenario = Group::open(&scenario_path).expect("open scenario group");
+
+        let absolute_path = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"Absolute-\xe2\x98\x83.c4d".to_vec()));
+        std::fs::create_dir_all(&absolute_path).expect("absolute definition directory");
+        let absolute_spec =
+            lc_script::c4_string_from_bytes(absolute_path.as_os_str().as_bytes());
+        let resolved_absolute = resolve_one_definition_group(
+            &scenario,
+            &FileSystemResolver { roots: Vec::new() },
+            &absolute_spec,
+        )
+        .expect("absolute legacy-byte definition resolves");
+        assert_eq!(resolved_absolute.root(), absolute_path);
+
+        let relative_name = std::ffi::OsString::from_vec(b"Rooted-\xe2\x98\x85.c4d".to_vec());
+        let rooted_path = dir.path().join(&relative_name);
+        std::fs::create_dir_all(&rooted_path).expect("rooted definition directory");
+        let relative_spec = lc_script::c4_string_from_bytes(relative_name.as_bytes());
+        let resolved_rooted = resolve_rooted_definition_group(dir.path(), &relative_spec)
+            .expect("rooted legacy-byte definition resolves");
+        assert_eq!(resolved_rooted.root(), rooted_path);
+    }
+
+    #[test]
+    fn literal_definition_prefix_preserves_separatorless_and_dot_spellings() {
+        fn write_pack(path: &Path, id: &str) {
+            std::fs::create_dir_all(path).expect("definition pack");
+            std::fs::write(
+                path.join("DefCore.txt"),
+                format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n"),
+            )
+            .expect("definition core");
+            std::fs::write(path.join("Script.c"), "// prefix fixture\n")
+                .expect("definition script");
+            write_test_definition_graphics(path);
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let prefix = dir.path().join("Defs");
+        std::fs::create_dir_all(&prefix).expect("DefinitionPath activation directory");
+        let prefixed_objects = dir.path().join("DefsObjects.c4d");
+        let prefixed_preset = dir.path().join("Defs.").join("Preset.c4d");
+        let original_objects = dir.path().join("Objects.c4d");
+        let original_preset = dir.path().join("Preset.c4d");
+        for (path, id) in [
+            (&prefixed_objects, "POBJ"),
+            (&prefixed_preset, "PSET"),
+            (&original_objects, "OOBJ"),
+            (&original_preset, "OPST"),
+        ] {
+            write_pack(path, id);
+        }
+        let scenario_path = dir.path().join("Prefix.c4s");
+        std::fs::create_dir_all(&scenario_path).expect("scenario group");
+        std::fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Literal prefix\n\n[Definitions]\nDefinition1=Ignored.c4d\n",
+        )
+        .expect("scenario core");
+        let scenario_group = Group::open(&scenario_path).expect("open scenario");
+        let modules = vec!["Objects.c4d".to_owned(), "./Preset.c4d".to_owned()];
+        let scenario = Scenario::load_from_group_with_languages_and_definition_selection_and_prefix(
+            &scenario_group,
+            &FileSystemResolver {
+                roots: vec![dir.path().to_path_buf()],
+            },
+            &["US"],
+            &[] as &[String],
+            Some(modules.as_slice()),
+            Some(&prefix),
+        )
+        .expect("literal prefix vector loads");
+
+        assert_eq!(
+            scenario.definition_resource_paths(),
+            [
+                prefixed_objects,
+                prefixed_preset,
+                original_objects,
+                original_preset,
+            ]
+        );
+        let definitions = scenario.lobby_metadata().unwrap().definitions();
+        assert_eq!(definitions.requested_modules(), ["Objects.c4d", "Preset.c4d"]);
+        assert_eq!(
+            definitions.requested_module_spellings(),
+            ["Objects.c4d", "./Preset.c4d"]
+        );
     }
 
     #[test]

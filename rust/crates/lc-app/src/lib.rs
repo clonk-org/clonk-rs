@@ -1,6 +1,7 @@
 mod client_network_scenario;
 mod client_start_barrier;
 mod configured_client_players;
+mod resource_path_identity;
 
 // Keep these suites in the library test harness instead of Cargo integration
 // targets. Integration targets make Cargo also build the normal lc-app binary,
@@ -21,12 +22,11 @@ pub use client_network_scenario::{
 };
 pub use client_start_barrier::ClientStartBarrier;
 pub use configured_client_players::{
-    configured_native_boolean, configured_native_dynamic_value, configured_native_value,
-    configured_native_scalar, load_configured_client_players, load_configured_mission_access,
+    configured_native_boolean, configured_native_dynamic_value, configured_native_scalar,
+    configured_native_value, load_configured_client_players, load_configured_mission_access,
     load_snapshotted_client_players, snapshot_configured_client_player_selection,
-    update_configured_native_values,
-    ConfiguredClientPlayerSelection, ConfiguredClientPlayers, ConfiguredClientPlayersError,
-    NativeConfigValue,
+    update_configured_native_values, ConfiguredClientPlayerSelection, ConfiguredClientPlayers,
+    ConfiguredClientPlayersError, NativeConfigValue,
 };
 
 use std::collections::HashMap;
@@ -47,7 +47,9 @@ use thiserror::Error;
 pub struct SelectedClientPlayer {
     source_path: PathBuf,
     module_filename: LegacyCString,
+    resource_lookup_name: LegacyCString,
     resource_wire_name: LegacyCString,
+    resource_opened_name: LegacyCString,
     player_name: LegacyCString,
     player_name_valid: bool,
     network_color: u32,
@@ -67,6 +69,8 @@ impl SelectedClientPlayer {
         Self {
             source_path: source_path.into(),
             module_filename: wire_name.clone(),
+            resource_lookup_name: wire_name.clone(),
+            resource_opened_name: wire_name.clone(),
             resource_wire_name: wire_name,
             player_name: player_name.clone().unwrap_or_default(),
             player_name_valid: player_name.is_some(),
@@ -79,7 +83,9 @@ impl SelectedClientPlayer {
     pub(crate) fn from_configured(
         source_path: PathBuf,
         module_filename: LegacyCString,
+        resource_lookup_name: LegacyCString,
         resource_wire_name: LegacyCString,
+        resource_opened_name: LegacyCString,
         player_name: LegacyCString,
         network_color: u32,
         alternate_color: u32,
@@ -88,7 +94,9 @@ impl SelectedClientPlayer {
         Self {
             source_path,
             module_filename,
+            resource_lookup_name,
             resource_wire_name,
+            resource_opened_name,
             player_name,
             player_name_valid: true,
             network_color,
@@ -109,8 +117,16 @@ impl SelectedClientPlayer {
         &self.module_filename
     }
 
+    pub fn resource_lookup_name(&self) -> &LegacyCString {
+        &self.resource_lookup_name
+    }
+
     pub fn resource_wire_name(&self) -> &LegacyCString {
         &self.resource_wire_name
+    }
+
+    pub fn resource_opened_name(&self) -> &LegacyCString {
+        &self.resource_opened_name
     }
 
     pub fn player_name(&self) -> &LegacyCString {
@@ -627,6 +643,8 @@ mod tests {
                 PathBuf::from("/players/One.c4p"),
                 raw(b"AliasOne.c4p"),
                 raw(b"Shared.c4p"),
+                raw(b"Shared.c4p"),
+                raw(b"Shared.c4p"),
                 raw(b"One"),
                 0x11_22_33,
                 0,
@@ -636,6 +654,8 @@ mod tests {
                 PathBuf::from("/players/Two.c4p"),
                 raw(b"AliasTwo.c4p"),
                 raw(b"Shared.c4p"),
+                raw(b"Shared.c4p"),
+                raw(b"Shared.c4p"),
                 raw(b"Two"),
                 0x11_22_33,
                 0,
@@ -644,6 +664,8 @@ mod tests {
             super::SelectedClientPlayer::from_configured(
                 PathBuf::from("/players/One.c4p"),
                 raw(b"AliasThree.c4p"),
+                raw(b"Renamed.c4p"),
+                raw(b"Renamed.c4p"),
                 raw(b"Renamed.c4p"),
                 raw(b"Three"),
                 0x11_22_33,

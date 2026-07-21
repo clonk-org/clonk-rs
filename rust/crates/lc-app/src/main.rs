@@ -33,6 +33,7 @@ mod object_menu;
 mod offline_savegame;
 mod offline_startup;
 mod prepared_host_bootstrap;
+mod resource_path_identity;
 mod runtime_join_save;
 mod save_browser;
 mod settings;
@@ -218,8 +219,8 @@ use offline_startup::{
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use prepared_host_bootstrap::{
-    PreparedHostPlayerIdentity, PreparedHostPlayerSource, ProcessInitialHostTeamAssignmentOracle,
-    CLASSIC_SAFE_RANDOM_LOCK,
+    PreparedHostBootstrap, PreparedHostPlayerIdentity, PreparedHostPlayerSource,
+    ProcessInitialHostTeamAssignmentOracle, CLASSIC_SAFE_RANDOM_LOCK,
 };
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
 use serde::{
@@ -1019,6 +1020,9 @@ struct PreparedGoLoadingState {
     auto_frame_skip: bool,
     team_configuration: TeamConfiguration,
     team_registry: Vec<lc_engine::TeamInfo>,
+    /// Separately retained `Game.DefinitionFilenames`. Final C4GameRes types
+    /// select the groups InitDefs opens but do not rewrite this save identity.
+    definition_modules: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -1137,6 +1141,7 @@ impl ScenarioLoadingState {
                 auto_frame_skip,
                 team_configuration,
                 team_registry,
+                definition_modules: None,
             }),
             offline_startup_players: None,
             offline_savegame: None,
@@ -2023,7 +2028,9 @@ fn effective_loader_definition_modules(
         {
             modules.clone()
         }
-        ScenarioDefinitionLoad::Seed { .. } => head.configured_definition_modules().to_vec(),
+        ScenarioDefinitionLoad::Seed { .. } => {
+            head.configured_definition_module_spellings().to_vec()
+        }
     })
 }
 
@@ -3154,26 +3161,14 @@ fn classic_global_gui_runtime_overrides(
     overrides
 }
 
-fn open_loader_group_below(root: &Path, specification: &str) -> Result<Group> {
-    let normalized = specification.replace('\\', "/");
-    let mut group = open_group_path_for_folder_map(root)?;
-    for component in Path::new(&normalized).components() {
-        match component {
-            Component::Normal(name) => {
-                group = open_child_flexible(&group, Path::new(name))?.with_context(|| {
-                    format!(
-                        "definition group `{specification}` is unavailable below {}",
-                        root.display()
-                    )
-                })?;
-            }
-            Component::CurDir => {}
-            _ => anyhow::bail!(
-                "definition group `{specification}` is not a classic relative group path"
-            ),
-        }
-    }
-    Ok(group)
+fn open_loader_group_with_prefix(prefix: &Path, specification: &str) -> Result<Group> {
+    let candidate = concatenate_legacy_path(prefix, &lc_script::c4_string_bytes(specification));
+    open_group_path_for_folder_map(&candidate).with_context(|| {
+        format!(
+            "definition group `{specification}` is unavailable at {}",
+            candidate.display()
+        )
+    })
 }
 
 fn definition_graphics_source_registrations(
@@ -3195,7 +3190,7 @@ fn definition_graphics_source_registrations(
     let mut groups = Vec::new();
     if let Some(root) = definition_root {
         for module in &modules {
-            groups.push(open_loader_group_below(root, module)?);
+            groups.push(open_loader_group_with_prefix(root, module)?);
         }
     }
     let resolver = InstallDefinitionResolver::new(Some(Arc::new(paths.clone())));
@@ -12291,6 +12286,10 @@ enum PendingInputDialogPurpose {
 struct StagedNetworkHostScenario {
     frontend: FrontendScenario,
     definition_load: ScenarioDefinitionLoad,
+    effective_definition_modules: Vec<String>,
+    definition_resources: Vec<lc_network::HostInitialResourceSource>,
+    definition_executable_path: String,
+    definition_path: String,
     scenario: Scenario,
     /// The exact scenario loader selected before the host socket is opened.
     /// It is moved into `GameApp::loader_screen` while the worker starts and
@@ -13220,9 +13219,9 @@ fn joined_classic_lobby_resource_rows(
 }
 
 fn path_has_raw_directory_prefix(path: &Path, directory: &Path) -> bool {
-    let path = path.as_os_str().as_encoded_bytes();
-    let directory = directory.as_os_str().as_encoded_bytes();
-    path.starts_with(directory)
+    let path = path_to_legacy_bytes(path);
+    let directory = path_to_legacy_bytes(directory);
+    path.starts_with(&directory)
 }
 
 fn lobby_resource_save_possible(
@@ -13302,6 +13301,70 @@ fn initial_network_control_clock(
         // whose start tick is zero and whose synthetic parameters use rate 1.
         Some(NetworkMode::Host(_)) => Some(NetworkControlClock::new(0, 1)),
     }
+}
+
+fn network_material_load_plan<'a>(
+    network_mode: Option<&NetworkMode>,
+    material_groups: Option<&'a [Group]>,
+) -> (Option<&'a [Group]>, bool) {
+    let prepared_host = matches!(
+        network_mode,
+        Some(NetworkMode::Host(HostSettings {
+            prepared: Some(_),
+            ..
+        }))
+    );
+    let authoritative_groups = match network_mode {
+        Some(NetworkMode::Client(_)) => material_groups,
+        Some(NetworkMode::Host(HostSettings {
+            prepared: Some(_),
+            ..
+        })) => material_groups,
+        Some(NetworkMode::Host(_)) | None => None,
+    };
+    let reuse_preloaded = !(prepared_host && authoritative_groups.is_some());
+    (authoritative_groups, reuse_preloaded)
+}
+
+fn activated_definition_load(
+    retained_modules: Option<Vec<String>>,
+    effective_load: ScenarioDefinitionLoad,
+) -> ScenarioDefinitionLoad {
+    retained_modules.map_or(effective_load, |modules| ScenarioDefinitionLoad::Fixed {
+        modules,
+        definition_root: None,
+    })
+}
+
+fn recording_definition_modules(
+    scenario_data: &Scenario,
+    retained_modules: Option<&[String]>,
+) -> Vec<String> {
+    retained_modules.map_or_else(
+        || {
+            scenario_data
+                .definition_resource_paths()
+                .iter()
+                .map(|path| path_as_legacy_text(path))
+                .collect()
+        },
+        <[String]>::to_vec,
+    )
+}
+
+fn recording_description_definition_modules(
+    scenario_data: &Scenario,
+    retained_modules: Option<&[String]>,
+) -> Vec<Vec<u8>> {
+    retained_modules.map_or_else(
+        || raw_definition_description_modules(scenario_data.definition_resource_paths()),
+        |modules| {
+            modules
+                .iter()
+                .map(|module| lc_script::c4_string_bytes(module))
+                .collect()
+        },
+    )
 }
 
 fn initial_host_join_snapshot(
@@ -14786,6 +14849,10 @@ struct GameApp {
     /// attempt. Clear this after successful activation so later rounds do not
     /// inherit the native no-startup failure policy.
     classic_record_stream_activation_pending: bool,
+    /// ParseCommandLine snapshots the config/`.c4d` definition vector once
+    /// for the next game init. Later startup rounds begin from an empty Game
+    /// and the unchecked selector appends only Objects.c4d.
+    initial_definition_seed: Option<Vec<String>>,
     /// Persistent developer-window policy selected by `/console`. Unlike
     /// per-round classic arguments, `/open` must not reset this.
     console_mode: bool,
@@ -14951,9 +15018,10 @@ struct GameApp {
     pending_client_start_status: Option<lc_network::NetworkStatus>,
     client_combined_scenario_path: Option<PathBuf>,
     client_combined_preload_file: ClientCombinedPreloadFile,
-    /// Exact host-ordered NRT_Material groups from JoinData. `Some([])` is
-    /// authoritative too: a network client must not fall back to local files.
-    client_material_resource_groups: Option<Vec<Group>>,
+    /// Exact host-ordered NRT_Material groups from final resource publication
+    /// or JoinData. `Some([])` is authoritative: neither side may fall back to
+    /// a process-local global Material.c4g.
+    network_material_resource_groups: Option<Vec<Group>>,
     executing_ready_tick: Option<Tick>,
     recording_enabled: bool,
     recordings_dir: Option<PathBuf>,
@@ -15318,6 +15386,10 @@ struct RuntimeRecordingSeed {
     scenario_title: LegacyCString,
     definition_modules: Vec<String>,
     description_definition_modules: Vec<Vec<u8>>,
+    /// Process-loaded SetModules path pair shared by the initial and every
+    /// later non-initial record image.
+    definition_executable_path: String,
+    definition_path: String,
     scenario_origin: String,
     parameters: lc_network::JoinGameParametersEnvelope,
     scenario_defaults: lc_network::InitialNetworkScenarioDefaults,
@@ -15618,16 +15690,12 @@ fn has_player_group_extension(name: &[u8]) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case(b".c4p"))
 }
 
-#[cfg(unix)]
 fn path_to_legacy_bytes(path: &Path) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-
-    path.as_os_str().as_bytes().to_vec()
+    resource_path_identity::path_wire_bytes(path)
 }
 
-#[cfg(not(unix))]
-fn path_to_legacy_bytes(path: &Path) -> Vec<u8> {
-    path.to_string_lossy().as_bytes().to_vec()
+fn path_as_legacy_text(path: &Path) -> String {
+    lc_script::c4_string_from_bytes(&path_to_legacy_bytes(path))
 }
 
 fn league_record_name(path: &Path) -> Option<LegacyCString> {
@@ -15641,17 +15709,32 @@ fn raw_definition_description_modules(paths: &[PathBuf]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-#[cfg(unix)]
 fn path_from_group_name_bytes(bytes: &[u8]) -> PathBuf {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-
-    PathBuf::from(OsString::from_vec(bytes.to_vec()))
+    resource_path_identity::path_from_wire_bytes(bytes)
 }
 
-#[cfg(not(unix))]
-fn path_from_group_name_bytes(bytes: &[u8]) -> PathBuf {
-    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+fn normalize_legacy_path_bytes(mut bytes: Vec<u8>) -> Vec<u8> {
+    for byte in &mut bytes {
+        if *byte == b'\\' {
+            *byte = std::path::MAIN_SEPARATOR as u8;
+        }
+    }
+    bytes
+}
+
+fn concatenate_legacy_path(prefix: &Path, suffix: &[u8]) -> PathBuf {
+    let mut bytes = path_to_legacy_bytes(prefix);
+    bytes.extend_from_slice(suffix);
+    path_from_group_name_bytes(&normalize_legacy_path_bytes(bytes))
+}
+
+fn path_with_trailing_native_separator(path: &Path) -> PathBuf {
+    let mut bytes = path_to_legacy_bytes(path);
+    let separator = std::path::MAIN_SEPARATOR as u8;
+    if bytes.last() != Some(&separator) {
+        bytes.push(separator);
+    }
+    path_from_group_name_bytes(&bytes)
 }
 
 fn count_direct_stream_player_crew_files(group: &Group) -> std::result::Result<usize, String> {
@@ -21228,7 +21311,7 @@ impl InstallDefinitionResolver {
         }
         slice = slice.trim_matches(|c| c == '"' || c == '\'');
         let normalized = slice.replace('\\', "/");
-        let absolute = PathBuf::from(&normalized);
+        let absolute = path_from_group_name_bytes(&lc_script::c4_string_bytes(&normalized));
         if absolute.is_absolute() {
             return Some(absolute);
         }
@@ -21240,7 +21323,9 @@ impl InstallDefinitionResolver {
         if slice.is_empty() {
             return None;
         }
-        Some(PathBuf::from(slice))
+        Some(path_from_group_name_bytes(&lc_script::c4_string_bytes(
+            slice,
+        )))
     }
 
     fn open_and_push(
@@ -21356,26 +21441,11 @@ impl InstallDefinitionResolver {
     }
 
     fn app_definition_bases(&self) -> Vec<PathBuf> {
-        let Some(paths) = &self.app_paths else {
-            return Vec::new();
-        };
-        let mut bases = Vec::new();
-        if let Some(content) = paths.content_dir() {
-            bases.push(content.to_path_buf());
-        }
-        bases.extend([
-            paths.planet_dir().to_path_buf(),
-            paths.install_root().to_path_buf(),
-            paths.system_group_path().to_path_buf(),
-            paths.user_data_dir().to_path_buf(),
-            paths.scenario_dir(),
-        ]);
-        if let Some(parent) = paths.system_group_path().parent() {
-            bases.push(parent.to_path_buf());
-        }
-        let mut seen = HashSet::new();
-        bases.retain(|base| seen.insert(base.clone()));
-        bases
+        // C4GameResList opens every explicit DefinitionFilename from the
+        // process ExePath. AppPaths may project that installed data directory
+        // across source-checkout roots, but user/scenario directories are not
+        // fallback search locations for an explicit pack.
+        self.executable_data_bases()
     }
 
     fn append_relative_at(
@@ -23691,45 +23761,83 @@ fn update_dirty_gamepad_axis_calibration_config(
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StartupDefinitionPaths {
     selector_root: PathBuf,
+    /// Physical prefix used by `C4Game::OpenScenario`. Its trailing separator
+    /// is significant because C++ concatenates it with each module verbatim.
     active_custom_root: Option<PathBuf>,
 }
 
 fn startup_definition_paths(paths: &AppPaths) -> io::Result<StartupDefinitionPaths> {
-    let configured_path = match Config::load(paths.config_file()) {
-        Ok(config) => config
-            .get_in(Some("General"), "DefinitionPath")
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from),
+    let configured_text = match fs::read(paths.config_file()) {
+        Ok(config) => native_config_text(&config, "General", "DefinitionPath")
+            .filter(|path| !path.is_empty()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
+    let configured_bytes = configured_text
+        .as_ref()
+        .map(|path| lc_script::c4_string_bytes(path));
+    let configured_path = configured_bytes.as_ref().map(|path| {
+        path_from_group_name_bytes(&normalize_legacy_path_bytes(
+            path.clone(),
+        ))
+    });
     // AppPaths maps an installed C++ ExePath data layout to `content/` in a
     // source checkout; packaged layouts fall back to the install root.
     let exe_data_root = paths.content_dir().unwrap_or(paths.install_root());
-    let selector_root = configured_path
+    let executable_prefix = path_with_trailing_native_separator(exe_data_root);
+    let selector_root = configured_text
         .as_ref()
-        .map(|path| {
-            // C4Config::AtExePath is literal concatenation, even when the
-            // configured string starts with a root/drive marker.
-            let normalized = path.to_string_lossy().replace('\\', "/");
-            let relative = normalized.trim_start_matches('/');
-            PathBuf::from(format!(
-                "{}{}{}",
-                exe_data_root.display(),
-                std::path::MAIN_SEPARATOR,
-                relative
-            ))
-        })
+        // C4Config::AtExePath is literal concatenation even when DefinitionPath
+        // starts with a root or drive marker.
+        .map(|path| concatenate_legacy_path(&executable_prefix, &lc_script::c4_string_bytes(path)))
         .unwrap_or_else(|| exe_data_root.to_path_buf());
-    let active_custom_root = configured_path
-        .is_some()
-        .then(|| selector_root.clone())
-        .filter(|path| path.is_dir());
+    let active_custom_root = configured_bytes
+        .as_deref()
+        .and_then(definition_path_directory_probe)
+        .and_then(|probe| {
+            let process_resolved = legacy_definition_path_uses_process_resolution(&probe);
+            let probe_path = if process_resolved {
+                path_from_group_name_bytes(&probe)
+            } else {
+                let mut full = path_to_legacy_bytes(&executable_prefix);
+                full.extend_from_slice(&probe);
+                path_from_group_name_bytes(&full)
+            };
+            probe_path.is_dir().then(|| {
+                if process_resolved {
+                    configured_path
+                        .clone()
+                        .expect("configured bytes have a configured path")
+                } else {
+                    selector_root.clone()
+                }
+            })
+        });
     Ok(StartupDefinitionPaths {
         selector_root,
         active_custom_root,
     })
+}
+
+fn definition_path_directory_probe(path: &[u8]) -> Option<Vec<u8>> {
+    let mut path = path.to_vec();
+    if path.last() == Some(&(std::path::MAIN_SEPARATOR as u8)) {
+        path.pop();
+    }
+    if path.last().is_some_and(|byte| matches!(byte, b'/' | b'\\')) {
+        path.pop();
+    }
+    (!path.is_empty()).then_some(path)
+}
+
+fn legacy_definition_path_uses_process_resolution(path: &[u8]) -> bool {
+    if cfg!(windows) {
+        path.first()
+            .is_some_and(|byte| matches!(byte, b'/' | b'\\'))
+            || path.get(1) == Some(&b':')
+    } else {
+        path.first() == Some(&b'/')
+    }
 }
 
 fn enumerate_startup_definition_files(root: &Path) -> io::Result<Vec<PathBuf>> {
@@ -23814,7 +23922,7 @@ where
         ScenarioDefinitionLoad::Fixed {
             modules,
             definition_root,
-        } => Scenario::load_from_group_with_languages_and_definition_selection_and_progress(
+        } => Scenario::load_from_group_with_languages_and_definition_selection_and_prefix_and_progress(
             &group,
             resolver,
             languages,
@@ -23826,7 +23934,7 @@ where
         ScenarioDefinitionLoad::Seed {
             modules,
             definition_root,
-        } => Scenario::load_from_group_with_languages_and_definition_selection_and_progress(
+        } => Scenario::load_from_group_with_languages_and_definition_selection_and_prefix_and_progress(
             &group,
             resolver,
             languages,
@@ -23891,7 +23999,7 @@ where
         ScenarioDefinitionLoad::Fixed {
             modules,
             definition_root,
-        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_progress(
+        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_prefix_and_progress(
             &group,
             resolver,
             languages,
@@ -23905,7 +24013,7 @@ where
         ScenarioDefinitionLoad::Seed {
             modules,
             definition_root,
-        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_progress(
+        } => Scenario::load_from_group_with_languages_and_seed_and_definition_selection_and_startup_player_count_and_prefix_and_progress(
             &group,
             resolver,
             languages,
@@ -24323,17 +24431,20 @@ fn classic_command_line_definition_modules(
 ) -> Vec<String> {
     let mut modules = native_config_text(config, "General", "Definitions")
         .map(|definitions| {
-            definitions
+            let mut modules = definitions
                 .split(';')
-                .filter(|module| !module.is_empty())
                 .map(str::to_string)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            if definitions.is_empty() || definitions.ends_with(';') {
+                modules.pop();
+            }
+            modules
         })
         .unwrap_or_default();
     modules.extend(
         definition_files
             .iter()
-            .map(|path| path.to_string_lossy().into_owned()),
+            .map(|path| path_as_legacy_text(path)),
     );
     modules
 }
@@ -24363,22 +24474,19 @@ fn native_config_text(config: &[u8], section: &str, key: &str) -> Option<String>
 /// The two path strings passed by C4GameSave::SaveCore to
 /// C4SDefinitions::SetModules. AppPaths maps an installed ExePath layout to
 /// `content/` in a source checkout; packaged layouts use the install root.
-fn game_save_definition_paths(
-    paths: Option<&AppPaths>,
-    native_config: &[u8],
-) -> (String, String) {
+fn game_save_definition_paths(paths: Option<&AppPaths>, native_config: &[u8]) -> (String, String) {
     let executable_path = paths
         .map(|paths| paths.content_dir().unwrap_or(paths.install_root()))
         .map(|path| {
-            let mut path = path.to_string_lossy().into_owned();
+            let mut path = path_as_legacy_text(path);
             if !path.ends_with(std::path::MAIN_SEPARATOR) {
                 path.push(std::path::MAIN_SEPARATOR);
             }
             path
         })
         .unwrap_or_default();
-    let definition_path = native_config_text(native_config, "General", "DefinitionPath")
-        .unwrap_or_default();
+    let definition_path =
+        native_config_text(native_config, "General", "DefinitionPath").unwrap_or_default();
     (executable_path, definition_path)
 }
 
@@ -24515,6 +24623,10 @@ fn load_sound_command_cooldown(paths: Option<&AppPaths>) -> Duration {
 fn build_network_host_preparation(
     app: &GameApp,
     scenario: &FrontendScenario,
+    definition_load: &ScenarioDefinitionLoad,
+    effective_definition_modules: &[String],
+    definition_resources: &[lc_network::HostInitialResourceSource],
+    staged_definition_paths: Option<(&str, &str)>,
     staged_identity: Option<(&str, &str)>,
 ) -> Result<NetworkHostPreparation> {
     let scenario_path = scenario
@@ -24536,8 +24648,12 @@ fn build_network_host_preparation(
             .map(|value| parse_config_bool(&value))
             .unwrap_or(default)
     };
-    let (definition_executable_path, definition_path) =
-        game_save_definition_paths(app.app_paths.as_ref(), &config_bytes);
+    let (definition_executable_path, definition_path) = staged_definition_paths
+        .map(|(executable, definitions)| (executable.to_owned(), definitions.to_owned()))
+        .unwrap_or_else(|| game_save_definition_paths(app.app_paths.as_ref(), &config_bytes));
+    let definition_executable_root = path_from_group_name_bytes(&lc_script::c4_string_bytes(
+        &definition_executable_path,
+    ));
 
     let mut install_roots = Vec::new();
     if let Some(paths) = app.app_paths.as_ref() {
@@ -24624,7 +24740,10 @@ fn build_network_host_preparation(
             .map(|player| PreparedHostPlayerSource {
                 resource: lc_network::HostInitialResourceSource {
                     path: player.source_path().to_path_buf(),
+                    lookup_name: player.resource_lookup_name().clone(),
+                    opened_name: player.resource_opened_name().clone(),
                     wire_name: player.resource_wire_name().clone(),
+                    virtual_group_bytes: None,
                 },
                 identity: Some(PreparedHostPlayerIdentity {
                     player_name: player.player_name().clone(),
@@ -24643,10 +24762,21 @@ fn build_network_host_preparation(
                         .ok_or_else(|| {
                             anyhow!("selected player filename contains an interior NUL")
                         })?;
+                let opened_name = lc_engine::LegacyCString::from_bytes(
+                    resource_path_identity::opened_group_name(
+                        &player.path,
+                        wire_name.as_bytes(),
+                        &definition_executable_root,
+                    ),
+                )
+                .ok_or_else(|| anyhow!("opened player filename contains an interior NUL"))?;
                 Ok(PreparedHostPlayerSource::from(
                     lc_network::HostInitialResourceSource {
                         path: player.path.clone(),
+                        lookup_name: wire_name.clone(),
+                        opened_name,
                         wire_name,
+                        virtual_group_bytes: None,
                     },
                 ))
             })
@@ -24667,10 +24797,26 @@ fn build_network_host_preparation(
     let league_server_signup = app.scenario_game_options.values().league_server_signup;
     let league = (master_server_signup || league_server_signup)
         .then(|| load_prepared_league_host_config(app.app_paths.as_ref(), league_server_signup));
+    let (initial_definition_modules, fixed_definition_modules, selector_definition_root) =
+        match definition_load {
+            ScenarioDefinitionLoad::Seed {
+                modules,
+                definition_root,
+            } => (modules.clone(), None, definition_root.clone()),
+            ScenarioDefinitionLoad::Fixed {
+                modules,
+                definition_root,
+            } => (Vec::new(), Some(modules.clone()), definition_root.clone()),
+        };
 
     Ok(NetworkHostPreparation {
         scenario_path,
         install_roots,
+        effective_definition_modules: effective_definition_modules.to_vec(),
+        definition_resources: definition_resources.to_vec(),
+        initial_definition_modules,
+        fixed_definition_modules,
+        selector_definition_root,
         definition_executable_path,
         definition_path,
         languages: startup_language_sequence(app.app_paths.as_ref()),
@@ -27161,6 +27307,10 @@ impl GameApp {
             app_paths: paths.cloned(),
             classic_command_line: ClassicCommandLine::default(),
             classic_record_stream_activation_pending: false,
+            initial_definition_seed: Some(classic_command_line_definition_modules(
+                &load_native_config_bytes(paths),
+                &[],
+            )),
             console_mode: false,
             developer_console: DeveloperConsole::new(),
             developer_console_edit_mode: ConsoleEditMode::Play,
@@ -27241,7 +27391,7 @@ impl GameApp {
             pending_client_start_status: None,
             client_combined_scenario_path: None,
             client_combined_preload_file: ClientCombinedPreloadFile::default(),
-            client_material_resource_groups: None,
+            network_material_resource_groups: None,
             executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
             recordings_dir: paths.map(AppPaths::recordings_dir),
@@ -27383,6 +27533,10 @@ impl GameApp {
     fn apply_classic_command_line(&mut self, classic: &ClassicCommandLine) -> Result<()> {
         self.classic_command_line = classic.clone();
         self.classic_record_stream_activation_pending = false;
+        self.initial_definition_seed = Some(classic_command_line_definition_modules(
+            &load_native_config_bytes(self.app_paths.as_ref()),
+            &classic.definition_files,
+        ));
         if !classic.player_files.is_empty() {
             self.configured_client_player_selection = self
                 .app_paths
@@ -28763,11 +28917,7 @@ impl GameApp {
     }
 
     fn classic_command_line_definition_load(&self) -> ScenarioDefinitionLoad {
-        let config = load_native_config_bytes(self.app_paths.as_ref());
-        let modules = classic_command_line_definition_modules(
-            &config,
-            &self.classic_command_line.definition_files,
-        );
+        let modules = self.initial_definition_seed.clone().unwrap_or_default();
         let definition_root =
             self.app_paths
                 .as_ref()
@@ -42817,7 +42967,7 @@ impl GameApp {
             .control_player_infos
             .issue_unjoined_players(client_id, |core| {
                 resources.complete_path(core.id).and_then(|path| {
-                    lc_engine::LegacyCString::from_bytes(path.to_string_lossy().as_bytes().to_vec())
+                    lc_engine::LegacyCString::from_bytes(path_to_legacy_bytes(path))
                 })
             });
         let tick = self.local_control_submission_tick();
@@ -42910,7 +43060,7 @@ impl GameApp {
             players,
             |core| {
                 resources.complete_path(core.id).and_then(|path| {
-                    lc_engine::LegacyCString::from_bytes(path.to_string_lossy().as_bytes().to_vec())
+                    lc_engine::LegacyCString::from_bytes(path_to_legacy_bytes(path))
                 })
             },
         );
@@ -43525,7 +43675,7 @@ impl GameApp {
             })
             .unwrap_or_default();
         if let Some(material_groups) = material_groups {
-            self.client_material_resource_groups = Some(material_groups);
+            self.network_material_resource_groups = Some(material_groups);
         }
         self.fade_out_game_music();
         let random_seed = u64::from(join_data.parameters.random_seed as u32);
@@ -58518,20 +58668,26 @@ impl GameApp {
             self.status_text = "A network connection is already in progress".to_string();
             return;
         }
-        let staged_identity = self
-            .staged_network_host_scenario
-            .as_ref()
-            .filter(|staged| {
-                staged.frontend.identifier == scenario.identifier
-                    && staged.frontend.path == scenario.path
-            })
-            .map(|staged| {
-                (
-                    staged.lobby.local_name.as_str(),
-                    staged.lobby.nick.as_str(),
-                )
-            });
-        let preparation = match build_network_host_preparation(self, &scenario, staged_identity) {
+        let staged = self.staged_network_host_scenario.as_ref().filter(|staged| {
+            staged.frontend.identifier == scenario.identifier
+                && staged.frontend.path == scenario.path
+        });
+        let Some(staged) = staged else {
+            self.status_text =
+                "Unable to prepare network game: staged scenario resources are unavailable"
+                    .to_string();
+            return;
+        };
+        let staged_identity = Some((staged.lobby.local_name.as_str(), staged.lobby.nick.as_str()));
+        let preparation = match build_network_host_preparation(
+            self,
+            &scenario,
+            &staged.definition_load,
+            &staged.effective_definition_modules,
+            &staged.definition_resources,
+            Some((&staged.definition_executable_path, &staged.definition_path)),
+            staged_identity,
+        ) {
             Ok(preparation) => preparation,
             Err(error) => {
                 self.status_text = format!("Unable to prepare network game: {error}");
@@ -58693,7 +58849,8 @@ impl GameApp {
         self.startup_restart_diagnostics.begin_game_init();
         self.clear_lobby_preload();
         self.active_scenario = None;
-        self.active_definition_load = Some(self.scenario_seed_definition_load());
+        let definition_load = self.take_scenario_seed_definition_load();
+        self.active_definition_load = Some(definition_load);
         self.active_description_definition_modules.clear();
     }
 
@@ -59604,7 +59761,7 @@ impl GameApp {
         self.pending_client_start_status = None;
         self.client_combined_scenario_path = None;
         self.client_combined_preload_file.clear();
-        self.client_material_resource_groups = None;
+        self.network_material_resource_groups = None;
         self.active_scenario = None;
         self.active_definition_load = None;
         self.active_description_definition_modules.clear();
@@ -65910,6 +66067,10 @@ impl GameApp {
         )
     }
 
+    fn install_prepared_host_material_resources(&mut self, prepared: &PreparedHostBootstrap) {
+        self.network_material_resource_groups = Some(prepared.material_resource_groups().to_vec());
+    }
+
     fn start_network_game_now(&mut self) -> Result<(), EngineError> {
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             self.status_text = "Only the host can start the game".to_string();
@@ -66030,6 +66191,12 @@ impl GameApp {
                 team_configuration,
                 team_registry,
             );
+            loading
+                .prepared_go
+                .as_mut()
+                .expect("from_loaded always stages the Go boundary")
+                .definition_modules = Some(prepared.definition_modules().to_vec());
+            self.install_prepared_host_material_resources(&prepared);
             if let Some(staged) = self.staged_network_host_scenario.take() {
                 loading.refreshed_resources = Some(staged.loader_refreshed_resources);
                 loading.refreshed_tooltip_font = staged.loader_refreshed_tooltip_font;
@@ -67797,7 +67964,7 @@ impl GameApp {
                 .scenario
                 .definition_resource_paths()
                 .iter()
-                .map(|path| path.to_string_lossy().into_owned())
+                .map(|path| path_as_legacy_text(path))
                 .collect::<Vec<_>>();
             return Ok(LobbyPreloadJob {
                 graphics,
@@ -67931,7 +68098,7 @@ impl GameApp {
                 let definition_paths = scenario
                     .definition_resource_paths()
                     .iter()
-                    .map(|path| path.to_string_lossy().into_owned())
+                    .map(|path| path_as_legacy_text(path))
                     .collect::<Vec<_>>();
                 let effective_definition_load = ScenarioDefinitionLoad::Fixed {
                     modules: definition_paths.clone(),
@@ -68003,7 +68170,7 @@ impl GameApp {
                             resource.core.resource_type
                                 == lc_network::HostResourceType::Definitions as u8
                         })
-                        .map(|resource| resource.path.to_string_lossy().into_owned())
+                        .map(|resource| path_as_legacy_text(&resource.path))
                         .collect::<Vec<_>>();
                     let mut definition_groups = Vec::new();
                     let mut material_groups = Vec::new();
@@ -68155,7 +68322,7 @@ impl GameApp {
     fn clear_client_preload_projection(&mut self) {
         self.client_combined_preload_file.clear();
         self.client_combined_scenario_path = None;
-        self.client_material_resource_groups = None;
+        self.network_material_resource_groups = None;
     }
 
     fn clear_lobby_preload(&mut self) {
@@ -68196,7 +68363,7 @@ impl GameApp {
             }
             self.client_combined_scenario_path = Some(artifact.scenario_path.clone());
             let client = artifact.client.as_mut().expect("client artifact");
-            self.client_material_resource_groups =
+            self.network_material_resource_groups =
                 Some(std::mem::take(&mut client.material_groups));
         } else if let Some(catalog_host) = artifact.catalog_host.as_ref() {
             let current = self.catalog_host_preload_key().as_ref() == Some(&catalog_host.key);
@@ -68213,7 +68380,7 @@ impl GameApp {
                         .scenario
                         .definition_resource_paths()
                         .iter()
-                        .map(|path| path.to_string_lossy().into_owned())
+                        .map(|path| path_as_legacy_text(path))
                         .collect::<Vec<_>>();
                     staged.frontend.path.as_ref() == Some(&artifact.scenario_path)
                         && definition_paths == artifact.definition_paths
@@ -71291,7 +71458,7 @@ impl GameApp {
         self.pending_client_start_status = None;
         self.client_combined_scenario_path = None;
         self.client_combined_preload_file.clear();
-        self.client_material_resource_groups = None;
+        self.network_material_resource_groups = None;
         self.control_clients = ControlClientRegistry::default();
         self.network_client_activity.clear();
         self.control_clients.register(local_client_id, true, false);
@@ -71490,23 +71657,19 @@ impl GameApp {
         // Unicode and cannot safely recreate every native byte sequence.
         let title = native_bytes_as_legacy_text(parameters.title.as_bytes());
         let origin = prepared.scenario_origin().to_string();
-        let maker = self.process_group_maker.as_bytes().to_vec();
-        let group_filename = std::str::from_utf8(prepared.dynamic_wire_name().as_bytes())
-            .map_err(|_| "prepared runtime dynamic filename is not ASCII".to_string())?
-            .to_string();
+        let maker = prepared.host_config().group_maker.as_bytes().to_vec();
+        let group_filename = prepared.dynamic_filename_seed().to_owned();
         let scenario_defaults = prepared.scenario_defaults().clone();
         let dynamic_tick = self.next_network_control_tick();
-        let native_config = load_native_config_bytes(self.app_paths.as_ref());
-        let (definition_executable_path, definition_path) =
-            game_save_definition_paths(self.app_paths.as_ref(), &native_config);
+        let (definition_executable_path, definition_path) = prepared.definition_save_paths();
 
         let save = self
             .engine
             .serialize_live_c4_save(lc_engine::LiveC4SaveSpec {
                 title: &title,
                 definition_modules: &definition_modules,
-                definition_executable_path: &definition_executable_path,
-                definition_path: &definition_path,
+                definition_executable_path,
+                definition_path,
                 origin: &origin,
                 music_enabled: self.runtime_music_enabled,
                 copied_material_group_is_file: false,
@@ -82428,6 +82591,8 @@ impl GameApp {
         scenario: &FrontendScenario,
         scenario_data: &Scenario,
         initial_source: Option<InitialRecordingSource<'_>>,
+        retained_definition_modules: Option<&[String]>,
+        retained_definition_save_paths: Option<(&str, &str)>,
     ) -> std::result::Result<(), String> {
         self.runtime_record_requested = false;
         self.live_save_seed = None;
@@ -82439,13 +82604,20 @@ impl GameApp {
                 Err("recording requires a filesystem-backed scenario".to_string())
             };
         };
-        let definition_modules = scenario_data
-            .definition_resource_paths()
-            .iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        let description_definition_modules =
-            raw_definition_description_modules(scenario_data.definition_resource_paths());
+        let definition_modules =
+            recording_definition_modules(scenario_data, retained_definition_modules);
+        let description_definition_modules = recording_description_definition_modules(
+            scenario_data,
+            retained_definition_modules,
+        );
+        let (definition_executable_path, definition_path) =
+            retained_definition_save_paths.map_or_else(
+                || {
+                    let native_config = load_native_config_bytes(self.app_paths.as_ref());
+                    game_save_definition_paths(self.app_paths.as_ref(), &native_config)
+                },
+                |(executable, definitions)| (executable.to_owned(), definitions.to_owned()),
+            );
         let scenario_origin =
             record_scenario_origin(scenario_path, self.app_paths.as_ref(), &scenario.identifier);
         let (recording_parameters, scenario_defaults) =
@@ -82457,6 +82629,8 @@ impl GameApp {
             scenario_title: recording_parameters.title.clone(),
             definition_modules: definition_modules.clone(),
             description_definition_modules: description_definition_modules.clone(),
+            definition_executable_path: definition_executable_path.clone(),
+            definition_path: definition_path.clone(),
             scenario_origin: scenario_origin.clone(),
             parameters: recording_parameters.clone(),
             scenario_defaults: scenario_defaults.clone(),
@@ -82491,9 +82665,6 @@ impl GameApp {
         ));
         record_title.truncate(512);
         let record_title = lc_script::c4_string_from_bytes(&record_title);
-        let native_config = load_native_config_bytes(self.app_paths.as_ref());
-        let (definition_executable_path, definition_path) =
-            game_save_definition_paths(self.app_paths.as_ref(), &native_config);
         let source =
             open_group_path_for_folder_map(scenario_path).map_err(|error| error.to_string())?;
         let mut group = MutableGroup::from_group(&source).map_err(|error| error.to_string())?;
@@ -82898,9 +83069,6 @@ impl GameApp {
         ));
         record_title.truncate(512);
         let record_title = lc_script::c4_string_from_bytes(&record_title);
-        let native_config = load_native_config_bytes(self.app_paths.as_ref());
-        let (definition_executable_path, definition_path) =
-            game_save_definition_paths(self.app_paths.as_ref(), &native_config);
         let source = open_group_path_for_folder_map(&seed.scenario_source_path)
             .map_err(|error| error.to_string())?;
         let mut group = MutableGroup::from_group(&source).map_err(|error| error.to_string())?;
@@ -82967,8 +83135,8 @@ impl GameApp {
             lc_engine::LiveC4SaveSpec {
                 title: &record_title,
                 definition_modules: &seed.definition_modules,
-                definition_executable_path: &definition_executable_path,
-                definition_path: &definition_path,
+                definition_executable_path: &seed.definition_executable_path,
+                definition_path: &seed.definition_path,
                 origin: &seed.scenario_origin,
                 music_enabled: self.runtime_music_enabled,
                 copied_material_group_is_file,
@@ -83710,7 +83878,7 @@ impl GameApp {
         self.pending_client_start_status = None;
         self.client_combined_scenario_path = None;
         self.client_combined_preload_file.clear();
-        self.client_material_resource_groups = None;
+        self.network_material_resource_groups = None;
         self.refresh_object_menu();
         self.focus_id = None;
         self.focus_snapshot = None;
@@ -84141,6 +84309,10 @@ impl GameApp {
     }
 
     fn scenario_seed_definition_load(&self) -> ScenarioDefinitionLoad {
+        let mut modules = self.initial_definition_seed.clone().unwrap_or_default();
+        // The unchecked scenario-selector branch appends Objects.c4d to the
+        // vector ParseCommandLine seeded once for the first game init.
+        modules.push("Objects.c4d".to_string());
         let definition_root = self
             .app_paths
             .as_ref()
@@ -84155,9 +84327,15 @@ impl GameApp {
                 }
             });
         ScenarioDefinitionLoad::Seed {
-            modules: vec!["Objects.c4d".to_string()],
+            modules,
             definition_root,
         }
+    }
+
+    fn take_scenario_seed_definition_load(&mut self) -> ScenarioDefinitionLoad {
+        let definition_load = self.scenario_seed_definition_load();
+        self.initial_definition_seed = None;
+        definition_load
     }
 
     fn accept_scenario_from_selector(
@@ -84166,8 +84344,10 @@ impl GameApp {
         selector_mode: ScenarioSelectorMode,
         definition_load: Option<ScenarioDefinitionLoad>,
     ) -> Result<(), EngineError> {
-        let definition_load =
-            definition_load.unwrap_or_else(|| self.scenario_seed_definition_load());
+        let definition_load = match definition_load {
+            Some(definition_load) => definition_load,
+            None => self.take_scenario_seed_definition_load(),
+        };
         match selector_mode {
             ScenarioSelectorMode::Local => {
                 self.start_scenario_with_definition_load(scenario, definition_load)
@@ -84184,6 +84364,7 @@ impl GameApp {
         frontend: FrontendScenario,
         definition_load: ScenarioDefinitionLoad,
     ) {
+        self.initial_definition_seed = None;
         self.startup_restart_diagnostics.begin_game_init();
         self.staged_network_host_scenario = None;
         self.clear_lobby_preload();
@@ -84256,6 +84437,36 @@ impl GameApp {
                 detail: "legacy Scenario.txt lobby metadata is unavailable".to_string(),
             })
         })?;
+        let effective_definition_modules = metadata
+            .definitions()
+            .effective_modules()
+            .unwrap_or_default()
+            .to_vec();
+        let effective_definition_spellings = metadata
+            .definitions()
+            .effective_modules()
+            .map(|_| metadata.definitions().requested_module_spellings().to_vec())
+            .unwrap_or_default();
+        let native_config = load_native_config_bytes(Some(paths));
+        let (definition_executable_path, definition_path) =
+            game_save_definition_paths(Some(paths), &native_config);
+        let definition_executable_root = path_from_group_name_bytes(&lc_script::c4_string_bytes(
+            &definition_executable_path,
+        ));
+        let definition_resources =
+            host_game_resource_sources::freeze_host_definition_resource_sources(
+                scenario.definition_resource_paths(),
+                path,
+                &effective_definition_spellings,
+                metadata.definitions().definition_root_applied(),
+                &definition_executable_root,
+                &definition_path,
+            )
+            .map_err(|error| {
+                classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                    detail: format!("definition publication freeze failed: {error}"),
+                })
+            })?;
         if metadata.head().is_replay() {
             return Err(classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
                 detail: "network replay selection must be rejected by CanOpen".to_string(),
@@ -84317,6 +84528,10 @@ impl GameApp {
         Ok(StagedNetworkHostScenario {
             frontend,
             definition_load,
+            effective_definition_modules,
+            definition_resources,
+            definition_executable_path,
+            definition_path,
             scenario,
             loader_screen: Some(loader_setup.screen),
             loader_initial_tooltip_font,
@@ -84338,6 +84553,12 @@ impl GameApp {
         modules: Vec<String>,
         definition_root: Option<PathBuf>,
     ) -> Result<(), EngineError> {
+        // This convenience route accepts a physical directory. The loader's
+        // retained field is the literal C++ DefinitionPath prefix, whose
+        // separator must remain present before module concatenation.
+        let definition_root = definition_root
+            .as_deref()
+            .map(path_with_trailing_native_separator);
         self.start_scenario_with_definition_load(
             scenario,
             ScenarioDefinitionLoad::Fixed {
@@ -84352,6 +84573,7 @@ impl GameApp {
         scenario: FrontendScenario,
         definition_load: ScenarioDefinitionLoad,
     ) -> Result<(), EngineError> {
+        self.initial_definition_seed = None;
         self.startup_restart_diagnostics.begin_game_init();
         self.close_context_menu_silently();
         self.definition_selector = None;
@@ -84612,6 +84834,21 @@ impl GameApp {
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .is_some();
+        let retained_definition_modules = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .and_then(|prepared| prepared.definition_modules.clone());
+        let retained_definition_save_paths = self.network_mode.as_ref().and_then(|mode| match mode {
+            NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            }) => {
+                let (executable, definitions) = prepared.definition_save_paths();
+                Some((executable.to_owned(), definitions.to_owned()))
+            }
+            NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+        });
         let path = scenario
             .path
             .clone()
@@ -84619,10 +84856,12 @@ impl GameApp {
         let effective_definition_paths = scenario_data
             .definition_resource_paths()
             .iter()
-            .map(|path| path.to_string_lossy().into_owned())
+            .map(|path| path_as_legacy_text(path))
             .collect::<Vec<_>>();
-        let effective_description_definition_modules =
-            raw_definition_description_modules(scenario_data.definition_resource_paths());
+        let effective_description_definition_modules = recording_description_definition_modules(
+            scenario_data,
+            retained_definition_modules.as_deref(),
+        );
         let effective_definition_load = ScenarioDefinitionLoad::Fixed {
             modules: effective_definition_paths.clone(),
             // The vector already contains the rooted and original blocks
@@ -85059,14 +85298,25 @@ impl GameApp {
         self.runtime_player_big_icons.clear();
         self.runtime_player_big_icon_misses.clear();
         if !replay {
+            let recording_definition_save_paths = retained_definition_save_paths
+                .as_ref()
+                .map(|(executable, definitions)| (executable.as_str(), definitions.as_str()));
             let prepare_result = match initial_record_game_data.as_ref() {
                 Some(Ok(game_data)) => self.prepare_recording_for(
                     &scenario,
                     &scenario_data,
                     Some(InitialRecordingSource::Fresh(game_data)),
+                    retained_definition_modules.as_deref(),
+                    recording_definition_save_paths,
                 ),
                 Some(Err(error)) => Err(error.clone()),
-                None => self.prepare_recording_for(&scenario, &scenario_data, None),
+                None => self.prepare_recording_for(
+                    &scenario,
+                    &scenario_data,
+                    None,
+                    retained_definition_modules.as_deref(),
+                    recording_definition_save_paths,
+                ),
             };
             if let Err(error) = prepare_result {
                 let league_host = self.network_is_league
@@ -85300,14 +85550,17 @@ impl GameApp {
         self.snapshot = self.engine.snapshot();
         self.rebuild_definition_sprites();
         {
-            // A client consumes its already-opened GameRes groups in wire order;
-            // only offline/host loading resolves the local installation chain.
+            // Network peers consume the final published GameRes groups in wire
+            // order. Some([]) is authoritative and suppresses local fallback.
             // Both paths retain C++'s independent material/texture overloads.
-            let authoritative_external_groups = match self.network_mode.as_ref() {
-                Some(NetworkMode::Client(_)) => self.client_material_resource_groups.as_deref(),
-                _ => None,
-            };
-            if let Some((texture_images, render_info)) = preloaded_materials {
+            let (authoritative_external_groups, reuse_preloaded_materials) =
+                network_material_load_plan(
+                    self.network_mode.as_ref(),
+                    self.network_material_resource_groups.as_deref(),
+                );
+            if let Some((texture_images, render_info)) =
+                preloaded_materials.filter(|_| reuse_preloaded_materials)
+            {
                 self.material_texture_images = texture_images;
                 self.material_render_info = render_info;
             } else {
@@ -85418,9 +85671,11 @@ impl GameApp {
         self.refresh_object_menu();
         self.refresh_focus();
         self.active_scenario = Some(scenario.clone());
-        self.active_definition_load = Some(effective_definition_load);
-        self.active_description_definition_modules =
-            effective_description_definition_modules;
+        self.active_definition_load = Some(activated_definition_load(
+            retained_definition_modules,
+            effective_definition_load,
+        ));
+        self.active_description_definition_modules = effective_description_definition_modules;
         self.control_playback = control_playback;
         self.play_scenario_audio(&path);
         if initial_game_data.is_some() {
@@ -86205,29 +86460,11 @@ impl GameApp {
             let languages = startup_language_sequence(resolver_paths.as_deref());
             let resolver = InstallDefinitionResolver::new(resolver_paths);
             let scenario_data = match saved_definition_load.as_ref() {
-                Some(ScenarioDefinitionLoad::Fixed {
-                    modules,
-                    definition_root: Some(root),
-                }) => Scenario::load_from_path_with_languages_and_definition_modules_in_root(
-                    path, &resolver, &languages, modules, root,
-                ),
-                Some(ScenarioDefinitionLoad::Fixed {
-                    modules,
-                    definition_root: None,
-                }) => Scenario::load_from_path_with_languages_and_definition_modules(
-                    path, &resolver, &languages, modules,
-                ),
-                Some(ScenarioDefinitionLoad::Seed {
-                    modules,
-                    definition_root: Some(root),
-                }) => Scenario::load_from_path_with_languages_and_definition_seed_in_root(
-                    path, &resolver, &languages, modules, root,
-                ),
-                Some(ScenarioDefinitionLoad::Seed {
-                    modules,
-                    definition_root: None,
-                }) => Scenario::load_from_path_with_languages_and_definition_seed(
-                    path, &resolver, &languages, modules,
+                Some(definition_load) => load_scenario_with_definition_load(
+                    path,
+                    &resolver,
+                    &languages,
+                    definition_load,
                 ),
                 None => Scenario::load_from_path_with_languages(path, &resolver, &languages),
             }
@@ -86292,7 +86529,7 @@ impl GameApp {
                 modules: scenario_data
                     .definition_resource_paths()
                     .iter()
-                    .map(|path| path.to_string_lossy().into_owned())
+                    .map(|path| path_as_legacy_text(path))
                     .collect(),
                 definition_root: None,
             });
@@ -86326,7 +86563,7 @@ impl GameApp {
                     source_save_player_infos: save.source_save_player_infos.as_deref(),
                     source_title_png: save.source_title_png.as_deref(),
                 });
-            self.prepare_recording_for(&frontend, scenario_data, initial_source)
+            self.prepare_recording_for(&frontend, scenario_data, initial_source, None, None)
         });
         if let Some(clock) = self.network_control_clock.as_mut() {
             clock.set_control_rate(self.engine.control_rate());
@@ -93996,6 +94233,75 @@ mod tests {
         tempfile::Builder::new().prefix("lc-test-").tempdir()
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn definition_paths_round_trip_native_bytes_at_string_boundaries() {
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+        let native_path = PathBuf::from(OsString::from_vec(b"Defs-\xe4-\xff.c4d".to_vec()));
+        let projected = path_as_legacy_text(&native_path);
+        assert_eq!(lc_script::c4_string_bytes(&projected), native_path.as_os_str().as_bytes());
+        assert_eq!(
+            path_from_group_name_bytes(&lc_script::c4_string_bytes(&projected)),
+            native_path
+        );
+
+        let mut config = b"[General]\nDefinitionPath=Custom-".to_vec();
+        config.push(0xe4);
+        config.extend_from_slice(b"/\n");
+        let (_, definition_path) = game_save_definition_paths(None, &config);
+        assert_eq!(lc_script::c4_string_bytes(&definition_path), b"Custom-\xe4/");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn definition_graphics_route_reopens_a_projected_non_ascii_path() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("native definition user data");
+        let content = tempdir().expect("native definition content");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
+        let definition = content
+            .path()
+            .join(OsString::from_vec(b"Native-\xe2\x98\x83.c4d".to_vec()));
+        fs::create_dir_all(&definition).expect("native-byte definition group");
+        let scenario = content.path().join("NativePath.c4s");
+        fs::create_dir_all(&scenario).expect("native-byte scenario group");
+        fs::write(scenario.join("Scenario.txt"), "[Head]\nTitle=Native Path\n")
+            .expect("native-byte scenario core");
+        let scenario_group = Group::open(&scenario).expect("open native-byte scenario");
+        let head = ScenarioLoaderHead::load_from_group(&scenario_group).expect("load head");
+        let registrations = definition_graphics_source_registrations(
+            &head,
+            &scenario_group,
+            &ScenarioDefinitionLoad::Fixed {
+                modules: vec![path_as_legacy_text(&definition)],
+                definition_root: None,
+            },
+            &paths,
+            0,
+        )
+        .expect("graphics route reopens projected native path");
+        assert_eq!(registrations[0].group.root(), definition.as_path());
+    }
+
+    #[test]
+    fn definition_path_directory_probe_applies_both_cpp_trailing_removals() {
+        let separator = std::path::MAIN_SEPARATOR as u8;
+        assert_eq!(definition_path_directory_probe(&[separator]), None);
+        assert_eq!(definition_path_directory_probe(&[separator, separator]), None);
+        assert_eq!(
+            definition_path_directory_probe(&[b'D', b'e', b'f', b's', separator]),
+            Some(b"Defs".to_vec())
+        );
+        let alternate = if separator == b'/' { b'\\' } else { b'/' };
+        assert_eq!(
+            definition_path_directory_probe(&[b'D', b'e', b'f', b's', alternate]),
+            Some(b"Defs".to_vec())
+        );
+    }
+
     #[test]
     fn startup_player_count_uses_roster_only_at_frame_zero() {
         assert_eq!(
@@ -94094,6 +94400,8 @@ mod tests {
             &scenario,
             &scenario_data,
             Some(InitialRecordingSource::Fresh(&initial_game_data)),
+            None,
+            None,
         )
         .expect("prepare initial record");
         let packed = app
@@ -94218,6 +94526,8 @@ mod tests {
                 source_save_player_infos: Some(b"original saved roster"),
                 source_title_png: Some(b"saved game screenshot"),
             }),
+            None,
+            None,
         )
         .expect("prepare loaded initial record");
         // InitPlayers performs this only after InitControl has snapshotted
@@ -94839,6 +95149,14 @@ mod tests {
                 "Defs/ExtraOne.c4d",
                 "Defs/ExtraTwo.C4D",
             ]
+        );
+        assert_eq!(
+            classic_command_line_definition_modules(
+                b"[General]\nDefinitions=;Base.c4d;;Second.c4d;\n",
+                &[],
+            ),
+            vec!["", "Base.c4d", "", "Second.c4d"],
+            "std::getline preserves leading/interior empty modules but not a trailing delimiter"
         );
     }
 
@@ -115620,12 +115938,53 @@ public func Grant(password) { return GainMissionAccess(password); }
         configure_test_startup_participant(&paths, user_data.path());
         persist_config_value(&paths, "General", "DefinitionPath", "Definitions/")
             .expect("configure selector root");
+        let configured_definition_paths =
+            startup_definition_paths(&paths).expect("read configured definition paths");
         assert_eq!(
-            startup_definition_paths(&paths).expect("read configured definition paths"),
+            configured_definition_paths,
             StartupDefinitionPaths {
                 selector_root: definition_root.clone(),
                 active_custom_root: Some(definition_root.clone()),
             }
+        );
+        assert_eq!(
+            path_to_legacy_bytes(
+                configured_definition_paths
+                    .active_custom_root
+                    .as_deref()
+                    .expect("active definition prefix")
+            )
+            .last(),
+            Some(&(std::path::MAIN_SEPARATOR as u8)),
+            "the active prefix retains DefinitionPath's trailing separator"
+        );
+        let external = tempdir().expect("absolute definition prefix");
+        let external_value = format!(
+            "{}{sep}",
+            external.path().display(),
+            sep = std::path::MAIN_SEPARATOR
+        );
+        persist_config_value(&paths, "General", "DefinitionPath", &external_value)
+            .expect("configure absolute definition prefix");
+        let absolute_paths =
+            startup_definition_paths(&paths).expect("read absolute definition prefix");
+        assert_eq!(
+            absolute_paths.selector_root,
+            concatenate_legacy_path(
+                &path_with_trailing_native_separator(executable_data.path()),
+                &lc_script::c4_string_bytes(&external_value),
+            ),
+            "the selector uses raw ExePath + DefinitionPath concatenation"
+        );
+        assert_eq!(
+            path_to_legacy_bytes(
+                absolute_paths
+                    .active_custom_root
+                    .as_deref()
+                    .expect("absolute prefix is active")
+            ),
+            normalize_legacy_path_bytes(lc_script::c4_string_bytes(&external_value)),
+            "game loading honors an absolute DefinitionPath independently"
         );
         let missing_definition_root = executable_data.path().join("missing-definitions");
         persist_config_value(&paths, "General", "DefinitionPath", "/missing-definitions/")
@@ -117563,6 +117922,79 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("pre-bind minimal host scenario")
     }
 
+    fn install_network_definition_pack(root: &Path, module: &str, id: &str) -> PathBuf {
+        let path = root.join(module);
+        fs::create_dir_all(&path).expect("create network definition pack");
+        fs::write(
+            path.join("DefCore.txt"),
+            format!(
+                "[DefCore]\nid={id}\nName={id}\nCategory=0\nCrewMember=0\n"
+            ),
+        )
+        .expect("write network definition core");
+        fs::write(path.join("Script.c"), "// network definition fixture\n")
+            .expect("write network definition script");
+        write_test_definition_graphics(&path);
+        path
+    }
+
+    fn packed_network_definition(module: &str, id: &str) -> lc_resources::MutableGroup {
+        let mut definition = lc_resources::MutableGroup::new(module);
+        definition
+            .add_file(
+                "DefCore.txt",
+                format!(
+                    "[DefCore]\nid={id}\nName={id}\nCategory=0\nCrewMember=0\n"
+                )
+                .into_bytes(),
+            )
+            .expect("add packed network definition core");
+        definition
+            .add_file("Script.c", b"// packed network definition fixture\n".to_vec())
+            .expect("add packed network definition script");
+        definition
+            .add_file(
+                "Graphics.png",
+                include_bytes!("../../../../content/Material.c4g/Snow.png").to_vec(),
+            )
+            .expect("add packed network definition graphics");
+        definition
+    }
+
+    fn prepare_staged_network_host(
+        app: &GameApp,
+        staged: &StagedNetworkHostScenario,
+    ) -> PreparedHostBootstrap {
+        build_network_host_preparation(
+            app,
+            &staged.frontend,
+            &staged.definition_load,
+            &staged.effective_definition_modules,
+            &staged.definition_resources,
+            Some((&staged.definition_executable_path, &staged.definition_path)),
+            Some((&staged.lobby.local_name, &staged.lobby.nick)),
+        )
+        .expect("build staged network host preparation")
+        .prepare()
+        .expect("prepare staged network host")
+    }
+
+    fn published_definition_wire_names(prepared: &PreparedHostBootstrap) -> Vec<Vec<u8>> {
+        prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters
+            .game_resources
+            .iter()
+            .filter(|core| {
+                core.resource_type == lc_network::HostResourceType::Definitions as u8
+            })
+            .map(|core| core.filename.as_bytes().to_vec())
+            .collect()
+    }
+
     fn install_test_classic_host_lobby(app: &mut GameApp) {
         app.startup_view = StartupView::NetworkLobby;
         app.classic_host_lobby = Some(ClassicHostLobbyState {
@@ -118180,10 +118612,14 @@ public func Grant(password) { return GainMissionAccess(password); }
             GameOptionContext::NetworkHostSelector,
             GameOptionValues::default(),
         );
-        let staged = prepare_minimal_host_lobby(&app, scenario);
+        let staged = prepare_minimal_host_lobby(&app, scenario.clone());
         let prepared = build_network_host_preparation(
             &app,
             &staged.frontend,
+            &staged.definition_load,
+            &staged.effective_definition_modules,
+            &staged.definition_resources,
+            Some((&staged.definition_executable_path, &staged.definition_path)),
             Some((&staged.lobby.local_name, &staged.lobby.nick)),
         )
             .expect("build participant host preparation")
@@ -118745,6 +119181,10 @@ public func Grant(password) { return GainMissionAccess(password); }
         let preparation = build_network_host_preparation(
             &app,
             &staged.frontend,
+            &staged.definition_load,
+            &staged.effective_definition_modules,
+            &staged.definition_resources,
+            Some((&staged.definition_executable_path, &staged.definition_path)),
             Some((&staged.lobby.local_name, &staged.lobby.nick)),
         )
         .expect("host preparation reuses the staged sanitized identity");
@@ -119846,10 +120286,8 @@ public func Grant(password) { return GainMissionAccess(password); }
         let scenario = install_minimal_prepared_host_fixture(content.path());
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
         let mut app = new_menu_app_with_paths(640, 480, &paths);
-        let prepared = build_network_host_preparation(&app, &scenario, None)
-            .expect("build prepared host inputs")
-            .prepare()
-            .expect("prepare retained host scenario");
+        let staged = prepare_minimal_host_lobby(&app, scenario.clone());
+        let prepared = prepare_staged_network_host(&app, &staged);
         let expected_go = lc_network::NetworkStatus {
             state: lc_network::NETWORK_STATE_GO,
             control_mode: prepared.host_config().initial_status.control_mode,
@@ -119900,10 +120338,8 @@ public func Grant(password) { return GainMissionAccess(password); }
         let scenario = install_minimal_prepared_host_fixture(content.path());
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content.path()));
         let mut app = new_menu_app_with_paths(640, 480, &paths);
-        let prepared = build_network_host_preparation(&app, &scenario, None)
-            .expect("build prepared host inputs")
-            .prepare()
-            .expect("prepare retained host scenario");
+        let staged = prepare_minimal_host_lobby(&app, scenario.clone());
+        let prepared = prepare_staged_network_host(&app, &staged);
         let expected_go = lc_network::NetworkStatus {
             state: lc_network::NETWORK_STATE_GO,
             control_mode: prepared.host_config().initial_status.control_mode,
@@ -140424,7 +140860,9 @@ ScenInfoArea=70,5,25,90
             &scenario,
             &ScenarioDefinitionLoad::Fixed {
                 modules: vec!["Objects.c4d".to_string()],
-                definition_root: Some(definition_root.path().to_path_buf()),
+                definition_root: Some(path_with_trailing_native_separator(
+                    definition_root.path(),
+                )),
             },
             &paths,
             &assets,
@@ -141552,7 +141990,9 @@ ScenInfoArea=70,5,25,90
         frontend.path = Some(repository.join("content/Tutorial.c4f/Tutorial01.c4s"));
         let definition_load = ScenarioDefinitionLoad::Fixed {
             modules: vec!["Objects.c4d".to_string()],
-            definition_root: Some(definition_root.path().to_path_buf()),
+            definition_root: Some(path_with_trailing_native_separator(
+                definition_root.path(),
+            )),
         };
         let app = new_menu_app_with_paths(320, 200, &paths);
 
@@ -145300,8 +145740,19 @@ ScenInfoArea=70,5,25,90
         scenario.title = "Order".to_string();
         scenario.path = Some(scenario_path);
 
-        let preparation =
-            build_network_host_preparation(&app, &scenario, None).expect("prepare host inputs");
+        let preparation = build_network_host_preparation(
+            &app,
+            &scenario,
+            &ScenarioDefinitionLoad::Seed {
+                modules: Vec::new(),
+                definition_root: None,
+            },
+            &[],
+            &[],
+            None,
+            None,
+        )
+        .expect("prepare host inputs");
 
         assert_eq!(
             lc_resources::encode_legacy_script_text(&preparation.group_maker),
@@ -145362,6 +145813,712 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
+    fn command_line_definition_selection_is_published_to_network_clients() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("command-line host user data");
+        let content = tempdir().expect("command-line host content");
+        let content_root = content.path();
+        fs::create_dir_all(content_root.join("Material.c4g")).expect("global material group");
+        let base = install_network_definition_pack(content_root, "Base.c4d", "BAS1");
+        let extra_one = install_network_definition_pack(content_root, "ExtraOne.c4d", "EXT1");
+        let extra_two = install_network_definition_pack(content_root, "ExtraTwo.c4d", "EXT2");
+        let objects = install_network_definition_pack(content_root, "Objects.c4d", "OBJS");
+        let scenario_path = content_root.join("CommandLine.c4s");
+        fs::create_dir_all(&scenario_path).expect("command-line scenario group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Command Line Definitions\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nLocalOnly=1\n",
+        )
+        .expect("command-line scenario core");
+
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content_root));
+        persist_config_value(&paths, "General", "Definitions", "Base.c4d")
+            .expect("configure default definition seed");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let classic = parse_classic_command_line(&[
+            OsString::from("./ExtraOne.c4d"),
+            OsString::from("ExtraTwo.c4d"),
+        ]);
+        app.apply_classic_command_line(&classic)
+            .expect("apply classic definition arguments");
+        persist_config_value(&paths, "General", "Definitions", "ChangedAfterParse.c4d")
+            .expect("mutate config after ParseCommandLine snapshot");
+        let definition_load = app.take_scenario_seed_definition_load();
+        assert!(matches!(
+            &definition_load,
+            ScenarioDefinitionLoad::Seed { modules, .. }
+                if modules == &["Base.c4d", "./ExtraOne.c4d", "ExtraTwo.c4d", "Objects.c4d"]
+        ));
+        let frontend = FrontendScenario {
+            identifier: "CommandLine.c4s".to_string(),
+            title: "Command Line Definitions".to_string(),
+            path: Some(scenario_path),
+            ..FrontendScenario::fallback()
+        };
+        let staged = app
+            .prepare_network_host_scenario(frontend, definition_load)
+            .expect("stage the consumed command-line definition host");
+        assert!(matches!(
+            app.scenario_seed_definition_load(),
+            ScenarioDefinitionLoad::Seed { modules, .. }
+                if modules == ["Objects.c4d"]
+        ));
+        assert_eq!(
+            staged.scenario.definition_resource_paths(),
+            &[
+                base.clone(),
+                extra_one.clone(),
+                extra_two.clone(),
+                objects.clone(),
+            ]
+        );
+        let prepared = prepare_staged_network_host(&app, &staged);
+        assert_eq!(
+            published_definition_wire_names(&prepared),
+            vec![
+                b"Base.c4d".to_vec(),
+                b"./ExtraOne.c4d".to_vec(),
+                b"ExtraTwo.c4d".to_vec(),
+                b"Objects.c4d".to_vec(),
+            ]
+        );
+
+        let host = prepared.host_config();
+        let snapshot = host
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .clone();
+        assert_eq!(
+            snapshot
+                .parameters
+                .game_resources
+                .iter()
+                .filter(|core| {
+                    core.resource_type == lc_network::HostResourceType::Definitions as u8
+                })
+                .map(|core| core.filename.as_bytes().to_vec())
+                .collect::<Vec<_>>(),
+            published_definition_wire_names(&prepared)
+        );
+        let dynamic_path = host
+            .resource_files
+            .iter()
+            .find(|resource| {
+                resource.core.resource_type == lc_network::HostResourceType::Dynamic as u8
+            })
+            .expect("published dynamic")
+            .path
+            .clone();
+        let dynamic_scenario = Group::open(&dynamic_path)
+            .expect("open published dynamic")
+            .read_file("Scenario.txt")
+            .expect("dynamic Scenario.txt");
+        let expected_definitions =
+            b"Definitions=\"Base.c4d\",\"./ExtraOne.c4d\",\"ExtraTwo.c4d\",\"Objects.c4d\"";
+        assert!(dynamic_scenario
+            .windows(expected_definitions.len())
+            .any(|window| window == expected_definitions));
+
+        let host_files = host.resource_files.clone();
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 2,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let complete_path = |core: &lc_engine::NetworkResourceCore| {
+            host_files
+                .iter()
+                .find(|resource| resource.core.id == core.id)
+                .map(|resource| resource.path.clone())
+        };
+        let scenario_resources =
+            resolve_client_scenario_resources(&join_data, complete_path).expect("client scenario");
+        let game_resources = resolve_client_game_resources(&join_data, |core| {
+            host_files
+                .iter()
+                .find(|resource| resource.core.id == core.id)
+                .map(|resource| resource.path.clone())
+        })
+        .expect("client game resources");
+        let client_directory = tempdir().expect("client preload directory");
+        let combined_path = client_directory.path().join("Combined2.c4s");
+        let mut artifact = GameApp::run_lobby_preload_job(LobbyPreloadJob {
+            graphics: LobbyPreloadGraphicsContext {
+                app_paths: app.app_paths.clone(),
+                fallback: app.startup_game_graphics_resources(),
+                liquid_animation_enabled: app.assets.liquid_animation_enabled(),
+            },
+            source: LobbyPreloadJobSource::Client {
+                join_data,
+                scenario_resources: Some(scenario_resources),
+                game_resources,
+                resource_directory: client_directory.path().to_path_buf(),
+                maker: "Exact Host".to_string(),
+                scenario_path: combined_path,
+                staging_path: None,
+            },
+        })
+        .expect("client loads published definition vector");
+        let mut client_definition_ids = Vec::new();
+        artifact
+            .client
+            .as_mut()
+            .and_then(|client| client.scenario.take())
+            .expect("preloaded client Scenario")
+            .visit_definition_groups(|id, _| client_definition_ids.push(id.to_string()));
+        assert_eq!(
+            client_definition_ids,
+            vec![
+                "BAS1".to_string(),
+                "EXT1".to_string(),
+                "EXT2".to_string(),
+                "OBJS".to_string(),
+            ]
+        );
+        let mut host_definition_ids = Vec::new();
+        prepared
+            .claim_scenario()
+            .expect("prepared host Scenario")
+            .visit_definition_groups(|id, _| host_definition_ids.push(id.to_string()));
+        assert_eq!(host_definition_ids, client_definition_ids);
+    }
+
+    #[test]
+    fn packed_scenario_alias_is_skipped_as_an_external_definition() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("scenario-alias user data");
+        let content = tempdir().expect("scenario-alias content");
+        let content_root = content.path();
+        fs::create_dir_all(content_root.join("Material.c4g"))
+            .expect("scenario-alias global material group");
+        let scenario_path = content_root.join("AliasScenario.c4s");
+        let mut scenario_group = lc_resources::MutableGroup::new("AliasScenario.c4s");
+        scenario_group
+            .add_file(
+                "Scenario.txt",
+                b"[Head]\nTitle=Scenario Alias\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nLocalOnly=1\n"
+                    .to_vec(),
+            )
+            .expect("add packed scenario core");
+        scenario_group
+            .add_child(
+                "ScenarioDef.c4d",
+                packed_network_definition("ScenarioDef.c4d", "SCEN"),
+            )
+            .expect("add packed scenario definition");
+        fs::write(
+            &scenario_path,
+            scenario_group.pack().expect("pack aliased scenario"),
+        )
+        .expect("write aliased scenario");
+
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content_root));
+        let app = new_menu_app_with_paths(640, 480, &paths);
+        let staged = app
+            .prepare_network_host_scenario(
+                FrontendScenario {
+                    identifier: "AliasScenario.c4s".to_string(),
+                    title: "Scenario Alias".to_string(),
+                    path: Some(scenario_path.clone()),
+                    ..FrontendScenario::fallback()
+                },
+                ScenarioDefinitionLoad::Fixed {
+                    modules: vec![path_as_legacy_text(&scenario_path)],
+                    definition_root: None,
+                },
+            )
+            .expect("stage packed scenario alias");
+        assert_eq!(
+            staged.scenario.definition_resource_paths(),
+            [scenario_path.clone()]
+        );
+
+        let prepared = prepare_staged_network_host(&app, &staged);
+        let snapshot = prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("scenario-alias JoinData");
+        assert_eq!(snapshot.parameters.game_resources[0].id, snapshot.parameters.scenario.id);
+        assert_eq!(
+            snapshot.parameters.game_resources[0].resource_type,
+            lc_network::HostResourceType::Scenario as u8
+        );
+        assert!(published_definition_wire_names(&prepared).is_empty());
+        assert_eq!(
+            prepared.definition_modules(),
+            [path_as_legacy_text(&scenario_path)]
+        );
+
+        let scenario = prepared
+            .claim_scenario()
+            .expect("claim post-publication scenario alias");
+        assert!(scenario.definition_resource_paths().is_empty());
+        let mut definition_ids = Vec::new();
+        scenario.visit_definition_groups(|id, _| definition_ids.push(id.to_string()));
+        assert_eq!(definition_ids, ["SCEN"]);
+    }
+
+    #[test]
+    fn packed_system_alias_becomes_a_repeated_definition_row() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("system-alias user data");
+        let content = tempdir().expect("system-alias content");
+        let content_root = content.path();
+        let system_path = content_root.join("System.c4g");
+        let mut system_group = lc_resources::MutableGroup::new("System.c4g");
+        system_group
+            .add_child(
+                "SystemDef.c4d",
+                packed_network_definition("SystemDef.c4d", "SYSD"),
+            )
+            .expect("add definition to packed System");
+        fs::write(
+            &system_path,
+            system_group.pack().expect("pack aliased System"),
+        )
+        .expect("write aliased System");
+        fs::create_dir_all(content_root.join("Material.c4g"))
+            .expect("system-alias global material group");
+        let scenario_path = content_root.join("SystemAlias.c4s");
+        fs::create_dir_all(&scenario_path).expect("system-alias scenario");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=System Alias\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nLocalOnly=1\n",
+        )
+        .expect("system-alias scenario core");
+
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content_root));
+        let app = new_menu_app_with_paths(640, 480, &paths);
+        let staged = app
+            .prepare_network_host_scenario(
+                FrontendScenario {
+                    identifier: "SystemAlias.c4s".to_string(),
+                    title: "System Alias".to_string(),
+                    path: Some(scenario_path),
+                    ..FrontendScenario::fallback()
+                },
+                ScenarioDefinitionLoad::Fixed {
+                    modules: vec!["System.c4g".to_string()],
+                    definition_root: None,
+                },
+            )
+            .expect("stage packed System alias");
+        assert_eq!(staged.scenario.definition_resource_paths(), [system_path.clone()]);
+
+        let prepared = prepare_staged_network_host(&app, &staged);
+        let game_resources = &prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("system-alias JoinData")
+            .parameters
+            .game_resources;
+        assert_eq!(game_resources[0], game_resources[1]);
+        assert_eq!(
+            game_resources[0].resource_type,
+            lc_network::HostResourceType::Definitions as u8
+        );
+        assert_eq!(
+            published_definition_wire_names(&prepared),
+            vec![b"System.c4g".to_vec(), b"System.c4g".to_vec()]
+        );
+        assert_eq!(prepared.definition_modules(), ["System.c4g"]);
+
+        let scenario = prepared
+            .claim_scenario()
+            .expect("claim post-publication System alias");
+        assert_eq!(
+            scenario.definition_resource_paths(),
+            [system_path.clone(), system_path]
+        );
+        let mut definition_ids = Vec::new();
+        scenario.visit_definition_groups(|id, _| definition_ids.push(id.to_string()));
+        assert_eq!(definition_ids, ["SYSD"]);
+    }
+
+    #[test]
+    fn packed_material_alias_removes_the_host_material_projection() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("material-alias user data");
+        let content = tempdir().expect("material-alias content");
+        let content_root = content.path();
+        fs::create_dir_all(content_root.join("System.c4g"))
+            .expect("material-alias System group");
+        let material_path = content_root.join("Material.c4g");
+        let mut material_group = lc_resources::MutableGroup::new("Material.c4g");
+        material_group
+            .add_child(
+                "MaterialDef.c4d",
+                packed_network_definition("MaterialDef.c4d", "MATD"),
+            )
+            .expect("add definition to packed Material");
+        fs::write(
+            &material_path,
+            material_group.pack().expect("pack aliased Material"),
+        )
+        .expect("write aliased Material");
+        let scenario_path = content_root.join("MaterialAlias.c4s");
+        fs::create_dir_all(&scenario_path).expect("material-alias scenario");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Material Alias\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nLocalOnly=1\n",
+        )
+        .expect("material-alias scenario core");
+
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content_root));
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let staged = app
+            .prepare_network_host_scenario(
+                FrontendScenario {
+                    identifier: "MaterialAlias.c4s".to_string(),
+                    title: "Material Alias".to_string(),
+                    path: Some(scenario_path),
+                    ..FrontendScenario::fallback()
+                },
+                ScenarioDefinitionLoad::Fixed {
+                    modules: vec!["Material.c4g".to_string()],
+                    definition_root: None,
+                },
+            )
+            .expect("stage packed Material alias");
+
+        let prepared = prepare_staged_network_host(&app, &staged);
+        let game_resources = &prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("material-alias JoinData")
+            .parameters
+            .game_resources;
+        assert_eq!(game_resources[0], game_resources[2]);
+        assert_eq!(
+            game_resources[2].resource_type,
+            lc_network::HostResourceType::Definitions as u8
+        );
+        assert!(prepared.material_resource_groups().is_empty());
+        assert_eq!(prepared.definition_modules(), ["Material.c4g"]);
+        let frozen_definition_paths = {
+            let (executable, definitions) = prepared.definition_save_paths();
+            (executable.to_owned(), definitions.to_owned())
+        };
+        assert_eq!(
+            frozen_definition_paths,
+            game_save_definition_paths(
+                Some(&paths),
+                &load_native_config_bytes(Some(&paths)),
+            )
+        );
+        persist_config_value(&paths, "General", "DefinitionPath", "Changed/")
+            .expect("rewrite DefinitionPath after host preparation");
+        assert_eq!(
+            prepared.definition_save_paths(),
+            (
+                frozen_definition_paths.0.as_str(),
+                frozen_definition_paths.1.as_str(),
+            ),
+            "runtime saves retain the process-loaded path pair frozen for the initial dynamic"
+        );
+        assert_eq!(
+            game_save_definition_paths(
+                Some(&paths),
+                &load_native_config_bytes(Some(&paths)),
+            )
+            .1,
+            "Changed/",
+            "the on-disk value really changed after preparation"
+        );
+
+        app.install_prepared_host_material_resources(&prepared);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_owned(),
+            prepared: Some(prepared.clone()),
+        }));
+        let (authoritative_materials, reuse_preloaded) = network_material_load_plan(
+            app.network_mode.as_ref(),
+            app.network_material_resource_groups.as_deref(),
+        );
+        assert_eq!(authoritative_materials.map(<[Group]>::len), Some(0));
+        assert!(
+            !reuse_preloaded,
+            "an authoritative empty host material vector bypasses staged local preload data"
+        );
+
+        let scenario = prepared
+            .claim_scenario()
+            .expect("claim post-publication Material alias");
+        app.prepare_recording_for(
+            &staged.frontend,
+            &scenario,
+            None,
+            Some(prepared.definition_modules()),
+            Some(prepared.definition_save_paths()),
+        )
+        .expect("prepare recording from frozen host definition identity");
+        let recording_seed = app
+            .live_save_seed
+            .as_ref()
+            .expect("prepared-host recording seed");
+        assert_eq!(recording_seed.definition_modules, ["Material.c4g"]);
+        assert_eq!(
+            (
+                recording_seed.definition_executable_path.as_str(),
+                recording_seed.definition_path.as_str(),
+            ),
+            (
+                frozen_definition_paths.0.as_str(),
+                frozen_definition_paths.1.as_str(),
+            ),
+            "initial and runtime record saves share the definition paths frozen before the config rewrite"
+        );
+        assert_eq!(
+            recording_definition_modules(&scenario, Some(prepared.definition_modules())),
+            ["Material.c4g"],
+            "recording keeps Game.DefinitionFilenames instead of final cross-type resource rows"
+        );
+        assert_eq!(
+            recording_definition_modules(&scenario, None),
+            [
+                path_as_legacy_text(&material_path),
+                path_as_legacy_text(&material_path),
+            ],
+            "the fallback demonstrates the repeated physical projection that must not seed a prepared-host record"
+        );
+        assert_eq!(
+            scenario.definition_resource_paths(),
+            [material_path.clone(), material_path]
+        );
+        let mut definition_ids = Vec::new();
+        scenario.visit_definition_groups(|id, _| definition_ids.push(id.to_string()));
+        assert_eq!(definition_ids, ["MATD"]);
+    }
+
+    #[test]
+    fn scenario_preset_replaces_seed_while_fixed_selection_wins_publication() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("definition selection user data");
+        let content = tempdir().expect("definition selection content");
+        let content_root = content.path();
+        fs::create_dir_all(content_root.join("Material.c4g")).expect("global material group");
+        let custom_root = content_root.join("Custom");
+        for (module, id) in [
+            ("Seed.c4d", "SEED"),
+            ("Preset.c4d", "PSET"),
+            ("FixedA.c4d", "FIXA"),
+            ("FixedB.c4d", "FIXB"),
+        ] {
+            install_network_definition_pack(content_root, module, id);
+            install_network_definition_pack(&custom_root, module, id);
+        }
+        let outer = content_root.join("Outer.c4f");
+        install_network_definition_pack(&outer, "LocalOnly.c4d", "LOCL");
+        let scenario_path = outer.join("Choice.c4s");
+        fs::create_dir_all(&scenario_path).expect("selection scenario group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Definition Choice\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=./Preset.c4d\n",
+        )
+        .expect("selection scenario core");
+
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content_root));
+        persist_config_value(&paths, "General", "DefinitionPath", "Custom/")
+            .expect("configure DefinitionPath");
+        let app = new_menu_app_with_paths(640, 480, &paths);
+        let custom_prefix = startup_definition_paths(&paths)
+            .expect("read configured DefinitionPath")
+            .active_custom_root
+            .expect("activate configured DefinitionPath prefix");
+        let frontend = FrontendScenario {
+            identifier: "Outer.c4f/Choice.c4s".to_string(),
+            title: "Definition Choice".to_string(),
+            path: Some(scenario_path.clone()),
+            ..FrontendScenario::fallback()
+        };
+        let seed = app
+            .prepare_network_host_scenario(
+                frontend.clone(),
+                ScenarioDefinitionLoad::Seed {
+                    modules: vec!["Seed.c4d".to_string()],
+                    definition_root: Some(custom_prefix.clone()),
+                },
+            )
+            .expect("stage scenario-preset host");
+        let mismatch = build_network_host_preparation(
+            &app,
+            &seed.frontend,
+            &seed.definition_load,
+            &seed.effective_definition_modules,
+            &[],
+            Some((&seed.definition_executable_path, &seed.definition_path)),
+            Some((&seed.lobby.local_name, &seed.lobby.nick)),
+        )
+        .expect("build mismatched staged definition probe")
+        .prepare()
+        .expect_err("host preparation rejects a changed staged definition vector");
+        assert!(matches!(
+            mismatch,
+            prepared_host_bootstrap::PrepareHostBootstrapError::StagedDefinitionResourcesChanged {
+                staged,
+                prepared,
+            } if staged.is_empty()
+                && prepared
+                    == vec![
+                        custom_root.join("Preset.c4d"),
+                        content_root.join("Preset.c4d"),
+                        outer.clone(),
+                    ]
+        ));
+        let seed_prepared = prepare_staged_network_host(&app, &seed);
+        assert_eq!(
+            published_definition_wire_names(&seed_prepared),
+            vec![
+                b"Custom/./Preset.c4d".to_vec(),
+                b"./Preset.c4d".to_vec(),
+                b"Outer.c4f".to_vec(),
+            ],
+            "a nonempty scenario preset replaces the seed before rooted/local expansion"
+        );
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Definition Choice\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Preset.c4d\n",
+        )
+        .expect("change only the scenario preset spelling after staging");
+        let changed_spelling = build_network_host_preparation(
+            &app,
+            &seed.frontend,
+            &seed.definition_load,
+            &seed.effective_definition_modules,
+            &seed.definition_resources,
+            Some((&seed.definition_executable_path, &seed.definition_path)),
+            Some((&seed.lobby.local_name, &seed.lobby.nick)),
+        )
+        .expect("build changed-spelling probe")
+        .prepare()
+        .expect_err("host preparation rejects changed staged publication spellings");
+        assert!(matches!(
+            changed_spelling,
+            prepared_host_bootstrap::PrepareHostBootstrapError::StagedDefinitionPublicationChanged {
+                staged,
+                prepared,
+            } if staged != prepared
+        ));
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Definition Choice\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Seed.c4d\n",
+        )
+        .expect("change scenario preset after staging");
+        let changed_selection = build_network_host_preparation(
+            &app,
+            &seed.frontend,
+            &seed.definition_load,
+            &seed.effective_definition_modules,
+            &seed.definition_resources,
+            Some((&seed.definition_executable_path, &seed.definition_path)),
+            Some((&seed.lobby.local_name, &seed.lobby.nick)),
+        )
+        .expect("build changed-selection probe")
+        .prepare()
+        .expect_err("host preparation rejects changed staged selection semantics");
+        assert!(matches!(
+            changed_selection,
+            prepared_host_bootstrap::PrepareHostBootstrapError::StagedDefinitionSelectionChanged {
+                staged,
+                prepared,
+            } if staged == vec!["Preset.c4d".to_owned()]
+                && prepared == vec!["Seed.c4d".to_owned()]
+        ));
+
+        let fixed = app
+            .prepare_network_host_scenario(
+                frontend.clone(),
+                ScenarioDefinitionLoad::Fixed {
+                    modules: vec!["FixedB.c4d".to_string(), "./FixedA.c4d".to_string()],
+                    definition_root: Some(custom_prefix.clone()),
+                },
+            )
+            .expect("stage fixed-definition host");
+        let fixed_prepared = prepare_staged_network_host(&app, &fixed);
+        assert_eq!(
+            published_definition_wire_names(&fixed_prepared),
+            vec![
+                b"Custom/FixedB.c4d".to_vec(),
+                b"Custom/./FixedA.c4d".to_vec(),
+                b"FixedB.c4d".to_vec(),
+                b"./FixedA.c4d".to_vec(),
+                b"Outer.c4f".to_vec(),
+            ],
+            "fixed selection stays authoritative and folder locals append exactly once"
+        );
+        assert_eq!(
+            fixed_prepared.definition_modules(),
+            [
+                "Custom/FixedB.c4d",
+                "Custom/./FixedA.c4d",
+                "FixedB.c4d",
+                "./FixedA.c4d",
+                "Outer.c4f",
+            ],
+            "the pre-SetModules vector remains available after publication"
+        );
+        assert_eq!(
+            activated_definition_load(
+                Some(fixed_prepared.definition_modules().to_vec()),
+                ScenarioDefinitionLoad::Fixed {
+                    modules: vec!["final/retyped/paths.c4d".to_owned()],
+                    definition_root: None,
+                },
+            ),
+            ScenarioDefinitionLoad::Fixed {
+                modules: vec![
+                    "Custom/FixedB.c4d".to_owned(),
+                    "Custom/./FixedA.c4d".to_owned(),
+                    "FixedB.c4d".to_owned(),
+                    "./FixedA.c4d".to_owned(),
+                    "Outer.c4f".to_owned(),
+                ],
+                definition_root: None,
+            },
+            "activation retains Game.DefinitionFilenames instead of retyped resource paths"
+        );
+        let dynamic = fixed_prepared
+            .host_config()
+            .resource_files
+            .iter()
+            .find(|resource| {
+                resource.core.resource_type == lc_network::HostResourceType::Dynamic as u8
+            })
+            .expect("fixed dynamic resource");
+        let scenario = Group::open(&dynamic.path)
+            .expect("open fixed dynamic")
+            .read_file("Scenario.txt")
+            .expect("fixed dynamic Scenario.txt");
+        let expected = b"Definitions=\"FixedB.c4d\",\"./FixedA.c4d\",\"FixedB.c4d\",\"./FixedA.c4d\",\"Outer.c4f\"";
+        assert!(scenario
+            .windows(expected.len())
+            .any(|window| window == expected));
+
+        let fixed_empty = app
+            .prepare_network_host_scenario(
+                frontend,
+                ScenarioDefinitionLoad::Fixed {
+                    modules: Vec::new(),
+                    definition_root: Some(custom_prefix),
+                },
+            )
+            .expect("stage fixed-empty definition host");
+        let fixed_empty_prepared = prepare_staged_network_host(&app, &fixed_empty);
+        assert_eq!(
+            published_definition_wire_names(&fixed_empty_prepared),
+            vec![b"Outer.c4f".to_vec()],
+            "fixed-empty suppresses the nonempty preset while folder locals still append"
+        );
+    }
+
+    #[test]
     fn selected_network_scenario_installs_prepared_host_before_admission() {
         // OpenScenario and InitHost finish before Players.Init authors the
         // empty Initial PlayerInfo; AllowJoin follows that direct local
@@ -145389,6 +146546,8 @@ ScenInfoArea=70,5,25,90
         )
         .expect("configure selected-host reference listener");
         let mut app = new_menu_app_with_paths(1280, 720, &paths);
+        let staged = prepare_minimal_host_lobby(&app, scenario.clone());
+        app.staged_network_host_scenario = Some(staged);
 
         app.activate_prepared_network_host(scenario.clone(), SocketAddr::from(([127, 0, 0, 1], 0)));
         assert!(app.network.is_none(), "preparation must precede bind");
@@ -145413,11 +146572,15 @@ ScenInfoArea=70,5,25,90
         assert!(app.control_player_infos.contains_client(0));
         assert_eq!(app.control_player_infos.player_count(), 0);
         assert_eq!(
-            app.network_lobby
-                .as_ref()
-                .and_then(NetworkLobbyState::selected_identifier),
-            Some(scenario.identifier.as_str())
+            prepared.scenario_wire_name().as_bytes(),
+            scenario.identifier.as_bytes(),
+            "the prepared host retains the selected scenario's wire identity"
         );
+        assert!(
+            app.network_lobby.is_none(),
+            "a staged host uses the exact C++ lobby instead of the generic projection"
+        );
+        assert!(app.classic_host_lobby.is_some());
         let local_addresses = app
             .network
             .as_ref()
@@ -145477,7 +146640,13 @@ ScenInfoArea=70,5,25,90
             target_tick: 0,
         };
         let (manager, events, mut commands) = NetworkManager::test_stub_with_commands();
-        app.network = Some(manager);
+        // The live manager owns the temporary published definition packs.
+        // Keep it alive while the command stub observes the countdown; C++
+        // likewise retains its resource list through game activation.
+        let _prepared_resource_owner = app
+            .network
+            .replace(manager)
+            .expect("prepared host retains its live resource manager");
         install_test_classic_host_lobby(&mut app);
         app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
             countdown_seconds: DEFAULT_LOBBY_COUNTDOWN_SECONDS,
@@ -145581,7 +146750,10 @@ ScenInfoArea=70,5,25,90
         assert_eq!(
             app.engine.random_seed(),
             prepared_random_seed,
-            "the network host seed remains authoritative over offline defaults",
+            "the network host seed remains authoritative over offline defaults (status: {:?}, mode: {:?}, loading: {})",
+            app.status_text,
+            app.mode,
+            app.loading_state.is_some(),
         );
         assert_eq!(
             (
@@ -161929,14 +163101,14 @@ VendorNestedField=discard me\n";
         let mut app = new_state_only_menu_app(320, 200);
         app.client_combined_scenario_path = Some(owned_path.clone());
         app.client_combined_preload_file.replace(owned_path.clone());
-        app.client_material_resource_groups = Some(Vec::new());
+        app.network_material_resource_groups = Some(Vec::new());
 
         app.clear_lobby_preload();
 
         assert!(!owned_path.exists());
         assert!(app.client_combined_scenario_path.is_none());
         assert!(!app.client_combined_preload_file.is_owned());
-        assert!(app.client_material_resource_groups.is_none());
+        assert!(app.network_material_resource_groups.is_none());
 
         let existing_path = directory.path().join("Combined8.c4s");
         fs::write(&existing_path, b"pre-existing scenario").expect("write existing scenario");
@@ -171973,6 +173145,7 @@ protected func InputCallback(string answer, int player)
                     lc_engine::TeamInfo::new(1, "One", 0).with_player_ids(vec![20]),
                     lc_engine::TeamInfo::new(2, "Two", 0),
                 ],
+                definition_modules: None,
             }),
             offline_startup_players: None,
             offline_savegame: None,
@@ -193197,6 +194370,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 auto_frame_skip: true,
                 team_configuration: TeamConfiguration::default(),
                 team_registry: Vec::new(),
+                definition_modules: None,
             }),
             offline_startup_players: None,
             offline_savegame: None,
@@ -193330,6 +194504,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 auto_frame_skip: true,
                 team_configuration: TeamConfiguration::default(),
                 team_registry: Vec::new(),
+                definition_modules: None,
             }),
             offline_startup_players: None,
             offline_savegame: None,

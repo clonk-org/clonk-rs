@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use lc_engine::{player_file::PlayerFile, LegacyCString};
 use lc_network::HostInitialResourceSource;
 use lc_platform::AppPaths;
-use lc_resources::Group;
 use thiserror::Error;
 
+use crate::resource_path_identity::{
+    open_group_path, opened_group_name, path_from_wire_bytes, path_wire_bytes,
+};
 use crate::SelectedClientPlayer;
 
 const CFG_MAX_STRING: usize = 1024;
@@ -116,7 +118,10 @@ impl ConfiguredClientPlayers {
             .iter()
             .map(|player| HostInitialResourceSource {
                 path: player.source_path().to_path_buf(),
+                lookup_name: player.resource_lookup_name().clone(),
+                opened_name: player.resource_opened_name().clone(),
                 wire_name: player.resource_wire_name().clone(),
+                virtual_group_bytes: None,
             })
             .collect()
     }
@@ -444,8 +449,7 @@ fn native_config_section_name(line: &[u8]) -> Option<&[u8]> {
         .position(|byte| !matches!(byte, b' ' | b'\t'))
         .unwrap_or(line.len());
     let structural = &line[start..];
-    if structural.first() != Some(&b'[')
-        || !structural.get(1).is_some_and(u8::is_ascii_alphabetic)
+    if structural.first() != Some(&b'[') || !structural.get(1).is_some_and(u8::is_ascii_alphabetic)
     {
         return None;
     }
@@ -668,29 +672,39 @@ fn load_module(module: &[u8], exe_roots: &[PathBuf]) -> Option<SelectedClientPla
     let module_filename = LegacyCString::from_bytes(module.to_vec())?;
     let module_path = path_from_bytes(module);
     let module_is_absolute = module_path.is_absolute();
-    let source_path = if module_is_absolute {
-        module_path
+    let (group, executable_root) = if module_is_absolute {
+        let group = open_group_path(&module_path).ok()?;
+        let executable_root = matching_executable_root(&module_path, exe_roots)
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
+        (group, executable_root)
     } else {
-        exe_roots
-            .iter()
-            .map(|root| root.join(&module_path))
-            .find(|candidate| candidate.exists())?
+        exe_roots.iter().find_map(|root| {
+            open_group_path(&root.join(&module_path))
+                .ok()
+                .map(|group| (group, root.clone()))
+        })?
     };
     let resource_name = if module_is_absolute {
-        exe_relative_name(&source_path, module, exe_roots)
+        exe_relative_name(&module_path, module, exe_roots)
     } else {
         module.to_vec()
     };
-    let resource_wire_name = LegacyCString::from_bytes(resource_name)?;
-    let group = Group::open(&source_path).ok()?;
+    let resource_lookup_name = LegacyCString::from_bytes(resource_name.clone())?;
+    let resource_opened_name_bytes =
+        opened_group_name(group.root(), &resource_name, &executable_root);
+    let resource_wire_name = resource_lookup_name.clone();
+    let resource_opened_name = LegacyCString::from_bytes(resource_opened_name_bytes)?;
     let player_file = PlayerFile::load(&group).ok()?;
     let player_text = group.read_file("Player.txt").ok()?;
     let player_name = player_name_from_core(&player_text);
     let (network_color, alternate_color) = player_colors_from_core(&player_text);
     Some(SelectedClientPlayer::from_configured(
-        source_path,
+        group.root().to_path_buf(),
         module_filename,
+        resource_lookup_name,
         resource_wire_name,
+        resource_opened_name,
         legacy_string(&player_name),
         network_color,
         alternate_color,
@@ -698,17 +712,18 @@ fn load_module(module: &[u8], exe_roots: &[PathBuf]) -> Option<SelectedClientPla
     ))
 }
 
-fn exe_relative_name(source_path: &Path, module: &[u8], exe_roots: &[PathBuf]) -> Vec<u8> {
+fn matching_executable_root<'a>(source_path: &Path, exe_roots: &'a [PathBuf]) -> Option<&'a Path> {
     exe_roots
         .iter()
-        .filter_map(|root| {
-            source_path
-                .strip_prefix(root)
-                .ok()
-                .map(|relative| (root.components().count(), relative))
-        })
-        .max_by_key(|(component_count, _)| *component_count)
-        .map(|(_, relative)| path_bytes(relative))
+        .filter(|root| source_path.strip_prefix(root).is_ok())
+        .max_by_key(|root| root.components().count())
+        .map(PathBuf::as_path)
+}
+
+fn exe_relative_name(source_path: &Path, module: &[u8], exe_roots: &[PathBuf]) -> Vec<u8> {
+    matching_executable_root(source_path, exe_roots)
+        .and_then(|root| source_path.strip_prefix(root).ok())
+        .map(path_bytes)
         .unwrap_or_else(|| module.to_vec())
 }
 
@@ -940,7 +955,9 @@ fn parse_cpp_u32(value: &[u8]) -> Option<u32> {
         if digit >= radix {
             break;
         }
-        parsed = parsed.wrapping_mul(u64::from(radix)).wrapping_add(u64::from(digit));
+        parsed = parsed
+            .wrapping_mul(u64::from(radix))
+            .wrapping_add(u64::from(digit));
         consumed = true;
     }
     consumed.then(|| {
@@ -1040,27 +1057,12 @@ fn trim_spaces(value: &[u8]) -> &[u8] {
     &value[start..end]
 }
 
-#[cfg(unix)]
 fn path_from_bytes(bytes: &[u8]) -> PathBuf {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-    PathBuf::from(OsString::from_vec(bytes.to_vec()))
+    path_from_wire_bytes(bytes)
 }
 
-#[cfg(not(unix))]
-fn path_from_bytes(bytes: &[u8]) -> PathBuf {
-    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
-}
-
-#[cfg(unix)]
 fn path_bytes(path: &Path) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-    path.as_os_str().as_bytes().to_vec()
-}
-
-#[cfg(not(unix))]
-fn path_bytes(path: &Path) -> Vec<u8> {
-    path.to_string_lossy().as_bytes().to_vec()
+    path_wire_bytes(path)
 }
 
 #[cfg(test)]
@@ -1283,6 +1285,38 @@ mod tests {
     }
 
     #[test]
+    fn host_resource_sources_retain_the_group_opened_player_alias() {
+        // AddByFile first probes the incoming alias, but stores the filename
+        // retained by C4Group. A later exact spelling therefore reuses the
+        // alias-opened resource (src/C4PlayerInfo.cpp:70-101;
+        // src/C4Network2Res.cpp:377-422,1414-1449).
+        let install = tempdir().expect("install root");
+        let player = install.path().join("Players/Player.c4p");
+        write_player(&player, b"Player");
+        let config = install.path().join("LegacyClonk.conf");
+        fs::write(
+            &config,
+            b"[General]\nParticipants=\"Players/P?ayer.c4p;Players/Player.c4p\"\n",
+        )
+        .expect("write config");
+
+        let loaded = super::load_configured_client_players_from_roots(
+            &config,
+            &[install.path().to_path_buf()],
+        )
+        .expect("load aliased players");
+        let sources = loaded.host_initial_resource_sources();
+
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].path, player);
+        assert_eq!(sources[0].lookup_name.as_bytes(), b"Players/P?ayer.c4p");
+        assert_eq!(sources[0].opened_name.as_bytes(), b"Players/Player.c4p");
+        assert_eq!(sources[0].wire_name.as_bytes(), b"Players/P?ayer.c4p");
+        assert_eq!(sources[1].lookup_name.as_bytes(), b"Players/Player.c4p");
+        assert_eq!(sources[1].opened_name.as_bytes(), b"Players/Player.c4p");
+    }
+
+    #[test]
     fn empty_module_segment_consumes_cpp_player_capacity() {
         // C4ClientPlayerInfos allocates SModuleCount slots but indexes the raw
         // semicolon segments. A leading empty segment therefore consumes the
@@ -1292,11 +1326,7 @@ mod tests {
         let install = tempdir().expect("install root");
         write_player(&install.path().join("Alpha.c4p"), b"Alpha");
         let config = install.path().join("LegacyClonk.conf");
-        fs::write(
-            &config,
-            b"[General]\nParticipants=\";Alpha.c4p\"\n",
-        )
-        .expect("write config");
+        fs::write(&config, b"[General]\nParticipants=\";Alpha.c4p\"\n").expect("write config");
 
         let loaded = super::load_configured_client_players_from_roots(
             &config,
@@ -1558,8 +1588,7 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
             .expect("add Player.txt");
         fs::write(&player, group.pack().expect("pack player")).expect("write player");
         let config = install.path().join("LegacyClonk.conf");
-        fs::write(&config, b"[General]\nParticipants=\"Alice.c4p\"\n")
-            .expect("write config");
+        fs::write(&config, b"[General]\nParticipants=\"Alice.c4p\"\n").expect("write config");
 
         let loaded = super::load_configured_client_players_from_roots(
             &config,

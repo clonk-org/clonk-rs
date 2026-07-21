@@ -95,7 +95,7 @@ impl Group {
         }
         if path.is_dir() {
             if path.file_name().is_some_and(|name| {
-                ignored_group_entry_bytes(name.as_encoded_bytes())
+                ignored_group_entry_bytes(&crate::path_to_legacy_bytes(Path::new(name)))
             }) {
                 return Err(GroupError::InvalidGroup(format!(
                     "ignored directory name: {}",
@@ -291,7 +291,7 @@ impl Group {
 
     pub fn open_child<P: AsRef<Path>>(&self, relative: P) -> Result<Self, GroupError> {
         let relative = normalize_path(relative.as_ref());
-        if relative.as_os_str().as_encoded_bytes().contains(&b'*') {
+        if crate::path_to_legacy_bytes(&relative).contains(&b'*') {
             return Err(GroupError::InvalidGroup(
                 "OpenAsChild: No wildcards allowed".to_string(),
             ));
@@ -441,7 +441,7 @@ impl MutableGroup {
     /// `C4Group::AppendEntry2StdFile`. Directory children are cloned
     /// recursively so the resulting group has the same child hierarchy.
     pub fn from_group(group: &Group) -> Result<Self, MutableGroupError> {
-        let mut mutable = Self::new_bytes(group.root().as_os_str().as_encoded_bytes().to_vec());
+        let mut mutable = Self::new_bytes(crate::path_to_legacy_bytes(group.root()));
         if let Some(header) = group.rewrite_header_template() {
             mutable.set_rewrite_header_template(header);
         }
@@ -767,9 +767,7 @@ impl PackedGroup {
             .entries
             .iter()
             .find(|entry| entry.name_bytes == name)
-            .ok_or_else(|| {
-                GroupError::EntryNotFound(PathBuf::from(String::from_utf8_lossy(name).into_owned()))
-            })?;
+            .ok_or_else(|| GroupError::EntryNotFound(crate::path_from_legacy_bytes(name)))?;
         self.read_entry_bytes(entry)
     }
 
@@ -826,13 +824,13 @@ impl PackedGroup {
     }
 
     fn open_child(&self, relative: &Path) -> Result<Group, GroupError> {
-        let pattern = relative.as_os_str().as_encoded_bytes();
+        let pattern = crate::path_to_legacy_bytes(relative);
         // C4Group::GetEntry applies WildcardMatch while walking stored order,
         // then validates only that selected entry as a child.
         let entry = self
             .entries
             .iter()
-            .find(|entry| group_name_wildcard_match(pattern, &entry.name_bytes))
+            .find(|entry| group_name_wildcard_match(&pattern, &entry.name_bytes))
             .ok_or_else(|| GroupError::EntryNotFound(relative.to_path_buf()))?;
         self.open_child_entry(entry)
     }
@@ -869,7 +867,7 @@ fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
         if entry.path() == root {
             continue;
         }
-        let name_bytes = entry.file_name().as_encoded_bytes().to_vec();
+        let name_bytes = crate::path_to_legacy_bytes(Path::new(&entry.file_name()));
         if ignored_group_entry_bytes(&name_bytes) {
             continue;
         }
@@ -918,7 +916,7 @@ fn resolve_directory_entry(root: &Path, relative: &Path) -> Result<PathBuf, Grou
         let Component::Normal(requested) = component else {
             return Err(missing());
         };
-        let requested = requested.as_encoded_bytes();
+        let requested = crate::path_to_legacy_bytes(Path::new(requested));
         let entries = fs::read_dir(&current).map_err(|error| {
             if matches!(
                 error.kind(),
@@ -932,9 +930,8 @@ fn resolve_directory_entry(root: &Path, relative: &Path) -> Result<PathBuf, Grou
         let mut matched = None;
         for entry in entries {
             let entry = entry?;
-            let name = entry.file_name();
-            let name = name.as_encoded_bytes();
-            if name.eq_ignore_ascii_case(requested) && !ignored_group_entry_bytes(name) {
+            let name = crate::path_to_legacy_bytes(Path::new(&entry.file_name()));
+            if name.eq_ignore_ascii_case(&requested) && !ignored_group_entry_bytes(&name) {
                 matched = Some(entry);
                 break;
             }
@@ -952,7 +949,7 @@ fn resolve_directory_entry(root: &Path, relative: &Path) -> Result<PathBuf, Grou
 /// selects the first matching directory entry without sorting.
 fn resolve_directory_child_entry(root: &Path, relative: &Path) -> Result<PathBuf, GroupError> {
     let missing = || GroupError::EntryNotFound(relative.to_path_buf());
-    let pattern = relative.as_os_str().as_encoded_bytes();
+    let pattern = crate::path_to_legacy_bytes(relative);
     let entries = fs::read_dir(root).map_err(|error| {
         if matches!(
             error.kind(),
@@ -965,9 +962,8 @@ fn resolve_directory_child_entry(root: &Path, relative: &Path) -> Result<PathBuf
     })?;
     for entry in entries {
         let entry = entry?;
-        let name = entry.file_name();
-        let name = name.as_encoded_bytes();
-        if group_name_wildcard_match(pattern, name) && !ignored_group_entry_bytes(name) {
+        let name = crate::path_to_legacy_bytes(Path::new(&entry.file_name()));
+        if group_name_wildcard_match(&pattern, &name) && !ignored_group_entry_bytes(&name) {
             return Ok(entry.path());
         }
     }
@@ -1101,7 +1097,7 @@ fn parse_entry(
             child_group_entry_filename_bytes(c_bytes(&name_bytes)).to_vec()
         }
     };
-    let name = String::from_utf8_lossy(&name_bytes).into_owned();
+    let name = lc_script::c4_string_from_bytes(&name_bytes);
     let _packed = cursor.read_i32::<LittleEndian>()?;
     let child = cursor.read_i32::<LittleEndian>()? != 0;
     let size = cursor.read_i32::<LittleEndian>()?;
@@ -1121,7 +1117,7 @@ fn parse_entry(
     cursor.read_exact(&mut skip)?;
 
     Ok(PackedEntry {
-        relative_path: normalize_path(Path::new(&name)),
+        relative_path: normalize_path(&crate::path_from_legacy_bytes(&name_bytes)),
         name_bytes,
         is_directory: child,
         size: size as u64,
@@ -1134,22 +1130,14 @@ fn parse_entry(
 }
 
 fn child_group_entry_filename_bytes(name: &[u8]) -> &[u8] {
-    let separator = name.iter().rposition(|byte| {
-        *byte == b'/' || (cfg!(windows) && *byte == b'\\')
-    });
+    let separator = name
+        .iter()
+        .rposition(|byte| *byte == b'/' || (cfg!(windows) && *byte == b'\\'));
     separator.map_or(name, |index| &name[index + 1..])
 }
 
-#[cfg(unix)]
 fn path_component_from_name_bytes(name: &[u8]) -> PathBuf {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    PathBuf::from(std::ffi::OsStr::from_bytes(name))
-}
-
-#[cfg(not(unix))]
-fn path_component_from_name_bytes(name: &[u8]) -> PathBuf {
-    PathBuf::from(lc_script::c4_string_from_bytes(name))
+    crate::path_from_legacy_bytes(name)
 }
 
 fn crc32(initial: u32, data: &[u8]) -> u32 {
@@ -1268,7 +1256,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 fn case_fold_group_path(path: &Path) -> Vec<u8> {
-    case_fold_group_name(path.as_os_str().as_encoded_bytes())
+    case_fold_group_name(&crate::path_to_legacy_bytes(path))
 }
 
 fn case_fold_group_name(name: &[u8]) -> Vec<u8> {
@@ -1884,12 +1872,14 @@ mod tests {
             ("a*b.txt", false, b"root"),
             ("Child.c4g", true, &child_image),
         ]);
-        let root = Group::from_memory(PathBuf::from("Outer.c4g"), outer)
-            .expect("root group opens");
+        let root = Group::from_memory(PathBuf::from("Outer.c4g"), outer).expect("root group opens");
 
         let root_entries = root.entries().unwrap();
         assert_eq!(root_entries[0].name_bytes, b"a_b.txt");
-        assert!(root.exists("a_b.txt"), "OpenRealGrpFile validates root names");
+        assert!(
+            root.exists("a_b.txt"),
+            "OpenRealGrpFile validates root names"
+        );
 
         let child = root.open_child("Child.c4g").expect("nested child opens");
         assert_eq!(child.entries().unwrap()[0].name_bytes, b"a*b.txt");

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use lc_engine::{LegacyCString, NetworkResourceCore};
 use lc_network::{
     publish_host_initial_resources, HostConfig, HostInitialResourcePublicationSpec,
-    HostInitialResourceSource, InitialNetworkDynamic, InitialNetworkDynamicEntry,
+    HostInitialResourceSource, HostResourceType, InitialNetworkDynamic, InitialNetworkDynamicEntry,
     JoinClientRegistrySnapshot, JoinGameParametersEnvelope, JoinTeamListSnapshot,
     PlayerInfoListSnapshot, ResourceDiscoverPacket, ResourceFileOwnership, ResourcePacket,
     ResourceTransferBackend,
@@ -255,6 +255,446 @@ fn cpp_host_publication_reuses_network_core_for_repeated_game_resource_file() {
 }
 
 #[test]
+fn packed_cross_type_source_reuses_the_definition_core() {
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    let network = directory.path().join("Network");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "scenario.bin", "Scenario", b"scenario");
+    let shared = packed_source(&sources, "shared.bin", "Shared", b"shared");
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
+        max_load_file_size: 100 * 1024 * 1024,
+        scenario: source(scenario, b"Scenario.c4s"),
+        definitions: vec![source(shared.clone(), b"System.c4g")],
+        system: source(shared, b"System.c4g"),
+        materials: Vec::new(),
+        players: Vec::new(),
+        dynamic: composed_dynamic(),
+        dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
+        parameters: base_parameters(),
+        dynamic_tick: 0,
+    })
+    .unwrap();
+
+    let resources = &publication.join_snapshot.parameters.game_resources;
+    assert_eq!(resources.len(), 2);
+    assert_eq!(resources[0].id, resources[1].id);
+    assert!(resources
+        .iter()
+        .all(|core| core.resource_type == HostResourceType::Definitions as u8));
+}
+
+#[test]
+fn packed_physical_directory_rewrites_the_reuse_key() {
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    let network = directory.path().join("Network");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "scenario.bin", "Scenario", b"scenario");
+    let shared = sources.join("Shared.c4g");
+    fs::create_dir_all(&shared).unwrap();
+    fs::write(shared.join("Payload.txt"), b"directory payload").unwrap();
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
+        max_load_file_size: 100 * 1024 * 1024,
+        scenario: source(scenario, b"Scenario.c4s"),
+        definitions: vec![
+            source(shared.clone(), b"Shared.c4g"),
+            source(shared.clone(), b"Shared.c4g"),
+            source_with_names(
+                shared.clone(),
+                b"Network/Shared.c4g",
+                b"Network/Shared.c4g",
+                b"LogicalAlias.c4g",
+            ),
+        ],
+        system: source(shared, b"Shared.c4g"),
+        materials: Vec::new(),
+        players: Vec::new(),
+        dynamic: composed_dynamic(),
+        dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
+        parameters: base_parameters(),
+        dynamic_tick: 0,
+    })
+    .unwrap();
+
+    assert_eq!(
+        publication
+            .join_snapshot
+            .parameters
+            .game_resources
+            .iter()
+            .map(|core| (core.id, core.resource_type))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, HostResourceType::Definitions as u8),
+            (2, HostResourceType::Definitions as u8),
+            (1, HostResourceType::Definitions as u8),
+            (3, HostResourceType::System as u8),
+        ]
+    );
+}
+
+#[test]
+fn post_pack_over_limit_directory_retains_logical_key_and_temporary_file() {
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    let network = directory.path().join("cache");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "scenario.bin", "Scenario", b"scenario");
+    let system = packed_source(&sources, "system.bin", "System", b"system");
+    let definition = sources.join("Empty.c4d");
+    fs::create_dir_all(&definition).unwrap();
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
+        max_load_file_size: 1,
+        scenario: source(scenario, b"Scenario.c4s"),
+        definitions: vec![
+            source(definition.clone(), b"Empty.c4d"),
+            source_with_names(
+                definition,
+                b"Network/Empty.c4d",
+                b"Network/Empty.c4d",
+                b"Alias.c4d",
+            ),
+        ],
+        system: source(system, b"System.c4g"),
+        materials: Vec::new(),
+        players: Vec::new(),
+        dynamic: composed_dynamic(),
+        dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
+        parameters: base_parameters(),
+        dynamic_tick: 0,
+    })
+    .unwrap();
+
+    let resources = &publication.join_snapshot.parameters.game_resources;
+    assert_eq!(resources[0].id, resources[1].id);
+    assert!(!resources[0].loadable);
+    let hosted = publication
+        .resource_files
+        .iter()
+        .find(|resource| resource.core.id == resources[0].id)
+        .expect("unloadable packed directory remains hosted for lifetime cleanup");
+    assert_eq!(hosted.ownership, ResourceFileOwnership::Temporary);
+    assert!(!hosted.binary_compatible);
+    assert!(hosted.path.exists());
+}
+
+#[test]
+fn same_source_path_with_a_distinct_wire_name_publishes_a_distinct_core() {
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    let network = directory.path().join("Network");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "scenario.bin", "Scenario", b"scenario");
+    let definition = packed_source(&sources, "definitions.bin", "Defs", b"definitions");
+    let system = packed_source(&sources, "system.bin", "System", b"system");
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
+        max_load_file_size: 100 * 1024 * 1024,
+        scenario: source(scenario, b"Scenario.c4s"),
+        definitions: vec![
+            source(definition.clone(), b"First.c4d"),
+            source(definition.clone(), b"First.c4d"),
+            source(definition, b"Alias.c4d"),
+        ],
+        system: source(system, b"System.c4g"),
+        materials: Vec::new(),
+        players: Vec::new(),
+        dynamic: composed_dynamic(),
+        dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
+        parameters: base_parameters(),
+        dynamic_tick: 0,
+    })
+    .unwrap();
+
+    assert_eq!(
+        publication
+            .resource_files
+            .iter()
+            .map(|resource| (resource.core.id, resource.core.filename.as_bytes()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, b"Scenario.c4s".as_slice()),
+            (1, b"First.c4d".as_slice()),
+            (2, b"Alias.c4d".as_slice()),
+            (3, b"System.c4g".as_slice()),
+            (4, b"Network/DynScenario.c4s".as_slice()),
+        ]
+    );
+    assert_eq!(
+        publication
+            .join_snapshot
+            .parameters
+            .game_resources
+            .iter()
+            .map(|core| core.id)
+            .collect::<Vec<_>>(),
+        vec![1, 1, 2, 3]
+    );
+}
+
+#[test]
+fn absolute_opened_source_and_relative_alias_publish_distinct_cores_with_same_wire_name() {
+    // AddByFile compares the incoming spelling with each earlier resource's
+    // retained group filename. An absolute first spelling therefore does not
+    // absorb a later relative alias, even when both open the same file and
+    // publish the same core filename. Once the relative spelling is retained,
+    // an exact repeat reuses that second core.
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    let network = directory.path().join("Network");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "scenario.bin", "Scenario", b"scenario");
+    let definition = packed_source(&sources, "definitions.bin", "Defs", b"definitions");
+    let absolute_name = definition.to_string_lossy().into_owned().into_bytes();
+    let system = packed_source(&sources, "system.bin", "System", b"system");
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
+        max_load_file_size: 100 * 1024 * 1024,
+        scenario: source(scenario, b"Scenario.c4s"),
+        definitions: vec![
+            source_with_names(
+                definition.clone(),
+                &absolute_name,
+                &absolute_name,
+                b"Objects.c4d",
+            ),
+            source(definition.clone(), b"Objects.c4d"),
+            source(definition, b"Objects.c4d"),
+        ],
+        system: source(system, b"System.c4g"),
+        materials: Vec::new(),
+        players: Vec::new(),
+        dynamic: composed_dynamic(),
+        dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
+        parameters: base_parameters(),
+        dynamic_tick: 0,
+    })
+    .unwrap();
+
+    assert_eq!(
+        publication
+            .resource_files
+            .iter()
+            .map(|resource| (resource.core.id, resource.core.filename.as_bytes()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, b"Scenario.c4s".as_slice()),
+            (1, b"Objects.c4d".as_slice()),
+            (2, b"Objects.c4d".as_slice()),
+            (3, b"System.c4g".as_slice()),
+            (4, b"Network/DynScenario.c4s".as_slice()),
+        ]
+    );
+    assert_eq!(
+        publication
+            .join_snapshot
+            .parameters
+            .game_resources
+            .iter()
+            .map(|core| core.id)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 2, 3]
+    );
+}
+
+#[test]
+fn player_lookup_reuses_an_earlier_cross_type_resource_core() {
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    let network = directory.path().join("Network");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "scenario.bin", "Scenario", b"scenario");
+    let shared = packed_source(&sources, "shared.bin", "Shared", b"shared");
+    let system = packed_source(&sources, "system.bin", "System", b"system");
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
+        max_load_file_size: 100 * 1024 * 1024,
+        scenario: source(scenario, b"Scenario.c4s"),
+        definitions: vec![source(shared.clone(), b"Shared.c4p")],
+        system: source(system, b"System.c4g"),
+        materials: Vec::new(),
+        players: vec![source(shared.clone(), b"Shared.c4p")],
+        dynamic: composed_dynamic(),
+        dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
+        parameters: base_parameters(),
+        dynamic_tick: 0,
+    })
+    .unwrap();
+
+    assert_eq!(publication.player_cores.len(), 1);
+    assert_eq!(publication.player_cores[0].id, 1);
+    assert_eq!(
+        publication.player_cores[0].resource_type,
+        HostResourceType::Definitions as u8
+    );
+    assert_eq!(
+        publication.player_cores[0].filename.as_bytes(),
+        b"Shared.c4p"
+    );
+    assert_eq!(
+        publication.player_resource_sources,
+        vec![(shared, publication.player_cores[0].clone())]
+    );
+    assert_eq!(
+        publication
+            .resource_files
+            .iter()
+            .map(|resource| resource.core.id)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+}
+
+#[test]
+fn exact_player_name_reuses_an_earlier_alias_opened_core() {
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    let network = directory.path().join("Network");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "scenario.bin", "Scenario", b"scenario");
+    let system = packed_source(&sources, "system.bin", "System", b"system");
+    let player = packed_source(&sources, "player.bin", "Player", b"player");
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
+        max_load_file_size: 100 * 1024 * 1024,
+        scenario: source(scenario, b"Scenario.c4s"),
+        definitions: Vec::new(),
+        system: source(system, b"System.c4g"),
+        materials: Vec::new(),
+        players: vec![
+            source_with_names(
+                player.clone(),
+                b"Players/P?ayer.c4p",
+                b"Players/Player.c4p",
+                b"Players/P?ayer.c4p",
+            ),
+            source(player, b"Players/Player.c4p"),
+        ],
+        dynamic: composed_dynamic(),
+        dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
+        parameters: base_parameters(),
+        dynamic_tick: 0,
+    })
+    .unwrap();
+
+    assert_eq!(publication.player_cores.len(), 2);
+    assert_eq!(
+        publication.player_cores[0].id,
+        publication.player_cores[1].id
+    );
+    assert_eq!(
+        publication.player_cores[0].filename.as_bytes(),
+        b"Players/P?ayer.c4p"
+    );
+}
+
+#[test]
+fn virtual_group_materialization_sanitizes_the_opened_basename() {
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    let network = directory.path().join("Network");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "scenario.bin", "Scenario", b"scenario");
+    let system = packed_source(&sources, "system.bin", "System", b"system");
+    let mut virtual_group = MutableGroup::new("Virtual.c4d");
+    virtual_group
+        .add_file_with_metadata("Data.bin", b"virtual".to_vec(), 1, false)
+        .unwrap();
+    let virtual_group_bytes = virtual_group.pack().unwrap();
+    let virtual_path = sources.join("Parent.c4f/Virtual.c4d");
+    let raw_wire_name = b"Folder\\Raw\xff.c4d";
+    let opened_name = b"Folder/Opened\xfe.c4d";
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
+        max_load_file_size: 100 * 1024 * 1024,
+        scenario: source(scenario, b"Scenario.c4s"),
+        definitions: vec![HostInitialResourceSource {
+            path: virtual_path,
+            lookup_name: LegacyCString::from_bytes(raw_wire_name.to_vec()).unwrap(),
+            opened_name: LegacyCString::from_bytes(opened_name.to_vec()).unwrap(),
+            wire_name: LegacyCString::from_bytes(raw_wire_name.to_vec()).unwrap(),
+            virtual_group_bytes: Some(virtual_group_bytes.clone()),
+        }],
+        system: source(system, b"System.c4g"),
+        materials: Vec::new(),
+        players: Vec::new(),
+        dynamic: composed_dynamic(),
+        dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
+        parameters: base_parameters(),
+        dynamic_tick: 0,
+    })
+    .unwrap();
+
+    let definition = &publication.resource_files[1];
+    assert_eq!(definition.core.filename.as_bytes(), raw_wire_name);
+    assert_eq!(definition.path.file_name().unwrap(), "Opened_.c4d");
+    assert_eq!(definition.ownership, ResourceFileOwnership::Temporary);
+    assert_eq!(fs::read(&definition.path).unwrap(), virtual_group_bytes);
+}
+
+#[test]
+fn virtual_group_materialization_flattens_native_backslashes_before_basename_selection() {
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    let network = directory.path().join("Network");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "scenario.bin", "Scenario", b"scenario");
+    let system = packed_source(&sources, "system.bin", "System", b"system");
+    let mut virtual_group = MutableGroup::new("Virtual.c4d");
+    virtual_group
+        .add_file_with_metadata("Data.bin", b"virtual".to_vec(), 1, false)
+        .unwrap();
+    let virtual_group_bytes = virtual_group.pack().unwrap();
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
+        max_load_file_size: 100 * 1024 * 1024,
+        scenario: source(scenario, b"Scenario.c4s"),
+        definitions: vec![HostInitialResourceSource {
+            path: sources.join("Parent.c4f/Virtual.c4d"),
+            lookup_name: LegacyCString::from_bytes(b"Lookup.c4d".to_vec()).unwrap(),
+            opened_name: LegacyCString::from_bytes(b"C:\\Root\\Opened.c4d".to_vec()).unwrap(),
+            wire_name: LegacyCString::from_bytes(b"Lookup.c4d".to_vec()).unwrap(),
+            virtual_group_bytes: Some(virtual_group_bytes),
+        }],
+        system: source(system, b"System.c4g"),
+        materials: Vec::new(),
+        players: Vec::new(),
+        dynamic: composed_dynamic(),
+        dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
+        parameters: base_parameters(),
+        dynamic_tick: 0,
+    })
+    .unwrap();
+
+    assert_eq!(
+        publication.resource_files[1].path.file_name().unwrap(),
+        "C__Root_Opened.c4d"
+    );
+}
+
+#[test]
 fn league_initial_publication_hashes_scenario_and_all_game_resources_only() {
     let directory = TestDirectory::new();
     let sources = directory.path().join("sources");
@@ -360,14 +800,86 @@ fn failed_player_publication_consumes_its_reserved_resource_id() {
     );
 }
 
+#[test]
+fn failed_virtual_player_materialization_is_skipped_with_an_id_hole() {
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    let network = directory.path().join("Network");
+    fs::create_dir_all(&sources).unwrap();
+    fs::create_dir_all(&network).unwrap();
+    for suffix in 1..=999 {
+        let filename = if suffix == 1 {
+            "Packed.c4p".to_owned()
+        } else {
+            format!("Packed_{suffix}.c4p")
+        };
+        fs::write(network.join(filename), b"occupied").unwrap();
+    }
+    let scenario = packed_source(&sources, "scenario.bin", "Scenario", b"scenario");
+    let system = packed_source(&sources, "system.bin", "System", b"system");
+    let valid_player = packed_source(&sources, "valid.c4p", "Player", b"player");
+    let mut packed_player = MutableGroup::new("Packed.c4p");
+    packed_player
+        .add_file("Player.txt", b"[Player]\nName=Packed\n".to_vec())
+        .unwrap();
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: LegacyCString::from_bytes(b"OracleHost".to_vec()).unwrap(),
+        max_load_file_size: 100 * 1024 * 1024,
+        scenario: source(scenario, b"Scenario.c4s"),
+        definitions: Vec::new(),
+        system: source(system, b"System.c4g"),
+        materials: Vec::new(),
+        players: vec![
+            HostInitialResourceSource {
+                path: sources.join("Parent.c4f/Packed.c4p"),
+                lookup_name: LegacyCString::from_bytes(b"Packed.c4p".to_vec()).unwrap(),
+                opened_name: LegacyCString::from_bytes(b"Packed.c4p".to_vec()).unwrap(),
+                wire_name: LegacyCString::from_bytes(b"Packed.c4p".to_vec()).unwrap(),
+                virtual_group_bytes: Some(packed_player.pack().unwrap()),
+            },
+            source(valid_player, b"Valid.c4p"),
+        ],
+        dynamic: composed_dynamic(),
+        dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
+        parameters: base_parameters(),
+        dynamic_tick: 0,
+    })
+    .unwrap();
+
+    assert_eq!(publication.player_cores.len(), 1);
+    assert_eq!(publication.player_cores[0].id, 4);
+    assert_eq!(
+        publication
+            .resource_files
+            .iter()
+            .map(|resource| resource.core.id)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 4]
+    );
+}
+
 fn file_sha(path: &Path) -> [u8; 20] {
     Sha1::digest(fs::read(path).unwrap()).into()
 }
 
 fn source(path: PathBuf, wire_name: &[u8]) -> HostInitialResourceSource {
+    source_with_names(path, wire_name, wire_name, wire_name)
+}
+
+fn source_with_names(
+    path: PathBuf,
+    lookup_name: &[u8],
+    opened_name: &[u8],
+    wire_name: &[u8],
+) -> HostInitialResourceSource {
     HostInitialResourceSource {
         path,
+        lookup_name: LegacyCString::from_bytes(lookup_name.to_vec()).unwrap(),
+        opened_name: LegacyCString::from_bytes(opened_name.to_vec()).unwrap(),
         wire_name: LegacyCString::from_bytes(wire_name.to_vec()).unwrap(),
+        virtual_group_bytes: None,
     }
 }
 

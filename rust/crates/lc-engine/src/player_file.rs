@@ -404,13 +404,12 @@ impl CrewInfo {
         let bytes = group.read_file("ObjectInfo.txt")?;
         let source = lc_script::c4_string_from_bytes(&bytes);
         let assets = load_crew_portrait_assets(group);
-        let mut info =
-            Self::from_object_info_source(
-                &source,
-                assets.loaded,
-                load_unnamed_portrait,
-                value_resolution,
-            );
+        let mut info = Self::from_object_info_source(
+            &source,
+            assets.loaded,
+            load_unnamed_portrait,
+            value_resolution,
+        );
         info.core.original_filename = lc_script::c4_string_from_bytes(filename);
         if load_unnamed_portrait || info.core.portrait_file == "custom" {
             info.core.portrait_png = assets.png;
@@ -518,9 +517,7 @@ impl CrewInfo {
             in_action_time: 0,
             has_died: false,
             extra_data: entry(object_info, "ExtraData")
-                .and_then(|value| {
-                    parse_persisted_value_map(&value, value_resolution).ok()
-                })
+                .and_then(|value| parse_persisted_value_map(&value, value_resolution).ok())
                 .unwrap_or_default(),
             portraits,
         }
@@ -749,11 +746,7 @@ impl PlayerFile {
         group: &Group,
         load_unnamed_portraits: bool,
     ) -> Result<Self, ScenarioError> {
-        Self::load_with_portraits_and_optional_value_resolution(
-            group,
-            load_unnamed_portraits,
-            None,
-        )
+        Self::load_with_portraits_and_optional_value_resolution(group, load_unnamed_portraits, None)
     }
 
     pub fn load_with_portraits_and_value_resolution(
@@ -790,12 +783,7 @@ impl PlayerFile {
         };
 
         let mut crew = Vec::new();
-        collect_crew(
-            group,
-            &mut crew,
-            load_unnamed_portraits,
-            value_resolution,
-        )?;
+        collect_crew(group, &mut crew, load_unnamed_portraits, value_resolution)?;
         let pref_control_style_value = int("Preferences", "AutoStopControl", 0);
         let pref_control_style = pref_control_style_value != 0;
         let pref_auto_context_menu_value = match int("Preferences", "AutoContextMenu", -1) {
@@ -819,8 +807,7 @@ impl PlayerFile {
         } else {
             pref_color_dw_raw & 0x00ff_ffff
         };
-        let pref_color2_dw =
-            int("Preferences", "AlternateColorDw", 0) as u32 & 0x00ff_ffff;
+        let pref_color2_dw = int("Preferences", "AlternateColorDw", 0) as u32 & 0x00ff_ffff;
         let pref_position = int("Preferences", "Position", 0);
         let pref_control = int("Preferences", "Control", 1);
         let pref_mouse_value = int("Preferences", "Mouse", 1);
@@ -951,14 +938,12 @@ fn collect_crew(
             continue;
         };
         if is_info {
-            if let Ok(info) =
-                CrewInfo::load_with_filename(
-                    &child,
-                    &entry.name_bytes,
-                    load_unnamed_portraits,
-                    value_resolution,
-                )
-            {
+            if let Ok(info) = CrewInfo::load_with_filename(
+                &child,
+                &entry.name_bytes,
+                load_unnamed_portraits,
+                value_resolution,
+            ) {
                 crew.push(info);
             }
         }
@@ -970,17 +955,8 @@ fn collect_crew(
     Ok(())
 }
 
-#[cfg(unix)]
 fn path_from_group_name_bytes(bytes: &[u8]) -> std::path::PathBuf {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-
-    std::path::PathBuf::from(OsString::from_vec(bytes.to_vec()))
-}
-
-#[cfg(not(unix))]
-fn path_from_group_name_bytes(bytes: &[u8]) -> std::path::PathBuf {
-    std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+    lc_resources::path_from_legacy_bytes(bytes)
 }
 
 #[derive(Default)]
@@ -1128,9 +1104,7 @@ fn parse_persisted_value_map(
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
         {
-            return Err(parser.error(format!(
-                "invalid C4ValueMapData identifier `{name}`"
-            )));
+            return Err(parser.error(format!("invalid C4ValueMapData identifier `{name}`")));
         }
         parser.expect(b'=')?;
         let value = parser.value()?;
@@ -1231,9 +1205,11 @@ impl<'a> PersistedC4ValueParser<'a> {
     fn integer(&mut self) -> Result<i32, ScenarioError> {
         self.skip_whitespace();
         let start = self.position;
-        if self.input.get(self.position..self.position.saturating_add(2)).is_some_and(
-            |prefix| matches!(prefix, [b'0', b'x' | b'X']),
-        ) {
+        if self
+            .input
+            .get(self.position..self.position.saturating_add(2))
+            .is_some_and(|prefix| matches!(prefix, [b'0', b'x' | b'X']))
+        {
             self.position += 2;
             let digit_start = self.position;
             while self
@@ -1341,9 +1317,8 @@ impl<'a> PersistedC4ValueParser<'a> {
                 if (1_000_000_000..=1_001_000_000).contains(&value) {
                     let number = u64::try_from(value - 1_000_000_000).ok();
                     if let Some(number) = number.filter(|number| {
-                        self.resolution.is_some_and(|resolution| {
-                            resolution.object_numbers.contains(number)
-                        })
+                        self.resolution
+                            .is_some_and(|resolution| resolution.object_numbers.contains(number))
                     }) {
                         Ok((
                             lc_script::Value::Object(number),
@@ -1376,9 +1351,7 @@ impl<'a> PersistedC4ValueParser<'a> {
             }),
             b'I' => self.integer().map(|value| {
                 (
-                    lc_script::Value::C4Id(lc_script::c4_id_from_raw(
-                        value as isize as usize,
-                    )),
+                    lc_script::Value::C4Id(lc_script::c4_id_from_raw(value as isize as usize)),
                     PersistedDirectObjectStatus::NONE,
                 )
             }),
@@ -1386,9 +1359,7 @@ impl<'a> PersistedC4ValueParser<'a> {
                 let id = self.integer()?;
                 let value = self
                     .resolution
-                    .and_then(|resolution| {
-                        lc_script::resolve_c4_string(&resolution.strings, id)
-                    })
+                    .and_then(|resolution| lc_script::resolve_c4_string(&resolution.strings, id))
                     .map(lc_script::Value::String)
                     .unwrap_or(lc_script::Value::Nil);
                 Ok((value, PersistedDirectObjectStatus::NONE))
@@ -1402,9 +1373,8 @@ impl<'a> PersistedC4ValueParser<'a> {
                 let number = u64::try_from(number).ok();
                 let value = number
                     .filter(|number| {
-                        self.resolution.is_some_and(|resolution| {
-                            resolution.object_numbers.contains(number)
-                        })
+                        self.resolution
+                            .is_some_and(|resolution| resolution.object_numbers.contains(number))
                     })
                     .map(lc_script::Value::Object);
                 let missing = value.is_none();
@@ -1456,16 +1426,18 @@ impl<'a> PersistedC4ValueParser<'a> {
                     let (key, key_object) = self.value_with_direct_object_status()?;
                     self.expect(b'=')?;
                     let (value, value_object) = self.value_with_direct_object_status()?;
-                    if let Some(existing) = entries.iter().position(
-                        |(existing_key, existing_key_object, _, _)| {
-                            Self::map_keys_equal(
-                                existing_key,
-                                *existing_key_object,
-                                &key,
-                                key_object,
-                            )
-                        },
-                    ) {
+                    if let Some(existing) =
+                        entries
+                            .iter()
+                            .position(|(existing_key, existing_key_object, _, _)| {
+                                Self::map_keys_equal(
+                                    existing_key,
+                                    *existing_key_object,
+                                    &key,
+                                    key_object,
+                                )
+                            })
+                    {
                         if Self::map_assignment_is_nil(&value, value_object)
                             && !Self::map_assignment_is_nil(
                                 &entries[existing].2,
@@ -1616,11 +1588,8 @@ mod tests {
         };
 
         assert_eq!(
-            parse_persisted_value_map(
-                "1;Complex=a[3;S1,O42,m[1;S2=S0]]",
-                Some(&resolution),
-            )
-            .unwrap(),
+            parse_persisted_value_map("1;Complex=a[3;S1,O42,m[1;S2=S0]]", Some(&resolution),)
+                .unwrap(),
             vec![(
                 "Complex".to_string(),
                 lc_script::Value::Array(vec![
@@ -1648,11 +1617,8 @@ mod tests {
             object_numbers: HashSet::new(),
         };
 
-        let values = parse_persisted_value_map(
-            "1;Map=m[2;o999=S0;i1=i2]",
-            Some(&resolution),
-        )
-        .expect("persistent map parses");
+        let values = parse_persisted_value_map("1;Map=m[2;o999=S0;i1=i2]", Some(&resolution))
+            .expect("persistent map parses");
         let Some((_, lc_script::Value::Proplist(mut map))) = values.into_iter().next() else {
             panic!("persistent value is a map");
         };
@@ -2049,8 +2015,8 @@ mod tests {
         }
 
         let group = Group::open(&root).expect("reopen player group");
-        let remote = PlayerFile::load_with_portraits(&group, false)
-            .expect("remote player file loads");
+        let remote =
+            PlayerFile::load_with_portraits(&group, false).expect("remote player file loads");
         let explicit = remote
             .crew
             .iter()

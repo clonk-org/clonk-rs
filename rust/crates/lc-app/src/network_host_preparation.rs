@@ -15,6 +15,17 @@ use crate::prepared_host_bootstrap::{
 pub struct NetworkHostPreparation {
     pub scenario_path: PathBuf,
     pub install_roots: Vec<PathBuf>,
+    /// Exact effective module spellings selected while staging, before
+    /// DefinitionPath expansion and folder-local discovery.
+    pub effective_definition_modules: Vec<String>,
+    /// Exact ordered `DefinitionFilenames` resources resolved while staging
+    /// the host scenario, including their frozen network filename spellings.
+    pub definition_resources: Vec<lc_network::HostInitialResourceSource>,
+    pub initial_definition_modules: Vec<String>,
+    /// `Some(empty)` is distinct from an empty seed: fixed-empty suppresses
+    /// a nonempty scenario preset just like C++ `FixedDefinitions`.
+    pub fixed_definition_modules: Option<Vec<String>>,
+    pub selector_definition_root: Option<PathBuf>,
     pub definition_executable_path: String,
     pub definition_path: String,
     pub languages: Vec<String>,
@@ -46,6 +57,11 @@ impl NetworkHostPreparation {
             PreparedHostBootstrapSpec {
                 scenario_path: &self.scenario_path,
                 install_roots: &self.install_roots,
+                effective_definition_modules: &self.effective_definition_modules,
+                definition_resources: &self.definition_resources,
+                initial_definition_modules: &self.initial_definition_modules,
+                fixed_definition_modules: self.fixed_definition_modules.as_deref(),
+                selector_definition_root: self.selector_definition_root.as_deref(),
                 definition_executable_path: &self.definition_executable_path,
                 definition_path: &self.definition_path,
                 languages: &self.languages,

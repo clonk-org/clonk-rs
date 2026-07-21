@@ -9,9 +9,12 @@ use lc_engine::{
 };
 use thiserror::Error;
 
+use crate::local_resource_resolution::{
+    resolve_local_resource_candidates_with_group_maker, LocalResourceCandidate,
+};
 use crate::{
-    resolve_local_resource_with_group_maker, JoinDataEnvelope, LocalResourceMatch,
-    LocalResourceResolution, LocalResourceResolutionError, NonLoadableResourceMismatch,
+    JoinDataEnvelope, LocalResourceMatch, LocalResourceResolution, LocalResourceResolutionError,
+    NonLoadableResourceMismatch,
 };
 
 /// Candidate paths to search, in C++ search order, for each resource ID.
@@ -68,18 +71,28 @@ impl ClientBootstrapLocalCandidates {
         }
     }
 
-    fn for_core(&self, core: &NetworkResourceCore, work_path: &Path) -> Vec<PathBuf> {
+    fn for_core(
+        &self,
+        core: &NetworkResourceCore,
+        work_path: &Path,
+    ) -> Vec<LocalResourceCandidate> {
         let mut candidates = self
             .by_resource_id
             .get(&core.id)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .map(LocalResourceCandidate::exact)
+            .collect();
+        let filename_bytes =
+            &core.filename.as_bytes()[c4_filename_start(core.filename.as_bytes())..];
         let filename = c4_filename_path(core.filename.as_bytes());
         for root in &self.search_roots {
             append_cpp_search_candidates(
                 &mut candidates,
                 root,
                 &filename,
+                filename_bytes,
                 work_path,
                 self.max_search_recursion,
             );
@@ -89,18 +102,34 @@ impl ClientBootstrapLocalCandidates {
 }
 
 fn append_cpp_search_candidates(
-    candidates: &mut Vec<PathBuf>,
+    candidates: &mut Vec<LocalResourceCandidate>,
     search_root: &Path,
     c4_filename: &Path,
+    c4_filename_bytes: &[u8],
     work_path: &Path,
     max_search_recursion: usize,
 ) {
-    append_unique(candidates, search_root.join(c4_filename));
-    if let Some(basename) = c4_filename
-        .file_name()
-        .filter(|basename| c4_filename != Path::new(basename))
-    {
-        append_unique(candidates, search_root.join(basename));
+    append_unique(
+        candidates,
+        LocalResourceCandidate::with_lookup_name(
+            search_root.join(c4_filename),
+            c4_filename_bytes.to_vec(),
+        ),
+    );
+    let basename_start = c4_filename_bytes
+        .iter()
+        .rposition(|byte| is_directory_separator(*byte))
+        .map_or(0, |separator| separator + 1);
+    if basename_start != 0 && basename_start != c4_filename_bytes.len() {
+        let basename_bytes = &c4_filename_bytes[basename_start..];
+        let basename = bytes_path(basename_bytes);
+        append_unique(
+            candidates,
+            LocalResourceCandidate::with_lookup_name(
+                search_root.join(&basename),
+                basename_bytes.to_vec(),
+            ),
+        );
     }
     append_cpp_recursive_search(
         candidates,
@@ -113,7 +142,7 @@ fn append_cpp_search_candidates(
 }
 
 fn append_cpp_recursive_search(
-    candidates: &mut Vec<PathBuf>,
+    candidates: &mut Vec<LocalResourceCandidate>,
     search_root: &Path,
     c4_filename: &Path,
     work_path: &Path,
@@ -133,7 +162,10 @@ fn append_cpp_recursive_search(
         {
             continue;
         }
-        append_unique(candidates, path.join(c4_filename));
+        append_unique(
+            candidates,
+            LocalResourceCandidate::exact(path.join(c4_filename)),
+        );
         append_cpp_recursive_search(
             candidates,
             &path,
@@ -145,8 +177,11 @@ fn append_cpp_recursive_search(
     }
 }
 
-fn append_unique(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
-    if !candidates.contains(&candidate) {
+fn append_unique(candidates: &mut Vec<LocalResourceCandidate>, candidate: LocalResourceCandidate) {
+    if !candidates
+        .iter()
+        .any(|existing| existing.path() == candidate.path())
+    {
         candidates.push(candidate);
     }
 }
@@ -170,15 +205,13 @@ fn paths_identical(left: &Path, right: &Path) -> bool {
 }
 
 fn c4_directory_has_no_extension(path: &Path) -> bool {
-    path.file_name().map(os_str_bytes).is_some_and(|name| {
-        name.iter()
-            .rposition(|byte| *byte == b'.')
-            .is_none_or(|dot| dot + 1 == name.len())
-    })
-}
-
-fn c4_filename_path(filename: &[u8]) -> PathBuf {
-    bytes_path(&filename[c4_filename_start(filename)..])
+    path.file_name()
+        .map(|name| lc_resources::path_to_legacy_bytes(Path::new(name)))
+        .is_some_and(|name| {
+            name.iter()
+                .rposition(|byte| *byte == b'.')
+                .is_none_or(|dot| dot + 1 == name.len())
+        })
 }
 
 fn c4_filename_start(path: &[u8]) -> usize {
@@ -199,28 +232,26 @@ fn is_directory_separator(byte: u8) -> bool {
     byte == b'/' || cfg!(windows) && byte == b'\\'
 }
 
-#[cfg(unix)]
+fn c4_filename_path(filename: &[u8]) -> PathBuf {
+    bytes_path(&filename[c4_filename_start(filename)..])
+}
+
 fn bytes_path(bytes: &[u8]) -> PathBuf {
-    use std::os::unix::ffi::OsStringExt;
-
-    std::ffi::OsString::from_vec(bytes.to_vec()).into()
-}
-
-#[cfg(not(unix))]
-fn bytes_path(bytes: &[u8]) -> PathBuf {
-    String::from_utf8_lossy(bytes).into_owned().into()
-}
-
-#[cfg(unix)]
-fn os_str_bytes(value: &std::ffi::OsStr) -> &[u8] {
-    use std::os::unix::ffi::OsStrExt;
-
-    value.as_bytes()
-}
-
-#[cfg(not(unix))]
-fn os_str_bytes(value: &std::ffi::OsStr) -> &[u8] {
-    value.to_str().unwrap_or_default().as_bytes()
+    // C4Group::Open converts backslashes to the native directory separator
+    // after GetC4Filename/GetFilename have applied their platform-specific
+    // lexical rules. Keep lookup names raw, but normalize the filesystem
+    // path passed to the group opener on every platform.
+    let bytes = bytes
+        .iter()
+        .map(|byte| {
+            if *byte == b'\\' {
+                std::path::MAIN_SEPARATOR as u8
+            } else {
+                *byte
+            }
+        })
+        .collect::<Vec<_>>();
+    lc_resources::path_from_legacy_bytes(&bytes)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,12 +540,7 @@ pub fn plan_client_bootstrap(
     local_candidates: &ClientBootstrapLocalCandidates,
     standalone_directory: impl AsRef<Path>,
 ) -> Result<ClientBootstrapPlan, ClientBootstrapPlanError> {
-    plan_client_bootstrap_with_group_maker(
-        join_data,
-        local_candidates,
-        standalone_directory,
-        b"",
-    )
+    plan_client_bootstrap_with_group_maker(join_data, local_candidates, standalone_directory, b"")
 }
 
 /// Plans initial resources with the process-wide C4Group maker used when a
@@ -543,7 +569,7 @@ fn plan_resource(
     group_maker: &[u8],
 ) -> Result<ClientBootstrapResourcePlan, ClientBootstrapPlanError> {
     let candidates = local_candidates.for_core(core, standalone_directory);
-    let source = match resolve_local_resource_with_group_maker(
+    let source = match resolve_local_resource_candidates_with_group_maker(
         core,
         &candidates,
         standalone_directory,
@@ -770,6 +796,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn generated_local_candidates_retain_cpp_lexical_probe_names() {
+        let directory = TestDirectory::new();
+        let core = resource_core(1, 7, false, b"Easy.c4f/Castle.c4s", b"scenario");
+        let mut candidates = ClientBootstrapLocalCandidates::default();
+        candidates.extend_search_roots([&directory.root]);
+
+        let probes = candidates.for_core(&core, &directory.standalone);
+
+        assert_eq!(probes[0].path(), directory.root.join("Easy.c4f/Castle.c4s"));
+        assert_eq!(probes[0].lookup_name(), b"Easy.c4f/Castle.c4s");
+        assert_eq!(probes[1].path(), directory.root.join("Castle.c4s"));
+        assert_eq!(probes[1].lookup_name(), b"Castle.c4s");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_local_candidates_normalize_backslashes_only_for_physical_probes() {
+        // GetC4Filename/GetFilename do not split backslashes on Unix, but
+        // C4Group::Open subsequently converts them to native separators
+        // before touching the filesystem (src/StdFile.cpp:41-81;
+        // src/C4Group.cpp:660-668).
+        let directory = TestDirectory::new();
+        let core = resource_core(1, 7, false, b"Defs\\Objects.c4d", b"definitions");
+        let mut candidates = ClientBootstrapLocalCandidates::default();
+        candidates.extend_search_roots([&directory.root]);
+
+        let probes = candidates.for_core(&core, &directory.standalone);
+
+        assert_eq!(probes[0].path(), directory.root.join("Defs/Objects.c4d"));
+        assert_eq!(probes[0].lookup_name(), b"Defs\\Objects.c4d");
+        assert!(!probes
+            .iter()
+            .any(|probe| probe.path() == directory.root.join("Objects.c4d")));
     }
 
     #[test]
