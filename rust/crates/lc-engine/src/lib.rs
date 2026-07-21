@@ -22496,9 +22496,9 @@ impl Engine {
 
     /// `C4ObjectInfoList::GetIdle` (C4ObjectInfoList.cpp:113-142): the
     /// highest-experience idle entry whose def is loaded; first of equal
-    /// experience wins. The empty-id NativeCrew exclusion (`!c_id &&
-    /// !pDef->NativeCrew`) is approximated as any-def until the DefCore
-    /// NativeCrew flag is parsed.
+    /// experience wins. An empty id accepts only definitions whose DefCore
+    /// `NoStandardCrew` (`C4Def::NativeCrew`) value is zero, while an explicit
+    /// matching id remains eligible regardless of that flag.
     fn idle_crew_info_index(&self, number: i32, id_token: &str) -> Option<usize> {
         let roster = self.crew_rosters.get(&number)?;
         let mut best: Option<usize> = None;
@@ -22514,13 +22514,17 @@ impl Engine {
             let Some(info) = roster.get(index) else {
                 continue;
             };
-            if !self
+            let Some(definition) = self
                 .definitions
-                .contains_key(&DefinitionId::from(info.id.as_str()))
-            {
+                .get(&DefinitionId::from(info.id.as_str()))
+            else {
                 continue;
-            }
-            if !id_token.is_empty() && info.id != id_token {
+            };
+            if id_token.is_empty() {
+                if definition.no_standard_crew != 0 {
+                    continue;
+                }
+            } else if info.id != id_token {
                 continue;
             }
             if info.participation == 0 || info.in_action || info.has_died {
@@ -60813,6 +60817,78 @@ mod legacy_contents_order_regression {
         assert_eq!(object.state.controller, 0);
         assert_eq!(object.state.plr_view_range, 500);
         assert_eq!(object.state.info_physical, Some(physical));
+    }
+}
+
+#[cfg(test)]
+mod no_standard_crew_idle_regression {
+    use super::*;
+
+    fn idle_crew(id: &str, name: &str, experience: i32) -> player_file::CrewInfo {
+        player_file::CrewInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            death_message: String::new(),
+            core: CrewInfoCoreFields::default(),
+            rank: 0,
+            rank_name: "Clonk".to_string(),
+            experience,
+            rounds: 0,
+            physical: PhysicalInfo::default(),
+            death_count: 0,
+            total_playing_time: 0,
+            birthday: 0,
+            age: 0,
+            participation: 1,
+            in_action: false,
+            was_in_action: false,
+            in_action_time: 0,
+            has_died: false,
+            extra_data: Vec::new(),
+            portraits: CrewPortraitState::default(),
+        }
+    }
+
+    #[test]
+    fn empty_id_get_idle_excludes_no_standard_crew_definitions() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("STND", "Standard crew", "")
+                    .expect("standard definition compiles"),
+            )
+            .expect("standard definition registers");
+        let mut excluded = Definition::from_script("SPEC", "Special crew", "")
+            .expect("special definition compiles");
+        excluded.no_standard_crew = -2;
+        engine
+            .register_definition(excluded)
+            .expect("special definition registers");
+
+        engine.crew_rosters.insert(
+            4,
+            vec![
+                idle_crew("STND", "Standard", 100),
+                idle_crew("SPEC", "Special", 900),
+            ],
+        );
+        engine.crew_info_order.insert(4, vec![1, 0]);
+
+        assert_eq!(engine.idle_crew_info_index(4, ""), Some(0));
+        assert_eq!(engine.idle_crew_info_index(4, "SPEC"), Some(1));
+
+        let (standard_index, _) = engine
+            .recruit_crew_info(4, "")
+            .expect("empty id recruits standard crew");
+        assert_eq!(standard_index, 0);
+        assert!(engine.crew_rosters[&4][0].in_action);
+        assert!(!engine.crew_rosters[&4][1].in_action);
+
+        let (special_index, _) = engine
+            .recruit_crew_info(4, "SPEC")
+            .expect("explicit id recruits special crew");
+        assert_eq!(special_index, 1);
+        assert!(engine.crew_rosters[&4][1].in_action);
     }
 }
 
