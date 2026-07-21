@@ -69,6 +69,7 @@ struct CatalogVectorFont {
     resource: FontResource,
 }
 
+const C4_MAX_NAME_BYTES: usize = 30;
 const VECTOR_FONT_EXTENSIONS: [&[u8]; 6] = [b"fon", b"fnt", b"ttf", b"ttc", b"fot", b"otf"];
 
 fn vector_font_face_bytes<'a>(filename: &'a [u8], extension: &[u8]) -> Option<&'a [u8]> {
@@ -245,52 +246,61 @@ impl FontCatalog {
         role: FontRole,
         shadow: bool,
     ) -> Vec<ResolvedFontSpec> {
-        if request.is_empty() {
+        let request_bytes = lc_script::c4_string_bytes(request);
+        let request_bytes = request_bytes
+            .split(|byte| *byte == 0)
+            .next()
+            .unwrap_or_default();
+        if request_bytes.is_empty() {
             return Vec::new();
         }
+        let request = lc_script::c4_string_from_bytes(request_bytes);
         let mapped = shadow
-            .then(|| select_font_definition(&self.definitions, request, base_size))
+            .then(|| select_font_definition(&self.definitions, &request, base_size))
             .flatten()
             .map(|definition| definition.font_for(role))
-            .unwrap_or(request);
+            .unwrap_or(&request);
         if mapped.is_empty() {
             return Vec::new();
         }
-        let mut segments = mapped.split(',');
-        let face = segments.next().unwrap_or_default();
-        let second = segments.next();
-        let extension = Path::new(face)
-            .extension()
-            .and_then(|value| value.to_str())
+        let mapped_bytes = lc_script::c4_string_bytes(mapped);
+        let mapped_bytes = mapped_bytes
+            .split(|byte| *byte == 0)
+            .next()
             .unwrap_or_default();
-        if extension.eq_ignore_ascii_case("png") || extension.eq_ignore_ascii_case("bmp") {
+        if mapped_bytes.is_empty() {
+            return Vec::new();
+        }
+        let face_bytes = font_spec_segment(mapped_bytes, 0).unwrap_or_default();
+        let face = lc_script::c4_string_from_bytes(face_bytes);
+        let second = font_spec_segment(mapped_bytes, 1);
+        let extension = font_spec_extension(face_bytes);
+        if extension.eq_ignore_ascii_case(b"png") || extension.eq_ignore_ascii_case(b"bmp") {
             return vec![ResolvedFontSpec::Bitmap {
-                filename: face.to_string(),
-                indent: second.and_then(parse_i32_prefix).unwrap_or(0),
+                filename: face,
+                indent: second.and_then(parse_percent_i_prefix).unwrap_or(0),
             }];
         }
         let size = second
-            .and_then(parse_i32_prefix)
+            .and_then(parse_percent_i_prefix)
             .unwrap_or_else(|| role.derived_size(base_size));
-        let weight = segments
-            .next()
-            .and_then(parse_i32_prefix)
+        let weight = font_spec_segment(mapped_bytes, 2)
+            .and_then(parse_percent_i_prefix)
             .map(|value| value as u32)
             .unwrap_or(400);
-        let face_bytes = lc_script::c4_string_bytes(face);
         self.vector_fonts
             .iter()
             .rev()
-            .filter(|font| font.face.as_slice() == face_bytes.as_slice())
+            .filter(|font| font.face.as_slice() == face_bytes)
             .map(|font| ResolvedFontSpec::Vector {
-                face: face.to_string(),
+                face: face.clone(),
                 bytes: Some(font.resource.clone_bytes()),
                 face_index: 0,
                 size,
                 weight,
             })
             .chain(std::iter::once_with(|| ResolvedFontSpec::Vector {
-                face: face.to_string(),
+                face: face.clone(),
                 bytes: None,
                 face_index: 0,
                 size,
@@ -300,16 +310,94 @@ impl FontCatalog {
     }
 }
 
-fn parse_i32_prefix(value: &str) -> Option<i32> {
-    let value = value.trim_start();
-    let end = value
-        .char_indices()
-        .take_while(|(index, character)| {
-            character.is_ascii_digit() || (*index == 0 && matches!(character, '+' | '-'))
-        })
-        .map(|(index, character)| index + character.len_utf8())
-        .last()?;
-    value[..end].parse().ok()
+fn font_spec_segment(value: &[u8], index: usize) -> Option<&[u8]> {
+    let mut segment = value;
+    for _ in 0..index {
+        let separator = segment.iter().position(|byte| *byte == b',')?;
+        segment = &segment[separator + 1..];
+    }
+    let end = segment
+        .iter()
+        .position(|byte| *byte == b',')
+        .unwrap_or(segment.len())
+        .min(C4_MAX_NAME_BYTES);
+    Some(&segment[..end])
+}
+
+fn font_spec_extension(face: &[u8]) -> &[u8] {
+    let separator = std::path::MAIN_SEPARATOR as u8;
+    match face
+        .iter()
+        .rposition(|byte| matches!(*byte, b'.') || *byte == separator)
+    {
+        Some(position) if face[position] == b'.' => &face[position + 1..],
+        _ => &face[face.len()..],
+    }
+}
+
+fn ascii_digit_value(byte: u8) -> Option<u32> {
+    match byte {
+        b'0'..=b'9' => Some(u32::from(byte - b'0')),
+        b'a'..=b'f' => Some(u32::from(byte - b'a') + 10),
+        b'A'..=b'F' => Some(u32::from(byte - b'A') + 10),
+        _ => None,
+    }
+}
+
+fn parse_percent_i_prefix(value: &[u8]) -> Option<i32> {
+    let mut index = 0;
+    while value
+        .get(index)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c'))
+    {
+        index += 1;
+    }
+
+    let negative = match value.get(index) {
+        Some(b'-') => {
+            index += 1;
+            true
+        }
+        Some(b'+') => {
+            index += 1;
+            false
+        }
+        _ => false,
+    };
+    let radix = if value.get(index) == Some(&b'0')
+        && value
+            .get(index + 1)
+            .is_some_and(|byte| byte.eq_ignore_ascii_case(&b'x'))
+        && value
+            .get(index + 2)
+            .and_then(|byte| ascii_digit_value(*byte))
+            .is_some()
+    {
+        index += 2;
+        16_u32
+    } else if value.get(index) == Some(&b'0') {
+        8_u32
+    } else {
+        10_u32
+    };
+
+    let digit_start = index;
+    let mut parsed = 0_u32;
+    while let Some(digit) = value
+        .get(index)
+        .and_then(|byte| ascii_digit_value(*byte))
+        .filter(|digit| *digit < radix)
+    {
+        parsed = parsed.wrapping_mul(radix).wrapping_add(digit);
+        index += 1;
+    }
+    (index > digit_start).then(|| {
+        if negative {
+            0_u32.wrapping_sub(parsed) as i32
+        } else {
+            parsed as i32
+        }
+    })
 }
 
 fn parse_font_definitions(bytes: &[u8]) -> Vec<FontDefinition> {
@@ -480,6 +568,160 @@ TitleFont=LaterTitle
             assert_eq!(size, 20);
             assert_eq!(weight, 700);
         }
+    }
+
+    #[test]
+    fn font_specs_apply_c4maxname_and_percent_i_numeric_grammar() {
+        let catalog = FontCatalog::default();
+
+        for (spec, expected_size, expected_weight) in [
+            ("Face,19junk,700tail", 19, 700),
+            ("Face,+0x10junk,0700tail", 16, 448),
+            ("Face,-010junk,-0X2BCtail", -8, (-700_i32) as u32),
+            ("Face,09ignored,+42ignored", 0, 42),
+        ] {
+            let Some(ResolvedFontSpec::Vector { size, weight, .. }) =
+                catalog.resolve(spec, 14, FontRole::Main, true)
+            else {
+                panic!("expected vector spec for {spec}")
+            };
+            assert_eq!(size, expected_size, "size parsed from {spec}");
+            assert_eq!(weight, expected_weight, "weight parsed from {spec}");
+        }
+
+        let bounded_parameters = format!("Face,{}42,{}70", " ".repeat(30), " ".repeat(30));
+        let Some(ResolvedFontSpec::Vector { size, weight, .. }) =
+            catalog.resolve(&bounded_parameters, 14, FontRole::Main, true)
+        else {
+            panic!("expected vector spec with bounded parameters")
+        };
+        assert_eq!(size, 14, "the size digit lies beyond its 30-byte field");
+        assert_eq!(
+            weight, 400,
+            "the weight digit lies beyond its 30-byte field"
+        );
+
+        let utf8_boundary = lc_script::c4_string_from_bytes(
+            &[b'A'; 29]
+                .into_iter()
+                .chain([0xc3, 0xa9])
+                .chain(*b",12,400")
+                .collect::<Vec<_>>(),
+        );
+        let Some(ResolvedFontSpec::Vector { face, size, .. }) =
+            catalog.resolve(&utf8_boundary, 14, FontRole::Main, true)
+        else {
+            panic!("expected UTF-8-boundary vector spec")
+        };
+        assert_eq!(
+            lc_script::c4_string_bytes(&face),
+            [b'A'; 29].into_iter().chain([0xc3]).collect::<Vec<_>>()
+        );
+        assert_eq!(size, 12, "commas are found before fields are truncated");
+
+        let high_byte_boundary = lc_script::c4_string_from_bytes(
+            &[b'B'; 29]
+                .into_iter()
+                .chain([0xe9, b'Z'])
+                .chain(*b",13,500")
+                .collect::<Vec<_>>(),
+        );
+        let Some(ResolvedFontSpec::Vector {
+            face, size, weight, ..
+        }) = catalog.resolve(&high_byte_boundary, 14, FontRole::Main, true)
+        else {
+            panic!("expected high-byte-boundary vector spec")
+        };
+        assert_eq!(
+            lc_script::c4_string_bytes(&face),
+            [b'B'; 29].into_iter().chain([0xe9]).collect::<Vec<_>>()
+        );
+        assert_eq!((size, weight), (13, 500));
+
+        let extension_beyond_boundary = format!("{}.png,7", "X".repeat(27));
+        assert!(matches!(
+            catalog.resolve(&extension_beyond_boundary, 14, FontRole::Main, true),
+            Some(ResolvedFontSpec::Vector { .. })
+        ));
+        assert!(matches!(
+            catalog.resolve("Glyph.png,010junk,ignored", 14, FontRole::Main, true),
+            Some(ResolvedFontSpec::Bitmap { ref filename, indent: 8 })
+                if filename == "Glyph.png"
+        ));
+        assert!(matches!(
+            catalog.resolve(".PnG,010junk,ignored", 14, FontRole::Main, true),
+            Some(ResolvedFontSpec::Bitmap { ref filename, indent: 8 })
+                if filename == ".PnG"
+        ));
+
+        let nul_alias = lc_script::c4_string_from_bytes(b"Alias\0ignored");
+        let mapped_catalog = FontCatalog {
+            definitions: vec![FontDefinition {
+                name: "Alias".to_string(),
+                size: 14,
+                font: "Mapped,0x10,0700".to_string(),
+                ..FontDefinition::default()
+            }],
+            vector_fonts: Vec::new(),
+        };
+        assert!(matches!(
+            mapped_catalog.resolve(&nul_alias, 14, FontRole::Main, true),
+            Some(ResolvedFontSpec::Vector { ref face, size: 16, weight: 448, .. })
+                if face == "Mapped"
+        ));
+        let nul_parameters = lc_script::c4_string_from_bytes(b"Face,12\0,700");
+        assert!(matches!(
+            catalog.resolve(&nul_parameters, 14, FontRole::Main, true),
+            Some(ResolvedFontSpec::Vector {
+                size: 12,
+                weight: 400,
+                ..
+            })
+        ));
+
+        let long_registered_face = vec![b'R'; 31];
+        let truncated_registered_face = long_registered_face[..C4_MAX_NAME_BYTES].to_vec();
+        let registered_catalog = FontCatalog {
+            definitions: Vec::new(),
+            vector_fonts: vec![
+                CatalogVectorFont {
+                    face: truncated_registered_face.clone(),
+                    resource: FontResource::new("truncated.ttf", b"truncated".to_vec()),
+                },
+                CatalogVectorFont {
+                    face: long_registered_face.clone(),
+                    resource: FontResource::new("untruncated.ttf", b"untruncated".to_vec()),
+                },
+            ],
+        };
+        let long_registered_spec = lc_script::c4_string_from_bytes(
+            &long_registered_face
+                .into_iter()
+                .chain(*b",12,400")
+                .collect::<Vec<_>>(),
+        );
+        let candidates =
+            registered_catalog.resolve_candidates(&long_registered_spec, 14, FontRole::Main, true);
+        assert_eq!(
+            candidates.len(),
+            2,
+            "one exact registered face plus fallback"
+        );
+        for candidate in &candidates {
+            let ResolvedFontSpec::Vector { face, .. } = candidate else {
+                panic!("expected registered vector candidate")
+            };
+            assert_eq!(lc_script::c4_string_bytes(face), truncated_registered_face);
+        }
+        assert!(matches!(
+            &candidates[0],
+            ResolvedFontSpec::Vector { bytes: Some(bytes), .. }
+                if bytes.as_ref() == b"truncated"
+        ));
+        assert!(matches!(
+            &candidates[1],
+            ResolvedFontSpec::Vector { bytes: None, .. }
+        ));
     }
 
     #[test]

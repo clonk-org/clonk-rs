@@ -132740,11 +132740,24 @@ ScenInfoArea=70,5,25,90
         .expect("catalog font wins before system lookup");
         assert!(provider.requests().is_empty());
 
-        let explicit_face = root.path().join("ExplicitFace.ttf");
-        fs::write(&explicit_face, font_bytes.as_ref()).expect("explicit font file");
+        let explicit_file = tempfile::Builder::new()
+            .prefix("lc-font-")
+            .suffix(".ttf")
+            .tempfile_in(".")
+            .expect("short explicit font file");
+        fs::write(explicit_file.path(), font_bytes.as_ref()).expect("explicit font bytes");
+        let explicit_face = explicit_file
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("UTF-8 fixture filename");
+        assert!(
+            lc_script::c4_string_bytes(explicit_face).len() <= 30,
+            "the explicit-file precedence fixture must fit C4MaxName"
+        );
         resolve_classic_font_bundle_for_request_with_system_fonts(
             &paths,
-            explicit_face.to_str().expect("UTF-8 fixture path"),
+            explicit_face,
             14,
             &[],
             &[],
