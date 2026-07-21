@@ -699,9 +699,20 @@ impl RuntimeHandle {
             .as_ref()
             .map(crate::player_file::PlayerFile::exact_info_core)
             .unwrap_or_default();
-        // StartupPlayerCount: the number of players at game start
-        // (C4GameParameters); approximated by the infos seen so far.
-        let startup_player_count = self.player_infos.len().max(1) as i32;
+        // C4Game freezes Parameters.StartupPlayerCount before control/replay
+        // initialization. Replay packages seed that value during scenario
+        // loading; synthetic/non-replay runners fall back once to the exact
+        // nonremoved registry visible at their first join.
+        let observed_startup_player_count = i32::try_from(
+            self.player_infos
+                .values()
+                .filter(|entry| entry.flags & crate::PLAYER_INFO_FLAG_REMOVED == 0)
+                .count(),
+        )
+        .unwrap_or(i32::MAX);
+        let startup_player_count = self
+            .engine
+            .freeze_startup_player_count(observed_startup_player_count);
         let config = if let Some(info) = info.as_ref() {
             crate::prepare_join_player_config(crate::JoinPlayerPreparation {
                 join,
@@ -2187,11 +2198,35 @@ fn load_scenario_into_runtime(
         roots,
         language_packs: language_packs.clone(),
     };
-    let scenario = Scenario::load_from_path_with_seed(path, &resolver, seed)
+    let scenario_group = lc_resources::Group::open(path)
         .map_err(|error| format!("failed to load scenario: {error}"))?;
+    let replay_startup = if scenario_group.exists("Scenario.json") {
+        None
+    } else {
+        Scenario::preflight_replay_startup_from_group(&scenario_group)
+            .map_err(|error| format!("failed to load scenario: {error}"))?
+    };
+    let scenario = match replay_startup {
+        Some(startup) => {
+            Scenario::load_from_group_with_languages_and_seed_and_startup_player_count(
+                &scenario_group,
+                &resolver,
+                &["US", "DE"],
+                seed,
+                startup.startup_player_count,
+            )
+        },
+        None => Scenario::load_from_group_with_seed(&scenario_group, &resolver, seed),
+    }
+    .map_err(|error| format!("failed to load scenario: {error}"))?;
     runtime.engine = Engine::with_seed(seed);
     runtime.engine.set_control_host(false);
     runtime.engine.set_replay_control(true);
+    if let Some(startup) = replay_startup {
+        runtime
+            .engine
+            .freeze_startup_player_count(startup.startup_player_count);
+    }
     // The lc-app boot sequence: materials, then the engine-global
     // System.c4g scripts, then the scenario (which adds its own System.c4g).
     {
@@ -4914,6 +4949,235 @@ global func Step(state, frame, random)
             .filter(|object| object.owner == 0 && object.crew_member)
             .count();
         assert_eq!(crew_count, 2, "ready crew placed by the join");
+    }
+
+    #[test]
+    fn replay_late_join_uses_frozen_startup_player_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d/Good.c4d");
+        std::fs::create_dir_all(&defs).expect("def dir");
+        std::fs::write(
+            defs.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\n",
+        )
+        .expect("defcore");
+        std::fs::write(defs.join("Script.c"), "// definition\n").expect("script");
+        write_definition_graphics(&defs);
+
+        let scenario_dir = dir.path().join("Replay.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Replay\nReplay=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=64\nMapHeight=40\nMapZoom=10\n",
+        )
+        .expect("scenario core");
+        std::fs::write(
+            scenario_dir.join("Parameters.txt"),
+            "[Parameters]\nRandomSeed=7\nStartupPlayerCount=4\n",
+        )
+        .expect("replay parameters");
+        std::fs::write(
+            scenario_dir.join("PlayerInfos.txt"),
+            concat!(
+                "[PlayerInfoList]\n",
+                "LastPlayerID=2\n",
+                "  [Client]\n",
+                "  ID=0\n",
+                "  Flags=Initial\n",
+                "    [Player]\n",
+                "    Name=Player 1\n",
+                "    ID=1\n",
+                "    Type=User\n",
+                "    [Player]\n",
+                "    Name=Player 2\n",
+                "    ID=2\n",
+                "    Type=User\n",
+            ),
+        )
+        .expect("initial replay player infos");
+
+        let player_dir = dir.path().join("Replay.c4p");
+        std::fs::create_dir_all(&player_dir).expect("player dir");
+        std::fs::write(
+            player_dir.join("Player.txt"),
+            "[Player]\nName=Replay Player\n\n[Preferences]\nPosition=3\nColorDw=255\n",
+        )
+        .expect("player core");
+        let player_filename = LegacyCString::from_bytes(
+            player_dir
+                .as_os_str()
+                .to_string_lossy()
+                .as_bytes()
+                .to_vec(),
+        )
+        .expect("player filename");
+        let info = |id, flags| ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(format!("Player {id}").into_bytes())
+                .expect("player name"),
+            id,
+            flags,
+            ..ControlPlayerInfoEntry::default()
+        };
+        let join = |info_id| {
+            ControlPacket::JoinPlayer(JoinPlayerControlData {
+                filename: player_filename.clone(),
+                at_client: 0,
+                info_id,
+                source: JoinPlayerSource::Embedded(Vec::new()),
+                by_client: 0,
+            })
+        };
+
+        let mut runtime = RuntimeHandle::new();
+        load_scenario_into_runtime(&mut runtime, &scenario_dir, 7).expect("replay loads");
+        assert_eq!(runtime.engine.startup_player_count(), Some(2));
+        runtime.control_packets.insert(
+            0,
+            vec![
+                ControlPacket::PlayerInfo(crate::PlayerInfoControlData {
+                    client_id: 0,
+                    flags: crate::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                    players: vec![info(1, 0), info(2, 0)],
+                    by_client: 0,
+                }),
+                join(1),
+                join(2),
+            ],
+        );
+        runtime
+            .apply_control_packets_for_frame(0)
+            .expect("initial replay joins apply");
+        assert_eq!(runtime.engine.player(0).unwrap().position_index(), 1);
+        assert_eq!(runtime.engine.player(1).unwrap().position_index(), 0);
+
+        let mut export_error: *mut c_char = ptr::null_mut();
+        let json_ptr = lc_engine_runtime_export_state_json(&mut runtime, &mut export_error);
+        assert!(export_error.is_null());
+        assert!(!json_ptr.is_null());
+        let state_json = unsafe {
+            let json = CStr::from_ptr(json_ptr)
+                .to_str()
+                .expect("state JSON is UTF-8")
+                .to_owned();
+            lc_engine_string_free(json_ptr);
+            json
+        };
+        let state_value: Value = serde_json::from_str(&state_json).expect("state JSON parses");
+        assert_eq!(state_value["startup_player_count"], Value::from(2));
+
+        let mut restored = RuntimeHandle::new();
+        let state_json = CString::new(state_json).expect("state CString");
+        let mut import_error: *mut c_char = ptr::null_mut();
+        assert!(lc_engine_runtime_import_state_json(
+            &mut restored,
+            state_json.as_ptr(),
+            &mut import_error,
+        ));
+        assert!(import_error.is_null());
+        assert_eq!(restored.engine.startup_player_count(), Some(2));
+
+        restored.control_packets.insert(
+            1,
+            vec![
+                ControlPacket::PlayerInfo(crate::PlayerInfoControlData {
+                    client_id: 0,
+                    flags: 0,
+                    players: vec![
+                        info(1, crate::PLAYER_INFO_FLAG_JOINED),
+                        info(2, crate::PLAYER_INFO_FLAG_JOINED),
+                        info(3, 0),
+                        info(4, 0),
+                    ],
+                    by_client: 0,
+                }),
+                ControlPacket::RemovePlayer(crate::RemovePlayerControlData {
+                    player: 0,
+                    disconnected: false,
+                    by_client: 0,
+                }),
+                join(3),
+            ],
+        );
+        restored
+            .apply_control_packets_for_frame(1)
+            .expect("late replay join applies");
+
+        assert_ne!(
+            restored.player_infos[&1].flags & crate::PLAYER_INFO_FLAG_REMOVED,
+            0,
+            "the mutable roster changed after startup"
+        );
+        assert_eq!(restored.player_infos.len(), 4, "late infos were retained");
+        let late = restored
+            .engine
+            .players()
+            .find(|player| player.player_info_id() == 3)
+            .expect("late replay player joined");
+        assert_eq!(
+            late.position_index(),
+            1,
+            "late join reused the original two-slot startup distribution"
+        );
+        assert_eq!(restored.engine.startup_player_count(), Some(2));
+
+        let mut removal_only = RuntimeHandle::new();
+        let mut removal_import_error: *mut c_char = ptr::null_mut();
+        assert!(lc_engine_runtime_import_state_json(
+            &mut removal_only,
+            state_json.as_ptr(),
+            &mut removal_import_error,
+        ));
+        assert!(removal_import_error.is_null());
+        removal_only.control_packets.insert(
+            1,
+            vec![
+                ControlPacket::PlayerInfo(crate::PlayerInfoControlData {
+                    client_id: 0,
+                    flags: 0,
+                    players: vec![
+                        info(1, crate::PLAYER_INFO_FLAG_JOINED),
+                        info(2, crate::PLAYER_INFO_FLAG_JOINED),
+                        info(3, 0),
+                    ],
+                    by_client: 0,
+                }),
+                ControlPacket::RemovePlayer(crate::RemovePlayerControlData {
+                    player: 0,
+                    disconnected: false,
+                    by_client: 0,
+                }),
+                ControlPacket::RemovePlayer(crate::RemovePlayerControlData {
+                    player: 1,
+                    disconnected: false,
+                    by_client: 0,
+                }),
+                join(3),
+            ],
+        );
+        removal_only
+            .apply_control_packets_for_frame(1)
+            .expect("post-removal replay join applies");
+        assert_eq!(
+            removal_only
+                .player_infos
+                .values()
+                .filter(|entry| entry.flags & crate::PLAYER_INFO_FLAG_REMOVED == 0)
+                .count(),
+            1,
+            "only the delayed player remains in the mutable roster"
+        );
+        let post_removal = removal_only
+            .engine
+            .players()
+            .find(|player| player.player_info_id() == 3)
+            .expect("post-removal replay player joined");
+        assert_eq!(
+            post_removal.position_index(),
+            1,
+            "roster shrinkage does not change the original two-slot distribution"
+        );
+        assert_eq!(removal_only.engine.startup_player_count(), Some(2));
     }
 
     #[test]

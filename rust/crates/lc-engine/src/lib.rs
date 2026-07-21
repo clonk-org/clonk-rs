@@ -10744,6 +10744,10 @@ pub struct EngineState {
     /// seeded by the scenario/app when restoring an older Rust state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_players: Option<i32>,
+    /// Saved `Game.Parameters.StartupPlayerCount`. `None` keeps the value
+    /// frozen by the replay/app startup seam when restoring an older state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_player_count: Option<i32>,
     /// Saved `Game.Parameters.League`. None preserves an app-seeded value
     /// when restoring Rust states written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -11037,6 +11041,7 @@ impl EngineState {
             frame: snapshot.frame,
             game_time: snapshot.game_time,
             max_players: None,
+            startup_player_count: None,
             league_name: Some(snapshot.league_name.clone()),
             player_info_league_progress_data: Some(saved_player_info_league_progress_data),
             player_info_league_scores: Some(saved_player_info_league_scores),
@@ -17795,6 +17800,9 @@ pub struct Engine {
     /// `Game.Parameters.MaxPlayers`. `None` means the embedding app or
     /// scenario has not attached the active game-parameter value yet.
     max_players: Option<i32>,
+    /// `Game.Parameters.StartupPlayerCount`, frozen once before landscape
+    /// creation and reused by every initial or runtime player join.
+    startup_player_count: Option<i32>,
     /// `Game.Parameters.UseFairCrew`: when enabled, objects carrying crew
     /// info read definition-based fair-crew physicals instead of their
     /// persistent trained info physicals.
@@ -20067,6 +20075,7 @@ impl Engine {
             scenario_script_counter: 0,
             random_seed: seed,
             max_players: None,
+            startup_player_count: None,
             use_fair_crew: true,
             fair_crew_strength: 1_000,
             fair_crew_forced: false,
@@ -24207,6 +24216,18 @@ impl Engine {
 
     pub fn max_players(&self) -> Option<i32> {
         self.max_players
+    }
+
+    /// Freeze `Game.Parameters.StartupPlayerCount` at the native startup
+    /// boundary. Repeated calls retain the first value exactly, including 0.
+    pub fn freeze_startup_player_count(&mut self, startup_player_count: i32) -> i32 {
+        *self
+            .startup_player_count
+            .get_or_insert(startup_player_count)
+    }
+
+    pub fn startup_player_count(&self) -> Option<i32> {
+        self.startup_player_count
     }
 
     /// Updates `Game.Parameters.UseFairCrew` for subsequent live physical
@@ -35121,6 +35142,7 @@ impl Engine {
             frame: self.frame,
             game_time: self.game_time,
             max_players: self.max_players,
+            startup_player_count: self.startup_player_count,
             league_name: Some(self.league_name.as_ref().clone()),
             player_info_league_progress_data: Some(saved_player_info_league_progress_data),
             player_info_league_scores: Some(saved_player_info_league_scores),
@@ -35219,6 +35241,9 @@ impl Engine {
         self.game_time = state.game_time;
         if let Some(max_players) = state.max_players {
             self.max_players = Some(max_players);
+        }
+        if let Some(startup_player_count) = state.startup_player_count {
+            self.startup_player_count = Some(startup_player_count);
         }
         if let Some(league_name) = &state.league_name {
             self.league_name = Rc::new(legacy_c_string_bytes(league_name.clone()));
@@ -61523,6 +61548,37 @@ mod dig_out_material_cast_tick5_regression {
                 frame_index + 1
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod startup_player_count_regression {
+    use super::*;
+
+    #[test]
+    fn startup_player_count_state_preserves_exact_zero_and_legacy_seed() {
+        let mut source = Engine::new();
+        assert_eq!(source.freeze_startup_player_count(0), 0);
+        assert_eq!(source.freeze_startup_player_count(7), 0);
+
+        let state = source.capture_state();
+        assert_eq!(state.startup_player_count, Some(0));
+
+        let mut restored = Engine::new();
+        restored.freeze_startup_player_count(9);
+        restored.restore_state(&state).expect("state restores");
+        assert_eq!(restored.startup_player_count(), Some(0));
+
+        let mut legacy = serde_json::to_value(&state).expect("state serializes");
+        legacy
+            .as_object_mut()
+            .expect("state is an object")
+            .remove("startup_player_count");
+        let legacy: EngineState = serde_json::from_value(legacy).expect("legacy state parses");
+        let mut seeded = Engine::new();
+        seeded.freeze_startup_player_count(3);
+        seeded.restore_state(&legacy).expect("legacy state restores");
+        assert_eq!(seeded.startup_player_count(), Some(3));
     }
 }
 

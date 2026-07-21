@@ -154,8 +154,9 @@ pub struct OfflineScenarioStartupPreflight {
 }
 
 /// Parameters that must be frozen before a replay's dynamic landscape is
-/// created. They come from the same Scenario.txt/Parameters.txt merge used by
-/// `C4GameParameters::Load` and therefore precede CtrlRec playback.
+/// created. `startup_player_count` already includes C4Game's frame-zero
+/// overwrite from `PlayerInfos.txt`; nonzero-frame records retain the value
+/// serialized in `Parameters.txt`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplayScenarioStartupPreflight {
     pub random_seed: i32,
@@ -1835,9 +1836,13 @@ impl Scenario {
         let parameters = load_legacy_game_parameter_overrides(group, &defaults)?
             .map(|overrides| overrides.apply_to(&defaults))
             .unwrap_or(defaults);
+        let startup_player_count = replay_startup_player_count_from_group(
+            group,
+            parameters.startup_player_count,
+        )?;
         Ok(Some(ReplayScenarioStartupPreflight {
             random_seed: parameters.random_seed,
-            startup_player_count: parameters.startup_player_count,
+            startup_player_count,
         }))
     }
 
@@ -9842,6 +9847,47 @@ fn legacy_map_seed(random_seed: u64) -> i32 {
 /// bridge for comparison with the C++ engine.
 fn legacy_map_creation_rng(random_seed: u64) -> crate::rng::LcgRng {
     crate::rng::LcgRng::seed_from_u64(legacy_random_seed(random_seed))
+}
+
+/// C4Game::InitGame overwrites the serialized parameter from the initial
+/// player-info list only at frame zero (C4Game.cpp:2455-2456). Runtime
+/// records/savegames retain the value captured by C4GameParameters instead.
+fn replay_startup_player_count_from_group(
+    group: &Group,
+    serialized_startup_player_count: i32,
+) -> Result<i32, ScenarioError> {
+    let frame = try_read_group_file_case_insensitive(group, "Game.txt")?
+        .map(|source| crate::parse_initial_network_game_data(&source).frame)
+        .unwrap_or_default();
+    if frame != 0 {
+        return Ok(serialized_startup_player_count);
+    }
+
+    let Some(source) = try_read_group_file_case_insensitive(group, "PlayerInfos.txt")? else {
+        return Ok(0);
+    };
+    let tree = LegacyIniTree::parse(&bytes_as_latin1_string(&source));
+    let Some(root) = tree.first_section(0, "PlayerInfoList") else {
+        return Ok(0);
+    };
+    Ok(tree
+        .sections(root, "Client")
+        .flat_map(|client| tree.sections(client, "Player"))
+        .filter(|player| {
+            !tree.value(*player, "Flags").is_some_and(|flags| {
+                flags
+                    .split(['|', ','])
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
+                    .any(|token| {
+                        token.eq_ignore_ascii_case("Removed")
+                            || parse_std_u32(token).is_some_and(|value| {
+                                value & u32::from(crate::PLAYER_INFO_FLAG_REMOVED) != 0
+                            })
+                    })
+            })
+        })
+        .fold(0_i32, |count, _| count.saturating_add(1)))
 }
 
 /// `Game.Parameters.StartupPlayerCount` (MapPlayerExtend input,
@@ -18926,14 +18972,55 @@ RandomTeamCount=2
             "[Parameters]\nRandomSeed=73\nStartupPlayerCount=4\n",
         )
         .unwrap();
+        std::fs::write(
+            directory.path().join("PlayerInfos.txt"),
+            concat!(
+                "[PlayerInfoList]\n",
+                "  [Client]\n",
+                "    [Player]\n",
+                "    Name=First\n",
+                "    [Player]\n",
+                "    Name=Removed\n",
+                "    Flags=Joined|Removed\n",
+                "    [Player]\n",
+                "    Name=Numeric Removed\n",
+                "    Flags=4\n",
+                "    [Player]\n",
+                "    Name=Second\n",
+            ),
+        )
+        .unwrap();
         let group = Group::open(directory.path()).unwrap();
 
         assert_eq!(
             Scenario::preflight_replay_startup_from_group(&group).unwrap(),
             Some(ReplayScenarioStartupPreflight {
                 random_seed: 73,
-                startup_player_count: 4,
+                startup_player_count: 2,
             })
+        );
+
+        std::fs::write(directory.path().join("Game.txt"), "[Game]\nFrame=37\n").unwrap();
+        let group = Group::open(directory.path()).unwrap();
+        assert_eq!(
+            Scenario::preflight_replay_startup_from_group(&group).unwrap(),
+            Some(ReplayScenarioStartupPreflight {
+                random_seed: 73,
+                startup_player_count: 4,
+            }),
+            "nonzero-frame records retain the serialized parameter"
+        );
+
+        std::fs::remove_file(directory.path().join("Game.txt")).unwrap();
+        std::fs::remove_file(directory.path().join("PlayerInfos.txt")).unwrap();
+        let group = Group::open(directory.path()).unwrap();
+        assert_eq!(
+            Scenario::preflight_replay_startup_from_group(&group)
+                .unwrap()
+                .expect("replay preflight")
+                .startup_player_count,
+            0,
+            "a frame-zero replay with no PlayerInfos has an empty startup list"
         );
     }
 

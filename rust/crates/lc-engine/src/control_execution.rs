@@ -3007,6 +3007,16 @@ impl ControlPlayerInfoRegistry {
     pub fn player_count(&self) -> usize {
         self.clients.iter().map(|client| client.players.len()).sum()
     }
+
+    /// `C4PlayerInfoList::GetStartupCount`: every retained player-info row
+    /// except rows carrying PIF_Removed, irrespective of joined/type state.
+    pub fn nonremoved_player_count(&self) -> usize {
+        self.clients
+            .iter()
+            .flat_map(|client| &client.players)
+            .filter(|player| player.flags & PLAYER_INFO_FLAG_REMOVED == 0)
+            .count()
+    }
 }
 
 pub struct JoinPlayerPreparation<'a> {
@@ -3260,6 +3270,23 @@ mod tests {
             id,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn startup_count_excludes_only_removed_player_infos() {
+        let mut removed = player(2);
+        removed.flags = PLAYER_INFO_FLAG_REMOVED;
+        let mut joined = player(3);
+        joined.flags = PLAYER_INFO_FLAG_JOINED;
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 1,
+            players: vec![player(1), removed, joined],
+            ..Default::default()
+        });
+
+        assert_eq!(registry.player_count(), 3);
+        assert_eq!(registry.nonremoved_player_count(), 2);
     }
 
     #[test]

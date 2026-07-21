@@ -12498,6 +12498,21 @@ fn player_info_list_entries(
         .flat_map(|client| client.players.iter().cloned())
 }
 
+/// C4Game::InitGame recomputes StartupPlayerCount from the synchronized
+/// PlayerInfos only for frame zero. A runtime save/dynamic retains the scalar
+/// serialized when the original game began.
+fn startup_player_count_for_init(
+    frame: i32,
+    serialized: Option<i32>,
+    frame_zero_player_count: Option<i32>,
+) -> Option<i32> {
+    if frame == 0 {
+        frame_zero_player_count
+    } else {
+        serialized
+    }
+}
+
 fn client_network_restore_player_infos(
     network_runtime_join: bool,
     scenario_group: &Group,
@@ -26477,8 +26492,9 @@ impl GameApp {
             .ok_or_else(|| anyhow!("live save parameter seed is unavailable"))?;
         let mut parameters = seed.parameters.clone();
         parameters.random_seed = (self.engine.random_seed() as u32) as i32;
-        parameters.startup_player_count =
-            i32::try_from(self.control_player_infos.player_count()).unwrap_or(i32::MAX);
+        parameters.startup_player_count = self.engine.startup_player_count().unwrap_or_else(|| {
+            i32::try_from(self.control_player_infos.nonremoved_player_count()).unwrap_or(i32::MAX)
+        });
         parameters.max_players = self
             .engine
             .max_players()
@@ -71261,8 +71277,13 @@ impl GameApp {
             .as_ref()
             .map(PlayerFile::exact_info_core)
             .unwrap_or_default();
-        let startup_player_count =
-            i32::try_from(self.control_player_infos.player_count().max(1)).unwrap_or(i32::MAX);
+        let observed_startup_player_count = i32::try_from(
+            self.control_player_infos.nonremoved_player_count(),
+        )
+        .unwrap_or(i32::MAX);
+        let startup_player_count = self
+            .engine
+            .freeze_startup_player_count(observed_startup_player_count);
         let config = match lc_engine::prepare_join_player_config(lc_engine::JoinPlayerPreparation {
             join: &join,
             info: &info,
@@ -80245,8 +80266,9 @@ impl GameApp {
                 clients: lc_network::JoinClientRegistrySnapshot::new(Vec::new()),
             });
         parameters.random_seed = (self.engine.random_seed() as u32) as i32;
-        parameters.startup_player_count =
-            i32::try_from(self.control_player_infos.player_count()).unwrap_or(i32::MAX);
+        parameters.startup_player_count = self.engine.startup_player_count().unwrap_or_else(|| {
+            i32::try_from(self.control_player_infos.nonremoved_player_count()).unwrap_or(i32::MAX)
+        });
         parameters.max_players = self.engine.max_players().unwrap_or(defaults.max_players);
         parameters.use_fair_crew = self.engine.use_fair_crew();
         parameters.fair_crew_forced = self.engine.fair_crew_forced();
@@ -80492,8 +80514,9 @@ impl GameApp {
 
         let mut parameters = seed.parameters;
         parameters.random_seed = (self.engine.random_seed() as u32) as i32;
-        parameters.startup_player_count =
-            i32::try_from(self.control_player_infos.player_count()).unwrap_or(i32::MAX);
+        parameters.startup_player_count = self.engine.startup_player_count().unwrap_or_else(|| {
+            i32::try_from(self.control_player_infos.nonremoved_player_count()).unwrap_or(i32::MAX)
+        });
         parameters.max_players = self
             .engine
             .max_players()
@@ -82107,6 +82130,12 @@ impl GameApp {
                 .lobby_metadata()
                 .and_then(ScenarioLobbyMetadata::embedded_game_parameter_values)
         }).flatten();
+        let serialized_startup_player_count = scenario_data.lobby_metadata().map(|metadata| {
+            metadata.embedded_game_parameter_values().map_or_else(
+                || metadata.game_parameter_defaults().startup_player_count(),
+                |parameters| parameters.startup_player_count(),
+            )
+        });
         if prepared_random_seed.is_none() {
             prepared_random_seed = replay_parameters
                 .as_ref()
@@ -82134,13 +82163,25 @@ impl GameApp {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let (control_playback, replay_player_infos) = if replay {
+        let (control_playback, replay_player_infos, replay_startup_player_count) = if replay {
             let group = open_group_path_for_folder_map(&path).map_err(|error| {
                 ScenarioActivationError::Recoverable(format!(
                     "Failed to open replay {}: {error}",
                     scenario.title
                 ))
             })?;
+            let startup_player_count = if group.exists("Scenario.json") {
+                None
+            } else {
+                Scenario::preflight_replay_startup_from_group(&group)
+                    .map_err(|error| {
+                        ScenarioActivationError::Recoverable(format!(
+                            "Replay {} has invalid startup parameters: {error}",
+                            scenario.title
+                        ))
+                    })?
+                    .map(|startup| startup.startup_player_count)
+            };
             let bytes = group.read_file("CtrlRec.c4b").map_err(|error| {
                 ScenarioActivationError::Recoverable(format!(
                     "Replay {} has no readable CtrlRec.c4b: {error}",
@@ -82169,9 +82210,9 @@ impl GameApp {
             } else {
                 None
             };
-            (Some(playback), player_infos)
+            (Some(playback), player_infos, startup_player_count)
         } else {
-            (None, None)
+            (None, None, None)
         };
         let mut offline_team_metadata = if network_game || replay {
             None
@@ -82215,6 +82256,32 @@ impl GameApp {
         }
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
         engine.set_smoke_level(self.graphics_smoke_level);
+        let frozen_startup_player_count = if replay {
+            replay_startup_player_count
+        } else {
+            let serialized = self
+                .host_join_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.parameters.startup_player_count)
+                .or(serialized_startup_player_count);
+            let frame_zero_player_count = offline_startup_players
+                .as_ref()
+                .map(OfflineStartupPlayers::startup_player_count)
+                .or_else(|| {
+                    network_game.then(|| {
+                        i32::try_from(self.control_player_infos.nonremoved_player_count())
+                            .unwrap_or(i32::MAX)
+                    })
+                });
+            startup_player_count_for_init(
+                initial_game_data.map_or(0, |game_data| game_data.frame),
+                serialized,
+                frame_zero_player_count,
+            )
+        };
+        if let Some(startup_player_count) = frozen_startup_player_count {
+            engine.freeze_startup_player_count(startup_player_count);
+        }
         if let Some(parameters) = replay_parameters.as_ref() {
             engine.set_control_rate(parameters.control_rate());
         }
@@ -82446,7 +82513,10 @@ impl GameApp {
         self.advance_scenario_loader(97, "Input and audio runtime initialized");
         if !network_game && !replay {
             if let Some(startup) = offline_startup_players.as_ref() {
-                let startup_player_count = startup.startup_player_count();
+                let startup_player_count = self
+                    .engine
+                    .startup_player_count()
+                    .unwrap_or_else(|| startup.startup_player_count());
                 let (mut local_players, mut joined_player_files) = if let Some(savegame) =
                     offline_savegame.as_ref()
                 {
@@ -90150,6 +90220,26 @@ mod tests {
 
     fn tempdir() -> std::io::Result<tempfile::TempDir> {
         tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
+
+    #[test]
+    fn startup_player_count_uses_roster_only_at_frame_zero() {
+        assert_eq!(
+            startup_player_count_for_init(0, Some(7), Some(2)),
+            Some(2),
+            "fresh games overwrite a stale serialized parameter"
+        );
+        assert_eq!(
+            startup_player_count_for_init(37, Some(7), Some(1)),
+            Some(7),
+            "runtime restores retain their original startup scalar"
+        );
+        assert_eq!(
+            startup_player_count_for_init(-1, Some(0), Some(3)),
+            Some(0),
+            "the native branch tests exact zero rather than positive frames"
+        );
+        assert_eq!(startup_player_count_for_init(0, Some(4), None), None);
     }
 
     #[test]
