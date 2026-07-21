@@ -19068,10 +19068,12 @@ impl NetworkLobbyState {
         scenario_game_options: &GameOptionButtons,
     ) -> (LobbyLayout, LobbyRosterLayout, GameOptionButtons) {
         self.sync_classic_controller();
-        let mut option_values = scenario_game_options.values().clone();
-        option_values.lobby_is_league = self.league_mode;
-        option_values.countdown = self.countdown.is_some();
-        let mut options = GameOptionButtons::new(self.controller.role().game_option_context(), option_values);
+        // C4GameLobby owns one C4GameOptionButtons instance for the dialog
+        // lifetime. Render a projection of the retained application strip so
+        // hover, press, focus, and tooltip timing survive frame boundaries.
+        let mut options = scenario_game_options.clone();
+        options.set_lobby_league(self.league_mode);
+        options.set_countdown(self.countdown.is_some());
         let layout = self.controller.layout(width, height, fonts);
         options.set_bounds(layout.game_option_strip);
         let _ = self.controller.chat_scroll_metrics(&layout, &fonts.text);
@@ -30134,6 +30136,12 @@ impl GameApp {
                 .controller
                 .layout(surface.width() as i32, surface.height() as i32, fonts)
                 .game_option_strip
+        } else if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.sync_classic_controller();
+            lobby
+                .controller
+                .layout(surface.width() as i32, surface.height() as i32, fonts)
+                .game_option_strip
         } else {
             startup_scensel_game_option_bounds(
                 surface.width() as i32,
@@ -30143,6 +30151,58 @@ impl GameApp {
         };
         self.scenario_game_options.set_bounds(bounds);
     }
+
+    fn sync_network_lobby_game_option_state(&mut self) {
+        if self.classic_host_lobby.is_some() {
+            // The exact host lobby owns the retained strip lifecycle.
+            return;
+        }
+        let Some((is_host, countdown)) = self
+            .network_lobby
+            .as_ref()
+            .map(|lobby| (lobby.is_host, lobby.countdown.is_some()))
+        else {
+            return;
+        };
+        let context = if is_host {
+            GameOptionContext::LobbyHost
+        } else {
+            GameOptionContext::LobbyClient
+        };
+
+        let league = self.network_is_league;
+        let fair_crew = self.engine.use_fair_crew();
+        let fair_crew_strength = self.engine.fair_crew_strength();
+        let fair_crew_forced = self.engine.fair_crew_forced();
+        if self.scenario_game_options.context() != context {
+            let mut values = self.scenario_game_options.values().clone();
+            values.lobby_is_league = league;
+            values.fair_crew = fair_crew;
+            values.fair_crew_strength = fair_crew_strength;
+            values.lobby_fair_crew_forced = fair_crew_forced;
+            values.countdown = countdown;
+            self.scenario_game_options = GameOptionButtons::new(context, values);
+        } else {
+            self.scenario_game_options.set_lobby_league(league);
+            self.scenario_game_options.set_lobby_fair_crew_state(
+                fair_crew,
+                fair_crew_strength,
+                fair_crew_forced,
+            );
+            self.scenario_game_options.set_countdown(countdown);
+        }
+        self.sync_scenario_game_option_bounds();
+    }
+
+    /// The reconstructed (non-exact-host) network lobby adapter is receiving
+    /// startup input.
+    fn joined_network_lobby_active(&self) -> bool {
+        self.mode == AppMode::Menu
+            && self.startup_view == StartupView::NetworkLobby
+            && self.classic_host_lobby.is_none()
+            && self.network_lobby.is_some()
+    }
+
 
     fn sync_scenario_game_option_constraint(&mut self) {
         let constraint = scenario_fair_crew_constraint(self.menu_state.selected_scenario());
@@ -39860,6 +39920,9 @@ impl GameApp {
         if self.handle_network_lobby_chat_key(key, state)? {
             return Ok(());
         }
+        if self.handle_joined_lobby_controller_key(key, state)? {
+            return Ok(());
+        }
 
         match self.mode {
             AppMode::Menu => {
@@ -47651,6 +47714,7 @@ impl GameApp {
                             lobby.preload.reset_for_context();
                         }
                         self.pending_network_join_data = Some(join_data);
+                        self.sync_network_lobby_game_option_state();
                         self.sync_classic_lobby_roster();
                         self.sync_classic_lobby_resource_ready();
                         self.acknowledge_initial_lobby_status_if_ready();
@@ -49679,6 +49743,38 @@ impl GameApp {
         if self.classic_host_lobby_active() {
             return self.handle_classic_lobby_gamepad_direction(button, state);
         }
+        if self.joined_network_lobby_active() {
+            let option_focused = self.network_lobby.as_mut().is_some_and(|lobby| {
+                lobby.sync_classic_controller();
+                matches!(lobby.controller.focus(), LobbyControl::GameOption(_))
+            });
+            if option_focused {
+                if state == ElementState::Pressed {
+                    let (horizontal, vertical) = match button {
+                        ControlButton::Left => (-1, 0),
+                        ControlButton::Right => (1, 0),
+                        ControlButton::Up => (0, -1),
+                        ControlButton::Down => (0, 1),
+                    };
+                    let assets = Arc::clone(&self.assets);
+                    let actions = self
+                        .network_lobby
+                        .as_mut()
+                        .expect("joined lobby was checked above")
+                        .with_classic_controller_input(
+                            self.graphics.surface(),
+                            assets.as_ref(),
+                            &self.scenario_game_options,
+                            |controller, layout, roster| {
+                                controller.gamepad_direction(horizontal, vertical, layout, roster)
+                            },
+                        )
+                        .map_err(Self::joined_lobby_input_error)?;
+                    self.process_joined_lobby_controller_actions(actions)?;
+                }
+                return Ok(());
+            }
+        }
         if self.mode == AppMode::Menu
             && self.startup_view == StartupView::PlayerSelection
             && self.startup_crew_rename.is_some()
@@ -50093,14 +50189,54 @@ impl GameApp {
                             };
                             self.process_main_menu_actions(actions)?;
                         }
-                        StartupView::NetworkLobby => match state {
-                            ElementState::Pressed => self.handle_menu_input(|menu| {
-                                menu.menu().handle_key_down(KeyCode::Enter)
-                            })?,
-                            ElementState::Released => self.handle_menu_input(|menu| {
-                                menu.menu().handle_key_up(KeyCode::Enter)
-                            })?,
-                        },
+                        StartupView::NetworkLobby => {
+                            let option_focused = self.joined_network_lobby_active()
+                                && self.network_lobby.as_mut().is_some_and(|lobby| {
+                                    lobby.sync_classic_controller();
+                                    matches!(
+                                        lobby.controller.focus(),
+                                        LobbyControl::GameOption(_)
+                                    )
+                                });
+                            if option_focused {
+                                let assets = Arc::clone(&self.assets);
+                                let actions = {
+                                    let lobby = self
+                                        .network_lobby
+                                        .as_mut()
+                                        .expect("joined lobby was checked above");
+                                    match state {
+                                        ElementState::Pressed => lobby
+                                            .with_classic_controller_input(
+                                                self.graphics.surface(),
+                                                assets.as_ref(),
+                                                &self.scenario_game_options,
+                                                |controller, layout, roster| {
+                                                    controller.gamepad_low_down(
+                                                        Instant::now(),
+                                                        layout,
+                                                        roster,
+                                                    )
+                                                },
+                                            )
+                                            .map_err(Self::joined_lobby_input_error)?,
+                                        ElementState::Released => {
+                                            lobby.controller.gamepad_low_up()
+                                        }
+                                    }
+                                };
+                                self.process_joined_lobby_controller_actions(actions)?;
+                                return Ok(());
+                            }
+                            match state {
+                                ElementState::Pressed => self.handle_menu_input(|menu| {
+                                    menu.menu().handle_key_down(KeyCode::Enter)
+                                })?,
+                                ElementState::Released => self.handle_menu_input(|menu| {
+                                    menu.menu().handle_key_up(KeyCode::Enter)
+                                })?,
+                            }
+                        }
                         StartupView::Options | StartupView::About => {}
                     }
                 }
@@ -68097,7 +68233,10 @@ impl GameApp {
             }
             return Ok(true);
         }
-        if hotkey != 'T' {
+        // The chat mnemonic plus the option-strip mnemonics the controller
+        // dispatches as GameOptions hotkeys; Players/Options/Start/Ready
+        // stay with the reduced adapter's own controls.
+        if hotkey != 'T' && !matches!(hotkey, 'I' | 'L' | 'M' | 'F' | 'R') {
             return Ok(false);
         }
         if state == ElementState::Pressed {
@@ -68108,6 +68247,64 @@ impl GameApp {
                 .classic_hotkey(hotkey);
             self.process_joined_lobby_controller_actions(actions)?;
         }
+        Ok(true)
+    }
+
+    /// Dialog-level keys of the reconstructed joined lobby: Tab traverses the
+    /// controller focus order, and every mapped key reaches a focused
+    /// option-strip button (`Dialog::KeyFocusDefault` reroutes unhandled
+    /// ones). Escape stays with the adapter's direct Exit route.
+    fn handle_joined_lobby_controller_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if !self.joined_network_lobby_active() {
+            return Ok(false);
+        }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if !c4_modifiers.is_empty() && c4_modifiers != ModifiersState::SHIFT {
+            return Ok(false);
+        }
+        let Some(gui_key) = map_key_code(key) else {
+            return Ok(false);
+        };
+        if gui_key == KeyCode::Escape {
+            return Ok(false);
+        }
+        let option_focused = self.network_lobby.as_mut().is_some_and(|lobby| {
+            lobby.sync_classic_controller();
+            matches!(lobby.controller.focus(), LobbyControl::GameOption(_))
+        });
+        if gui_key != KeyCode::Tab && !option_focused {
+            return Ok(false);
+        }
+        let shift = self.keyboard_modifiers.shift();
+        let assets = Arc::clone(&self.assets);
+        let actions = {
+            let lobby = self
+                .network_lobby
+                .as_mut()
+                .expect("joined lobby was checked above");
+            match state {
+                ElementState::Pressed => lobby
+                    .with_classic_controller_input(
+                        self.graphics.surface(),
+                        assets.as_ref(),
+                        &self.scenario_game_options,
+                        |controller, layout, roster| {
+                            controller.key_down(gui_key, shift, layout, roster, Instant::now())
+                        },
+                    )
+                    .map_err(Self::joined_lobby_input_error)?,
+                ElementState::Released => {
+                    lobby.sync_classic_controller();
+                    lobby.controller.key_up(gui_key)
+                }
+            }
+        };
+        self.process_joined_lobby_controller_actions(actions)?;
         Ok(true)
     }
 
@@ -68510,6 +68707,41 @@ impl GameApp {
         &mut self,
         input: LobbyGameOptionInput,
     ) -> Result<Vec<ClassicLobbyAction>, EngineError> {
+        self.route_lobby_game_option_input(input, false)
+    }
+
+    /// Routes a strip input of the reconstructed joined lobby, using its
+    /// retained classic controller for the enclosing-dialog focus
+    /// bookkeeping.
+    fn route_joined_lobby_game_option_input(
+        &mut self,
+        input: LobbyGameOptionInput,
+    ) -> Result<Vec<ClassicLobbyAction>, EngineError> {
+        self.route_lobby_game_option_input(input, true)
+    }
+
+    /// The `ClassicGameLobby` that encloses the retained option strip: the
+    /// exact host lobby's, or the joined adapter's when `joined`.
+    fn lobby_game_option_enclosing_controller(
+        &mut self,
+        joined: bool,
+    ) -> Option<&mut ClassicGameLobby> {
+        if joined {
+            self.network_lobby
+                .as_mut()
+                .map(|lobby| &mut lobby.controller)
+        } else {
+            self.classic_host_lobby
+                .as_mut()
+                .map(|state| &mut state.controller)
+        }
+    }
+
+    fn route_lobby_game_option_input(
+        &mut self,
+        input: LobbyGameOptionInput,
+        joined: bool,
+    ) -> Result<Vec<ClassicLobbyAction>, EngineError> {
         let previous_focus = self.scenario_game_options.focused_button();
         let mut unhandled = false;
         let option_actions = match input {
@@ -68546,9 +68778,10 @@ impl GameApp {
                 outcome.actions
             }
             LobbyGameOptionInput::KeyUp(key) => {
-                let outcome = self.scenario_game_options.handle_key_up(key);
-                unhandled = !outcome.captured;
-                outcome.actions
+                // Dialog::KeyFocusDefault binds only key-down events
+                // (C4GuiDialogs.cpp:380-383): an unmatched release never
+                // refocuses the default control.
+                self.scenario_game_options.handle_key_up(key).actions
             }
             LobbyGameOptionInput::Hotkey(hotkey) => {
                 self.scenario_game_options.handle_hotkey(hotkey)
@@ -68559,9 +68792,8 @@ impl GameApp {
                 outcome.actions
             }
             LobbyGameOptionInput::GamepadLowUp => {
-                let outcome = self.scenario_game_options.handle_gamepad_low_up();
-                unhandled = !outcome.captured;
-                outcome.actions
+                // Releases share the key-down-only KeyFocusDefault rule.
+                self.scenario_game_options.handle_gamepad_low_up().actions
             }
             LobbyGameOptionInput::GamepadDirection {
                 horizontal,
@@ -68589,12 +68821,9 @@ impl GameApp {
             match action {
                 GameOptionAction::FocusTraversalRequested { backwards } => {
                     lobby_actions.extend(
-                        self.classic_host_lobby
-                            .as_mut()
-                            .map(|state| {
-                                state
-                                    .controller
-                                    .game_option_focus_traversal_requested(backwards)
+                        self.lobby_game_option_enclosing_controller(joined)
+                            .map(|controller| {
+                                controller.game_option_focus_traversal_requested(backwards)
                             })
                             .unwrap_or_default(),
                     );
@@ -68606,14 +68835,12 @@ impl GameApp {
         if focused != previous_focus {
             if let Some(button) = focused {
                 let actions = self
-                    .classic_host_lobby
-                    .as_mut()
+                    .lobby_game_option_enclosing_controller(joined)
                     .ok_or_else(|| {
                         classic_game_lobby_child_error(ClassicGameLobbyChild::GameOptionSideEffect(
                             "recursive focus",
                         ))
                     })?
-                    .controller
                     .game_option_focus_changed(button)
                     .map_err(|error| {
                         classic_game_lobby_child_error(ClassicGameLobbyChild::GameOptionSideEffect(
@@ -68629,9 +68856,8 @@ impl GameApp {
         }
         if unhandled {
             lobby_actions.extend(
-                self.classic_host_lobby
-                    .as_mut()
-                    .map(|state| state.controller.game_option_input_unhandled())
+                self.lobby_game_option_enclosing_controller(joined)
+                    .map(|controller| controller.game_option_input_unhandled())
                     .unwrap_or_default(),
             );
         }
@@ -71003,11 +71229,19 @@ impl GameApp {
         &mut self,
         actions: Vec<ClassicLobbyAction>,
     ) -> Result<(), EngineError> {
-        for action in actions {
+        let mut pending: VecDeque<ClassicLobbyAction> = actions.into();
+        while let Some(action) = pending.pop_front() {
             self.mark_menu_dirty();
             match action {
                 ClassicLobbyAction::FocusChanged(control) => {
                     self.set_active_lobby_chat_focus(control == LobbyControl::ChatInput);
+                    self.scenario_game_options.set_focused_button(match control {
+                        LobbyControl::GameOption(button) => Some(button),
+                        _ => None,
+                    });
+                }
+                ClassicLobbyAction::GameOptions(input) => {
+                    pending.extend(self.route_joined_lobby_game_option_input(input)?);
                 }
                 ClassicLobbyAction::Chat(request) => {
                     self.process_classic_lobby_chat_request(request)?;
@@ -71030,8 +71264,8 @@ impl GameApp {
                 }
                 // The reduced joined-lobby adapter still owns the remaining
                 // commands (sheets, ready, start, Exit) through its legacy
-                // panel actions; the retained controller only supplies their
-                // native sounds.
+                // panel actions; the retained controller supplies their
+                // native sounds, and the retained option strip routes above.
                 _ => {}
             }
         }
@@ -72270,6 +72504,7 @@ impl GameApp {
         } else {
             self.scenario_label = "Network lobby unavailable".to_string();
         }
+        self.sync_network_lobby_game_option_state();
         self.status_text.clear();
         self.acknowledge_initial_lobby_status_if_ready();
     }
@@ -74314,8 +74549,11 @@ impl GameApp {
                     host_snapshot_changed = true;
                 }
                 if self.scenario_game_options.context().is_lobby() {
-                    self.scenario_game_options
-                        .set_lobby_fair_crew(use_fair_crew, false);
+                    self.scenario_game_options.set_lobby_fair_crew_state(
+                        use_fair_crew,
+                        fair_crew_strength,
+                        false,
+                    );
                 }
             }
             // C4CVT_None and unknown raw values are release-build no-ops.
@@ -126820,6 +127058,452 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
     }
 
+    fn joined_option_strip_app() -> GameApp {
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let (network, _events) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.sync_network_lobby_game_option_state();
+        app
+    }
+
+    fn joined_option_center(app: &GameApp, button: GameOptionButton) -> PhysicalPosition<f64> {
+        let rect = app
+            .scenario_game_options
+            .layout()
+            .rect(button)
+            .expect("button present in the joined strip");
+        PhysicalPosition::new(f64::from(rect.x + rect.w / 2), f64::from(rect.y + rect.h / 2))
+    }
+
+    fn joined_option_point(app: &GameApp, button: GameOptionButton) -> GuiPoint {
+        let rect = app
+            .scenario_game_options
+            .layout()
+            .rect(button)
+            .expect("button present in the joined strip");
+        GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
+    }
+
+    fn joined_option_controller_focus(app: &mut GameApp) -> LobbyControl {
+        let lobby = app.network_lobby.as_mut().expect("joined lobby");
+        lobby.sync_classic_controller();
+        lobby.controller.focus()
+    }
+
+    #[test]
+    fn joined_lobby_game_option_strip_routes_input() {
+        let mut app = joined_option_strip_app();
+
+        // C4GameLobby.cpp:214 builds the client strip (fNetwork, !fHost,
+        // fLobby): League and Fair Crew stay locked while Record is live.
+        assert_eq!(
+            app.scenario_game_options.context(),
+            GameOptionContext::LobbyClient
+        );
+        assert!(
+            !app.scenario_game_options
+                .view(GameOptionButton::League)
+                .expect("League is visible")
+                .enabled
+        );
+        assert!(
+            !app.scenario_game_options
+                .view(GameOptionButton::FairCrew)
+                .expect("Fair Crew is visible")
+                .enabled
+        );
+        assert!(
+            app.scenario_game_options
+                .view(GameOptionButton::Record)
+                .expect("Record is visible")
+                .enabled
+        );
+
+        // Pointer: an enabled joined control presses with the native sounds
+        // and toggles Config.General.Record on release. Buttons deliberately
+        // keep the chat focus on mouse clicks.
+        app.handle_cursor_moved(joined_option_center(&app, GameOptionButton::Record))
+            .expect("hover Record");
+        assert_eq!(
+            app.scenario_game_options.hovered_button(),
+            Some(GameOptionButton::Record),
+            "the retained strip tracks controller-routed hover for its tooltip"
+        );
+        app.ui_sound_log.clear();
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press Record");
+        assert_eq!(app.ui_sound_log, ["ArrowHit".to_string()]);
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release Record");
+        assert_eq!(
+            app.ui_sound_log,
+            ["ArrowHit".to_string(), "Click".to_string()]
+        );
+        assert!(app.scenario_game_options.values().record);
+        assert!(app.startup_view_flags.record);
+        assert_eq!(app.scenario_game_options.focused_button(), None);
+        assert_eq!(
+            joined_option_controller_focus(&mut app),
+            LobbyControl::ChatInput
+        );
+
+        // Pointer: host-only/locked controls stay inert and visually exact.
+        // Each press resets the native double-click clock so the classic
+        // LeftDouble path (which never presses buttons) stays out of the way.
+        let fair_crew_before = app.scenario_game_options.values().fair_crew;
+        for locked in [GameOptionButton::League, GameOptionButton::FairCrew] {
+            app.handle_cursor_moved(joined_option_center(&app, locked))
+                .expect("hover a locked joined control");
+            app.ui_sound_log.clear();
+            app.last_application_left_press = None;
+            app.handle_mouse_button(ElementState::Pressed)
+                .expect("press a locked joined control");
+            app.handle_mouse_button(ElementState::Released)
+                .expect("release a locked joined control");
+            assert!(app.ui_sound_log.is_empty(), "{locked:?} is silent");
+        }
+        assert!(!app.scenario_game_options.values().lobby_is_league);
+        assert_eq!(
+            app.scenario_game_options.values().fair_crew,
+            fair_crew_before
+        );
+        assert_eq!(
+            app.scenario_game_options
+                .view(GameOptionButton::League)
+                .expect("League stays visible")
+                .icon,
+            lc_frontend::game_option_buttons::GameOptionIcon::LeagueOff
+        );
+        assert_eq!(
+            app.scenario_game_options
+                .view(GameOptionButton::FairCrew)
+                .expect("Fair Crew stays visible")
+                .icon,
+            if fair_crew_before {
+                lc_frontend::game_option_buttons::GameOptionIcon::FairCrewGray
+            } else {
+                lc_frontend::game_option_buttons::GameOptionIcon::NormalCrewGray
+            }
+        );
+
+        // A press that drags off the enabled button pops the visual with the
+        // native ArrowHit and releases without an activation.
+        app.handle_cursor_moved(joined_option_center(&app, GameOptionButton::Record))
+            .expect("re-hover Record");
+        app.ui_sound_log.clear();
+        app.last_application_left_press = None;
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("hold Record");
+        app.handle_cursor_moved(joined_option_center(&app, GameOptionButton::FairCrew))
+            .expect("drag off the held Record");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release outside the held Record");
+        assert_eq!(
+            app.ui_sound_log,
+            ["ArrowHit".to_string(), "ArrowHit".to_string()]
+        );
+        assert!(
+            app.scenario_game_options.values().record,
+            "an aborted click keeps the Record preference"
+        );
+
+        // Keyboard: Tab walks the C4GUI dialog focus order, in which every
+        // strip button is a stop (Control::IsFocusElement holds while
+        // disabled). Space activates only enabled buttons; an unhandled key
+        // on a locked stop falls back to the chat default per
+        // Dialog::KeyFocusDefault.
+        let tab = |app: &mut GameApp| {
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("Tab down");
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("Tab up");
+        };
+        let mut guard = 0;
+        while joined_option_controller_focus(&mut app)
+            != LobbyControl::GameOption(GameOptionButton::League)
+        {
+            tab(&mut app);
+            guard += 1;
+            assert!(guard < 16, "the dialog focus cycle reaches the strip");
+        }
+        assert_eq!(
+            app.scenario_game_options.focused_button(),
+            Some(GameOptionButton::League)
+        );
+        app.ui_sound_log.clear();
+        app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("Space on the locked League");
+        assert_eq!(
+            joined_option_controller_focus(&mut app),
+            LobbyControl::ChatInput,
+            "KeyFocusDefault returns an unhandled option key to the chat edit"
+        );
+        assert_eq!(app.scenario_game_options.focused_button(), None);
+        assert!(app.ui_sound_log.is_empty());
+        app.handle_key(VirtualKeyCode::Space, ElementState::Released)
+            .expect("Space release after the focus fallback");
+        let mut guard = 0;
+        while joined_option_controller_focus(&mut app)
+            != LobbyControl::GameOption(GameOptionButton::League)
+        {
+            tab(&mut app);
+            guard += 1;
+            assert!(guard < 16, "the dialog focus cycle reaches the strip again");
+        }
+        tab(&mut app);
+        assert_eq!(
+            joined_option_controller_focus(&mut app),
+            LobbyControl::GameOption(GameOptionButton::FairCrew)
+        );
+        tab(&mut app);
+        assert_eq!(
+            joined_option_controller_focus(&mut app),
+            LobbyControl::GameOption(GameOptionButton::Record)
+        );
+        assert_eq!(
+            app.scenario_game_options.focused_button(),
+            Some(GameOptionButton::Record)
+        );
+        app.ui_sound_log.clear();
+        app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("Space press on Record");
+        app.handle_key(VirtualKeyCode::Space, ElementState::Released)
+            .expect("Space release on Record");
+        assert_eq!(
+            app.ui_sound_log,
+            ["ArrowHit".to_string(), "Click".to_string()]
+        );
+        assert!(!app.scenario_game_options.values().record);
+
+        // A typed character on a focused option button refocuses the chat
+        // edit and inserts (Dialog::KeyFocusDefault with CharIn).
+        app.handle_text_input('y').expect("char while strip focused");
+        assert_eq!(
+            joined_option_controller_focus(&mut app),
+            LobbyControl::ChatInput
+        );
+        assert_eq!(app.scenario_game_options.focused_button(), None);
+        assert_eq!(
+            app.network_lobby.as_ref().expect("joined lobby").chat_edit.text,
+            "y"
+        );
+
+        // Alt hotkeys reach enabled controls silently and skip locked ones.
+        app.keyboard_modifiers = ModifiersState::ALT;
+        app.ui_sound_log.clear();
+        app.handle_key(VirtualKeyCode::R, ElementState::Pressed)
+            .expect("Alt+R toggles Record");
+        app.handle_key(VirtualKeyCode::R, ElementState::Released)
+            .expect("Alt+R release");
+        assert!(app.scenario_game_options.values().record);
+        assert!(app.ui_sound_log.is_empty(), "dialog hotkeys are silent");
+        app.handle_key(VirtualKeyCode::L, ElementState::Pressed)
+            .expect("Alt+L stays inert");
+        app.handle_key(VirtualKeyCode::L, ElementState::Released)
+            .expect("Alt+L release");
+        assert!(!app.scenario_game_options.values().lobby_is_league);
+        app.keyboard_modifiers = ModifiersState::empty();
+
+        // Touch mirrors the pointer path.
+        let record_point = joined_option_point(&app, GameOptionButton::Record);
+        app.ui_sound_log.clear();
+        app.last_application_left_press = None;
+        app.handle_touch(TouchPhase::Started, record_point)
+            .expect("touch Record");
+        app.handle_touch(TouchPhase::Ended, record_point)
+            .expect("lift off Record");
+        assert_eq!(
+            app.ui_sound_log,
+            ["ArrowHit".to_string(), "Click".to_string()]
+        );
+        assert!(!app.scenario_game_options.values().record);
+        let league_point = joined_option_point(&app, GameOptionButton::League);
+        app.ui_sound_log.clear();
+        app.last_application_left_press = None;
+        app.handle_touch(TouchPhase::Started, league_point)
+            .expect("touch the locked League");
+        app.handle_touch(TouchPhase::Ended, league_point)
+            .expect("lift off the locked League");
+        assert!(app.ui_sound_log.is_empty());
+
+        // Gamepad: Left/Right traverse the strip stops, Select activates the
+        // focused button, and Select on a locked stop falls back to the chat
+        // default.
+        let mut guard = 0;
+        while joined_option_controller_focus(&mut app)
+            != LobbyControl::GameOption(GameOptionButton::League)
+        {
+            tab(&mut app);
+            guard += 1;
+            assert!(guard < 16, "the dialog focus cycle reaches the strip");
+        }
+        app.handle_gamepad_direction(
+            GamepadSlot::new(0),
+            ControlButton::Right,
+            ElementState::Pressed,
+        )
+        .expect("gamepad Right advances the strip focus");
+        assert_eq!(
+            joined_option_controller_focus(&mut app),
+            LobbyControl::GameOption(GameOptionButton::FairCrew)
+        );
+        app.handle_gamepad_direction(
+            GamepadSlot::new(0),
+            ControlButton::Right,
+            ElementState::Pressed,
+        )
+        .expect("gamepad Right reaches Record");
+        assert_eq!(
+            joined_option_controller_focus(&mut app),
+            LobbyControl::GameOption(GameOptionButton::Record)
+        );
+        app.ui_sound_log.clear();
+        app.handle_gamepad_action(
+            GamepadSlot::new(0),
+            GamepadActionType::Select,
+            ElementState::Pressed,
+        )
+        .expect("gamepad Select holds Record");
+        app.handle_gamepad_action(
+            GamepadSlot::new(0),
+            GamepadActionType::Select,
+            ElementState::Released,
+        )
+        .expect("gamepad Select clicks Record");
+        assert_eq!(
+            app.ui_sound_log,
+            ["ArrowHit".to_string(), "Click".to_string()]
+        );
+        assert!(app.scenario_game_options.values().record);
+        let mut guard = 0;
+        while joined_option_controller_focus(&mut app)
+            != LobbyControl::GameOption(GameOptionButton::League)
+        {
+            tab(&mut app);
+            guard += 1;
+            assert!(guard < 16, "the dialog focus cycle reaches League");
+        }
+        app.handle_gamepad_action(
+            GamepadSlot::new(0),
+            GamepadActionType::Select,
+            ElementState::Pressed,
+        )
+        .expect("gamepad Select on a locked stop");
+        assert_eq!(
+            joined_option_controller_focus(&mut app),
+            LobbyControl::ChatInput,
+            "Select on a locked option falls back to the chat default"
+        );
+
+        // A league round grays Record exactly like the host rules; the
+        // joined control then rejects pointer and hotkey input.
+        app.network_is_league = true;
+        app.sync_network_lobby_game_option_state();
+        assert!(app.scenario_game_options.values().lobby_is_league);
+        assert!(
+            !app.scenario_game_options
+                .view(GameOptionButton::Record)
+                .expect("Record stays visible")
+                .enabled
+        );
+        assert_eq!(
+            app.scenario_game_options
+                .view(GameOptionButton::Record)
+                .expect("Record stays visible")
+                .icon,
+            lc_frontend::game_option_buttons::GameOptionIcon::RecordOn
+        );
+        let record_before = app.scenario_game_options.values().record;
+        app.handle_cursor_moved(joined_option_center(&app, GameOptionButton::Record))
+            .expect("hover the league-locked Record");
+        app.ui_sound_log.clear();
+        app.last_application_left_press = None;
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press the league-locked Record");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release the league-locked Record");
+        app.keyboard_modifiers = ModifiersState::ALT;
+        app.handle_key(VirtualKeyCode::R, ElementState::Pressed)
+            .expect("Alt+R on the league-locked Record");
+        app.handle_key(VirtualKeyCode::R, ElementState::Released)
+            .expect("Alt+R release on the league-locked Record");
+        app.keyboard_modifiers = ModifiersState::empty();
+        assert_eq!(app.scenario_game_options.values().record, record_before);
+        assert!(app.ui_sound_log.is_empty());
+    }
+
+    #[test]
+    fn network_lobby_game_option_state_matches_role_and_render_focus() {
+        // The retained strip and joined controller keep the recursive focus
+        // mirrored, so ClassicGameLobby::render's focus/context checks hold
+        // on the projected render state.
+        let mut app = joined_option_strip_app();
+        let tab = |app: &mut GameApp| {
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("Tab down");
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("Tab up");
+        };
+        let mut seen = Vec::new();
+        loop {
+            let focus = joined_option_controller_focus(&mut app);
+            if focus == LobbyControl::GameOption(GameOptionButton::League) {
+                break;
+            }
+            seen.push(focus);
+            tab(&mut app);
+            assert!(seen.len() < 16, "focus cycle never reaches the strip: {seen:?}");
+        }
+        let surface = app.graphics.surface();
+        let (controller, options) = app
+            .network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .classic_render_state(surface, app.assets.as_ref(), &app.scenario_game_options)
+            .expect("build the joined render state");
+        assert_eq!(
+            controller.focus(),
+            LobbyControl::GameOption(GameOptionButton::League)
+        );
+        assert_eq!(options.focused_button(), Some(GameOptionButton::League));
+        assert_eq!(options.context(), GameOptionContext::LobbyClient);
+
+        // A host-role generic lobby retains the LobbyHost context so the
+        // render-time context checks and native enable rules hold.
+        let mut host = new_menu_app(640, 480);
+        host.startup_view = StartupView::NetworkLobby;
+        host.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), true));
+        host.sync_network_lobby_game_option_state();
+        assert_eq!(
+            host.scenario_game_options.context(),
+            GameOptionContext::LobbyHost
+        );
+        assert!(
+            !host
+                .scenario_game_options
+                .view(GameOptionButton::League)
+                .expect("host League is visible")
+                .enabled,
+            "the lobby locks the League toggle for the host too"
+        );
+
+        // The exact classic host lobby owns the strip: the generic sync must
+        // not clobber it.
+        let mut classic = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut classic);
+        classic.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), true));
+        let before = classic.scenario_game_options.values().clone();
+        classic.network_is_league = true;
+        classic.sync_network_lobby_game_option_state();
+        assert_eq!(*classic.scenario_game_options.values(), before);
+    }
+
     #[test]
     fn l102_lobby_client_info_renders_modally_and_escape_release_cannot_exit_lobby() {
         let mut app = new_real_menu_app(640, 480);
@@ -126832,6 +127516,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             SocketAddr::from(([127, 0, 0, 1], 11_112)),
             "Client",
         )));
+        app.sync_network_lobby_game_option_state();
         app.control_clients
             .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Client")]);
 
@@ -134926,6 +135611,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         wait_for_menu(&mut app);
         app.startup_view = StartupView::NetworkLobby;
         app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        app.sync_network_lobby_game_option_state();
         let mut frame = vec![0x5a; 640 * 480 * 4];
 
         app.render(&mut frame)
@@ -142035,6 +142721,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         let mut app = new_real_classic_menu_app(320, 200);
         app.startup_view = StartupView::NetworkLobby;
         app.network_lobby = Some(NetworkLobbyState::new(7, "Host".to_string(), true));
+        app.sync_network_lobby_game_option_state();
         assert!(app.status_text.is_empty());
 
         let cached = vec![0x31; 320 * 200 * 4];

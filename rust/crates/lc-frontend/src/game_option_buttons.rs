@@ -455,6 +455,7 @@ impl<'a> GameOptionButtonResources<'a> {
 }
 
 /// Pure presentation/input state for one embedded option-button strip.
+#[derive(Clone)]
 pub struct GameOptionButtons {
     context: GameOptionContext,
     values: GameOptionValues,
@@ -620,7 +621,14 @@ impl GameOptionButtons {
     }
 
     pub fn set_lobby_fair_crew(&mut self, fair: bool, forced: bool) {
+        self.set_lobby_fair_crew_state(fair, self.values.fair_crew_strength, forced);
+    }
+
+    /// Refreshes the synchronized lobby Fair Crew parameters in place so a
+    /// retained strip keeps its pointer, focus, and tooltip state.
+    pub fn set_lobby_fair_crew_state(&mut self, fair: bool, strength: i32, forced: bool) {
         self.values.fair_crew = fair;
+        self.values.fair_crew_strength = strength;
         self.values.lobby_fair_crew_forced = forced;
         self.cancel_disabled_presses();
     }
@@ -1137,9 +1145,7 @@ impl GameOptionButtons {
             return;
         };
         let inside = self.hovered == Some(pointer_button)
-            && self
-                .view(pointer_button)
-                .is_some_and(|view| view.enabled);
+            && self.view(pointer_button).is_some_and(|view| view.enabled);
         if self.pointer_down_visual && !inside {
             self.pointer_down_visual = false;
             self.sounds.push(GameOptionSound::ArrowHit);
@@ -1795,10 +1801,7 @@ mod tests {
         assert!(state.values().password.is_empty());
         assert_eq!(state.values().last_password, "remembered password");
         assert!(state.take_sound_events().is_empty());
-        state.apply_lobby_password_result(
-            "new password",
-            Some("new password".to_string()),
-        );
+        state.apply_lobby_password_result("new password", Some("new password".to_string()));
         assert_eq!(state.values().password, "new password");
         assert_eq!(state.values().last_password, "new password");
         assert_eq!(state.take_sound_events(), [GameOptionSound::Connect]);
@@ -2055,15 +2058,10 @@ mod tests {
         let (mut key_first, fair) = exercise();
         assert_eq!(
             key_first.handle_key_up(KeyCode::Enter),
-            GameOptionKeyOutcome::captured(vec![
-                GameOptionAction::FairCrewPreferenceChanged(true)
-            ])
+            GameOptionKeyOutcome::captured(vec![GameOptionAction::FairCrewPreferenceChanged(true)])
         );
         assert_eq!(key_first.take_sound_events(), [GameOptionSound::Click]);
-        assert_eq!(
-            key_first.pointer_pressed,
-            Some(GameOptionButton::FairCrew)
-        );
+        assert_eq!(key_first.pointer_pressed, Some(GameOptionButton::FairCrew));
         assert!(!key_first.pointer_down_visual);
         key_first.handle_pointer_move(point(fair));
         assert!(key_first.take_sound_events().is_empty());
@@ -2109,9 +2107,7 @@ mod tests {
         assert!(released_outside.take_sound_events().is_empty());
         assert_eq!(
             released_outside.handle_key_up(KeyCode::Enter),
-            GameOptionKeyOutcome::captured(vec![
-                GameOptionAction::FairCrewPreferenceChanged(true)
-            ])
+            GameOptionKeyOutcome::captured(vec![GameOptionAction::FairCrewPreferenceChanged(true)])
         );
         assert_eq!(
             released_outside.take_sound_events(),
