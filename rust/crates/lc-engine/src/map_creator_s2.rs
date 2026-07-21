@@ -1431,12 +1431,10 @@ impl Parser<'_, '_> {
                                 );
                                 new_node = Some(id);
                                 state = State::Keywd1;
-                                // operator type check (C4MapCreatorS2.cpp:
-                                // 1067-1069): the last operand was an
-                                // overlay (points cannot carry ops).
-                                if was_got_op {
-                                    return Err("operator type mismatch".into());
-                                }
+                                // The native operator type check below this
+                                // branch observes PS_KEYWD1, not PS_GOTOP.
+                                // Preserve that precedence/state bug: a point
+                                // is accepted after an overlay operator.
                             } else if name == "map" {
                                 if !global_scope {
                                     return Err("can't declare map in local scope".into());
@@ -3195,6 +3193,74 @@ mod tests {
         assert_eq!(at(4, 5), 0, "left-only region unset");
         assert_eq!(at(7, 5), 3 | 0x80, "intersection set by the chain tail");
         assert_eq!(at(12, 5), 0, "right-only region unset");
+    }
+
+    #[test]
+    fn point_keyword_after_operator_is_ignored_and_chain_reaches_next_overlay_like_cpp() {
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let creation = create_s2_map_with_state(
+            "map Test { seed=1; wdt=3px; hgt=1px; \
+               overlay A { seed=2; algo=solid; x=0px; wdt=1px; \
+                           mat=Rock; tex=Ridge; sub=0; } & \
+               point { x=2px; y=0px; }; \
+               overlay B { seed=3; algo=solid; x=0px; wdt=3px; \
+                           mat=Earth; tex=Rough; sub=0; }; \
+             };",
+            &mut classifier,
+            LegacyC4SVal::new(3, 0, 3, 3),
+            LegacyC4SVal::new(1, 0, 1, 1),
+            false,
+            1,
+            &mut rng,
+        );
+
+        assert_eq!(
+            creation.bitmap.expect("map renders").indices,
+            vec![2, 0, 0],
+            "the point is skipped and B paints only the A & B intersection"
+        );
+        let map = last_map(&creation.creator.tree).expect("map remains parsed");
+        let children = &creation.creator.tree.nodes[map].children;
+        assert_eq!(children.len(), 3, "A, the point, and B all stay linked");
+        assert_eq!(creation.creator.tree.nodes[children[0]].name, "A");
+        assert_eq!(
+            creation
+                .creator
+                .tree
+                .overlay(children[0])
+                .map(|overlay| overlay.op),
+            Some(Op::And)
+        );
+        assert!(matches!(
+            creation.creator.tree.nodes[children[1]].kind,
+            NodeKind::Point(_)
+        ));
+        assert_eq!(creation.creator.tree.nodes[children[2]].name, "B");
+        assert!(creation.creator.tree.overlay(children[2]).is_some());
+
+        let mut rng = LcgRng::seed_from_u64(1);
+        let rejected = create_s2_map_with_state(
+            "map Test { seed=1; wdt=1px; hgt=1px; \
+               point {} & overlay B { seed=2; mat=Earth; tex=Rough; sub=0; }; \
+               overlay C { seed=3; mat=Rock; tex=Ridge; sub=0; }; \
+             };",
+            &mut classifier,
+            LegacyC4SVal::new(1, 0, 1, 1),
+            LegacyC4SVal::new(1, 0, 1, 1),
+            false,
+            1,
+            &mut rng,
+        );
+        let map = last_map(&rejected.creator.tree).expect("partial map stays linked");
+        let children = &rejected.creator.tree.nodes[map].children;
+        assert_eq!(children.len(), 1, "a point still cannot carry an operator");
+        assert!(matches!(
+            rejected.creator.tree.nodes[children[0]].kind,
+            NodeKind::Point(_)
+        ));
+        assert!(rejected.creator.tree.node_by_name(map, "B").is_none());
+        assert!(rejected.creator.tree.node_by_name(map, "C").is_none());
     }
 
     #[test]
