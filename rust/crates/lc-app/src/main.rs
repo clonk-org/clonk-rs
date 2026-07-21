@@ -9429,7 +9429,6 @@ impl AudioContext {
         looped: bool,
         identity: Option<Arc<MusicAssetIdentity>>,
     ) {
-        self.stop_current_music();
         // Initialize the pull decoder off-thread. This retains the compressed
         // bytes and parses bounded source state (including a MIDI event
         // schedule) without rendering the complete track to PCM, matching
@@ -9548,23 +9547,33 @@ impl AudioContext {
                 }
                 .ok_or_else(|| anyhow!("queued default music has no enabled asset"))?;
                 let identity = Arc::clone(&selected.identity);
-                let data = selected
-                    .load_audio()
+                let data = self
+                    .read_resolved_music_asset(&selected)
                     .context("failed to read default music asset")?;
                 (data, looped, Some(identity))
             }
             MusicStartKind::Asset { asset, looped } => {
                 let identity = Arc::clone(&asset.identity);
                 let name = asset.file_name.clone();
-                let data = asset
-                    .load_audio()
+                let data = self
+                    .read_resolved_music_asset(&asset)
                     .with_context(|| format!("failed to read named music asset `{name}`"))?;
                 (data, looped, Some(identity))
             }
-            MusicStartKind::Data { data, looped } => (data, looped, None),
+            MusicStartKind::Data { data, looped } => {
+                self.stop_current_music();
+                (data, looped, None)
+            }
         };
         self.start_music_asset_now(data, looped, identity);
         Ok(())
+    }
+
+    fn read_resolved_music_asset(&mut self, asset: &MusicAsset) -> Result<Vec<u8>, GroupError> {
+        // C4MusicSystem::Play returns before Stop when selection fails, but a
+        // resolved Song hard-stops before C4Group_ReadFile can fail.
+        self.stop_current_music();
+        asset.load_audio()
     }
 
     fn stop_music(&mut self) {
@@ -125995,6 +126004,124 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let after = lock_unpoisoned(&audio.music_control).generation;
         assert_eq!(after, before, "a miss must leave current playback intact");
+    }
+
+    #[test]
+    fn resolved_unreadable_music_stops_current_playback_before_failure() {
+        for named in [true, false] {
+            let dir = tempdir().expect("tempdir");
+            let global = dir.path().join("Music.c4g");
+            fs::create_dir_all(&global).expect("create global music group");
+            fs::write(global.join("Prior.ogg"), b"prior").expect("write prior fixture");
+            fs::write(global.join("Gone.ogg"), b"gone").expect("write stale fixture");
+
+            let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+            audio.music_resolver = MusicResolver::with_global_group(
+                Group::open(&global).expect("open global music group"),
+            )
+            .expect("build music resolver");
+            let prior = Arc::clone(
+                &audio
+                    .music_resolver
+                    .resolve("Prior")
+                    .expect("resolve prior music")
+                    .identity,
+            );
+            lock_unpoisoned(&audio.music_control).most_recently_played = Some(Arc::clone(&prior));
+            audio.set_music_playlist(Some("Gone.*".to_string()));
+
+            let current = audio
+                .system
+                .load_music(&silent_pcm_wav(5_000))
+                .expect("load current music");
+            audio
+                .system
+                .play_music(&current, true)
+                .expect("start current music");
+            *lock_unpoisoned(&audio.pending_music) = Some(current);
+            let before = lock_unpoisoned(&audio.music_control).generation;
+
+            fs::remove_file(global.join("Gone.ogg")).expect("remove catalogued replacement");
+            let result = if named {
+                audio.play_named_music("Gone", false)
+            } else {
+                audio.play_default_music(false)
+            };
+            assert!(
+                result.is_err(),
+                "the resolved {} replacement must reach its failed read",
+                if named { "named" } else { "default" }
+            );
+            assert!(!audio.system.music_is_playing());
+            assert!(lock_unpoisoned(&audio.pending_music).is_none());
+            assert_eq!(audio.music_load_pending.load(AtomicOrdering::Acquire), 0);
+            assert!(audio.queued_music_starts.is_empty());
+            assert_ne!(
+                lock_unpoisoned(&audio.music_control).generation,
+                before,
+                "the resolved replacement invalidates the current generation"
+            );
+            let recent = lock_unpoisoned(&audio.music_control)
+                .most_recently_played
+                .clone()
+                .expect("failed replacement preserves prior marker");
+            assert!(Arc::ptr_eq(&recent, &prior));
+        }
+    }
+
+    #[test]
+    fn deferred_unreadable_music_stops_predecessor_and_preserves_recent_marker() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create global music group");
+        fs::write(global.join("A.ogg"), b"A").expect("write A fixture");
+        fs::write(global.join("B.ogg"), b"B").expect("write B fixture");
+
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        audio.music_resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("open global music group"),
+        )
+        .expect("build music resolver");
+        let a_identity = Arc::clone(
+            &audio
+                .music_resolver
+                .resolve("A")
+                .expect("resolve A")
+                .identity,
+        );
+        let fixture = audio
+            .system
+            .load_music(&silent_pcm_wav(5_000))
+            .expect("predecode controlled music fixture");
+        audio.control_music_loads_with(fixture);
+
+        audio
+            .play_named_music("A", false)
+            .expect("start predecessor request");
+        audio
+            .play_named_music("B", false)
+            .expect("queue resolved replacement");
+        assert_eq!(audio.queued_music_starts.len(), 1);
+        fs::remove_file(global.join("B.ogg")).expect("remove deferred catalogued replacement");
+
+        assert!(audio
+            .complete_next_controlled_music_load()
+            .expect("complete predecessor and pump replacement"));
+        assert!(!audio.system.music_is_playing());
+        assert_eq!(audio.music_load_pending.load(AtomicOrdering::Acquire), 0);
+        assert!(audio.queued_music_starts.is_empty());
+        assert!(audio
+            .controlled_music_loads
+            .as_ref()
+            .expect("controlled music loading")
+            .requests
+            .is_empty());
+        assert!(lock_unpoisoned(&audio.pending_music).is_none());
+        let recent = lock_unpoisoned(&audio.music_control)
+            .most_recently_played
+            .clone()
+            .expect("predecessor remains the last successful music");
+        assert!(Arc::ptr_eq(&recent, &a_identity));
     }
 
     #[test]
