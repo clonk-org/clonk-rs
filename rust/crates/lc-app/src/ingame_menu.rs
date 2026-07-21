@@ -8,8 +8,8 @@
 //!
 //! C++ opens this menu per player via `COM_PlayerMenu`
 //! (C4Game.cpp:3593-3601 -> C4Player::ActivateMenuMain, C4Player.cpp:2327).
-//! Bare Escape follows C++ into `C4AbortGameDialog`; until that separate
-//! dialog is ported, lc-app fails at a typed parity boundary.
+//! Bare Escape and the Abort command leave this menu layer and open the
+//! standalone `C4AbortGameDialog` port owned by lc-app.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -204,11 +204,6 @@ pub enum MenuAction {
     /// "TeamSwitch:<id>" queues `CID_SetPlayerTeam`
     /// (C4MainMenu.cpp:909-918).
     SwitchTeam(i32),
-    /// C4AbortGameDialog "Yes": `Game.Abort()` (C4GameDialogs.cpp:104-121).
-    AbortConfirmed,
-    /// C4AbortGameDialog "Restart": `Application.SetNextMission` + abort
-    /// (C4GameDialogs.cpp:116-120).
-    RestartRound,
     /// Items with an empty command (the "No" buttons, C4MainMenu.cpp:533).
     NoOp,
 }
@@ -229,7 +224,6 @@ pub enum MenuPage {
     Surrender,
     ClientDisconnect,
     HostDisconnect,
-    AbortConfirm,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1145,40 +1139,6 @@ impl IngameMenuState {
             items,
             false,
             Some(MenuAction::ActivateMain),
-        )
-    }
-
-    /// Menu-shaped approximation of `C4AbortGameDialog`
-    /// (C4GameDialogs.cpp:33-79): "Abort round?" with Yes / (Restart) / No;
-    /// the restart button appears for the control host (local rounds).
-    pub fn abort_confirm_menu(show_restart: bool) -> Self {
-        let mut items = vec![MenuItem::new(
-            "Yes",
-            MenuSymbol::OkCancel(3, 0),
-            MenuAction::AbortConfirmed,
-            None,
-        )];
-        if show_restart {
-            items.push(MenuItem::new(
-                "Restart",
-                MenuSymbol::GuiIcon(ICO_GAME_RUNNING),
-                MenuAction::RestartRound,
-                None,
-            ));
-        }
-        items.push(MenuItem::new(
-            "No",
-            MenuSymbol::OkCancel(1, 0),
-            MenuAction::NoOp,
-            None,
-        ));
-        Self::new(
-            MenuPage::AbortConfirm,
-            "Abort round?",
-            MenuSymbol::GuiIcon(ICO_EXIT),
-            items,
-            false,
-            None,
         )
     }
 
@@ -3157,39 +3117,6 @@ mod tests {
         assert_eq!(menu.items()[0].action, MenuAction::Surrender);
         assert_eq!(menu.items()[1].action, MenuAction::NoOp);
         assert!(!menu.is_permanent());
-    }
-
-    // Abort confirmation mirrors C4AbortGameDialog: Yes/Restart/No for the
-    // control host, Yes/No otherwise (C4GameDialogs.cpp:33-79).
-    #[test]
-    fn l002_abort_confirm_offers_restart_for_control_host() {
-        let menu = IngameMenuState::abort_confirm_menu(true);
-        assert_eq!(menu.page(), MenuPage::AbortConfirm);
-        assert_eq!(menu.selection(), 0);
-        assert!(!menu.is_permanent());
-        assert_eq!(captions(&menu), vec!["Yes", "Restart", "No"]);
-        assert_eq!(
-            menu.items()
-                .iter()
-                .map(|item| item.action.clone())
-                .collect::<Vec<_>>(),
-            vec![
-                MenuAction::AbortConfirmed,
-                MenuAction::RestartRound,
-                MenuAction::NoOp,
-            ]
-        );
-        assert!(menu.close_action().is_none());
-        let menu = IngameMenuState::abort_confirm_menu(false);
-        assert_eq!(captions(&menu), vec!["Yes", "No"]);
-        assert_eq!(
-            menu.items()
-                .iter()
-                .map(|item| item.action.clone())
-                .collect::<Vec<_>>(),
-            vec![MenuAction::AbortConfirmed, MenuAction::NoOp]
-        );
-        assert!(menu.close_action().is_none());
     }
 
     #[test]

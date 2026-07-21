@@ -2745,6 +2745,27 @@ impl ControlPlayerInfoRegistry {
         true
     }
 
+    /// Apply the `C4ControlVoteEnd` pre-abort/pre-kick PlayerInfo history
+    /// update. `None` marks every nonremoved row for an approved Cancel;
+    /// `Some(client_id)` marks only that client's rows for an approved Kick.
+    pub fn mark_voted_out(&mut self, client_id: Option<i32>) -> usize {
+        let mut changed = 0;
+        for client in &mut self.clients {
+            if client_id.is_some_and(|client_id| client.client_id != client_id) {
+                continue;
+            }
+            for player in &mut client.players {
+                if player.flags & PLAYER_INFO_FLAG_REMOVED == 0
+                    && player.flags & crate::PLAYER_INFO_FLAG_VOTED_OUT == 0
+                {
+                    player.flags |= crate::PLAYER_INFO_FLAG_VOTED_OUT;
+                    changed += 1;
+                }
+            }
+        }
+        changed
+    }
+
     pub fn mark_removed(&mut self, info_id: i32, disconnected: bool, game_part_frame: i32) -> bool {
         let Some(info) = self.get_mut(info_id) else {
             return false;
@@ -3833,6 +3854,53 @@ mod tests {
         assert_eq!((retained.game_number, retained.game_join_frame), (3, 77));
         assert_ne!(retained.flags & PLAYER_INFO_FLAG_JOINED, 0);
         assert_ne!(retained.flags & crate::PLAYER_INFO_FLAG_WON, 0);
+    }
+
+    #[test]
+    fn approved_vote_marks_only_active_player_info_rows_voted_out() {
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.replace_snapshot(
+            30,
+            [
+                PlayerInfoControlData {
+                    client_id: 7,
+                    players: vec![
+                        player(10),
+                        ControlPlayerInfoEntry {
+                            id: 11,
+                            flags: PLAYER_INFO_FLAG_REMOVED,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                PlayerInfoControlData {
+                    client_id: 8,
+                    players: vec![player(20)],
+                    ..Default::default()
+                },
+            ],
+        );
+
+        assert_eq!(registry.mark_voted_out(Some(7)), 1);
+        assert_ne!(
+            registry.get(10).expect("active target row").flags & crate::PLAYER_INFO_FLAG_VOTED_OUT,
+            0
+        );
+        assert_eq!(
+            registry.get(11).expect("removed target row").flags & crate::PLAYER_INFO_FLAG_VOTED_OUT,
+            0
+        );
+        assert_eq!(
+            registry.get(20).expect("other client row").flags & crate::PLAYER_INFO_FLAG_VOTED_OUT,
+            0
+        );
+        assert_eq!(registry.mark_voted_out(None), 1);
+        assert_ne!(
+            registry.get(20).expect("all-client cancel row").flags
+                & crate::PLAYER_INFO_FLAG_VOTED_OUT,
+            0
+        );
     }
 
     #[test]

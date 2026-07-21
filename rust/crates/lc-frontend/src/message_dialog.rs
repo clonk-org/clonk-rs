@@ -52,8 +52,12 @@ impl MessageDialogButtons {
     pub const YES: Self = Self(4);
     pub const NO: Self = Self(8);
     pub const RETRY: Self = Self(16);
+    /// Abort-dialog callback button. The native generic message dialog leaves
+    /// this bit unused; `C4AbortGameDialog` inserts Restart between Yes and No.
+    pub const RESTART: Self = Self(32);
     pub const OK_CANCEL: Self = Self(Self::OK.0 | Self::CANCEL.0);
     pub const YES_NO: Self = Self(Self::YES.0 | Self::NO.0);
+    pub const YES_RESTART_NO: Self = Self(Self::YES.0 | Self::RESTART.0 | Self::NO.0);
     pub const RETRY_CANCEL: Self = Self(Self::RETRY.0 | Self::CANCEL.0);
 
     pub const fn contains(self, button: MessageDialogButton) -> bool {
@@ -89,11 +93,19 @@ pub enum MessageDialogButton {
     Retry,
     Cancel,
     Yes,
+    Restart,
     No,
 }
 
 impl MessageDialogButton {
-    const ORDER: [Self; 5] = [Self::Ok, Self::Retry, Self::Cancel, Self::Yes, Self::No];
+    const ORDER: [Self; 6] = [
+        Self::Ok,
+        Self::Retry,
+        Self::Cancel,
+        Self::Yes,
+        Self::Restart,
+        Self::No,
+    ];
 
     const fn mask(self) -> u8 {
         match self {
@@ -101,6 +113,7 @@ impl MessageDialogButton {
             Self::Retry => MessageDialogButtons::RETRY.0,
             Self::Cancel => MessageDialogButtons::CANCEL.0,
             Self::Yes => MessageDialogButtons::YES.0,
+            Self::Restart => MessageDialogButtons::RESTART.0,
             Self::No => MessageDialogButtons::NO.0,
         }
     }
@@ -111,6 +124,7 @@ impl MessageDialogButton {
             Self::Retry => "Retry",
             Self::Cancel => "Cancel",
             Self::Yes => "&Yes",
+            Self::Restart => "Restart",
             Self::No => "&No",
         }
     }
@@ -121,6 +135,7 @@ impl MessageDialogButton {
             Self::Retry => MessageDialogResult::Retry,
             Self::Cancel => MessageDialogResult::Cancel,
             Self::Yes => MessageDialogResult::Yes,
+            Self::Restart => MessageDialogResult::Restart,
             Self::No => MessageDialogResult::No,
         }
     }
@@ -132,6 +147,7 @@ pub enum MessageDialogResult {
     Retry,
     Cancel,
     Yes,
+    Restart,
     No,
     Dismissed,
 }
@@ -144,7 +160,7 @@ pub enum MessageDialogSound {
 
 impl MessageDialogResult {
     pub const fn is_positive(self) -> bool {
-        matches!(self, Self::Ok | Self::Retry | Self::Yes)
+        matches!(self, Self::Ok | Self::Retry | Self::Yes | Self::Restart)
     }
 }
 
@@ -154,6 +170,9 @@ pub enum MessageDialogSize {
     Regular,
     Medium,
     Small,
+    /// Exact native dialog width for custom dialogs such as
+    /// `C4AbortGameDialog`'s 400px host/Film2 layout.
+    Fixed(i32),
 }
 
 impl MessageDialogSize {
@@ -162,6 +181,7 @@ impl MessageDialogSize {
             Self::Regular => REGULAR_WIDTH,
             Self::Medium => MEDIUM_WIDTH,
             Self::Small => SMALL_WIDTH,
+            Self::Fixed(width) => width,
         }
     }
 }
@@ -374,6 +394,11 @@ impl MessageDialogState {
 
     pub fn with_placement(mut self, placement: MessageDialogPlacement) -> Self {
         self.placement = placement;
+        self
+    }
+
+    pub fn with_fixed_width(mut self, width: i32) -> Self {
+        self.size = MessageDialogSize::Fixed(width);
         self
     }
 
@@ -1306,7 +1331,7 @@ fn initial_focus_button(buttons: &[MessageDialogButton], default_no: bool) -> Op
             return Some(index);
         }
     }
-    find(MessageDialogButton::No)
+    find(MessageDialogButton::No).or_else(|| find(MessageDialogButton::Restart))
 }
 
 fn hit_target(layout: &MessageDialogLayout, point: GuiPoint) -> Option<DialogTarget> {
@@ -2013,6 +2038,7 @@ mod tests {
             | MessageDialogButtons::RETRY
             | MessageDialogButtons::CANCEL
             | MessageDialogButtons::YES
+            | MessageDialogButtons::RESTART
             | MessageDialogButtons::NO;
         for (size, width) in [
             (MessageDialogSize::Regular, 500),
@@ -2038,6 +2064,61 @@ mod tests {
                 MessageDialogButton::ORDER
             );
         }
+    }
+
+    #[test]
+    fn abort_like_dialog_uses_fixed_width_restart_order_and_native_close_focus() {
+        let fonts = endeavour_font_set();
+        let mut dialog = MessageDialogState::new(
+            "Abort round?",
+            "Abort",
+            MessageDialogButtons::YES_RESTART_NO,
+            MessageDialogIcon::Standard(33),
+            MessageDialogSize::Small,
+            false,
+        )
+        .with_fixed_width(400)
+        .with_centered_message();
+        let layout = dialog.layout(1280, 720, &fonts.text);
+
+        assert_eq!(dialog.size(), MessageDialogSize::Fixed(400));
+        assert_eq!(layout.bounds.w, 400);
+        assert!(layout.close_button.is_some());
+        assert_eq!(
+            layout
+                .buttons
+                .iter()
+                .map(|button| button.button)
+                .collect::<Vec<_>>(),
+            [
+                MessageDialogButton::Yes,
+                MessageDialogButton::Restart,
+                MessageDialogButton::No,
+            ]
+        );
+        assert_eq!(layout.buttons[0].rect.x - layout.bounds.x, 10);
+        assert_eq!(layout.buttons[1].rect.x - layout.bounds.x, 140);
+        assert_eq!(layout.buttons[2].rect.x - layout.bounds.x, 270);
+        assert_eq!(dialog.focused_button(), Some(MessageDialogButton::Yes));
+
+        dialog.handle_key_down(KeyCode::Tab, false);
+        assert_eq!(dialog.focused_button(), Some(MessageDialogButton::Restart));
+        assert!(!dialog.close_focused());
+        assert_eq!(dialog.handle_key_down(KeyCode::Enter, false), None);
+        assert_eq!(
+            dialog.handle_key_up(KeyCode::Enter),
+            Some(MessageDialogResult::Restart)
+        );
+        assert!(MessageDialogResult::Restart.is_positive());
+
+        dialog.handle_key_down(KeyCode::Tab, false);
+        assert_eq!(dialog.focused_button(), Some(MessageDialogButton::No));
+        dialog.handle_key_down(KeyCode::Tab, false);
+        assert!(dialog.close_focused());
+        dialog.handle_key_down(KeyCode::Tab, false);
+        assert_eq!(dialog.focused_button(), Some(MessageDialogButton::Yes));
+        dialog.handle_key_down(KeyCode::Tab, true);
+        assert!(dialog.close_focused());
     }
 
     #[test]

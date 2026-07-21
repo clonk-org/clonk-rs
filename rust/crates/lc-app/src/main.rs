@@ -12082,6 +12082,9 @@ enum MenuTitleDrag {
 #[derive(Clone)]
 enum MessageDialogContinuation {
     None,
+    /// `C4AbortGameDialog` owns one offline `Game.HaltCount` increment from
+    /// `OnShown` until the first normal close path reaches `OnClosed`.
+    AbortGame { halted_offline: bool },
     /// Native `C4Console::Message` blocks before an optional second status
     /// dialog (the script-created-object warning precedes a save error).
     DeveloperConsoleNotice { follow_up: Option<String> },
@@ -14916,10 +14919,10 @@ struct GameApp {
     /// `C4GameControl::Input` packets produced outside the simulation in a
     /// local game. They execute together at the next control-rate frame.
     offline_control_input: Vec<NetworkControl>,
-    /// Offline counterpart of C4Game::HaltCount. Native assigns this as a
-    /// boolean from Pause/Unpause and tests it after Control.Prepare, leaving
-    /// the outer event and graphics loops alive while simulation is stopped.
-    offline_halt_count: bool,
+    /// Offline counterpart of C4Game::HaltCount. Pause/Unpause assign 1/0,
+    /// while native modal owners increment/decrement the same counted stack.
+    /// Any nonzero value stops simulation but leaves event/render loops alive.
+    offline_halt_count: i32,
     network_control_running: bool,
     /// App-owned counterpart of C4Network2's runtime fStatusReached state.
     /// The session owns acknowledgement consensus; the app owns driving
@@ -14982,6 +14985,10 @@ struct GameApp {
     /// Native restart handoff captured at full game initialization and kept
     /// across the next same-scenario lobby only.
     restart_restore_infos: RestartRestoreInfos,
+    /// `Application.NextMission` set by C4AbortGameDialog's Restart button.
+    /// It deliberately survives a rejected/ignored league vote and is
+    /// consumed by the next hard `QuitGame` route.
+    abort_restart_pending: bool,
     /// PlayerListItem runs its restore hook only on construction, not on each
     /// later row update. Track the items already constructed in this lobby.
     restart_restore_roster_items: HashSet<(i32, i32)>,
@@ -16954,7 +16961,6 @@ enum ClassicParityBoundary {
         show_count: i32,
     },
     RunningViewport(ClassicViewportBoundary),
-    AbortDialog,
     HudGameMessage {
         count: usize,
     },
@@ -17120,10 +17126,6 @@ impl fmt::Display for ClassicParityBoundary {
                     "declared local player {owner} has no authoritative local viewport; refusing the solid navy fallback and an arbitrary first-object focus/selection"
                 )
             }
-            Self::AbortDialog => write!(
-                f,
-                "classic C4AbortGameDialog is unavailable; refusing menu-shaped approximation"
-            ),
             Self::HudGameMessage { count } => write!(
                 f,
                 "classic C4GameMessage renderer is unavailable for {count} visible message(s)"
@@ -27353,7 +27355,7 @@ impl GameApp {
             network_ticks: NetworkTickGate::default(),
             network_sync: NetworkSyncGate::default(),
             offline_control_input: Vec::new(),
-            offline_halt_count: false,
+            offline_halt_count: 0,
             network_control_running,
             runtime_network_status_barrier: None,
             host_reference_paused: false,
@@ -27381,6 +27383,7 @@ impl GameApp {
             control_player_infos,
             local_player_profile_paths: HashMap::new(),
             restart_restore_infos: RestartRestoreInfos::default(),
+            abort_restart_pending: false,
             restart_restore_roster_items: HashSet::new(),
             host_local_alternate_colors_by_resource,
             host_local_player_info_ids,
@@ -34970,7 +34973,7 @@ impl GameApp {
             return false;
         }
         if self.running_chat_controller().is_some()
-            || self.top_message_dialog_is_exclusive_vote()
+            || self.top_message_dialog_is_exclusive()
         {
             return true;
         }
@@ -35255,7 +35258,7 @@ impl GameApp {
             // before Control.Execute and the simulation ticks.
             !self.network_control_running
         } else {
-            self.offline_halt_count
+            self.offline_halt_count != 0
         }
     }
 
@@ -35291,7 +35294,7 @@ impl GameApp {
     fn set_runtime_pause(&mut self, paused: bool) {
         let role = self.runtime_network_role();
         let currently_paused = match role {
-            RuntimeNetworkRole::Offline => self.offline_halt_count,
+            RuntimeNetworkRole::Offline => self.offline_halt_count != 0,
             RuntimeNetworkRole::Host | RuntimeNetworkRole::Client => {
                 self.runtime_network_is_paused()
             }
@@ -35304,7 +35307,7 @@ impl GameApp {
             RuntimeNetworkRole::Offline => {
                 // C++ HaltCount is an integer for nested engine holds, but
                 // Game::Pause and Game::Unpause assign true/false.
-                self.offline_halt_count = paused;
+                self.offline_halt_count = i32::from(paused);
             }
             RuntimeNetworkRole::Host | RuntimeNetworkRole::Client
                 if self.network_is_league && !self.game_over_handled =>
@@ -35332,7 +35335,7 @@ impl GameApp {
             return;
         }
         let paused = match self.runtime_network_role() {
-            RuntimeNetworkRole::Offline => self.offline_halt_count,
+            RuntimeNetworkRole::Offline => self.offline_halt_count != 0,
             RuntimeNetworkRole::Host | RuntimeNetworkRole::Client => {
                 self.runtime_network_is_paused()
             }
@@ -36080,7 +36083,8 @@ impl GameApp {
                 .is_some_and(|dialog| {
                     matches!(
                         dialog.continuation,
-                        MessageDialogContinuation::LeagueVote { .. }
+                        MessageDialogContinuation::AbortGame { .. }
+                            | MessageDialogContinuation::LeagueVote { .. }
                             | MessageDialogContinuation::LeagueSurrender
                     )
                 }),
@@ -36586,7 +36590,7 @@ impl GameApp {
             return true;
         }
         if self.active_message_dialog_index().is_some()
-            && self.top_message_dialog_is_exclusive_vote()
+            && self.top_message_dialog_is_exclusive()
             && (modifiers.is_empty()
                 || (key == VirtualKeyCode::Tab && modifiers == ModifiersState::SHIFT))
         {
@@ -38196,7 +38200,7 @@ impl GameApp {
                 });
         let active_vote_hotkey = dialog_callbacks_active
             && alt_hotkey_modifiers
-            && self.top_message_dialog_is_exclusive_vote()
+            && self.top_message_dialog_is_exclusive()
             && message_dialog_hotkey(key).is_some_and(|hotkey| {
                 self.active_message_dialog_index()
                     .and_then(|index| self.message_dialogs.get(index))
@@ -40714,25 +40718,106 @@ impl GameApp {
         }
     }
 
-    /// `C4FullScreen::ShowAbortDlg`: keep the confirmation unique, suppress
-    /// it while evaluation is visible, and expose Restart only to the control
-    /// host (or a cinematic film), as `C4AbortGameDialog` does.
-    fn show_abort_dialog(&mut self, player: i32) -> bool {
+    /// `C4FullScreen::ShowAbortDlg`: construct the standalone, exclusive
+    /// screen dialog and capture its one offline `HaltCount` lease.
+    fn show_abort_dialog(&mut self, _player: i32) -> bool {
         if !matches!(self.mode, AppMode::Running)
             || self.game_over_dialog.is_some()
             || self
-                .ingame_menu
+                .message_dialogs
                 .iter()
-                .any(|(_, menu)| menu.page() == ingame_menu::MenuPage::AbortConfirm)
+                .any(|dialog| {
+                    matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })
+                })
         {
             return false;
         }
         let show_restart = self.engine.is_control_host() || self.engine.cinematic_film();
-        self.ingame_menu.replace(
-            player,
-            Some(IngameMenuState::abort_confirm_menu(show_restart)),
-        );
+        let buttons = if show_restart {
+            lc_frontend::message_dialog::MessageDialogButtons::YES_RESTART_NO
+        } else {
+            lc_frontend::message_dialog::MessageDialogButtons::YES_NO
+        };
+        let size = if show_restart {
+            lc_frontend::message_dialog::MessageDialogSize::Fixed(400)
+        } else {
+            lc_frontend::message_dialog::MessageDialogSize::Small
+        };
+        let halted_offline = self.network.is_none();
+        let state = lc_frontend::message_dialog::MessageDialogState::new(
+            self.runtime_resource_text("IDS_HOLD_ABORT", "Abort round?"),
+            self.runtime_resource_text("IDS_DLG_ABORT", "Abort"),
+            buttons,
+            lc_frontend::message_dialog::MessageDialogIcon::Standard(33),
+            size,
+            false,
+        )
+        .with_centered_message();
+        if let Err(error) = self.push_message_dialog(
+            state,
+            MessageDialogContinuation::AbortGame { halted_offline },
+        ) {
+            tracing::error!(%error, "failed to show abort confirmation");
+            return false;
+        }
+        if halted_offline {
+            self.offline_halt_count += 1;
+        }
         true
+    }
+
+    /// `C4Game::Abort(false)`: league rounds vote first; all remaining cases
+    /// enter the hard QuitGame path. Restart is represented by the retained
+    /// `Application.NextMission` analogue consumed from `return_to_menu`.
+    fn route_abort_confirmation(&mut self) -> Result<(), EngineError> {
+        if self.network.is_some() && self.network_is_league && !self.engine.is_game_over() {
+            if self.engine.is_control_host() {
+                let _ = self.submit_own_league_vote(
+                    LeagueVoteSubject {
+                        vote_type: lc_engine::VOTE_TYPE_CANCEL,
+                        data: 0,
+                    },
+                    true,
+                );
+                return Ok(());
+            }
+            let local_client_id = self
+                .network
+                .as_ref()
+                .and_then(|network| i32::try_from(network.local_client_id()).ok());
+            let has_local_player = self
+                .local_controls
+                .owners()
+                .any(|owner| self.engine.player(owner).is_some());
+            if let Some(local_client_id) = local_client_id.filter(|_| has_local_player) {
+                let _ = self.submit_own_league_vote(
+                    LeagueVoteSubject {
+                        vote_type: lc_engine::VOTE_TYPE_KICK,
+                        data: local_client_id,
+                    },
+                    true,
+                );
+                return Ok(());
+            }
+        }
+        self.hard_abort_running_game()
+    }
+
+    fn hard_abort_running_game(&mut self) -> Result<(), EngineError> {
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+            .unwrap_or(-1);
+        let _ = self
+            .engine
+            .abort_players_without_callbacks(local_client_id)?;
+        self.snapshot = self.engine.snapshot();
+        if !self.abort_restart_pending && self.network.is_some() {
+            self.change_network_control_to_local(local_client_id);
+        }
+        self.return_to_menu();
+        Ok(())
     }
 
     fn close_ingame_menu(&mut self) {
@@ -41445,18 +41530,6 @@ impl GameApp {
             }
             MenuAction::Abort => {
                 self.show_abort_dialog(player);
-            }
-            MenuAction::AbortConfirmed => {
-                // `Game.Abort()` back to the startup menu
-                // (C4GameDialogs.cpp:104-121).
-                self.close_ingame_menu();
-                self.return_to_menu();
-            }
-            MenuAction::RestartRound => {
-                // `Application.SetNextMission(Game.ScenarioFilename)` +
-                // abort (C4GameDialogs.cpp:116-120).
-                self.close_ingame_menu();
-                self.restart_current_scenario()?;
             }
             MenuAction::Surrender => {
                 // CID_SurrenderPlayer -> player surrenders with evaluation
@@ -42541,7 +42614,10 @@ impl GameApp {
     }
 
     fn restart_current_scenario(&mut self) -> Result<(), EngineError> {
-        if matches!(self.runtime_network_role(), RuntimeNetworkRole::Host) {
+        // QuitGame snapshots the raw NetworkActive flag before Game.Clear and
+        // restores it for any scheduled NextMission. Even a Film2 client
+        // therefore re-enters the network-host/lobby path on Restart.
+        if self.network.is_some() {
             self.restart_current_network_scenario();
             return Ok(());
         }
@@ -45317,7 +45393,7 @@ impl GameApp {
         if self.running_chat.is_some()
             || self.game_option_input_dialog.is_some()
             || self.game_over_dialog.is_some()
-            || self.top_message_dialog_is_exclusive_vote()
+            || self.top_message_dialog_is_exclusive()
             || self.external_irc_dialog_visible
             || self.context_menu.is_some()
             || self
@@ -71451,7 +71527,7 @@ impl GameApp {
         self.network_sync.clear();
         self.offline_control_input.clear();
         self.sync_checks.clear();
-        self.offline_halt_count = false;
+        self.offline_halt_count = 0;
         self.network_control_running = true;
         self.runtime_network_status_barrier = None;
         self.league_votes.clear();
@@ -73021,11 +73097,21 @@ impl GameApp {
         if !result.approve {
             return;
         }
-        if result.vote_type == lc_engine::VOTE_TYPE_CANCEL {
-            if let Some(local_client_id) = local_client_id {
-                self.change_network_control_to_local(local_client_id);
+        if !self.engine.is_game_over() {
+            match result.vote_type {
+                lc_engine::VOTE_TYPE_CANCEL => {
+                    self.control_player_infos.mark_voted_out(None);
+                }
+                lc_engine::VOTE_TYPE_KICK => {
+                    self.control_player_infos.mark_voted_out(Some(result.data));
+                }
+                _ => {}
             }
-            self.return_to_menu();
+        }
+        if result.vote_type == lc_engine::VOTE_TYPE_CANCEL {
+            if let Err(error) = self.hard_abort_running_game() {
+                tracing::error!(%error, "failed to hard-abort an approved league cancellation");
+            }
             return;
         }
         if result.vote_type != lc_engine::VOTE_TYPE_KICK {
@@ -76358,6 +76444,7 @@ impl GameApp {
             (MessageDialogButton::Retry, "IDS_BTN_RETRY", "Retry"),
             (MessageDialogButton::Cancel, "IDS_DLG_CANCEL", "Cancel"),
             (MessageDialogButton::Yes, "IDS_DLG_YES", "&Yes"),
+            (MessageDialogButton::Restart, "IDS_BTN_RESTART", "&Restart"),
             (MessageDialogButton::No, "IDS_DLG_NO", "&No"),
         ] {
             state.set_button_label(button, self.runtime_resource_text(key, fallback));
@@ -76506,6 +76593,16 @@ impl GameApp {
             self.release_message_dialog_pointer_elements();
             self.release_game_option_input_pointer_elements();
         }
+        let releases_abort_halt = matches!(
+            &self.message_dialogs[index].continuation,
+            MessageDialogContinuation::AbortGame {
+                halted_offline: true
+            }
+        );
+        if releases_abort_halt {
+            debug_assert!(self.offline_halt_count > 0);
+            self.offline_halt_count -= 1;
+        }
         let pending = self.message_dialogs.remove(index);
         self.remove_running_dialog(removed_entry);
         self.message_dialog_active_index = match self.message_dialog_active_index {
@@ -76564,6 +76661,24 @@ impl GameApp {
         self.mark_menu_dirty();
         match pending.continuation {
             MessageDialogContinuation::None => {}
+            MessageDialogContinuation::AbortGame { .. } => match result {
+                lc_frontend::message_dialog::MessageDialogResult::Yes => {
+                    self.restart_restore_infos = RestartRestoreInfos::default();
+                    self.route_abort_confirmation()?;
+                }
+                lc_frontend::message_dialog::MessageDialogResult::Restart => {
+                    self.retain_restart_restore_mask_for_restart();
+                    self.abort_restart_pending = true;
+                    self.route_abort_confirmation()?;
+                }
+                lc_frontend::message_dialog::MessageDialogResult::Ok
+                | lc_frontend::message_dialog::MessageDialogResult::Retry
+                | lc_frontend::message_dialog::MessageDialogResult::Cancel
+                | lc_frontend::message_dialog::MessageDialogResult::No
+                | lc_frontend::message_dialog::MessageDialogResult::Dismissed => {
+                    self.clear_local_controls()?;
+                }
+            },
             MessageDialogContinuation::DeveloperConsoleNotice { follow_up } => {
                 if let Some(message) = follow_up {
                     self.show_developer_console_message(message, None)?;
@@ -77111,11 +77226,12 @@ impl GameApp {
         })
     }
 
-    fn top_message_dialog_is_exclusive_vote(&self) -> bool {
+    fn top_message_dialog_is_exclusive(&self) -> bool {
         self.message_dialogs.last().is_some_and(|dialog| {
             matches!(
                 dialog.continuation,
-                MessageDialogContinuation::LeagueVote { .. }
+                MessageDialogContinuation::AbortGame { .. }
+                    | MessageDialogContinuation::LeagueVote { .. }
                     | MessageDialogContinuation::LeagueSurrender
             )
         })
@@ -83742,6 +83858,12 @@ impl GameApp {
     }
 
     fn return_to_menu(&mut self) {
+        if std::mem::take(&mut self.abort_restart_pending) {
+            if let Err(error) = self.restart_current_scenario() {
+                tracing::error!(%error, "failed to consume scheduled abort-dialog restart");
+            }
+            return;
+        }
         self.restart_restore_infos = RestartRestoreInfos::default();
         self.return_to_menu_with_dialog_restore(true);
     }
@@ -83752,6 +83874,7 @@ impl GameApp {
 
     fn return_to_menu_with_dialog_restore(&mut self, restore_dialog: bool) {
         let last_startup_dialog = self.last_startup_dialog;
+        self.abort_restart_pending = false;
         self.finalize_pending_league_end_for_teardown();
         self.clear_lobby_preload();
         self.restart_restore_roster_items.clear();
@@ -83854,7 +83977,7 @@ impl GameApp {
         self.network_ticks.clear();
         self.network_sync.clear();
         self.offline_control_input.clear();
-        self.offline_halt_count = false;
+        self.offline_halt_count = 0;
         self.network_control_running = self.network.is_none();
         self.runtime_network_status_barrier = None;
         self.league_votes.clear();
@@ -87038,7 +87161,7 @@ impl GameApp {
         self.network_ticks.clear();
         self.network_sync.clear();
         self.offline_control_input.clear();
-        self.offline_halt_count = false;
+        self.offline_halt_count = 0;
         self.network_control_running = self.network.is_none();
         self.runtime_network_status_barrier = None;
         if self.network.is_none() {
@@ -106436,7 +106559,9 @@ func Award()
         };
         control_script_error_to_status(fatal).expect_err("engine-model errors stay fatal");
 
-        let boundary = classic_parity_engine_error(ClassicParityBoundary::AbortDialog);
+        let boundary = classic_parity_engine_error(ClassicParityBoundary::RunningShortcut {
+            key: "unported-test-key",
+        });
         assert!(matches!(
             control_script_error_to_status(boundary),
             Err(EngineError::ClassicMenuParityBoundary { .. })
@@ -137542,12 +137667,8 @@ public func Grant(password) { return GainMissionAccess(password); }
                     activated: true,
                 }]),
             ),
-            (
-                "C4AbortGameDialog",
-                IngameMenuState::abort_confirm_menu(true),
-            ),
         ];
-        assert_eq!(pages.len(), 11, "MenuPage exhaustiveness changed");
+        assert_eq!(pages.len(), 10, "MenuPage exhaustiveness changed");
         for (label, page) in pages {
             let mut app = new_running_sandbox_app();
             app.ingame_menu.replace(app.local_owner, Some(page));
@@ -138679,21 +138800,18 @@ ScenInfoArea=70,5,25,90
             .expect("start explicit test sandbox");
         app.apply_ingame_menu_action(MenuAction::Abort)
             .expect("open C4AbortGameDialog confirmation");
-        let menu = app
-            .ingame_menu
-            .get(app.local_owner)
-            .expect("abort confirmation is visible");
-        assert_eq!(menu.page(), ingame_menu::MenuPage::AbortConfirm);
+        let dialog = app.message_dialogs.last().expect("abort dialog is visible");
         assert_eq!(
-            menu.items()
-                .iter()
-                .map(|item| item.action.clone())
-                .collect::<Vec<_>>(),
-            vec![
-                MenuAction::AbortConfirmed,
-                MenuAction::RestartRound,
-                MenuAction::NoOp,
-            ]
+            dialog.state.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::YES_RESTART_NO
+        );
+        assert_eq!(
+            dialog.state.size(),
+            lc_frontend::message_dialog::MessageDialogSize::Fixed(400)
+        );
+        assert_eq!(
+            dialog.state.focused_button(),
+            Some(lc_frontend::message_dialog::MessageDialogButton::Yes)
         );
         assert!(matches!(app.mode, AppMode::Running));
     }
@@ -138720,11 +138838,13 @@ ScenInfoArea=70,5,25,90
             CommandKind::Press,
         )
             .expect("production Abort opens the confirmation");
-        assert_eq!(
-            app.ingame_menu
-                .get(app.local_owner)
-                .map(IngameMenuState::page),
-            Some(ingame_menu::MenuPage::AbortConfirm)
+        assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::AbortGame { .. }
+        )));
+        assert!(
+            app.ingame_menu.is_none(),
+            "C4Menu::Enter closes the nonpermanent main menu before Abort"
         );
         assert!(matches!(app.mode, AppMode::Running));
         assert!(app.status_text.is_empty());
@@ -147409,9 +147529,7 @@ ScenInfoArea=70,5,25,90
     #[test]
     fn l038_local_round_abort_and_evaluation_end_restore_fresh_browser() {
         let mut aborted = l038_running_browser_sandbox(ScenarioSelectorMode::Local);
-        aborted
-            .apply_ingame_menu_action(MenuAction::AbortConfirmed)
-            .expect("abort local L038 round");
+        confirm_abort_dialog(&mut aborted);
         assert_l038_browser_return(&aborted, ScenarioSelectorMode::Local);
 
         let mut evaluated = l038_running_browser_sandbox(ScenarioSelectorMode::Local);
@@ -147433,18 +147551,14 @@ ScenInfoArea=70,5,25,90
         joined
             .start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start joined L038 sandbox round");
-        joined
-            .apply_ingame_menu_action(MenuAction::AbortConfirmed)
-            .expect("leave joined L038 round");
+        confirm_abort_dialog(&mut joined);
         assert!(matches!(joined.mode, AppMode::Menu));
         assert_eq!(joined.startup_view, StartupView::NetworkGame);
         assert_eq!(joined.last_startup_dialog, StartupDialog::NetworkGame);
 
         let mut hosted = l038_running_browser_sandbox(ScenarioSelectorMode::NetworkHost);
         hosted.open_network_lobby();
-        hosted
-            .apply_ingame_menu_action(MenuAction::AbortConfirmed)
-            .expect("leave hosted L038 round");
+        confirm_abort_dialog(&mut hosted);
         assert_l038_browser_return(&hosted, ScenarioSelectorMode::NetworkHost);
         hosted
             .scensel_do_back()
@@ -147467,9 +147581,7 @@ ScenInfoArea=70,5,25,90
         reused
             .start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start joined round after backing out of host selection");
-        reused
-            .apply_ingame_menu_action(MenuAction::AbortConfirmed)
-            .expect("leave joined round with reused Back history");
+        confirm_abort_dialog(&mut reused);
         assert_l038_browser_return(&reused, ScenarioSelectorMode::NetworkHost);
     }
 
@@ -147488,9 +147600,7 @@ ScenInfoArea=70,5,25,90
         backed_out
             .start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start round after reusing the retained Main dialog");
-        backed_out
-            .apply_ingame_menu_action(MenuAction::AbortConfirmed)
-            .expect("leave round after reusing the retained Main dialog");
+        confirm_abort_dialog(&mut backed_out);
         assert_l038_browser_return(&backed_out, ScenarioSelectorMode::Local);
         backed_out
             .scensel_do_back()
@@ -147499,9 +147609,7 @@ ScenInfoArea=70,5,25,90
         assert_eq!(backed_out.last_startup_dialog, StartupDialog::MainMenu);
 
         let mut previous_session = l038_running_browser_sandbox(ScenarioSelectorMode::Local);
-        previous_session
-            .apply_ingame_menu_action(MenuAction::AbortConfirmed)
-            .expect("restore previous session browser");
+        confirm_abort_dialog(&mut previous_session);
         assert_l038_browser_return(&previous_session, ScenarioSelectorMode::Local);
         drop(previous_session);
 
@@ -147535,8 +147643,7 @@ ScenInfoArea=70,5,25,90
             app.startup_game_search.is_none(),
             "restart must not leave startup discovery behind the new round"
         );
-        app.apply_ingame_menu_action(MenuAction::AbortConfirmed)
-            .expect("leave restarted L038 probe");
+        confirm_abort_dialog(&mut app);
         assert_eq!(app.startup_view, StartupView::NetworkGame);
         assert_eq!(app.last_startup_dialog, StartupDialog::NetworkGame);
     }
@@ -152213,6 +152320,26 @@ ScenInfoArea=70,5,25,90
         new_running_sandbox_app_with_definitions(SandboxDefinitionLoad::InstallCrew(
             paths.as_ref(),
         ))
+    }
+
+    fn finish_abort_dialog(
+        app: &mut GameApp,
+        result: lc_frontend::message_dialog::MessageDialogResult,
+    ) {
+        assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::AbortGame { .. }
+        )));
+        app.finish_message_dialog(result)
+            .expect("finish C4AbortGameDialog");
+    }
+
+    fn confirm_abort_dialog(app: &mut GameApp) {
+        assert!(app.show_abort_dialog(app.local_owner));
+        finish_abort_dialog(
+            app,
+            lc_frontend::message_dialog::MessageDialogResult::Yes,
+        );
     }
 
     #[inline(never)]
@@ -162002,13 +162129,10 @@ VendorNestedField=discard me\n";
 
         app.handle_key(VirtualKeyCode::B, ElementState::Pressed)
             .expect("custom abort callback");
-        assert_eq!(
-            app.ingame_menu
-                .get(app.local_owner)
-                .expect("abort confirmation menu")
-                .page(),
-            ingame_menu::MenuPage::AbortConfirm
-        );
+        assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::AbortGame { .. }
+        )));
 
         let mut context_priority = new_scoreboard_test_app(
             r#"global func Initialize()
@@ -190534,6 +190658,7 @@ func ControlDig() { dig_count = 1; return(1); }
             app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
                 .expect("release modified Tab");
             assert!(app.ingame_menu.is_none());
+            assert!(app.message_dialogs.is_empty());
             assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
             assert!(app.scoreboard_dialog.is_none());
         }
@@ -195283,14 +195408,12 @@ func ControlDig() { dig_count = 1; return(1); }
                     caption: "Host (Host)".to_string(),
                     activated: true,
                 }]),
-                IngameMenuState::abort_confirm_menu(true),
-                IngameMenuState::abort_confirm_menu(false),
             ]
         };
         let default_pages = every_player_menu_page();
         let rebound_pages = every_player_menu_page();
         let sound_pages = every_player_menu_page();
-        assert_eq!(default_pages.len(), 15);
+        assert_eq!(default_pages.len(), 13);
         let page_index = |page: ingame_menu::MenuPage| match page {
             ingame_menu::MenuPage::Main => 0,
             ingame_menu::MenuPage::Hostility => 1,
@@ -195305,7 +195428,6 @@ func ControlDig() { dig_count = 1; return(1); }
             ingame_menu::MenuPage::Surrender => 10,
             ingame_menu::MenuPage::ClientDisconnect => 11,
             ingame_menu::MenuPage::HostDisconnect => 12,
-            ingame_menu::MenuPage::AbortConfirm => 13,
         };
         let test_music_bytes = silent_pcm_wav(10);
         let load_test_music = |app: &GameApp| {
@@ -195339,7 +195461,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .control
             .control_style = true;
         let mut sound_app = new_classic_lightweight_running_sandbox_app();
-        let mut covered = [false; 14];
+        let mut covered = [false; 13];
         for ((default_menu, rebound_menu), sound_menu) in default_pages
             .into_iter()
             .zip(rebound_pages)
@@ -197275,16 +197397,14 @@ func ControlDig() { dig_count = 1; return(1); }
                     caption: "Host (Host)".to_string(),
                     activated: true,
                 }]),
-                IngameMenuState::abort_confirm_menu(true),
-                IngameMenuState::abort_confirm_menu(false),
             ]
         };
         let default_pages = every_player_menu_page();
         let rebound_pages = every_player_menu_page();
         assert_eq!(
             default_pages.len(),
-            15,
-            "fourteen MenuPage roots plus both AbortConfirm button variants"
+            13,
+            "all native C4MainMenu page roots"
         );
         let page_index = |page: ingame_menu::MenuPage| match page {
             ingame_menu::MenuPage::Main => 0,
@@ -197300,7 +197420,6 @@ func ControlDig() { dig_count = 1; return(1); }
             ingame_menu::MenuPage::Surrender => 10,
             ingame_menu::MenuPage::ClientDisconnect => 11,
             ingame_menu::MenuPage::HostDisconnect => 12,
-            ingame_menu::MenuPage::AbortConfirm => 13,
         };
         let mut default_app = new_classic_running_sandbox_app();
         let mut rebound_app = new_running_sandbox_app();
@@ -197313,7 +197432,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("local player")
             .control
             .control_style = true;
-        let mut covered_pages = [false; 14];
+        let mut covered_pages = [false; 13];
 
         for (default_menu, rebound_menu) in default_pages.into_iter().zip(rebound_pages) {
             let page = default_menu.page();
@@ -198989,7 +199108,7 @@ func ControlDig() { dig_count = 1; return(1); }
         let frame_before_pause = app.engine.frame();
         app.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
             .expect("Logo+Pause halts the offline round without an error");
-        assert!(app.offline_halt_count);
+        assert_ne!(app.offline_halt_count, 0);
         for _ in 0..3 {
             app.update().expect("the halted app loop remains live");
         }
@@ -199038,10 +199157,10 @@ func ControlDig() { dig_count = 1; return(1); }
         app
             .handle_key(VirtualKeyCode::Pause, ElementState::Released)
             .expect("runtime Pause release is consumed");
-        assert!(app.offline_halt_count, "release does not toggle");
+        assert_ne!(app.offline_halt_count, 0, "release does not toggle");
         app.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
             .expect("a repeated Pause down resumes the offline round");
-        assert!(!app.offline_halt_count);
+        assert_eq!(app.offline_halt_count, 0);
         app.update().expect("resumed simulation advances");
         assert_eq!(app.engine.frame(), frame_before_pause + 1);
 
@@ -199049,7 +199168,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("pause before teardown");
         assert!(!app.take_exit_request());
         app.return_to_menu();
-        assert!(!app.offline_halt_count, "Game::Default clears the halt");
+        assert_eq!(app.offline_halt_count, 0, "Game::Default clears the halt");
     }
 
     #[test]
@@ -199197,7 +199316,7 @@ func ControlDig() { dig_count = 1; return(1); }
         unavailable_key_config
             .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
             .expect("an unavailable Pause mapping is suppressed, never fatal");
-        assert!(!unavailable_key_config.offline_halt_count);
+        assert_eq!(unavailable_key_config.offline_halt_count, 0);
         assert!(!unavailable_key_config.take_exit_request());
     }
 
@@ -199219,7 +199338,7 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("queue script halt");
         app.update().expect("apply direct script halt before simulation");
         assert_eq!(app.engine.frame(), initial_frame);
-        assert!(app.offline_halt_count);
+        assert_ne!(app.offline_halt_count, 0);
 
         app.engine
             .call_scenario_script_function("Toggle", Vec::new())
@@ -199227,14 +199346,14 @@ func ControlDig() { dig_count = 1; return(1); }
         app.update()
             .expect("a pre-existing toggle drains before the halt gate");
         assert_eq!(app.engine.frame(), initial_frame + 1);
-        assert!(!app.offline_halt_count);
+        assert_eq!(app.offline_halt_count, 0);
 
         app.engine
             .call_scenario_script_function("Toggle", Vec::new())
             .expect("queue a running script toggle");
         app.update().expect("direct toggle halts before another tick");
         assert_eq!(app.engine.frame(), initial_frame + 1);
-        assert!(app.offline_halt_count);
+        assert_ne!(app.offline_halt_count, 0);
 
         let mut game_over = new_game_over_keyboard_app();
         game_over.engine.clear_scenario_script();
@@ -199257,7 +199376,7 @@ func ControlDig() { dig_count = 1; return(1); }
         game_over
             .update()
             .expect("evaluation consumes queued pause requests before returning");
-        assert!(!game_over.offline_halt_count);
+        assert_eq!(game_over.offline_halt_count, 0);
         game_over
             .handle_modifiers_changed(ModifiersState::ALT)
             .expect("set the Continue mnemonic modifier");
@@ -199268,7 +199387,7 @@ func ControlDig() { dig_count = 1; return(1); }
         game_over
             .update()
             .expect("discarded evaluation requests do not replay after Continue");
-        assert!(!game_over.offline_halt_count);
+        assert_eq!(game_over.offline_halt_count, 0);
     }
 
     #[test]
@@ -199390,7 +199509,7 @@ func ControlDig() { dig_count = 1; return(1); }
                 .handle_key(VirtualKeyCode::Pause, state)
                 .expect("C4 disables Pause throughout round evaluation");
             assert_eq!(runtime_global_ui_snapshot(&game_over), before_game_over);
-            assert!(!game_over.offline_halt_count);
+            assert_eq!(game_over.offline_halt_count, 0);
         }
 
         let mut message = new_running_sandbox_app();
@@ -199407,7 +199526,7 @@ func ControlDig() { dig_count = 1; return(1); }
         message
             .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
             .expect("Pause precedes an ordinary running modal");
-        assert!(message.offline_halt_count);
+        assert_ne!(message.offline_halt_count, 0);
         assert_eq!(message.message_dialogs.len(), 1);
 
         let mut ingame = new_running_sandbox_app();
@@ -199415,7 +199534,7 @@ func ControlDig() { dig_count = 1; return(1); }
         ingame
             .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
             .expect("Pause precedes the fullscreen in-game menu");
-        assert!(ingame.offline_halt_count);
+        assert_ne!(ingame.offline_halt_count, 0);
         assert!(ingame.ingame_menu.is_some());
     }
 
@@ -199508,31 +199627,15 @@ func ControlDig() { dig_count = 1; return(1); }
             .clone();
 
         app.handle_window_close_requested();
-        assert_eq!(
-            app.ingame_menu
-                .get(app.local_owner)
-                .map(IngameMenuState::page),
-            Some(ingame_menu::MenuPage::AbortConfirm)
-        );
+        assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::AbortGame { .. }
+        )));
         assert!(!app.take_exit_request());
-        let no = app
-            .ingame_menu
-            .get(app.local_owner)
-            .expect("window-close abort confirmation")
-            .items()
-            .iter()
-            .position(|item| item.action == MenuAction::NoOp)
-            .expect("No button");
-        app.ingame_menu
-            .get_mut(app.local_owner)
-            .expect("window-close abort confirmation")
-            .set_selection(no);
-        app.handle_menu_command_failsafe(
-            app.local_owner,
-            ControlCommand::MenuEnter,
-            CommandKind::Press,
-        )
-        .expect("decline window-close abort");
+        finish_abort_dialog(
+            &mut app,
+            lc_frontend::message_dialog::MessageDialogResult::No,
+        );
         assert!(matches!(app.mode, AppMode::Running));
         assert_eq!(app.engine.frame(), running_frame);
         assert_eq!(
@@ -199543,12 +199646,10 @@ func ControlDig() { dig_count = 1; return(1); }
         );
 
         app.handle_window_close_requested();
-        app.handle_menu_command_failsafe(
-            app.local_owner,
-            ControlCommand::MenuEnter,
-            CommandKind::Press,
-        )
-        .expect("confirm window-close abort");
+        finish_abort_dialog(
+            &mut app,
+            lc_frontend::message_dialog::MessageDialogResult::Yes,
+        );
         assert!(matches!(app.mode, AppMode::Menu));
         assert!(app.active_scenario.is_none());
         assert!(!app.take_exit_request(), "Yes ends the round, not the process");
@@ -199564,6 +199665,7 @@ func ControlDig() { dig_count = 1; return(1); }
         loading.handle_window_close_requested();
         assert!(loading.take_exit_request());
         assert!(loading.ingame_menu.is_none());
+        assert!(loading.message_dialogs.is_empty());
     }
 
     #[test]
@@ -199582,20 +199684,19 @@ func ControlDig() { dig_count = 1; return(1); }
 
         observer.handle_window_close_requested();
         observer.handle_window_close_requested();
-        assert_eq!(
-            observer
-                .ingame_menu
-                .get(OWNER_NONE)
-                .map(IngameMenuState::page),
-            Some(ingame_menu::MenuPage::AbortConfirm)
-        );
-        assert_eq!(observer.ingame_menu.iter().count(), 1);
+        assert!(observer.ingame_menu.is_none());
+        assert_eq!(observer.message_dialogs.len(), 1);
+        assert!(matches!(
+            observer.message_dialogs[0].continuation,
+            MessageDialogContinuation::AbortGame { .. }
+        ));
         assert!(!observer.take_exit_request());
 
         let mut game_over = new_game_over_keyboard_app();
         game_over.handle_window_close_requested();
         assert!(game_over.game_over_dialog.is_some());
         assert!(game_over.ingame_menu.is_none());
+        assert!(game_over.message_dialogs.is_empty());
         assert!(!game_over.take_exit_request());
     }
 
@@ -199607,18 +199708,16 @@ func ControlDig() { dig_count = 1; return(1); }
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("bare Escape opens C4AbortGameDialog");
 
-        assert_eq!(
-            app.ingame_menu
-                .get(app.local_owner)
-                .map(IngameMenuState::page),
-            Some(ingame_menu::MenuPage::AbortConfirm)
-        );
+        assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::AbortGame { .. }
+        )));
         assert!(app.object_menu.is_none());
         assert!(matches!(app.mode, AppMode::Running));
         assert!(!app.take_exit_request());
         assert!(app.status_text.is_empty());
         assert!(!app.show_abort_dialog(app.local_owner));
-        assert_eq!(app.ingame_menu.iter().count(), 1);
+        assert_eq!(app.message_dialogs.len(), 1);
     }
 
     #[test]
@@ -199636,10 +199735,11 @@ func ControlDig() { dig_count = 1; return(1); }
 
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("ownerless Escape opens fullscreen abort confirmation");
-        assert_eq!(
-            app.ingame_menu.get(OWNER_NONE).map(IngameMenuState::page),
-            Some(ingame_menu::MenuPage::AbortConfirm)
-        );
+        assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::AbortGame { .. }
+        )));
+        assert!(app.ingame_menu.is_none());
         assert!(!app.ingame_menu_belongs_to(app.local_owner));
         assert!(matches!(app.mode, AppMode::Running));
         assert!(!app.take_exit_request());
@@ -199660,27 +199760,12 @@ func ControlDig() { dig_count = 1; return(1); }
         declined
             .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("open abort confirmation for decline");
-        let no = declined
-            .ingame_menu
-            .get(declined.local_owner)
-            .expect("abort confirmation")
-            .items()
-            .iter()
-            .position(|item| item.action == MenuAction::NoOp)
-            .expect("No button");
-        declined
-            .ingame_menu
-            .get_mut(declined.local_owner)
-            .expect("abort confirmation")
-            .set_selection(no);
-        declined
-            .handle_menu_command_failsafe(
-                declined.local_owner,
-                ControlCommand::MenuEnter,
-                CommandKind::Press,
-            )
-            .expect("decline abort");
+        finish_abort_dialog(
+            &mut declined,
+            lc_frontend::message_dialog::MessageDialogResult::No,
+        );
         assert!(declined.ingame_menu.is_none());
+        assert!(declined.message_dialogs.is_empty());
         assert!(matches!(declined.mode, AppMode::Running));
         assert_eq!(
             declined
@@ -199695,13 +199780,10 @@ func ControlDig() { dig_count = 1; return(1); }
         confirmed
             .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("open abort confirmation for Yes");
-        confirmed
-            .handle_menu_command_failsafe(
-                confirmed.local_owner,
-                ControlCommand::MenuEnter,
-                CommandKind::Press,
-            )
-            .expect("confirm abort");
+        finish_abort_dialog(
+            &mut confirmed,
+            lc_frontend::message_dialog::MessageDialogResult::Yes,
+        );
         assert!(matches!(confirmed.mode, AppMode::Menu));
         assert!(confirmed.active_scenario.is_none());
         assert!(confirmed.ingame_menu.is_none());
@@ -199718,26 +199800,10 @@ func ControlDig() { dig_count = 1; return(1); }
         restarted
             .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("open abort confirmation for restart");
-        let restart = restarted
-            .ingame_menu
-            .get(restarted.local_owner)
-            .expect("abort confirmation")
-            .items()
-            .iter()
-            .position(|item| item.action == MenuAction::RestartRound)
-            .expect("control host Restart button");
-        restarted
-            .ingame_menu
-            .get_mut(restarted.local_owner)
-            .expect("abort confirmation")
-            .set_selection(restart);
-        restarted
-            .handle_menu_command_failsafe(
-                restarted.local_owner,
-                ControlCommand::MenuEnter,
-                CommandKind::Press,
-            )
-            .expect("restart current scenario");
+        finish_abort_dialog(
+            &mut restarted,
+            lc_frontend::message_dialog::MessageDialogResult::Restart,
+        );
         wait_for_running(&mut restarted);
         assert_eq!(
             restarted
@@ -199748,6 +199814,180 @@ func ControlDig() { dig_count = 1; return(1); }
         );
         assert_eq!(restarted.engine.frame(), 0);
         assert!(restarted.ingame_menu.is_none());
+        assert!(restarted.message_dialogs.is_empty());
+    }
+
+    #[test]
+    fn abort_dialog_uses_stacked_halt_and_preserves_prior_pause() {
+        let mut unpaused = new_running_sandbox_app();
+        assert_eq!(unpaused.offline_halt_count, 0);
+        assert!(unpaused.show_abort_dialog(unpaused.local_owner));
+        assert_eq!(unpaused.offline_halt_count, 1);
+        assert!(
+            !unpaused.show_abort_dialog(unpaused.local_owner),
+            "the singleton abort dialog cannot acquire a second halt lease"
+        );
+        assert_eq!(unpaused.offline_halt_count, 1);
+        finish_abort_dialog(
+            &mut unpaused,
+            lc_frontend::message_dialog::MessageDialogResult::No,
+        );
+        assert_eq!(unpaused.offline_halt_count, 0);
+
+        let mut app = new_running_sandbox_app();
+        app.set_runtime_pause(true);
+        assert_eq!(app.offline_halt_count, 1);
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .control
+            .pressed_coms = 1 << lc_engine::COM_LEFT;
+        let frozen_frame = app.engine.frame();
+
+        assert!(app.show_abort_dialog(app.local_owner));
+        assert_eq!(app.offline_halt_count, 2);
+        assert!(app.runtime_halt_active());
+        app.update().expect("stacked halt keeps the app loop live");
+        assert_eq!(app.engine.frame(), frozen_frame);
+
+        finish_abort_dialog(
+            &mut app,
+            lc_frontend::message_dialog::MessageDialogResult::No,
+        );
+        assert_eq!(app.offline_halt_count, 1);
+        assert!(app.runtime_halt_active(), "the prior pause remains owned");
+        assert_eq!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms,
+            0,
+            "decline clears every local player's pressed commands"
+        );
+
+        assert!(app.show_abort_dialog(app.local_owner));
+        assert_eq!(app.offline_halt_count, 2);
+        let index = app.message_dialogs.len() - 1;
+        app.remove_message_dialog_at(index)
+            .expect("silent dialog removal releases its captured lease");
+        assert_eq!(app.offline_halt_count, 1);
+        app.set_runtime_pause(false);
+        assert_eq!(app.offline_halt_count, 0);
+
+        let mut network = new_running_sandbox_app();
+        let (_events, _commands) = install_running_network_stub(&mut network, 0, 0, 1);
+        assert!(network.show_abort_dialog(network.local_owner));
+        assert_eq!(network.offline_halt_count, 0);
+        finish_abort_dialog(
+            &mut network,
+            lc_frontend::message_dialog::MessageDialogResult::No,
+        );
+        assert_eq!(network.offline_halt_count, 0);
+    }
+
+    #[test]
+    fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
+        let mut host = new_running_sandbox_app();
+        let (_host_events, mut host_commands) =
+            install_running_network_stub(&mut host, 0, 0, 1);
+        host.network_is_league = true;
+        assert!(host.show_abort_dialog(host.local_owner));
+        finish_abort_dialog(
+            &mut host,
+            lc_frontend::message_dialog::MessageDialogResult::Yes,
+        );
+        assert_eq!(
+            host_commands.take_submitted_votes(),
+            vec![lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_CANCEL,
+                approve: true,
+                data: 0,
+                by_client: 0,
+            }]
+        );
+        assert!(matches!(host.mode, AppMode::Running));
+
+        let mut restart_host = new_running_sandbox_app();
+        let (_restart_events, mut restart_commands) =
+            install_running_network_stub(&mut restart_host, 0, 0, 1);
+        restart_host.network_is_league = true;
+        assert!(restart_host.show_abort_dialog(restart_host.local_owner));
+        finish_abort_dialog(
+            &mut restart_host,
+            lc_frontend::message_dialog::MessageDialogResult::Restart,
+        );
+        let restart_vote = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_CANCEL,
+            approve: true,
+            data: 0,
+            by_client: 0,
+        };
+        assert_eq!(
+            restart_commands.take_submitted_votes(),
+            vec![restart_vote]
+        );
+        assert!(restart_host.abort_restart_pending);
+        restart_host.league_votes.add(restart_vote);
+        restart_host.execute_league_vote_end(lc_engine::VoteControlData {
+            approve: false,
+            ..restart_vote
+        });
+        assert!(matches!(restart_host.mode, AppMode::Running));
+        assert!(
+            restart_host.abort_restart_pending,
+            "a rejected vote leaves Application.NextMission scheduled"
+        );
+        assert!(restart_host.message_dialogs.iter().any(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::LeagueSurrender
+        )));
+        restart_host.loader_render_error = Some("test restart blocker".to_string());
+        restart_host
+            .hard_abort_running_game()
+            .expect("a later hard quit consumes the scheduled restart");
+        assert!(!restart_host.abort_restart_pending);
+        assert_eq!(
+            restart_host.scenario_selector_mode,
+            ScenarioSelectorMode::NetworkHost
+        );
+
+        let mut client = new_running_sandbox_app();
+        let (_client_events, mut client_commands) =
+            install_running_network_stub(&mut client, 7, 0, 1);
+        client.engine.set_control_host(false);
+        client.network_is_league = true;
+        assert!(client.show_abort_dialog(client.local_owner));
+        finish_abort_dialog(
+            &mut client,
+            lc_frontend::message_dialog::MessageDialogResult::Yes,
+        );
+        assert_eq!(
+            client_commands.take_submitted_votes(),
+            vec![lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: 7,
+                by_client: 7,
+            }]
+        );
+        assert!(matches!(client.mode, AppMode::Running));
+
+        let mut observer = new_running_sandbox_app();
+        let (_observer_events, mut observer_commands) =
+            install_running_network_stub(&mut observer, 9, 0, 1);
+        observer.engine.set_control_host(false);
+        observer.engine.set_local_players([]);
+        observer.local_controls = LocalControlRegistry::default();
+        observer.network_is_league = true;
+        assert!(observer.show_abort_dialog(OWNER_NONE));
+        finish_abort_dialog(
+            &mut observer,
+            lc_frontend::message_dialog::MessageDialogResult::Yes,
+        );
+        assert!(observer_commands.take_submitted_votes().is_empty());
+        assert!(matches!(observer.mode, AppMode::Menu));
+        assert!(observer.active_scenario.is_none());
     }
 
     #[test]
@@ -199757,23 +199997,54 @@ func ControlDig() { dig_count = 1; return(1); }
         client
             .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("open client abort confirmation");
-        let client_dialog = client
-            .ingame_menu
-            .get(client.local_owner)
-            .expect("client abort confirmation");
-        assert!(client_dialog
-            .items()
-            .iter()
-            .all(|item| item.action != MenuAction::RestartRound));
+        let client_dialog = client.message_dialogs.last().expect("client abort dialog");
+        assert_eq!(
+            client_dialog.state.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::YES_NO
+        );
+        assert_eq!(
+            client_dialog.state.size(),
+            lc_frontend::message_dialog::MessageDialogSize::Small
+        );
+
+        let mut film_client = new_running_sandbox_app();
+        film_client.engine.set_control_host(false);
+        set_test_scenario_head_flags(&mut film_client, 0, 2);
+        let (_film_events, _film_commands) =
+            install_running_network_stub(&mut film_client, 7, 0, 1);
+        film_client
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Film2 client opens abort confirmation");
+        let film_dialog = film_client
+            .message_dialogs
+            .last()
+            .expect("Film2 abort dialog");
+        assert_eq!(
+            film_dialog.state.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::YES_RESTART_NO
+        );
+        assert_eq!(
+            film_dialog.state.size(),
+            lc_frontend::message_dialog::MessageDialogSize::Fixed(400)
+        );
+        film_client.loader_render_error = Some("test restart blocker".to_string());
+        finish_abort_dialog(
+            &mut film_client,
+            lc_frontend::message_dialog::MessageDialogResult::Restart,
+        );
+        assert!(!film_client.abort_restart_pending);
+        assert_eq!(
+            film_client.scenario_selector_mode,
+            ScenarioSelectorMode::NetworkHost,
+            "C++ preserves NetworkActive for a Film2 client's NextMission"
+        );
 
         let mut game_over = new_game_over_keyboard_app();
         game_over
             .apply_ingame_menu_action(MenuAction::Abort)
             .expect("suppressed abort request is non-fatal");
         assert!(game_over.game_over_dialog.is_some());
-        assert!(game_over.ingame_menu.iter().all(|(_, menu)| {
-            menu.page() != ingame_menu::MenuPage::AbortConfirm
-        }));
+        assert!(game_over.message_dialogs.is_empty());
         assert!(matches!(game_over.mode, AppMode::Running));
     }
 
@@ -199801,12 +200072,10 @@ func ControlDig() { dig_count = 1; return(1); }
             .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("Logo is outside C++'s Alt/Ctrl/Shift modifier mask");
-        assert_eq!(
-            app.ingame_menu
-                .get(app.local_owner)
-                .map(IngameMenuState::page),
-            Some(ingame_menu::MenuPage::AbortConfirm)
-        );
+        assert!(app.message_dialogs.last().is_some_and(|dialog| matches!(
+            dialog.continuation,
+            MessageDialogContinuation::AbortGame { .. }
+        )));
         app.handle_modifiers_changed(ModifiersState::empty())
             .expect("set keyboard modifiers");
     }
@@ -200508,6 +200777,26 @@ func ControlDig() { dig_count = 1; return(1); }
             prepared: None,
         }));
         app.control_clients.register(7, true, false);
+        app.control_player_infos.replace_snapshot(
+            72,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 71,
+                        flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                        ..Default::default()
+                    },
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 72,
+                        flags: lc_engine::PLAYER_INFO_FLAG_JOINED
+                            | lc_engine::PLAYER_INFO_FLAG_REMOVED,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+        );
 
         app.apply_ready_controls(
             23,
@@ -200528,6 +200817,67 @@ func ControlDig() { dig_count = 1; return(1); }
                     .expect("valid C++ vote reason"),
                 by_client: 0,
             }]
+        );
+        assert_ne!(
+            app.control_player_infos
+                .get(71)
+                .expect("active target player info")
+                .flags
+                & lc_engine::PLAYER_INFO_FLAG_VOTED_OUT,
+            0,
+        );
+        assert_eq!(
+            app.control_player_infos
+                .get(72)
+                .expect("removed target player info")
+                .flags
+                & lc_engine::PLAYER_INFO_FLAG_VOTED_OUT,
+            0,
+            "removed history rows remain unchanged",
+        );
+
+        let mut game_over = new_state_only_running_sandbox_app();
+        assert!(
+            game_over
+                .engine
+                .request_game_over_from_control()
+                .expect("mark the round game over")
+        );
+        let (manager, _events, _commands) = NetworkManager::test_stub_with_commands();
+        game_over.network = Some(manager);
+        game_over.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        game_over.control_clients.register(7, true, false);
+        game_over.control_player_infos.replace_snapshot(
+            81,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 81,
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        game_over.apply_ready_controls(
+            24,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: 7,
+                by_client: 0,
+            })],
+        )
+        .expect("execute a post-game-over approved kick");
+        assert_eq!(
+            game_over
+                .control_player_infos
+                .get(81)
+                .expect("completed-round target row")
+                .flags
+                & lc_engine::PLAYER_INFO_FLAG_VOTED_OUT,
+            0,
+            "C4ControlVoteEnd suppresses the history mutation after GameOver",
         );
     }
 
