@@ -20,12 +20,8 @@ pub type RgbPalette = [[u8; 3]; BMP_PALETTE_ENTRY_COUNT];
 pub enum BitmapError {
     #[error("bitmap data truncated ({0})")]
     Truncated(&'static str),
-    #[error("not a BMP file (missing BM signature)")]
-    Signature,
     #[error("unsupported BMP bit depth {0} (only 8-bit indexed is read)")]
     BitDepth(u16),
-    #[error("unsupported BMP compression {0} (only uncompressed is read)")]
-    Compression(u32),
     #[error("8-bit BMP pixel offset {0} precedes the required 256-entry palette")]
     PaletteOffset(u32),
     #[error("invalid BMP dimensions {width}x{height}")]
@@ -56,31 +52,22 @@ pub struct IndexedBitmap {
 }
 
 impl IndexedBitmap {
-    /// Decode an uncompressed, bottom-up 8-bit BMP with the full 256-entry
-    /// palette layout assumed by `CBitmap256Info`. Rows are exposed top-down;
-    /// scanline padding to 4-byte boundaries is skipped.
+    /// Decode a bottom-up 8-bit BMP with the full 256-entry palette layout
+    /// assumed by `CBitmap256Info`. Like `CSurface8::Read`, this interprets
+    /// the payload as raw rows regardless of the signature and compression
+    /// tag. Rows are exposed top-down; scanline padding is skipped.
     pub fn decode(bytes: &[u8]) -> Result<Self, BitmapError> {
         if bytes.len() < 54 {
             return Err(BitmapError::Truncated("header"));
-        }
-        // Native ignores the signature and compression fields entirely.
-        // Keep the port's intentional hardening instead of accepting a
-        // signature-less file or interpreting compressed payload as raw rows.
-        if &bytes[0..2] != b"BM" {
-            return Err(BitmapError::Signature);
         }
         let raw_data_offset = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
         let data_offset = raw_data_offset as usize;
         let width = i32::from_le_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
         let raw_height = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
         let bit_count = u16::from_le_bytes([bytes[28], bytes[29]]);
-        let compression = u32::from_le_bytes([bytes[30], bytes[31], bytes[32], bytes[33]]);
 
         if bit_count != 8 {
             return Err(BitmapError::BitDepth(bit_count));
-        }
-        if compression != 0 {
-            return Err(BitmapError::Compression(compression));
         }
         if data_offset < BMP_DATA_OFFSET {
             return Err(BitmapError::PaletteOffset(raw_data_offset));
@@ -337,20 +324,31 @@ mod tests {
     }
 
     #[test]
-    fn rejects_signature_and_compression_as_intentional_hardening() {
-        let mut missing_signature = encode_bmp(&[&[1, 2]], true);
-        missing_signature[0..2].copy_from_slice(b"ZZ");
-        assert!(matches!(
-            IndexedBitmap::decode(&missing_signature),
-            Err(BitmapError::Signature)
-        ));
+    fn indexed_bitmap_ignores_signature_and_compression_like_csurface8() {
+        let baseline = encode_bmp(&[&[1, 2, 3], &[4, 5, 6]], true);
+        let expected = IndexedBitmap {
+            width: 3,
+            height: 2,
+            indices: vec![1, 2, 3, 4, 5, 6],
+        };
+        assert_eq!(
+            IndexedBitmap::decode(&baseline).expect("baseline decodes"),
+            expected
+        );
 
-        let mut compressed = encode_bmp(&[&[1, 2]], true);
+        let mut missing_signature = baseline.clone();
+        missing_signature[0..2].copy_from_slice(b"ZZ");
+        assert_eq!(
+            IndexedBitmap::decode(&missing_signature).expect("signature is ignored"),
+            expected
+        );
+
+        let mut compressed = baseline;
         compressed[30..34].copy_from_slice(&1_u32.to_le_bytes());
-        assert!(matches!(
-            IndexedBitmap::decode(&compressed),
-            Err(BitmapError::Compression(1))
-        ));
+        assert_eq!(
+            IndexedBitmap::decode(&compressed).expect("compression tag is ignored"),
+            expected
+        );
     }
 
     #[test]
