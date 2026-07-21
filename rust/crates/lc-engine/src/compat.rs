@@ -45770,9 +45770,10 @@ pub struct AudioRegistry {
     /// is client-local presentation state, not synchronized or save-persisted
     /// state; cloning the registry across callbacks is cheap.
     available_samples: Arc<HashSet<String>>,
-    /// One entry per C4MusicFile record in the active client-side catalog.
-    /// Keep duplicates: C++ counts records, not unique filenames.
-    available_music: Arc<Vec<String>>,
+    /// Exact basename bytes for each C4MusicFile record in the active
+    /// client-side catalog. Keep duplicates: C++ counts records, not unique
+    /// filenames.
+    available_music: Arc<Vec<Vec<u8>>>,
     /// `None` is C4MusicSystem's default playlist; `Some("")` is the
     /// explicit empty filter produced by script nil/omitted arguments.
     music_playlist: Option<String>,
@@ -45833,7 +45834,7 @@ impl AudioRegistry {
         self.available_music = Arc::new(
             tracks
                 .into_iter()
-                .map(|track| track.as_ref().to_owned())
+                .map(|track| music_script_c_string_bytes(track.as_ref()))
                 .collect(),
         );
     }
@@ -45856,14 +45857,16 @@ impl AudioRegistry {
     }
 
     pub(crate) fn set_music_playlist(&mut self, playlist: String, restart: bool) -> i32 {
+        let playlist_bytes = music_script_c_string_bytes(&playlist);
+        let playlist = lc_script::c4_string_from_bytes(&playlist_bytes);
         let count = self
             .available_music
             .iter()
             .filter(|track| {
-                let filename = track.rsplit(['/', '\\']).next().unwrap_or(track);
-                playlist
-                    .split(';')
-                    .any(|pattern| lc_core::std_file::wildcard_match(pattern, filename))
+                let filename = music_filename_bytes(track);
+                playlist_bytes
+                    .split(|byte| *byte == b';')
+                    .any(|pattern| music_wildcard_match(pattern, filename))
             })
             .count();
         self.music_playlist = Some(playlist.clone());
@@ -45993,6 +45996,50 @@ impl AudioRegistry {
         self.events.push(AudioCommand::SetMusicLevel { level });
         self.music_level
     }
+}
+
+fn music_script_c_string_bytes(value: &str) -> Vec<u8> {
+    let mut bytes = lc_script::c4_string_bytes(value);
+    if let Some(end) = bytes.iter().position(|byte| *byte == 0) {
+        bytes.truncate(end);
+    }
+    bytes
+}
+
+fn music_filename_bytes(path: &[u8]) -> &[u8] {
+    path.iter()
+        .rposition(|byte| *byte == b'/' || (cfg!(windows) && *byte == b'\\'))
+        .map_or(path, |separator| &path[separator + 1..])
+}
+
+fn music_wildcard_match(pattern: &[u8], value: &[u8]) -> bool {
+    let (mut pattern_index, mut value_index) = (0usize, 0usize);
+    let (mut backtrack_pattern, mut backtrack_value) = (None, None);
+    while pattern_index < pattern.len() || backtrack_pattern.is_some() {
+        if pattern.get(pattern_index) == Some(&b'*') {
+            pattern_index += 1;
+            backtrack_pattern = Some(pattern_index);
+            backtrack_value = Some(value_index);
+        } else if value_index >= value.len() {
+            break;
+        } else if pattern.get(pattern_index) == Some(&b'?')
+            || pattern
+                .get(pattern_index)
+                .is_some_and(|byte| byte.eq_ignore_ascii_case(&value[value_index]))
+        {
+            pattern_index += 1;
+            value_index += 1;
+        } else if let (Some(saved_pattern), Some(saved_value)) =
+            (backtrack_pattern, backtrack_value)
+        {
+            pattern_index = saved_pattern;
+            value_index = saved_value.saturating_add(1);
+            backtrack_value = Some(value_index);
+        } else {
+            return false;
+        }
+    }
+    pattern_index == pattern.len() && value_index == value.len()
 }
 
 impl Default for AudioOutcome {
@@ -59615,6 +59662,41 @@ func Announce()
                 }]
             );
         }
+    }
+
+    #[test]
+    fn set_playlist_count_preserves_legacy_music_name_bytes() {
+        let first = lc_script::c4_string_from_bytes(b"Tune\x80.ogg");
+        let second = lc_script::c4_string_from_bytes(b"Tune\x81.ogg");
+        let mut audio = AudioRegistry::new();
+        audio.set_available_music([first, second]);
+
+        assert_eq!(
+            audio.set_music_playlist(lc_script::c4_string_from_bytes(b"Tune\x80.*"), false),
+            1,
+            "literal high bytes must not collide through a lossy filename"
+        );
+        assert_eq!(
+            audio.set_music_playlist(lc_script::c4_string_from_bytes(b"Tune?.ogg"), false),
+            2,
+            "one native '?' consumes one legacy filename byte"
+        );
+        assert_eq!(
+            audio.set_music_playlist(
+                lc_script::c4_string_from_bytes(b"Tune\x80.*\0Tune\x81.*"),
+                false,
+            ),
+            1,
+            "playlist matching stops at the native C-string terminator"
+        );
+        assert_eq!(
+            audio
+                .music_playlist()
+                .map(lc_script::c4_string_bytes)
+                .as_deref(),
+            Some(b"Tune\x80.*".as_slice()),
+            "the retained playlist cannot expose bytes hidden after the terminator"
+        );
     }
 
     #[test]

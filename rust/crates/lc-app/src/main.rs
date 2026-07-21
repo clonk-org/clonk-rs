@@ -9569,7 +9569,7 @@ impl AudioContext {
             }
             MusicStartKind::Asset { asset, looped } => {
                 let identity = Arc::clone(&asset.identity);
-                let name = asset.file_name.clone();
+                let name = String::from_utf8_lossy(&asset.file_name_bytes).into_owned();
                 let data = self
                     .read_resolved_music_asset(&asset)
                     .with_context(|| format!("failed to read named music asset `{name}`"))?;
@@ -91205,10 +91205,10 @@ fn scenario_root_key(path: &Path) -> String {
 
 const MUSIC_FILE_EXTENSIONS: [&str; 7] = ["it", "mid", "mod", "mp3", "ogg", "s3m", "xm"];
 
-fn music_playlist_matches(playlist: &str, filename: &str) -> bool {
+fn music_playlist_matches(playlist: &[u8], filename: &[u8]) -> bool {
     playlist
-        .split(';')
-        .any(|pattern| lc_core::std_file::wildcard_match(pattern, filename))
+        .split(|byte| *byte == b';')
+        .any(|pattern| classic_raw_wildcard_match(pattern, filename))
 }
 
 #[derive(Clone)]
@@ -91236,6 +91236,16 @@ impl MusicCatalog {
         group: Group,
         pattern: &[u8],
     ) -> Result<(), lc_resources::GroupError> {
+        let root_bytes = music_path_bytes(group.root())?;
+        self.extend_group_matching_from(group, pattern, &root_bytes)
+    }
+
+    fn extend_group_matching_from(
+        &mut self,
+        group: Group,
+        pattern: &[u8],
+        root_bytes: &[u8],
+    ) -> Result<(), lc_resources::GroupError> {
         let source = Arc::new(group);
         let mut entries: Vec<_> = source
             .entries()?
@@ -91243,37 +91253,45 @@ impl MusicCatalog {
             .filter(|entry| {
                 !entry.is_directory
                     && classic_wildcard_match(pattern, &entry.name_bytes)
-                    && is_music_path(&entry.relative_path)
+                    && is_music_name_bytes(&entry.name_bytes)
             })
-            .map(|entry| entry.relative_path)
             .collect();
-        entries.sort_by_cached_key(|path| path.to_string_lossy().to_ascii_lowercase());
+        entries.sort_by_cached_key(|entry| entry.name_bytes.to_ascii_lowercase());
         let assets = entries
             .into_iter()
-            .map(|relative_path| MusicAsset::new(Arc::clone(&source), relative_path))
+            .map(|entry| MusicAsset::new(Arc::clone(&source), entry, root_bytes))
             .collect::<Vec<_>>();
         self.assets.extend(assets);
         Ok(())
     }
 
     fn resolve(&self, name: &str) -> Option<&MusicAsset> {
+        let name = music_script_c_string_bytes(name);
         self.assets
             .iter()
-            .find(|asset| asset.full_path == name)
-            .or_else(|| self.assets.iter().find(|asset| asset.file_name == name))
+            .find(|asset| asset.full_path_bytes == name)
+            .or_else(|| {
+                self.assets
+                    .iter()
+                    .find(|asset| asset.file_name_bytes == name)
+            })
             .or_else(|| {
                 self.assets.iter().find(|asset| {
-                    MUSIC_FILE_EXTENSIONS
-                        .iter()
-                        .any(|extension| format!("{name}.{extension}") == asset.file_name)
+                    MUSIC_FILE_EXTENSIONS.iter().any(|extension| {
+                        asset.file_name_bytes.len() == name.len() + extension.len() + 1
+                            && asset.file_name_bytes.starts_with(&name)
+                            && asset.file_name_bytes[name.len()] == b'.'
+                            && &asset.file_name_bytes[name.len() + 1..] == extension.as_bytes()
+                    })
                 })
             })
     }
 
     fn first_enabled(&self, playlist: Option<&str>) -> Option<&MusicAsset> {
+        let playlist = playlist.map(music_script_c_string_bytes);
         self.assets
             .iter()
-            .find(|asset| Self::is_enabled(asset, playlist))
+            .find(|asset| Self::is_enabled(asset, playlist.as_deref()))
     }
 
     fn select_enabled_with(
@@ -91282,11 +91300,12 @@ impl MusicCatalog {
         most_recently_played: Option<&Arc<MusicAssetIdentity>>,
         mut next_mod: impl FnMut(usize) -> usize,
     ) -> Option<&MusicAsset> {
+        let playlist = playlist.map(music_script_c_string_bytes);
         let candidates = self
             .assets
             .iter()
             .filter(|asset| {
-                Self::is_enabled(asset, playlist)
+                Self::is_enabled(asset, playlist.as_deref())
                     && most_recently_played
                         .map_or(true, |recent| !Arc::ptr_eq(&asset.identity, recent))
             })
@@ -91303,24 +91322,28 @@ impl MusicCatalog {
         // without consuming another SafeRandom value.
         most_recently_played.and_then(|recent| {
             self.assets.iter().find(|asset| {
-                Arc::ptr_eq(&asset.identity, recent) && Self::is_enabled(asset, playlist)
+                Arc::ptr_eq(&asset.identity, recent) && Self::is_enabled(asset, playlist.as_deref())
             })
         })
     }
 
-    fn is_enabled(asset: &MusicAsset, playlist: Option<&str>) -> bool {
+    fn is_enabled(asset: &MusicAsset, playlist: Option<&[u8]>) -> bool {
         match playlist {
-            Some(playlist) => music_playlist_matches(playlist, &asset.file_name),
-            None => !["@", "Credits.", "Frontend."]
-                .iter()
-                .any(|prefix| asset.file_name.starts_with(prefix)),
+            Some(playlist) => music_playlist_matches(playlist, &asset.file_name_bytes),
+            None => ![
+                b"@".as_slice(),
+                b"Credits.".as_slice(),
+                b"Frontend.".as_slice(),
+            ]
+            .iter()
+            .any(|prefix| asset.file_name_bytes.starts_with(prefix)),
         }
     }
 
     fn filenames(&self) -> Vec<String> {
         self.assets
             .iter()
-            .map(|asset| asset.file_name.clone())
+            .map(|asset| lc_script::c4_string_from_bytes(&asset.file_name_bytes))
             .collect()
     }
 }
@@ -91328,9 +91351,9 @@ impl MusicCatalog {
 #[derive(Clone)]
 struct MusicAsset {
     source: Arc<Group>,
-    relative_path: PathBuf,
-    full_path: String,
-    file_name: String,
+    entry: GroupEntry,
+    full_path_bytes: Vec<u8>,
+    file_name_bytes: Vec<u8>,
     identity: Arc<MusicAssetIdentity>,
 }
 
@@ -91338,57 +91361,220 @@ struct MusicAsset {
 struct MusicAssetIdentity;
 
 impl MusicAsset {
-    fn new(source: Arc<Group>, relative_path: PathBuf) -> Self {
-        let full_path = source
-            .root()
-            .join(&relative_path)
-            .to_string_lossy()
-            .into_owned();
-        let file_name = relative_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| relative_path.to_string_lossy().into_owned());
+    fn new(source: Arc<Group>, entry: GroupEntry, root_bytes: &[u8]) -> Self {
+        let file_name_bytes = entry.name_bytes.clone();
+        let mut full_path_bytes = root_bytes.to_vec();
+        if full_path_bytes
+            .last()
+            .is_some_and(|byte| music_path_separator(*byte))
+        {
+            full_path_bytes.pop();
+        }
+        full_path_bytes.push(std::path::MAIN_SEPARATOR as u8);
+        full_path_bytes.extend_from_slice(&file_name_bytes);
         Self {
             source,
-            relative_path,
-            full_path,
-            file_name,
+            entry,
+            full_path_bytes,
+            file_name_bytes,
             identity: Arc::new(MusicAssetIdentity),
         }
     }
 
+    #[cfg(test)]
+    fn for_test_path(source: Arc<Group>, relative_path: PathBuf) -> Self {
+        let root_bytes = music_path_bytes(source.root()).expect("encode test music root");
+        let name_bytes = relative_path
+            .file_name()
+            .unwrap_or(relative_path.as_os_str())
+            .as_encoded_bytes()
+            .to_vec();
+        Self::new(
+            source,
+            GroupEntry {
+                relative_path,
+                name_bytes,
+                is_directory: false,
+                size: 0,
+                time: 0,
+                executable: false,
+                crc_state: 0,
+                stored_crc: 0,
+            },
+            &root_bytes,
+        )
+    }
+
     fn load_audio(&self) -> Result<Vec<u8>, lc_resources::GroupError> {
-        self.source.read_file(&self.relative_path)
+        self.source.read_entry_bytes_exact(&self.entry)
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum MoreMusicDirective {
     Clear,
-    Add(String),
+    Add(Vec<u8>),
 }
 
 fn parse_more_music(contents: &[u8]) -> Vec<MoreMusicDirective> {
-    String::from_utf8_lossy(contents)
-        .split('\n')
+    contents
+        .split(|byte| *byte == b'\n')
         .filter_map(|line| {
-            let line = line.trim_matches(|character| matches!(character, ' ' | '\t' | '\r'));
-            match line {
-                "" => None,
-                "#clear" => Some(MoreMusicDirective::Clear),
-                comment if comment.starts_with('#') => None,
-                path => Some(MoreMusicDirective::Add(path.to_string())),
+            let trim = |byte: &u8| matches!(*byte, b' ' | b'\t' | b'\r');
+            let start = line.iter().position(|byte| !trim(byte))?;
+            let end = line.iter().rposition(|byte| !trim(byte))? + 1;
+            let line = &line[start..end];
+            if line == b"#clear" {
+                Some(MoreMusicDirective::Clear)
+            } else if line.starts_with(b"#") {
+                None
+            } else {
+                Some(MoreMusicDirective::Add(line.to_vec()))
             }
         })
         .collect()
 }
 
+fn music_c_string_bytes(bytes: &[u8]) -> &[u8] {
+    bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .map_or(bytes, |end| &bytes[..end])
+}
+
+fn music_script_c_string_bytes(value: &str) -> Vec<u8> {
+    let mut bytes = lc_script::c4_string_bytes(value);
+    if let Some(end) = bytes.iter().position(|byte| *byte == 0) {
+        bytes.truncate(end);
+    }
+    bytes
+}
+
+fn music_path_separator(byte: u8) -> bool {
+    byte == b'/' || (cfg!(windows) && byte == b'\\')
+}
+
+#[cfg(unix)]
+fn music_path_from_bytes(bytes: &[u8]) -> io::Result<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+#[cfg(windows)]
+fn music_path_from_bytes(bytes: &[u8]) -> io::Result<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt as _;
+    use windows::Win32::Globalization::{
+        MultiByteToWideChar, CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS,
+    };
+
+    if bytes.is_empty() {
+        return Ok(PathBuf::new());
+    }
+    let required =
+        unsafe { MultiByteToWideChar(CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, None) };
+    if required == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut wide = vec![0; required as usize];
+    let written = unsafe {
+        MultiByteToWideChar(
+            CP_ACP,
+            MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
+            bytes,
+            Some(&mut wide),
+        )
+    };
+    if written == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    wide.truncate(written as usize);
+    Ok(PathBuf::from(OsString::from_wide(&wide)))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn music_path_from_bytes(bytes: &[u8]) -> io::Result<PathBuf> {
+    Ok(PathBuf::from(lc_script::c4_string_from_bytes(bytes)))
+}
+
+#[cfg(unix)]
+fn music_path_bytes(path: &Path) -> io::Result<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    Ok(path.as_os_str().as_bytes().to_vec())
+}
+
+#[cfg(windows)]
+fn music_path_bytes(path: &Path) -> io::Result<Vec<u8>> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::core::PCSTR;
+    use windows::Win32::Globalization::{WideCharToMultiByte, CP_ACP};
+
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if wide.is_empty() {
+        return Ok(Vec::new());
+    }
+    let required = unsafe { WideCharToMultiByte(CP_ACP, 0, &wide, None, PCSTR::null(), None) };
+    if required == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut bytes = vec![0; required as usize];
+    let written =
+        unsafe { WideCharToMultiByte(CP_ACP, 0, &wide, Some(&mut bytes), PCSTR::null(), None) };
+    if written == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    bytes.truncate(written as usize);
+    Ok(bytes)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn music_path_bytes(path: &Path) -> io::Result<Vec<u8>> {
+    Ok(path.as_os_str().as_encoded_bytes().to_vec())
+}
+
+fn open_music_group_path(path: &Path) -> Result<Group, GroupError> {
+    if path.exists() {
+        return Group::open(path);
+    }
+
+    let mut ancestor = path.to_path_buf();
+    let mut children = Vec::new();
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name().map(|name| name.to_os_string()) else {
+            return Err(GroupError::Missing(path.to_path_buf()));
+        };
+        children.push(name);
+        if !ancestor.pop() {
+            return Err(GroupError::Missing(path.to_path_buf()));
+        }
+    }
+
+    let mut group = Group::open(ancestor)?;
+    for child in children.iter().rev() {
+        let pattern = music_path_bytes(Path::new(child))?;
+        if pattern.contains(&b'*') {
+            return Err(GroupError::InvalidGroup(
+                "OpenAsChild: No wildcards allowed".to_string(),
+            ));
+        }
+        let entry = group
+            .entries()?
+            .into_iter()
+            .find(|entry| classic_raw_wildcard_match(&pattern, &entry.name_bytes))
+            .ok_or_else(|| GroupError::EntryNotFound(path.to_path_buf()))?;
+        group = group.open_child_entry_exact(&entry)?;
+    }
+    Ok(group)
+}
+
 fn add_more_music_spec(
     catalog: &mut MusicCatalog,
     base: &Path,
-    spec: &str,
+    spec: &[u8],
 ) -> Result<(), GroupError> {
-    let path = PathBuf::from(spec);
+    let path = music_path_from_bytes(music_c_string_bytes(spec))?;
     let path = if path.is_absolute() {
         path
     } else {
@@ -91396,13 +91582,15 @@ fn add_more_music_spec(
     };
     let pattern = path
         .file_name()
-        .map(|name| name.as_encoded_bytes().to_vec())
+        .map(|name| music_path_bytes(Path::new(name)))
+        .transpose()?
         .unwrap_or_else(|| b"*".to_vec());
     let has_wildcard = pattern.iter().any(|byte| matches!(byte, b'*' | b'?'));
 
     if !has_wildcard {
-        if let Ok(group) = open_group_path_for_folder_map(&path) {
-            return catalog.extend_group(group);
+        if let Ok(group) = open_music_group_path(&path) {
+            let root_bytes = music_path_bytes(&path)?;
+            return catalog.extend_group_matching_from(group, b"*", &root_bytes);
         }
     }
 
@@ -91410,8 +91598,9 @@ fn add_more_music_spec(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let group = open_group_path_for_folder_map(parent)?;
-    catalog.extend_group_matching(group, &pattern)
+    let group = open_music_group_path(parent)?;
+    let root_bytes = music_path_bytes(parent)?;
+    catalog.extend_group_matching_from(group, &pattern, &root_bytes)
 }
 
 fn load_more_music(catalog: &mut MusicCatalog, manifest: &Path) -> io::Result<()> {
@@ -91430,6 +91619,7 @@ fn load_more_music(catalog: &mut MusicCatalog, manifest: &Path) -> io::Result<()
             MoreMusicDirective::Clear => catalog.assets.clear(),
             MoreMusicDirective::Add(spec) => {
                 if let Err(error) = add_more_music_spec(catalog, base, &spec) {
+                    let spec = String::from_utf8_lossy(&spec);
                     tracing::warn!(%spec, %error, "MoreMusic entry skipped");
                 }
             }
@@ -91621,7 +91811,7 @@ fn build_scenario_music_catalog(
     let scenario_has_tracks = scenario
         .entries()?
         .into_iter()
-        .any(|entry| !entry.is_directory && is_music_path(&entry.relative_path));
+        .any(|entry| !entry.is_directory && is_music_name_bytes(&entry.name_bytes));
     if scenario_has_tracks {
         catalog.extend_group(scenario.clone())?;
     }
@@ -91863,14 +92053,15 @@ fn has_extension(path: &Path, expected: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
 }
 
-fn is_music_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .is_some_and(|extension| {
-            // C4MusicSystem.cpp:31-32. WAV belongs to the sound-effect resolver.
-            MUSIC_FILE_EXTENSIONS.contains(&extension.as_str())
-        })
+fn is_music_name_bytes(name: &[u8]) -> bool {
+    let Some(dot) = name.iter().rposition(|byte| *byte == b'.') else {
+        return false;
+    };
+    let extension = &name[dot + 1..];
+    // C4MusicSystem.cpp:31-32. WAV belongs to the sound-effect resolver.
+    MUSIC_FILE_EXTENSIONS
+        .iter()
+        .any(|candidate| extension.eq_ignore_ascii_case(candidate.as_bytes()))
 }
 
 fn sandbox_music_bytes() -> &'static [u8] {
@@ -125221,9 +125412,87 @@ public func Grant(password) { return GainMissionAccess(password); }
             ),
             vec![
                 MoreMusicDirective::Clear,
-                MoreMusicDirective::Add("Extra Music".to_string()),
+                MoreMusicDirective::Add(b"Extra Music".to_vec()),
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn more_music_and_playlist_preserve_non_utf8_track_name_bytes() {
+        const EXTRA_GROUP: &[u8] = b"Extra\xfe.c4g";
+        const FIRST_TRACK: &[u8] = b"Tune\x80.ogg";
+        const SECOND_TRACK: &[u8] = b"Tune\x81.ogg";
+
+        let root = tempdir().expect("legacy MoreMusic fixture");
+        let outer = root.path().join("Outer.c4g");
+        let mut extra_group = MutableGroup::new_bytes(EXTRA_GROUP.to_vec());
+        extra_group
+            .add_file_bytes_with_metadata(FIRST_TRACK.to_vec(), b"first".to_vec(), 1, false)
+            .expect("add first raw-name track");
+        extra_group
+            .add_file_bytes_with_metadata(SECOND_TRACK.to_vec(), b"second".to_vec(), 1, false)
+            .expect("add second raw-name track");
+        let mut outer_group = MutableGroup::new("Outer.c4g");
+        outer_group
+            .add_child_bytes(EXTRA_GROUP.to_vec(), extra_group)
+            .expect("add invalid-UTF-8 music child");
+        fs::write(&outer, outer_group.pack().expect("pack outer music group"))
+            .expect("write outer music group");
+
+        let manifest = root.path().join("MoreMusic.txt");
+        fs::write(
+            &manifest,
+            b"Outer.c4g/Extra\xfe.c4g/\0ignored-after-c-string\n".as_slice(),
+        )
+        .expect("write invalid-UTF-8 MoreMusic path");
+
+        let mut catalog = MusicCatalog::empty();
+        load_more_music(&mut catalog, &manifest).expect("load raw MoreMusic catalog");
+        assert_eq!(catalog.assets.len(), 2);
+        assert_eq!(
+            catalog
+                .resolve(&lc_script::c4_string_from_bytes(FIRST_TRACK))
+                .expect("resolve first raw basename")
+                .load_audio()
+                .expect("read first raw basename exactly"),
+            b"first"
+        );
+        assert_eq!(
+            catalog
+                .resolve(&lc_script::c4_string_from_bytes(SECOND_TRACK))
+                .expect("resolve second raw basename")
+                .load_audio()
+                .expect("read second raw basename exactly"),
+            b"second"
+        );
+
+        let mut first_full_path = outer.as_os_str().as_encoded_bytes().to_vec();
+        first_full_path.push(std::path::MAIN_SEPARATOR as u8);
+        first_full_path.extend_from_slice(EXTRA_GROUP);
+        first_full_path.push(std::path::MAIN_SEPARATOR as u8);
+        first_full_path.extend_from_slice(FIRST_TRACK);
+        assert_eq!(
+            catalog
+                .resolve(&lc_script::c4_string_from_bytes(&first_full_path))
+                .expect("resolve raw full path")
+                .file_name_bytes
+                .as_slice(),
+            FIRST_TRACK
+        );
+
+        let mut resolver = MusicResolver::empty();
+        resolver.global = catalog;
+        resolver.set_playlist(Some(lc_script::c4_string_from_bytes(b"Tune\x81.*")));
+        assert_eq!(
+            resolver
+                .first_default()
+                .map(|asset| asset.file_name_bytes.as_slice()),
+            Some(SECOND_TRACK),
+            "script playlist bytes distinguish names that share a lossy rendering"
+        );
+        assert!(music_playlist_matches(b"Tune?.ogg", FIRST_TRACK));
+        assert!(music_playlist_matches(b"Tune?.ogg", SECOND_TRACK));
     }
 
     #[test]
@@ -125343,24 +125612,28 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn music_playlist_filter_uses_raw_semicolon_patterns_and_basename_matching() {
-        assert!(music_playlist_matches("NoMatch;*.mId", "Theme.MID"));
-        assert!(music_playlist_matches("NoMatch;Ambient.*", "Ambient.ogg"));
+        assert!(music_playlist_matches(b"NoMatch;*.mId", b"Theme.MID"));
+        assert!(music_playlist_matches(
+            b"NoMatch;Ambient.*",
+            b"Ambient.ogg"
+        ));
         assert!(
-            !music_playlist_matches("NoMatch; Ambient.*", "Ambient.ogg"),
+            !music_playlist_matches(b"NoMatch; Ambient.*", b"Ambient.ogg"),
             "C++ does not trim playlist sections"
         );
 
         let dir = tempdir().expect("tempdir");
         let group = Group::open(dir.path()).expect("open music fixture root");
-        let asset = MusicAsset::new(Arc::new(group), PathBuf::from("nested/Theme.MID"));
+        let asset =
+            MusicAsset::for_test_path(Arc::new(group), PathBuf::from("nested/Theme.MID"));
         let catalog = MusicCatalog {
             assets: vec![asset],
         };
         assert_eq!(
             catalog
                 .first_enabled(Some("*.mid"))
-                .map(|asset| asset.file_name.as_str()),
-            Some("Theme.MID"),
+                .map(|asset| asset.file_name_bytes.as_slice()),
+            Some(b"Theme.MID".as_slice()),
             "playlist matching uses GetFilename rather than the full asset path"
         );
     }
@@ -125379,16 +125652,16 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(
             resolver
                 .first_default()
-                .map(|asset| asset.file_name.as_str()),
-            Some("Theme.ogg")
+                .map(|asset| asset.file_name_bytes.as_slice()),
+            Some(b"Theme.ogg".as_slice())
         );
 
         resolver.set_playlist(Some("Frontend.*".to_string()));
         assert_eq!(
             resolver
                 .first_default()
-                .map(|asset| asset.file_name.as_str()),
-            Some("Frontend.ogg"),
+                .map(|asset| asset.file_name_bytes.as_slice()),
+            Some(b"Frontend.ogg".as_slice()),
             "an explicit playlist replaces the default exclusions"
         );
 
@@ -125396,8 +125669,8 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(
             resolver
                 .first_default()
-                .map(|asset| asset.file_name.as_str()),
-            Some("Theme.ogg"),
+                .map(|asset| asset.file_name_bytes.as_slice()),
+            Some(b"Theme.ogg".as_slice()),
             "restoring the default playlist excludes frontend/credits/@ tracks again"
         );
     }
@@ -125438,8 +125711,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             audio
                 .music_resolver
                 .first_default()
-                .map(|asset| asset.file_name.as_str()),
-            Some("Frontend.mid"),
+                .map(|asset| asset.file_name_bytes.as_slice()),
+            Some(b"Frontend.mid".as_slice()),
             "all C++ music extensions resolve through the frontend playlist"
         );
         assert_eq!(lock_unpoisoned(&audio.music_control).scenario_level, None);
@@ -125562,11 +125835,19 @@ public func Grant(password) { return GainMissionAccess(password); }
                     choices.pop_front().expect("stubbed SafeRandom choice")
                 })
                 .expect("enabled music candidate");
-            selected_names.push(selected.file_name.clone());
+            selected_names.push(selected.file_name_bytes.clone());
             recent = Some(Arc::clone(&selected.identity));
         }
 
-        assert_eq!(selected_names, ["A.ogg", "B.ogg", "C.ogg", "A.ogg"]);
+        assert_eq!(
+            selected_names,
+            [
+                b"A.ogg".to_vec(),
+                b"B.ogg".to_vec(),
+                b"C.ogg".to_vec(),
+                b"A.ogg".to_vec()
+            ]
+        );
         assert_eq!(bounds, [3, 2, 2, 2]);
         assert!(
             selected_names.windows(2).all(|pair| pair[0] != pair[1]),
@@ -125637,8 +125918,8 @@ public func Grant(password) { return GainMissionAccess(password); }
         let source = Arc::new(Group::open(dir.path()).expect("open music fixture root"));
         let catalog = MusicCatalog {
             assets: vec![
-                MusicAsset::new(Arc::clone(&source), PathBuf::from("Shared.ogg")),
-                MusicAsset::new(source, PathBuf::from("Shared.ogg")),
+                MusicAsset::for_test_path(Arc::clone(&source), PathBuf::from("Shared.ogg")),
+                MusicAsset::for_test_path(source, PathBuf::from("Shared.ogg")),
             ],
         };
 
@@ -125656,7 +125937,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             })
             .expect("other duplicate record remains eligible");
 
-        assert_eq!(first.full_path, second.full_path);
+        assert_eq!(first.full_path_bytes, second.full_path_bytes);
         assert!(!Arc::ptr_eq(&first.identity, &second.identity));
     }
 
@@ -125677,8 +125958,8 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(
             resolver
                 .resolve("A")
-                .map(|asset| asset.file_name.as_str()),
-            Some("A.ogg"),
+                .map(|asset| asset.file_name_bytes.as_slice()),
+            Some(b"A.ogg".as_slice()),
             "an explicit Music(\"Name\") lookup ignores the default playlist"
         );
         let selected = resolver
@@ -125688,7 +125969,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             })
             .expect("filtered default selection");
         assert_eq!(
-            selected.file_name, "C.ogg",
+            selected.file_name_bytes, b"C.ogg",
             "a restarted playlist uses the random choice instead of its first match"
         );
     }
@@ -125733,8 +126014,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             audio
                 .music_resolver
                 .first_default()
-                .map(|asset| asset.file_name.as_str()),
-            Some("Frontend.ogg"),
+                .map(|asset| asset.file_name_bytes.as_slice()),
+            Some(b"Frontend.ogg".as_slice()),
             "the filter still applies while playback is disabled"
         );
 
@@ -125882,8 +126163,8 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(
             resolver
                 .first_default()
-                .map(|asset| asset.file_name.as_str()),
-            Some("Local Theme.ogg"),
+                .map(|asset| asset.file_name_bytes.as_slice()),
+            Some(b"Local Theme.ogg".as_slice()),
             "loading a new scenario music catalog restores the default playlist"
         );
     }
@@ -126006,8 +126287,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             audio
                 .music_resolver
                 .first_default()
-                .map(|asset| asset.file_name.as_str()),
-            Some("Frontend.ogg"),
+                .map(|asset| asset.file_name_bytes.as_slice()),
+            Some(b"Frontend.ogg".as_slice()),
             "the ensuing frontend selection must use the rediscovered catalog"
         );
 
