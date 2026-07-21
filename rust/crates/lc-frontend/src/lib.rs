@@ -6788,7 +6788,9 @@ impl GraphicsSystem {
             modulation: (landscape.modulation() != 0).then_some(landscape.modulation()),
             fog_modulation: None,
         };
-        if self.material_textures.is_empty() || self.material_render_info.is_empty() {
+        if !grid.has_surface32_pixels()
+            && (self.material_textures.is_empty() || self.material_render_info.is_empty())
+        {
             return false;
         }
         enum CacheUpdate {
@@ -25336,6 +25338,54 @@ mod tests {
                 baseline.surface().get_pixel(1, 0),
             ],
             "disabling animation must retain the pre-animation renderer bytes"
+        );
+    }
+
+    #[test]
+    fn surface32_landscape_renders_without_material_resources() {
+        // Landscape.png supplies C4Landscape::Surface32 directly. It does not
+        // depend on a texture/material composition pass, so an authored exact
+        // surface remains drawable even when those resource maps are empty.
+        let landscape: Landscape = serde_json::from_value(serde_json::json!({
+            "width": 2,
+            "surface": [1, 1],
+            "world_height": 1,
+            "shade_materials": false,
+            "pixels": {
+                "width": 2,
+                "height": 1,
+                "bytes": "0000",
+                "surface32_pixels": {
+                    "0": 0x0011_2233_u32,
+                    "1": 0x0044_5566_u32
+                },
+                "texture_names": [],
+                "densities": [],
+                "material_names": []
+            }
+        }))
+        .expect("PNG-backed exact landscape");
+        let mut graphics = GraphicsSystem::new(
+            2,
+            1,
+            1,
+            "Exact Landscape.png",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        assert_eq!(
+            [
+                graphics.surface().get_pixel(0, 0),
+                graphics.surface().get_pixel(1, 0),
+            ],
+            [
+                Some(Color::opaque(0x11, 0x22, 0x33)),
+                Some(Color::opaque(0x44, 0x55, 0x66)),
+            ]
         );
     }
 

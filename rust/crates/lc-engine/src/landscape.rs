@@ -379,6 +379,31 @@ impl PixelGrid {
         }
     }
 
+    /// Install the complete presentation-only Surface32 created while an
+    /// exact landscape is loading. This is an initial-state operation rather
+    /// than a sequence of runtime SetPixDw calls: no dirty generations have
+    /// been presented yet, and constructing the map in one pass avoids a
+    /// revision (and allocation bookkeeping) for every PNG pixel.
+    pub(crate) fn install_initial_surface32_pixels(&mut self, pixels: Vec<u32>) {
+        debug_assert_eq!(pixels.len(), self.width as usize * self.height as usize);
+        let mut surface32_pixels = HashMap::with_capacity(pixels.len());
+        for (slot, color) in pixels.into_iter().enumerate() {
+            // C4Surface::SetPixDw discards stale RGB for a fully transparent
+            // source pixel (C4Surface.cpp:726-728).
+            let color = if color >> 24 == 0xff {
+                0xff00_0000
+            } else {
+                color
+            };
+            surface32_pixels.insert(slot, color);
+        }
+        self.surface32_pixels = Arc::new(surface32_pixels);
+        self.surface32_revision = 0;
+        self.surface32_render_token = 0;
+        self.surface32_dirty_generations.clear();
+        self.pending_surface32_relights.clear();
+    }
+
     fn slot(&self, x: i32, y: i32) -> Option<usize> {
         if x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height {
             return None;
@@ -1746,8 +1771,11 @@ impl RuntimeTexMapState {
     /// order. Callers validate the index even though the original helper's
     /// direct array access is undefined for invalid script input.
     pub(crate) fn default_material_entry_by_index(&self, index: i32) -> Option<u8> {
-        let material = self.materials.get(usize::try_from(index).ok()?)?;
-        self.default_material_entry(&material.name)
+        let index = usize::try_from(index).ok()?;
+        self.materials.get(index)?;
+        self.default_material_entries
+            .get(index)
+            .map(|(_, slot)| *slot)
     }
 }
 

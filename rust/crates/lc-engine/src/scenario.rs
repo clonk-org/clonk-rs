@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use image::{ImageError, load_from_memory};
+use image::{ImageError, ImageFormat, load_from_memory};
 use lc_resources::definition::{
     ActionFacet as ResourceActionFacet, DefCore as ResourceDefCore,
     DefinitionGraphicsVariant as ResourceGraphicsVariant,
@@ -10418,26 +10418,175 @@ pub(crate) fn build_map_pixel_classifier(
     Ok(Some(classifier))
 }
 
+fn invalid_exact_landscape_pixel(width: u32, slot: usize, byte: u8) -> ScenarioError {
+    let width = width.max(1) as usize;
+    let x = slot % width;
+    let y = slot / width;
+    ScenarioError::InvalidLandscape(format!(
+        "landscape loading error at ({x}/{y}): pixel value {byte} is not a valid material"
+    ))
+}
+
+/// Convert the two historical exact-landscape byte formats and enforce the
+/// current PixCol2Mat gate. The two native branches are deliberately not one
+/// match: a PNG entry suppresses format-0 conversion, but format 1 converts
+/// independently and never goes through the live-byte validation afterwards
+/// (C4Landscape.cpp:1557-1600).
+fn convert_exact_landscape_indices(
+    bitmap: &lc_resources::bitmap::IndexedBitmap,
+    texmap: &RuntimeTexMapState,
+    format: i32,
+    png_present: bool,
+) -> Result<Vec<u8>, ScenarioError> {
+    let mut indices = bitmap.indices.clone();
+    let material_count = texmap.materials.len();
+
+    if !png_present && format == 0 {
+        for (slot, byte) in indices.iter_mut().enumerate() {
+            let source = *byte;
+            let old_index = usize::from(source & 63);
+            let material = (source >= 128
+                && old_index < material_count.saturating_mul(3))
+            .then_some(old_index / 3)
+            .ok_or_else(|| invalid_exact_landscape_pixel(bitmap.width, slot, source))?;
+            // Native Mat2PixColDefault(MNone) indexes outside the material
+            // array for malformed format-0 input. Reject that undefined case
+            // rather than manufacturing a material byte.
+            let default = texmap
+                .default_material_entry_by_index(material as i32)
+                .unwrap_or(0);
+            let ift = if source >= 192 { 0x80 } else { 0 };
+            *byte = default.wrapping_add(ift);
+        }
+    }
+
+    if format == 1 {
+        let vehicle = texmap
+            .materials
+            .iter()
+            .position(|material| material.name.eq_ignore_ascii_case("Vehicle"))
+            .map_or(-1, |index| index as i32);
+        let material_count = material_count as i32;
+        for byte in &mut indices {
+            let source = *byte;
+            let mut material = i32::from(source & 0x7f) - 1;
+            if material > vehicle {
+                if material == vehicle + 1 {
+                    material = vehicle;
+                } else {
+                    material -= 2;
+                }
+            }
+            *byte = if (0..material_count).contains(&material) {
+                texmap
+                    .default_material_entry_by_index(material)
+                    .unwrap_or(0)
+                    .wrapping_add(source & 0x80)
+            } else {
+                0
+            };
+        }
+        return Ok(indices);
+    }
+
+    for (slot, &byte) in indices.iter().enumerate() {
+        if byte == 0 {
+            continue;
+        }
+        let texmap_slot = usize::from(byte & 0x7f);
+        let valid = (1..127).contains(&texmap_slot)
+            && texmap
+                .material_names
+                .get(texmap_slot)
+                .and_then(Option::as_ref)
+                .is_some();
+        if !valid {
+            return Err(invalid_exact_landscape_pixel(bitmap.width, slot, byte));
+        }
+    }
+    Ok(indices)
+}
+
+fn decode_exact_landscape_png(
+    source: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u32>, String> {
+    let rgba = image::load_from_memory_with_format(source, ImageFormat::Png)
+        .map_err(|error| error.to_string())?
+        .to_rgba8();
+    if rgba.width() < width || rgba.height() < height {
+        // Native code performs unchecked source reads for a smaller PNG.
+        // Contain that undefined case as the same nonfatal PNG-load failure.
+        return Err(format!(
+            "Landscape.png is {}x{}, smaller than Landscape.bmp {width}x{height}",
+            rgba.width(),
+            rgba.height()
+        ));
+    }
+    let mut pixels = Vec::with_capacity(width as usize * height as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let [red, green, blue, alpha] = rgba.get_pixel(x, y).0;
+            let transparency = 255_u8.wrapping_sub(alpha);
+            let color = (u32::from(transparency) << 24)
+                | (u32::from(red) << 16)
+                | (u32::from(green) << 8)
+                | u32::from(blue);
+            pixels.push(if transparency == 0xff {
+                0xff00_0000
+            } else {
+                color
+            });
+        }
+    }
+    Ok(pixels)
+}
+
 /// Install an exact landscape's decoded index plane directly as Surface8.
 /// C4Landscape::Load keeps the texture map but no C4Landscape::Map, and does
-/// not apply MapZoom/ChunkOZoom (C4Landscape.cpp:658-668,1520-1533).
+/// not apply MapZoom/ChunkOZoom (C4Landscape.cpp:658-668,1520-1600).
 fn exact_classified_landscape(
     bitmap: &lc_resources::bitmap::IndexedBitmap,
     classifier: &MapPixelClassifier,
     map_seed: i32,
+    format: i32,
+    landscape_png: Option<&[u8]>,
 ) -> Result<Landscape, ScenarioError> {
+    let surface32_pixels = landscape_png.and_then(|source| {
+        match decode_exact_landscape_png(source, bitmap.width, bitmap.height) {
+            Ok(pixels) => Some(pixels),
+            Err(error) => {
+                tracing::error!(
+                    error,
+                    "could not load 32-bit landscape surface from Landscape.png"
+                );
+                None
+            }
+        }
+    });
+    let indices = convert_exact_landscape_indices(
+        bitmap,
+        &classifier.state,
+        format,
+        landscape_png.is_some(),
+    )?;
     let world_height = bitmap.height as i32;
     let mut landscape = Landscape::new(bitmap.width, vec![world_height; bitmap.width as usize])
         .map_err(|error| ScenarioError::InvalidLandscape(error.to_string()))?;
     landscape.set_world_height(world_height);
-    landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+    let mut pixels = crate::landscape::PixelGrid::new(
         bitmap.width,
         bitmap.height,
-        bitmap.indices.clone(),
+        indices,
         classifier.state.densities.clone(),
         classifier.state.material_names.clone(),
         classifier.state.texture_names.clone(),
-    ));
+    );
+    if let Some(surface32_pixels) = surface32_pixels {
+        pixels.install_initial_surface32_pixels(surface32_pixels);
+    }
+    landscape.set_pixel_grid(pixels);
     landscape.refresh_all_raster_columns();
     landscape.set_raster_state(LandscapeRasterState::new(
         0,
@@ -10649,6 +10798,11 @@ fn load_legacy_landscape_body(
             }
         }
     };
+    let exact_landscape_png = if exact_landscape {
+        read_optional("Landscape.png")?
+    } else {
+        None
+    };
 
     let mut classifier = classifier;
     if let Some(bytes) = map_bytes {
@@ -10664,7 +10818,13 @@ fn load_legacy_landscape_body(
         if let Some(classifier) = classifier.take() {
             if let Some((bitmap, source_palette)) = retained_indexed.as_ref() {
                 let mut landscape = if exact_landscape {
-                    exact_classified_landscape(bitmap, classifier, map_seed)?
+                    exact_classified_landscape(
+                        bitmap,
+                        classifier,
+                        map_seed,
+                        manifest.core.landscape.new_style_landscape,
+                        exact_landscape_png.as_deref(),
+                    )?
                 } else {
                     let map_zoom_u32 = legacy_map_zoom(landscape_section, &mut map_rng);
                     classified_landscape(
@@ -31217,7 +31377,7 @@ public func ActualizePhase(pClonk)
             scenario_dir.join("Scenario.txt"),
             "[Head]\nTitle=Coreless section\n\n\
              [Definitions]\nDefinition1=Defs.c4d\n\n\
-             [Landscape]\nExactLandscape=1\nGravity=137,0,137,137\n",
+             [Landscape]\nExactLandscape=1\nNewStyleLandscape=2\nGravity=137,0,137,137\n",
         )
         .expect("write main scenario core");
         std::fs::write(
@@ -31901,6 +32061,15 @@ public func ActualizePhase(pClonk)
         assert_eq!(duplicate_defaults.len(), 2);
         assert_eq!(classifier.state.default_material_entry("dup"), Some(duplicate_defaults[0]));
         assert_eq!(
+            classifier.state.default_material_entry_by_index(1),
+            Some(duplicate_defaults[0])
+        );
+        assert_eq!(
+            classifier.state.default_material_entry_by_index(2),
+            Some(duplicate_defaults[1]),
+            "numeric material lookup keeps a later same-name material's own DefaultMatTex"
+        );
+        assert_eq!(
             classifier.state.match_texture_names[usize::from(duplicate_defaults[0])].as_deref(),
             Some("Rough")
         );
@@ -32361,15 +32530,15 @@ public func ActualizePhase(pClonk)
         let bitmap = lc_resources::bitmap::IndexedBitmap {
             width: 3,
             height: 1,
-            indices: vec![1, 2, 3],
+            indices: vec![1, 2, 0],
         };
-        let landscape = exact_classified_landscape(&bitmap, &classifier, 0)
+        let landscape = exact_classified_landscape(&bitmap, &classifier, 0, 2, None)
             .expect("indexed map classifies");
         assert_eq!(
             (0..3)
                 .map(|x| landscape.grid_byte_at(x, 0))
                 .collect::<Vec<_>>(),
-            vec![Some(1), Some(2), Some(3)]
+            vec![Some(1), Some(2), Some(0)]
         );
         for (offset, (name, _)) in material_order.iter().enumerate() {
             if *name == "Wet" {
@@ -33128,7 +33297,7 @@ public func ActualizePhase(pClonk)
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
-            "[Landscape]\nExactLandscape=1\nMapZoom=7\n",
+            "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\nMapZoom=7\n",
         )
         .expect("write scenario core");
         let expected = vec![
@@ -33143,8 +33312,10 @@ public func ActualizePhase(pClonk)
         .expect("write mixed-case exact landscape");
 
         let group = Group::open(&scenario_dir).expect("scenario group opens");
-        let manifest = parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\nMapZoom=7\n")
-            .expect("scenario core parses");
+        let manifest = parse_legacy_scenario_text(
+            "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\nMapZoom=7\n",
+        )
+        .expect("scenario core parses");
         let mut densities = [0i32; 128];
         densities[5] = 100;
         let mut names = vec![None; 128];
@@ -33187,13 +33358,197 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn exact_landscape_honors_new_style_version_png_and_invalid_bytes() {
+        fn classifier() -> MapPixelClassifier {
+            let mut state = RuntimeTexMapState::default();
+            state.materials = [
+                ("Dup", 60),
+                ("dUp", 61),
+                ("Vehicle", 100),
+                ("Tunnel", 50),
+            ]
+            .into_iter()
+            .map(|(name, density)| RuntimeTexMapMaterial {
+                name: name.to_string(),
+                density,
+                shape: crate::chunky::ChunkShape::Flat,
+            })
+            .collect();
+            state.default_material_entries = vec![
+                ("Dup".to_string(), 30),
+                ("dUp".to_string(), 31),
+                ("Vehicle".to_string(), 7),
+                ("Tunnel".to_string(), 10),
+            ];
+            for (slot, name, density) in [
+                (30, "Dup", 60),
+                (31, "dUp", 61),
+                (7, "Vehicle", 100),
+                (10, "Tunnel", 50),
+            ] {
+                state.material_names[slot] = Some(name.to_string());
+                state.densities[slot] = density;
+                state.shapes[slot] = Some(crate::chunky::ChunkShape::Flat);
+            }
+            MapPixelClassifier::from_runtime_state(state)
+        }
+
+        fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+            use image::ImageEncoder as _;
+
+            let mut encoded = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut encoded)
+                .write_image(rgba, width, height, ColorType::Rgba8)
+                .expect("encode Landscape.png");
+            encoded
+        }
+
+        fn load_fixture(
+            root: &Path,
+            name: &str,
+            format: i32,
+            rows: &[&[u8]],
+            png: Option<&[u8]>,
+            classifier: &mut MapPixelClassifier,
+        ) -> Result<Landscape, ScenarioError> {
+            let scenario_dir = root.join(format!("{name}.c4s"));
+            std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+            let source = format!(
+                "[Landscape]\nExactLandscape=1\nNewStyleLandscape={format}\n"
+            );
+            std::fs::write(scenario_dir.join("Scenario.txt"), &source)
+                .expect("write scenario core");
+            std::fs::write(
+                scenario_dir.join("Landscape.bmp"),
+                encode_indexed_bmp(rows),
+            )
+            .expect("write Landscape.bmp");
+            if let Some(png) = png {
+                std::fs::write(scenario_dir.join("lAnDsCaPe.PnG"), png)
+                    .expect("write Landscape.png");
+            }
+            let group = Group::open(&scenario_dir).expect("scenario group opens");
+            let manifest = parse_legacy_scenario_text(&source).expect("scenario core parses");
+            load_legacy_landscape_body_for_test(&group, &manifest, Some(classifier), 0, 1)?
+                .ok_or_else(|| {
+                    ScenarioError::InvalidLandscape("exact landscape was not created".to_string())
+                })
+        }
+
+        let dir = tempdir().expect("tempdir");
+
+        // Format 0: three colors per material and the old 0x40 IFT range
+        // become each material's current DefaultMatTex plus current 0x80 IFT.
+        // The case-only duplicate material names deliberately own different
+        // numeric defaults.
+        let mut format0_classifier = classifier();
+        let format0 = load_fixture(
+            dir.path(),
+            "Format0",
+            0,
+            &[&[128, 131, 134, 137, 192, 195, 198, 201]],
+            None,
+            &mut format0_classifier,
+        )
+        .expect("format-0 landscape converts");
+        assert_eq!(
+            format0.pixel_grid().unwrap().bytes(),
+            &[30, 31, 7, 10, 158, 159, 135, 138]
+        );
+
+        // Format 1 conversion is independent of PNG presence. It retains the
+        // three Vehicle colors, maps out-of-range material indices to sky and
+        // preserves the source IFT bit.
+        let format1_rgba = [1, 2, 3, 255].repeat(10);
+        let format1_png = encode_png(10, 1, &format1_rgba);
+        let mut format1_classifier = classifier();
+        let format1 = load_fixture(
+            dir.path(),
+            "Format1",
+            1,
+            &[&[0, 1, 2, 3, 4, 5, 6, 7, 129, 134]],
+            Some(&format1_png),
+            &mut format1_classifier,
+        )
+        .expect("format-1 landscape converts with PNG present");
+        assert_eq!(
+            format1.pixel_grid().unwrap().bytes(),
+            &[0, 30, 31, 7, 7, 7, 10, 0, 158, 138]
+        );
+        assert_eq!(format1.surface32_pixel_at(0, 0), Some(0x0001_0203));
+
+        // Landscape.png is presentation-only: BMP material bytes stay live,
+        // ordinary PNG alpha becomes inverted Clonk transparency, and a fully
+        // transparent source pixel is canonical transparent black.
+        let png = encode_png(
+            3,
+            1,
+            &[
+                0x11, 0x22, 0x33, 255, 0x44, 0x55, 0x66, 128, 0x99, 0x88, 0x77, 0,
+            ],
+        );
+        let mut png_classifier = classifier();
+        let png_landscape = load_fixture(
+            dir.path(),
+            "Png",
+            2,
+            &[&[30, 31, 7]],
+            Some(&png),
+            &mut png_classifier,
+        )
+        .expect("current-format PNG landscape loads");
+        assert_eq!(png_landscape.pixel_grid().unwrap().bytes(), &[30, 31, 7]);
+        assert_eq!(
+            (0..3)
+                .map(|x| png_landscape.surface32_pixel_at(x, 0))
+                .collect::<Vec<_>>(),
+            vec![Some(0x0011_2233), Some(0x7f44_5566), Some(0xff00_0000)]
+        );
+
+        // Merely finding the sidecar suppresses format-0 conversion. Decode
+        // failure is nonfatal, so this already-live byte remains untouched.
+        let mut malformed_png_classifier = classifier();
+        let malformed_png = load_fixture(
+            dir.path(),
+            "MalformedPng",
+            0,
+            &[&[30]],
+            Some(b"not a PNG"),
+            &mut malformed_png_classifier,
+        )
+        .expect("malformed PNG is nonfatal");
+        assert_eq!(malformed_png.pixel_grid().unwrap().bytes(), &[30]);
+        assert_eq!(malformed_png.surface32_pixel_at(0, 0), None);
+
+        // Current/live format validates before DiffLandscape.bmp is applied
+        // and rejects the first unmapped nonzero byte in row-major order.
+        let mut invalid_classifier = classifier();
+        let error = match load_fixture(
+            dir.path(),
+            "Invalid",
+            2,
+            &[&[0, 31], &[7, 42]],
+            None,
+            &mut invalid_classifier,
+        ) {
+            Ok(_) => panic!("invalid live byte must reject the landscape"),
+            Err(error) => error,
+        };
+        let ScenarioError::InvalidLandscape(detail) = error else {
+            panic!("unexpected invalid-byte error: {error:?}");
+        };
+        assert!(detail.contains("(1/1)"), "wrong invalid-byte coordinate: {detail}");
+        assert!(detail.contains("42"), "wrong invalid-byte value: {detail}");
+    }
+
+    #[test]
     fn legacy_landscape_diff_is_applied_after_initial_snapshot() {
         let dir = tempdir().expect("tempdir");
         let scenario_dir = dir.path().join("Diff.c4s");
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
-            "[Landscape]\nExactLandscape=1\n",
+            "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n",
         )
         .expect("write scenario core");
         std::fs::write(
@@ -33212,8 +33567,10 @@ public func ActualizePhase(pClonk)
         .expect("write mixed-case diff landscape");
 
         let group = Group::open(&scenario_dir).expect("scenario group opens");
-        let manifest = parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\n")
-            .expect("scenario core parses");
+        let manifest = parse_legacy_scenario_text(
+            "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n",
+        )
+        .expect("scenario core parses");
         let mut densities = [0i32; 128];
         let mut names = vec![None; 128];
         let mut shapes = vec![None; 128];
@@ -33270,7 +33627,8 @@ public func ActualizePhase(pClonk)
             encode_indexed_bmp(&[&[1]]),
         )
         .expect("write exact landscape");
-        let source = "[Landscape]\nExactLandscape=1\nShadeMaterials=0\n";
+        let source =
+            "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\nShadeMaterials=0\n";
         let group = Group::open(&scenario_dir).expect("scenario group opens");
         let manifest = parse_legacy_scenario_text(source).expect("scenario core parses");
         let mut densities = [0i32; 128];
@@ -33323,8 +33681,10 @@ public func ActualizePhase(pClonk)
         )
         .expect("write static map only");
         let group = Group::open(&scenario_dir).expect("scenario group opens");
-        let manifest = parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\n")
-            .expect("scenario core parses");
+        let manifest = parse_legacy_scenario_text(
+            "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n",
+        )
+        .expect("scenario core parses");
 
         let error = load_legacy_landscape_body_for_test(&group, &manifest, None, 0, 1)
             .expect_err("exact load must require Landscape.bmp");
@@ -33353,7 +33713,7 @@ public func ActualizePhase(pClonk)
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
-            "[Head]\nTitle=Exact\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=GOOD=1\nPosition=4,2\n\n[Landscape]\nExactLandscape=1\n",
+            "[Head]\nTitle=Exact\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=GOOD=1\nPosition=4,2\n\n[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n",
         )
         .expect("write scenario core");
         let mut bitmap = RgbaImage::from_pixel(8, 6, Rgba([0, 0, 255, 255]));
