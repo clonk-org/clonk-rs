@@ -64,7 +64,7 @@ pub mod text_spec;
 pub use action::{
     ActionLibrary, ActionProcedure, ActionSpec, ActionState, ActionUpdate, ActionUpdateResult,
 };
-use action::SharedActionLibrary;
+use action::{ScriptCallbackLink, ScriptCallbackTarget, SharedActionLibrary};
 pub use command::{CommandStackSnapshot, MenuRequest, MenuRequestKind};
 #[doc(hidden)]
 pub use compat::BlastReplay;
@@ -11455,6 +11455,9 @@ pub struct Definition {
     has_initialize: bool,
     has_step: bool,
     action_library: ActionLibrary,
+    /// Whether `C4DefScriptHost::AfterLink` populated action and TimerCall
+    /// function pointers for the current linked script tree.
+    callbacks_linked: bool,
     action_graphics: HashMap<String, DefinitionActionGraphics>,
     crew_member: bool,
     /// Literal signed DefCore `CrewMember` value returned by FnCrewMember.
@@ -11608,6 +11611,8 @@ pub struct Definition {
     /// Timer-th Execute per object (C4Object.cpp:1085-1091). None when
     /// the def names no callback (C++ links to nullptr).
     timer_call: Option<String>,
+    /// Runtime-only `C4Def::TimerCall` function pointer cache.
+    timer_call_link: ScriptCallbackLink,
     components: Vec<DefinitionComponent>,
     line_connect: u32,
     /// ContactIncinerate=N: 1-in-N contact-fire chance (0 = not inflammable).
@@ -11777,6 +11782,7 @@ impl Definition {
             has_initialize,
             has_step,
             action_library: ActionLibrary::default(),
+            callbacks_linked: false,
             action_graphics: HashMap::new(),
             crew_member: false,
             crew_member_value: 0,
@@ -11857,6 +11863,7 @@ impl Definition {
             hide_hud_elements: 0,
             timer: 35,
             timer_call: None,
+            timer_call_link: ScriptCallbackLink::default(),
             components: Vec::new(),
             line_connect: 0,
             contact_incinerate: 0,
@@ -12023,10 +12030,67 @@ impl Definition {
         self.has_step = has_step;
     }
 
+    fn mark_callbacks_unlinked(&mut self) {
+        self.callbacks_linked = false;
+        self.action_library.reset_callback_links();
+        self.timer_call_link.reset();
+    }
+
+    /// Cache ActMap and TimerCall functions after appends/includes are final.
+    /// C++'s two GetSFunc layers each consume one leading failsafe marker.
+    fn link_callbacks(&mut self) {
+        if self.callbacks_linked {
+            return;
+        }
+
+        let script = Arc::clone(&self.script);
+        let definition = self.id.clone();
+        let resolve = |configured: &str| {
+            if configured.is_empty() {
+                return None;
+            }
+            let function_name = configured.strip_prefix('~').unwrap_or(configured);
+            let function_name = function_name.strip_prefix('~').unwrap_or(function_name);
+            script
+                .resolve_function(function_name, false)
+                .map(|resolution| ScriptCallbackTarget::linked(function_name, resolution))
+        };
+
+        self.action_library
+            .link_callbacks(|action, slot, configured| {
+                let target = resolve(configured);
+                if target.is_none() && !configured.is_empty() {
+                    tracing::warn!(
+                        definition = %definition,
+                        "Error getting Action {}: {} function '{}'",
+                        action,
+                        slot,
+                        configured
+                    );
+                }
+                target
+            });
+
+        let timer_target = self.timer_call.as_deref().and_then(|configured| {
+            let target = resolve(configured);
+            if target.is_none() && !configured.is_empty() {
+                tracing::warn!(
+                    definition = %definition,
+                    "Error getting TimerCall function '{}'",
+                    configured
+                );
+            }
+            target
+        });
+        self.timer_call_link.set_linked(timer_target);
+        self.callbacks_linked = true;
+    }
+
     /// Restores the host to its own preparsed functions. C++ UnLink deletes
     /// linked include/append copies but retains original script functions and
     /// the engine-owned global value cells.
     fn reset_script_links(&mut self) {
+        self.mark_callbacks_unlinked();
         Arc::make_mut(&mut self.script)
             .replace_script_deferred(self.base_script.clone(), false);
         self.includes_resolved = false;
@@ -12045,6 +12109,7 @@ impl Definition {
     }
 
     fn replace_base_script(&mut self, source: &str, script: lc_script::Script) {
+        self.mark_callbacks_unlinked();
         self.includes = script.includes().to_vec();
         self.appends = script.appends().to_vec();
         self.script_source = source.to_owned();
@@ -12067,6 +12132,7 @@ impl Definition {
     }
 
     pub fn merge_from(&mut self, parent: &Definition) {
+        self.mark_callbacks_unlinked();
         Arc::make_mut(&mut self.script).merge_from(&parent.script);
         self.include_definition_metadata(parent);
         self.refresh_script_flags();
@@ -12416,10 +12482,12 @@ impl Definition {
         specs: HashMap<String, ActionSpec>,
     ) {
         self.action_library = ActionLibrary::new(default_action, specs);
+        self.mark_callbacks_unlinked();
     }
 
     pub(crate) fn configure_physical_actions(&mut self, actions: Vec<(String, ActionSpec)>) {
         self.action_library.set_physical_actions(actions);
+        self.mark_callbacks_unlinked();
     }
 
     pub(crate) fn configure_action_reflections(
@@ -13228,8 +13296,13 @@ impl Definition {
         self.timer_call.as_deref()
     }
 
+    fn timer_callback(&self) -> Option<ScriptCallbackTarget> {
+        self.timer_call_link.target(self.timer_call.as_deref())
+    }
+
     pub fn set_timer_call(&mut self, timer_call: Option<String>) {
         self.timer_call = timer_call;
+        self.mark_callbacks_unlinked();
     }
 
     pub fn set_upright_attach(&mut self, upright_attach: u32) {
@@ -14250,7 +14323,7 @@ impl Definition {
     fn call_action_callback(
         &self,
         object_definition: &Definition,
-        function: &str,
+        callback: &ScriptCallbackTarget,
         kind: ActionCallbackKind,
         state: &ObjectState,
         object_id: ObjectId,
@@ -14265,10 +14338,8 @@ impl Definition {
         game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
-        // Note: We don't validate function existence here because has_function() only
-        // checks the current script's functions and doesn't traverse #include inheritance.
-        // Scripts can inherit callbacks from parent scripts (e.g., TRPR inherits Throwing
-        // from COWB). The VM will naturally handle truly missing functions when called.
+        // Linked definitions arrive with an exact retained function body.
+        // Unlinked synthetic fixtures keep their historical name-based path.
 
         // C++ ActMap callbacks pass no parameters, except AbortCall which
         // gets the last phase (C4Object.cpp:4154,4168,4182). The (state,
@@ -14356,7 +14427,14 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || self.run_live_object_session(function, &args, &state.local_vars, object_id),
+            || {
+                self.run_live_object_callback_session(
+                    callback,
+                    &args,
+                    &state.local_vars,
+                    object_id,
+                )
+            },
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -14720,16 +14798,39 @@ impl Definition {
         local_vars: &HashMap<String, Value>,
         object_id: ObjectId,
     ) -> Result<(Value, HashMap<String, Value>), lc_script::ScriptError> {
+        self.run_live_object_callback_session(
+            &ScriptCallbackTarget::unlinked(function),
+            args,
+            local_vars,
+            object_id,
+        )
+    }
+
+    fn run_live_object_callback_session(
+        &self,
+        callback: &ScriptCallbackTarget,
+        args: &[Value],
+        local_vars: &HashMap<String, Value>,
+        object_id: ObjectId,
+    ) -> Result<(Value, HashMap<String, Value>), lc_script::ScriptError> {
         let cells = lc_script::LocalCells::from_local_vars(local_vars);
         compat::register_session_local_cells(object_id, cells.clone());
-        self.script
-            .call_with_cells_and_this(
-                function,
+        let result = match callback.resolution() {
+            Some(resolution) => self.script.call_pinned_with_cells_and_this(
+                resolution.function.as_ref(),
+                resolution.scope == lc_script::ScriptFunctionScope::Global,
                 args,
                 &cells,
                 compat::object_reference_value(object_id),
-            )
-            .map(|value| (value, cells.snapshot()))
+            ),
+            None => self.script.call_with_cells_and_this(
+                callback.function_name(),
+                args,
+                &cells,
+                compat::object_reference_value(object_id),
+            ),
+        };
+        result.map(|value| (value, cells.snapshot()))
     }
 
     #[doc(hidden)]
@@ -14748,7 +14849,41 @@ impl Definition {
         game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(Value, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
-        if !self.script.has_function(function) {
+        self.call_object_callback(
+            state,
+            object_id,
+            &ScriptCallbackTarget::unlinked(function),
+            args,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn call_object_callback(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        callback: &ScriptCallbackTarget,
+        args: &[Value],
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<(Value, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
+        if callback.resolution().is_none()
+            && !self.script.has_function(callback.function_name())
+        {
             let next_object_id = world.next_object_id();
             return Ok((
                 Value::Nil,
@@ -14759,6 +14894,7 @@ impl Definition {
         }
 
         let arg_values: Vec<Value> = args.to_vec();
+        let function = callback.function_name();
         self.exec_in_object_context(
             state,
             object_id,
@@ -14771,8 +14907,15 @@ impl Definition {
             game_over_triggered,
             audio,
             function,
-            |script, cells, this| {
-                script.call_with_cells_and_this(function, &arg_values, cells, this)
+            |script, cells, this| match callback.resolution() {
+                Some(resolution) => script.call_pinned_with_cells_and_this(
+                    resolution.function.as_ref(),
+                    resolution.scope == lc_script::ScriptFunctionScope::Global,
+                    &arg_values,
+                    cells,
+                    this,
+                ),
+                None => script.call_with_cells_and_this(function, &arg_values, cells, this),
             },
         )
     }
@@ -27257,6 +27400,19 @@ impl Engine {
         function: &str,
         args: Vec<Value>,
     ) -> Result<Value, EngineError> {
+        self.call_object_callback(
+            index,
+            &ScriptCallbackTarget::unlinked(function),
+            args,
+        )
+    }
+
+    fn call_object_callback(
+        &mut self,
+        index: usize,
+        callback: &ScriptCallbackTarget,
+        args: Vec<Value>,
+    ) -> Result<Value, EngineError> {
         let (object_id, definition_id, state_snapshot) = {
             let object = self
                 .objects
@@ -27284,10 +27440,10 @@ impl Engine {
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context_for_object(index);
-        let call = definition.call_object_function(
+        let call = definition.call_object_callback(
             &state_snapshot,
             object_id,
-            function,
+            callback,
             &args,
             rng_state,
             &global_view,
@@ -28271,6 +28427,7 @@ impl Engine {
                         if let Some(source) = source_definition.as_ref() {
                             definition.include_definition_metadata(source);
                         }
+                        definition.mark_callbacks_unlinked();
                         Arc::make_mut(&mut definition.script).append_overrides_from(&source_script);
                         definition.refresh_script_flags();
                     }
@@ -28638,6 +28795,15 @@ impl Engine {
         // literals may acquire Hold; all hosts' constants were preparsed while
         // they were installed.
         self.acquire_script_string_holds();
+
+        // Native AfterLink resolves these only once the complete function
+        // tree exists. UnLink/reload clears the cache before rebuilding it.
+        for definition_id in self.definition_load_order.clone() {
+            if let Some(definition) = self.definitions.get_mut(&definition_id) {
+                definition.link_callbacks();
+            }
+        }
+        self.definition_metadata_cache.borrow_mut().take();
 
         Ok(())
     }
@@ -31209,9 +31375,8 @@ impl Engine {
                 };
 
                 if let Some(event) = advance_outcome.phase_event.take() {
-                    if let Some(function_name) = exec_action_library
-                        .spec_for_entry(&event.action, event.act_map_index)
-                        .and_then(|spec| spec.phase_call.as_deref())
+                    if let Some(callback) = exec_action_library
+                        .phase_callback_for_entry(&event.action, event.act_map_index)
                     {
                         // C++ runs the PhaseCall AFTER `Phase += Step` but
                         // BEFORE the length-wrap SetAction
@@ -31228,7 +31393,7 @@ impl Engine {
                             ActionCallbackKind::Phase,
                             &event.action,
                             event.act_map_index,
-                            Some(function_name),
+                            Some(callback),
                             Some(state_snapshot),
                             None,
                             Some(&exec_action_definition_id),
@@ -31515,15 +31680,12 @@ impl Engine {
                     (*object_timer >= interval)
                         .then(|| {
                             *object_timer = 0;
-                            definition
-                                .timer_call()
-                                .filter(|function| definition.has_function(function))
-                                .map(str::to_string)
+                            definition.timer_callback()
                         })
                         .flatten()
                 });
-                if let Some(function) = timer_call {
-                    tolerate_script_error(self.call_object_function(idx, &function, Vec::new()))?;
+                if let Some(callback) = timer_call {
+                    tolerate_script_error(self.call_object_callback(idx, &callback, Vec::new()))?;
                 }
                 if self.objects[idx].destroyed
                     || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
@@ -32815,7 +32977,7 @@ impl Engine {
         kind: ActionCallbackKind,
         action_name: &str,
         action_index: Option<u32>,
-        function_override: Option<&str>,
+        callback_override: Option<ScriptCallbackTarget>,
         state_override: Option<ObjectState>,
         abort_phase: Option<i32>,
         callback_definition_override: Option<&str>,
@@ -32834,22 +32996,28 @@ impl Engine {
             .get(callback_definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(callback_definition_id.to_string()))?;
 
-        let function = match function_override {
-            Some(name) => Some(name),
-            None => callback_definition
-                .action_library()
-                .spec_for_entry(action_name, action_index)
-                .and_then(|spec| match kind {
-                    ActionCallbackKind::Start => spec.start_call.as_deref(),
-                    ActionCallbackKind::End => spec.end_call.as_deref(),
-                    ActionCallbackKind::Phase => spec.phase_call.as_deref(),
-                    ActionCallbackKind::Abort => spec.abort_call.as_deref(),
-                }),
+        let callback = match callback_override {
+            Some(callback) => Some(callback),
+            None => match kind {
+                ActionCallbackKind::Start => callback_definition
+                    .action_library()
+                    .start_callback_for_entry(action_name, action_index),
+                ActionCallbackKind::End => callback_definition
+                    .action_library()
+                    .end_callback_for_entry(action_name, action_index),
+                ActionCallbackKind::Phase => callback_definition
+                    .action_library()
+                    .phase_callback_for_entry(action_name, action_index),
+                ActionCallbackKind::Abort => callback_definition
+                    .action_library()
+                    .abort_callback_for_entry(action_name, action_index),
+            },
         };
 
-        let Some(function) = function else {
+        let Some(callback) = callback else {
             return Ok(());
         };
+        let function = callback.function_name();
 
         tracing::debug!(
             definition = %callback_definition_id,
@@ -32871,7 +33039,7 @@ impl Engine {
         let world = self.host_world_context_for_object(index);
         let callback = callback_definition.call_action_callback(
             object_definition,
-            function,
+            &callback,
             kind,
             &state_snapshot,
             object_id,
@@ -62947,6 +63115,194 @@ mod missing_include_regression {
                 Definition::from_script(id, id, source).expect("fixture script compiles"),
             )
             .expect("fixture definition registers");
+    }
+
+    #[test]
+    fn definition_link_warns_once_and_disables_missing_actmap_and_timer_callbacks() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let calls = Arc::clone(&calls);
+            hooks.set_on_call(move |name, _| {
+                if matches!(
+                    name,
+                    "MissingStart"
+                        | "MissingPhase"
+                        | "MissingEnd"
+                        | "MissingAbort"
+                        | "MissingTimer"
+                ) {
+                    calls.lock().unwrap().push(name.to_string());
+                }
+            });
+        }
+
+        let probe = ActionSpec::default()
+            .with_delay(1)
+            .with_length(100)
+            .with_start_call("MissingStart")
+            .with_phase_call("MissingPhase")
+            .with_end_call("MissingEnd")
+            .with_abort_call("MissingAbort");
+        let mut definition = Definition::from_script(
+            "CBLK",
+            "Callback linker",
+            "#strict\npublic func ExerciseSetAction() { return SetAction(\"Probe\"); }\n",
+        )
+        .expect("missing-callback fixture compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_debugger_hooks(hooks);
+        definition.configure_actions(
+            None,
+            HashMap::from([("Probe".to_string(), probe.clone())]),
+        );
+        definition.configure_physical_actions(vec![("Probe".to_string(), probe)]);
+        definition.set_timer(1);
+        definition.set_timer_call(Some("MissingTimer".to_string()));
+
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("callback definition registers");
+        engine.resolve_appends();
+        let expected = [
+            "Error getting Action Probe: StartCall function 'MissingStart'",
+            "Error getting Action Probe: PhaseCall function 'MissingPhase'",
+            "Error getting Action Probe: EndCall function 'MissingEnd'",
+            "Error getting Action Probe: AbortCall function 'MissingAbort'",
+            "Error getting TimerCall function 'MissingTimer'",
+        ];
+        let valid_source = r#"#strict
+public func ExerciseSetAction() { return SetAction("Probe"); }
+private func MissingStart() { return 1; }
+private func MissingPhase() { return 1; }
+private func MissingEnd() { return 1; }
+private func MissingAbort(int old_phase) { return old_phase; }
+private func MissingTimer() { return 1; }
+"#;
+        assert_eq!(
+            capture_warnings(|| engine.resolve_includes().expect("initial callback link succeeds")),
+            expected,
+        );
+
+        let mut action = ActionState::new("Probe");
+        action.act_map_index = Some(0);
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new("CBLK")
+                    .with_action(action)
+                    .with_loaded(true),
+            )
+            .expect("callback fixture spawns");
+        let index = engine.find_object_index(object).expect("fixture exists");
+
+        // Make every name dynamically resolvable without touching the base
+        // script or relinking. C++ must keep using its five cached nulls.
+        let injected = lc_script::Script::compile_c4_string(valid_source)
+            .expect("injected callbacks compile");
+        Arc::make_mut(
+            &mut engine
+                .definitions
+                .get_mut("CBLK")
+                .expect("callback definition exists")
+                .script,
+        )
+        .add_script(injected);
+        engine.invalidate_host_definition_tables();
+        assert!(engine
+            .definitions
+            .get("CBLK")
+            .expect("callback definition exists")
+            .has_function("MissingTimer"));
+        let runtime_warnings = capture_warnings(|| {
+            engine
+                .call_object_function(index, "ExerciseSetAction", Vec::new())
+                .expect("missing synchronous Start/Abort callbacks are no-ops");
+            engine
+                .tick_without_snapshot()
+                .expect("cached missing PhaseCall and TimerCall remain no-ops");
+            engine
+                .invoke_action_callback(
+                    index,
+                    ActionCallbackKind::End,
+                    "Probe",
+                    Some(0),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("a cached missing EndCall is a no-op");
+        });
+        assert!(runtime_warnings.is_empty());
+        assert!(calls.lock().unwrap().is_empty());
+
+        assert_eq!(
+            capture_warnings(|| engine.relink_scripts().expect("unchanged relink succeeds")),
+            expected,
+            "each missing physical slot warns once again on the next link",
+        );
+
+        assert!(
+            capture_warnings(|| {
+                assert!(engine
+                    .reload_definition_script("CBLK", valid_source)
+                    .expect("valid callback script reload succeeds"));
+            })
+            .is_empty(),
+            "private callbacks satisfy AA_PRIVATE link lookup",
+        );
+
+        // Delete all callback names from the live lookup table without a
+        // relink. The retained bodies must still run, including compat's
+        // synchronous SetAction path.
+        let driver_only = lc_script::Script::compile_c4_string(
+            "#strict\npublic func ExerciseSetAction() { return SetAction(\"Probe\"); }\n",
+        )
+        .expect("driver-only replacement compiles");
+        Arc::make_mut(
+            &mut engine
+                .definitions
+                .get_mut("CBLK")
+                .expect("callback definition exists")
+                .script,
+        )
+        .replace_script(driver_only, false);
+        engine.invalidate_host_definition_tables();
+        assert!(!engine
+            .definitions
+            .get("CBLK")
+            .expect("callback definition exists")
+            .has_function("MissingStart"));
+
+        engine
+            .call_object_function(index, "ExerciseSetAction", Vec::new())
+            .expect("linked synchronous Start/Abort callbacks dispatch");
+        engine
+            .tick_without_snapshot()
+            .expect("linked private PhaseCall and TimerCall dispatch");
+        engine
+            .invoke_action_callback(
+                index,
+                ActionCallbackKind::End,
+                "Probe",
+                Some(0),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("linked private EndCall dispatches");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [
+                "MissingStart",
+                "MissingAbort",
+                "MissingPhase",
+                "MissingTimer",
+                "MissingEnd",
+            ],
+        );
     }
 
     #[test]

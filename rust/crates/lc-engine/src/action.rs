@@ -6,13 +6,123 @@ use std::rc::Rc;
 use crate::{math::C4Fixed, ObjectId};
 use lc_resources::ActionDefinition as ResourceActionDefinition;
 use lc_resources::definition::ACT_HOLD;
-use lc_script::Value;
+use lc_script::{ScriptFunctionResolution, Value};
 
 pub const DEFAULT_ACTION_NAME: &str = "Idle";
 
 pub(crate) fn is_builtin_idle_name(action: &str) -> bool {
     matches!(action, DEFAULT_ACTION_NAME | "ActIdle")
 }
+
+/// A native callback target selected during `C4DefScriptHost::AfterLink`.
+/// Retaining the function body mirrors C++'s cached `C4AulScriptFunc *` and
+/// prevents another name lookup before the next relink.
+#[derive(Clone, Debug)]
+pub(crate) struct ScriptCallbackTarget {
+    function_name: String,
+    resolution: Option<ScriptFunctionResolution>,
+}
+
+impl ScriptCallbackTarget {
+    pub(crate) fn unlinked(function_name: impl Into<String>) -> Self {
+        Self {
+            function_name: function_name.into(),
+            resolution: None,
+        }
+    }
+
+    pub(crate) fn linked(
+        function_name: impl Into<String>,
+        resolution: ScriptFunctionResolution,
+    ) -> Self {
+        Self {
+            function_name: function_name.into(),
+            resolution: Some(resolution),
+        }
+    }
+
+    pub(crate) fn function_name(&self) -> &str {
+        &self.function_name
+    }
+
+    pub(crate) fn resolution(&self) -> Option<&ScriptFunctionResolution> {
+        self.resolution.as_ref()
+    }
+}
+
+/// Outer state distinguishes an unlinked synthetic fixture from C++'s
+/// deliberately cached null pointer for a missing callback. Equality ignores
+/// this runtime-only cache so ActionSpec retains metadata/value semantics.
+#[derive(Clone, Default)]
+pub(crate) enum ScriptCallbackLink {
+    #[default]
+    Unlinked,
+    Linked(Option<ScriptCallbackTarget>),
+}
+
+impl std::fmt::Debug for ScriptCallbackLink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unlinked => formatter.write_str("Unlinked"),
+            Self::Linked(None) => formatter.write_str("Linked(None)"),
+            Self::Linked(Some(target)) => formatter
+                .debug_tuple("Linked")
+                .field(&target.function_name())
+                .finish(),
+        }
+    }
+}
+
+impl PartialEq for ScriptCallbackLink {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ScriptCallbackLink {}
+
+impl ScriptCallbackLink {
+    pub(crate) fn target(&self, configured: Option<&str>) -> Option<ScriptCallbackTarget> {
+        match self {
+            Self::Unlinked => configured
+                .filter(|name| !name.is_empty())
+                .map(ScriptCallbackTarget::unlinked),
+            Self::Linked(target) => target.clone(),
+        }
+    }
+
+    pub(crate) fn set_linked(&mut self, target: Option<ScriptCallbackTarget>) {
+        *self = Self::Linked(target);
+    }
+
+    pub(crate) fn reset(&mut self) {
+        *self = Self::Unlinked;
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ActionCallbackLinks {
+    start: ScriptCallbackLink,
+    phase: ScriptCallbackLink,
+    end: ScriptCallbackLink,
+    abort: ScriptCallbackLink,
+}
+
+/// Runtime-only cache. Equality deliberately ignores both link state and
+/// retained function bodies so ActionLibrary keeps metadata/value semantics.
+#[derive(Clone, Debug, Default)]
+struct ActionCallbackCache {
+    named: HashMap<String, ActionCallbackLinks>,
+    physical: Vec<ActionCallbackLinks>,
+}
+
+impl PartialEq for ActionCallbackCache {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ActionCallbackCache {}
 
 /// Complete post-load `C4ActionDef::CompileFunc` view for GetActMapVal.
 /// Runtime action fields and this reflection payload preserve the exact
@@ -485,6 +595,7 @@ pub struct ActionLibrary {
     /// reflection; this array preserves duplicate slot identity at runtime.
     physical: Vec<(String, ActionSpec)>,
     first_physical: HashMap<String, u32>,
+    callback_cache: ActionCallbackCache,
 }
 
 /// Cheap, single-threaded sharing for engine-internal script-host scopes.
@@ -534,6 +645,7 @@ impl ActionLibrary {
             reflections: HashMap::new(),
             physical: Vec::new(),
             first_physical: HashMap::new(),
+            callback_cache: ActionCallbackCache::default(),
         }
     }
 
@@ -562,6 +674,7 @@ impl ActionLibrary {
         }
         self.physical = physical;
         self.first_physical = first_physical;
+        self.callback_cache = ActionCallbackCache::default();
     }
 
     pub(crate) fn first_physical_index(&self, action: &str) -> Option<u32> {
@@ -695,6 +808,178 @@ impl ActionLibrary {
             .and_then(|spec| spec.abort_call.as_deref())
     }
 
+    pub(crate) fn start_callback_for_entry(
+        &self,
+        action: &str,
+        physical_index: Option<u32>,
+    ) -> Option<ScriptCallbackTarget> {
+        let spec = self.spec_for_entry(action, physical_index)?;
+        match self.callback_links_for_entry(action, physical_index) {
+            Some(links) => links.start.target(spec.start_call.as_deref()),
+            None => spec
+                .start_call
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .map(ScriptCallbackTarget::unlinked),
+        }
+    }
+
+    pub(crate) fn end_callback_for_entry(
+        &self,
+        action: &str,
+        physical_index: Option<u32>,
+    ) -> Option<ScriptCallbackTarget> {
+        let spec = self.spec_for_entry(action, physical_index)?;
+        match self.callback_links_for_entry(action, physical_index) {
+            Some(links) => links.end.target(spec.end_call.as_deref()),
+            None => spec
+                .end_call
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .map(ScriptCallbackTarget::unlinked),
+        }
+    }
+
+    pub(crate) fn phase_callback_for_entry(
+        &self,
+        action: &str,
+        physical_index: Option<u32>,
+    ) -> Option<ScriptCallbackTarget> {
+        let spec = self.spec_for_entry(action, physical_index)?;
+        match self.callback_links_for_entry(action, physical_index) {
+            Some(links) => links.phase.target(spec.phase_call.as_deref()),
+            None => spec
+                .phase_call
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .map(ScriptCallbackTarget::unlinked),
+        }
+    }
+
+    pub(crate) fn abort_callback_for_entry(
+        &self,
+        action: &str,
+        physical_index: Option<u32>,
+    ) -> Option<ScriptCallbackTarget> {
+        let spec = self.spec_for_entry(action, physical_index)?;
+        match self.callback_links_for_entry(action, physical_index) {
+            Some(links) => links.abort.target(spec.abort_call.as_deref()),
+            None => spec
+                .abort_call
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .map(ScriptCallbackTarget::unlinked),
+        }
+    }
+
+    fn callback_links_for_entry(
+        &self,
+        action: &str,
+        physical_index: Option<u32>,
+    ) -> Option<&ActionCallbackLinks> {
+        if let Some(index) = physical_index {
+            if self
+                .physical
+                .get(index as usize)
+                .is_some_and(|(name, _)| name == action)
+            {
+                return self.callback_cache.physical.get(index as usize);
+            }
+        }
+        if !self.physical.is_empty() {
+            return self
+                .first_physical_index(action)
+                .and_then(|index| self.callback_cache.physical.get(index as usize));
+        }
+        self.callback_cache.named.get(action)
+    }
+
+    /// Cache callbacks once for the current link. Physical resource slots
+    /// retain native order and duplicate identity; synthetic maps use a
+    /// deterministic declared-name order.
+    pub(crate) fn link_callbacks(
+        &mut self,
+        mut resolve: impl FnMut(
+            &str,
+            &'static str,
+            &str,
+        ) -> Option<ScriptCallbackTarget>,
+    ) {
+        fn link_spec(
+            action: &str,
+            spec: &ActionSpec,
+            resolve: &mut impl FnMut(
+                &str,
+                &'static str,
+                &str,
+            ) -> Option<ScriptCallbackTarget>,
+        ) -> ActionCallbackLinks {
+            let mut links = ActionCallbackLinks::default();
+            links.start.set_linked(
+                spec.start_call
+                    .as_deref()
+                    .and_then(|name| resolve(action, "StartCall", name)),
+            );
+            links.phase.set_linked(
+                spec.phase_call
+                    .as_deref()
+                    .and_then(|name| resolve(action, "PhaseCall", name)),
+            );
+            links.end.set_linked(
+                spec.end_call
+                    .as_deref()
+                    .and_then(|name| resolve(action, "EndCall", name)),
+            );
+            links.abort.set_linked(
+                spec.abort_call
+                    .as_deref()
+                    .and_then(|name| resolve(action, "AbortCall", name)),
+            );
+            links
+        }
+
+        let mut callback_cache = ActionCallbackCache::default();
+        if self.physical.is_empty() {
+            let mut actions = self.declared.iter().cloned().collect::<Vec<_>>();
+            actions.sort();
+            for action in actions {
+                if let Some(spec) = self.specs.get(&action) {
+                    callback_cache
+                        .named
+                        .insert(action.clone(), link_spec(&action, spec, &mut resolve));
+                }
+            }
+            self.callback_cache = callback_cache;
+            return;
+        }
+
+        for (action, spec) in &self.physical {
+            callback_cache
+                .physical
+                .push(link_spec(action, spec, &mut resolve));
+        }
+        // Name-based helpers retain the first physical entry. Mirror the
+        // exact retained function instead of resolving (or warning) twice.
+        let first_links = self
+            .first_physical
+            .iter()
+            .filter_map(|(name, index)| {
+                callback_cache
+                    .physical
+                    .get(*index as usize)
+                    .map(|links| (name.clone(), links.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (action, linked) in first_links {
+            callback_cache.named.insert(action, linked);
+        }
+        self.callback_cache = callback_cache;
+    }
+
+    pub(crate) fn reset_callback_links(&mut self) {
+        self.callback_cache = ActionCallbackCache::default();
+    }
+
     pub fn advance_state(&self, state: &mut ActionState) -> ActionAdvanceOutcome {
         self.advance_state_by(state, 1)
     }
@@ -758,7 +1043,7 @@ impl ActionLibrary {
             return ActionAdvanceOutcome::default();
         }
         if let Some(spec) = self.spec_for_entry(source_action, source_index) {
-            Self::advance_with_spec(
+            self.advance_with_spec(
                 state,
                 source_action,
                 source_index,
@@ -961,6 +1246,7 @@ impl ActionLibrary {
     }
 
     fn advance_with_spec(
+        &self,
         state: &mut ActionState,
         source_action: &str,
         source_index: Option<u32>,
@@ -1002,7 +1288,10 @@ impl ActionLibrary {
         // Phase += Step, then the PhaseCall, then the length check
         // (C4Object.cpp:5448-5464).
         state.phase = state.phase.wrapping_add(step);
-        if spec.phase_call.is_some() {
+        if self
+            .phase_callback_for_entry(source_action, source_index)
+            .is_some()
+        {
             outcome.phase_event = Some(ActionPhaseEvent {
                 action: source_action.to_string(),
                 act_map_index: source_index,

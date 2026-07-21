@@ -3,7 +3,7 @@ use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::rc::Rc;
 
-use crate::action::SharedActionLibrary;
+use crate::action::{ScriptCallbackTarget, SharedActionLibrary};
 use crate::command::{
     CallResultAction, CommandData, CommandDefinitionSnapshot, CommandEvent, CommandFailureFeedback,
     CommandFailureReason, CommandId, CommandMode, CommandObjectSnapshot, CommandOperation,
@@ -26082,8 +26082,8 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let mut sync_callbacks: Option<(
         ObjectId,
-        Option<String>,
-        Option<String>,
+        Option<ScriptCallbackTarget>,
+        Option<ScriptCallbackTarget>,
         i32,
         Option<String>,
     )> = None;
@@ -26215,17 +26215,13 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
                 .then(|| {
                     object
                         .action_library
-                        .spec_for_entry(actual_name, actual_index)
-                        .and_then(|spec| spec.start_call.as_deref())
+                        .start_callback_for_entry(actual_name, actual_index)
                 })
-                .flatten()
-                .map(str::to_string),
+                .flatten(),
             object
                 .action_library
-                .spec_for_entry(&current_action, current_index)
-                .and_then(|spec| spec.abort_call.as_deref())
-                .filter(|_| !force)
-                .map(str::to_string),
+                .abort_callback_for_entry(&current_action, current_index)
+                .filter(|_| !force),
             current_phase,
             callback_definition,
         ));
@@ -26271,10 +26267,10 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             abort_call.map(|callback| (callback, vec![Value::Int(previous_phase)])),
         ];
         for (callback, args) in callbacks.into_iter().flatten() {
-            if let Some(Err(error)) = call_world_object_own_function(id, &callback, &args) {
+            if let Some(Err(error)) = call_world_object_script_callback(id, &callback, &args) {
                 tracing::warn!(
                     %error,
-                    callback,
+                    callback = callback.function_name(),
                     "SetAction callback error; continuing like the C++ fail-safe exec"
                 );
             }
@@ -29601,16 +29597,12 @@ fn native_set_action_by_name_with_target(
                 .then(|| {
                     object
                         .action_library
-                        .spec_for_entry(actual_name, actual_index)
-                        .and_then(|spec| spec.start_call.as_deref())
+                        .start_callback_for_entry(actual_name, actual_index)
                 })
-                .flatten()
-                .map(str::to_string),
+                .flatten(),
             object
                 .action_library
-                .spec_for_entry(&current, current_index)
-                .and_then(|spec| spec.abort_call.as_deref())
-                .map(str::to_string),
+                .abort_callback_for_entry(&current, current_index),
             previous_phase,
             definition,
         );
@@ -29621,10 +29613,10 @@ fn native_set_action_by_name_with_target(
         return Ok(false);
     };
     if let Some(callback) = start_call {
-        if let Some(Err(error)) = call_world_object_own_function(target, &callback, &[]) {
+        if let Some(Err(error)) = call_world_object_script_callback(target, &callback, &[]) {
             tracing::warn!(
                 %error,
-                callback,
+                callback = callback.function_name(),
                 "native SetAction callback error; continuing like the C++ fail-safe exec"
             );
         }
@@ -29646,12 +29638,15 @@ fn native_set_action_by_name_with_target(
     });
     if callbacks_continue {
         if let Some(callback) = abort_call {
-            if let Some(Err(error)) =
-                call_world_object_own_function(target, &callback, &[Value::Int(previous_phase)])
+            if let Some(Err(error)) = call_world_object_script_callback(
+                target,
+                &callback,
+                &[Value::Int(previous_phase)],
+            )
             {
                 tracing::warn!(
                     %error,
-                    callback,
+                    callback = callback.function_name(),
                     "native SetAction callback error; continuing like the C++ fail-safe exec"
                 );
             }
@@ -44598,6 +44593,7 @@ fn call_world_object_reference_with(
                 include_globals,
                 script_override,
                 false,
+                false,
             )
         })
     })?;
@@ -44704,6 +44700,29 @@ pub(crate) fn call_world_object_own_function(
     call_world_object_function_with(target, function, args, false, false, None, false)
 }
 
+/// ActMap callbacks carry the exact function retained during definition
+/// linking. Unlinked synthetic fixtures preserve their name-based fallback.
+fn call_world_object_script_callback(
+    target: ObjectId,
+    callback: &ScriptCallbackTarget,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    match callback.resolution() {
+        Some(resolution) => call_world_object_function_with_options(
+            target,
+            callback.function_name(),
+            args,
+            false,
+            false,
+            None,
+            false,
+            false,
+            Some(resolution.clone()),
+        ),
+        None => call_world_object_own_function(target, callback.function_name(), args),
+    }
+}
+
 /// C4Object::Call for a scope that may still be in pre-insertion
 /// Construction/Initialize. Kept private to callbacks that C++ must run
 /// synchronously from that state; ordinary nested calls still require a
@@ -44798,6 +44817,7 @@ fn call_world_object_function_with_options(
                 include_globals,
                 script_override,
                 allow_scope_without_world_object,
+                pinned_resolution.is_some(),
             )
         })
     })?;
@@ -47274,6 +47294,7 @@ impl EffectHostContext {
         include_globals: bool,
         script_override: Option<Arc<ScriptEngine>>,
         allow_scope_without_world_object: bool,
+        function_is_pinned: bool,
     ) -> Option<NestedCallPrep> {
         let world_object = self.get_world_object(target);
         if world_object.is_none()
@@ -47295,11 +47316,12 @@ impl EffectHostContext {
         // C4Object::Call/GetSFunc requires an ordinary function owned by
         // the exact object script. A `global func` leaves only an unnamed
         // link in that host and is not an owner-local candidate.
-        let resolvable = (if include_globals {
-            script.has_function_or_global(function)
-        } else {
-            script.has_local_function(function)
-        })
+        let resolvable = function_is_pinned
+            || (if include_globals {
+                script.has_function_or_global(function)
+            } else {
+                script.has_local_function(function)
+            })
             || (host_fallback && script.has_host_function(function));
         if !resolvable {
             return None;
