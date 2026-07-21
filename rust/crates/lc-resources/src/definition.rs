@@ -872,7 +872,7 @@ pub struct DefCore {
     /// `NoFight` (C4Def.cpp:413): suppresses OCF_FightReady (SetOCF,
     /// C4Object.cpp:606-610).
     pub no_fight: bool,
-    /// `CanBeBase` (C4Def.cpp DefCore): marks structures usable as the
+    /// DefCore `Base` (`C4Def::CanBeBase`): marks structures usable as the
     /// FirstBase in PlaceReadyBase (C4Player.cpp:596-599).
     pub can_be_base: bool,
     /// Signed compiler values that the gameplay projection intentionally
@@ -1369,7 +1369,6 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut allow_picture_stack: i32 = 0;
     let mut graphics_scale: u32 = 100;
     let mut blit_mode: u32 = 0;
-    let mut shape: Option<PictureRect> = None;
     let mut shape_width: Option<i32> = None;
     let mut shape_height: Option<i32> = None;
     let mut shape_offset: Option<(i32, i32)> = None;
@@ -1533,9 +1532,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "NoStandardCrew" => {
                 no_standard_crew = parse_i32(value).unwrap_or(0);
             }
-            // C4DefCore::CompileFunc names CanBeBase as "Base"
-            // (C4Def.cpp:317). Keep the descriptive alias for fixtures.
-            "Base" | "CanBeBase" => {
+            "Base" => {
                 can_be_base = reflected_int!("Base", parse_reflected_int(value)) != 0;
             }
             "Picture" => {
@@ -1571,12 +1568,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "BlitMode" => {
                 blit_mode = parse_i32(value).unwrap_or(0) as u32;
             }
-            "Shape" => {
-                shape = parse_rect(value);
-            }
             // C4Def::CompileFunc maps Width/Height/Offset straight into
-            // Shape.Wdt/Hgt/x/y (C4Def.cpp) — CR DefCores never carry a
-            // combined Shape= key.
+            // Shape.Wdt/Hgt/x/y (C4Def.cpp).
             "Width" => {
                 shape_width = parse_i32(value);
             }
@@ -1694,7 +1687,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 no_burn_damage =
                     reflected_int!("NoBurnDamage", parse_reflected_int(value)) != 0;
             }
-            "BurnTo" | "BurnTurnTo" => {
+            "BurnTo" => {
                 burn_turn_to = parse_optional_c4_id_adapt(raw_value);
             }
             "ConstructTo" => {
@@ -1876,19 +1869,17 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         allow_picture_stack,
         graphics_scale,
         blit_mode,
-        shape: shape.or_else(|| {
-            (shape_width.is_some() || shape_height.is_some() || shape_offset.is_some()).then(
-                || {
-                    let (x, y) = shape_offset.unwrap_or((0, 0));
-                    PictureRect {
-                        x,
-                        y,
-                        width: shape_width.unwrap_or(0),
-                        height: shape_height.unwrap_or(0),
-                    }
-                },
-            )
-        }),
+        shape: (shape_width.is_some() || shape_height.is_some() || shape_offset.is_some()).then(
+            || {
+                let (x, y) = shape_offset.unwrap_or((0, 0));
+                PictureRect {
+                    x,
+                    y,
+                    width: shape_width.unwrap_or(0),
+                    height: shape_height.unwrap_or(0),
+                }
+            },
+        ),
         fire_top,
         lift_top,
         solid_mask,
@@ -5018,6 +5009,35 @@ Entrance=1,2,,4
     }
 
     #[test]
+    fn def_core_ignores_non_oracle_alias_keys() {
+        let aliases = parse_def_core(
+            b"[DefCore]\nid=ALIA\nCanBeBase=1\nShape=-8,-16,16,32\nBurnTurnTo=FIRE\n",
+        )
+        .expect("unknown DefCore aliases are ignored");
+        assert!(!aliases.can_be_base);
+        assert_eq!(aliases.shape, None);
+        assert_eq!(aliases.burn_turn_to, None);
+        assert!(!aliases.reflected_ints.contains_key("Base"));
+
+        let native = parse_def_core(
+            b"[DefCore]\nid=NATV\nBase=-2\nWidth=16\nHeight=32\nOffset=-8,-16\nBurnTo=FIREtail\n",
+        )
+        .expect("native DefCore keys parse");
+        assert!(native.can_be_base);
+        assert_eq!(native.reflected_ints.get("Base"), Some(&-2));
+        assert_eq!(
+            native.shape,
+            Some(PictureRect {
+                x: -8,
+                y: -16,
+                width: 16,
+                height: 32,
+            })
+        );
+        assert_eq!(native.burn_turn_to.as_deref(), Some("FIRE"));
+    }
+
+    #[test]
     fn parse_def_core_rct_all_skips_leading_and_preserves_trailing_whitespace() {
         let parsed = parse_def_core(
             b"[DefCore]\nid=RCTA\nName= \tBar \t\nTimerCall= \tFoo \t\n\
@@ -6669,7 +6689,9 @@ Default=Ghost
         let data = br#"
             [DefCore]
             id=PACK
-            Shape=-10,-20,20,40
+            Width=20
+            Height=40
+            Offset=-10,-20
             Collection=-5,-10,10,20
             CollectionLimit=3
             Collectible=1
@@ -6790,7 +6812,9 @@ Default=Ghost
         let data = br#"
             [DefCore]
             id=BASE
-            Shape=-4,-6,12,18
+            Width=12
+            Height=18
+            Offset=-4,-6
             SolidMask=2,3,8,9,-1,4
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
@@ -6983,12 +7007,6 @@ Default=Ghost
             assert_eq!(construct_raw, expected_raw, "ConstructTo={input}");
         }
 
-        // L166 owns removal of this non-oracle alias. Until then, its value
-        // must pass through the same adapter instead of retaining a long ID.
-        let alias = parse_def_core(b"[DefCore]\nid=TEST\nBurnTurnTo=FIREtail\n")
-            .expect("temporary BurnTurnTo alias parses");
-        assert_eq!(alias.burn_turn_to.as_deref(), Some("FIRE"));
-
         let high_byte_after_four =
             parse_def_core(b"[DefCore]\nid=TEST\nBurnTo=FIRE\x80tail\n")
                 .expect("a suffix after the fixed buffer is ignored");
@@ -7025,7 +7043,9 @@ Default=Ghost
         let data = br#"
             [DefCore]
             id=CLNK
-            Shape=-8,-16,16,32
+            Width=16
+            Height=32
+            Offset=-8,-16
             Vertices=3
             VertexX=0,-4,4
             VertexY=9,3,3

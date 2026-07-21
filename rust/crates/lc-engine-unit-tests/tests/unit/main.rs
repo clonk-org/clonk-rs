@@ -60783,7 +60783,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         std::fs::create_dir(&def_dir).expect("create definition directory");
         std::fs::write(
             def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=BLCK\nName=Blocker\nCategory=C4D_Object\nShape=0,0,2,1\nSolidMask=0,0,2,1,0,0\n",
+            b"[DefCore]\nid=BLCK\nName=Blocker\nCategory=C4D_Object\nWidth=2\nHeight=1\nOffset=0,0\nSolidMask=0,0,2,1,0,0\n",
         )
         .expect("write defcore");
         let mut image = image::RgbaImage::new(2, 1);
@@ -60854,7 +60854,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         std::fs::create_dir(&def_dir).expect("create definition directory");
         std::fs::write(
             def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=POST\nName=Post\nCategory=C4D_Object\nShape=0,0,3,1\nSolidMask=0,0,3,1,0,0\n",
+            b"[DefCore]\nid=POST\nName=Post\nCategory=C4D_Object\nWidth=3\nHeight=1\nOffset=0,0\nSolidMask=0,0,3,1,0,0\n",
         )
         .expect("write defcore");
         let mut image = image::RgbaImage::new(3, 1);
@@ -60993,7 +60993,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         std::fs::create_dir(&def_dir).expect("create definition directory");
         std::fs::write(
             def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=ELEV\nName=Elevator\nCategory=C4D_Object\nShape=0,0,4,4\nSolidMask=0,0,4,4,0,0\nRotatedSolidmasks=1\n",
+            b"[DefCore]\nid=ELEV\nName=Elevator\nCategory=C4D_Object\nWidth=4\nHeight=4\nOffset=0,0\nSolidMask=0,0,4,4,0,0\nRotatedSolidmasks=1\n",
         )
         .expect("write defcore");
         let group = lc_resources::Group::open(&def_dir).expect("open definition group");
@@ -61169,7 +61169,7 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
         std::fs::write(
             def_dir.join("DefCore.txt"),
             b"[DefCore]\nid=SIGN\nName=Signed\nCategory=C4D_Object\n\
-Shape=-1,-1,2,2\nCollection=-1,-1,2,2\nConstruction=1\n\
+Width=2\nHeight=2\nOffset=-1,-1\nCollection=-1,-1,2,2\nConstruction=1\n\
 Value=-11\nMass=-99\nCollectionLimit=-12\nContactIncinerate=-13\n\
 Grab=-14\nRotate=-15\nBorderBound=-1\nUprightAttach=-255\n\
 Basement=-18\nConSizeOff=-20\n",
@@ -62674,7 +62674,7 @@ func ProbeGraphicsBounds() {
         std::fs::create_dir(&def_dir).expect("create definition directory");
         std::fs::write(
             def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=BADS\nName=Invalid graphics bounds\nCategory=C4D_Object\nShape=0,0,64,64\nScale=200\nSolidMask=0,0,9999,9999,9,10\nTopFace=31,0,2,1,7,8\n",
+            b"[DefCore]\nid=BADS\nName=Invalid graphics bounds\nCategory=C4D_Object\nWidth=64\nHeight=64\nOffset=0,0\nScale=200\nSolidMask=0,0,9999,9999,9,10\nTopFace=31,0,2,1,7,8\n",
         )
         .expect("write DefCore");
         std::fs::write(
@@ -62721,7 +62721,7 @@ func ProbeGraphicsBounds() {
         std::fs::create_dir(&def_dir).expect("create definition directory");
         std::fs::write(
             def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=EDGE\nName=Exact graphics edges\nCategory=C4D_Object\nShape=0,0,64,64\nScale=200\nSolidMask=0,0,64,64,9,10\nTopFace=0,0,32,32,7,8\n",
+            b"[DefCore]\nid=EDGE\nName=Exact graphics edges\nCategory=C4D_Object\nWidth=64\nHeight=64\nOffset=0,0\nScale=200\nSolidMask=0,0,64,64,9,10\nTopFace=0,0,32,32,7,8\n",
         )
         .expect("write DefCore");
         std::fs::write(
@@ -63095,7 +63095,7 @@ func ProbeGraphicsBounds() {
         // (src/C4SolidMask.cpp:108-174), gated by Def->RotatedSolidmasks
         // (src/C4Object.cpp:5655).
         //
-        // Hand-derived golden: 3x1 bar mask (Shape=-1,0,3,1;
+        // Hand-derived golden: 3x1 bar mask (shape rect -1,0,3,1;
         // SolidMask=0,0,3,1,0,0), object center (10,10), r=90.
         // MatBuffPitch = int(sqrt(9+1))+1 = 4 (ctor, src/C4SolidMask.cpp:415).
         // Sin(-90) = -1, Cos(-90) = 0 (SineTable exact at multiples of 90),
@@ -63187,7 +63187,7 @@ func ProbeGraphicsBounds() {
     fn rotated_solid_mask_at_45_degrees_bakes_diamond_superset_like_cpp() {
         // Mirrors src/C4SolidMask.cpp:130-173 at a non-cardinal angle.
         //
-        // Hand-derived golden: 3x3 mask (Shape=-1,-1,3,3;
+        // Hand-derived golden: 3x3 mask (shape rect -1,-1,3,3;
         // SolidMask=0,0,3,3,0,0), object center (10,10), r=45.
         // MatBuffPitch = int(sqrt(18))+1 = 5; SineTable[4500] = 46340, so
         // Ma1=Ma2=Mb2=46340, Mb1=-46340; centerx=centery=0 =>
@@ -66258,7 +66258,7 @@ protected func Initialize() {
         std::fs::create_dir(&def_dir).expect("create definition directory");
         std::fs::write(
             def_dir.join("DefCore.txt"),
-            b"[DefCore]\nid=STRG\nName=Stretch\nCategory=C4D_Object\nShape=2,0,6,4\nVertices=1\nVertexX=8\nVertexY=4\nVertexCNAT=8\nStretchGrowth=1\n",
+            b"[DefCore]\nid=STRG\nName=Stretch\nCategory=C4D_Object\nWidth=6\nHeight=4\nOffset=2,0\nVertices=1\nVertexX=8\nVertexY=4\nVertexCNAT=8\nStretchGrowth=1\n",
         )
         .expect("write defcore");
 
