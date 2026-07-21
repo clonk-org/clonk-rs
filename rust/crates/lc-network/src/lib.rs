@@ -151,16 +151,16 @@ pub use league::{
     LeagueUpdateResponse, PlayerInfoListIniError, LEAGUE_HTTP_TIMEOUT, LEAGUE_HTTP_USER_AGENT,
     LEAGUE_MIN_UPDATE_INTERVAL_SECONDS, MAX_LEAGUES,
 };
-pub use league_stream::{
-    LeagueRecordStream, LeagueRecordStreamError, LeagueRecordUpload,
-    LEAGUE_STREAM_FILE_CHUNK_TYPE, LEAGUE_STREAM_INTERVAL_SECONDS,
-    LEAGUE_STREAM_MAX_BLOCK_SIZE, LEAGUE_STREAM_MIN_BLOCK_SIZE,
-    encode_league_stream_file_chunk,
-};
 pub use league_round_results_packet::{
     decode_league_round_results_payload, encode_league_round_results_payload,
     LeagueRoundPlayerStatus, LeagueRoundResultsDecodeError, LeagueRoundResultsEncodeError,
     LeagueRoundResultsPacket, LeagueRoundResultsPlayer, PID_LEAGUE_ROUND_RESULTS,
+};
+pub use league_stream::{
+    decode_classic_record_stream, encode_league_stream_file_chunk, ClassicRecordStream,
+    ClassicRecordStreamDecodeError, ClassicRecordStreamFile, LeagueRecordStream,
+    LeagueRecordStreamError, LeagueRecordUpload, LEAGUE_STREAM_FILE_CHUNK_TYPE,
+    LEAGUE_STREAM_INTERVAL_SECONDS, LEAGUE_STREAM_MAX_BLOCK_SIZE, LEAGUE_STREAM_MIN_BLOCK_SIZE,
 };
 pub use live_network_dynamic::{
     compose_live_network_dynamic, LiveNetworkDynamic, LiveNetworkDynamicComponent,

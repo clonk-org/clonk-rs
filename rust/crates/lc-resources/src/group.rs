@@ -398,7 +398,7 @@ impl Group {
     /// Opens bytes with the same envelope requirement as a physical,
     /// top-level C4Group file. This is used when a caller has extracted an
     /// ordinary entry before applying `C4Group_IsGroup` classification.
-    pub(crate) fn from_top_level_memory(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
+    pub fn from_top_level_memory(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
         if !data.starts_with(&C4GROUP_GZ_MAGIC) && !data.starts_with(&GZ_MAGIC) {
             return Err(GroupError::InvalidGroup(
                 "invalid compressed group magic".into(),

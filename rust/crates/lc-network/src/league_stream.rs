@@ -1,5 +1,11 @@
-use flate2::{Compress, Compression, FlushCompress, Status};
+use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
+use lc_engine::{LegacyCString, RCT_CTRL, RCT_CTRL_PKT, RCT_END, RCT_FRAME};
 use thiserror::Error;
+
+use crate::legacy::{
+    decode_control_entry_prefix, decode_control_list_prefix, encode_control_entry_payload,
+    encode_control_list_payload,
+};
 
 /// `C4NetStreamingMinBlockSize`: live record uploads wait for at least this
 /// much compressed data.
@@ -10,6 +16,217 @@ pub const LEAGUE_STREAM_MAX_BLOCK_SIZE: usize = 20 * 1024;
 pub const LEAGUE_STREAM_INTERVAL_SECONDS: i64 = 30;
 /// `C4Record::StreamFile`'s record-stream-only file chunk.
 pub const LEAGUE_STREAM_FILE_CHUNK_TYPE: u8 = 0x30;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassicRecordStreamFile {
+    pub filename: LegacyCString,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassicRecordStream {
+    pub initial_group: Vec<u8>,
+    pub files: Vec<ClassicRecordStreamFile>,
+    pub control_record: Vec<u8>,
+}
+
+#[derive(Debug, Error)]
+pub enum ClassicRecordStreamDecodeError {
+    #[error("classic record stream decompression failed: {0}")]
+    Decompression(#[from] flate2::DecompressError),
+    #[error("classic record stream decompression made no progress")]
+    DecompressionStalled,
+    #[error("classic record stream output cannot grow further")]
+    OutputTooLarge,
+    #[error("classic record stream does not begin with a complete file chunk")]
+    MissingInitialFile,
+}
+
+#[derive(Debug)]
+enum DecodedClassicRecordChunk {
+    File {
+        filename: LegacyCString,
+        data: Vec<u8>,
+    },
+    Retained {
+        frame: u32,
+        chunk_type: u8,
+        payload: Vec<u8>,
+    },
+}
+
+/// Inflate and decode a classic C++ league-record stream.
+///
+/// `C4Playback::ReadBinary` retains every complete chunk before a malformed
+/// or interrupted suffix, and `StreamToRecord` ignores its failure result.
+/// Preserve that recoverability here: only the zlib envelope and the leading
+/// complete `RCT_File` are mandatory. File chunks are removed, while retained
+/// chunks are canonically rewritten with their absolute frames intact.
+pub fn decode_classic_record_stream(
+    compressed: &[u8],
+) -> Result<ClassicRecordStream, ClassicRecordStreamDecodeError> {
+    let inflated = inflate_classic_record_stream(compressed)?;
+    let chunks = decode_classic_record_chunks(&inflated);
+    let initial_group = match chunks.first() {
+        Some(DecodedClassicRecordChunk::File { data, .. }) => data.clone(),
+        _ => return Err(ClassicRecordStreamDecodeError::MissingInitialFile),
+    };
+
+    let mut files = Vec::new();
+    let mut control_record = Vec::new();
+    let mut previous_retained_frame = 0_u32;
+    for chunk in chunks.into_iter().skip(1) {
+        match chunk {
+            DecodedClassicRecordChunk::File { filename, data, .. } => {
+                files.push(ClassicRecordStreamFile { filename, data });
+            }
+            DecodedClassicRecordChunk::Retained {
+                frame,
+                chunk_type,
+                payload,
+            } => {
+                control_record.push(frame.wrapping_sub(previous_retained_frame) as u8);
+                control_record.push(chunk_type);
+                control_record.extend_from_slice(&payload);
+                previous_retained_frame = frame;
+            }
+        }
+    }
+
+    Ok(ClassicRecordStream {
+        initial_group,
+        files,
+        control_record,
+    })
+}
+
+fn inflate_classic_record_stream(
+    compressed: &[u8],
+) -> Result<Vec<u8>, ClassicRecordStreamDecodeError> {
+    let initial_capacity = compressed.len().checked_mul(5).unwrap_or(usize::MAX);
+    let mut inflated = Vec::new();
+    inflated
+        .try_reserve(initial_capacity.max(1))
+        .map_err(|_| ClassicRecordStreamDecodeError::OutputTooLarge)?;
+    let mut decompressor = Decompress::new(true);
+
+    loop {
+        if inflated.len() == inflated.capacity() {
+            inflated
+                .try_reserve(compressed.len().max(1))
+                .map_err(|_| ClassicRecordStreamDecodeError::OutputTooLarge)?;
+        }
+        let before_in = decompressor.total_in();
+        let before_out = decompressor.total_out();
+        let input_offset = usize::try_from(before_in)
+            .map_err(|_| ClassicRecordStreamDecodeError::OutputTooLarge)?;
+        let status = decompressor.decompress_vec(
+            &compressed[input_offset.min(compressed.len())..],
+            &mut inflated,
+            FlushDecompress::Finish,
+        )?;
+        match status {
+            Status::StreamEnd => return Ok(inflated),
+            Status::BufError
+                if usize::try_from(decompressor.total_in()).ok() == Some(compressed.len()) =>
+            {
+                return Ok(inflated);
+            }
+            Status::Ok | Status::BufError => {}
+        }
+        if decompressor.total_in() == before_in && decompressor.total_out() == before_out {
+            return Err(ClassicRecordStreamDecodeError::DecompressionStalled);
+        }
+    }
+}
+
+fn decode_classic_record_chunks(bytes: &[u8]) -> Vec<DecodedClassicRecordChunk> {
+    let mut chunks = Vec::new();
+    let mut cursor = 0_usize;
+    let mut frame = 0_u32;
+    while bytes.len().saturating_sub(cursor) >= 2 {
+        let delta = bytes[cursor];
+        let chunk_type = bytes[cursor + 1];
+        let payload = &bytes[cursor + 2..];
+        let next_frame = frame.wrapping_add(u32::from(delta));
+
+        if chunk_type == LEAGUE_STREAM_FILE_CHUNK_TYPE {
+            let Some((filename, data, consumed)) = decode_classic_file_payload(payload) else {
+                break;
+            };
+            chunks.push(DecodedClassicRecordChunk::File { filename, data });
+            cursor += 2 + consumed;
+        } else {
+            let Some((canonical, consumed)) = decode_classic_retained_payload(chunk_type, payload)
+            else {
+                break;
+            };
+            chunks.push(DecodedClassicRecordChunk::Retained {
+                frame: next_frame,
+                chunk_type,
+                payload: canonical,
+            });
+            cursor += 2 + consumed;
+        }
+        frame = next_frame;
+        if chunk_type == RCT_END {
+            break;
+        }
+    }
+    chunks
+}
+
+fn decode_classic_file_payload(payload: &[u8]) -> Option<(LegacyCString, Vec<u8>, usize)> {
+    let name_end = payload.iter().position(|byte| *byte == 0)?;
+    let filename = LegacyCString::from_bytes(payload[..name_end].to_vec())?;
+    let length_offset = name_end.checked_add(1)?;
+    let (length, encoded_length) = decode_packed_u32(payload.get(length_offset..)?)?;
+    let data_offset = length_offset.checked_add(encoded_length)?;
+    let data_end = data_offset.checked_add(length as usize)?;
+    let data = payload.get(data_offset..data_end)?.to_vec();
+    Some((filename, data, data_end))
+}
+
+fn decode_classic_retained_payload(chunk_type: u8, payload: &[u8]) -> Option<(Vec<u8>, usize)> {
+    match chunk_type {
+        RCT_CTRL => {
+            let (controls, consumed) = decode_control_list_prefix(payload).ok()?;
+            let canonical = encode_control_list_payload(&controls).ok()?;
+            Some((canonical, consumed))
+        }
+        RCT_CTRL_PKT => {
+            let (control, consumed) = decode_control_entry_prefix(payload).ok()?;
+            let canonical = encode_control_entry_payload(&control).ok()?;
+            Some((canonical, consumed))
+        }
+        RCT_FRAME | RCT_END => Some((Vec::new(), 0)),
+        debug_type if debug_type >= 0x80 => {
+            let debug_packet_type = payload.get(..4)?;
+            let (length, encoded_length) = decode_packed_u32(payload.get(4..)?)?;
+            let data_offset = 4_usize.checked_add(encoded_length)?;
+            let data_end = data_offset.checked_add(length as usize)?;
+            let data = payload.get(data_offset..data_end)?;
+            let mut canonical = Vec::with_capacity(4 + 5 + data.len());
+            canonical.extend_from_slice(debug_packet_type);
+            encode_packed_u32(length, &mut canonical);
+            canonical.extend_from_slice(data);
+            Some((canonical, data_end))
+        }
+        _ => Some((Vec::new(), 0)),
+    }
+}
+
+fn decode_packed_u32(bytes: &[u8]) -> Option<(u32, usize)> {
+    let mut value = 0_u32;
+    for (index, byte) in bytes.iter().copied().take(5).enumerate() {
+        let chunk = u32::from(byte & 0x7f);
+        value |= chunk << (index * 7);
+        if byte & 0x80 == 0 {
+            return Some((value, index + 1));
+        }
+    }
+    None
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeagueRecordUpload {
@@ -295,9 +512,10 @@ impl LeagueRecordStream {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
+    use std::io::{Read, Write};
 
     use flate2::read::ZlibDecoder;
+    use flate2::write::ZlibEncoder;
 
     use super::*;
 
@@ -319,6 +537,90 @@ mod tests {
             .read_to_end(&mut decoded)
             .expect("decode streamed zlib bytes");
         decoded
+    }
+
+    fn encode_zlib(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(bytes).expect("encode zlib fixture");
+        encoder.finish().expect("finish zlib fixture")
+    }
+
+    #[test]
+    fn classic_stream_decoder_extracts_files_and_retimes_retained_chunks() {
+        let initial_name = LegacyCString::from_bytes(b"ignored-name.tmp".to_vec()).unwrap();
+        let later_name = LegacyCString::from_bytes(b"Later.dat".to_vec()).unwrap();
+        let mut raw = encode_league_stream_file_chunk(&initial_name, b"initial group").unwrap();
+        raw.extend_from_slice(&[3, RCT_FRAME]);
+        let mut later = encode_league_stream_file_chunk(&later_name, b"later payload").unwrap();
+        later[0] = 4;
+        raw.extend_from_slice(&later);
+        raw.extend_from_slice(&[5, RCT_FRAME]);
+        raw.extend_from_slice(&[1, 0x80]);
+        raw.extend_from_slice(&0x1234_i32.to_le_bytes());
+        raw.extend_from_slice(&[3, 0xaa, 0xbb, 0xcc]);
+        raw.extend_from_slice(&[2, RCT_END]);
+        raw.extend_from_slice(b"ignored after end");
+
+        let decoded = decode_classic_record_stream(&encode_zlib(&raw)).unwrap();
+
+        assert_eq!(decoded.initial_group, b"initial group");
+        assert_eq!(
+            decoded.files,
+            [ClassicRecordStreamFile {
+                filename: later_name,
+                data: b"later payload".to_vec(),
+            }]
+        );
+        assert_eq!(
+            decoded.control_record,
+            [
+                3, RCT_FRAME, 9, RCT_FRAME, 1, 0x80, 0x34, 0x12, 0, 0, 3, 0xaa, 0xbb, 0xcc, 2,
+                RCT_END,
+            ],
+            "the removed file's frame delta is folded into the next retained chunk"
+        );
+    }
+
+    #[test]
+    fn classic_stream_decoder_keeps_complete_prefix_without_an_end_chunk() {
+        let initial_name = LegacyCString::from_bytes(b"first.c4s".to_vec()).unwrap();
+        let mut raw = encode_league_stream_file_chunk(&initial_name, b"initial").unwrap();
+        raw.extend_from_slice(&[7, RCT_FRAME]);
+        raw.extend_from_slice(&[2, LEAGUE_STREAM_FILE_CHUNK_TYPE, b'i']);
+
+        let mut compressed = encode_zlib(&raw);
+        compressed.truncate(compressed.len() - 4);
+        let decoded = decode_classic_record_stream(&compressed).unwrap();
+
+        assert_eq!(decoded.initial_group, b"initial");
+        assert!(decoded.files.is_empty());
+        assert_eq!(decoded.control_record, [7, RCT_FRAME]);
+    }
+
+    #[test]
+    fn classic_stream_decoder_requires_a_complete_leading_file() {
+        let compressed = encode_zlib(&[0, RCT_FRAME]);
+        assert!(matches!(
+            decode_classic_record_stream(&compressed),
+            Err(ClassicRecordStreamDecodeError::MissingInitialFile)
+        ));
+
+        let mut noncanonical = vec![
+            0,
+            LEAGUE_STREAM_FILE_CHUNK_TYPE,
+            b'x',
+            0,
+            0x81,
+            0x80,
+            0x80,
+            0x80,
+            0x10,
+            b'z',
+        ];
+        noncanonical.extend_from_slice(&[1, RCT_FRAME]);
+        let decoded = decode_classic_record_stream(&encode_zlib(&noncanonical)).unwrap();
+        assert_eq!(decoded.initial_group, b"z");
+        assert_eq!(decoded.control_record, [1, RCT_FRAME]);
     }
 
     #[test]

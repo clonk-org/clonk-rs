@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use thiserror::Error;
 
-use crate::group_writer::c4group_entry_crc;
+use crate::group_writer::{c4group_entry_crc, compress_c4group_image};
 use crate::{Group, GroupEntry, GroupError, MutableGroup, MutableGroupError};
 
 const MATERIAL_GROUP: &[u8] = b"Material.c4g";
@@ -75,6 +75,22 @@ pub fn combine_network_scenario(
     combined.pack().map_err(Into::into)
 }
 
+/// Overlay every top-level source entry as if a packed group had first been
+/// extracted and then passed to `C4Group::Merge`.
+///
+/// In particular, an ordinary entry whose bytes form a standalone C4Group is
+/// promoted to a child group during the destination rewrite. Matching names
+/// replace earlier entries in source order.
+pub fn merge_extracted_group_entries(
+    target: &mut MutableGroup,
+    source: &Group,
+) -> Result<(), NetworkScenarioError> {
+    for entry in source.entries()? {
+        copy_entry(target, source, &entry)?;
+    }
+    Ok(())
+}
+
 fn copy_entry(
     target: &mut MutableGroup,
     source: &Group,
@@ -113,15 +129,28 @@ fn copy_entry(
 
     let data = source.read_entry_bytes_exact(entry)?;
     if entry.is_directory {
-        let child = Group::from_raw_memory(entry.relative_path.clone(), data.clone())?;
-        let contents_crc = child.contents_crc()?;
-        target.add_packed_child_bytes_with_metadata(
-            entry.name_bytes.clone(),
-            data,
-            contents_crc,
-            entry.time,
-            false,
-        )?;
+        if let Ok(child) = Group::from_raw_memory(entry.relative_path.clone(), data.clone()) {
+            target.add_packed_child_bytes_with_metadata(
+                entry.name_bytes.clone(),
+                data,
+                child.contents_crc_or_zero(),
+                entry.time,
+                cfg!(target_os = "linux") && entry.executable,
+            )?;
+        } else {
+            // UnpackDirectory still writes a child-marked payload to a
+            // standalone gzip file. Merge then runs C4Group_IsGroup on that
+            // file and demotes an invalid image to an ordinary entry.
+            let data = compress_c4group_image(&data)?;
+            let contents_crc = c4group_entry_crc(&data, &entry.name_bytes);
+            target.add_existing_file_bytes_with_metadata(
+                entry.name_bytes.clone(),
+                data,
+                contents_crc,
+                entry.time,
+                cfg!(target_os = "linux") && entry.executable,
+            )?;
+        }
     } else if let Ok(child) =
         Group::from_top_level_memory(entry.relative_path.clone(), data.clone())
     {
@@ -129,7 +158,7 @@ fn copy_entry(
         // final folder pack C4Group_IsGroup promotes any valid standalone
         // group file and stores its uncompressed image as an opaque child.
         let data = child.raw_image()?;
-        let contents_crc = child.contents_crc()?;
+        let contents_crc = child.contents_crc_or_zero();
         target.add_packed_child_bytes_with_metadata(
             entry.name_bytes.clone(),
             data,
@@ -196,4 +225,45 @@ fn case_fold(name: &[u8]) -> Vec<u8> {
     let mut folded = name.to_vec();
     folded.make_ascii_lowercase();
     folded
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::MutableGroupEntryKind;
+
+    use super::*;
+
+    #[test]
+    fn classic_record_merge_demotes_an_invalid_child_image_after_extraction() {
+        let mut initial = MutableGroup::new("Initial.c4s");
+        initial
+            .add_imported_packed_child_core_bytes_with_metadata(
+                b"Broken.c4g".to_vec(),
+                b"not a raw group image".to_vec(),
+                0,
+                0,
+                None,
+                123,
+                false,
+            )
+            .unwrap();
+        let initial =
+            Group::from_top_level_memory(PathBuf::from("Initial.c4s"), initial.pack().unwrap())
+                .unwrap();
+        let mut record = MutableGroup::new("Record.c4s");
+
+        merge_extracted_group_entries(&mut record, &initial).unwrap();
+
+        assert_eq!(
+            record.entry_kind("Broken.c4g"),
+            Some(MutableGroupEntryKind::File)
+        );
+        let record =
+            Group::from_top_level_memory(PathBuf::from("Record.c4s"), record.pack().unwrap())
+                .unwrap();
+        let extracted = record.read_file("Broken.c4g").unwrap();
+        assert!(Group::from_top_level_memory(PathBuf::from("Broken.c4g"), extracted).is_err());
+    }
 }

@@ -32,7 +32,9 @@ pub use group_writer::{
 };
 pub use language::{ComponentGroups, LanguageInfo, LanguagePacks, LoadedComponent};
 pub use material::{MaterialDefinition, MaterialError, MaterialLibrary};
-pub use network_scenario::{combine_network_scenario, NetworkScenarioError};
+pub use network_scenario::{
+    combine_network_scenario, merge_extracted_group_entries, NetworkScenarioError,
+};
 pub use particle::{
     ParticleDefinition, ParticleDefinitionCore, ParticleDefinitionError, ParticleFacet,
 };

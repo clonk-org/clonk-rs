@@ -416,6 +416,17 @@ impl MutableGroup {
         )
     }
 
+    /// Imports a freshly moved standalone group using the timestamp and
+    /// executable defaults of `C4Group::AddEntryOnDisk`.
+    pub fn add_packed_child_bytes(
+        &mut self,
+        name: impl Into<Vec<u8>>,
+        data: Vec<u8>,
+        contents_crc: u32,
+    ) -> Result<(), MutableGroupError> {
+        self.add_packed_child_bytes_with_metadata(name, data, contents_crc, unix_time_now(), false)
+    }
+
     pub fn add_packed_child_bytes_with_metadata(
         &mut self,
         name: impl Into<Vec<u8>>,
@@ -721,6 +732,28 @@ impl MutableGroup {
             })
         });
         true
+    }
+
+    /// Retargets a standalone group and applies the stock sort list selected
+    /// by its destination filename. The return value reports whether native
+    /// `C4Group::Sort` would mark the group modified and rewrite its header.
+    pub fn resort_for_filename_bytes(&mut self, filename: impl Into<Vec<u8>>) -> bool {
+        self.filename = filename.into();
+        let Some(sort_list) = standard_sort_list_for_filename(&self.filename) else {
+            return false;
+        };
+        let patterns = sort_list.split('|').collect::<Vec<_>>();
+        let before = self
+            .entries
+            .iter()
+            .map(|entry| entry.name_bytes.clone())
+            .collect::<Vec<_>>();
+        self.entries
+            .sort_by(|left, right| entry_sort_order(left, right, &patterns));
+        self.entries
+            .iter()
+            .map(|entry| &entry.name_bytes)
+            .ne(before.iter())
     }
 
     fn add_entry(

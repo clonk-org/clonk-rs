@@ -9,6 +9,7 @@
 )]
 
 mod advanced_config;
+mod classic_record_stream;
 mod clonk_fonts;
 mod control_message;
 mod control_options;
@@ -465,7 +466,6 @@ struct ClassicCommandLine {
     update_requested: bool,
     fair_crew: Option<bool>,
     record_dump: Option<String>,
-    stream_address: Option<String>,
     startup_screen: Option<String>,
     tcp_port: Option<u16>,
     udp_port: Option<u16>,
@@ -611,7 +611,7 @@ fn parse_classic_command_line(arguments: &[OsString]) -> ClassicCommandLine {
         } else if let Some(value) = classic_argument_value(argument, "/recdump:") {
             parsed.record_dump = Some(value.to_string());
         } else if let Some(value) = classic_argument_value(argument, "/stream:") {
-            parsed.stream_address = Some(value.to_string());
+            parsed.record_stream = Some(PathBuf::from(value));
         } else if let Some(value) = classic_argument_value(argument, "/startup:") {
             parsed.startup_screen = Some(value.to_string());
         } else if argument.eq_ignore_ascii_case("/console") {
@@ -14781,6 +14781,10 @@ struct GameApp {
     /// Process-local compatibility arguments applied after configuration is
     /// loaded. They must never be written back to the selected config file.
     classic_command_line: ClassicCommandLine,
+    /// A converted command-line stream still owns the initial OpenGame
+    /// attempt. Clear this after successful activation so later rounds do not
+    /// inherit the native no-startup failure policy.
+    classic_record_stream_activation_pending: bool,
     /// Persistent developer-window policy selected by `/console`. Unlike
     /// per-round classic arguments, `/open` must not reset this.
     console_mode: bool,
@@ -27114,6 +27118,7 @@ impl GameApp {
             loader_gamma,
             app_paths: paths.cloned(),
             classic_command_line: ClassicCommandLine::default(),
+            classic_record_stream_activation_pending: false,
             console_mode: false,
             developer_console: DeveloperConsole::new(),
             developer_console_edit_mode: ConsoleEditMode::Play,
@@ -27335,6 +27340,7 @@ impl GameApp {
 
     fn apply_classic_command_line(&mut self, classic: &ClassicCommandLine) -> Result<()> {
         self.classic_command_line = classic.clone();
+        self.classic_record_stream_activation_pending = false;
         if !classic.player_files.is_empty() {
             self.configured_client_player_selection = self
                 .app_paths
@@ -27346,18 +27352,6 @@ impl GameApp {
         self.auto_open_update_dialog =
             classic.update_requested || classic.incoming_update.is_some();
 
-        if let Some(record) = classic.record_stream.as_ref() {
-            tracing::warn!(
-                path = %record.display(),
-                "classic record-stream playback is not implemented in lc-app"
-            );
-        }
-        if let Some(address) = classic.stream_address.as_deref() {
-            tracing::warn!(
-                address,
-                "classic /stream output is not implemented in lc-app"
-            );
-        }
         if let Some(screen) = classic.startup_screen.as_deref() {
             tracing::warn!(
                 screen,
@@ -28865,24 +28859,70 @@ impl GameApp {
         Ok(())
     }
 
-    fn launch_classic_command_line_scenario(&mut self) -> Result<(), EngineError> {
+    fn launch_classic_command_line_scenario(&mut self) -> Result<()> {
         if self.classic_command_line.direct_join.is_some() {
             return Ok(());
         }
-        let Some(path) = self.classic_command_line.scenario.clone() else {
+        let scenario = self
+            .classic_command_line
+            .scenario
+            .clone()
+            .filter(|path| !path.as_os_str().is_empty());
+        let record_stream = self
+            .classic_command_line
+            .record_stream
+            .clone()
+            .filter(|path| !path.as_os_str().is_empty());
+        if scenario.is_none() && record_stream.is_none() {
             return Ok(());
-        };
+        }
+        if record_stream.is_some() {
+            self.classic_record_stream_activation_pending = true;
+        }
         if self.boot_loading.is_some() {
             self.auto_start_classic_command_line_scenario = true;
             return Ok(());
         }
+        let path = if let Some(stream_path) = record_stream {
+            let converted = classic_record_stream::convert_classic_record_stream(
+                &stream_path,
+                self.process_group_maker.as_bytes(),
+            )
+            .with_context(|| {
+                format!(
+                    "Could not process record stream data {}",
+                    stream_path.display()
+                )
+            })?;
+            self.classic_command_line.scenario = Some(converted.clone());
+            converted
+        } else {
+            scenario.expect("a non-stream command-line scenario was checked above")
+        };
         let scenario = FrontendScenario::from_command_line(&path);
         let definition_load = self.classic_command_line_definition_load();
-        if self.classic_command_line.network_active == Some(true) {
+        let replay_disables_network = if self.classic_command_line.network_active == Some(true) {
+            self.scenario_loader_head_for_start(&scenario)
+                .map_err(|error| anyhow!(error.to_string()))?
+                .is_some_and(|head| head.is_replay())
+        } else {
+            false
+        };
+        if replay_disables_network {
+            tracing::error!(
+                "{}",
+                self.runtime_resource_text(
+                    "IDS_PRC_NONETREPLAY",
+                    "Cannot play back records while in network mode."
+                )
+            );
+        }
+        if self.classic_command_line.network_active == Some(true) && !replay_disables_network {
             self.stage_network_host_scenario(scenario, definition_load);
             Ok(())
         } else {
-            self.start_scenario_with_definition_load(scenario, definition_load)
+            self.start_scenario_with_definition_load(scenario, definition_load)?;
+            Ok(())
         }
     }
 
@@ -74499,7 +74539,9 @@ impl GameApp {
         self.network_start_wait = None;
         self.mode = AppMode::Menu;
         self.restore_startup_fonts();
-        if returns_to_startup {
+        if self.failed_record_stream_exits() {
+            self.request_exit();
+        } else if returns_to_startup {
             if let Some(audio) = self.audio.as_mut() {
                 audio.configure_scenario(None);
             }
@@ -74558,7 +74600,11 @@ impl GameApp {
         if let Some((scenario, result, prepared_go)) = completion {
             match result {
                 Ok(data) => {
-                    if let Err(error) = self.activate_loaded_scenario(scenario.clone(), &data) {
+                    let activation = self.activate_loaded_scenario(scenario.clone(), &data);
+                    if activation.is_ok() {
+                        self.classic_record_stream_activation_pending = false;
+                    }
+                    if let Err(error) = activation {
                         let message = match error {
                             ScenarioActivationError::Recoverable(message) => message,
                         };
@@ -74679,6 +74725,13 @@ impl GameApp {
                     tracing::error!(?error, "failed to start command-line scenario");
                     self.status_text = format!("Unable to start command-line scenario: {error}");
                     failed = true;
+                }
+                if failed && self.failed_record_stream_exits() {
+                    // ParseCommandLine disables the startup dialog for a
+                    // nonempty RecordStream. A failed StreamToRecord therefore
+                    // ends the application instead of exposing the main menu.
+                    self.request_exit();
+                    return;
                 }
                 if failed
                     || (self.startup_network_connection.is_none()
@@ -83357,11 +83410,10 @@ impl GameApp {
                 .record_stream
                 .as_ref()
                 .is_none_or(|path| path.as_os_str().is_empty())
-            && self
-                .classic_command_line
-                .stream_address
-                .as_deref()
-                .is_none_or(str::is_empty)
+    }
+
+    fn failed_record_stream_exits(&self) -> bool {
+        !self.console_mode && self.classic_record_stream_activation_pending
     }
 
     fn resume_startup_music_after_failed_open_game(&mut self) {
@@ -92263,7 +92315,10 @@ fn persist_console_save_group(
         };
         return replace_directory_from_same_parent(&source, &physical_destination);
     }
-    if let Some(parent) = destination.parent() {
+    if let Some(parent) = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         fs::create_dir_all(parent)
             .with_context(|| format!("create save parent {}", parent.display()))?;
     }
@@ -94728,6 +94783,28 @@ mod tests {
     }
 
     #[test]
+    fn classic_record_stream_forms_share_one_last_assignment() {
+        let classic = parse_classic_command_line(&[
+            OsString::from("First.c4r"),
+            OsString::from("/stream:Second.c4r"),
+            OsString::from("Third.C4R"),
+        ]);
+        assert_eq!(classic.record_stream, Some(PathBuf::from("Third.C4R")));
+
+        let prefixed =
+            parse_classic_command_line(&[OsString::from("/stream:Nested/League.c4r")]);
+        assert_eq!(
+            prefixed.record_stream,
+            Some(PathBuf::from("Nested/League.c4r")),
+            "the .c4r suffix must not retain the /stream: prefix"
+        );
+        assert_eq!(
+            parse_classic_command_line(&[OsString::from("/stream:")]).record_stream,
+            Some(PathBuf::new())
+        );
+    }
+
+    #[test]
     fn classic_recdump_c4r_suffix_retains_both_native_interpretations() {
         let classic = parse_classic_command_line(&[OsString::from("/recdump:dump.c4r")]);
         assert_eq!(classic.record_dump.as_deref(), Some("dump.c4r"));
@@ -94735,6 +94812,257 @@ mod tests {
             classic.record_stream,
             Some(PathBuf::from("/recdump:dump.c4r"))
         );
+    }
+
+    #[test]
+    fn classic_record_stream_is_converted_and_activated() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("isolated record-stream user data");
+        let working_directory = env::current_dir().expect("record-stream working directory");
+        let fixture = tempfile::Builder::new()
+            .prefix("lc-record-stream-")
+            .tempdir_in(&working_directory)
+            .expect("record-stream fixture");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+
+        let origin_path = fixture.path().join("Origin.c4s");
+        let definition_root = fixture.path().join("Defs.c4d");
+        let definition_path = definition_root.join("Good.c4d");
+        let origin_reference = origin_path
+            .strip_prefix(&working_directory)
+            .expect("origin is below the working directory")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let definition_reference = definition_root
+            .strip_prefix(paths.install_root())
+            .expect("definitions are below the install root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        fs::create_dir_all(&origin_path).expect("create record origin");
+        fs::create_dir_all(&definition_path).expect("create record definition");
+        fs::write(
+            definition_path.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Record fixture\nCategory=1\n",
+        )
+        .expect("write record definition core");
+        fs::write(definition_path.join("Script.c"), "// record fixture\n")
+            .expect("write record definition script");
+        write_test_definition_graphics(&definition_path);
+        fs::write(
+            origin_path.join("Scenario.txt"),
+            format!(
+                "[Head]\nTitle=Origin\nIcon=2\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1={}\n",
+                definition_reference
+            ),
+        )
+        .expect("write origin scenario core");
+        fs::write(origin_path.join("OriginOnly.txt"), b"copied from origin")
+            .expect("write origin-only component");
+        fs::write(origin_path.join("Layer.txt"), b"origin")
+            .expect("write origin layer");
+        let mut origin_child = MutableGroup::new("OriginChild.c4g");
+        origin_child
+            .add_file("OriginChild.txt", b"origin child".to_vec())
+            .expect("add origin child component");
+        fs::write(
+            origin_path.join("OriginChild.c4g"),
+            origin_child.pack().expect("pack origin child"),
+        )
+        .expect("write packed origin child");
+
+        let mut initial = MutableGroup::new("Initial.c4s");
+        initial
+            .add_file(
+                "Scenario.txt",
+                format!(
+                    "[Head]\nTitle=Converted record\nIcon=2\nMaxPlayer=1\nSaveGame=1\nNoInitialize=1\nReplay=1\nOrigin={}\n\n[Definitions]\nDefinition1={}\n",
+                    origin_reference,
+                    definition_reference
+                )
+                .into_bytes(),
+            )
+            .expect("add initial scenario core");
+        initial
+            .add_file("Layer.txt", b"initial".to_vec())
+            .expect("add initial overlay");
+        initial
+            .add_file("InitialOnly.txt", b"initial component".to_vec())
+            .expect("add initial-only component");
+        let mut initial_child = MutableGroup::new("InitialChild.c4g");
+        initial_child
+            .add_file("InitialChild.txt", b"initial child".to_vec())
+            .expect("add initial child component");
+        initial
+            .add_child("InitialChild.c4g", initial_child)
+            .expect("add packed initial child");
+        let initial = initial.pack().expect("pack streamed initial save");
+        let initial_child_raw = Group::from_top_level_memory(
+            PathBuf::from("Initial.c4s"),
+            initial.clone(),
+        )
+        .expect("reopen streamed initial save")
+        .open_child("InitialChild.c4g")
+        .expect("open original initial child")
+        .raw_image()
+        .expect("capture original initial child image");
+
+        let ignored_name = LegacyCString::from_bytes(b"ignored-initial-name.tmp".to_vec())
+            .expect("valid initial stream filename");
+        let mut raw = lc_network::encode_league_stream_file_chunk(&ignored_name, &initial)
+            .expect("encode initial stream file");
+        let mut append_file = |delta: u8, name: &[u8], data: &[u8]| {
+            let name = LegacyCString::from_bytes(name.to_vec()).expect("valid stream filename");
+            let mut chunk = lc_network::encode_league_stream_file_chunk(&name, data)
+                .expect("encode later stream file");
+            chunk[0] = delta;
+            raw.extend_from_slice(&chunk);
+        };
+        append_file(2, b"Layer.txt", b"later");
+        let mut later_child = MutableGroup::new("WrongSortName.tmp");
+        later_child
+            .add_file("LaterChild.txt", b"later child".to_vec())
+            .expect("add later child component");
+        append_file(
+            3,
+            b"LaterChild.c4g",
+            &later_child.pack().expect("pack later child"),
+        );
+        append_file(4, b"CtrlRec.c4b", b"must be replaced");
+        raw.extend_from_slice(&[5, lc_engine::RCT_FRAME]);
+
+        let stream_path = fixture.path().join("League.c4r");
+        let mut encoder = flate2::write::ZlibEncoder::new(
+            Vec::new(),
+            flate2::Compression::best(),
+        );
+        encoder.write_all(&raw).expect("compress classic stream");
+        fs::write(
+            &stream_path,
+            encoder.finish().expect("finish classic stream compression"),
+        )
+        .expect("write classic stream");
+
+        let classic = parse_classic_command_line(&[
+            OsString::from(format!("/stream:{}", stream_path.display())),
+            OsString::from("/network"),
+        ]);
+        assert_eq!(classic.record_stream.as_deref(), Some(stream_path.as_path()));
+        let mut app = GameApp::new(
+            640,
+            480,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize record-stream app");
+        app.apply_classic_command_line(&classic)
+            .expect("apply record-stream command line");
+        app.launch_classic_command_line_scenario()
+            .expect("defer record stream until boot completes");
+        assert!(app.auto_start_classic_command_line_scenario);
+        wait_for_running_with_attempts(&mut app, 2_400);
+
+        let output_path = fixture.path().join("League.c4s");
+        assert_eq!(
+            app.classic_command_line.scenario.as_deref(),
+            Some(output_path.as_path())
+        );
+        assert_eq!(
+            app.active_scenario
+                .as_ref()
+                .and_then(|scenario| scenario.path.as_deref()),
+            Some(output_path.as_path())
+        );
+        assert!(app.control_playback.is_some());
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(!app.classic_record_stream_activation_pending);
+        assert!(output_path.is_dir());
+        for child in ["OriginChild.c4g", "InitialChild.c4g", "LaterChild.c4g"] {
+            assert!(
+                output_path.join(child).is_file(),
+                "folder-backed conversion must retain {child} as a packed file"
+            );
+        }
+        let output = Group::open(&output_path).expect("open converted record");
+        assert_eq!(
+            output.read_file("OriginOnly.txt").expect("origin component"),
+            b"copied from origin"
+        );
+        assert_eq!(
+            output.read_file("InitialOnly.txt").expect("initial component"),
+            b"initial component"
+        );
+        assert_eq!(output.read_file("Layer.txt").expect("later overlay"), b"later");
+        assert_eq!(
+            output.read_file("CtrlRec.c4b").expect("converted CtrlRec"),
+            [14, lc_engine::RCT_FRAME],
+            "file chunks are removed and their deltas folded into the retained stream"
+        );
+        assert_eq!(
+            output
+                .open_child("LaterChild.c4g")
+                .expect("open streamed packed child")
+                .read_file("LaterChild.txt")
+                .expect("streamed child component"),
+            b"later child"
+        );
+        assert_eq!(
+            output
+                .open_child("InitialChild.c4g")
+                .expect("open initial packed child")
+                .raw_image()
+                .expect("read initial child image"),
+            initial_child_raw,
+            "unpacking the streamed initial save preserves child images"
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn unusable_classic_record_stream_exits_without_showing_startup() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("isolated bad record-stream user data");
+        let fixture = tempdir().expect("bad record-stream fixture");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let stream_path = fixture.path().join("Broken.c4r");
+        fs::write(&stream_path, b"not a zlib stream").expect("write unusable record stream");
+        let classic = parse_classic_command_line(&[stream_path.clone().into_os_string()]);
+        let mut app = GameApp::new(
+            640,
+            480,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize bad record-stream app");
+        app.apply_classic_command_line(&classic)
+            .expect("apply bad record-stream command line");
+        app.launch_classic_command_line_scenario()
+            .expect("defer bad record stream until boot completes");
+        for _ in 0..2_400 {
+            if app.exit_requested {
+                break;
+            }
+            app.update().expect("poll deferred record-stream failure");
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(app.exit_requested, "explicit unusable .c4r must terminate");
+        assert_ne!(app.mode, AppMode::Menu);
+        assert!(app.status_text.contains("Could not process record stream data"));
+        reset_cached_app_paths();
     }
 
     #[test]
@@ -94782,8 +95110,8 @@ mod tests {
         assert_eq!(classic.comment.as_deref(), Some("launch comment"));
         assert_eq!(classic.record_dump.as_deref(), Some("dump.TXT"));
         assert_eq!(
-            classic.stream_address.as_deref(),
-            Some("record.example:11114")
+            classic.record_stream,
+            Some(PathBuf::from("record.example:11114"))
         );
         assert_eq!(classic.fair_crew, Some(false));
         assert_eq!(classic.config_file, Some(PathBuf::from("portable.cfg")));
@@ -128342,9 +128670,9 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
 
         app.classic_command_line.scenario = None;
-        app.classic_command_line.stream_address = Some("record.example:11114".to_string());
+        app.classic_command_line.record_stream = Some(PathBuf::from("record.example:11114"));
         assert!(!app.failed_open_game_returns_to_startup());
-        app.classic_command_line.stream_address = Some(String::new());
+        app.classic_command_line.record_stream = Some(PathBuf::new());
         app.classic_command_line.direct_join = Some(String::new());
         assert!(
             app.failed_open_game_returns_to_startup(),
