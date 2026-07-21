@@ -99,6 +99,29 @@ pub(crate) fn evaluate_map_size(
     (wdt, hgt)
 }
 
+/// Evaluate the `float` surface locals from `C4MapCreator::Create`
+/// (src/C4Map.cpp:94-98), promoting them only after all native-precision
+/// arithmetic is complete.
+fn evaluate_surface_parameters(
+    params: &BasicMapParams,
+    player_num: i32,
+    rng: &mut LcgRng,
+) -> (f64, f64, f64, f64) {
+    let amplitude = params.amplitude.evaluate(rng) as f32;
+    let phase = params.phase.evaluate(rng) as f32;
+    let mut period = params.period.evaluate(rng) as f32;
+    if params.map_player_extend {
+        period *= player_num.min(MAX_MAP_PLAYER_EXTEND) as f32;
+    }
+    let natural = params.random.evaluate(rng) as f32;
+    (
+        f64::from(amplitude),
+        f64::from(phase),
+        f64::from(period),
+        f64::from(natural),
+    )
+}
+
 /// C4MapCreator::Create (src/C4Map.cpp:73-167) with `fLayers = true`
 /// (C4Landscape::CreateMap always passes true, src/C4Landscape.cpp:523).
 /// Returns row-major map bytes.
@@ -140,13 +163,7 @@ pub(crate) fn create_basic_map(
     let ccol = classifier
         .get_index_mat_tex(&params.material, Some("Smooth"))
         .wrapping_add(MAP_IFT);
-    let amplitude = params.amplitude.evaluate(rng) as f64;
-    let phase = params.phase.evaluate(rng) as f64;
-    let mut period = params.period.evaluate(rng) as f64;
-    if params.map_player_extend {
-        period *= f64::from(player_num.min(MAX_MAP_PLAYER_EXTEND));
-    }
-    let natural = params.random.evaluate(rng) as f64;
+    let (amplitude, phase, period, natural) = evaluate_surface_parameters(params, player_num, rng);
     let level0 = map_wdt.min(map_hgt) / 2;
     let maxrange = level0 * 3 / 4;
 
@@ -269,6 +286,51 @@ mod tests {
             liquid_level: LegacyC4SVal::new(0, 0, 0, 100),
             layers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn basic_map_quantizes_surface_parameters_through_f32_like_cpp() {
+        fn exact(value: i32) -> LegacyC4SVal {
+            LegacyC4SVal::new(value, 0, i32::MIN, i32::MAX)
+        }
+
+        // C4MapCreator stores all four evaluated values in `float` locals
+        // before their later promotion into the double surface formula.
+        let mut params = flat_params();
+        params.amplitude = exact(16_777_217);
+        params.phase = exact(16_777_217);
+        params.period = exact(16_777_217);
+        params.random = exact(16_777_217);
+        let mut rng = LcgRng::seed_from_u64(7);
+        let (amplitude, phase, period, natural) = evaluate_surface_parameters(&params, 1, &mut rng);
+        assert_eq!(amplitude, 16_777_216.0, "Amplitude narrows to float");
+        assert_eq!(phase, 16_777_216.0, "Phase narrows to float");
+        assert_eq!(period, 16_777_216.0, "Period narrows to float");
+        assert_eq!(natural, 16_777_216.0, "Random narrows to float");
+
+        // The quantized Phase is observable at a surface boundary, so the
+        // production map path must render the adjacent integers identically.
+        params.map_width = exact(100);
+        params.map_height = exact(100);
+        params.amplitude = exact(100);
+        params.period = exact(0);
+        params.random = exact(0);
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(7);
+        let quantized = create_basic_map(&params, &mut classifier, 1, &mut rng);
+        params.phase = exact(16_777_216);
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(7);
+        let rounded = create_basic_map(&params, &mut classifier, 1, &mut rng);
+        assert_eq!(quantized, rounded);
+
+        // The compound MapPlayerExtend multiplication also happens while
+        // Period is still a float: the exact product 50_331_645 rounds down.
+        params.map_player_extend = true;
+        params.period = exact(16_777_215);
+        let mut rng = LcgRng::seed_from_u64(7);
+        let (_, _, period, _) = evaluate_surface_parameters(&params, 3, &mut rng);
+        assert_eq!(period, 50_331_644.0);
     }
 
     #[test]
