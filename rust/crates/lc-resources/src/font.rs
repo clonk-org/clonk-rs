@@ -189,27 +189,30 @@ pub fn select_font_definition<'a>(
 }
 
 impl FontCatalog {
-    /// Appends vector faces and definitions from one registered group.
+    /// Appends vector faces and definitions from one group.
     /// Lookups scan vector faces newest-first, matching C4FontLoader's
     /// prepended `C4VectorFont` chain.
     pub fn load_group(&mut self, group: &Group) -> Result<(), FontResourceError> {
-        let entries = group.entries()?;
-        for extension in VECTOR_FONT_EXTENSIONS {
-            for entry in &entries {
-                if entry.relative_path.components().count() != 1 {
-                    continue;
+        if let Ok(entries) = group.entries() {
+            for extension in VECTOR_FONT_EXTENSIONS {
+                for entry in &entries {
+                    if entry.relative_path.components().count() != 1 {
+                        continue;
+                    }
+                    let Some(face) = vector_font_face_bytes(&entry.name_bytes, extension) else {
+                        continue;
+                    };
+                    let Ok(bytes) = group.read_entry_bytes_exact(entry) else {
+                        continue;
+                    };
+                    self.vector_fonts.push(CatalogVectorFont {
+                        face: face.to_vec(),
+                        resource: FontResource::new(
+                            lc_script::c4_string_from_bytes(&entry.name_bytes),
+                            bytes,
+                        ),
+                    });
                 }
-                let Some(face) = vector_font_face_bytes(&entry.name_bytes, extension) else {
-                    continue;
-                };
-                let bytes = group.read_entry_bytes_exact(entry)?;
-                self.vector_fonts.push(CatalogVectorFont {
-                    face: face.to_vec(),
-                    resource: FontResource::new(
-                        lc_script::c4_string_from_bytes(&entry.name_bytes),
-                        bytes,
-                    ),
-                });
             }
         }
         self.definitions.extend(load_font_definitions(group)?);
@@ -227,8 +230,23 @@ impl FontCatalog {
         role: FontRole,
         shadow: bool,
     ) -> Option<ResolvedFontSpec> {
+        self.resolve_candidates(request, base_size, role, shadow)
+            .into_iter()
+            .next()
+    }
+
+    /// Resolves every source candidate in native attempt order.
+    /// Matching registered vector faces are newest-first, followed by one
+    /// unresolved face/filename candidate for the host-system fallback.
+    pub fn resolve_candidates(
+        &self,
+        request: &str,
+        base_size: i32,
+        role: FontRole,
+        shadow: bool,
+    ) -> Vec<ResolvedFontSpec> {
         if request.is_empty() {
-            return None;
+            return Vec::new();
         }
         let mapped = shadow
             .then(|| select_font_definition(&self.definitions, request, base_size))
@@ -236,7 +254,7 @@ impl FontCatalog {
             .map(|definition| definition.font_for(role))
             .unwrap_or(request);
         if mapped.is_empty() {
-            return None;
+            return Vec::new();
         }
         let mut segments = mapped.split(',');
         let face = segments.next().unwrap_or_default();
@@ -246,10 +264,10 @@ impl FontCatalog {
             .and_then(|value| value.to_str())
             .unwrap_or_default();
         if extension.eq_ignore_ascii_case("png") || extension.eq_ignore_ascii_case("bmp") {
-            return Some(ResolvedFontSpec::Bitmap {
+            return vec![ResolvedFontSpec::Bitmap {
                 filename: face.to_string(),
                 indent: second.and_then(parse_i32_prefix).unwrap_or(0),
-            });
+            }];
         }
         let size = second
             .and_then(parse_i32_prefix)
@@ -260,19 +278,25 @@ impl FontCatalog {
             .map(|value| value as u32)
             .unwrap_or(400);
         let face_bytes = lc_script::c4_string_bytes(face);
-        let bytes = self
-            .vector_fonts
+        self.vector_fonts
             .iter()
             .rev()
-            .find(|font| font.face.as_slice() == face_bytes.as_slice())
-            .map(|font| font.resource.clone_bytes());
-        Some(ResolvedFontSpec::Vector {
-            face: face.to_string(),
-            bytes,
-            face_index: 0,
-            size,
-            weight,
-        })
+            .filter(|font| font.face.as_slice() == face_bytes.as_slice())
+            .map(|font| ResolvedFontSpec::Vector {
+                face: face.to_string(),
+                bytes: Some(font.resource.clone_bytes()),
+                face_index: 0,
+                size,
+                weight,
+            })
+            .chain(std::iter::once_with(|| ResolvedFontSpec::Vector {
+                face: face.to_string(),
+                bytes: None,
+                face_index: 0,
+                size,
+                weight,
+            }))
+            .collect()
     }
 }
 

@@ -2216,12 +2216,9 @@ fn load_classic_font_catalog(
         .load_group(&system)
         .context("failed to load classic system font resources")?;
     for registration in registrations {
-        catalog.load_group(&registration.group).with_context(|| {
-            format!(
-                "failed to load classic font resources from {}",
-                registration.group.root().display()
-            )
-        })?;
+        // C4GroupSet::RegisterGroup ignores LoadDefs failures. Vector faces
+        // loaded before an unreadable optional Fonts.txt remain registered.
+        let _ = catalog.load_group(&registration.group);
     }
     Ok(catalog)
 }
@@ -2310,6 +2307,40 @@ fn resolve_classic_font_spec(
     })
 }
 
+fn build_classic_font_from_catalog(
+    catalog: &FontCatalog,
+    request: &str,
+    base_size: i32,
+    role: FontRole,
+    apply_definition: bool,
+    system_fonts: &dyn system_fonts::SystemFontProvider,
+    registrations: &[LoaderGroupRegistration],
+    graphics: &Group,
+    shadow: bool,
+) -> Result<(ResolvedFontSpec, lc_graphics::clonk_font::ClonkFont)> {
+    let candidates = catalog.resolve_candidates(request, base_size, role, apply_definition);
+    if candidates.is_empty() {
+        return Err(anyhow!("classic font `{request}` has no {role:?} mapping"));
+    }
+
+    let mut last_error = None;
+    for candidate in candidates {
+        let resolved = match resolve_classic_font_spec(candidate, system_fonts) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
+        match build_classic_font_spec(resolved.clone(), registrations, graphics, shadow) {
+            Ok(font) => return Ok((resolved, font)),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("classic font `{request}` has no usable {role:?} face")))
+}
+
 fn matching_native_font_source(
     title: &ResolvedFontSpec,
     caption: &ResolvedFontSpec,
@@ -2386,41 +2417,32 @@ fn resolve_classic_font_bundle_for_request_with_system_fonts(
 ) -> Result<ClassicFontBundle> {
     let catalog = load_classic_font_catalog(paths, catalog_registrations)?;
     let graphics = main_graphics_group(paths)?;
-    let resolve = |role, apply_definition| {
-        let spec = catalog
-            .resolve(&request, base_size, role, apply_definition)
-            .with_context(|| {
-                format!(
-                    "classic font `{request}` has no {} mapping",
-                    match role {
-                        FontRole::Log => "LogFont",
-                        FontRole::MainSmall => "SmallFont",
-                        FontRole::Main => "Font",
-                        FontRole::Caption => "CaptionFont",
-                        FontRole::Title => "TitleFont",
-                    }
-                )
-            })?;
-        resolve_classic_font_spec(spec, system_fonts)
+    let build = |role, apply_definition, shadow| {
+        build_classic_font_from_catalog(
+            &catalog,
+            request,
+            base_size,
+            role,
+            apply_definition,
+            system_fonts,
+            graphics_registrations,
+            &graphics,
+            shadow,
+        )
     };
-    let build = |spec: &ResolvedFontSpec, shadow| {
-        build_classic_font_spec(spec.clone(), graphics_registrations, &graphics, shadow)
-    };
-    let text_spec = resolve(FontRole::Main, true)?;
-    let title_spec = resolve(FontRole::Title, true)?;
-    let caption_spec = resolve(FontRole::Caption, true)?;
-    let mini_spec = resolve(FontRole::Log, true)?;
-    let tooltip_spec = resolve(FontRole::Main, false)?;
     use lc_graphics::clonk_font::ClonkFontRole;
-    let text = build(&text_spec, true)?.with_role(ClonkFontRole::GuiText);
+    let (text_spec, text) = build(FontRole::Main, true, true)?;
+    let text = text.with_role(ClonkFontRole::GuiText);
+    let (title_spec, title) = build(FontRole::Title, true, true)?;
+    let (caption_spec, caption) = build(FontRole::Caption, true, true)?;
+    let (mini_spec, mini) = build(FontRole::Log, true, true)?;
+    let (tooltip_spec, tooltip) = build(FontRole::Main, false, false)?;
     // C4GraphicsResource never requests C4FT_MainSmall. Populate the Rust
     // compatibility slot at the derived raw size when possible, but never
     // make a valid logical FontDef alias depend on a same-named vector face.
-    let (main_small, main_small_spec) = match resolve(FontRole::MainSmall, false)
-        .and_then(|spec| build(&spec, true).map(|font| (font, Some(spec))))
-    {
-        Ok(pair) => pair,
-        Err(_) => (text.clone(), None),
+    let (main_small_spec, main_small) = match build(FontRole::MainSmall, false, true) {
+        Ok((spec, font)) => (Some(spec), font),
+        Err(_) => (None, text.clone()),
     };
     let main_small = main_small.with_role(ClonkFontRole::GuiMainSmall);
     let native_source = matching_native_font_source(
@@ -2432,13 +2454,13 @@ fn resolve_classic_font_bundle_for_request_with_system_fonts(
         &tooltip_spec,
     );
     let fonts = lc_frontend::ClonkFontSet {
-        title: build(&title_spec, true)?.with_role(ClonkFontRole::GuiTitle),
-        caption: build(&caption_spec, true)?.with_role(ClonkFontRole::GuiCaption),
+        title: title.with_role(ClonkFontRole::GuiTitle),
+        caption: caption.with_role(ClonkFontRole::GuiCaption),
         text,
         main_small,
-        mini: build(&mini_spec, true)?.with_role(ClonkFontRole::GuiMini),
+        mini: mini.with_role(ClonkFontRole::GuiMini),
     };
-    let tooltip = build(&tooltip_spec, false)?.with_role(ClonkFontRole::GuiTooltip);
+    let tooltip = tooltip.with_role(ClonkFontRole::GuiTooltip);
     Ok(ClassicFontBundle {
         fonts: Arc::new(fonts),
         tooltip: Arc::new(tooltip),
@@ -2475,20 +2497,25 @@ fn resolve_classic_startup_font_bundle_for_request_with_system_fonts(
 
     let catalog = load_classic_font_catalog(paths, catalog_registrations)?;
     let graphics = main_graphics_group(paths)?;
-    let resolve = |role| {
-        let spec = catalog
-            .resolve(request, base_size, role, true)
-            .with_context(|| format!("classic startup font `{request}` has no {role:?} mapping"))?;
-        resolve_classic_font_spec(spec, system_fonts)
-    };
-    let build = |spec: ResolvedFontSpec| {
-        build_classic_font_spec(spec, graphics_registrations, &graphics, false)
+    let build = |role| {
+        build_classic_font_from_catalog(
+            &catalog,
+            request,
+            base_size,
+            role,
+            true,
+            system_fonts,
+            graphics_registrations,
+            &graphics,
+            false,
+        )
+        .map(|(_, font)| font)
     };
 
-    let title = build(resolve(FontRole::Title)?)?.with_role(ClonkFontRole::BookTitle);
-    let caption = build(resolve(FontRole::Caption)?)?.with_role(ClonkFontRole::BookCaption);
-    let text = build(resolve(FontRole::Main)?)?.with_role(ClonkFontRole::BookText);
-    let small = build(resolve(FontRole::MainSmall)?)?.with_role(ClonkFontRole::BookSmall);
+    let title = build(FontRole::Title)?.with_role(ClonkFontRole::BookTitle);
+    let caption = build(FontRole::Caption)?.with_role(ClonkFontRole::BookCaption);
+    let text = build(FontRole::Main)?.with_role(ClonkFontRole::BookText);
+    let small = build(FontRole::MainSmall)?.with_role(ClonkFontRole::BookSmall);
 
     Ok(ClassicStartupFontBundle {
         book: Arc::new(lc_frontend::startup_scensel::BookFontSet {
@@ -102060,6 +102087,15 @@ func Award()
         image
     }
 
+    fn make_packed_test_entry_unreadable(group: &mut [u8], entry_index: usize) {
+        const HEADER_SIZE: usize = 204;
+        const ENTRY_SIZE: usize = 316;
+        const SIZE_OFFSET: usize = 268;
+
+        let size = HEADER_SIZE + entry_index * ENTRY_SIZE + SIZE_OFFSET;
+        group[size..size + 4].copy_from_slice(&i32::MAX.to_le_bytes());
+    }
+
     fn packed_test_file_group(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
         let mut group = lc_resources::MutableGroup::new("Fixture.bin");
         for (name, child, data) in entries {
@@ -132701,6 +132737,149 @@ ScenInfoArea=70,5,25,90
         .err()
         .expect("malformed system bytes cannot be substituted or accepted");
         assert!(error.to_string().contains("failed to initialize classic vector font"));
+    }
+
+    #[test]
+    fn font_catalog_skips_bad_optional_candidates_and_falls_through_matching_faces() {
+        let _lock = env_lock().lock();
+        let root = tempdir().expect("font candidate fallback fixture");
+        install_global_gui_and_loader_test_root(root.path());
+        let user = root.path().join("user");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(root.path())),
+            ("LC_CONTENT_DIR", None),
+            ("LC_USER_DATA_DIR", Some(user.as_path())),
+        ]);
+        let paths = AppPaths::discover().expect("font fallback paths");
+        paths.ensure_user_dirs().expect("font fallback user dirs");
+        let system_font = fs::read(root.path().join("planet/System.c4g/Endeavour.ttf"))
+            .expect("fixture vector font");
+
+        // FreeType accepts trailing bytes in an sfnt. Distinct sentinels let
+        // the winning same-face registration be observed without changing
+        // either usable font's rendered face.
+        let mut oldest_font = system_font.clone();
+        oldest_font.extend_from_slice(b"oldest-registration");
+        let mut newest_usable_font = system_font.clone();
+        newest_usable_font.extend_from_slice(b"newest-usable-registration");
+        let oldest = Group::from_raw_memory(
+            PathBuf::from("oldest-fonts.c4g"),
+            packed_test_group(&[("FallbackFace.ttf", false, &oldest_font)]),
+        )
+        .expect("oldest font group");
+        let newest_usable = Group::from_raw_memory(
+            PathBuf::from("newest-usable-fonts.c4g"),
+            packed_test_group(&[("FallbackFace.ttf", false, &newest_usable_font)]),
+        )
+        .expect("newest usable font group");
+
+        let mut unreadable_vector =
+            packed_test_group(&[("Unreadable.ttf", false, b"optional vector")]);
+        make_packed_test_entry_unreadable(&mut unreadable_vector, 0);
+        let unreadable_vector = Group::from_raw_memory(
+            PathBuf::from("unreadable-vector-fonts.c4g"),
+            unreadable_vector,
+        )
+        .expect("unreadable vector group still opens");
+        assert!(unreadable_vector.read_file("Unreadable.ttf").is_err());
+
+        let mut unreadable_definitions =
+            packed_test_group(&[("Fonts.txt", false, b"[Font]\nName=MustNotLoad\n")]);
+        make_packed_test_entry_unreadable(&mut unreadable_definitions, 0);
+        let unreadable_definitions = Group::from_raw_memory(
+            PathBuf::from("unreadable-font-definitions.c4g"),
+            unreadable_definitions,
+        )
+        .expect("unreadable font-definition group still opens");
+        assert!(unreadable_definitions.read_file("Fonts.txt").is_err());
+
+        let corrupt_face = Group::from_raw_memory(
+            PathBuf::from("corrupt-font-face.c4g"),
+            packed_test_group(&[("FallbackFace.ttf", false, b"not a font")]),
+        )
+        .expect("corrupt readable font group");
+        assert_eq!(
+            corrupt_face
+                .read_file("FallbackFace.ttf")
+                .expect("corrupt face remains readable")
+                .as_slice(),
+            b"not a font"
+        );
+
+        let registration = |registration_order, group| LoaderGroupRegistration {
+            priority: 100,
+            registration_order,
+            group,
+        };
+        let registrations = vec![
+            registration(0, oldest),
+            registration(1, newest_usable),
+            registration(2, unreadable_vector.clone()),
+            registration(3, unreadable_definitions.clone()),
+            registration(4, corrupt_face.clone()),
+        ];
+        let provider = FakeSystemFontProvider::new("FallbackFace", system_font.clone());
+
+        let bundle = resolve_classic_font_bundle_for_request_with_system_fonts(
+            &paths,
+            "FallbackFace",
+            14,
+            &registrations,
+            &[],
+            &provider,
+        )
+        .expect("corrupt newest face falls through to the newest usable registration");
+        assert_eq!(
+            bundle
+                .native_source
+                .expect("matching winning candidates retain a native source")
+                .bytes
+                .as_ref(),
+            newest_usable_font.as_slice()
+        );
+        resolve_classic_startup_font_bundle_for_request_with_system_fonts(
+            &paths,
+            "FallbackFace",
+            14,
+            &registrations,
+            &[],
+            &provider,
+        )
+        .expect("startup fonts use the same full candidate chain");
+        assert!(
+            provider.requests().is_empty(),
+            "the system face is attempted only after every matching registered face"
+        );
+
+        let bad_registrations = [
+            registration(2, unreadable_vector),
+            registration(3, unreadable_definitions),
+            registration(4, corrupt_face),
+        ];
+        let system_bundle = resolve_classic_font_bundle_for_request_with_system_fonts(
+            &paths,
+            "FallbackFace",
+            14,
+            &bad_registrations,
+            &[],
+            &provider,
+        )
+        .expect("system face follows the exhausted corrupt registered chain");
+        assert_eq!(
+            system_bundle
+                .native_source
+                .expect("system fallback supplies a native source")
+                .bytes
+                .as_ref(),
+            system_font.as_slice()
+        );
+        assert!(!provider.requests().is_empty());
+        assert!(
+            provider
+                .requests()
+                .iter()
+                .all(|(family, weight)| family == "FallbackFace" && *weight == 400)
+        );
     }
 
     #[test]
