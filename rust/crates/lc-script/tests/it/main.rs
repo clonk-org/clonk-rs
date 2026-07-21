@@ -72,4 +72,5 @@ mod test_truthiness;
 mod test_var_hoisting;
 mod test_var_local_slots;
 mod test_var_shadows_static;
+mod test_value_stack;
 mod test_warp_script;

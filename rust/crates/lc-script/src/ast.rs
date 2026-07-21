@@ -392,7 +392,7 @@ pub enum AssignmentTarget {
     },
     Variable(String),
     Property(Box<AssignmentTarget>, String),
-    Index(Box<AssignmentTarget>, Box<Expr>), // arr[index] as lvalue
+    Index(Box<AssignmentTarget>, IndexOperand), // arr[index] as lvalue
     /// `expression[]`: AB_ARRAY_APPEND operates on the current stack value.
     /// A referenced array yields its new last-slot reference; a self-owned
     /// temporary loses that reference with its container and collapses to nil.
@@ -405,6 +405,9 @@ pub enum AssignmentTarget {
         object: Box<Expr>,
         method: String,
         args: Vec<Expr>,
+        /// Distinguishes `obj->Fn(arg)` (target + ten slots) from the
+        /// normalized direct native spelling `Fn(arg, obj)` (native arity).
+        is_arrow: bool,
     },
     FunctionCall {
         // func(&...) as lvalue - reference-returning function call
@@ -451,7 +454,7 @@ pub enum Expr {
     },
     Array(Vec<Expr>),
     Proplist(Vec<(Expr, Expr)>),
-    Index(Box<Expr>, Box<Expr>),
+    Index(Box<Expr>, IndexOperand),
     Property(Box<Expr>, String),
     ArrayAppend(Box<Expr>),
     /// Assignment to `array[]` must retain the new append reference while the
@@ -495,9 +498,18 @@ pub struct SafeNavigationStep {
     pub operation: NavigationOperation,
 }
 
+/// C4Aul emits a dedicated AB_MAPA_R/V operand for a direct string token in
+/// `value["key"]`. An equivalent expression such as `value[("key")]` uses
+/// an ordinary value-stack slot instead.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IndexOperand {
+    EmbeddedString(String),
+    Dynamic(Box<Expr>),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum NavigationOperation {
-    Index(Box<Expr>),
+    Index(IndexOperand),
     ArrayAppend,
     Property(String),
     MethodCall {

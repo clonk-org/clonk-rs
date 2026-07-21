@@ -1,6 +1,7 @@
 use crate::ast::{
-    AccessLevel, AppendTo, AssignmentTarget, BinaryOp, Expr, Function, NavigationOperation,
-    Parameter, SafeNavigationStep, Script, Stmt, TypeAnnotation, UnaryOp, VarDecl, VarDeclKind,
+    AccessLevel, AppendTo, AssignmentTarget, BinaryOp, Expr, Function, IndexOperand,
+    NavigationOperation, Parameter, SafeNavigationStep, Script, Stmt, TypeAnnotation, UnaryOp,
+    VarDecl, VarDeclKind,
 };
 use crate::error::ParseError;
 use crate::lexer::Lexer;
@@ -1103,7 +1104,7 @@ impl<'a> Parser<'a> {
                 // yielding the first value, matching the old C4Aul bytecode.
                 Expr::Index(
                     Box::new(Expr::Array(exprs)),
-                    Box::new(Expr::Literal(Literal::Int(0))),
+                    IndexOperand::Dynamic(Box::new(Expr::Literal(Literal::Int(0)))),
                 )
             };
             return Ok(Stmt::Return(Some(value)));
@@ -1492,6 +1493,7 @@ impl<'a> Parser<'a> {
                                 object: Box::new(object),
                                 method: name.clone(),
                                 args: vec![first_arg],
+                                is_arrow: false,
                             });
                         }
                         // NEW: Allow any function call as a potential lvalue
@@ -1511,6 +1513,7 @@ impl<'a> Parser<'a> {
                             object: object.clone(),
                             method: method.clone(),
                             args,
+                            is_arrow: true,
                         });
                     }
                 }
@@ -2060,9 +2063,17 @@ impl<'a> Parser<'a> {
                 self.consume()?;
                 return Ok(Some(NavigationOperation::ArrayAppend));
             }
+            let starts_with_string_token =
+                matches!(&self.peek()?.kind, TokenKind::String(_));
             let index = self.parse_expression()?;
+            let index = match (starts_with_string_token, index) {
+                (true, Expr::Literal(Literal::String(value))) => {
+                    IndexOperand::EmbeddedString(value)
+                }
+                (_, index) => IndexOperand::Dynamic(Box::new(index)),
+            };
             self.expect_symbol(Symbol::RBracket, "expected ']' after index expression")?;
-            return Ok(Some(NavigationOperation::Index(Box::new(index))));
+            return Ok(Some(NavigationOperation::Index(index)));
         }
         if let Some(dot) = self.consume_if_symbol(Symbol::Dot)? {
             if self.strict_level < 3 {
@@ -3820,5 +3831,73 @@ func Ok() { return 1; }
             "func Test() { for (i = 0, j = 1; i < 3; ++i) {} }"
         )
         .is_err());
+    }
+
+    #[test]
+    fn only_raw_string_indexes_use_the_embedded_operand_ast() {
+        let embedded = parse_expression_at_strict(r#"map["key"]"#, 3)
+            .expect("raw string index parses");
+        assert!(matches!(
+            embedded,
+            Expr::Index(_, IndexOperand::EmbeddedString(key)) if key == "key"
+        ));
+
+        let dynamic = parse_expression_at_strict(r#"map[("key")]"#, 3)
+            .expect("parenthesized string index parses");
+        assert!(matches!(
+            dynamic,
+            Expr::Index(
+                _,
+                IndexOperand::Dynamic(index)
+            ) if matches!(
+                index.as_ref(),
+                Expr::Literal(Literal::String(key)) if key == "key"
+            )
+        ));
+
+        let assignment = parse_script(r#"#strict 3
+            func Test() { map["key"] = 1; map[("key")] = 2; }
+            "#)
+            .expect("string-index assignments parse");
+        assert!(matches!(
+            &assignment.functions[0].body[..],
+            [
+                Stmt::Assignment {
+                    target: AssignmentTarget::Index(
+                        _,
+                        IndexOperand::EmbeddedString(embedded)
+                    ),
+                    ..
+                },
+                Stmt::Assignment {
+                    target: AssignmentTarget::Index(_, IndexOperand::Dynamic(_)),
+                    ..
+                }
+            ] if embedded == "key"
+        ));
+
+        let navigation = parse_expression_at_strict(r#"map?["key"]?[(("key"))]"#, 3)
+            .expect("safe string-index navigation parses");
+        assert!(matches!(
+            navigation,
+            Expr::SafeNavigation { steps, .. }
+                if matches!(
+                    &steps[..],
+                    [
+                        SafeNavigationStep {
+                            operation: NavigationOperation::Index(
+                                IndexOperand::EmbeddedString(embedded)
+                            ),
+                            ..
+                        },
+                        SafeNavigationStep {
+                            operation: NavigationOperation::Index(
+                                IndexOperand::Dynamic(_)
+                            ),
+                            ..
+                        }
+                    ] if embedded == "key"
+                )
+        ));
     }
 }

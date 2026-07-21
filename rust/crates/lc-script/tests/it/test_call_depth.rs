@@ -1,6 +1,7 @@
-// Parity: the script call-stack depth limit matches C++ MAX_CONTEXT_STACK=512
-// (C4AulExec.cpp:62,143-145). A script that recurses 65-511 deep runs in C++ but
-// used to error in Rust at the old limit of 64.
+// C4Aul's 512-entry context stack shares a separate 1,024-entry value stack.
+// Every ordinary script frame retains ten parameter slots, so zero-local
+// recursion reaches the value-stack ceiling first (C4AulExec.cpp:62-63,
+// 182-221,330-363,1435-1462).
 
 use lc_script::{Engine, Value};
 
@@ -14,23 +15,29 @@ fn recurse_to(depth: i32) -> Result<Value, lc_script::ScriptError> {
 
 #[test]
 fn recursion_past_old_limit_of_64_now_runs() {
-    // 200 deep: errored at the old 64 limit, must run under C++'s 512.
+    // The historical Rust-only 64-frame limit was still too small: C++ can
+    // execute this depth before its value-stack ceiling becomes relevant.
     assert_eq!(
-        recurse_to(200).expect("200-deep recursion runs"),
-        Value::Int(200)
+        recurse_to(90).expect("90-deep recursion runs"),
+        Value::Int(90)
     );
 }
 
 #[test]
-fn recursion_near_the_limit_runs() {
+fn recursion_at_the_value_stack_boundary_runs() {
+    // The initial call plus 101 recursive calls retain 1,020 parameter slots;
+    // the base-case comparison peaks at 1,022.
     assert_eq!(
-        recurse_to(500).expect("500-deep recursion runs"),
-        Value::Int(500)
+        recurse_to(101).expect("the last fitting recursion depth runs"),
+        Value::Int(101)
     );
 }
 
 #[test]
-fn recursion_far_beyond_the_limit_errors_cleanly() {
-    // Well past 512: a clean error, never a crash.
-    assert!(recurse_to(5000).is_err());
+fn recursion_beyond_the_value_stack_limit_errors_cleanly() {
+    let error = recurse_to(102).expect_err("the 103rd active frame must overflow");
+    let lc_script::ScriptError::Runtime(error) = error else {
+        panic!("expected runtime value-stack overflow, got {error}");
+    };
+    assert_eq!(error.message(), "internal error: value stack overflow!");
 }

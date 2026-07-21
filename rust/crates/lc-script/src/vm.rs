@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use indexmap::IndexMap;
 
 use crate::ast::{
-    AccessLevel, AssignmentTarget, BinaryOp, Expr, ForInit, Function, NavigationOperation,
-    Parameter, SafeNavigationStep, Stmt, TypeAnnotation, UnaryOp, VarDecl,
+    AccessLevel, AssignmentTarget, BinaryOp, Expr, ForInit, Function, IndexOperand,
+    NavigationOperation, Parameter, SafeNavigationStep, Stmt, TypeAnnotation, UnaryOp, VarDecl,
 };
 use crate::debugger::DebuggerHooks;
 use crate::engine::{
@@ -25,6 +25,10 @@ use crate::value::{
 /// (C4AulExec.cpp:62). A script recursing within this bound runs; beyond it the
 /// VM returns a clean error (C++ throws "call stack overflow", :143-145).
 const MAX_CALL_DEPTH: usize = 512;
+/// Fixed `C4AulExec::Values` capacity (C4AulExec.cpp:62-63). This is one
+/// execution-wide stack: suspended callers, nested script hosts and DirectExec
+/// all share the same 1,024 C4Value slots.
+const MAX_VALUE_STACK: usize = 1024;
 /// C4AUL_MAX_Par: every C4Aul call frame carries exactly 10 parameter slots
 /// (C4Aul.h); `Par(n)` beyond them reads nil and `F(...)` forwards at most
 /// this many.
@@ -35,6 +39,124 @@ const ARRAY_MAX_SIZE: usize = 1_000_000;
 /// `C4ValueList::MaxSize` (C4ValueList.h:32): `Global(index)` may grow up to,
 /// but not including, this index.
 const GLOBAL_SLOT_MAX_SIZE: i32 = 1_000_000;
+
+thread_local! {
+    /// C++ owns one process-global executor. Rust tests execute VMs in
+    /// parallel, so thread-local state preserves that synchronous singleton
+    /// behavior without coupling unrelated test threads.
+    static VALUE_STACK_SIZE: Cell<usize> = const { Cell::new(0) };
+    /// AB_CALL/AB_CALLGLOBAL always supply ten parameter slots even when the
+    /// selected native declares fewer. A cross-host dispatch consumes this
+    /// one-shot override at the actual callee boundary.
+    static CALL_PARAMETER_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+struct ValueStackReservation {
+    count: usize,
+}
+
+impl ValueStackReservation {
+    fn empty() -> Self {
+        Self { count: 0 }
+    }
+
+    fn reserve(count: usize) -> Result<Self, RuntimeError> {
+        let mut reservation = Self::empty();
+        reservation.grow(count)?;
+        Ok(reservation)
+    }
+
+    fn check(count: usize) -> Result<(), RuntimeError> {
+        VALUE_STACK_SIZE.with(|size| {
+            let fits = size
+                .get()
+                .checked_add(count)
+                .is_some_and(|next| next <= MAX_VALUE_STACK);
+            if fits {
+                Ok(())
+            } else {
+                Err(RuntimeError::new(
+                    "internal error: value stack overflow!",
+                ))
+            }
+        })
+    }
+
+    fn grow(&mut self, count: usize) -> Result<(), RuntimeError> {
+        if count == 0 {
+            return Ok(());
+        }
+        Self::check(count)?;
+        VALUE_STACK_SIZE.with(|size| size.set(size.get() + count));
+        self.count += count;
+        Ok(())
+    }
+
+    fn shrink(&mut self, count: usize) {
+        debug_assert!(self.count >= count);
+        VALUE_STACK_SIZE.with(|size| {
+            debug_assert!(size.get() >= count);
+            size.set(size.get().saturating_sub(count));
+        });
+        self.count = self.count.saturating_sub(count);
+    }
+}
+
+impl Drop for ValueStackReservation {
+    fn drop(&mut self) {
+        VALUE_STACK_SIZE.with(|size| {
+            debug_assert!(size.get() >= self.count);
+            size.set(size.get().saturating_sub(self.count));
+        });
+    }
+}
+
+struct CallParameterOverrideGuard {
+    previous: Option<usize>,
+    restore_previous: bool,
+}
+
+impl CallParameterOverrideGuard {
+    fn enter(parameter_slots: usize) -> Self {
+        let previous = CALL_PARAMETER_OVERRIDE.with(|slot| slot.replace(Some(parameter_slots)));
+        Self {
+            previous,
+            restore_previous: true,
+        }
+    }
+
+    /// Method-dispatch bridges establish their own ten-slot frame only when
+    /// the caller has not already reserved it and installed a zero-slot
+    /// ownership handoff.
+    fn enter_if_absent(parameter_slots: usize) -> Self {
+        CALL_PARAMETER_OVERRIDE.with(|slot| {
+            if slot.get().is_some() {
+                Self {
+                    previous: None,
+                    restore_previous: false,
+                }
+            } else {
+                slot.set(Some(parameter_slots));
+                Self {
+                    previous: None,
+                    restore_previous: true,
+                }
+            }
+        })
+    }
+}
+
+impl Drop for CallParameterOverrideGuard {
+    fn drop(&mut self) {
+        if self.restore_previous {
+            CALL_PARAMETER_OVERRIDE.with(|slot| slot.set(self.previous));
+        }
+    }
+}
+
+fn take_call_parameter_slots(default: usize) -> usize {
+    CALL_PARAMETER_OVERRIDE.with(|slot| slot.take().unwrap_or(default))
+}
 
 fn ensure_array_concat_size(left: usize, right: usize) -> Result<(), RuntimeError> {
     match left.checked_add(right) {
@@ -2714,6 +2836,16 @@ impl ReturnValue {
             ReturnValue::Reference(reference) => reference.read(),
         }
     }
+
+    fn into_value_on_stack(self) -> Result<Value, RuntimeError> {
+        let _result_slot = ValueStackReservation::reserve(1)?;
+        self.into_value()
+    }
+
+    fn into_tracked_on_stack(self) -> Result<TrackedValue, RuntimeError> {
+        let _result_slot = ValueStackReservation::reserve(1)?;
+        self.into_tracked()
+    }
 }
 
 struct GlobalCallContextGuard<'a> {
@@ -3157,11 +3289,14 @@ impl<'a> Vm<'a> {
     ) -> Result<ValueCell, RuntimeError> {
         // All supplied arguments evaluate before an engine call, even though
         // FnGlobal consumes only the first C4Aul parameter slot.
-        let mut values = Vec::with_capacity(args.len());
-        for arg in args {
-            values.push(self.evaluate(arg, env, depth)?);
-        }
-        let index = match values.first().cloned().unwrap_or(Value::Nil) {
+        let values = self.build_call_args(None, None, args, env, depth)?;
+        let _parameter_slot = ValueStackReservation::reserve(1)?;
+        let index = match values
+            .first()
+            .map(CallArg::read)
+            .transpose()?
+            .unwrap_or(Value::Nil)
+        {
             Value::Int(index) => index,
             Value::Bool(flag) => i32::from(flag),
             Value::RawBool(raw) => raw as u32 as i32,
@@ -3185,11 +3320,13 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<Option<ValueCell>, RuntimeError> {
-        let mut values = Vec::with_capacity(args.len());
-        for arg in args {
-            values.push(self.evaluate(arg, env, depth)?);
-        }
-        let value = values.first().cloned().unwrap_or(Value::Nil);
+        let values = self.build_call_args(None, None, args, env, depth)?;
+        let _parameter_slot = ValueStackReservation::reserve(1)?;
+        let value = values
+            .first()
+            .map(CallArg::read)
+            .transpose()?
+            .unwrap_or(Value::Nil);
         let name = match value {
             Value::String(name) => name.into_string(),
             Value::Nil => String::new(),
@@ -3228,7 +3365,7 @@ impl<'a> Vm<'a> {
         args: Vec<CallArg>,
     ) -> Result<Value, RuntimeError> {
         self.invoke_engine_global_raw(name, args, 0, None)?
-            .into_value()
+            .into_value_on_stack()
     }
 
     /// Invoke an already-resolved immutable script function without another
@@ -3252,7 +3389,7 @@ impl<'a> Vm<'a> {
                 ObjectState::default(),
                 None,
             )?
-            .into_value()
+            .into_value_on_stack()
         })
     }
 
@@ -3279,7 +3416,7 @@ impl<'a> Vm<'a> {
                 cells.state.clone(),
                 None,
             )?
-            .into_value()
+            .into_value_on_stack()
         })
     }
 
@@ -3315,7 +3452,15 @@ impl<'a> Vm<'a> {
             // with a nil `this`, so the destination host must restore Def.
             caller.definition_context |= self.definition_context;
         }
-        self.invoke_value(name, args, 0, cells.state.clone(), caller)
+        let _parameter_override =
+            CallParameterOverrideGuard::enter_if_absent(MAX_CALL_PARAMETERS);
+        self.invoke_value_with_reserved_result(
+            name,
+            args,
+            0,
+            cells.state.clone(),
+            caller,
+        )
     }
 
     /// Reference-returning counterpart to [`Vm::call_with_cells`].
@@ -3343,6 +3488,8 @@ impl<'a> Vm<'a> {
         if let Some(caller) = &mut caller {
             caller.definition_context |= self.definition_context;
         }
+        let _parameter_override =
+            CallParameterOverrideGuard::enter_if_absent(MAX_CALL_PARAMETERS);
         self.invoke_reference(name, args, 0, cells.state.clone(), caller)
             .map(ValueReference)
     }
@@ -3523,6 +3670,18 @@ impl<'a> Vm<'a> {
         caller: Option<ScriptCallerContext>,
     ) -> Result<Value, RuntimeError> {
         self.invoke_raw(name, args, depth, object_state, caller)?
+            .into_value_on_stack()
+    }
+
+    fn invoke_value_with_reserved_result(
+        &self,
+        name: &str,
+        args: Vec<CallArg>,
+        depth: usize,
+        object_state: ObjectState,
+        caller: Option<ScriptCallerContext>,
+    ) -> Result<Value, RuntimeError> {
+        self.invoke_raw(name, args, depth, object_state, caller)?
             .into_value()
     }
 
@@ -3535,7 +3694,7 @@ impl<'a> Vm<'a> {
         caller: Option<ScriptCallerContext>,
     ) -> Result<TrackedValue, RuntimeError> {
         self.invoke_raw(name, args, depth, object_state, caller)?
-            .into_tracked()
+            .into_tracked_on_stack()
     }
 
     fn invoke_engine_value(
@@ -3559,7 +3718,7 @@ impl<'a> Vm<'a> {
         caller: Option<ScriptCallerContext>,
     ) -> Result<TrackedValue, RuntimeError> {
         self.invoke_engine_raw(name, args, depth, object_state, caller)?
-            .into_tracked()
+            .into_tracked_on_stack()
     }
 
     fn invoke_engine_raw(
@@ -3587,6 +3746,8 @@ impl<'a> Vm<'a> {
             }
 
             if name == "VarN" && !self.has_host_function(name) {
+                let parameter_slots = take_call_parameter_slots(1);
+                let _value_stack = ValueStackReservation::reserve(parameter_slots)?;
                 return self.invoke_varn_raw(&args, caller.as_ref());
             }
 
@@ -3829,6 +3990,12 @@ impl<'a> Vm<'a> {
         object_state: ObjectState,
         caller: Option<ScriptCallerContext>,
     ) -> Result<ReturnValue, RuntimeError> {
+        // C4AulScriptFunc inherits GetParCount()==10. These are the caller's
+        // balanced argument slots and become the callee's parameter frame;
+        // cross-host AB_CALL may provide the same count through the one-shot
+        // override, so consume it exactly once at the true call boundary.
+        let parameter_slots = take_call_parameter_slots(MAX_CALL_PARAMETERS);
+        let mut value_stack = ValueStackReservation::reserve(parameter_slots)?;
         // Every script call carries the full ten-slot C4AulParSet. Parameter
         // conversion also visits the unnamed tail (whose declared type is
         // C4V_Any), so Par(n) observes the same eager-zero normalization as a
@@ -3858,24 +4025,6 @@ impl<'a> Vm<'a> {
             .iter()
             .map(|arg| matches!(arg, CallArg::Reference(_)))
             .collect::<Vec<_>>();
-        let debug_args = self.call_args_to_values(&args)?;
-        let profile_host_identity =
-            (function.access != AccessLevel::Global).then_some(self.host_identity);
-        let mut diagnostic = ScriptDiagnosticGuard::enter(
-            name,
-            profile_host_identity,
-            &debug_args[..debug_arg_count],
-            &debug_arg_references,
-            &self.this_value,
-            self.owner_definition_name,
-            function,
-        );
-        if let Some(debugger) = &self.debugger {
-            if let Some(callback) = debugger.on_call() {
-                callback(name, &debug_args[..debug_arg_count]);
-            }
-        }
-
         let mut env = Environment::new_with_params(
             &function.params,
             &args,
@@ -3918,6 +4067,26 @@ impl<'a> Vm<'a> {
         // table (C4AulParse.cpp:2709-2729). Hoist them first so an effect
         // callback's `var pClonk` cannot alias MART's persistent `pClonk`.
         hoist_function_vars(&function.body, &mut env);
+        let function_var_count = env.function_vars.borrow().len();
+        value_stack.grow(function_var_count)?;
+
+        let debug_args = self.call_args_to_values(&args)?;
+        let profile_host_identity =
+            (function.access != AccessLevel::Global).then_some(self.host_identity);
+        let mut diagnostic = ScriptDiagnosticGuard::enter(
+            name,
+            profile_host_identity,
+            &debug_args[..debug_arg_count],
+            &debug_arg_references,
+            &self.this_value,
+            self.owner_definition_name,
+            function,
+        );
+        if let Some(debugger) = &self.debugger {
+            if let Some(callback) = debugger.on_call() {
+                callback(name, &debug_args[..debug_arg_count]);
+            }
+        }
 
         // `define_object_local` preserves parameter/function-var bindings so
         // MART::Mode0(pObj, ...) receives its argument and a same-name local
@@ -3944,6 +4113,7 @@ impl<'a> Vm<'a> {
             }
         };
 
+        let _return_slot = ValueStackReservation::reserve(1)?;
         let debug_return = value.as_value()?;
         diagnostic.returned(&debug_return);
         if let Some(debugger) = &self.debugger {
@@ -4197,22 +4367,19 @@ impl<'a> Vm<'a> {
         self.prepare_native_host_call_args(name, args)
     }
 
-    fn invoke_host_function(
-        &self,
-        name: &str,
-        function: &RegisteredHostFunction,
-        args: &[Value],
-    ) -> Result<Value, RuntimeError> {
-        let args = self.prepare_registered_host_values(name, function, args)?;
-        self.invoke_host_function_raw(name, function, &args)
-    }
-
     fn invoke_host_function_call_args(
         &self,
         name: &str,
         function: &RegisteredHostFunction,
         args: &[CallArg],
     ) -> Result<Value, RuntimeError> {
+        // Reserve before dereferencing/converting CallArgs: a lazy HostPath
+        // may invoke engine code, but C++ has already balanced the callee's
+        // native frame at that point.
+        let parameter_slots = take_call_parameter_slots(
+            function.parameter_count().unwrap_or(MAX_CALL_PARAMETERS),
+        );
+        let _value_stack = ValueStackReservation::reserve(parameter_slots)?;
         let args = self.prepare_registered_host_call_args(name, function, args)?;
         let values = self.call_args_to_values(&args)?;
         let result = self.invoke_host_function_raw(name, function, &values)?;
@@ -4252,6 +4419,10 @@ impl<'a> Vm<'a> {
         function: &HostReferenceFunction,
         args: &[CallArg],
     ) -> Result<Value, RuntimeError> {
+        let parameter_slots = take_call_parameter_slots(
+            function.parameter_count().unwrap_or(MAX_CALL_PARAMETERS),
+        );
+        let _value_stack = ValueStackReservation::reserve(parameter_slots)?;
         let normalized;
         let args = match function.parameter_count() {
             Some(parameter_count) if args.len() != parameter_count => {
@@ -4471,6 +4642,12 @@ impl<'a> Vm<'a> {
                 // C4Aul evaluates the container once and keeps its key order
                 // stable for the duration of the loop.
                 let iterable_value = self.evaluate(iterable, env, depth)?;
+                // AB_FOREACH reserves its cursor metadata before checking the
+                // container type. Arrays retain iterable+cursor; maps retain
+                // iterable+key+value throughout the body.
+                let _foreach_slots = ValueStackReservation::reserve(
+                    if value_variable.is_some() { 3 } else { 2 },
+                )?;
 
                 let items: Vec<(Value, Option<Value>)> = if value_variable.is_some() {
                     match &iterable_value {
@@ -4500,7 +4677,6 @@ impl<'a> Vm<'a> {
                         }
                     }
                 };
-
                 for (key_or_item, map_value) in items {
                     // Both header spellings use the function-scoped named-var
                     // slots populated by the pre-parser/hoisting pass.
@@ -4718,16 +4894,6 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn evaluate_map_key(
-        &self,
-        expr: &Expr,
-        env: &mut Environment,
-        depth: usize,
-    ) -> Result<Value, RuntimeError> {
-        self.evaluate_set_no_ref_result(expr, env, depth)?
-            .into_value()
-    }
-
     fn evaluate(
         &self,
         expr: &Expr,
@@ -4742,6 +4908,10 @@ impl<'a> Vm<'a> {
         } else {
             c4_set_copy_value(value)
         };
+        // Every expression leaves one C4Value (or C4Value reference) for its
+        // parent opcode. Parents explicitly retain that slot while evaluating
+        // later operands; the root statement drops it on return.
+        ValueStackReservation::check(1)?;
         self.register_runtime_value(&value);
         Ok(value)
     }
@@ -4784,6 +4954,7 @@ impl<'a> Vm<'a> {
             let _pin_creation = LegacyPathPinCreationGuard::enter();
             self.evaluate_reference_or_value(first, env, depth)?
         };
+        let mut value_stack = ValueStackReservation::reserve(1)?;
         let mut discarded_values = Vec::with_capacity(discarded.len());
         for expression in discarded {
             let value = {
@@ -4791,6 +4962,7 @@ impl<'a> Vm<'a> {
                 self.evaluate_reference_or_value(expression, env, depth)?
             };
             discarded_values.push(value);
+            value_stack.grow(1)?;
         }
         // AB_STACK pops surplus results in reverse order before AB_CONDN
         // dereferences the retained first result. Keeping every temporary
@@ -4798,6 +4970,7 @@ impl<'a> Vm<'a> {
         while let Some(value) = discarded_values.pop() {
             drop(value);
         }
+        value_stack.shrink(discarded.len());
         first.into_value()
     }
 
@@ -4853,6 +5026,7 @@ impl<'a> Vm<'a> {
                 }
                 if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
                     let left = self.evaluate_tracked(lhs, env, depth)?;
+                    let _left_slot = ValueStackReservation::reserve(1)?;
                     let right = self.evaluate_tracked(rhs, env, depth)?;
                     let equal = self.values_equal(
                         &left.value,
@@ -4884,6 +5058,7 @@ impl<'a> Vm<'a> {
                         }
                         return self.evaluate(rhs, env, depth);
                     }
+                    let _left_slot = ValueStackReservation::reserve(1)?;
                     let right = self.evaluate(rhs, env, depth)?;
                     return Ok(Value::Bool(left.as_bool() && right.as_bool()));
                 }
@@ -4894,9 +5069,11 @@ impl<'a> Vm<'a> {
                         }
                         return self.evaluate(rhs, env, depth);
                     }
+                    let _left_slot = ValueStackReservation::reserve(1)?;
                     let right = self.evaluate(rhs, env, depth)?;
                     return Ok(Value::Bool(left.as_bool() || right.as_bool()));
                 }
+                let _left_slot = ValueStackReservation::reserve(1)?;
                 let right = self.evaluate(rhs, env, depth)?;
                 self.eval_binary(left, op, right, env.strict_level, None)
             }
@@ -4978,32 +5155,35 @@ impl<'a> Vm<'a> {
                             && !self.functions.contains_key(name)
                             && !self.has_host_function(name)
                         {
+                            let evaluated_args = self.build_call_args(
+                                None,
+                                None,
+                                args,
+                                env,
+                                depth + 1,
+                            )?;
+                            let _parameter_slots = ValueStackReservation::reserve(
+                                if name == "Var" { 1 } else { 2 },
+                            )?;
+                            let index = Self::slot_index_from_value(
+                                if name == "Var" { "Var()" } else { "Local()" },
+                                evaluated_args
+                                    .first()
+                                    .map(CallArg::read)
+                                    .transpose()?
+                                    .unwrap_or(Value::Nil),
+                            )?;
                             if name == "Local"
                                 && self.retain_global_call_context_for_host_paths
                             {
-                                let index = args
-                                    .first()
-                                    .cloned()
-                                    .unwrap_or(Expr::Literal(Literal::Int(0)));
-                                let _ = self.evaluate_slot_index(
-                                    "Local()",
-                                    &index,
-                                    env,
-                                    depth + 1,
-                                )?;
                                 return Ok(Value::Nil);
                             }
-                            let index = Box::new(
-                                args.first()
-                                    .cloned()
-                                    .unwrap_or(Expr::Literal(Literal::Int(0))),
-                            );
-                            let target = if name == "Var" {
-                                AssignmentTarget::VarSlot(index)
+                            let cell = if name == "Var" {
+                                slot_cell(&env.var_slots, index)
                             } else {
-                                AssignmentTarget::LocalSlot(index)
+                                env.object_state.local_slot_cell(index)
                             };
-                            return self.get_target_value(env, &target);
+                            return Ok(cell.borrow().clone());
                         }
                         // `Local(n, pObj)` reads ANOTHER object's numbered
                         // slot through the returned reference (FnLocal,
@@ -5013,12 +5193,22 @@ impl<'a> Vm<'a> {
                             && !self.functions.contains_key(name)
                             && !self.has_host_function(name)
                         {
-                            let index =
-                                self.evaluate_slot_index("Local()", &args[0], env, depth)?;
+                            let evaluated_args = self.build_call_args(
+                                None,
+                                None,
+                                args,
+                                env,
+                                depth + 1,
+                            )?;
+                            let _parameter_slots = ValueStackReservation::reserve(2)?;
+                            let index = Self::slot_index_from_value(
+                                "Local()",
+                                evaluated_args[0].read()?,
+                            )?;
                             if index < 0 {
                                 return Ok(Value::Nil);
                             }
-                            let target = self.evaluate(&args[1], env, depth + 1)?;
+                            let target = evaluated_args[1].read()?;
                             let cell = self.numbered_local_cell(env, index, Some(target));
                             let value = cell.borrow().clone();
                             return Ok(value);
@@ -5027,12 +5217,17 @@ impl<'a> Vm<'a> {
                         // numbered Local slot, returns the value; a nil or
                         // absent object defaults to the executing object.
                         if name == "SetLocal"
-                            && (1..=3).contains(&args.len())
                             && !self.functions.contains_key(name)
                             && !self.has_host_function(name)
                         {
                             return self
-                                .set_local_tracked(args, None, env, depth + 1)
+                                .set_local_tracked(
+                                    args,
+                                    None,
+                                    env,
+                                    depth + 1,
+                                    3,
+                                )
                                 .map(|tracked| tracked.value);
                         }
                         // FnSetGlobal writes the same engine-global numbered
@@ -5058,7 +5253,15 @@ impl<'a> Vm<'a> {
                             && (1..=2).contains(&args.len())
                             && !self.functions.contains_key(name)
                         {
-                            let local_name = match self.evaluate(&args[0], env, depth + 1)? {
+                            let evaluated_args = self.build_call_args(
+                                None,
+                                None,
+                                args,
+                                env,
+                                depth + 1,
+                            )?;
+                            let _parameter_slots = ValueStackReservation::reserve(2)?;
+                            let local_name = match evaluated_args[0].read()? {
                                 Value::String(local_name) => local_name,
                                 other => {
                                     return Err(RuntimeError::new(format!(
@@ -5067,9 +5270,9 @@ impl<'a> Vm<'a> {
                                     )))
                                 }
                             };
-                            let target = args
+                            let target = evaluated_args
                                 .get(1)
-                                .map(|arg| self.evaluate(arg, env, depth + 1))
+                                .map(CallArg::read)
                                 .transpose()?;
                             if self.retain_global_call_context_for_host_paths
                                 && target.as_ref().is_none_or(|value| {
@@ -5134,9 +5337,18 @@ impl<'a> Vm<'a> {
                             && !self.functions.contains_key(name)
                             && !self.has_host_function(name)
                         {
-                            let code = match args
+                            let evaluated_args = self.build_call_args(
+                                None,
+                                None,
+                                args,
+                                env,
+                                depth + 1,
+                            )?;
+                            let _eval_parameter_slot =
+                                ValueStackReservation::reserve(1)?;
+                            let code = match evaluated_args
                                 .first()
-                                .map(|arg| self.evaluate(arg, env, depth + 1))
+                                .map(CallArg::read)
                                 .transpose()?
                             {
                                 Some(Value::String(code)) => code,
@@ -5189,9 +5401,17 @@ impl<'a> Vm<'a> {
                             && !self.functions.contains_key(name)
                             && !self.has_host_function(name)
                         {
-                            let index = args
+                            let evaluated_args = self.build_call_args(
+                                None,
+                                None,
+                                args,
+                                env,
+                                depth + 1,
+                            )?;
+                            let _parameter_slot = ValueStackReservation::reserve(1)?;
+                            let index = evaluated_args
                                 .first()
-                                .map(|arg| self.evaluate(arg, env, depth + 1))
+                                .map(CallArg::read)
                                 .transpose()?
                                 .map(|value| match value {
                                     Value::Int(index) => Ok(index),
@@ -5407,25 +5627,30 @@ impl<'a> Vm<'a> {
             }
             Expr::Array(elements) => {
                 let mut values = Vec::with_capacity(elements.len());
+                let mut value_stack = ValueStackReservation::empty();
                 for element in elements {
                     values.push(c4_set_copy_value(self.evaluate(element, env, depth)?));
+                    value_stack.grow(1)?;
                 }
                 Ok(Value::Array(values))
             }
             Expr::Proplist(entries) => {
                 let mut map = ValueMap::with_capacity(entries.len());
+                let mut value_stack = ValueStackReservation::empty();
                 for (key_expr, value_expr) in entries {
-                    let key = self.evaluate_map_key(key_expr, env, depth)?;
-                    let value = self
-                        .evaluate_set_no_ref_result(value_expr, env, depth)?
-                        .into_value()?;
+                    let key = self.evaluate_set_no_ref_result(key_expr, env, depth)?;
+                    value_stack.grow(1)?;
+                    let key = key.into_value()?;
+                    let value = self.evaluate_set_no_ref_result(value_expr, env, depth)?;
+                    value_stack.grow(1)?;
+                    let value = value.into_value()?;
                     c4_map_assign_set(&mut map, key, value);
                 }
                 Ok(Value::Proplist(map))
             }
             Expr::Index(_, _) | Expr::ArrayAppend(_) => self
                 .evaluate_reference_or_value(expr, env, depth)?
-                .into_value(),
+                .into_value_on_stack(),
             Expr::ArrayAppendAssignment {
                 target,
                 operation,
@@ -5459,10 +5684,12 @@ impl<'a> Vm<'a> {
             Expr::Property(target, _)
                 if Self::expression_contains_array_append(target) =>
             {
-                self.evaluate_reference_or_value(expr, env, depth)?.into_value()
+                self.evaluate_reference_or_value(expr, env, depth)?
+                    .into_value_on_stack()
             }
             Expr::Property(target, name) => {
                 let proplist = self.evaluate(target, env, depth)?;
+                let _target_slot = ValueStackReservation::reserve(1)?;
                 self.eval_property(proplist, name, env)
             }
             Expr::SafeNavigation { receiver, steps } => self
@@ -5500,6 +5727,7 @@ impl<'a> Vm<'a> {
         } else {
             tracked.set_copy()
         };
+        ValueStackReservation::check(1)?;
         self.register_runtime_value(&tracked.value);
         Ok(tracked)
     }
@@ -5545,25 +5773,30 @@ impl<'a> Vm<'a> {
             },
             Expr::Array(elements) => {
                 let mut tracked = Vec::with_capacity(elements.len());
+                let mut value_stack = ValueStackReservation::empty();
                 for element in elements {
                     tracked.push(self.evaluate_tracked(element, env, depth)?.set_copy());
+                    value_stack.grow(1)?;
                 }
                 Ok(TrackedValue::array(tracked))
             }
             Expr::Proplist(entries) => {
                 let mut tracked = Vec::with_capacity(entries.len());
+                let mut value_stack = ValueStackReservation::empty();
                 for (key_expr, value_expr) in entries {
-                    let key = self.evaluate_map_key(key_expr, env, depth)?;
-                    let value = self
-                        .evaluate_set_no_ref_result(value_expr, env, depth)?
-                        .into_tracked()?;
+                    let key = self.evaluate_set_no_ref_result(key_expr, env, depth)?;
+                    value_stack.grow(1)?;
+                    let key = key.into_value()?;
+                    let value = self.evaluate_set_no_ref_result(value_expr, env, depth)?;
+                    value_stack.grow(1)?;
+                    let value = value.into_tracked()?;
                     tracked.push((key, value));
                 }
                 Ok(TrackedValue::proplist(tracked))
             }
             Expr::Index(_, _) | Expr::ArrayAppend(_) => self
                 .evaluate_reference_or_value(expr, env, depth)?
-                .into_tracked(),
+                .into_tracked_on_stack(),
             Expr::ArrayAppendAssignment {
                 target,
                 operation,
@@ -5594,10 +5827,11 @@ impl<'a> Vm<'a> {
                 if Self::expression_contains_array_append(target) =>
             {
                 self.evaluate_reference_or_value(expr, env, depth)?
-                    .into_tracked()
+                    .into_tracked_on_stack()
             }
             Expr::Property(target, name) => {
                 let collection = self.evaluate_tracked(target, env, depth)?;
+                let _target_slot = ValueStackReservation::reserve(1)?;
                 self.eval_property_tracked(collection, name, env)
             }
             Expr::SafeNavigation { receiver, steps } => {
@@ -5605,6 +5839,7 @@ impl<'a> Vm<'a> {
             }
             Expr::Binary(left, BinaryOp::Concat, right) => {
                 let left = self.evaluate_tracked(left, env, depth)?;
+                let _left_slot = ValueStackReservation::reserve(1)?;
                 let right = self.evaluate_tracked(right, env, depth)?;
                 self.eval_concat_tracked(left, right, env.strict_level, "..")
             }
@@ -5652,7 +5887,7 @@ impl<'a> Vm<'a> {
                     env,
                     depth,
                 )?
-                .into_tracked(),
+                .into_tracked_on_stack(),
             Expr::Call {
                 callee,
                 args,
@@ -5661,13 +5896,19 @@ impl<'a> Vm<'a> {
             } if !*is_optional => {
                 if let Expr::Property(base, name) = callee.as_ref() {
                     let target = self.evaluate(base, env, depth + 1)?;
-                    if matches!(target, Value::Object(_))
+                    let _target_slot = ValueStackReservation::reserve(1)?;
+                    if matches!(&target, Value::Object(id) if *id != 0)
                         && name == "SetLocal"
-                        && (1..=3).contains(&args.len())
                         && !self.functions.contains_key(name)
                         && !self.has_host_function(name)
                     {
-                        return self.set_local_tracked(args, Some(target), env, depth + 1);
+                        return self.set_local_tracked(
+                            args,
+                            Some(target),
+                            env,
+                            depth + 1,
+                            MAX_CALL_PARAMETERS,
+                        );
                     }
                     return self
                         .invoke_property_call_with_target(
@@ -5695,11 +5936,16 @@ impl<'a> Vm<'a> {
                         return self.evaluate(expr, env, depth).map(TrackedValue::runtime);
                     }
                     if name == "SetLocal"
-                        && (1..=3).contains(&args.len())
                         && function.is_none()
                         && !self.has_host_function(name)
                     {
-                        return self.set_local_tracked(args, None, env, depth + 1);
+                        return self.set_local_tracked(
+                            args,
+                            None,
+                            env,
+                            depth + 1,
+                            3,
+                        );
                     }
                     if name == "SetGlobal"
                         && function.is_none()
@@ -5799,9 +6045,11 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<TrackedValue, RuntimeError> {
-        let mut current = self
-            .evaluate_set_no_ref_result(receiver, env, depth)?
-            .into_tracked()?;
+        let current = self.evaluate_set_no_ref_result(receiver, env, depth)?;
+        // Every navigation opcode rewrites one receiver/result slot in place.
+        // Index and method arguments execute while that slot remains live.
+        let _current_slot = ValueStackReservation::reserve(1)?;
+        let mut current = current.into_tracked()?;
 
         for step in steps {
             if step.nil_guard && matches!(current.value, Value::Nil) {
@@ -5809,8 +6057,9 @@ impl<'a> Vm<'a> {
             }
 
             current = match &step.operation {
-                NavigationOperation::Index(index_expr) => {
-                    let index = self.evaluate(index_expr, env, depth)?;
+                NavigationOperation::Index(index_operand) => {
+                    let (index, _index_slot) =
+                        self.evaluate_index_operand(index_operand, env, depth)?;
                     self.eval_index_tracked(current, index, env)?.set_copy()
                 }
                 // SetNoRef before AB_JUMPNIL makes the guarded base a value.
@@ -5868,7 +6117,7 @@ impl<'a> Vm<'a> {
         self.evaluate_reference_assignment_raw(
             target, operation, operator, value, env, depth, false,
         )?
-        .into_tracked()
+        .into_tracked_on_stack()
     }
 
     fn evaluate_reference_assignment_raw(
@@ -5890,6 +6139,7 @@ impl<'a> Vm<'a> {
             let _pin_creation = LegacyPathPinCreationGuard::enter();
             self.assignment_target_to_reference_or_value(env, target, depth)?
         };
+        let _target_slot = ValueStackReservation::reserve(1)?;
         let reference = match target {
             ReturnValue::Reference(reference) => reference,
             ReturnValue::Value(left) => {
@@ -5925,6 +6175,7 @@ impl<'a> Vm<'a> {
                 Self::c4v_type_name(left.value.c4v_type())
             ))
         };
+        let mut right_slot = ValueStackReservation::empty();
         let result = if matches!(operation, Some(BinaryOp::NilCoalescing)) {
             let left = reference.read_tracked()?;
             if !matches!(left.value, Value::Nil) {
@@ -5936,6 +6187,7 @@ impl<'a> Vm<'a> {
                 });
             }
             let right = self.evaluate_tracked(value, env, depth)?;
+            right_slot.grow(1)?;
             if let Some(left) = reference.resolved_legacy_value() {
                 return Err(invalidated_error(left));
             }
@@ -5944,6 +6196,7 @@ impl<'a> Vm<'a> {
             // The RHS runs while the reference is live. Read only afterward:
             // it may have changed the referenced slot before AB_*It executes.
             let right = self.evaluate_tracked(value, env, depth)?;
+            right_slot.grow(1)?;
             if let Some(left) = reference.resolved_legacy_value() {
                 return Err(invalidated_error(left));
             }
@@ -5965,6 +6218,7 @@ impl<'a> Vm<'a> {
             // as AB_ARRAYA_R does while evaluating the target.
             reference.read_tracked()?;
             let right = self.evaluate_tracked(value, env, depth)?;
+            right_slot.grow(1)?;
             if let Some(left) = reference.resolved_legacy_value() {
                 return Err(invalidated_error(left));
             }
@@ -5992,7 +6246,7 @@ impl<'a> Vm<'a> {
         operation: &str,
     ) -> Result<Value, RuntimeError> {
         self.update_counter_raw(expr, env, delta, return_old, operation)?
-            .into_value()
+            .into_value_on_stack()
     }
 
     fn update_counter_raw(
@@ -6028,6 +6282,7 @@ impl<'a> Vm<'a> {
                 }
             }
         };
+        let _operand_slot = ValueStackReservation::reserve(1)?;
         let old_value = Self::counter_operand(reference.read()?, operation)?;
         let new_value = old_value.wrapping_add(delta);
         reference.write(Value::Int(new_value))?;
@@ -6964,10 +7219,14 @@ impl<'a> Vm<'a> {
             }
             // Parse_Params(0, nullptr) still evaluates every explicit
             // argument, but a missing failsafe call forwards no `...` slots.
+            let _target_slot = ValueStackReservation::reserve(1)?;
             let _ = self.build_call_args(Some(name), None, args, env, depth + 1)?;
             return Ok(ReturnValue::Value(TrackedValue::runtime(Value::Nil)));
         }
 
+        // AB_CALLGLOBAL pushes a nil target/return slot before parsing its
+        // arguments. It stays live through the selected global function.
+        let _target_slot = ValueStackReservation::reserve(1)?;
         let mut evaluated_args =
             self.build_call_args(Some(name), function, args, env, depth + 1)?;
         // Parse_Params evaluates every explicit expression, then balances the
@@ -6976,6 +7235,10 @@ impl<'a> Vm<'a> {
         if forward_rest {
             Self::append_forwarded_args(&mut evaluated_args, env, MAX_CALL_PARAMETERS)?;
         }
+        // Parse_Params balances every global call to ten slots. Reserve them
+        // here and tell the eventual script/native boundary that these are
+        // already the callee's parameter frame.
+        let _parameter_slots = ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
 
         let _context = GlobalCallContextGuard::enter(self.global_call_context_hook);
         let global_vm = self.engine_global_vm();
@@ -7004,9 +7267,17 @@ impl<'a> Vm<'a> {
                 }));
             }
         }
-        global_vm
-            .invoke_engine_global_raw(name, evaluated_args, depth + 1, Some(env.caller_context()))
-            .map(materialize_target_call_result)
+        // Install the one-shot only after hooks and VM builtins have run: an
+        // eval builtin or context hook may itself call script and must not
+        // consume the parameter ownership intended for this dispatch.
+        let _parameter_override = CallParameterOverrideGuard::enter(0);
+        global_vm.invoke_engine_global_raw(
+            name,
+            evaluated_args,
+            depth + 1,
+            Some(env.caller_context()),
+        )
+        .map(materialize_target_call_result)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7020,7 +7291,7 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<Value, RuntimeError> {
         self.invoke_global_call_raw(name, args, failsafe, forward_rest, env, depth)?
-            .into_value()
+            .into_value_on_stack()
     }
 
     /// `base->name(args)` / `base->~name(args)`: the direct object call
@@ -7042,6 +7313,7 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<Value, RuntimeError> {
         let target = self.evaluate(base, env, depth + 1)?;
+        let _target_slot = ValueStackReservation::reserve(1)?;
         self.invoke_property_call_with_target(
             target,
             name,
@@ -7111,12 +7383,16 @@ impl<'a> Vm<'a> {
         // call sites). Matches the two-argument `LocalN("name", pObj)` form.
         // A zero target still falls through to the "target is zero" guard, as
         // the C++ arrow-call check fires before FnLocalN runs.
-        if matches!(target, Value::Object(_))
+        if matches!(&target, Value::Object(id) if *id != 0)
             && name == "LocalN"
             && args.len() == 1
             && !self.functions.contains_key(name)
         {
-            let local_name = match self.evaluate(&args[0], env, depth + 1)? {
+            let evaluated_args =
+                self.build_call_args(None, None, args, env, depth + 1)?;
+            let _parameter_slots =
+                ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+            let local_name = match evaluated_args[0].read()? {
                 Value::String(local_name) => local_name,
                 other => {
                     return Err(RuntimeError::new(format!(
@@ -7134,13 +7410,20 @@ impl<'a> Vm<'a> {
         // TARGET's `__local_{n}` slot through the cross-object cell hook, not
         // world dispatch. A negative index reads nil like FnLocal. Hazard's
         // Ammo.c `return(ammo->Local(0))` depends on it.
-        if matches!(target, Value::Object(_))
+        if matches!(&target, Value::Object(id) if *id != 0)
             && name == "Local"
             && args.len() == 1
             && !self.functions.contains_key(name)
             && !self.has_host_function(name)
         {
-            let index = self.evaluate_slot_index("Local()", &args[0], env, depth)?;
+            let evaluated_args =
+                self.build_call_args(None, None, args, env, depth + 1)?;
+            let _parameter_slots =
+                ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+            let index = Self::slot_index_from_value(
+                "Local()",
+                evaluated_args[0].read()?,
+            )?;
             if index < 0 {
                 return Ok(Value::Nil);
             }
@@ -7152,19 +7435,28 @@ impl<'a> Vm<'a> {
         // pObj the executing object, so an omitted/falsy explicit target
         // defaults to the receiver. Route directly through the same numbered
         // local cell hook as Local(index, pObj), never world method dispatch.
-        if matches!(target, Value::Object(_))
+        if matches!(&target, Value::Object(id) if *id != 0)
             && name == "SetLocal"
-            && (1..=3).contains(&args.len())
             && !self.functions.contains_key(name)
             && !self.has_host_function(name)
         {
             return self
-                .set_local_tracked(args, Some(target), env, depth + 1)
+                .set_local_tracked(
+                    args,
+                    Some(target),
+                    env,
+                    depth + 1,
+                    MAX_CALL_PARAMETERS,
+                )
                 .map(|tracked| tracked.value);
         }
         if matches!(
             &target,
-            Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
+            Value::Nil
+                | Value::Int(0)
+                | Value::Bool(false)
+                | Value::RawBool(0)
+                | Value::Object(0)
         )
             || matches!(&target, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
         {
@@ -7174,6 +7466,8 @@ impl<'a> Vm<'a> {
             // an argument error win before reporting the zero target.
             let function = self.functions.get(name);
             let _ = self.build_call_args(Some(name), function, args, env, depth + 1)?;
+            let _parameter_slots =
+                ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
             return Err(RuntimeError::new("Object call: target is zero!"));
         }
         match &target {
@@ -7185,6 +7479,8 @@ impl<'a> Vm<'a> {
                 if forward_rest {
                     Self::append_forwarded_args(&mut evaluated_args, env, MAX_CALL_PARAMETERS)?;
                 }
+                let _parameter_slots =
+                    ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
                 let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
                 dispatch_args.push(target.clone());
                 dispatch_args.push(Value::String(name.to_string().into()));
@@ -7201,6 +7497,7 @@ impl<'a> Vm<'a> {
                 // its dedicated preserving entry can reproduce C++ AB_CALL's
                 // `CallCtx.Caller = pCurCtx`.
                 let _guard = CallerContextGuard::enter(Some(env.caller_context()));
+                let _parameter_override = CallParameterOverrideGuard::enter(0);
                 dispatch(&dispatch_args)
             }
             Value::Object(_) | Value::C4Id(_) => {
@@ -7211,6 +7508,11 @@ impl<'a> Vm<'a> {
             }
             other => {
                 if self.method_dispatch.is_some() {
+                    let function = self.functions.get(name);
+                    let _ =
+                        self.build_call_args(Some(name), function, args, env, depth + 1)?;
+                    let _parameter_slots =
+                        ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
                     Err(RuntimeError::new(format!(
                         "Object call: Invalid target type {}, expected object or id!",
                         other.type_name()
@@ -7253,7 +7555,9 @@ impl<'a> Vm<'a> {
         if forward_rest {
             Self::append_forwarded_args(&mut evaluated_args, env, MAX_CALL_PARAMETERS)?;
         }
-        self.invoke_value(
+        let _parameter_override =
+            CallParameterOverrideGuard::enter(MAX_CALL_PARAMETERS);
+        self.invoke_value_with_reserved_result(
             name,
             evaluated_args,
             depth + 1,
@@ -7271,6 +7575,7 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<Vec<CallArg>, RuntimeError> {
         let mut evaluated_args = Vec::with_capacity(args.len());
+        let mut value_stack = ValueStackReservation::empty();
         for (index, arg) in args.iter().enumerate() {
             let script_wants_reference = function
                 .and_then(|function| function.params.get(index))
@@ -7315,6 +7620,7 @@ impl<'a> Vm<'a> {
                     ReturnValue::Reference(reference) => CallArg::Reference(reference),
                     ReturnValue::Value(value) => CallArg::Value(value),
                 });
+                value_stack.grow(1)?;
                 continue;
             }
             if (script_wants_reference || host_wants_reference) && can_be_reference {
@@ -7326,8 +7632,10 @@ impl<'a> Vm<'a> {
                     ReturnValue::Reference(reference) => CallArg::Reference(reference),
                     ReturnValue::Value(value) => CallArg::Value(value),
                 });
+                value_stack.grow(1)?;
             } else {
                 evaluated_args.push(CallArg::Value(self.evaluate_tracked(arg, env, depth)?));
+                value_stack.grow(1)?;
             }
         }
         Ok(evaluated_args)
@@ -7464,6 +7772,7 @@ impl<'a> Vm<'a> {
             if *operator == "??=" && !matches!(left, Value::Nil) {
                 return Ok(left);
             }
+            let _left_slot = ValueStackReservation::reserve(1)?;
             self.evaluate(value_expr, env, depth)?;
             return Err(RuntimeError::new(format!(
                 "operator \"{operator}\" left side: got \"{}\", but expected \"&\"!",
@@ -7483,7 +7792,7 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<TrackedValue, RuntimeError> {
         self.evaluate_plain_assignment_raw(target, value_expr, env, depth)?
-            .into_tracked()
+            .into_tracked_on_stack()
     }
 
     fn evaluate_plain_assignment_raw(
@@ -7502,6 +7811,7 @@ impl<'a> Vm<'a> {
             let _pin_creation = LegacyPathPinCreationGuard::enter();
             self.assignment_target_to_reference_or_value(env, target, depth)?
         };
+        let _target_slot = ValueStackReservation::reserve(1)?;
         let reference = match target {
             ReturnValue::Reference(reference) => reference,
             ReturnValue::Value(left) => {
@@ -7512,7 +7822,9 @@ impl<'a> Vm<'a> {
                 )));
             }
         };
-        let tracked = match self.evaluate_set_no_ref_result(value_expr, env, depth)? {
+        let value = self.evaluate_set_no_ref_result(value_expr, env, depth)?;
+        let _right_slot = ValueStackReservation::reserve(1)?;
+        let tracked = match value {
             // SetNoRef cannot rewrite a reference-returning call opcode, so
             // AB_Set's CheckOpPar<Any> reaches FnCnvDeref. Deref copies the
             // referent through Set before the destination assignment.
@@ -7527,106 +7839,6 @@ impl<'a> Vm<'a> {
         }
         reference.write_tracked(tracked.clone())?;
         Ok(ReturnValue::Reference(reference))
-    }
-
-    fn assignment_target_value(
-        &self,
-        env: &mut Environment,
-        target: &AssignmentTarget,
-    ) -> Result<Value, RuntimeError> {
-        match target {
-            AssignmentTarget::EffectSlot(args) => {
-                let mut arg_values = Vec::new();
-                for arg in args {
-                    arg_values.push(self.evaluate(arg, env, 0)?);
-                }
-                // `EffectVar(...)` reads through the host's real effect
-                // variables (FnEffectVar by-reference, C4Script.cpp) —
-                // compound assignments (--EffectVar) must see live values.
-                if let Some(host) = self.host_functions.get("EffectVar") {
-                    let _guard = CallerContextGuard::enter(Some(env.caller_context()));
-                    return self.invoke_host_function("EffectVar", host, &arg_values);
-                }
-                // Host-less fixture VMs keep the legacy env-slot shim.
-                let slot_name = format!(
-                    "__effect_{}",
-                    arg_values
-                        .iter()
-                        .map(|v| match v {
-                            Value::Int(n) => n.to_string(),
-                            Value::String(s) => s.to_string(),
-                            _ => format!("{:?}", v),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("_")
-                );
-                Ok(env.get(&slot_name)?.unwrap_or(Value::Nil))
-            }
-            AssignmentTarget::MethodSlot {
-                object,
-                method,
-                args,
-            } => {
-                if !matches!(method.as_str(), "LocalN" | "Local" | "Var" | "EffectVar") {
-                    return self.assignment_target_to_lvalue(env, target, 0)?.read();
-                }
-                // Evaluate the object to get its identity
-                let object_value = self.evaluate(object, env, 0)?;
-                // `LocalN("name", obj)` / `obj->LocalN("name")` reads the
-                // TARGET's named local through the resolved cell (FnLocalN
-                // by-reference access, C4Script.cpp:4591-4605).
-                if method == "LocalN" && args.len() == 1 {
-                    let local_name = match self.evaluate(&args[0], env, 0)? {
-                        Value::String(local_name) => local_name,
-                        other => {
-                            return Err(RuntimeError::new(format!(
-                                "LocalN: expected string for name, got {}",
-                                other.type_name()
-                            )))
-                        }
-                    };
-                    let cell = self.localn_cell(env, &local_name, Some(object_value));
-                    let value = cell.borrow().clone();
-                    return Ok(value);
-                }
-                // `Local(n, obj)` compound reads (FnLocal by-reference,
-                // C4Script.cpp:3423-3433).
-                if method == "Local" && args.len() == 1 {
-                    let index = self.evaluate_slot_index("Local()", &args[0], env, 0)?;
-                    if index < 0 {
-                        return Ok(Value::Nil);
-                    }
-                    let cell = self.numbered_local_cell(env, index, Some(object_value));
-                    let value = cell.borrow().clone();
-                    return Ok(value);
-                }
-                let object_id = match object_value {
-                    Value::Int(n) => n.to_string(),
-                    Value::String(s) => s.to_string(),
-                    _ => format!("{:?}", object_value),
-                };
-
-                // Evaluate arguments to create the key
-                let mut arg_values = Vec::new();
-                for arg in args {
-                    arg_values.push(self.evaluate(arg, env, 0)?);
-                }
-                let key = arg_values
-                    .iter()
-                    .map(|v| match v {
-                        Value::Int(n) => n.to_string(),
-                        Value::String(s) => s.to_string(),
-                        _ => format!("{:?}", v),
-                    })
-                    .collect::<Vec<_>>()
-                    .join("_");
-
-                // Retrieve from environment with naming scheme: __method_{object_id}_{method}_{key}
-                let slot_name = format!("__method_{}_{}_{}", object_id, method, key);
-                Ok(env.get(&slot_name)?.unwrap_or(Value::Nil))
-            }
-            _ => self.assignment_target_to_lvalue(env, target, 0)?.read(),
-        }
     }
 
     fn assignment_target_to_reference_or_value(
@@ -7667,6 +7879,7 @@ impl<'a> Vm<'a> {
             AssignmentTarget::ArrayAppend(base) => self.evaluate_array_append(base, env, depth),
             AssignmentTarget::Property(base, property) => {
                 let base = self.assignment_target_to_reference_or_value(env, base, depth)?;
+                let _base_slot = ValueStackReservation::reserve(1)?;
                 if let ReturnValue::Reference(reference) = &base {
                     if reference.resolved_legacy_value().is_none()
                         && !matches!(reference, LValueRef::HostPath { .. })
@@ -7687,6 +7900,7 @@ impl<'a> Vm<'a> {
             }
             AssignmentTarget::Index(base, index) => {
                 let base = self.assignment_target_to_reference_or_value(env, base, depth)?;
+                let _base_slot = ValueStackReservation::reserve(1)?;
                 self.index_reference_or_value(base, index, env, depth)
             }
             _ => self
@@ -7714,6 +7928,7 @@ impl<'a> Vm<'a> {
                 .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'"))),
             AssignmentTarget::Property(base, property) => {
                 let reference = self.assignment_target_to_lvalue(env, base, depth)?;
+                let _base_slot = ValueStackReservation::reserve(1)?;
                 if !matches!(&reference, LValueRef::HostPath { .. }) {
                     let collection = reference.read()?;
                     match &collection {
@@ -7738,10 +7953,15 @@ impl<'a> Vm<'a> {
                 reference.detach_container_identity_if_shared();
                 reference.append(PathSegment::Property(property.clone()))
             }
-            AssignmentTarget::Index(base, index_expr) => {
+            AssignmentTarget::Index(base, index_operand) => {
                 let reference = self.assignment_target_to_lvalue(env, base, depth)?;
+                let _base_slot = ValueStackReservation::reserve(1)?;
                 if !matches!(&reference, LValueRef::HostPath { .. }) {
-                    let index = self.evaluate(index_expr, env, depth)?;
+                    let (index, _index_slot) = self.evaluate_index_operand(
+                        index_operand,
+                        env,
+                        depth,
+                    )?;
                     let collection = reference.read()?;
                     match (&collection, &index) {
                         (Value::Object(0), _) => {
@@ -7770,7 +7990,11 @@ impl<'a> Vm<'a> {
                         }
                     }
                 }
-                let index = self.evaluate(index_expr, env, depth)?;
+                let (index, _index_slot) = self.evaluate_index_operand(
+                    index_operand,
+                    env,
+                    depth,
+                )?;
                 reference.detach_container_identity_if_shared();
                 reference.append(PathSegment::Index(index))
             }
@@ -7784,6 +8008,7 @@ impl<'a> Vm<'a> {
             }
             AssignmentTarget::LocalSlot(index_expr) => {
                 let index = self.evaluate_slot_index("Local()", index_expr, env, depth)?;
+                let _parameter_slots = ValueStackReservation::reserve(2)?;
                 if self.retain_global_call_context_for_host_paths {
                     return Err(RuntimeError::new(
                         "function 'Local' does not return a reference",
@@ -7793,14 +8018,20 @@ impl<'a> Vm<'a> {
             }
             AssignmentTarget::VarSlot(index_expr) => {
                 let index = self.evaluate_slot_index("Var()", index_expr, env, depth)?;
+                let _parameter_slot = ValueStackReservation::reserve(1)?;
                 Ok(self.tracked_cell(slot_cell(&env.var_slots, index)))
             }
             AssignmentTarget::EffectSlot(args) => {
-                let raw_arg_values = args
+                let evaluated_args =
+                    self.build_call_args(None, None, args, env, depth + 1)?;
+                let raw_arg_values = evaluated_args
                     .iter()
-                    .map(|arg| self.evaluate(arg, env, depth + 1))
+                    .map(CallArg::read)
                     .collect::<Result<Vec<_>, _>>()?;
                 if let Some(function) = self.host_functions.get("EffectVar") {
+                    let _parameter_slots = ValueStackReservation::reserve(
+                        function.parameter_count().unwrap_or(3),
+                    )?;
                     let caller = env.caller_context();
                     let _guard = CallerContextGuard::enter(Some(caller.clone()));
                     let arg_values = self.prepare_registered_host_values(
@@ -7820,6 +8051,7 @@ impl<'a> Vm<'a> {
                         legacy_pin: None,
                     });
                 }
+                let _parameter_slots = ValueStackReservation::reserve(3)?;
 
                 // Host-less fixture VMs retain EffectVar slots in ordinary
                 // environment cells; exposing that cell keeps the same
@@ -7893,7 +8125,10 @@ impl<'a> Vm<'a> {
                 // `LocalN("x") = v` writes the named object local through;
                 // the two-argument form targets ANOTHER object's local via
                 // the host cell hook.
-                let local_name = match self.evaluate(&args[0], env, depth + 1)? {
+                let evaluated_args =
+                    self.build_call_args(None, None, args, env, depth + 1)?;
+                let _parameter_slots = ValueStackReservation::reserve(2)?;
+                let local_name = match evaluated_args[0].read()? {
                     Value::String(local_name) => local_name,
                     other => {
                         return Err(RuntimeError::new(format!(
@@ -7902,9 +8137,9 @@ impl<'a> Vm<'a> {
                         )))
                     }
                 };
-                let target = args
+                let target = evaluated_args
                     .get(1)
-                    .map(|arg| self.evaluate(arg, env, depth + 1))
+                    .map(CallArg::read)
                     .transpose()?;
                 if self.retain_global_call_context_for_host_paths
                     && target.as_ref().is_none_or(|value| {
@@ -7930,9 +8165,12 @@ impl<'a> Vm<'a> {
                     && !self.functions.contains_key(name)
                     && !self.has_host_function(name) =>
             {
-                let index = args
+                let evaluated_args =
+                    self.build_call_args(None, None, args, env, depth + 1)?;
+                let _parameter_slot = ValueStackReservation::reserve(1)?;
+                let index = evaluated_args
                     .first()
-                    .map(|arg| self.evaluate(arg, env, depth + 1))
+                    .map(CallArg::read)
                     .transpose()?
                     .map(|value| match value {
                         Value::Int(index) => Ok(index),
@@ -7974,9 +8212,32 @@ impl<'a> Vm<'a> {
                 object,
                 method,
                 args,
+                is_arrow,
             } if method == "LocalN" && args.len() == 1 => {
-                let object_value = self.evaluate(object, env, depth + 1)?;
-                let local_name = match self.evaluate(&args[0], env, depth + 1)? {
+                let (object_value, evaluated_args, _target_slot, _parameter_slots) =
+                    self.evaluate_method_slot_operands(
+                        object,
+                        args,
+                        *is_arrow,
+                        None,
+                        None,
+                        2,
+                        env,
+                        depth,
+                    )?;
+                if *is_arrow
+                    && matches!(
+                        &object_value,
+                        Value::Nil
+                            | Value::Int(0)
+                            | Value::Bool(false)
+                            | Value::RawBool(0)
+                            | Value::Object(0)
+                    )
+                {
+                    return Err(RuntimeError::new("Object call: target is zero!"));
+                }
+                let local_name = match evaluated_args[0].read()? {
                     Value::String(local_name) => local_name,
                     other => {
                         return Err(RuntimeError::new(format!(
@@ -7993,27 +8254,65 @@ impl<'a> Vm<'a> {
                 object,
                 method,
                 args,
+                is_arrow,
             } if method == "Local" && args.len() == 1 => {
-                let object_value = self.evaluate(object, env, depth + 1)?;
-                let index = self.evaluate_slot_index("Local()", &args[0], env, depth)?;
+                let (object_value, evaluated_args, _target_slot, _parameter_slots) =
+                    self.evaluate_method_slot_operands(
+                        object,
+                        args,
+                        *is_arrow,
+                        None,
+                        None,
+                        2,
+                        env,
+                        depth,
+                    )?;
+                if *is_arrow
+                    && matches!(
+                        &object_value,
+                        Value::Nil
+                            | Value::Int(0)
+                            | Value::Bool(false)
+                            | Value::RawBool(0)
+                            | Value::Object(0)
+                    )
+                {
+                    return Err(RuntimeError::new("Object call: target is zero!"));
+                }
+                let index = Self::slot_index_from_value(
+                    "Local()",
+                    evaluated_args[0].read()?,
+                )?;
                 Ok(self.tracked_cell(self.numbered_local_cell(env, index, Some(object_value))))
             }
             AssignmentTarget::MethodSlot {
                 object,
                 method,
                 args,
+                is_arrow,
             } if matches!(method.as_str(), "Var" | "EffectVar") => {
                 // Preserve the legacy method-slot shim as an actual retained
                 // cell so plain assignment can resolve it before the RHS.
-                let object_value = self.evaluate(object, env, depth + 1)?;
+                let native_slots = if method == "Var" { 1 } else { 3 };
+                let (object_value, evaluated_args, _target_slot, _parameter_slots) =
+                    self.evaluate_method_slot_operands(
+                        object,
+                        args,
+                        *is_arrow,
+                        None,
+                        None,
+                        native_slots,
+                        env,
+                        depth,
+                    )?;
                 let object_id = match object_value {
                     Value::Int(value) => value.to_string(),
                     Value::String(value) => value.into_string(),
                     other => format!("{other:?}"),
                 };
-                let arg_values = args
+                let arg_values = evaluated_args
                     .iter()
-                    .map(|arg| self.evaluate(arg, env, depth + 1))
+                    .map(CallArg::read)
                     .collect::<Result<Vec<_>, _>>()?;
                 let key = arg_values
                     .iter()
@@ -8035,8 +8334,20 @@ impl<'a> Vm<'a> {
                 object,
                 method,
                 args,
+                is_arrow,
             } if !matches!(method.as_str(), "Var" | "EffectVar") => {
-                let mut target = self.evaluate(object, env, depth + 1)?;
+                let function = self.functions.get(method);
+                let (mut target, evaluated_args, _target_slot, _parameter_slots) =
+                    self.evaluate_method_slot_operands(
+                        object,
+                        args,
+                        *is_arrow,
+                        Some(method),
+                        function,
+                        MAX_CALL_PARAMETERS,
+                        env,
+                        depth,
+                    )?;
                 if let Value::Proplist(map) = &target {
                     if let Some(Value::Int(id)) = map.get("id") {
                         if *id > 0 {
@@ -8044,12 +8355,13 @@ impl<'a> Vm<'a> {
                         }
                     }
                 }
-                let function = self.functions.get(method);
-                let evaluated_args =
-                    self.build_call_args(Some(method), function, args, env, depth + 1)?;
                 if matches!(
                     target,
-                    Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
+                    Value::Nil
+                        | Value::Int(0)
+                        | Value::Bool(false)
+                        | Value::RawBool(0)
+                        | Value::Object(0)
                 )
                     || matches!(&target, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
                 {
@@ -8074,34 +8386,96 @@ impl<'a> Vm<'a> {
                             })?;
                         let _guard =
                             CallerContextGuard::enter(Some(env.caller_context()));
+                        let _parameter_override =
+                            (*is_arrow).then(|| CallParameterOverrideGuard::enter(0));
                         dispatch(&dispatch_args).map(ValueReference::into_lvalue)
                     }
-                    Value::Object(_) | Value::C4Id(_) => self.invoke_reference(
-                        method,
-                        evaluated_args,
-                        depth + 1,
-                        env.object_state.clone(),
-                        Some(env.caller_context()),
-                    ),
+                    Value::Object(_) | Value::C4Id(_) => {
+                        let _parameter_override =
+                            (*is_arrow).then(|| CallParameterOverrideGuard::enter(0));
+                        self.invoke_reference(
+                            method,
+                            evaluated_args,
+                            depth + 1,
+                            env.object_state.clone(),
+                            Some(env.caller_context()),
+                        )
+                    }
                     other if self.method_reference_dispatch.is_some() => {
                         Err(RuntimeError::new(format!(
                             "Object call: Invalid target type {}, expected object or id!",
                             other.type_name()
                         )))
                     }
-                    _ => self.invoke_reference(
-                        method,
-                        evaluated_args,
-                        depth + 1,
-                        env.object_state.clone(),
-                        Some(env.caller_context()),
-                    ),
+                    _ => {
+                        let _parameter_override =
+                            (*is_arrow).then(|| CallParameterOverrideGuard::enter(0));
+                        self.invoke_reference(
+                            method,
+                            evaluated_args,
+                            depth + 1,
+                            env.object_state.clone(),
+                            Some(env.caller_context()),
+                        )
+                    }
                 }
             }
             AssignmentTarget::MethodSlot { .. } => Err(RuntimeError::new(
                 "this assignment target cannot be passed by reference",
             )),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_method_slot_operands(
+        &self,
+        object: &Expr,
+        args: &[Expr],
+        is_arrow: bool,
+        name: Option<&str>,
+        function: Option<&Function>,
+        native_parameter_slots: usize,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<
+        (
+            Value,
+            Vec<CallArg>,
+            ValueStackReservation,
+            ValueStackReservation,
+        ),
+        RuntimeError,
+    > {
+        if is_arrow {
+            let target = self.evaluate(object, env, depth + 1)?;
+            let target_slot = ValueStackReservation::reserve(1)?;
+            let evaluated_args =
+                self.build_call_args(name, function, args, env, depth + 1)?;
+            let parameter_slots =
+                ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+            return Ok((target, evaluated_args, target_slot, parameter_slots));
+        }
+
+        // Direct Local/LocalN syntax evaluates its ordinary parameter first
+        // and object parameter second. Preserve that source order even though
+        // AssignmentTarget stores the object separately for cell lookup.
+        let mut direct_args = args.to_vec();
+        direct_args.push(object.clone());
+        let mut evaluated_args =
+            self.build_call_args(name, function, &direct_args, env, depth + 1)?;
+        let parameter_slots =
+            ValueStackReservation::reserve(native_parameter_slots)?;
+        let object = evaluated_args
+            .pop()
+            .map(|value| value.read())
+            .transpose()?
+            .unwrap_or(Value::Nil);
+        Ok((
+            object,
+            evaluated_args,
+            ValueStackReservation::empty(),
+            parameter_slots,
+        ))
     }
 
     fn expr_to_lvalue(
@@ -8223,10 +8597,8 @@ impl<'a> Vm<'a> {
             }));
         }
         if name == "VarN" {
-            let mut values = Vec::with_capacity(args.len());
-            for arg in args {
-                values.push(CallArg::Value(self.evaluate_tracked(arg, env, depth + 1)?));
-            }
+            let values = self.build_call_args(None, None, args, env, depth + 1)?;
+            let _parameter_slot = ValueStackReservation::reserve(1)?;
             return self
                 .invoke_varn_raw(&values, Some(&env.caller_context()))
                 .map(Some);
@@ -8243,6 +8615,9 @@ impl<'a> Vm<'a> {
                     .unwrap_or(&Expr::Literal(Literal::Int(0))),
                 env,
                 depth + 1,
+            )?;
+            let _parameter_slots = ValueStackReservation::reserve(
+                if name == "Local" { 2 } else { 1 },
             )?;
             if name == "Local" && index < 0 {
                 return Ok(Some(ReturnValue::Value(TrackedValue::runtime(Value::Nil))));
@@ -8262,6 +8637,7 @@ impl<'a> Vm<'a> {
                 env,
                 depth + 1,
             )?;
+            let _parameter_slot = ValueStackReservation::reserve(1)?;
             let value = usize::try_from(index)
                 .ok()
                 .filter(|index| *index < MAX_CALL_PARAMETERS)
@@ -8336,6 +8712,17 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<ReturnValue, RuntimeError> {
+        let value = self.evaluate_reference_or_value_inner(expr, env, depth)?;
+        ValueStackReservation::check(1)?;
+        Ok(value)
+    }
+
+    fn evaluate_reference_or_value_inner(
+        &self,
+        expr: &Expr,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<ReturnValue, RuntimeError> {
         match expr {
             Expr::Binary(left, operation, right)
                 if matches!(operation, BinaryOp::NilCoalescing)
@@ -8357,11 +8744,13 @@ impl<'a> Vm<'a> {
             }
             Expr::Property(base, property) => {
                 let base = self.evaluate_reference_or_value(base, env, depth)?;
+                let _base_slot = ValueStackReservation::reserve(1)?;
                 self.property_reference_or_value(base, property, env)
             }
-            Expr::Index(base, index_expr) => {
+            Expr::Index(base, index_operand) => {
                 let base = self.evaluate_reference_or_value(base, env, depth)?;
-                self.index_reference_or_value(base, index_expr, env, depth)
+                let _base_slot = ValueStackReservation::reserve(1)?;
+                self.index_reference_or_value(base, index_operand, env, depth)
             }
             Expr::ArrayAppend(base) => self.evaluate_array_append(base, env, depth),
             Expr::GlobalCall {
@@ -8511,11 +8900,12 @@ impl<'a> Vm<'a> {
     fn index_reference_or_value(
         &self,
         base: ReturnValue,
-        index_expr: &Expr,
+        index_operand: &IndexOperand,
         env: &mut Environment,
         depth: usize,
     ) -> Result<ReturnValue, RuntimeError> {
-        let index = self.evaluate(index_expr, env, depth)?;
+        let (index, _index_slot) =
+            self.evaluate_index_operand(index_operand, env, depth)?;
         if !legacy_path_pin_creation_active() {
             let base = match base {
                 ReturnValue::Value(value) => value,
@@ -8592,13 +8982,36 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Constant string keys are embedded directly in C++ AB_MAPA_R/V and do
+    /// not consume a second value-stack slot. Every dynamic index does.
+    fn evaluate_index_operand(
+        &self,
+        index_operand: &IndexOperand,
+        env: &mut Environment,
+        depth: usize,
+    ) -> Result<(Value, ValueStackReservation), RuntimeError> {
+        match index_operand {
+            IndexOperand::EmbeddedString(value) => Ok((
+                Value::String(self.literal_string(value)),
+                ValueStackReservation::empty(),
+            )),
+            IndexOperand::Dynamic(index_expr) => {
+                let index = self.evaluate(index_expr, env, depth)?;
+                let index_slot = ValueStackReservation::reserve(1)?;
+                Ok((index, index_slot))
+            }
+        }
+    }
+
     fn evaluate_array_append(
         &self,
         base: &Expr,
         env: &mut Environment,
         depth: usize,
     ) -> Result<ReturnValue, RuntimeError> {
-        match self.evaluate_reference_or_value(base, env, depth)? {
+        let base = self.evaluate_reference_or_value(base, env, depth)?;
+        let _base_slot = ValueStackReservation::reserve(1)?;
+        match base {
             ReturnValue::Reference(reference) => self
                 .append_array_slot(reference)
                 .map(ReturnValue::Reference),
@@ -8685,7 +9098,11 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<i32, RuntimeError> {
-        match self.evaluate(expr, env, depth)? {
+        Self::slot_index_from_value(name, self.evaluate(expr, env, depth)?)
+    }
+
+    fn slot_index_from_value(name: &str, value: Value) -> Result<i32, RuntimeError> {
+        match value {
             Value::Int(index) => Ok(index),
             // Var/Local/SetLocal are typed C4ValueInt engine functions in
             // C++; C4Value::getInt converts nil to zero and bool directly
@@ -8707,16 +9124,38 @@ impl<'a> Vm<'a> {
         default_target: Option<Value>,
         env: &mut Environment,
         depth: usize,
+        parameter_slots: usize,
     ) -> Result<TrackedValue, RuntimeError> {
-        let index = self.evaluate_slot_index("SetLocal()", &args[0], env, depth)?;
-        let tracked = args
+        // Parse_Params retains all explicit operands while evaluating them,
+        // then pads/truncates to the selected call layout before FnSetLocal
+        // can mutate the destination.
+        let evaluated_args = self.build_call_args(None, None, args, env, depth)?;
+        let _parameter_slots = ValueStackReservation::reserve(parameter_slots)?;
+        let index = match evaluated_args
+            .first()
+            .map(CallArg::read)
+            .transpose()?
+            .unwrap_or(Value::Nil)
+        {
+            Value::Int(index) => index,
+            Value::Nil => 0,
+            Value::Bool(flag) => i32::from(flag),
+            Value::RawBool(raw) => raw as u32 as i32,
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "SetLocal() index must be an integer, got {}",
+                    other.type_name()
+                )))
+            }
+        };
+        let tracked = evaluated_args
             .get(1)
-            .map(|arg| self.evaluate_tracked(arg, env, depth))
+            .map(CallArg::read_tracked)
             .transpose()?
             .unwrap_or_else(|| TrackedValue::runtime(Value::Nil));
-        let explicit_target = args
+        let explicit_target = evaluated_args
             .get(2)
-            .map(|arg| self.evaluate(arg, env, depth))
+            .map(CallArg::read)
             .transpose()?;
         let target = explicit_target
             .filter(|value| {
@@ -8753,6 +9192,7 @@ impl<'a> Vm<'a> {
         if forward_rest {
             Self::append_forwarded_args(&mut evaluated_args, env, 2)?;
         }
+        let _parameter_slots = ValueStackReservation::reserve(2)?;
         self.invoke_global_builtin_raw("SetGlobal", &evaluated_args, env, depth)?
             .into_tracked()
     }
@@ -8771,7 +9211,7 @@ impl<'a> Vm<'a> {
                 let base_target = Self::expr_to_assignment_target(base)?;
                 Ok(AssignmentTarget::Index(
                     Box::new(base_target),
-                    Box::new((**index).clone()),
+                    index.clone(),
                 ))
             }
             Expr::ArrayAppend(base) => {
@@ -8807,6 +9247,7 @@ impl<'a> Vm<'a> {
                                 object: Box::new(args[1].clone()),
                                 method: name.clone(),
                                 args: vec![args[0].clone()],
+                                is_arrow: false,
                             });
                         }
                         // NEW: Allow any function call to be used with increment/decrement
@@ -8825,6 +9266,7 @@ impl<'a> Vm<'a> {
                             object: object.clone(),
                             method: method.clone(),
                             args: args.clone(),
+                            is_arrow: true,
                         });
                     }
                 }
@@ -8851,13 +9293,6 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn get_target_value(
-        &self,
-        env: &mut Environment,
-        target: &AssignmentTarget,
-    ) -> Result<Value, RuntimeError> {
-        self.assignment_target_value(env, target)
-    }
 }
 
 enum ControlFlow {
@@ -9421,16 +9856,17 @@ mod tests {
     }
 
     #[test]
-    fn vm_enforces_call_depth_limit() {
+    fn vm_enforces_value_stack_before_context_limit() {
         let source = r#"
             func Recursive(n) {
                 if (n <= 0) return 0;
                 return Recursive(n - 1);
             }
         "#;
-        // Should fail past MAX_CALL_DEPTH (512, matching C++ MAX_CONTEXT_STACK).
-        let error = execute_script(source, "Recursive", &[Value::Int(1000)]).unwrap_err();
-        assert!(error.message().contains("maximum call depth exceeded"));
+        // Ten parameter slots per call reach C++'s value-stack ceiling before
+        // its independent 512-context ceiling.
+        let error = execute_script(source, "Recursive", &[Value::Int(102)]).unwrap_err();
+        assert_eq!(error.message(), "internal error: value stack overflow!");
     }
 
     #[test]
