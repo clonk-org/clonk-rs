@@ -11253,8 +11253,8 @@ fn legacy_c4s_value(
 /// (C4Surface.cpp:855).
 const LEGACY_SKY_EXTENSIONS: [&str; 4] = ["png", "bmp", "jpeg", "jpg"];
 
-/// The default sky fade when `SkyDefFade` is all zero: game palette
-/// entries CSkyDef1=104 and 104+19 (C4Sky::SetFadePalette,
+/// The default sky fade when `SkyDefFade` has a signed sum of zero: game
+/// palette entries CSkyDef1=104 and 104+19 (C4Sky::SetFadePalette,
 /// C4Sky.cpp:56-62; C4Landscape.h:34), scaled `<< 2` at load
 /// (C4GraphicsResource.cpp:183-184). Values read from
 /// planet/Graphics.c4g/C4.PAL.
@@ -11333,14 +11333,16 @@ fn derive_legacy_sky(
         });
     }
 
-    // No sky surface: fade gradient (C4Sky.cpp:129-134). All-zero
-    // SkyDefFade selects the palette default (C4Sky.cpp:56-62).
+    // No sky surface: fade gradient (C4Sky.cpp:129-134). A zero signed sum
+    // across SkyDefFade selects the palette default (C4Sky.cpp:56-62).
     let fade = manifest.core.landscape.sky_fade;
     if fade.iter().sum::<i32>() == 0 {
         settings.fade_top = LEGACY_SKY_FADE_TOP_DEFAULT;
         settings.fade_bottom = LEGACY_SKY_FADE_BOTTOM_DEFAULT;
     } else {
-        let channel = |value: i32| value.clamp(0, 255) as u8;
+        // C4RGB projects every signed channel through `& 0xff`; it does not
+        // clamp values outside the byte range (StdColors.h:52).
+        let channel = |value: i32| value as u8;
         settings.fade_top = RgbColor::new(channel(fade[0]), channel(fade[1]), channel(fade[2]));
         settings.fade_bottom = RgbColor::new(channel(fade[3]), channel(fade[4]), channel(fade[5]));
     }
@@ -27831,6 +27833,21 @@ public func ActualizePhase(pClonk)
         let sky = scenario.sky().expect("legacy sky config present");
         assert_eq!(sky.settings.fade_top, RgbColor::new(1, 2, 3));
         assert_eq!(sky.settings.fade_bottom, RgbColor::new(4, 5, 6));
+    }
+
+    #[test]
+    fn legacy_sky_fade_channels_wrap_to_low_byte_like_c4rgb() {
+        // C4Sky::SetFadePalette passes raw signed SkyFade values to C4RGB,
+        // which retains each channel's low byte (C4Sky.cpp:63-68;
+        // StdColors.h:52).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir =
+            write_legacy_sky_fixture(dir.path(), "SkyFade=-1,256,511,513,-258,1024\n");
+
+        let scenario = load_legacy_sky(dir.path(), &scenario_dir);
+        let sky = scenario.sky().expect("legacy sky config present");
+        assert_eq!(sky.settings.fade_top, RgbColor::new(255, 0, 255));
+        assert_eq!(sky.settings.fade_bottom, RgbColor::new(1, 254, 0));
     }
 
     #[test]
