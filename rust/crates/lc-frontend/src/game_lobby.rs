@@ -953,6 +953,9 @@ pub enum LobbySound {
     ArrowHit,
     Click,
     Command,
+    /// `MainDlg::OnCountdownPacket` calls StartSoundEffect directly rather
+    /// than routing this notification through C4GUI::GUISound.
+    CountdownCommand,
     Fuse,
     StartElevatorLoop,
     StopElevatorLoop,
@@ -3893,7 +3896,7 @@ impl GameLobby {
                 };
                 self.logs.push(line.clone());
                 self.chat_follow_bottom = true;
-                self.sounds.push(LobbySound::Command);
+                self.sounds.push(LobbySound::CountdownCommand);
                 actions.push(LobbyAction::AppendLog(line));
             }
             _ => {}
@@ -7884,14 +7887,14 @@ mod tests {
         let mut lobby = lobby(LobbyRole::Host, vec![]);
         let actions = lobby.apply_countdown_packet(LobbyCountdownPacket::Seconds(12));
         assert!(actions.contains(&LobbyAction::NotifyUserIfInactive));
-        assert_eq!(lobby.take_sounds(), [LobbySound::Command]);
+        assert_eq!(lobby.take_sounds(), [LobbySound::CountdownCommand]);
         let _ = lobby.apply_countdown_packet(LobbyCountdownPacket::Seconds(10));
         assert_eq!(
             lobby.take_sounds(),
             [
                 LobbySound::Fuse,
                 LobbySound::StartElevatorLoop,
-                LobbySound::Command,
+                LobbySound::CountdownCommand,
             ]
         );
         let actions = lobby.apply_countdown_packet(LobbyCountdownPacket::Seconds(9));
@@ -7903,7 +7906,7 @@ mod tests {
         assert_eq!(
             lobby.take_sounds(),
             [
-                LobbySound::Command,
+                LobbySound::CountdownCommand,
                 LobbySound::StopElevatorLoop,
                 LobbySound::Pshshsh
             ]

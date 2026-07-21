@@ -9102,7 +9102,6 @@ struct AudioContext {
     controlled_music_loads: Option<ControlledMusicLoads>,
     loaded_sounds: HashMap<String, SoundHandle>,
     active_channels: HashMap<SoundInstanceKey, ChannelInfo>,
-    lobby_elevator_channel: Option<ChannelId>,
     next_sound_instance_order: u64,
     resolver: SoundResolver,
     music_resolver: MusicResolver,
@@ -9153,7 +9152,6 @@ impl AudioContext {
             controlled_music_loads: None,
             loaded_sounds: HashMap::new(),
             active_channels: HashMap::new(),
-            lobby_elevator_channel: None,
             next_sound_instance_order: 1,
             resolver,
             music_resolver,
@@ -9324,6 +9322,7 @@ impl AudioContext {
         runtime_music_enabled: &mut bool,
     ) {
         self.process_audio_with_viewports(snapshot, &[], runtime_music_enabled);
+        self.update_channels(snapshot, &[], true);
     }
 
     fn process_audio_with_viewports(
@@ -9341,17 +9340,47 @@ impl AudioContext {
                 runtime_music_enabled,
             );
         }
-        self.update_channels(snapshot, viewports);
     }
 
     fn reset_sfx(&mut self) {
-        self.stop_lobby_elevator();
-        for info in self.active_channels.values() {
-            if let Some(channel) = info.channel {
-                self.system.halt_channel(channel);
+        self.remove_sound_instances_matching(|_| true);
+    }
+
+    fn reset_sound_system_generation(&mut self) {
+        self.reset_sfx();
+        self.loaded_sounds.clear();
+        self.missing_sounds.clear();
+        self.next_sound_instance_order = 1;
+        self.resolver.reset_dynamic_catalog();
+    }
+
+    fn clear_object_sound_instances(&mut self) {
+        self.remove_sound_instances_matching(|info| info.target.is_some());
+    }
+
+    fn invalidate_reloaded_sound_samples(&mut self, sample_names: &HashSet<String>) {
+        if sample_names.is_empty() {
+            return;
+        }
+        self.remove_sound_instances_matching(|info| sample_names.contains(&info.sample_name));
+    }
+
+    fn remove_sound_instances_matching(
+        &mut self,
+        mut should_remove: impl FnMut(&ChannelInfo) -> bool,
+    ) {
+        let keys = self
+            .active_channels
+            .iter()
+            .filter_map(|(key, info)| should_remove(info).then(|| key.clone()))
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(info) = self.active_channels.remove(&key) {
+                if let Some(channel) = info.channel {
+                    self.system.halt_channel(channel);
+                }
             }
         }
-        self.active_channels.clear();
     }
 
     fn configure_scenario(&mut self, path: Option<&Path>) {
@@ -9371,16 +9400,42 @@ impl AudioContext {
         path: Option<&Path>,
         definition_roots: Option<&[Group]>,
     ) {
-        let sound_catalog_changed = match definition_roots {
-            Some(definition_roots) => self
-                .resolver
-                .configure_scenario_with_definition_roots(path, definition_roots),
-            None => self.resolver.configure_scenario(path),
+        let (sound_catalog_changed, reloaded_samples) = match definition_roots {
+            Some(definition_roots) => {
+                let changed = self
+                    .resolver
+                    .configure_scenario_with_definition_roots(path, definition_roots);
+                let reloaded = self
+                    .resolver
+                    .definition_sample_loads
+                    .iter()
+                    .chain(&self.resolver.scenario_sample_loads)
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                (changed, reloaded)
+            }
+            None => {
+                let changed = self.resolver.configure_scenario(path);
+                let reloaded = if changed && path.is_some() {
+                    self.resolver
+                        .scenario_sample_loads
+                        .iter()
+                        .cloned()
+                        .collect()
+                } else {
+                    HashSet::new()
+                };
+                (changed, reloaded)
+            }
         };
-        if sound_catalog_changed {
+        if sound_catalog_changed || !reloaded_samples.is_empty() {
             self.loaded_sounds.clear();
             self.missing_sounds.clear();
         }
+        // C4SoundSystem keeps its application-global sample list across game
+        // transitions. LoadEffects destroys instances only when a newly
+        // loaded sample replaces the same case-insensitive filename.
+        self.invalidate_reloaded_sound_samples(&reloaded_samples);
         let configured = match definition_roots {
             Some(definition_roots) => self
                 .music_resolver
@@ -9467,10 +9522,14 @@ impl AudioContext {
     }
 
     fn register_definition_sounds(&mut self, definition_id: &str, group: &Group) {
+        let reloaded_samples = direct_sound_sample_loads(group)
+            .into_iter()
+            .collect::<HashSet<_>>();
         self.resolver
             .register_definition_group(definition_id, group);
         self.loaded_sounds.clear();
         self.missing_sounds.clear();
+        self.invalidate_reloaded_sound_samples(&reloaded_samples);
     }
 
     fn available_sound_samples(&self) -> Vec<String> {
@@ -9497,63 +9556,26 @@ impl AudioContext {
         self.music_load_pending.load(AtomicOrdering::Acquire) != 0 || self.system.music_is_playing()
     }
 
-    fn play_ui_sound(&mut self, name: &str, game_running: bool) {
-        let enabled = if game_running {
-            self.options.sound_enabled
-        } else {
-            self.options.menu_sound_enabled
-        };
-        if !enabled {
+    fn play_gui_sound(&mut self, name: &str, game_running: bool, snapshot: &SimulationSnapshot) {
+        // C4GUI::GUISound has an outer FESamples gate even while a game is
+        // running. StartSoundEffect's instance then independently follows
+        // the current RXSound/FESamples gate in Instance::Execute.
+        if !self.options.menu_sound_enabled {
             return;
         }
-        let handle = match self.ensure_sound(name) {
-            Ok(Some(handle)) => handle,
-            Ok(None) => return,
-            Err(err) => {
-                tracing::error!(sound = %name, error = %err, "failed to load ui sound");
-                return;
-            }
-        };
-        match self.system.play_sound(&handle, false) {
-            Ok(channel) => {
-                self.system
-                    .channel_set_volume_and_pan(channel, self.options.sound_volume, 0.0);
-            }
-            Err(err) => {
-                tracing::error!(sound = %name, error = %err, "failed to play ui sound");
-            }
+        if let Err(error) = self.try_start_global_effect(name, game_running, snapshot) {
+            tracing::error!(sound = %name, %error, "failed to play GUI sound");
         }
     }
 
-    fn start_lobby_elevator(&mut self) {
-        if self.lobby_elevator_channel.is_some() || !self.options.menu_sound_enabled {
-            return;
-        }
-        let handle = match self.ensure_sound("Elevator") {
-            Ok(Some(handle)) => handle,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::error!(%error, "failed to load lobby countdown loop");
-                return;
-            }
-        };
-        match self.system.play_sound(&handle, true) {
-            Ok(channel) => {
-                self.system.channel_set_volume_and_pan(
-                    channel,
-                    self.options.sound_volume,
-                    0.0,
-                );
-                self.lobby_elevator_channel = Some(channel);
-            }
-            Err(error) => tracing::error!(%error, "failed to start lobby countdown loop"),
+    fn start_lobby_elevator(&mut self, snapshot: &SimulationSnapshot) {
+        if let Err(error) = self.try_start_global_sound("Elevator", true, false, snapshot) {
+            tracing::error!(%error, "failed to start lobby countdown loop");
         }
     }
 
     fn stop_lobby_elevator(&mut self) {
-        if let Some(channel) = self.lobby_elevator_channel.take() {
-            self.system.halt_channel(channel);
-        }
+        self.stop_sound("Elevator", None);
     }
 
     fn handle_events(
@@ -9773,16 +9795,22 @@ impl AudioContext {
         game_running: bool,
         snapshot: &SimulationSnapshot,
     ) -> Result<bool, AudioError> {
-        let sound_enabled = if game_running {
-            self.options.sound_enabled
-        } else {
-            self.options.menu_sound_enabled
-        };
+        self.try_start_global_sound(name, false, game_running, snapshot)
+    }
+
+    fn try_start_global_sound(
+        &mut self,
+        name: &str,
+        looped: bool,
+        game_running: bool,
+        snapshot: &SimulationSnapshot,
+    ) -> Result<bool, AudioError> {
+        let sound_enabled = self.sound_effects_enabled(game_running);
         self.try_start_sound_with_mix_enabled(
             name,
             None,
             100,
-            false,
+            looped,
             true,
             None,
             None,
@@ -9790,6 +9818,14 @@ impl AudioContext {
             &[],
             sound_enabled,
         )
+    }
+
+    fn sound_effects_enabled(&self, game_running: bool) -> bool {
+        if game_running {
+            self.options.sound_enabled
+        } else {
+            self.options.menu_sound_enabled
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -9983,11 +10019,12 @@ impl AudioContext {
         &mut self,
         snapshot: &SimulationSnapshot,
         viewports: &[ActiveViewportProjection],
+        game_running: bool,
     ) {
         let now = Instant::now();
         let mut finished = Vec::new();
         let mut updates: Vec<(ChannelId, f32, f32)> = Vec::new();
-        if !self.options.sound_enabled {
+        if !self.sound_effects_enabled(game_running) {
             for (key, info) in self.active_channels.iter_mut() {
                 if info
                     .target
@@ -10075,11 +10112,6 @@ impl AudioContext {
                 }
             }
         }
-    }
-
-    fn ensure_sound(&mut self, name: &str) -> Result<Option<SoundHandle>, AudioError> {
-        self.ensure_sound_with_key(name)
-            .map(|resolved| resolved.map(|resolved| resolved.handle))
     }
 
     fn ensure_sound_with_key(
@@ -10474,6 +10506,15 @@ impl SoundResolver {
             }
             self.rebuild_sample_ranks();
         }
+    }
+
+    fn reset_dynamic_catalog(&mut self) {
+        self.clear_registered_definition_libraries();
+        self.configure_scenario_catalog(None);
+        self.definition_sample_loads.clear();
+        self.scenario_sample_loads.clear();
+        self.sample_ranks_prebuilt = false;
+        self.rebuild_sample_ranks();
     }
 }
 
@@ -26411,7 +26452,7 @@ impl GameApp {
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             let message = self.classic_lobby_resource_text("IDS_MSG_CMD_HOSTONLY", "Host only!");
             tracing::warn!(%message, command = line, "console lobby command rejected");
-            self.append_lobby_command_error(message);
+            self.append_lobby_command_log(message);
             return Ok(());
         }
 
@@ -26429,7 +26470,7 @@ impl GameApp {
                             "Usage: /start [timer]",
                         );
                         tracing::warn!(%message, command = line, "console lobby command rejected");
-                        self.append_lobby_command_error(message);
+                        self.append_lobby_command_log(message);
                         return Ok(());
                     }
                 }
@@ -45963,7 +46004,7 @@ impl GameApp {
             self.status_text = "Network desync detected".to_string();
             return;
         }
-        self.play_ui_sound("SyncError");
+        self.play_global_sound_effect("SyncError");
         if let Some(local_client_id) = self
             .network
             .as_ref()
@@ -63710,9 +63751,8 @@ impl GameApp {
                     self.show_options_advanced_warning()?;
                 }
                 OptionsDlgAction::Sound(action) => match action {
-                    SoundSheetAction::GuiSound(sound) | SoundSheetAction::TestSound(sound) => {
-                        self.play_options_sound(sound);
-                    }
+                    SoundSheetAction::GuiSound(sound) => self.play_options_sound(sound),
+                    SoundSheetAction::TestSound(sound) => self.play_options_test_sound(sound),
                     SoundSheetAction::CheckboxChanged { id, checked } => match id {
                         SoundCheckboxId::FrontendMusic => {
                             self.set_frontend_music_option(checked)?;
@@ -63816,6 +63856,16 @@ impl GameApp {
 
     fn play_options_sound(&mut self, sound: lc_frontend::startup_options_dlg::SoundSheetSound) {
         self.play_ui_sound(match sound {
+            lc_frontend::startup_options_dlg::SoundSheetSound::ArrowHit => "ArrowHit",
+            lc_frontend::startup_options_dlg::SoundSheetSound::Command => "Command",
+        });
+    }
+
+    fn play_options_test_sound(
+        &mut self,
+        sound: lc_frontend::startup_options_dlg::SoundSheetSound,
+    ) {
+        self.play_global_sound_effect(match sound {
             lc_frontend::startup_options_dlg::SoundSheetSound::ArrowHit => "ArrowHit",
             lc_frontend::startup_options_dlg::SoundSheetSound::Command => "Command",
         });
@@ -65463,6 +65513,14 @@ impl GameApp {
             LobbyAction::Preload => self.request_lobby_preload(),
             LobbyAction::OpenExternalIrcChat => self.show_external_irc_dialog()?,
             LobbyAction::SubmitMessage(text) => {
+                if let Some(lobby) = self.network_lobby.as_mut() {
+                    lobby.chat_history_index = -1;
+                    lobby.chat_edit = LobbyChatEditView::default();
+                }
+                if text.is_empty() {
+                    self.play_ui_sound("Error");
+                    return Ok(());
+                }
                 self.store_message_input_history(&text);
                 if self.process_classic_lobby_command(&text)? {
                     return Ok(());
@@ -65536,7 +65594,7 @@ impl GameApp {
             match sound {
                 LobbySound::StartElevatorLoop => {
                     if let Some(audio) = self.audio.as_mut() {
-                        audio.start_lobby_elevator();
+                        audio.start_lobby_elevator(&self.snapshot);
                     }
                 }
                 LobbySound::StopElevatorLoop => {
@@ -65547,9 +65605,10 @@ impl GameApp {
                 LobbySound::ArrowHit => self.play_ui_sound("ArrowHit"),
                 LobbySound::Click => self.play_ui_sound("Click"),
                 LobbySound::Command => self.play_ui_sound("Command"),
-                LobbySound::Fuse => self.play_ui_sound("Fuse"),
-                LobbySound::Pshshsh => self.play_ui_sound("Pshshsh"),
-                LobbySound::Blast3 => self.play_ui_sound("Blast3"),
+                LobbySound::CountdownCommand => self.play_global_sound_effect("Command"),
+                LobbySound::Fuse => self.play_global_sound_effect("Fuse"),
+                LobbySound::Pshshsh => self.play_global_sound_effect("Pshshsh"),
+                LobbySound::Blast3 => self.play_global_sound_effect("Blast3"),
             }
         }
         let option_sounds = self.scenario_game_options.take_sound_events();
@@ -66942,7 +67001,11 @@ impl GameApp {
     }
 
     fn append_lobby_command_error(&mut self, message: String) {
-        self.play_ui_sound("Error");
+        self.play_global_sound_effect("Error");
+        self.append_lobby_command_log(message);
+    }
+
+    fn append_lobby_command_log(&mut self, message: String) {
         if let Some(lobby) = self.classic_host_lobby.as_mut() {
             lobby.controller.push_log(LobbyLogLine {
                 text: message.clone(),
@@ -67495,11 +67558,17 @@ impl GameApp {
                 install_view(self, view);
             }
             LobbyChatRequest::Submit(text) => {
-                self.store_message_input_history(&text);
                 if let Some(lobby) = self.classic_host_lobby.as_mut() {
                     lobby.chat_history_index = -1;
                     lobby.controller.set_chat_draft("");
                 }
+                if text.is_empty() {
+                    // C4GameLobby::MainDlg::OnChatInput uses GUISound here;
+                    // unlike OnError, this remains subject to FESamples.
+                    self.play_ui_sound("Error");
+                    return Ok(());
+                }
+                self.store_message_input_history(&text);
                 if self.process_classic_lobby_command(&text)? {
                     return Ok(());
                 }
@@ -71852,6 +71921,14 @@ impl GameApp {
     }
 
     fn update(&mut self) -> Result<(), EngineError> {
+        let result = self.update_before_sound_instance_step();
+        // C4Application runs SoundSystem::Execute after every application
+        // pass, including game-over, halt and network-control early returns.
+        self.update_sound_instances_for_current_mode();
+        result
+    }
+
+    fn update_before_sound_instance_step(&mut self) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.poll_lobby_preload()?;
         if let Some(network) = self.network.as_ref() {
@@ -72615,6 +72692,14 @@ impl GameApp {
             } else {
                 self.play_sandbox_audio();
             }
+        }
+    }
+
+    fn update_sound_instances_for_current_mode(&mut self) {
+        let game_running = matches!(self.mode, AppMode::Running);
+        let viewports = self.graphics.active_viewport_projections();
+        if let Some(audio) = self.audio.as_mut() {
+            audio.update_channels(&self.snapshot, &viewports, game_running);
         }
     }
 
@@ -81579,7 +81664,9 @@ impl GameApp {
         self.loading_state = None;
         self.runtime_music_enabled = false;
         if let Some(audio) = self.audio.as_mut() {
-            audio.reset_sfx();
+            // C4Application::QuitGame enters PreInit, which reconstructs the
+            // process sound system before showing startup again.
+            audio.reset_sound_system_generation();
             audio.configure_scenario(None);
         }
 
@@ -82949,7 +83036,7 @@ impl GameApp {
         self.mouse_control_allowed = !scenario_data.disables_mouse();
         self.mouse_control = self.mouse_control_allowed;
         if let Some(audio) = self.audio.as_mut() {
-            audio.reset_sfx();
+            audio.clear_object_sound_instances();
         }
         self.advance_scenario_loader(97, "Input and audio runtime initialized");
         if !network_game && !replay {
@@ -83964,6 +84051,11 @@ impl GameApp {
         self.live_save_seed = None;
         self.recording_template = None;
         self.control_playback = None;
+        if let Some(audio) = self.audio.as_mut() {
+            // Loading a save starts a fresh native round. Rebuild the
+            // SoundSystem generation before installing that round's effects.
+            audio.reset_sound_system_generation();
+        }
         self.engine = Engine::new();
         self.film_view_player = None;
         self.clear_physical_viewport_states();
@@ -84095,9 +84187,6 @@ impl GameApp {
                 .unwrap_or_default();
             self.engine.configure_sound_samples(sound_samples);
             self.engine.configure_music_tracks(music_tracks);
-            if let Some(audio) = self.audio.as_mut() {
-                audio.reset_sfx();
-            }
             // Restoring a save reloads definitions and world resources, but
             // C++ skips Script.Initialize for savegames. The captured engine
             // state below supplies the already-initialized world.
@@ -84467,7 +84556,20 @@ impl GameApp {
         #[cfg(test)]
         self.ui_sound_log.push(name.to_owned());
         if let Some(audio) = self.audio.as_mut() {
-            audio.play_ui_sound(name, game_running);
+            audio.play_gui_sound(name, game_running, &self.snapshot);
+        }
+    }
+
+    /// Calls native `StartSoundEffect` without C4GUI's outer FESamples gate.
+    fn play_global_sound_effect(&mut self, name: &str) {
+        let game_running = matches!(self.mode, AppMode::Running);
+        #[cfg(test)]
+        self.ui_sound_log.push(name.to_owned());
+        let Some(audio) = self.audio.as_mut() else {
+            return;
+        };
+        if let Err(error) = audio.try_start_global_effect(name, game_running, &self.snapshot) {
+            tracing::error!(sound = %name, %error, "failed to play global sound effect");
         }
     }
 
@@ -88882,7 +88984,7 @@ fn configure_sandbox_engine(
     if let Some(audio) = audio.as_deref_mut() {
         audio.set_music_playlist(None);
         audio.configure_scenario(None);
-        audio.reset_sfx();
+        audio.clear_object_sound_instances();
     }
     let install_paths = match definition_load {
         SandboxDefinitionLoad::InstallCatalog(paths) => {
@@ -91294,9 +91396,14 @@ mod tests {
                 lc_network::LobbyCountdownPacket::new(12),
             ]
         );
+        host.ui_sound_log.clear();
         host.process_console_command("/start ")
             .expect("invalid explicit timeout is consumed");
         assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert!(
+            host.ui_sound_log.is_empty(),
+            "native console validation only logs the usage error"
+        );
         assert_eq!(
             host.classic_host_lobby
                 .as_ref()
@@ -104055,7 +104162,7 @@ func Award()
             Vec::new(),
         );
         let viewports = [audio_viewport(0, OWNER_NONE, listener.position)];
-        audio.update_channels(&moved, &viewports);
+        audio.update_channels(&moved, &viewports, true);
         assert!(
             audio.active_channels.contains_key(&key),
             "the release pass retains the logical one-shot instance"
@@ -104063,7 +104170,7 @@ func Award()
         assert!(audio.active_channels[&key].channel.is_none());
         assert!(!audio.system.channel_is_playing(channel));
 
-        audio.update_channels(&moved, &viewports);
+        audio.update_channels(&moved, &viewports, true);
         assert!(
             !audio.active_channels.contains_key(&key),
             "the next pass culls an inaudible one-shot past half duration"
@@ -104253,6 +104360,212 @@ func Award()
         assert!(audio.active_channels[&key].channel.is_none());
     }
 
+    #[test]
+    fn running_gui_sound_requires_fe_samples_and_rx_sound() {
+        let dir = tempdir().expect("GUI sound fixture");
+        let scenario = dir.path().join("Audio.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("ArrowHit.wav"), silent_pcm_wav(1_000))
+            .expect("write GUI sound sample");
+        fs::write(scenario.join("Elevator.wav"), silent_pcm_wav(1_000))
+            .expect("write lobby loop sample");
+        let mut audio = AudioContext::try_new(AudioOptions {
+            sound_enabled: true,
+            menu_sound_enabled: false,
+            max_channels: 2,
+            ..AudioOptions::default()
+        })
+        .expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        let snapshot = make_snapshot(Vec::new(), Vec::new());
+        let key = SoundInstanceKey::new("ArrowHit", None);
+
+        audio.play_gui_sound("ArrowHit", false, &snapshot);
+        audio.play_gui_sound("ArrowHit", true, &snapshot);
+        assert!(
+            audio.active_channels.is_empty(),
+            "FESamples rejects new GUI requests in every game state"
+        );
+        assert!(
+            audio
+                .try_start_global_effect("ArrowHit", false, &snapshot)
+                .expect("direct effect creates a muted logical instance"),
+            "native direct StartSoundEffect has no outer GUI gate"
+        );
+        assert!(audio.active_channels[&key].channel.is_none());
+        audio.reset_sfx();
+
+        audio.options.menu_sound_enabled = true;
+        audio.options.sound_enabled = false;
+        audio.play_gui_sound("ArrowHit", true, &snapshot);
+        assert!(audio.active_channels.contains_key(&key));
+        assert!(
+            audio.active_channels[&key].channel.is_none(),
+            "RXSound mutes playback but retains the admitted GUI instance"
+        );
+        audio.options.sound_enabled = true;
+        audio.update_channels(&snapshot, &[], true);
+        assert!(
+            audio.active_channels[&key].channel.is_some(),
+            "unmuting before half duration recreates the SDL channel"
+        );
+
+        audio.reset_sfx();
+        audio.options.sound_enabled = false;
+        audio.play_gui_sound("ArrowHit", true, &snapshot);
+        let muted = &audio.active_channels[&key];
+        assert!(
+            !muted.non_looping_past_half_duration(muted.started_at + Duration::from_millis(500))
+        );
+        assert!(muted.non_looping_past_half_duration(muted.started_at + Duration::from_millis(501)));
+        audio
+            .active_channels
+            .get_mut(&key)
+            .expect("muted running GUI instance")
+            .started_at = Instant::now() - Duration::from_millis(600);
+        audio.update_channels(&snapshot, &[], true);
+        assert!(
+            !audio.active_channels.contains_key(&key),
+            "a channel-less one-shot expires strictly after half duration"
+        );
+
+        audio.play_gui_sound("ArrowHit", false, &snapshot);
+        let startup_channel = audio.active_channels[&key]
+            .channel
+            .expect("FESamples starts the pre-game channel despite RXSound=false");
+        audio.update_channels(&snapshot, &[], true);
+        assert!(audio.active_channels[&key].channel.is_none());
+        assert!(!audio.system.channel_is_playing(startup_channel));
+
+        audio.reset_sfx();
+        audio.options.menu_sound_enabled = false;
+        audio.start_lobby_elevator(&snapshot);
+        let elevator = SoundInstanceKey::new("Elevator", None);
+        assert!(audio.active_channels[&elevator].looped);
+        assert!(audio.active_channels[&elevator].channel.is_none());
+        audio.start_lobby_elevator(&snapshot);
+        assert_eq!(audio.active_channels.len(), 1);
+        audio.options.menu_sound_enabled = true;
+        audio.update_channels(&snapshot, &[], false);
+        assert!(audio.active_channels[&elevator].channel.is_some());
+        audio.stop_lobby_elevator();
+        assert!(audio.active_channels.is_empty());
+    }
+
+    #[test]
+    fn global_gui_instance_survives_transitions_until_its_sample_is_reloaded() {
+        let dir = tempdir().expect("GUI transition fixture");
+        let scenario = dir.path().join("First.c4s");
+        let unrelated = dir.path().join("Unrelated.c4d");
+        let replacement = dir.path().join("Replacement.c4d");
+        for path in [&scenario, &unrelated, &replacement] {
+            fs::create_dir_all(path).expect("create sound group");
+        }
+        fs::write(scenario.join("Click.wav"), silent_pcm_wav(1_000))
+            .expect("write initial GUI sample");
+        fs::write(unrelated.join("Command.wav"), silent_pcm_wav(1_000))
+            .expect("write unrelated sample");
+        fs::write(replacement.join("Click.wav"), silent_pcm_wav(1_000))
+            .expect("write replacement GUI sample");
+
+        let mut audio = AudioContext::try_new(AudioOptions {
+            sound_enabled: false,
+            menu_sound_enabled: true,
+            max_channels: 2,
+            ..AudioOptions::default()
+        })
+        .expect("audio context");
+        audio.configure_scenario_with_definition_roots(Some(&scenario), &[]);
+        let snapshot = make_snapshot(Vec::new(), Vec::new());
+        let key = SoundInstanceKey::new("Click", None);
+        audio.play_gui_sound("Click", false, &snapshot);
+        let frontend_channel = audio.active_channels[&key]
+            .channel
+            .expect("FESamples starts the frontend channel");
+
+        let unrelated_group = Group::open(&unrelated).expect("open unrelated group");
+        audio.register_definition_sounds("UNRELATED", &unrelated_group);
+        assert!(audio.active_channels.contains_key(&key));
+        assert!(audio.system.channel_is_playing(frontend_channel));
+
+        audio.update_channels(&snapshot, &[], true);
+        assert!(audio.active_channels[&key].channel.is_none());
+        assert!(!audio.system.channel_is_playing(frontend_channel));
+        assert!(
+            audio.active_channels.contains_key(&key),
+            "the startup instance crosses into running RXSound control"
+        );
+        audio.options.sound_enabled = true;
+        audio.update_channels(&snapshot, &[], true);
+        let restored_channel = audio.active_channels[&key]
+            .channel
+            .expect("RXSound restores the shared instance");
+
+        let replacement_group = Group::open(&replacement).expect("open replacement group");
+        audio.register_definition_sounds("TEST", &replacement_group);
+        assert!(!audio.active_channels.contains_key(&key));
+        assert!(!audio.system.channel_is_playing(restored_channel));
+
+        audio.play_gui_sound("Click", false, &snapshot);
+        let reloaded_channel = audio.active_channels[&key]
+            .channel
+            .expect("registered sample restarts");
+        audio.register_definition_sounds("TEST", &replacement_group);
+        assert!(
+            !audio.active_channels.contains_key(&key),
+            "reloading an already registered definition still replaces its sample"
+        );
+        assert!(!audio.system.channel_is_playing(reloaded_channel));
+
+        audio.play_gui_sound("Click", false, &snapshot);
+        let generation_channel = audio.active_channels[&key]
+            .channel
+            .expect("next sound-system generation has a live channel to clear");
+        audio.reset_sound_system_generation();
+        assert!(audio.active_channels.is_empty());
+        assert!(!audio.system.channel_is_playing(generation_channel));
+        assert!(audio.resolver.scenario_root.is_none());
+        assert_eq!(audio.resolver.definition_library_count, 0);
+        assert!(audio.resolver.registered_definitions.is_empty());
+    }
+
+    #[test]
+    fn repeated_gui_sound_uses_global_instance_dedup() {
+        let dir = tempdir().expect("GUI sound fixture");
+        let scenario = dir.path().join("Audio.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("Click.wav"), silent_pcm_wav(1_000))
+            .expect("write GUI sound sample");
+        let mut audio = AudioContext::try_new(AudioOptions {
+            max_channels: 2,
+            ..AudioOptions::default()
+        })
+        .expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        let snapshot = make_snapshot(Vec::new(), Vec::new());
+        let key = SoundInstanceKey::new("Click", None);
+
+        audio.play_gui_sound("Click", false, &snapshot);
+        let first = audio.active_channels[&key].clone();
+        audio.play_gui_sound("Click.wav", false, &snapshot);
+        assert_eq!(audio.active_channels.len(), 1);
+        assert_eq!(audio.active_channels[&key].channel, first.channel);
+        assert_eq!(
+            audio.active_channels[&key].instance_order, first.instance_order,
+            "the resolved sample's existing global instance is not retriggered"
+        );
+
+        let channel = first.channel.expect("startup GUI channel");
+        audio.system.halt_channel(channel);
+        audio.update_channels(&snapshot, &[], false);
+        assert!(
+            audio.active_channels.is_empty(),
+            "frontend frames sweep completed shared instances"
+        );
+        audio.play_gui_sound("Click", false, &snapshot);
+        assert!(audio.active_channels[&key].instance_order > first.instance_order);
+    }
+
     fn audio_viewport(
         index: usize,
         owner: i32,
@@ -104439,12 +104752,12 @@ func Award()
         assert_eq!(audio.active_channels[&key].detached_mix, Some((0.79, 0.7)));
         assert!(audio.active_channels[&key].channel.is_some());
 
-        audio.update_channels(&snapshot, &[]);
+        audio.update_channels(&snapshot, &[], true);
         assert_eq!(audio.active_channels[&key].detached_mix, Some((0.0, 0.0)));
         assert!(audio.active_channels[&key].channel.is_none());
 
         let moved_viewports = [audio_viewport(0, 7, Vector2::new(100, 100))];
-        audio.update_channels(&snapshot, &moved_viewports);
+        audio.update_channels(&snapshot, &moved_viewports, true);
         assert_eq!(audio.active_channels[&key].detached_mix, Some((0.79, 0.5)));
         assert!(audio.active_channels[&key].channel.is_some());
 
@@ -104456,7 +104769,7 @@ func Award()
             .expect("detached instance remains live");
         assert_eq!(info.target, None);
         assert_eq!(info.detached_mix, Some((0.79, 0.7)));
-        audio.update_channels(&snapshot, &[]);
+        audio.update_channels(&snapshot, &[], true);
         assert_eq!(
             audio
                 .active_channels
@@ -104934,7 +105247,7 @@ func Award()
 
         let moved_listener = make_object(1, "LIST", Vector2::new(2000, 1000));
         let moved = make_snapshot(vec![moved_listener.clone()], Vec::new());
-        audio.update_channels(&moved, &[]);
+        audio.update_channels(&moved, &[], true);
         assert_eq!(audio.active_channels[&key].detached_mix, Some(frozen_mix));
         assert!(!audio
             .try_start_sound(
@@ -114670,6 +114983,18 @@ public func Grant(password) { return GainMissionAccess(password); }
         let mut app = new_menu_app(640, 480);
         let (_events, mut commands) = install_classic_host_network_stub(&mut app);
 
+        if let Some(lobby) = app.classic_host_lobby.as_mut() {
+            lobby.chat_history_index = 3;
+            lobby.controller.set_chat_draft("stale");
+        }
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(String::new()))
+            .expect("empty chat remains a local GUI error");
+        assert_eq!(app.ui_sound_log, ["Error"]);
+        assert!(commands.take_submitted_messages().is_empty());
+        let lobby = app.classic_host_lobby.as_ref().unwrap();
+        assert_eq!(lobby.chat_history_index, -1);
+        assert!(lobby.controller.chat_edit_view().text.is_empty());
+
         app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
             "/start 12".to_string(),
         ))
@@ -114753,6 +115078,17 @@ public func Grant(password) { return GainMissionAccess(password); }
         let mut app = new_menu_app(640, 480);
         app.startup_view = StartupView::NetworkLobby;
         app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+
+        if let Some(lobby) = app.network_lobby.as_mut() {
+            lobby.chat_history_index = 3;
+            lobby.chat_edit.text = "stale".to_string();
+        }
+        app.process_lobby_action(LobbyAction::SubmitMessage(String::new()))
+            .expect("empty client chat remains a local GUI error");
+        assert_eq!(app.ui_sound_log, ["Error"]);
+        let lobby = app.network_lobby.as_ref().unwrap();
+        assert_eq!(lobby.chat_history_index, -1);
+        assert!(lobby.chat_edit.text.is_empty());
 
         app.process_lobby_action(LobbyAction::SubmitMessage("/start 10".to_string()))
             .expect("client start command is consumed");
