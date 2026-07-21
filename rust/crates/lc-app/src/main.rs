@@ -10193,12 +10193,34 @@ impl AudioContext {
             }
             return;
         }
-        for (key, info) in self.active_channels.iter_mut() {
+        // C4SoundSystem::Execute walks its sample list and then each sample's
+        // instance list. Preserve that order for the whole enabled pass: an
+        // earlier instance may release a scarce channel before a later one
+        // restores.
+        let mut ordered_channels = self
+            .active_channels
+            .iter()
+            .map(|(key, info)| {
+                (
+                    (info.sample_order, info.instance_order),
+                    key.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        ordered_channels.sort_unstable_by_key(|(order, _)| *order);
+        for (_, key) in ordered_channels {
+            let info = self
+                .active_channels
+                .get_mut(&key)
+                .expect("ordered sound instance remains live during update");
             if info
                 .target
                 .is_some_and(|target| snapshot.object(target).is_none())
             {
                 if info.looped {
+                    if let Some(channel) = info.channel.take() {
+                        self.system.halt_channel(channel);
+                    }
                     finished.push(key.clone());
                     continue;
                 }
@@ -104385,6 +104407,156 @@ func Award()
         let channel = audio.active_channels[&key]
             .channel
             .expect("muted loop starts after unmute");
+        assert!(audio.system.channel_is_playing(channel));
+    }
+
+    #[test]
+    fn channel_restore_at_capacity_follows_sample_then_instance_order() {
+        let dir = tempdir().expect("channel restore fixture");
+        let scenario = dir.path().join("Audio.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        for name in ["First.wav", "Second.wav", "Third.wav"] {
+            fs::write(scenario.join(name), silent_pcm_wav(1_000))
+                .expect("write sound fixture");
+        }
+        let mut audio = AudioContext::try_new(AudioOptions {
+            max_channels: 1,
+            ..AudioOptions::default()
+        })
+        .expect("audio context");
+        audio.configure_scenario(Some(&scenario));
+        audio.options.sound_enabled = false;
+        let snapshot = make_snapshot(Vec::new(), Vec::new());
+
+        for name in ["First", "Second", "Third"] {
+            audio
+                .start_sound(name, None, 100, true, false, None, &snapshot, &[])
+                .expect("muted loop starts without a channel");
+        }
+        assert_eq!(audio.active_channels.len(), 3);
+        assert!(audio
+            .active_channels
+            .values()
+            .all(|info| info.channel.is_none()));
+
+        // Assign synthetic native tuple ranks that deliberately disagree with
+        // this map's iteration order. This keeps the regression deterministic
+        // despite RandomState while exercising both ordering fields.
+        let hash_order = audio.active_channels.keys().cloned().collect::<Vec<_>>();
+        let winner = hash_order[2].clone();
+        let same_sample_later = hash_order[1].clone();
+        let later_sample = hash_order[0].clone();
+        {
+            let info = audio
+                .active_channels
+                .get_mut(&winner)
+                .expect("winner instance");
+            info.sample_order = 0;
+            info.instance_order = 1;
+        }
+        {
+            let info = audio
+                .active_channels
+                .get_mut(&same_sample_later)
+                .expect("later same-sample instance");
+            info.sample_order = 0;
+            info.instance_order = 2;
+        }
+        {
+            let info = audio
+                .active_channels
+                .get_mut(&later_sample)
+                .expect("later sample instance");
+            info.sample_order = 1;
+            info.instance_order = 0;
+        }
+
+        audio.options.sound_enabled = true;
+        audio.update_channels(&snapshot, &[], true);
+
+        assert_eq!(audio.active_channels.len(), 1);
+        assert!(audio.active_channels.contains_key(&winner));
+        let channel = audio.active_channels[&winner]
+            .channel
+            .expect("first native instance reacquires the only channel");
+        assert!(audio.system.channel_is_playing(channel));
+        assert!(!audio.active_channels.contains_key(&same_sample_later));
+        assert!(!audio.active_channels.contains_key(&later_sample));
+    }
+
+    #[test]
+    fn deleted_earlier_loop_frees_capacity_for_ordered_restore() {
+        let dir = tempdir().expect("ordered channel release fixture");
+        let scenario = dir.path().join("Audio.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        for name in ["First.wav", "Second.wav"] {
+            fs::write(scenario.join(name), silent_pcm_wav(1_000))
+                .expect("write sound fixture");
+        }
+        let mut audio = AudioContext::try_new(AudioOptions {
+            max_channels: 1,
+            ..AudioOptions::default()
+        })
+        .expect("audio context");
+        audio.configure_scenario(Some(&scenario));
+
+        let first = make_object(1, "SND1", Vector2::ZERO);
+        let second = make_object(2, "SND2", Vector2::new(100, 0));
+        let initial = make_snapshot(vec![first.clone(), second.clone()], Vec::new());
+        audio
+            .start_sound(
+                "First",
+                Some(first.id),
+                100,
+                true,
+                false,
+                None,
+                &initial,
+                &[audio_viewport(0, OWNER_NONE, first.position)],
+            )
+            .expect("first loop occupies the only channel");
+        audio
+            .start_sound(
+                "Second",
+                Some(second.id),
+                100,
+                true,
+                false,
+                None,
+                &initial,
+                &[],
+            )
+            .expect("inaudible second loop starts without a channel");
+        let first_key = SoundInstanceKey::new("First", Some(first.id));
+        let second_key = SoundInstanceKey::new("Second", Some(second.id));
+        assert!(audio.active_channels[&first_key].channel.is_some());
+        assert!(audio.active_channels[&second_key].channel.is_none());
+        audio
+            .active_channels
+            .get_mut(&first_key)
+            .expect("first instance")
+            .sample_order = 0;
+        audio
+            .active_channels
+            .get_mut(&second_key)
+            .expect("second instance")
+            .sample_order = 1;
+
+        let without_first = make_snapshot(vec![second.clone()], Vec::new());
+        audio.update_channels(
+            &without_first,
+            &[audio_viewport(0, OWNER_NONE, second.position)],
+            true,
+        );
+
+        assert!(!audio.active_channels.contains_key(&first_key));
+        let restored = audio
+            .active_channels
+            .get(&second_key)
+            .expect("later loop survives after the earlier release");
+        let channel = restored
+            .channel
+            .expect("later loop reacquires the released channel");
         assert!(audio.system.channel_is_playing(channel));
     }
 
