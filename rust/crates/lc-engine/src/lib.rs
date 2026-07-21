@@ -47642,6 +47642,13 @@ impl Engine {
         self.environment.temperature = climate;
         self.environment.wind = wind;
         self.environment.wind_target = wind;
+        // These Rust-side precipitation fields previously arrived through
+        // the eagerly installed scenario environment. Stage the same final
+        // metadata here so pre-init callbacks see C4Weather::Default without
+        // changing the established post-init EnvironmentSettings state.
+        let rain_base = init.rain.base().clamp(-100, 100);
+        self.environment.precipitation = rain_base;
+        self.environment.precipitation_strength = rain_base;
         if !init.no_initialize {
             let rain = init.rain.evaluate(&mut self.rng);
             if rain != 0 {
@@ -47669,6 +47676,9 @@ impl Engine {
         self.environment.meteorite = meteorite;
         self.environment.volcano = volcano;
         self.environment.earthquake = earthquake;
+        // C++ assigns NoGamma only after every scenario-value evaluation and
+        // cloud callback, immediately before SetSeasonGamma.
+        self.environment.no_gamma = init.no_gamma;
         // C4Weather::Init calls SetSeasonGamma after all scenario weather
         // fields, including NoGamma, have been established (:65-69).
         self.refresh_season_gamma_control();

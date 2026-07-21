@@ -89,7 +89,7 @@ fn call_probe(engine: &mut Engine, function: &str) {
         .unwrap_or_else(|error| panic!("{function} executes: {error}"));
 }
 
-fn cold_winter_weather_init() -> LegacyWeatherInit {
+fn cold_winter_weather_init(no_gamma: bool) -> LegacyWeatherInit {
     let flat = |value: i32| LegacyC4SVal::new(value, 0, -100, 100);
     LegacyWeatherInit {
         season: flat(0),
@@ -103,6 +103,7 @@ fn cold_winter_weather_init() -> LegacyWeatherInit {
         volcano: flat(0),
         earthquake: flat(0),
         no_initialize: true,
+        no_gamma,
     }
 }
 
@@ -112,7 +113,7 @@ fn weather_init_writes_exact_season_gamma_to_slot_one() {
     // Temperature, Climate, and NoGamma (C4Weather.cpp:36-69). Season 0
     // selects the winter row; Temperature=-20 subtracts 10 from red/green
     // and adds 10 to blue (C4Weather.cpp:259-284).
-    let init = cold_winter_weather_init();
+    let init = cold_winter_weather_init(false);
     let mut engine = Engine::with_seed(0);
     engine.set_environment(EnvironmentSettings::new(0).with_gamma_enabled());
 
@@ -139,7 +140,7 @@ fn no_gamma_leaves_the_existing_season_slot_untouched() {
     );
 
     engine
-        .apply_weather_init(&cold_winter_weather_init())
+        .apply_weather_init(&cold_winter_weather_init(true))
         .expect("weather initialization succeeds");
     assert_eq!(engine.gamma_controls().ramp(1), expected);
 

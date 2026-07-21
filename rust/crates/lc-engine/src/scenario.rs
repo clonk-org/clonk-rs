@@ -3350,6 +3350,17 @@ impl Scenario {
         Ok(())
     }
 
+    /// Live environment staged before the native Weather.Init boundary.
+    /// Fresh legacy games still expose C4Weather::Default here; savegames
+    /// and synthetic scenarios need their configured metadata immediately.
+    fn environment_before_weather_init(&self, runtime_savegame: bool) -> EnvironmentSettings {
+        if self.weather_init.is_some() && !runtime_savegame {
+            EnvironmentSettings::default()
+        } else {
+            self.environment.unwrap_or_default()
+        }
+    }
+
     fn apply_before_players_with_final_synchronize(
         &self,
         engine: &mut Engine,
@@ -3460,7 +3471,14 @@ impl Scenario {
             engine.set_physics(physics);
         }
 
-        engine.set_environment(self.environment.unwrap_or_default());
+        // C4Weather::Default remains the live weather for a fresh legacy
+        // game until Weather.Init(true), after InitializeDef, all placement
+        // callbacks and Landscape.PostInitMap (C4Weather.cpp:186-194;
+        // C4Game.cpp:2505-2525). Savegames must instead expose their
+        // scenario metadata here so Game.txt can overlay the compiled live
+        // Weather state before those callbacks; synthetic scenarios have no
+        // deferred Weather.Init and keep their configured environment.
+        engine.set_environment(self.environment_before_weather_init(runtime_savegame));
         // Weather.Init's draws happen AFTER the definitions, the loaded
         // objects and the InitVegetation→InitGoals placements — see the
         // block below the spawn loop (C4Game.cpp:2496-2507).
@@ -8212,7 +8230,7 @@ impl LegacyC4SVal {
         Self { std, rnd, min, max }
     }
 
-    fn base(self) -> i32 {
+    pub(crate) fn base(self) -> i32 {
         let (min, max) = ordered_bounds(self.min, self.max);
         self.std.clamp(min, max)
     }
@@ -11387,7 +11405,7 @@ fn derive_legacy_physics(
 
 /// The C4SVals C4Weather::Init evaluates at scenario start
 /// (C4Weather.cpp:36-70) plus the NoInitialize gate for the rain-cloud
-/// block (:49-58).
+/// block (:49-58) and the late NoGamma assignment (:65).
 #[derive(Debug, Clone)]
 #[doc(hidden)]
 pub struct LegacyWeatherInit {
@@ -11413,6 +11431,8 @@ pub struct LegacyWeatherInit {
     pub earthquake: LegacyC4SVal,
     #[doc(hidden)]
     pub no_initialize: bool,
+    #[doc(hidden)]
+    pub no_gamma: bool,
 }
 
 fn derive_legacy_weather_init(
@@ -11434,6 +11454,7 @@ fn derive_legacy_weather_init(
         volcano: legacy_c4s_value(disasters, "volcano", LegacyC4SVal::new(0, 0, 0, 100))?,
         earthquake: legacy_c4s_value(disasters, "earthquake", LegacyC4SVal::new(0, 0, 0, 100))?,
         no_initialize: manifest.core.head.no_initialize != 0,
+        no_gamma: manifest.core.weather.no_gamma,
     })
 }
 
@@ -26195,7 +26216,7 @@ public func ActualizePhase(pClonk)
                 "#strict\nstatic restored_named;\n\
                  static observed_saved_weather;\n\
                  func InitializeDef() {\n\
-                     observed_saved_weather = [restored_named, GetWind(), GetSeason(), GetTemperature()];\n\
+                     observed_saved_weather = [restored_named, GetWind(), GetSeason(), GetTemperature(), GetClimate()];\n\
                  }\n",
             )),
             "// no scenario script\n",
@@ -26315,6 +26336,7 @@ public func ActualizePhase(pClonk)
                 lc_script::Value::Int(73),
                 lc_script::Value::Int(44),
                 lc_script::Value::Int(-8),
+                lc_script::Value::Int(12),
             ])),
             "InitializeDef observes compiled weather, not fresh Weather.Init values"
         );
@@ -26326,8 +26348,22 @@ public func ActualizePhase(pClonk)
         assert_eq!(engine.environment.wind, 73);
         assert_eq!(engine.environment.wind_target, -21);
         assert_eq!(engine.environment.season, 44);
+        assert_eq!(engine.environment.year_speed, 5);
+        assert_eq!(engine.environment.season_delay, 17);
         assert_eq!(engine.environment.temperature, -8);
+        assert_eq!(engine.environment.temperature_range, 29);
+        assert_eq!(engine.environment.climate, 12);
+        assert_eq!(engine.environment.lightning, 3);
+        assert_eq!(engine.environment.meteorite, 4);
+        assert_eq!(engine.environment.volcano, 5);
+        assert_eq!(engine.environment.earthquake, 6);
+        assert!(engine.environment.no_gamma);
         assert_eq!(engine.gamma_controls(), &gamma);
+        assert_eq!(
+            engine.debug_rng_clone(),
+            crate::rng::LcgRng::seed_from_u64(0),
+            "Weather.Init(false) consumes no fresh scenario draws"
+        );
         assert!(engine.structures_need_energy);
         assert!(engine.construction_needs_material);
         assert!(engine.flag_removeable);
@@ -29968,6 +30004,181 @@ public func ActualizePhase(pClonk)
     // Random(2*Rnd+1) even for Rnd=0 (C4Scenario.cpp:43-46), so the whole
     // RNG stream shifts if any draw is skipped.
     #[test]
+    fn fresh_legacy_initialize_def_and_placements_observe_default_weather_before_weather_init() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            Some((
+                "PROB",
+                "#strict\n\
+                 static initialize_def_weather;\n\
+                 static initialize_def_random;\n\
+                 static placement_construction_weather;\n\
+                 static placement_completion_weather;\n\
+                 static placement_weather;\n\
+                 static placement_random;\n\
+                 func CurrentWeather() {\n\
+                     return [GetWind(0, 0, true), GetTemperature(), GetClimate(), GetSeason()];\n\
+                 }\n\
+                 func InitializeDef() {\n\
+                     initialize_def_weather = CurrentWeather();\n\
+                     initialize_def_random = Random(1000000);\n\
+                     return 1;\n\
+                 }\n\
+                 func Construction() {\n\
+                     placement_construction_weather = CurrentWeather();\n\
+                     return 1;\n\
+                 }\n\
+                 func Completion() {\n\
+                     placement_completion_weather = CurrentWeather();\n\
+                     return 1;\n\
+                 }\n\
+                 func Initialize() {\n\
+                     placement_weather = CurrentWeather();\n\
+                     placement_random = Random(1000000);\n\
+                     return 1;\n\
+                 }\n",
+            )),
+            "// no scenario script\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Weather callback order\n\n\
+             [Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapZoom=10\nGravity=120,3,10,200\n\
+             VegetationLevel=20,4,0,100\nInEarthLevel=30,2,0,100\n\n\
+             [Environment]\nObjects=PROB=1;\n\n\
+             [Weather]\nStartSeason=30,10,0,100\nYearSpeed=45,5,0,100\n\
+             Climate=60,10,0,100\nWind=10,5,-20,20\nRain=25,5,0,100\n\
+             Lightning=12,5,0,100\nNoGamma=0\n\n\
+             [Disasters]\nMeteorite=25,4,0,100\nVolcano=15,3,0,100\n\
+             Earthquake=5,2,0,100\n",
+        )
+        .expect("write scenario core");
+        // The loader expands this to its 100x100 static-map minimum:
+        // LandscapeLoaded enables the placement block while the world stays
+        // below the 500-pixel threshold for rain-cloud creation.
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[&[0u8, 0][..], &[0u8, 0][..]]),
+        )
+        .expect("write landscape");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        assert_ne!(
+            scenario.environment().expect("scenario environment"),
+            EnvironmentSettings::default(),
+            "the fixture must carry non-default scenario weather"
+        );
+        assert_eq!(
+            scenario.environment_before_weather_init(false),
+            EnvironmentSettings::default(),
+            "every staged live-weather field starts at C4Weather::Default"
+        );
+
+        let mut engine = Engine::with_seed(9);
+        scenario
+            .apply_before_network_final_init(&mut engine)
+            .expect("fresh scenario applies without the final RNG re-fix");
+
+        let global = |name: &str| {
+            engine
+                .script_globals
+                .borrow()
+                .get(name)
+                .map(|cell| cell.borrow().clone())
+        };
+        let default_getters = lc_script::Value::Array(vec![lc_script::Value::Int(0); 4]);
+        assert_eq!(
+            global("initialize_def_weather"),
+            Some(default_getters.clone()),
+            "InitializeDef sees C4Weather::Default"
+        );
+        assert_eq!(
+            global("placement_construction_weather"),
+            Some(default_getters.clone()),
+            "InitEnvironment object Construction sees C4Weather::Default"
+        );
+        assert_eq!(
+            global("placement_completion_weather"),
+            Some(default_getters.clone()),
+            "InitEnvironment object Completion sees C4Weather::Default"
+        );
+        assert_eq!(
+            global("placement_weather"),
+            Some(default_getters),
+            "InitEnvironment object Initialize sees C4Weather::Default"
+        );
+
+        // Replay the live synced ledger through the exact C++ boundary:
+        // Gravity, InitializeDef, the two unconditional placement-level
+        // evaluates, the placed object's Initialize, then Weather.Init.
+        let mut replay = crate::rng::LcgRng::seed_from_u64(9);
+        LegacyC4SVal::new(120, 3, 10, 200).evaluate(&mut replay);
+        let initialize_def_random = replay.random(1_000_000);
+        LegacyC4SVal::new(20, 4, 0, 100).evaluate(&mut replay);
+        LegacyC4SVal::new(30, 2, 0, 100).evaluate(&mut replay);
+        let placement_random = replay.random(1_000_000);
+        let season = LegacyC4SVal::new(30, 10, 0, 100).evaluate(&mut replay);
+        let year_speed = LegacyC4SVal::new(45, 5, 0, 100).evaluate(&mut replay);
+        let climate = 100 - LegacyC4SVal::new(60, 10, 0, 100).evaluate(&mut replay) - 50;
+        let wind = LegacyC4SVal::new(10, 5, -20, 20).evaluate(&mut replay);
+        let rain = LegacyC4SVal::new(25, 5, 0, 100).evaluate(&mut replay);
+        let lightning = LegacyC4SVal::new(12, 5, 0, 100).evaluate(&mut replay);
+        let meteorite = LegacyC4SVal::new(25, 4, 0, 100).evaluate(&mut replay);
+        let volcano = LegacyC4SVal::new(15, 3, 0, 100).evaluate(&mut replay);
+        let earthquake = LegacyC4SVal::new(5, 2, 0, 100).evaluate(&mut replay);
+
+        assert_eq!(
+            global("initialize_def_random"),
+            Some(lc_script::Value::Int(initialize_def_random))
+        );
+        assert_eq!(
+            global("placement_random"),
+            Some(lc_script::Value::Int(placement_random))
+        );
+        let environment = engine.environment();
+        assert_eq!(
+            (
+                environment.season,
+                environment.year_speed,
+                environment.climate,
+                environment.temperature,
+                environment.wind,
+                environment.wind_target,
+            ),
+            (season, year_speed, climate, climate, wind, wind)
+        );
+        assert_eq!(
+            (
+                environment.lightning,
+                environment.meteorite,
+                environment.volcano,
+                environment.earthquake,
+            ),
+            (lightning, meteorite, volcano, earthquake)
+        );
+        assert_eq!(environment.precipitation, rain);
+        assert_eq!(environment.precipitation_strength, 25);
+        assert_eq!((environment.season_min, environment.season_max), (0, 100));
+        assert_eq!(
+            (
+                environment.base_wind,
+                environment.wind_variation,
+                environment.wind_min,
+                environment.wind_max,
+            ),
+            (10, 5, -20, 20)
+        );
+        assert!(!environment.no_gamma);
+        assert_eq!(engine.debug_rng_clone(), replay);
+    }
+
+    #[test]
     fn weather_init_retains_the_precipitation_material_name() {
         // C4SWeather::CompileFunc stores `Precipitation` and
         // C4Weather::Init passes that exact name to LaunchCloud
@@ -30769,7 +30980,7 @@ public func ActualizePhase(pClonk)
             dir.path(),
             None,
             "#strict\nstatic callback_trace;\nstatic callback_calls;\nstatic callback_random;\n\
-             static callback_draw_result;\nstatic callback_map_result;\n\
+             static callback_weather;\nstatic callback_draw_result;\nstatic callback_map_result;\n\
              func AddCallback(tag, x, y, zoom) {\n\
                  if (!callback_trace) callback_trace = \"\";\n\
                  callback_trace = Format(\"%s%d,%d,%d,%d;\", callback_trace, tag, x, y, zoom);\n\
@@ -30778,6 +30989,7 @@ public func ActualizePhase(pClonk)
              func OnDraw(x, y, zoom) {\n\
                  if (!callback_calls) {\n\
                      callback_random = Random(1000000);\n\
+                     callback_weather = [GetWind(0, 0, true), GetTemperature(), GetClimate(), GetSeason()];\n\
                      callback_draw_result = DrawDefMap(0, 0, 10, 5, \"Named\");\n\
                      callback_map_result = DrawMap(0, 0, 15, 5,\n\
                          \"map Runtime { seed=8; Marked { x=2px; }; };\");\n\
@@ -30851,6 +31063,15 @@ public func ActualizePhase(pClonk)
                 .map(|cell| cell.borrow().clone()),
             Some(lc_script::Value::Int(expected_callback_random)),
             "PostInitMap runs after Gravity and placements but before Weather.Init"
+        );
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("callback_weather")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Array(vec![lc_script::Value::Int(0); 4])),
+            "PostInitMap still sees C4Weather::Default"
         );
         assert_eq!(
             engine

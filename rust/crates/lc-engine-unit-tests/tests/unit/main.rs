@@ -34504,6 +34504,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
             volcano: flat(0),
             earthquake: flat(0),
             no_initialize: true,
+            no_gamma: true,
         };
         engine
             .apply_weather_init(&init)
@@ -34578,6 +34579,7 @@ func Activate(inMat, inLength, inStrength)
             volcano: flat(0),
             earthquake: flat(0),
             no_initialize: false,
+            no_gamma: true,
         }
     }
 
