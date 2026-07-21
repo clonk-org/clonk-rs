@@ -304,10 +304,427 @@ impl MaterialId {
     }
 }
 
+/// One primitive exposed by `C4ValueGetCompiler` while decompiling a loaded
+/// `C4MaterialCore`.  Keep this engine-local representation independent of
+/// the script VM: the compatibility layer is responsible for constructing
+/// the corresponding script value (and for collapsing a zero C4ID to nil).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MaterialCoreValue {
+    Int(i32),
+    Bool(bool),
+    String(String),
+    C4Id(String),
+}
+
+/// Script-visible, fully compiled values of one `C4MaterialCore`.
+///
+/// The resource definition remains available for the material runtime, but
+/// `GetMaterialVal` decompiles the loaded core rather than re-reading source
+/// strings.  Storing the compiled primitives separately also avoids changing
+/// the runtime interpretation covered by the later material parity tickets.
+#[derive(Debug, Clone)]
+struct CompiledMaterialCore {
+    entries: HashMap<&'static str, Vec<MaterialCoreValue>>,
+}
+
+impl CompiledMaterialCore {
+    fn from_definition(definition: &ResourceMaterialDefinition) -> Self {
+        let mut entries = HashMap::new();
+
+        let color = fixed_int_array::<9>(definition.int_list("color"));
+        // ColorX compiles into the same array after Color.  If the entry is
+        // absent its whole-field default is the current Color array; if it is
+        // present, the array adaptor fills omitted elements with zero.
+        let color = definition
+            .int_list("colorx")
+            .map(|values| fixed_int_array::<9>(Some(values)))
+            .unwrap_or(color);
+        let alpha = fixed_int_array::<6>(definition.int_list("alpha"));
+        let pxs_gfx_rect = fixed_int_array::<6>(definition.int_list("pxsgfxrt"));
+
+        insert_string(&mut entries, "Name", definition.name());
+        insert_trimmed_int_array(&mut entries, "Color", &color);
+        insert_trimmed_int_array(&mut entries, "ColorX", &color);
+        insert_trimmed_int_array(&mut entries, "Alpha", &alpha);
+        // ColorAnimation is a raw/null adaptor.  C4ValueGetCompiler ignores
+        // raw values, so the entry intentionally has no reflected primitive.
+
+        let shape = definition.int("shape").unwrap_or(0);
+        let density = definition.int("density").unwrap_or(0);
+        let friction = definition.int("friction").unwrap_or(0);
+        let dig_free = definition.int("digfree").unwrap_or(0);
+        let blast_free = definition.int("blastfree").unwrap_or(0);
+        let dig_to_object_request = definition.int("dig2objectrequest").unwrap_or(0);
+        let mut placement = definition.int("placement").unwrap_or(0);
+        if placement == 0 {
+            placement = MaterialProperties::default_placement(
+                density,
+                dig_free != 0,
+                blast_free != 0,
+                dig_to_object_request != 0,
+            );
+        }
+
+        insert_int(&mut entries, "Shape", shape);
+        insert_int(&mut entries, "Density", density);
+        insert_int(&mut entries, "Friction", friction);
+        insert_int(&mut entries, "DigFree", dig_free);
+        insert_int(&mut entries, "BlastFree", blast_free);
+        insert_c4_id(
+            &mut entries,
+            "Blast2Object",
+            definition.value("blast2object"),
+        );
+        insert_c4_id(&mut entries, "Dig2Object", definition.value("dig2object"));
+        insert_int(
+            &mut entries,
+            "Dig2ObjectRatio",
+            definition.int("dig2objectratio").unwrap_or(0),
+        );
+        insert_int(&mut entries, "Dig2ObjectRequest", dig_to_object_request);
+        insert_int(
+            &mut entries,
+            "Blast2ObjectRatio",
+            definition.int("blast2objectratio").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "Blast2PXSRatio",
+            definition.int("blast2pxsratio").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "Instable",
+            definition.int("instable").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "MaxAirSpeed",
+            definition.int("maxairspeed").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "MaxSlide",
+            definition.int("maxslide").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "WindDrift",
+            definition.int("winddrift").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "Inflammable",
+            definition.int("inflammable").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "Incindiary",
+            definition.int("incindiary").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "Corrode",
+            definition.int("corrode").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "Corrosive",
+            definition.int("corrosive").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "Extinguisher",
+            definition.int("extinguisher").unwrap_or(0),
+        );
+        insert_int(&mut entries, "Soil", definition.int("soil").unwrap_or(0));
+        insert_int(&mut entries, "Placement", placement);
+        insert_definition_string(&mut entries, "TextureOverlay", definition, "textureoverlay");
+        insert_int(
+            &mut entries,
+            "OverlayType",
+            definition.int("overlaytype").unwrap_or(0),
+        );
+        insert_definition_string(&mut entries, "PXSGfx", definition, "pxsgfx");
+        entries.insert(
+            "PXSGfxRt",
+            pxs_gfx_rect
+                .into_iter()
+                .map(MaterialCoreValue::Int)
+                .collect(),
+        );
+        insert_int(
+            &mut entries,
+            "PXSGfxSize",
+            definition.int("pxsgfxsize").unwrap_or(pxs_gfx_rect[2]),
+        );
+        insert_int(
+            &mut entries,
+            "TempConvStrength",
+            definition.int("tempconvstrength").unwrap_or(0),
+        );
+        insert_definition_string(&mut entries, "BlastShiftTo", definition, "blastshiftto");
+        insert_definition_string(&mut entries, "InMatConvert", definition, "inmatconvert");
+        insert_definition_string(&mut entries, "InMatConvertTo", definition, "inmatconvertto");
+        insert_int(
+            &mut entries,
+            "InMatConvertDepth",
+            definition.int("inmatconvertdepth").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "AboveTempConvert",
+            definition.int("abovetempconvert").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "AboveTempConvertDir",
+            definition.int("abovetempconvertdir").unwrap_or(0),
+        );
+        insert_definition_string(
+            &mut entries,
+            "AboveTempConvertTo",
+            definition,
+            "abovetempconvertto",
+        );
+        insert_int(
+            &mut entries,
+            "BelowTempConvert",
+            definition.int("belowtempconvert").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "BelowTempConvertDir",
+            definition.int("belowtempconvertdir").unwrap_or(0),
+        );
+        insert_definition_string(
+            &mut entries,
+            "BelowTempConvertTo",
+            definition,
+            "belowtempconvertto",
+        );
+        insert_int(
+            &mut entries,
+            "MinHeightCount",
+            definition.int("minheightcount").unwrap_or(0),
+        );
+        insert_int(
+            &mut entries,
+            "SplashRate",
+            definition.int("splashrate").unwrap_or(10),
+        );
+
+        for reaction in definition.reactions() {
+            insert_reaction_values(&mut entries, reaction);
+        }
+
+        Self { entries }
+    }
+
+    fn entry(&self, name: &str, index: usize) -> Option<MaterialCoreValue> {
+        self.entries
+            .get(name)
+            .and_then(|values| values.get(index))
+            .cloned()
+    }
+}
+
+fn fixed_int_array<const N: usize>(values: Option<Vec<i32>>) -> [i32; N] {
+    let mut result = [0; N];
+    for (target, value) in result.iter_mut().zip(values.into_iter().flatten()) {
+        *target = value;
+    }
+    result
+}
+
+fn insert_int(
+    entries: &mut HashMap<&'static str, Vec<MaterialCoreValue>>,
+    name: &'static str,
+    value: i32,
+) {
+    entries.insert(name, vec![MaterialCoreValue::Int(value)]);
+}
+
+fn insert_string(
+    entries: &mut HashMap<&'static str, Vec<MaterialCoreValue>>,
+    name: &'static str,
+    value: &str,
+) {
+    entries.insert(name, vec![MaterialCoreValue::String(value.to_owned())]);
+}
+
+fn insert_definition_string(
+    entries: &mut HashMap<&'static str, Vec<MaterialCoreValue>>,
+    name: &'static str,
+    definition: &ResourceMaterialDefinition,
+    key: &str,
+) {
+    let value = compile_identifier_string(definition.value(key));
+    insert_string(entries, name, &value);
+}
+
+fn insert_trimmed_int_array(
+    entries: &mut HashMap<&'static str, Vec<MaterialCoreValue>>,
+    name: &'static str,
+    values: &[i32],
+) {
+    let reflected_len = values
+        .iter()
+        .rposition(|value| *value != 0)
+        .map_or(0, |index| index + 1);
+    entries.insert(
+        name,
+        values[..reflected_len]
+            .iter()
+            .copied()
+            .map(MaterialCoreValue::Int)
+            .collect(),
+    );
+}
+
+fn compile_identifier_string(value: Option<&str>) -> String {
+    value
+        .unwrap_or_default()
+        .trim_start_matches(|character: char| character.is_ascii_whitespace())
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        .map(char::from)
+        .collect()
+}
+
+fn compile_reaction_string(value: Option<&str>) -> String {
+    let value = value
+        .unwrap_or_default()
+        .trim_start_matches(|character: char| character.is_ascii_whitespace());
+    let Some(quoted) = value.strip_prefix('"') else {
+        return value.to_owned();
+    };
+
+    let mut compiled = String::new();
+    let mut characters = quoted.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '"' => break,
+            '\\' => match characters.next() {
+                Some('a') => compiled.push('\u{7}'),
+                Some('b') => compiled.push('\u{8}'),
+                Some('f') => compiled.push('\u{c}'),
+                Some('n') => compiled.push('\n'),
+                Some('r') => compiled.push('\r'),
+                Some('t') => compiled.push('\t'),
+                Some('v') => compiled.push('\u{b}'),
+                Some(escaped) => compiled.push(escaped),
+                None => break,
+            },
+            character => compiled.push(character),
+        }
+    }
+    compiled
+}
+
+fn compile_c4_id(value: Option<&str>) -> String {
+    let identifier = compile_identifier_string(value);
+    let bytes = identifier.as_bytes().get(..4).unwrap_or_default();
+    if bytes.len() != 4 || bytes == b"NONE" {
+        return "NONE".to_owned();
+    }
+    let is_numeric_zero = bytes.iter().all(u8::is_ascii_digit)
+        && bytes
+            .iter()
+            .fold(0u32, |number, digit| number * 10 + u32::from(*digit - b'0'))
+            == 0;
+    if is_numeric_zero {
+        "NONE".to_owned()
+    } else {
+        String::from_utf8(bytes.to_vec()).expect("material C4IDs contain only ASCII identifiers")
+    }
+}
+
+fn insert_c4_id(
+    entries: &mut HashMap<&'static str, Vec<MaterialCoreValue>>,
+    name: &'static str,
+    value: Option<&str>,
+) {
+    entries.insert(name, vec![MaterialCoreValue::C4Id(compile_c4_id(value))]);
+}
+
+fn append_reaction_value(
+    entries: &mut HashMap<&'static str, Vec<MaterialCoreValue>>,
+    name: &'static str,
+    value: MaterialCoreValue,
+) {
+    entries.entry(name).or_default().push(value);
+}
+
+fn insert_reaction_values(
+    entries: &mut HashMap<&'static str, Vec<MaterialCoreValue>>,
+    reaction: &MaterialReactionDefinition,
+) {
+    let reaction_type = match compile_reaction_string(reaction.value("type")).as_str() {
+        "Script" => "Script",
+        "Convert" => "Convert",
+        "Poof" => "Poof",
+        "Corrode" => "Corrode",
+        "Insert" => "Insert",
+        _ => "",
+    };
+    append_reaction_value(
+        entries,
+        "Type",
+        MaterialCoreValue::String(reaction_type.to_owned()),
+    );
+    append_reaction_value(
+        entries,
+        "TargetSpec",
+        MaterialCoreValue::String(compile_reaction_string(reaction.value("targetspec"))),
+    );
+    append_reaction_value(
+        entries,
+        "ScriptFunc",
+        MaterialCoreValue::String(compile_reaction_string(reaction.value("scriptfunc"))),
+    );
+    append_reaction_value(
+        entries,
+        "ExecMask",
+        MaterialCoreValue::Int(reaction.int("execmask").unwrap_or(-1)),
+    );
+    append_reaction_value(
+        entries,
+        "Reverse",
+        MaterialCoreValue::Bool(reaction.bool_flag("reverse").unwrap_or(false)),
+    );
+    append_reaction_value(
+        entries,
+        "InverseSpec",
+        MaterialCoreValue::Bool(reaction.bool_flag("inversespec").unwrap_or(false)),
+    );
+    append_reaction_value(
+        entries,
+        "CheckSlide",
+        MaterialCoreValue::Bool(reaction.bool_flag("checkslide").unwrap_or(true)),
+    );
+    append_reaction_value(
+        entries,
+        "Depth",
+        MaterialCoreValue::Int(reaction.int("depth").unwrap_or(0)),
+    );
+    append_reaction_value(
+        entries,
+        "ConvertMat",
+        MaterialCoreValue::String(compile_reaction_string(reaction.value("convertmat"))),
+    );
+    append_reaction_value(
+        entries,
+        "CorrosionRate",
+        MaterialCoreValue::Int(reaction.int("corrosionrate").unwrap_or(100)),
+    );
+}
+
 #[derive(Debug, Clone)]
 pub struct Material {
     id: MaterialId,
     definition: ResourceMaterialDefinition,
+    compiled_core: CompiledMaterialCore,
     properties: MaterialProperties,
     color: Vec<i32>,
     alpha: Vec<i32>,
@@ -501,6 +918,7 @@ impl MaterialProperties {
 
 impl Material {
     fn new(id: MaterialId, definition: ResourceMaterialDefinition) -> Self {
+        let compiled_core = CompiledMaterialCore::from_definition(&definition);
         let properties = MaterialProperties::from_definition(&definition);
         // C4MaterialCore::CompileFunc reads Color and then ColorX into the
         // same fixed array, so a present ColorX entry replaces Color.
@@ -513,6 +931,7 @@ impl Material {
         Self {
             id,
             definition,
+            compiled_core,
             properties,
             color,
             alpha,
@@ -536,14 +955,10 @@ impl Material {
         &self.definition
     }
 
-    /// Raw `[Material]` core entry by compile name and value index
-    /// (GetValByStdCompiler over C4MaterialCore — FnGetMaterialVal,
-    /// C4Script.cpp:4282-4300).
-    pub fn core_entry(&self, entry: &str, index: usize) -> Option<&str> {
-        self.definition
-            .values(entry)
-            .and_then(|values| values.get(index))
-            .map(|value| value.as_str())
+    /// One compiled `[Material]` core primitive by exact compile name and
+    /// value index (`GetValByStdCompiler` over `C4MaterialCore`).
+    pub(crate) fn core_entry(&self, entry: &str, index: usize) -> Option<MaterialCoreValue> {
+        self.compiled_core.entry(entry, index)
     }
 
     pub fn density(&self) -> i32 {
@@ -1460,6 +1875,83 @@ mod tests {
     fn build_material_set(source: &str) -> MaterialSet {
         let library = MaterialLibrary::parse(source).expect("material library parses");
         MaterialSet::from_resource_library(&library)
+    }
+
+    #[test]
+    fn compiled_material_core_covers_the_cpp_reflection_schema() {
+        let set = build_material_set(
+            "[Material]\nName=Probe\n\n[Reaction]\nType=Poof\nTargetSpec=Sky\n",
+        );
+        let material = set.get("Probe").expect("probe material exists");
+        let actual = material
+            .compiled_core
+            .entries
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            "Name",
+            "Color",
+            "ColorX",
+            "Alpha",
+            "Shape",
+            "Density",
+            "Friction",
+            "DigFree",
+            "BlastFree",
+            "Blast2Object",
+            "Dig2Object",
+            "Dig2ObjectRatio",
+            "Dig2ObjectRequest",
+            "Blast2ObjectRatio",
+            "Blast2PXSRatio",
+            "Instable",
+            "MaxAirSpeed",
+            "MaxSlide",
+            "WindDrift",
+            "Inflammable",
+            "Incindiary",
+            "Corrode",
+            "Corrosive",
+            "Extinguisher",
+            "Soil",
+            "Placement",
+            "TextureOverlay",
+            "OverlayType",
+            "PXSGfx",
+            "PXSGfxRt",
+            "PXSGfxSize",
+            "TempConvStrength",
+            "BlastShiftTo",
+            "InMatConvert",
+            "InMatConvertTo",
+            "InMatConvertDepth",
+            "AboveTempConvert",
+            "AboveTempConvertDir",
+            "AboveTempConvertTo",
+            "BelowTempConvert",
+            "BelowTempConvertDir",
+            "BelowTempConvertTo",
+            "MinHeightCount",
+            "SplashRate",
+            "Type",
+            "TargetSpec",
+            "ScriptFunc",
+            "ExecMask",
+            "Reverse",
+            "InverseSpec",
+            "CheckSlide",
+            "Depth",
+            "ConvertMat",
+            "CorrosionRate",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(actual, expected);
+        assert_eq!(material.core_entry("Material", 0), None);
+        assert_eq!(material.core_entry("ColorAnimation", 0), None);
+        assert_eq!(material.core_entry("Reaction", 0), None);
     }
 
     #[test]

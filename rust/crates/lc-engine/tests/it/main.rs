@@ -29,6 +29,7 @@ mod get_act_map_val;
 mod get_entrance;
 mod get_inventory;
 mod get_material_color;
+mod get_material_val;
 mod global_call;
 mod goldrush_scenario_batches;
 mod hangle_movement;

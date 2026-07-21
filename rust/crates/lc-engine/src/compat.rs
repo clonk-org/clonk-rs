@@ -7332,7 +7332,11 @@ fn get_material_val(args: &[Value]) -> Result<Value, RuntimeError> {
     if section.as_deref() != Some("Material") {
         return Ok(Value::Nil);
     }
-    let (Some(entry), Ok(index)) = (entry, usize::try_from(material)) else {
+    let (Some(entry), Ok(index), Ok(entry_index)) = (
+        entry,
+        usize::try_from(material),
+        usize::try_from(entry_index),
+    ) else {
         return Ok(Value::Nil);
     };
     HOST_CONTEXT.with(|cell| {
@@ -7344,10 +7348,19 @@ fn get_material_val(args: &[Value]) -> Result<Value, RuntimeError> {
                 let id = crate::material::MaterialId::new(index)?;
                 materials.get_by_id(id)
             })
-            .and_then(|material| material.core_entry(&entry, entry_index.max(0) as usize))
-            .map(|value| match value.parse::<i32>() {
-                Ok(number) => Value::Int(number),
-                Err(_) => Value::String(value.to_string().into()),
+            .and_then(|material| material.core_entry(&entry, entry_index))
+            .map(|value| match value {
+                crate::material::MaterialCoreValue::Int(value) => Value::Int(value),
+                crate::material::MaterialCoreValue::Bool(value) => Value::Bool(value),
+                crate::material::MaterialCoreValue::String(value) => Value::String(value.into()),
+                crate::material::MaterialCoreValue::C4Id(value) => {
+                    let raw = lc_script::c4_id_parse(&value);
+                    if raw == 0 {
+                        Value::Nil
+                    } else {
+                        Value::C4Id(lc_script::c4_id_from_raw(raw))
+                    }
+                }
             })
             .unwrap_or(Value::Nil))
     })
