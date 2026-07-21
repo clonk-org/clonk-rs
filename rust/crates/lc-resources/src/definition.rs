@@ -1190,25 +1190,26 @@ fn truncate_c4_string_bytes(value: &str, max_bytes: usize) -> String {
     lc_script::c4_string_from_bytes(&bytes[..bytes.len().min(max_bytes)])
 }
 
-fn parse_followed_physical(text: &str) -> PhysicalInfo {
-    struct NameNode<'a> {
-        name: &'a str,
-        value: Option<&'a str>,
-        parent: usize,
-        indent: usize,
-    }
+struct IniNameNode<'a> {
+    name: &'a str,
+    raw_value: &'a str,
+    parent: usize,
+    indent: usize,
+}
 
+fn create_ini_name_tree(text: &str) -> Vec<IniNameNode<'_>> {
     let text = text.split_once('\0').map_or(text, |(head, _)| head);
-    let mut nodes = vec![NameNode {
+    let mut nodes = vec![IniNameNode {
         name: "",
-        value: None,
+        raw_value: "",
         parent: 0,
         indent: 0,
     }];
     let mut current = 0;
 
-    // Reproduce the part of CreateNameTree that FollowName relies on:
-    // sections retain their indentation, while values are one level deeper.
+    // StdCompilerINIRead::CreateNameTree makes indentation structural before
+    // it validates the candidate's closing bracket or equals sign. Preserve
+    // that ordering: a malformed named line can still dedent later nodes.
     for raw_line in text.split(['\r', '\n']) {
         let indent = raw_line
             .as_bytes()
@@ -1216,21 +1217,31 @@ fn parse_followed_physical(text: &str) -> PhysicalInfo {
             .take_while(|byte| matches!(byte, b' ' | b'\t'))
             .count();
         let line = &raw_line[indent..];
-        let (name, value, node_indent, section) = if let Some(name) = ini_section_name(line) {
-            (name, None, indent, true)
-        } else if let Some((name, value)) = ini_value(line) {
-            (name, Some(value), indent.saturating_add(1), false)
-        } else {
+        let bytes = line.as_bytes();
+        let section =
+            bytes.first() == Some(&b'[') && bytes.get(1).is_some_and(u8::is_ascii_alphabetic);
+        if !section && !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
             continue;
-        };
+        }
+        // Values behave as one indentation level deeper so an unindented
+        // value remains a child of an unindented section.
+        let node_indent = indent.saturating_add(usize::from(!section));
 
         while current != 0 && nodes[current].indent >= node_indent {
             current = nodes[current].parent;
         }
+        let parsed = if section {
+            ini_section(line)
+        } else {
+            ini_value(line)
+        };
+        let Some((name, raw_value)) = parsed else {
+            continue;
+        };
         let parent = current;
-        nodes.push(NameNode {
+        nodes.push(IniNameNode {
             name,
-            value,
+            raw_value,
             parent,
             indent: node_indent,
         });
@@ -1238,7 +1249,10 @@ fn parse_followed_physical(text: &str) -> PhysicalInfo {
             current = nodes.len() - 1;
         }
     }
+    nodes
+}
 
+fn parse_followed_physical(nodes: &[IniNameNode<'_>]) -> PhysicalInfo {
     let Some(def_core) = nodes
         .iter()
         .position(|node| node.parent == 0 && node.name == "DefCore")
@@ -1268,10 +1282,7 @@ fn parse_followed_physical(text: &str) -> PhysicalInfo {
         if !is_physical_compiler_key(node.name) || !seen_values.insert(node.name) {
             continue;
         }
-        let Some(value) = node.value else {
-            continue;
-        };
-        physical.set_by_name(node.name, parse_i32(value.trim()).unwrap_or(0));
+        physical.set_by_name(node.name, parse_i32(node.raw_value.trim()).unwrap_or(0));
     }
     physical
 }
@@ -1281,12 +1292,10 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     // Preserve every pre-NUL byte through the script string projection.
     let bytes = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
     let text = lc_script::c4_string_from_bytes(bytes);
-    let mut current_section: Option<String> = None;
-    // StdCompilerINIRead compiles each named section and value once, using
-    // the first matching node and leaving later duplicates unused.
-    let mut current_section_is_first = true;
-    let mut seen_sections = HashSet::new();
-    let mut seen_values = HashSet::new();
+    let name_tree = create_ini_name_tree(&text);
+    let def_core_node = name_tree
+        .iter()
+        .position(|node| node.parent == 0 && node.name == "DefCore");
 
     let mut id: Option<String> = None;
     let mut version = [0; 5];
@@ -1352,7 +1361,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut burn_turn_to: Option<String> = None;
     let mut build_turn_to: Option<String> = None;
     let mut incomplete_activity = false;
-    let physical = parse_followed_physical(&text);
+    let physical = parse_followed_physical(&name_tree);
     let mut collectible = false;
     let mut grab_put_get: i32 = 0;
     let mut no_get: i32 = 0;
@@ -1401,47 +1410,25 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         }};
     }
 
-    // StdCompiler::CreateNameTree terminates a line on either byte, not only
-    // LF/CRLF. Old packed groups can therefore contain valid CR-only INI.
-    for raw_line in text.split(['\r', '\n']) {
-        let line = raw_line.trim_start_matches([' ', '\t']);
-        if line.is_empty()
-            || line.starts_with(';')
-            || line.starts_with('#')
-            || line.starts_with("//")
-        {
+    // Name("DefCore") selects the first exact root child, regardless of
+    // whether that node was spelled as a section or value. Each field then
+    // selects its first exact direct child and never falls through to a later
+    // duplicate after a malformed value.
+    let mut seen_values = HashSet::new();
+    for node in name_tree
+        .iter()
+        .filter(|node| Some(node.parent) == def_core_node)
+    {
+        let key = node.name;
+        if !seen_values.insert(key) {
             continue;
         }
-
-        if let Some(section) = ini_section_name(line) {
-            let section = section.to_string();
-            current_section_is_first = seen_sections.insert(section.clone());
-            current_section = Some(section);
-            continue;
-        }
-
-        let Some((key, raw_value)) = ini_value(line) else {
-            continue;
-        };
-        if !current_section_is_first {
-            continue;
-        }
+        let raw_value = node.raw_value;
         // StdCompilerINIRead::ReadString skips only leading ASCII space/tab
         // for RCT_All. Keep the fully trimmed view for the typed parsers,
         // but preserve trailing bytes for DefCore's three whole-line strings.
         let rct_all_value = raw_value.trim_start_matches([' ', '\t']);
         let value = raw_value.trim();
-
-        let Some(section) = current_section.as_deref() else {
-            continue;
-        };
-        if !seen_values.insert((section.to_string(), key.to_string())) {
-            continue;
-        }
-
-        if section != "DefCore" {
-            continue;
-        }
 
         match key {
             "id" => {
@@ -2160,7 +2147,7 @@ fn load_scripts<S: AsRef<str>>(
     })
 }
 
-pub(crate) fn ini_section_name(line: &str) -> Option<&str> {
+fn ini_section(line: &str) -> Option<(&str, &str)> {
     let bytes = line.as_bytes();
     if bytes.first() != Some(&b'[') || !bytes.get(1).is_some_and(u8::is_ascii_alphabetic) {
         return None;
@@ -2175,7 +2162,12 @@ pub(crate) fn ini_section_name(line: &str) -> Option<&str> {
     while bytes.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
         cursor += 1;
     }
-    (bytes.get(cursor) == Some(&b']')).then(|| &line[1..name_end])
+    (bytes.get(cursor) == Some(&b']'))
+        .then(|| (&line[1..name_end], &line[cursor.saturating_add(1)..]))
+}
+
+pub(crate) fn ini_section_name(line: &str) -> Option<&str> {
+    ini_section(line).map(|(name, _)| name)
 }
 
 pub(crate) fn ini_value(line: &str) -> Option<(&str, &str)> {
@@ -5903,6 +5895,52 @@ Energy=50000
             parse_def_core(b"id=XYZ1\nMass=100\n"),
             Err(DefinitionError::MissingDefCoreField("id"))
         ));
+    }
+
+    #[test]
+    fn def_core_main_fields_follow_create_name_tree_hierarchy() {
+        let parsed = parse_def_core(
+            br#"[Container]
+ [DefCore]
+ id=NEST
+ Mass=999
+[DefCore] ; root sibling
+id=ROOT
+ [Nested]
+ Mass=777
+Mass=42
+ [MalformedContext]
+Broken
+  Value=11
+[Physical]
+Energy=50000
+"#,
+        )
+        .expect("hierarchical DefCore parses");
+
+        assert_eq!(
+            parsed.id, "ROOT",
+            "a nested DefCore must not shadow a later root sibling"
+        );
+        assert_eq!(
+            parsed.mass, 42,
+            "an unindented value dedents from the nested section"
+        );
+        assert_eq!(
+            parsed.value, 11,
+            "a malformed named line performs its native dedent before rejection"
+        );
+        assert_eq!(
+            parsed.physical.energy, 50_000,
+            "the shared tree retains native FollowName adjacency"
+        );
+
+        let section_shadow = parse_def_core(b"[DefCore]\nid=SECT\n [Mass] 8\nMass=77\n")
+            .expect("field-named section DefCore parses");
+        assert_eq!(
+            section_shadow.mass, 8,
+            "Name() selects the first matching child without checking node kind"
+        );
     }
 
     #[test]
