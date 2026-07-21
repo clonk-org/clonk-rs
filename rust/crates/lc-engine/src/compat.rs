@@ -45650,19 +45650,7 @@ fn remove_host_solid_mask_raster(
     let (_, bake) = bakes.remove(index);
     let instance_sequence = bake.instance_sequence;
     let vehicle = landscape.grid_vehicle_byte()?;
-    for cy in 0..bake.height {
-        for cx in 0..bake.width {
-            let saved = bake.buffer[(cy * bake.width + cx) as usize];
-            if saved == vehicle {
-                continue;
-            }
-            let lx = bake.x + cx;
-            let ly = bake.y + cy;
-            if landscape.grid_byte_at(lx, ly) == Some(vehicle) {
-                landscape.grid_write_byte(lx, ly, saved);
-            }
-        }
-    }
+    bake.restore_background(landscape, vehicle);
     let mut overlapping_masks = bakes
         .iter()
         .enumerate()
@@ -45676,25 +45664,7 @@ fn remove_host_solid_mask_raster(
     });
     for other_index in overlapping_masks {
         let (_, other) = &mut bakes[other_index];
-        let clip_x0 = bake.x.max(other.x);
-        let clip_y0 = bake.y.max(other.y);
-        let clip_x1 = (bake.x + bake.width).min(other.x + other.width);
-        let clip_y1 = (bake.y + bake.height).min(other.y + other.height);
-        for ly in clip_y0..clip_y1 {
-            for lx in clip_x0..clip_x1 {
-                let mx = other.tx + (lx - other.x);
-                let my = other.ty + (ly - other.y);
-                if !other.mask_set(mx, my) {
-                    continue;
-                }
-                let current = landscape.grid_byte_at(lx, ly).unwrap_or(0);
-                if current != vehicle {
-                    other.buffer[((ly - other.y) * other.width + (lx - other.x)) as usize] =
-                        current;
-                }
-                landscape.grid_write_byte(lx, ly, vehicle);
-            }
-        }
+        other.reput_after_removal(&bake, landscape, vehicle);
     }
     Some((index, instance_sequence))
 }

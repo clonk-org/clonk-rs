@@ -10989,10 +10989,13 @@ pub struct EngineState {
     pub next_object_id: u64,
     #[serde(default)]
     pub landscape: Option<Landscape>,
-    /// True when `landscape` was captured with transient solid-mask pixels
-    /// removed and therefore needs masks re-put after object restoration.
-    /// Older EngineState JSON and SimulationSnapshot projections contain the
-    /// live baked plane and retain the old no-re-put behavior.
+    /// True when `landscape` was captured through the native active-list
+    /// RemoveSolidMasks bracket and therefore needs active masks re-put after
+    /// object restoration. Pixels owned by linked runtime-inactive masks
+    /// intentionally survive that bracket; loaded inactive objects have no
+    /// mask instance. Older EngineState JSON and SimulationSnapshot
+    /// projections contain the live baked plane and retain the old no-re-put
+    /// behavior.
     #[serde(default, skip_serializing_if = "is_false")]
     #[doc(hidden)]
     pub solid_masks_removed_from_landscape: bool,
@@ -18620,6 +18623,37 @@ impl SolidMaskBake {
                 if landscape.grid_byte_at(x, y) == Some(vehicle) {
                     landscape.grid_write_byte(x, y, saved);
                 }
+            }
+        }
+    }
+
+    /// The clipped, non-regular `Put` issued for a surviving mask by
+    /// `C4SolidMask::Remove` (C4SolidMask.cpp:39-54,263-274). Only opaque
+    /// cells in the removed rectangle are visited. Newly exposed background
+    /// replaces the survivor's saved byte, while an MCVehic byte retains the
+    /// old buffer ownership.
+    fn reput_after_removal(
+        &mut self,
+        removed: &SolidMaskBake,
+        landscape: &mut Landscape,
+        vehicle: u8,
+    ) {
+        let clip_x0 = removed.x.max(self.x);
+        let clip_y0 = removed.y.max(self.y);
+        let clip_x1 = (removed.x + removed.width).min(self.x + self.width);
+        let clip_y1 = (removed.y + removed.height).min(self.y + self.height);
+        for ly in clip_y0..clip_y1 {
+            for lx in clip_x0..clip_x1 {
+                let mx = self.tx + (lx - self.x);
+                let my = self.ty + (ly - self.y);
+                if !self.mask_set(mx, my) {
+                    continue;
+                }
+                let current = landscape.grid_byte_at(lx, ly).unwrap_or(0);
+                if current != vehicle {
+                    self.buffer[((ly - self.y) * self.width + (lx - self.x)) as usize] = current;
+                }
+                landscape.grid_write_byte(lx, ly, vehicle);
             }
         }
     }
@@ -35726,12 +35760,20 @@ impl Engine {
     /// to a clone so the running world's masks and their buffers stay put.
     /// Rust's exec list is the reverse of C++'s master list, hence `rev()`
     /// reproduces the C4GameObjects First->Next walk (C4GameObjects.cpp:
-    /// 296-303).
+    /// 296-303). Each removal also runs C4SolidMask's global Last->Prev
+    /// overlap repair against cloned buffers. That list includes a mask
+    /// retained by runtime deactivation even though its owner is no longer
+    /// in the active object list.
     fn landscape_without_solid_masks(&self) -> Option<Landscape> {
         let mut landscape = self.landscape.clone()?;
         let Some(vehicle) = landscape.grid_vehicle_byte() else {
             return Some(landscape);
         };
+        let mut bakes = self
+            .objects
+            .iter()
+            .map(|object| object.solid_mask_bake.clone())
+            .collect::<Vec<_>>();
         for &id in self.exec_list.iter().rev() {
             let Some(index) = self.find_object_index(id) else {
                 continue;
@@ -35740,8 +35782,27 @@ impl Engine {
             if object.state.status != ObjectStatus::Normal {
                 continue;
             }
-            if let Some(bake) = &object.solid_mask_bake {
-                bake.restore_background(&mut landscape, vehicle);
+            let Some(removed) = bakes[index].take() else {
+                continue;
+            };
+            removed.restore_background(&mut landscape, vehicle);
+
+            let mut overlapping = bakes
+                .iter()
+                .enumerate()
+                .filter_map(|(other_index, other)| {
+                    other.as_ref().and_then(|other| {
+                        other
+                            .overlaps(&removed)
+                            .then_some((other_index, other.instance_sequence))
+                    })
+                })
+                .collect::<Vec<_>>();
+            overlapping.sort_unstable_by(|left, right| right.1.cmp(&left.1));
+            for (other_index, _) in overlapping {
+                if let Some(other) = bakes[other_index].as_mut() {
+                    other.reput_after_removal(&removed, &mut landscape, vehicle);
+                }
             }
         }
         Some(landscape)
@@ -38129,8 +38190,9 @@ impl Engine {
             if flags & 1 != 0 {
                 current.landscape_modified = true;
                 // C4GameObjects::RemoveSolidMasks runs before a section
-                // landscape is persisted. Keep the running raster intact
-                // and retain the same mask-free clone used by root saves.
+                // landscape is persisted. Keep the running raster intact and
+                // retain the same native persistence clone used by root
+                // saves, including linked runtime-inactive mask survivors.
                 current.landscape = saved_section_landscape
                     .take()
                     .expect("landscape-save state captured above");
@@ -50784,33 +50846,10 @@ impl Engine {
             right.cmp(&left)
         });
         for other in overlapping_masks {
-            let Some(other_bake) = other.solid_mask_bake.clone() else {
+            let Some(other_bake) = other.solid_mask_bake.as_mut() else {
                 continue;
             };
-            let clip_x0 = bake.x.max(other_bake.x);
-            let clip_y0 = bake.y.max(other_bake.y);
-            let clip_x1 = (bake.x + bake.width).min(other_bake.x + other_bake.width);
-            let clip_y1 = (bake.y + bake.height).min(other_bake.y + other_bake.height);
-            let mut updated = other_bake.clone();
-            for ly in clip_y0..clip_y1 {
-                for lx in clip_x0..clip_x1 {
-                    let mx = updated.tx + (lx - updated.x);
-                    let my = updated.ty + (ly - updated.y);
-                    if !updated.mask_set(mx, my) {
-                        continue;
-                    }
-                    let current = landscape.grid_byte_at(lx, ly).unwrap_or(0);
-                    if current != vehicle {
-                        // The re-put refreshes the buffer only for pixels
-                        // not currently masked (C4SolidMask.cpp:92-96).
-                        updated.buffer
-                            [((ly - updated.y) * updated.width + (lx - updated.x)) as usize] =
-                            current;
-                    }
-                    landscape.grid_write_byte(lx, ly, vehicle);
-                }
-            }
-            other.solid_mask_bake = Some(updated);
+            other_bake.reput_after_removal(&bake, landscape, vehicle);
         }
 
         if !backup_attachments {
@@ -70510,6 +70549,20 @@ mod scenario_section_random_regression {
         }
     }
 
+    fn two_pixel_solid_mask_definition(id: &str, second_alpha: u8) -> Definition {
+        let mut definition = Definition::from_script(id, "Capture mask", "")
+            .expect("solid-mask definition compiles");
+        definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 2, 1)));
+        definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 2, 1, 0, 0)));
+        definition.set_sprite_image(Some(DefinitionSpriteImage {
+            width: 2,
+            height: 1,
+            pixels: Arc::from([0, 0, 0, 255, 0, 0, 0, second_alpha]),
+            color_mask: None,
+        }));
+        definition
+    }
+
     fn resumed_non_main_root_engine() -> Engine {
         let mut engine = Engine::with_seed(5);
         engine.configure_scenario_sections(&[
@@ -71110,6 +71163,183 @@ mod scenario_section_random_regression {
             Some(1),
             "opening the restored gate must reveal its original Earth byte"
         );
+    }
+
+    #[test]
+    fn section_save_preserves_overlapping_inactive_solid_mask_like_cpp() {
+        // RemoveSolidMasks walks only active objects, but each Remove repairs
+        // every overlapping linked C4SolidMask newest-first. Runtime
+        // deactivation retains that link; an Objects.txt-loaded inactive row
+        // never acquired one (C4Object.cpp:5987-5995;
+        // C4SolidMask.cpp:231-274).
+        const OVERLAP_X: i32 = 2;
+        const ACTIVE_X: i32 = 6;
+        const ALL_ACTIVE_X: i32 = 10;
+        const LOADED_INACTIVE_X: i32 = 14;
+        const STANDALONE_INACTIVE_X: i32 = 18;
+
+        let mut main_landscape = vehicle_section_landscape(24, 20);
+        for x in [
+            OVERLAP_X,
+            ACTIVE_X,
+            ALL_ACTIVE_X,
+            LOADED_INACTIVE_X,
+            STANDALONE_INACTIVE_X,
+        ] {
+            main_landscape.grid_write_byte(x, 10, 1);
+            main_landscape.grid_write_byte(x + 1, 10, 1);
+        }
+        let next_landscape = vehicle_section_landscape(24, 20);
+
+        let mut engine = Engine::with_seed(71);
+        engine.configure_scenario_sections(&[
+            vehicle_section("main", main_landscape.clone()),
+            vehicle_section("next", next_landscape),
+        ]);
+        engine.set_landscape(main_landscape);
+        engine
+            .register_definition(two_pixel_solid_mask_definition("SMFL", 255))
+            .expect("full mask registers");
+        engine
+            .register_definition(two_pixel_solid_mask_definition("SMHF", 0))
+            .expect("half mask registers");
+
+        let _overlap_owner = engine
+            .spawn_object(
+                SpawnConfig::new("SMFL")
+                    .with_position(Vector2::new(OVERLAP_X, 10))
+                    .with_loaded(true),
+            )
+            .expect("older overlap owner spawns");
+        let overlap_survivor = engine
+            .spawn_object(
+                SpawnConfig::new("SMHF")
+                    .with_position(Vector2::new(OVERLAP_X, 10))
+                    .with_loaded(true),
+            )
+            .expect("newer overlap survivor spawns");
+        let _active = engine
+            .spawn_object(
+                SpawnConfig::new("SMFL")
+                    .with_position(Vector2::new(ACTIVE_X, 10))
+                    .with_loaded(true),
+            )
+            .expect("non-overlap active mask spawns");
+        let _all_active_owner = engine
+            .spawn_object(
+                SpawnConfig::new("SMFL")
+                    .with_position(Vector2::new(ALL_ACTIVE_X, 10))
+                    .with_loaded(true),
+            )
+            .expect("all-active owner spawns");
+        let _all_active_second = engine
+            .spawn_object(
+                SpawnConfig::new("SMHF")
+                    .with_position(Vector2::new(ALL_ACTIVE_X, 10))
+                    .with_loaded(true),
+            )
+            .expect("all-active overlap spawns");
+        let loaded_inactive = engine
+            .spawn_object(
+                SpawnConfig::new("SMFL")
+                    .with_position(Vector2::new(LOADED_INACTIVE_X, 10))
+                    .with_status(ObjectStatus::Inactive)
+                    .with_loaded(true),
+            )
+            .expect("loaded inactive mask owner spawns");
+        let standalone_inactive = engine
+            .spawn_object(
+                SpawnConfig::new("SMHF")
+                    .with_position(Vector2::new(STANDALONE_INACTIVE_X, 10))
+                    .with_loaded(true),
+            )
+            .expect("standalone runtime-inactive owner spawns");
+
+        let all_active_capture = engine.capture_state();
+        let all_active_landscape = all_active_capture
+            .landscape
+            .as_ref()
+            .expect("all-active landscape captured");
+        for x in [OVERLAP_X, ACTIVE_X, ALL_ACTIVE_X, STANDALONE_INACTIVE_X] {
+            assert_eq!(all_active_landscape.grid_byte_at(x, 10), Some(1));
+            assert_eq!(all_active_landscape.grid_byte_at(x + 1, 10), Some(1));
+        }
+
+        for object in [overlap_survivor, standalone_inactive] {
+            engine
+                .apply_object_update(
+                    object,
+                    ObjectUpdate {
+                        status: Some(ObjectStatus::Inactive),
+                        ..ObjectUpdate::default()
+                    },
+                )
+                .expect("runtime deactivation applies");
+            let index = engine
+                .find_object_index(object)
+                .expect("runtime-inactive object remains");
+            assert!(
+                engine.objects[index].solid_mask_bake.is_some(),
+                "runtime deactivation retains the existing C4SolidMask"
+            );
+        }
+        let loaded_index = engine
+            .find_object_index(loaded_inactive)
+            .expect("loaded inactive object remains");
+        assert!(
+            engine.objects[loaded_index].solid_mask_bake.is_none(),
+            "loaded inactive objects must not be synthesized into survivors"
+        );
+
+        let capture = engine.capture_state();
+        let captured = capture.landscape.as_ref().expect("landscape captured");
+        assert_eq!(
+            [
+                captured.grid_byte_at(OVERLAP_X, 10),
+                captured.grid_byte_at(OVERLAP_X + 1, 10),
+                captured.grid_byte_at(ACTIVE_X, 10),
+                captured.grid_byte_at(ACTIVE_X + 1, 10),
+                captured.grid_byte_at(ALL_ACTIVE_X, 10),
+                captured.grid_byte_at(ALL_ACTIVE_X + 1, 10),
+                captured.grid_byte_at(LOADED_INACTIVE_X, 10),
+                captured.grid_byte_at(LOADED_INACTIVE_X + 1, 10),
+                captured.grid_byte_at(STANDALONE_INACTIVE_X, 10),
+                captured.grid_byte_at(STANDALONE_INACTIVE_X + 1, 10),
+            ],
+            [
+                Some(2),
+                Some(1),
+                Some(1),
+                Some(1),
+                Some(1),
+                Some(1),
+                Some(1),
+                Some(1),
+                Some(2),
+                Some(1),
+            ],
+            "only the two runtime-inactive half masks survive the active-list bracket"
+        );
+
+        assert!(engine
+            .load_scenario_section(
+                "next",
+                1,
+                vec![overlap_survivor, loaded_inactive, standalone_inactive],
+            )
+            .expect("section landscape saves"));
+        let saved = engine
+            .scenario_sections
+            .get("main")
+            .and_then(|section| section.landscape.as_ref())
+            .expect("departing landscape retained");
+        assert_eq!(saved.grid_byte_at(OVERLAP_X, 10), Some(2));
+        assert_eq!(saved.grid_byte_at(OVERLAP_X + 1, 10), Some(1));
+        assert_eq!(saved.grid_byte_at(ACTIVE_X, 10), Some(1));
+        assert_eq!(saved.grid_byte_at(ALL_ACTIVE_X, 10), Some(1));
+        assert_eq!(saved.grid_byte_at(LOADED_INACTIVE_X, 10), Some(1));
+        assert_eq!(saved.grid_byte_at(STANDALONE_INACTIVE_X, 10), Some(2));
+        assert_eq!(saved.grid_byte_at(STANDALONE_INACTIVE_X + 1, 10), Some(1));
     }
 
     #[test]
