@@ -15497,6 +15497,10 @@ fn path_to_legacy_bytes(path: &Path) -> Vec<u8> {
     path.to_string_lossy().as_bytes().to_vec()
 }
 
+fn league_record_name(path: &Path) -> Option<LegacyCString> {
+    LegacyCString::from_bytes(path_to_legacy_bytes(path))
+}
+
 fn raw_definition_description_modules(paths: &[PathBuf]) -> Vec<Vec<u8>> {
     paths
         .iter()
@@ -15517,17 +15521,16 @@ fn path_from_group_name_bytes(bytes: &[u8]) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
-fn collect_stream_player_crew_files(
-    group: &Group,
-    crew_files: &mut Vec<(Vec<u8>, Vec<u8>)>,
-) -> std::result::Result<usize, String> {
-    let mut subgroups = Vec::new();
+fn count_direct_stream_player_crew_files(group: &Group) -> std::result::Result<usize, String> {
     let mut direct_crew = 0;
     for entry in group.entries().map_err(|error| error.to_string())? {
         let is_crew = entry
             .name_bytes
             .get(entry.name_bytes.len().saturating_sub(4)..)
             .is_some_and(|extension| extension.eq_ignore_ascii_case(b".c4i"));
+        if !is_crew {
+            continue;
+        }
         let child = if group.is_directory() {
             group.open_child(&entry.relative_path)
         } else {
@@ -15540,16 +15543,9 @@ fn collect_stream_player_crew_files(
         let Ok(child) = child else {
             continue;
         };
-        if is_crew {
-            if let Ok(object_info) = child.read_file("ObjectInfo.txt") {
-                crew_files.push((entry.name_bytes, object_info));
-                direct_crew += 1;
-            }
+        if child.read_file("ObjectInfo.txt").is_ok() {
+            direct_crew += 1;
         }
-        subgroups.push(child);
-    }
-    for subgroup in subgroups {
-        collect_stream_player_crew_files(&subgroup, crew_files)?;
     }
     Ok(direct_crew)
 }
@@ -82453,7 +82449,7 @@ impl GameApp {
             let stream_initial_file = stream_initial_group
                 .pack()
                 .map_err(|error| error.to_string())?;
-            let stream_record_name = LegacyCString::from_bytes(path_to_legacy_bytes(&output_path))
+            let stream_record_name = league_record_name(&output_path)
                 .ok_or_else(|| "record stream filename contains an interior NUL".to_string())?;
             lc_network::encode_league_stream_file_chunk(
                 &stream_record_name,
@@ -82912,45 +82908,23 @@ impl GameApp {
         source: &Group,
         target: &[u8],
     ) -> std::result::Result<Vec<u8>, String> {
-        let player = PlayerFile::load(source).map_err(|error| error.to_string())?;
-        let mut crew_files = Vec::new();
-        let direct_crew = collect_stream_player_crew_files(source, &mut crew_files)?;
-        if direct_crew == 0 {
+        // C4Player::Strip loads crew with fLoadPortraits=false. An unnamed
+        // embedded image must not turn into a persisted `PortraitFile=custom`
+        // while the temporary stream copy is rebuilt.
+        let player = PlayerFile::load_with_portraits(source, false)
+            .map_err(|error| error.to_string())?;
+        if count_direct_stream_player_crew_files(source)? == 0 {
             return Err("player group contains no loadable direct crew info".to_string());
         }
-        if crew_files.len() != player.crew.len() {
-            return Err(format!(
-                "player crew core count mismatch: {} files, {} parsed entries",
-                crew_files.len(),
-                player.crew.len()
-            ));
-        }
-
-        let mut stripped = MutableGroup::new_bytes(target.to_vec());
-        if !self.process_group_maker.as_bytes().is_empty() {
-            stripped.set_maker_bytes(self.process_group_maker.as_bytes());
-        }
-        let player_core = source
-            .read_file("Player.txt")
-            .map_err(|error| error.to_string())?;
-        stripped
-            .add_file("Player.txt", player_core)
-            .map_err(|error| error.to_string())?;
-        for ((name, object_info), crew) in crew_files.into_iter().zip(player.crew) {
-            if self.engine.definition_name(&crew.id).is_none() {
-                continue;
-            }
-            let mut child = MutableGroup::new_bytes(name.clone());
-            if !self.process_group_maker.as_bytes().is_empty() {
-                child.set_maker_bytes(self.process_group_maker.as_bytes());
-            }
-            child
-                .add_file("ObjectInfo.txt", object_info)
-                .map_err(|error| error.to_string())?;
-            stripped
-                .add_child_bytes(name, child)
-                .map_err(|error| error.to_string())?;
-        }
+        let (_, _, player_rank_name_default) = self.developer_console_player_save_options();
+        let stripped = lc_engine::serialize_aggressively_stripped_c4_player(
+            &self.engine,
+            &player,
+            target,
+            self.process_group_maker.as_bytes(),
+            &player_rank_name_default,
+        )
+        .map_err(|error| error.to_string())?;
         stripped.pack().map_err(|error| error.to_string())
     }
 
@@ -83111,7 +83085,7 @@ impl GameApp {
                 return None;
             }
         };
-        let name = LegacyCString::from_bytes(path_to_legacy_bytes(&output_path))?;
+        let name = league_record_name(&output_path)?;
         Some(LeagueEndRecord {
             name,
             sha1: Sha1::digest(&on_disk).into(),
@@ -150299,13 +150273,52 @@ ScenInfoArea=70,5,25,90
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn league_record_stream_orders_initial_and_control_bytes_without_local_end() {
+    async fn league_streamed_player_strip_and_record_name_match_cpp_bytes() {
         let directory = tempdir().expect("record directory");
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let output_path = {
+            use std::os::unix::ffi::OsStringExt;
+
+            directory
+                .path()
+                .join(OsString::from_vec(b"001-Streamed-\xff.c4s".to_vec()))
+        };
+        // Darwin rejects non-UTF-8 path components with EILSEQ before the
+        // recording code can observe them. Keep the full filesystem lifecycle
+        // non-ASCII there; the raw invalid-byte conversion is asserted below.
+        #[cfg(target_os = "macos")]
+        let output_path = {
+            use std::os::unix::ffi::OsStringExt;
+
+            directory.path().join(OsString::from_vec(
+                b"001-Streamed-e\xcc\x81.c4s".to_vec(),
+            ))
+        };
+        #[cfg(not(unix))]
         let output_path = directory.path().join("001-Streamed.c4s");
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+
+            let invalid_path = directory
+                .path()
+                .join(OsString::from_vec(b"001-Streamed-\xff.c4s".to_vec()));
+            let invalid_name = league_record_name(&invalid_path).unwrap();
+            assert_eq!(
+                invalid_name.as_bytes(),
+                path_to_legacy_bytes(&invalid_path)
+            );
+            assert!(invalid_name
+                .as_bytes()
+                .ends_with(b"001-Streamed-\xff.c4s"));
+        }
         let (endpoint, request) = serve_one_record_stream_upload();
         let mut app = new_state_only_running_sandbox_app();
+        app.process_group_maker =
+            LegacyCString::from_bytes(b"League stream maker".to_vec()).unwrap();
         install_test_recording_template(&mut app, output_path.clone());
-        let initial_name = LegacyCString::from_bytes(b"Records/001-Streamed.c4s".to_vec()).unwrap();
+        let output_name_bytes = path_to_legacy_bytes(&output_path);
+        let initial_name = league_record_name(&output_path).unwrap();
         let initial_chunk = lc_network::encode_league_stream_file_chunk(
             &initial_name,
             b"packed initial record",
@@ -150319,11 +150332,31 @@ ScenInfoArea=70,5,25,90
         app.network = Some(network);
         app.network_is_league = true;
         assert!(app.engine.definition_name("CLNK").is_some());
+        let mut ranked = Definition::from_script("RANK", "Ranked crew", "")
+            .expect("custom-rank definition");
+        ranked.set_rank_system(
+            Some(vec!["Cadet".to_string(), "Veteran".to_string()]),
+            Some(1_200),
+        );
+        app.engine
+            .register_definition(ranked)
+            .expect("register custom-rank definition");
 
         let player_path = directory.path().join("Alice.c4p");
         let mut player_group = MutableGroup::new("Alice.c4p");
+        let raw_player_core = b"[Player]\n\
+Name=<i>Al</i>ice\n\
+Comment=stream candidate\n\
+Score=9\n\
+VendorPlayerField=discard me\n\
+[Preferences]\n\
+Color=2\n\
+ColorDw=0\n\
+AutoStopControl=2\n\
+[VendorPlayer]\n\
+Retain=never\n";
         player_group
-            .add_file("Player.txt", b"[Player]\nName=Alice\n".to_vec())
+            .add_file("Player.txt", raw_player_core.to_vec())
             .unwrap();
         player_group
             .add_file("BigIcon.png", b"large player icon".to_vec())
@@ -150332,29 +150365,54 @@ ScenInfoArea=70,5,25,90
             .add_file("Private.bin", b"must stay local".to_vec())
             .unwrap();
         let mut valid_crew = MutableGroup::new("Alice.c4i");
+        let raw_valid_crew = b"[ObjectInfo]\n\
+id=RANK-extra\n\
+Name=Alice\n\
+DeathMessage=@fell\n\
+RankName=Stale rank\n\
+NextRankName=Stale next rank\n\
+NextRankExp=999\n\
+VendorCrewField=discard me\n\
+[Physical]\n\
+Energy=1\n\
+[VendorCrew]\n\
+Retain=never\n";
         valid_crew
-            .add_file(
-                "ObjectInfo.txt",
-                b"[ObjectInfo]\nid=CLNK\nName=Alice\n".to_vec(),
-            )
+            .add_file("ObjectInfo.txt", raw_valid_crew.to_vec())
             .unwrap();
+        let raw_portrait = encode_rgba_png(1, 1, &[1, 2, 3, 255]).unwrap();
         valid_crew
-            .add_file("Portrait.png", b"portrait".to_vec())
+            .add_file("Portrait.png", raw_portrait.clone())
             .unwrap();
         valid_crew
             .add_file("Private.bin", b"crew extra".to_vec())
             .unwrap();
         player_group.add_child("Alice.c4i", valid_crew).unwrap();
         let mut missing_crew = MutableGroup::new("Missing.c4i");
+        let raw_missing_crew = b"[ObjectInfo]\nid=MISS\nName=Missing\n";
         missing_crew
-            .add_file(
-                "ObjectInfo.txt",
-                b"[ObjectInfo]\nid=MISS\nName=Missing\n".to_vec(),
-            )
+            .add_file("ObjectInfo.txt", raw_missing_crew.to_vec())
             .unwrap();
         player_group
             .add_child("Missing.c4i", missing_crew)
             .unwrap();
+        let raw_nested_crew = b"[ObjectInfo]\n\
+id=CLNK\n\
+Name=Nested\n\
+VendorNestedField=discard me\n";
+        let mut nested_crew = MutableGroup::new("Alice.c4i");
+        nested_crew
+            .add_file("ObjectInfo.txt", raw_nested_crew.to_vec())
+            .unwrap();
+        nested_crew
+            .add_file("Private.bin", b"nested extra".to_vec())
+            .unwrap();
+        let mut roster = MutableGroup::new("Roster.c4f");
+        // The repeated source filename makes the streamed names prove native
+        // direct-first recursive discovery: direct Alice keeps Alice.c4i,
+        // then nested Alice collides and falls back to its core name.
+        roster.add_child("Alice.c4i", nested_crew).unwrap();
+        player_group.add_child("Roster.c4f", roster).unwrap();
         fs::write(&player_path, player_group.pack().unwrap()).unwrap();
         app.admission_resources
             .mark_complete(17, player_path.clone());
@@ -150388,7 +150446,9 @@ ScenInfoArea=70,5,25,90
         let mut expected_writer = ControlRecordWriter::new();
         expected_writer.record_packet(frame, &packet).unwrap();
         let control_bytes = expected_writer.bytes().to_vec();
-        app.finish_recording().expect("streamed record metadata");
+        let metadata = app.finish_recording().expect("streamed record metadata");
+        assert_eq!(metadata.name.as_bytes(), output_name_bytes.as_slice());
+        assert_eq!(metadata.name.as_bytes(), initial_name.as_bytes());
 
         let request = request.join().unwrap();
         let header_end = request
@@ -150434,17 +150494,107 @@ ScenInfoArea=70,5,25,90
             decoded[cursor..packed_end].to_vec(),
         )
         .expect("stripped streamed player group opens");
+        assert_eq!(
+            streamed_player.maker_bytes(),
+            Some(b"League stream maker".as_slice())
+        );
         assert!(streamed_player.exists("Player.txt"));
         assert!(streamed_player.exists("Alice.c4i"));
+        assert!(streamed_player.exists("Nested.c4i"));
         assert!(!streamed_player.exists("Missing.c4i"));
+        assert!(!streamed_player.exists("Roster.c4f"));
         assert!(!streamed_player.exists("BigIcon.png"));
         assert!(!streamed_player.exists("Private.bin"));
+        let canonical_crlf = |bytes: &[u8]| {
+            bytes.iter().enumerate().all(|(index, byte)| {
+                *byte != b'\n' || index.checked_sub(1).is_some_and(|index| bytes[index] == b'\r')
+            })
+        };
+        let streamed_player_core = streamed_player
+            .read_file("Player.txt")
+            .expect("canonical streamed player core");
+        assert_ne!(streamed_player_core.as_slice(), raw_player_core);
+        assert!(canonical_crlf(&streamed_player_core));
+        let streamed_player_text = std::str::from_utf8(&streamed_player_core).unwrap();
+        assert!(!streamed_player_text.contains("VendorPlayer"));
+        assert!(!streamed_player_text.contains("<i>"));
+        let parsed_streamed_player =
+            PlayerFile::load_with_portraits(&streamed_player, false).unwrap();
+        assert_eq!(parsed_streamed_player.name, "Alice");
+        assert_eq!(parsed_streamed_player.score, 9);
+        assert_eq!(parsed_streamed_player.pref_color_dw, 0x00c800);
+        assert!(parsed_streamed_player.pref_control_style);
+        assert!(parsed_streamed_player.pref_auto_context_menu);
+        assert_eq!(
+            parsed_streamed_player
+                .exact_info_core()
+                .pref_control_style_value,
+            2
+        );
+        assert_eq!(
+            parsed_streamed_player
+                .exact_info_core()
+                .pref_auto_context_menu_value,
+            2
+        );
+        assert_eq!(
+            parsed_streamed_player
+                .crew
+                .iter()
+                .map(|crew| crew.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Alice", "Nested"]
+        );
         let streamed_crew = streamed_player
             .open_child("Alice.c4i")
             .expect("valid streamed crew opens");
+        assert_eq!(
+            streamed_crew.maker_bytes(),
+            Some(b"League stream maker".as_slice())
+        );
         assert!(streamed_crew.exists("ObjectInfo.txt"));
         assert!(!streamed_crew.exists("Portrait.png"));
         assert!(!streamed_crew.exists("Private.bin"));
+        let streamed_crew_core = streamed_crew
+            .read_file("ObjectInfo.txt")
+            .expect("canonical streamed crew core");
+        assert_ne!(streamed_crew_core.as_slice(), raw_valid_crew);
+        assert!(canonical_crlf(&streamed_crew_core));
+        let streamed_crew_text = std::str::from_utf8(&streamed_crew_core).unwrap();
+        assert!(!streamed_crew_text.contains("VendorCrew"));
+        assert!(!streamed_crew_text.contains("RANK-extra"));
+        assert!(!streamed_crew_text.contains("PortraitFile=custom"));
+        assert!(streamed_crew_core
+            .windows(b"DeathMessage= fell\r\n".len())
+            .any(|window| window == b"DeathMessage= fell\r\n"));
+        let streamed_alice = &parsed_streamed_player.crew[0];
+        assert_eq!(streamed_alice.id, "RANK");
+        assert_eq!(streamed_alice.death_message, "fell");
+        assert_eq!(streamed_alice.rank_name, "Cadet");
+        assert_eq!(streamed_alice.core.next_rank_name, "Veteran");
+        assert_eq!(streamed_alice.core.next_rank_exp, 1_200);
+        assert!(streamed_alice.core.portrait_file.is_empty());
+        assert_eq!(streamed_alice.physical.energy, 50_000);
+        assert_eq!(streamed_alice.physical.can_dig, 1);
+        assert_eq!(streamed_alice.physical.can_chop, 1);
+        assert_eq!(streamed_alice.physical.can_construct, 1);
+        assert_eq!(streamed_alice.physical.can_scale, 1);
+        assert_eq!(streamed_alice.physical.can_hangle, 1);
+        let streamed_nested = streamed_player
+            .open_child("Nested.c4i")
+            .expect("flattened streamed crew opens");
+        assert_eq!(
+            streamed_nested.maker_bytes(),
+            Some(b"League stream maker".as_slice())
+        );
+        assert!(streamed_nested.exists("ObjectInfo.txt"));
+        assert!(!streamed_nested.exists("Private.bin"));
+        let streamed_nested_core = streamed_nested.read_file("ObjectInfo.txt").unwrap();
+        assert_ne!(streamed_nested_core.as_slice(), raw_nested_crew);
+        assert!(canonical_crlf(&streamed_nested_core));
+        assert!(!std::str::from_utf8(&streamed_nested_core)
+            .unwrap()
+            .contains("VendorNestedField"));
         assert_eq!(&decoded[packed_end..], control_bytes);
 
         let record = Group::open(&output_path).expect("record group");
@@ -150454,11 +150604,59 @@ ScenInfoArea=70,5,25,90
         assert!(local_player.exists("BigIcon.png"));
         assert!(local_player.exists("Private.bin"));
         assert!(local_player.exists("Missing.c4i"));
+        assert!(local_player.exists("Roster.c4f"));
+        assert_eq!(
+            local_player.read_file("BigIcon.png").unwrap().as_slice(),
+            b"large player icon"
+        );
+        assert_eq!(
+            local_player.read_file("Private.bin").unwrap().as_slice(),
+            b"must stay local"
+        );
+        assert_eq!(
+            local_player.read_file("Player.txt").unwrap().as_slice(),
+            raw_player_core
+        );
+        assert_eq!(
+            local_player
+                .open_child("Missing.c4i")
+                .unwrap()
+                .read_file("ObjectInfo.txt")
+                .unwrap()
+                .as_slice(),
+            raw_missing_crew
+        );
         let local_crew = local_player
             .open_child("Alice.c4i")
             .expect("unstripped local crew group");
         assert!(local_crew.exists("Portrait.png"));
         assert!(local_crew.exists("Private.bin"));
+        assert_eq!(local_crew.read_file("Portrait.png").unwrap(), raw_portrait);
+        assert_eq!(
+            local_crew.read_file("Private.bin").unwrap().as_slice(),
+            b"crew extra"
+        );
+        assert_eq!(
+            local_crew.read_file("ObjectInfo.txt").unwrap().as_slice(),
+            raw_valid_crew
+        );
+        let local_nested = local_player
+            .open_child("Roster.c4f")
+            .unwrap()
+            .open_child("Alice.c4i")
+            .expect("nested local crew group");
+        assert!(local_nested.exists("Private.bin"));
+        assert_eq!(
+            local_nested.read_file("Private.bin").unwrap().as_slice(),
+            b"nested extra"
+        );
+        assert_eq!(
+            local_nested
+                .read_file("ObjectInfo.txt")
+                .unwrap()
+                .as_slice(),
+            raw_nested_crew
+        );
         let local = record.read_file("CtrlRec.c4b").expect("local CtrlRec");
         assert_eq!(&local[..control_bytes.len()], control_bytes);
         assert_eq!(local.len(), control_bytes.len() + 2);

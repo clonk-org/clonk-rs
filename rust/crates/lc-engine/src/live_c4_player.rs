@@ -11,7 +11,7 @@ use std::rc::Rc;
 use lc_resources::{Group, MutableGroup, MutableGroupError, PhysicalInfo};
 use thiserror::Error;
 
-use crate::player_file::{CrewInfo, PlayerInfoCoreState};
+use crate::player_file::{CrewInfo, PlayerFile, PlayerInfoCoreState};
 use crate::{Engine, EngineState, LiveC4ValueEncodeError, LiveC4ValueEnumeration, PlayerState};
 
 const C4FLS_PLAYER: &str = "Player.txt|Portrait.png|Portrait.bmp|*.c4i";
@@ -134,6 +134,68 @@ pub fn serialize_live_c4_player_with_options(
         options,
         PlayerValueEncoding::CurrentIds,
     )
+}
+
+/// Rebuild the temporary player group used by `C4Player::Strip(..., true)`.
+///
+/// The caller has already loaded the source through [`PlayerFile`], so both
+/// cores carry C++'s load-time normalization. The aggressive strip writes a
+/// fresh group containing only canonical `Player.txt` and retained
+/// `ObjectInfo.txt` files, drops crew without a currently loaded definition,
+/// and refreshes definition-owned custom-rank fields at the save boundary.
+pub fn serialize_aggressively_stripped_c4_player(
+    engine: &Engine,
+    player: &PlayerFile,
+    filename: &[u8],
+    maker: &[u8],
+    player_rank_name_default: &str,
+) -> Result<MutableGroup, LiveC4PlayerError> {
+    let mut group = MutableGroup::new_bytes(filename.to_vec());
+    if !maker.is_empty() {
+        group.set_maker_bytes(maker);
+    }
+    group.add_file(
+        "Player.txt",
+        serialize_player_info_core(
+            &player.exact_info_core(),
+            player_rank_name_default,
+            PlayerValueEncoding::CurrentIds,
+        )?,
+    )?;
+
+    let mut used_filenames = Vec::with_capacity(player.crew.len());
+    // PlayerFile retains C4ObjectInfoList::Load's discovery order. Native
+    // Add prepends each entry and Save walks tail-to-head, restoring exactly
+    // this order while flattening recursively discovered crew into the root.
+    for source in &player.crew {
+        let definition_id = lc_script::c4_id_text(&source.id);
+        let Some(definition) = engine.definition(&definition_id) else {
+            continue;
+        };
+        let mut info = source.clone();
+        crate::update_custom_rank_fields(
+            &mut info.rank_name,
+            &mut info.core,
+            info.rank,
+            definition.rank_names(),
+            definition.rank_base(),
+        );
+        let child_name = retained_or_unique_crew_filename(&info, &used_filenames);
+        let mut child = MutableGroup::new_bytes(child_name.clone());
+        if !maker.is_empty() {
+            child.set_maker_bytes(maker);
+        }
+        child.add_file(
+            "ObjectInfo.txt",
+            serialize_object_info(&info, PlayerValueEncoding::CurrentIds)?,
+        )?;
+        child.sort(C4FLS_OBJECT);
+        group.add_child_bytes(child_name.clone(), child)?;
+        used_filenames.push(child_name);
+    }
+
+    group.sort(C4FLS_PLAYER);
+    Ok(group)
 }
 
 /// Serialize the ordinary external `C4Player::Save()` synchronization path.
@@ -970,6 +1032,14 @@ fn serialize_player_core(
     core.total_playing_time = player.total_playing_time;
     core.extra_data.clone_from(&player.extra_data);
 
+    serialize_player_info_core(&core, rank_name_default, value_encoding)
+}
+
+fn serialize_player_info_core(
+    core: &PlayerInfoCoreState,
+    rank_name_default: &str,
+    value_encoding: PlayerValueEncoding<'_>,
+) -> Result<Vec<u8>, LiveC4PlayerError> {
     let mut player_lines = Vec::new();
     push_c4_string(&mut player_lines, "Name", &core.pref_name, "Neuling", 30);
     push_c4_string(&mut player_lines, "Comment", &core.comment, "", 256);

@@ -126,12 +126,12 @@ pub use landscape::{
     LANDSCAPE_MODE_EXACT, LANDSCAPE_MODE_STATIC, LANDSCAPE_MODE_UNDEFINED,
 };
 pub use live_c4_player::{
-    LiveC4CrewProfileCleanup, LiveC4PlayerError, LiveC4PlayerSaveOptions,
-    LiveC4SynchronizedPlayerGroup, serialize_live_c4_player,
+    serialize_aggressively_stripped_c4_player, serialize_live_c4_player,
     serialize_live_c4_player_for_synchronization, serialize_live_c4_player_from_state,
     serialize_live_c4_player_state, serialize_live_c4_player_with_options,
     serialize_live_c4_player_with_options_and_enumeration,
-    strip_unresolved_remote_crew_for_synchronization,
+    strip_unresolved_remote_crew_for_synchronization, LiveC4CrewProfileCleanup, LiveC4PlayerError,
+    LiveC4PlayerSaveOptions, LiveC4SynchronizedPlayerGroup,
 };
 pub use live_c4_save::{
     LiveC4ComponentHost, LiveC4SaveComponentMutation, LiveC4SaveComponentRef, LiveC4SaveComponents,
