@@ -55,7 +55,6 @@ use std::sync::Arc;
 use tracing::{debug, error, info};
 
 thread_local! {
-    static SETACTION_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static HOST_CONTEXT: RefCell<Option<EffectHostContext>> = const { RefCell::new(None) };
     static RANDOM_CONTEXT: RefCell<Option<Rc<RandomContext>>> = const { RefCell::new(None) };
     // C++ SafeRandom is a process-global, deliberately unsynchronized
@@ -26327,22 +26326,9 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         callback_definition,
     )) = sync_callbacks
     {
-        let depth = SETACTION_DEPTH.with(|d| {
-            d.set(d.get() + 1);
-            d.get()
-        });
-        // C++ has no recursion guard here — content terminates because its
-        // guards read the LIVE Action.Name (set before StartCall,
-        // C4Object.cpp:4116-4152). The rust nested-scope view can go stale
-        // across recursion levels (rider Riding vs coach IsStill —
-        // PORT_STATUS), so the backstop turns that defect into a log line
-        // instead of a freeze. Legitimate content chains are depth <= 3
-        // (mount -> RideStill -> Ride).
-        if depth > 16 {
-            tracing::warn!(?id, "SetAction callback recursion backstop hit");
-            SETACTION_DEPTH.with(|d| d.set(d.get() - 1));
-            return Ok(staged);
-        }
+        // C++ has no SetAction-specific recursion guard. Nested callbacks
+        // keep dispatching synchronously until they terminate or the shared
+        // script VM reports its native-equivalent stack/value limit.
         let callbacks = [
             start_call.map(|callback| (callback, Vec::new())),
             abort_call.map(|callback| (callback, vec![Value::Int(previous_phase)])),
@@ -26368,7 +26354,6 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
                 break;
             }
         }
-        SETACTION_DEPTH.with(|d| d.set(d.get() - 1));
     }
     Ok(staged)
 }

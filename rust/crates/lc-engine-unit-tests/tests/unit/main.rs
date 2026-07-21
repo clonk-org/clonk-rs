@@ -11196,6 +11196,170 @@ func OnOldAbort() { return 1; }
     }
 
     #[test]
+    fn set_action_callback_chain_is_not_truncated_at_sixteen() -> Result<(), EngineError> {
+        // A natural Root -> A01 transition runs Start(A01), whose nested
+        // SetActions form a 19-level depth-first chain. C++ completes every
+        // nested Start/Abort before resuming the outer End(Root); it has no
+        // SetAction-specific depth cap (C4Object.cpp:4171-4197, 5485).
+        const LAST_ACTION: usize = 20;
+        let mut script = String::from(
+            "#strict 2\nprotected func EndRoot() { return 1; }\n",
+        );
+        let mut actions = HashMap::from([(
+            "Root".to_string(),
+            ActionSpec::default()
+                .with_length(1)
+                .with_delay(1)
+                .with_next("A01")
+                .with_end_call("EndRoot"),
+        )]);
+        for index in 1..=LAST_ACTION {
+            let action = format!("A{index:02}");
+            let start = format!("Start{index:02}");
+            let abort = format!("Abort{index:02}");
+            let body = if index < LAST_ACTION {
+                format!("SetAction(\"A{:02}\"); ", index + 1)
+            } else {
+                String::new()
+            };
+            script.push_str(&format!(
+                "protected func {start}() {{ {body}return 1; }}\n\
+                 protected func {abort}(int phase) {{ return 1; }}\n"
+            ));
+            actions.insert(
+                action,
+                ActionSpec::default()
+                    .with_start_call(start)
+                    .with_abort_call(abort),
+            );
+        }
+
+        let callback_log = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let callback_log = Arc::clone(&callback_log);
+            hooks.set_on_call(move |name, _args| {
+                if name.starts_with("Start")
+                    || name.starts_with("Abort")
+                    || name == "EndRoot"
+                {
+                    callback_log.lock().unwrap().push(name.to_string());
+                }
+            });
+        }
+
+        let mut definition = Definition::from_script("SACD", "SetAction depth", &script)?;
+        definition.set_c4_callback_convention(true);
+        definition.set_debugger_hooks(hooks);
+        definition.configure_actions(Some("Root".to_string()), actions);
+
+        let mut engine = Engine::new();
+        engine.register_definition(definition)?;
+        let object = engine.spawn_object(
+            SpawnConfig::new("SACD")
+                .with_action(ActionState::new("Root"))
+                .with_loaded(true),
+        )?;
+        engine.tick_without_snapshot()?;
+
+        let mut expected = (1..=LAST_ACTION)
+            .map(|index| format!("Start{index:02}"))
+            .collect::<Vec<_>>();
+        expected.extend(
+            (1..LAST_ACTION)
+                .rev()
+                .map(|index| format!("Abort{index:02}")),
+        );
+        expected.push("EndRoot".to_string());
+        assert_eq!(callback_log.lock().unwrap().as_slice(), expected);
+        let index = engine.find_object_index(object).expect("object remains");
+        assert_eq!(engine.objects[index].state.action.name, "A20");
+        Ok(())
+    }
+
+    #[test]
+    fn runaway_set_action_callbacks_report_the_vm_limit() -> Result<(), EngineError> {
+        // C4Aul's fail-safe callback Exec reports and unwinds recursion once
+        // the shared VM stack is exhausted. SetAction itself still returns
+        // true; it must not silently skip the callback at an arbitrary host
+        // depth (C4AulExec.cpp:1318-1342).
+        let callback_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut hooks = DebuggerHooks::new();
+        {
+            let callback_count = Arc::clone(&callback_count);
+            hooks.set_on_call(move |name, _args| {
+                if name == "LoopStart" {
+                    callback_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
+        let mut definition = Definition::from_script(
+            "SACR",
+            "SetAction recursion",
+            r#"#strict 2
+public func Trigger() { return SetAction("Loop"); }
+public func Healthy() { return 73; }
+protected func LoopStart() { SetAction("Loop"); return 1; }
+protected func LoopAbort(int phase) { return 1; }
+"#,
+        )?;
+        definition.set_c4_callback_convention(true);
+        definition.set_debugger_hooks(hooks);
+        definition.configure_actions(
+            Some("Loop".to_string()),
+            HashMap::from([(
+                "Loop".to_string(),
+                ActionSpec::default()
+                    .with_start_call("LoopStart")
+                    .with_abort_call("LoopAbort"),
+            )]),
+        );
+
+        let mut engine = Engine::new();
+        engine.register_definition(definition)?;
+        let object = engine.spawn_object(
+            SpawnConfig::new("SACR")
+                .with_action(ActionState::new("Loop"))
+                .with_loaded(true),
+        )?;
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::layer::SubscriberExt::with(
+            tracing_subscriber::Registry::default(),
+            PlayerObjectCommandDiagnosticLayer {
+                records: Arc::clone(&records),
+            },
+        );
+        let index = engine.find_object_index(object).expect("object exists");
+        let result = tracing::subscriber::with_default(subscriber, || {
+            engine.call_object_function(index, "Trigger", Vec::new())
+        })?;
+
+        assert_eq!(result, Value::Bool(true));
+        assert!(
+            callback_count.load(std::sync::atomic::Ordering::Relaxed) > 16,
+            "callbacks continue beyond the removed Rust-only limit"
+        );
+        let records = records.lock().expect("diagnostic records lock");
+        assert!(records.iter().any(|record| {
+            record.message
+                == "SetAction callback error; continuing like the C++ fail-safe exec"
+                && record.error.as_deref().is_some_and(|error| {
+                    error.contains("internal error: value stack overflow!")
+                })
+        }));
+        assert!(!records
+            .iter()
+            .any(|record| record.message.contains("recursion backstop")));
+        drop(records);
+        assert_eq!(
+            engine.call_object_function(index, "Healthy", Vec::new())?,
+            Value::Int(73),
+            "the fail-safe unwind releases the shared VM stack"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn phase_call_set_phase_suppresses_same_tick_next_action_like_cpp(
     ) -> Result<(), EngineError> {
         let script = r#"#strict 2
@@ -25581,6 +25745,7 @@ func ReadMenu() { return GetMenu(); }
         level: tracing::Level,
         target: String,
         message: String,
+        error: Option<String>,
     }
 
     #[derive(Clone)]
@@ -25606,6 +25771,7 @@ func ReadMenu() { return GetMenu(); }
                     level: *event.metadata().level(),
                     target: event.metadata().target().to_string(),
                     message: visitor.message.unwrap_or_default(),
+                    error: visitor.error,
                 });
         }
     }
@@ -25613,6 +25779,7 @@ func ReadMenu() { return GetMenu(); }
     #[derive(Default)]
     struct PlayerObjectCommandMessageVisitor {
         message: Option<String>,
+        error: Option<String>,
     }
 
     impl tracing::field::Visit for PlayerObjectCommandMessageVisitor {
@@ -25626,12 +25793,16 @@ func ReadMenu() { return GetMenu(); }
                     text = stripped.to_string();
                 }
                 self.message = Some(text);
+            } else if field.name() == "error" {
+                self.error = Some(format!("{value:?}"));
             }
         }
 
         fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
             if field.name() == "message" {
                 self.message = Some(value.to_string());
+            } else if field.name() == "error" {
+                self.error = Some(value.to_string());
             }
         }
     }
@@ -25785,6 +25956,7 @@ func ReadMenu() { return GetMenu(); }
                     level: tracing::Level::WARN,
                     target: "lc-script".to_string(),
                     message: "PlayerObjectCommand: Command \"Call\" not supported".to_string(),
+                    error: None,
                 }],
                 "caller {strict_directive:?}"
             );
