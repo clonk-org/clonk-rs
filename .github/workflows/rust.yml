@@ -116,4 +116,4 @@ jobs:
         run: cargo nextest run --workspace --locked
 
       - name: Run workspace lints
-        run: cargo clippy --profile test --workspace --all-targets --features xtask/engine-tools --locked -- -D warnings
+        run: cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings

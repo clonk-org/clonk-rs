@@ -105305,13 +105305,52 @@ func Award()
     }
 
     #[test]
-    fn real_tutorial01_renders_cpp_decorated_portrait_message() {
+    fn real_tutorial01_message_render_subcases_batch() {
+        let prepared =
+            PreparedRealInstalledScenario::new("Tutorial.c4f/Tutorial01.c4s");
+        let mut failures = Vec::new();
+        run_real_tutorial01_app_subcase(
+            "renders_cpp_decorated_portrait_message",
+            &mut failures,
+            || real_tutorial01_renders_cpp_decorated_portrait_message(&prepared),
+        );
+        run_real_tutorial01_app_subcase(
+            "scale_three_message_commits_native_pixels_after_filtered_base",
+            &mut failures,
+            || scale_three_tutorial_message_commits_native_pixels_after_filtered_base(&prepared),
+        );
+        assert_no_real_tutorial01_app_subcase_failures(failures);
+    }
+
+    fn run_real_tutorial01_app_subcase(
+        name: &'static str,
+        failures: &mut Vec<&'static str>,
+        subcase: impl FnOnce(),
+    ) {
+        eprintln!("running Tutorial01 app subcase `{name}`");
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(subcase)).is_err() {
+            eprintln!("Tutorial01 app subcase `{name}` failed; continuing batch");
+            failures.push(name);
+        }
+    }
+
+    fn assert_no_real_tutorial01_app_subcase_failures(failures: Vec<&str>) {
+        assert!(
+            failures.is_empty(),
+            "Tutorial01 app subcase(s) failed: {}",
+            failures.join(", ")
+        );
+    }
+
+    fn real_tutorial01_renders_cpp_decorated_portrait_message(
+        prepared: &PreparedRealInstalledScenario,
+    ) {
         // TutorialMessage reaches C4GameMessage::Draw as a permanent
         // player-global message with DECO framing and an SCLK portrait
         // (Tutorial.c4f/System.c4g/Tutorial.c:22-31;
         // src/C4GameMessage.cpp:99-170).
         let _lock = env_lock().lock();
-        let mut app = real_tutorial_app_with_roster(1, "Tutorial message parity");
+        let mut app = prepared.instantiate("Tutorial message parity", true);
         advance_app_until(&mut app, "Tutorial01 welcome message", 180, |app| {
             app_tutorial_message_contains(app, "Welcome to the world of Clonk.")
         });
@@ -105661,15 +105700,16 @@ func Award()
         );
     }
 
-    #[test]
-    fn scale_three_tutorial_message_commits_native_pixels_after_filtered_base() {
+    fn scale_three_tutorial_message_commits_native_pixels_after_filtered_base(
+        prepared: &PreparedRealInstalledScenario,
+    ) {
         // FontRegular is rebuilt with Application.GetScale(), but its public
         // geometry remains in GUI units. Ordinary frame/portrait pixels pass
         // through GL_LINEAR first and native glyphs are then drawn into the
         // physical viewport (C4Fonts.cpp:158-173; StdFont.cpp:319-352,841-842;
         // C4Viewport.cpp:852-854).
         let _lock = env_lock().lock();
-        let mut app = real_tutorial_app_with_roster(1, "Native tutorial message parity");
+        let mut app = prepared.instantiate("Native tutorial message parity", true);
         advance_app_until(&mut app, "Tutorial01 welcome message", 180, |app| {
             app_tutorial_message_contains(app, "Welcome to the world of Clonk.")
         });
@@ -183963,8 +184003,27 @@ func ControlDig() { dig_count = 1; return(1); }
     }
 
     #[test]
-    fn saved_game_restores_music_level_after_scenario_reconfiguration() {
-        let mut app = real_tutorial_app(1, "MusicLevel restore parity");
+    fn real_tutorial01_saved_game_music_subcases_batch() {
+        let prepared =
+            PreparedRealInstalledScenario::new("Tutorial.c4f/Tutorial01.c4s");
+        let mut failures = Vec::new();
+        run_real_tutorial01_app_subcase(
+            "saved_game_restores_music_level_after_scenario_reconfiguration",
+            &mut failures,
+            || saved_game_restores_music_level_after_scenario_reconfiguration(&prepared),
+        );
+        run_real_tutorial01_app_subcase(
+            "saved_game_resume_uses_default_playlist_but_preserves_saved_filter",
+            &mut failures,
+            || saved_game_resume_uses_default_playlist_but_preserves_saved_filter(&prepared),
+        );
+        assert_no_real_tutorial01_app_subcase_failures(failures);
+    }
+
+    fn saved_game_restores_music_level_after_scenario_reconfiguration(
+        prepared: &PreparedRealInstalledScenario,
+    ) {
+        let mut app = prepared.instantiate("MusicLevel restore parity", false);
         let paths = cached_app_paths().expect("test app paths");
         paths.ensure_user_dirs().expect("test config directory");
         fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
@@ -184010,9 +184069,10 @@ func ControlDig() { dig_count = 1; return(1); }
         );
     }
 
-    #[test]
-    fn saved_game_resume_uses_default_playlist_but_preserves_saved_filter() {
-        let mut app = real_tutorial_app(1, "Music resume ordering parity");
+    fn saved_game_resume_uses_default_playlist_but_preserves_saved_filter(
+        prepared: &PreparedRealInstalledScenario,
+    ) {
+        let mut app = prepared.instantiate("Music resume ordering parity", false);
         let paths = cached_app_paths().expect("test app paths");
         paths.ensure_user_dirs().expect("test config directory");
         fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")

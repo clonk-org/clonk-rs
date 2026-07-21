@@ -58,7 +58,7 @@ commit message states whether it is structural or behavioral.
 
 ```
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
 cargo xtask engine-snapshots verify
 ```
 
@@ -91,7 +91,7 @@ built — `USE_RUST_ENGINE_VALIDATION` + `LC_RUST_ENGINE_*` env vars in
 cargo build --workspace
 cargo test -p <crate>                       # focused
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
 cargo xtask engine-snapshots record|verify  # Rust self-consistency snapshots
 cargo xtask ffi [--release] [-p <crate>]    # build staticlib/cdylib for C++
 ```

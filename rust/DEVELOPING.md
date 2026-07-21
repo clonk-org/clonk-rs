@@ -130,12 +130,16 @@ handoff or merge:
 
 ```sh
 cargo nextest run --workspace --locked
-cargo clippy --profile test --workspace --all-targets --features xtask/engine-tools --locked -- -D warnings
+cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
 ```
 
 The workspace test run includes deterministic engine snapshots, C++↔Rust
 differential parity, and the focused tutorial and virtual-play tests; running
 those checks again in the full gate only duplicates work.
+The explicit Clippy target set covers every production library, binary, and
+test without rebuilding `test = false` libraries as implicit benchmark
+harnesses. The two Criterion benchmarks remain opt-in through their `bench`
+features.
 Behavior changes can additionally require the relevant scenario sweep/audit
 and rebuilt live C++ comparison described in `PORT_STATUS.md`.
 

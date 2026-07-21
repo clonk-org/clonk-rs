@@ -192,9 +192,10 @@ worktrees had independently compiled the 162k-line `lc-app` harness while a
 workspace gate was running; one observed contended gate took 50.92s to compile
 and 73.736s to execute, with host load around 25--30 on 16 logical cores. That
 sample is evidence of contention, not a profile baseline. The shared worker
-protocol now admits compile/link/test commands through one token-owned build
-lock, polling without process-spawning at 5ms, and omits the redundant whole-
-crate working-phase suite before the final workspace gate.
+protocol now serializes the authoritative rebase, workspace gate, and fast-
+forward with the merge lock, and omits the redundant whole-crate working-phase
+suite before that final gate. Scoped diagnostics do not acquire a second lock,
+but do not start while a landing gate owns the machine.
 
 With the host build slot isolated, a same-source, one-line incremental app
 change compared warmed test-profile artifacts (`n = 1` each):
@@ -337,6 +338,27 @@ its immutable scenario once and instantiates two independent engines. Retained
 pre-change profiling samples totaled 14.293s across the five active Tutorial05
 cases and 7.112s for the Arctic case; those figures identify repeated work and
 are not presented as a same-command elapsed A/B.
+
+### Clippy targets and Tutorial01 preparation follow-up
+
+The full lint command now names production libraries, binaries, and tests
+instead of using Cargo's `--all-targets` expansion. The workspace has no
+examples, and both explicit Criterion benches require opt-in `bench` features,
+so lint coverage is unchanged. The old expansion additionally created five
+implicit benchmark-mode roots across targets that disable ordinary test
+harnesses: `lc-engine`, `lc-frontend`, `lc-logging`, and both `xtask` binaries.
+Those roots span 98,217 source lines; engine and frontend account for 96,512
+of them. The explicit target set avoids that duplicate codegen while retaining
+every production and test target.
+
+Four remaining Tutorial01 app assertions also prepared the same immutable
+installed scenario in separate nextest processes. Two failure-aggregating
+batches now prepare it once for the two message-render assertions and once for
+the two save/music assertions. Each assertion still receives a fresh app,
+engine, environment guard, and temporary user-data tree, while the 9.178s
+physical Tutorial01 route stays standalone. Retained pre-change samples for
+the four batched assertions totaled 20.428s; that aggregate identifies the
+duplicated work and is not claimed as a same-command elapsed speedup.
 
 The first local reference baseline was recorded on 2026-07-12 from
 `dd32e5d3` with content `67a54d0`, Rust 1.87.0, macOS/Darwin arm64, and an

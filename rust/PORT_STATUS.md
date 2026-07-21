@@ -137,7 +137,7 @@ cargo nextest run -p lc-engine-integration-tests --test engine_it -E 'test(/^(re
 cargo nextest run -p lc-engine-integration-tests --test engine_it -E 'test(/^virtual_player_harness::/)'
 cargo nextest run -p lc-app -E 'test(/app_virtual_keyboard_(completes|flings|opens)/)'
 cargo nextest run --workspace --no-fail-fast
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
 cargo xtask engine-snapshots verify
 cargo xtask parity verify
 ```
