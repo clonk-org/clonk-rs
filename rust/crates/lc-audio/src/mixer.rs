@@ -30,6 +30,10 @@ pub(crate) struct SoundId(u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct MusicId(u32);
 
+const INERT_SOUND_ID: SoundId = SoundId(0);
+const INERT_MUSIC_ID: MusicId = MusicId(0);
+const INERT_CHANNEL_INDEX: usize = usize::MAX;
+
 #[derive(Debug, Error)]
 pub enum AudioError {
     #[error("decode error: {0}")]
@@ -130,6 +134,7 @@ pub struct AudioSystem {
 enum Backend {
     #[cfg(feature = "cpal")]
     Cpal(CpalBackend),
+    Inert,
     Null(NullBackend),
     DeferredNull(Arc<DeferredNullBackend>),
 }
@@ -144,17 +149,49 @@ impl AudioSystem {
         resampling_mode: ResamplingMode,
     ) -> Result<Self, AudioError> {
         #[cfg(feature = "cpal")]
-        if let Ok((mixer, backend)) = CpalBackend::try_new(max_channels, resampling_mode) {
-            return Ok(Self {
-                mixer,
-                _backend: Backend::Cpal(backend),
-            });
-        }
-
-        Ok(Self::new_null_with_resampling(
+        let system = Self::open_output_or_inert(
             max_channels,
             resampling_mode,
-        ))
+            || {
+                let (mixer, backend) = CpalBackend::try_new(max_channels, resampling_mode)?;
+                Ok(Self {
+                    mixer,
+                    _backend: Backend::Cpal(backend),
+                })
+            },
+            |error| tracing::error!("{error}"),
+        );
+
+        #[cfg(not(feature = "cpal"))]
+        let system = Self::new_inert_with_resampling(max_channels, resampling_mode);
+
+        Ok(system)
+    }
+
+    #[cfg(any(feature = "cpal", test))]
+    fn open_output_or_inert(
+        max_channels: usize,
+        resampling_mode: ResamplingMode,
+        open_output: impl FnOnce() -> Result<Self, AudioError>,
+        log_error: impl FnOnce(&AudioError),
+    ) -> Self {
+        match open_output() {
+            Ok(system) => system,
+            Err(error) => {
+                log_error(&error);
+                Self::new_inert_with_resampling(max_channels, resampling_mode)
+            }
+        }
+    }
+
+    /// C4AudioSystemNone-compatible fallback used only when production output
+    /// initialization fails. It owns no worker and its mixer creates inert
+    /// placeholder handles without inspecting source bytes.
+    fn new_inert_with_resampling(_max_channels: usize, resampling_mode: ResamplingMode) -> Self {
+        Self {
+            mixer: Arc::new(AudioMixer::new_inert(resampling_mode)),
+            _backend: Backend::Inert,
+        }
     }
 
     /// Construct the same live mixer state without opening a platform audio
@@ -520,6 +557,7 @@ pub struct AudioMixer {
     channel_finished: Arc<RwLock<Option<ChannelFinished>>>,
     sample_rate: u32,
     resampling_mode: ResamplingMode,
+    inert: bool,
 }
 
 struct MixerState {
@@ -530,6 +568,7 @@ struct MixerState {
     active_music: Option<MusicPlayback>,
     next_sound_id: u32,
     next_music_id: u32,
+    next_inert_channel_generation: u64,
 }
 
 #[derive(Debug)]
@@ -595,6 +634,19 @@ impl AudioMixer {
         max_channels: usize,
         resampling_mode: ResamplingMode,
     ) -> Self {
+        Self::new_inner(sample_rate, max_channels, resampling_mode, false)
+    }
+
+    fn new_inert(resampling_mode: ResamplingMode) -> Self {
+        Self::new_inner(44_100, 0, resampling_mode, true)
+    }
+
+    fn new_inner(
+        sample_rate: u32,
+        max_channels: usize,
+        resampling_mode: ResamplingMode,
+        inert: bool,
+    ) -> Self {
         let state = MixerState {
             sounds: HashMap::new(),
             music: HashMap::new(),
@@ -603,12 +655,14 @@ impl AudioMixer {
             active_music: None,
             next_sound_id: 1,
             next_music_id: 1,
+            next_inert_channel_generation: 1,
         };
         Self {
             state: Arc::new(Mutex::new(state)),
             channel_finished: Arc::new(RwLock::new(None)),
             sample_rate,
             resampling_mode,
+            inert,
         }
     }
 
@@ -617,6 +671,9 @@ impl AudioMixer {
     }
 
     pub(crate) fn load_sound(&self, data: &[u8]) -> Result<SoundId, AudioError> {
+        if self.inert {
+            return Ok(INERT_SOUND_ID);
+        }
         let decoded = decode_audio(data)?;
         let clip = self.prepare_clip(decoded);
         let mut state = self.state.lock().unwrap();
@@ -627,10 +684,16 @@ impl AudioMixer {
     }
 
     pub(crate) fn load_music(&self, data: &[u8]) -> Result<MusicId, AudioError> {
+        if self.inert {
+            return Ok(INERT_MUSIC_ID);
+        }
         self.load_music_owned(data.to_vec())
     }
 
     pub(crate) fn load_music_owned(&self, data: Vec<u8>) -> Result<MusicId, AudioError> {
+        if self.inert {
+            return Ok(INERT_MUSIC_ID);
+        }
         let source: Arc<[u8]> = Arc::from(data.into_boxed_slice());
         // Opening validates the format and performs only bounded decoder
         // initialization. In particular, MIDI parses its event schedule but
@@ -648,16 +711,25 @@ impl AudioMixer {
     }
 
     pub(crate) fn unload_sound(&self, id: SoundId) {
+        if self.inert {
+            return;
+        }
         let mut state = self.state.lock().unwrap();
         state.sounds.remove(&id);
     }
 
     pub(crate) fn unload_music(&self, id: MusicId) {
+        if self.inert {
+            return;
+        }
         let mut state = self.state.lock().unwrap();
         state.music.remove(&id);
     }
 
     pub(crate) fn sound_duration_ms(&self, id: SoundId) -> Option<u32> {
+        if self.inert {
+            return Some(0);
+        }
         let state = self.state.lock().unwrap();
         state.sounds.get(&id).map(|clip| {
             let frames = clip.frames.len();
@@ -670,6 +742,15 @@ impl AudioMixer {
     }
 
     pub(crate) fn play_sound(&self, id: SoundId, looped: bool) -> Result<ChannelId, AudioError> {
+        if self.inert {
+            let mut state = self.state.lock().unwrap();
+            let generation = state.next_inert_channel_generation;
+            state.next_inert_channel_generation = generation.wrapping_add(1);
+            if state.next_inert_channel_generation == 0 {
+                state.next_inert_channel_generation = 1;
+            }
+            return Ok(ChannelId(INERT_CHANNEL_INDEX, generation));
+        }
         let mut state = self.state.lock().unwrap();
         let clip = state
             .sounds
@@ -735,6 +816,9 @@ impl AudioMixer {
     }
 
     pub(crate) fn play_music(&self, id: MusicId, looped: bool) -> Result<(), AudioError> {
+        if self.inert {
+            return Ok(());
+        }
         let asset = {
             let state = self.state.lock().unwrap();
             state
@@ -1486,6 +1570,83 @@ mod tests {
             cpal_config_range(2, cpal::SampleFormat::I32, 48_000, 48_000),
         ])
         .is_none());
+    }
+
+    #[test]
+    fn device_failure_uses_logged_inert_none_backend() {
+        let mut logged = Vec::new();
+        let system = AudioSystem::open_output_or_inert(
+            2,
+            ResamplingMode::Linear,
+            || {
+                Err(AudioError::Stream(
+                    "injected output-open failure".to_string(),
+                ))
+            },
+            |error| logged.push(error.to_string()),
+        );
+
+        assert_eq!(
+            logged,
+            ["failed to create audio stream: injected output-open failure"]
+        );
+        assert!(matches!(&system._backend, Backend::Inert));
+        assert!(system.mixer.inert);
+        assert_eq!(system.resampling_mode(), ResamplingMode::Linear);
+
+        let sound = system
+            .load_sound(b"not decodable audio")
+            .expect("inert backend creates a placeholder sound");
+        assert_eq!(sound.duration_ms(), Some(0));
+        assert_eq!(system.sound_duration_ms(&sound), Some(0));
+        let channel = system
+            .play_sound(&sound, true)
+            .expect("inert backend creates a placeholder channel");
+        let second_channel = system
+            .play_sound(&sound, false)
+            .expect("each inert play creates another placeholder channel");
+        assert_eq!(channel.0, INERT_CHANNEL_INDEX);
+        assert_eq!(second_channel.0, INERT_CHANNEL_INDEX);
+        assert_ne!(channel, second_channel);
+        assert!(!system.channel_is_playing(channel));
+        assert!(!system.channel_is_playing(second_channel));
+        system.channel_set_volume_and_pan(channel, 0.75, -0.5);
+        system.halt_channel(channel);
+        assert!(!system.channel_is_playing(channel));
+
+        let music = system
+            .load_music(b"not decodable music")
+            .expect("inert backend creates a placeholder music file");
+        let owned_music = system
+            .load_music_owned(b"also not decodable music".to_vec())
+            .expect("inert backend accepts owned placeholder music");
+        for handle in [&music, &owned_music] {
+            system
+                .play_music(handle, true)
+                .expect("inert music play is a no-op success");
+            assert!(!system.music_is_playing());
+        }
+        system.music_set_volume(0.25);
+        assert!(!system.music_fade_out(250));
+        system.halt_music();
+
+        let worker = system.worker_handle();
+        let worker_music = worker
+            .load_music_owned(b"worker does not decode this".to_vec())
+            .expect("inert worker creates a placeholder music file");
+        worker
+            .play_music(&worker_music, false)
+            .expect("inert worker music play is a no-op success");
+        worker.music_set_volume(0.5);
+        worker.halt_music();
+        assert!(!system.music_is_playing());
+
+        let active_null = AudioSystem::new_null(1);
+        assert!(matches!(&active_null._backend, Backend::Null(_)));
+        assert!(matches!(
+            active_null.load_sound(b"not decodable audio"),
+            Err(AudioError::Decode(_))
+        ));
     }
 
     #[test]
