@@ -181,7 +181,7 @@ use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
     load_endeavour_font, scenario as resource_scenario, DefCore as ResourceDefCore,
     DefinitionError as ResourceDefinitionError, FontCatalog, FontRole, GraphicsError,
-    GraphicsImage, GraphicsResource, Group, GroupError, LanguagePacks, MutableGroup,
+    GraphicsImage, GraphicsResource, Group, GroupEntry, GroupError, LanguagePacks, MutableGroup,
     MutableGroupChildMut, ParticleDefinition as ResourceParticleDefinition, ResolvedFontSpec,
     ResourceDefinition as ResourceDefinitionData,
 };
@@ -1183,7 +1183,28 @@ struct LoaderGroupRegistration {
 
 struct SelectedLoaderSource {
     group: Group,
-    filename: PathBuf,
+    entry: GroupEntry,
+}
+
+impl SelectedLoaderSource {
+    fn filename_bytes(&self) -> &[u8] {
+        &self.entry.name_bytes
+    }
+
+    fn presentation_filename(&self) -> String {
+        legacy_presentation_text(self.filename_bytes())
+    }
+
+    fn extension_bytes(&self) -> &[u8] {
+        let Some(dot) = self.filename_bytes().iter().rposition(|byte| *byte == b'.') else {
+            return b"";
+        };
+        &self.filename_bytes()[dot + 1..]
+    }
+
+    fn read_bytes(&self) -> std::result::Result<Vec<u8>, GroupError> {
+        self.group.read_entry_bytes_exact(&self.entry)
+    }
 }
 
 struct ResolvedGraphicsImage {
@@ -1544,12 +1565,13 @@ fn loader_patterns(specification: &str) -> Result<LoaderPatterns> {
     } else {
         specification
     };
+    let specification_bytes = lc_script::c4_string_bytes(specification);
     anyhow::ensure!(
-        specification.len() <= 128,
+        specification_bytes.len() <= 128,
         "classic loader specification exceeds C++'s 128-byte buffer"
     );
     anyhow::ensure!(
-        !specification.contains('\0'),
+        !specification_bytes.contains(&0),
         "classic loader specification contains an embedded NUL"
     );
     let with_default_extension = |extension: &str| {
@@ -1581,17 +1603,9 @@ fn seek_loader_candidates(
     chosen: &mut Option<SelectedLoaderSource>,
     next_mod: &mut impl FnMut(usize) -> usize,
 ) -> Result<()> {
+    let wildcard = lc_script::c4_string_bytes(wildcard);
     for entry in group.entries()? {
-        if entry.relative_path.components().count() != 1 {
-            continue;
-        }
-        let filename = entry.relative_path.to_str().with_context(|| {
-            format!(
-                "classic loader entry in {} is not UTF-8",
-                group.root().display()
-            )
-        })?;
-        if !classic_wildcard_match(wildcard.as_bytes(), filename.as_bytes()) {
+        if !classic_wildcard_match(&wildcard, &entry.name_bytes) {
             continue;
         }
         *count = count
@@ -1610,7 +1624,7 @@ fn seek_loader_candidates(
         if draw == 0 {
             *chosen = Some(SelectedLoaderSource {
                 group: group.clone(),
-                filename: entry.relative_path,
+                entry,
             });
         }
     }
@@ -1655,21 +1669,15 @@ fn classic_raw_wildcard_match(wildcard: &[u8], value: &[u8]) -> bool {
 }
 
 fn loader_group_has_content(group: &Group) -> Result<bool> {
-    for entry in group.entries()? {
-        let filename = entry.relative_path.to_str().with_context(|| {
-            format!(
-                "classic loader entry in {} is not UTF-8",
-                group.root().display()
-            )
-        })?;
-        if ["Loader*.bmp", "Loader*.png", "Loader*.jpg", "Loader*.jpeg"]
+    Ok(loader_entries_have_content(&group.entries()?))
+}
+
+fn loader_entries_have_content(entries: &[GroupEntry]) -> bool {
+    entries.iter().any(|entry| {
+        ["Loader*.bmp", "Loader*.png", "Loader*.jpg", "Loader*.jpeg"]
             .iter()
-            .any(|wildcard| classic_wildcard_match(wildcard.as_bytes(), filename.as_bytes()))
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+            .any(|wildcard| classic_wildcard_match(wildcard.as_bytes(), &entry.name_bytes))
+    })
 }
 
 fn loader_parent_paths(path: &Path) -> Vec<PathBuf> {
@@ -2160,24 +2168,20 @@ fn decode_selected_loader(source: &SelectedLoaderSource) -> Result<ImageData> {
     // Force direct-entry semantics first. A child group whose name happens
     // to match Loader*.png participates in C4Group::FindEntry, but its image
     // load fails rather than recursively finding a nested image.
-    let bytes = source.group.read_file(&source.filename).with_context(|| {
+    let bytes = source.read_bytes().with_context(|| {
         format!(
             "selected classic loader `{}` in {} is not a readable file",
-            source.filename.display(),
+            source.presentation_filename(),
             source.group.root().display()
         )
     })?;
     // C4Surface selects its decoder from the entry name rather than sniffing
     // the payload. Preserve that behavior so a renamed image fails instead of
     // silently loading through a different codec.
-    let extension = source
-        .filename
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default();
-    let format = if extension.eq_ignore_ascii_case("png") {
+    let extension = source.extension_bytes();
+    let format = if extension.eq_ignore_ascii_case(b"png") {
         image::ImageFormat::Png
-    } else if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg") {
+    } else if extension.eq_ignore_ascii_case(b"jpg") || extension.eq_ignore_ascii_case(b"jpeg") {
         image::ImageFormat::Jpeg
     } else {
         image::ImageFormat::Bmp
@@ -2185,7 +2189,7 @@ fn decode_selected_loader(source: &SelectedLoaderSource) -> Result<ImageData> {
     let image = image::load_from_memory_with_format(&bytes, format).with_context(|| {
         format!(
             "failed to decode exact classic image entry `{}` from {}",
-            source.filename.display(),
+            source.presentation_filename(),
             source.group.root().display()
         )
     })?;
@@ -2582,8 +2586,8 @@ fn validate_representable_system_font_defs(paths: &AppPaths) -> Result<()> {
             paths.system_group_path().display()
         )
     })?;
-    if let Some(path) = find_classic_named_entry(&group, "Fonts.txt")? {
-        let bytes = group.read_file(&path)?;
+    if let Some(entry) = find_classic_named_entry(&group, "Fonts.txt")? {
+        let bytes = group.read_entry_bytes_exact(&entry)?;
         let source = std::str::from_utf8(&bytes)
             .context("classic System.c4g Fonts.txt is not valid UTF-8")?;
         let mut in_font_record = false;
@@ -2713,7 +2717,7 @@ fn select_named_graphics_image_source(
         registration: &base,
         from_registration: false,
     });
-    let mut selected: Option<(Group, PathBuf, bool)> = None;
+    let mut selected: Option<(Group, GroupEntry, bool)> = None;
     for extension in ["bmp", "jpeg", "jpg", "png"] {
         let filename = format!("{name}.{extension}");
         candidates.sort_by(|left, right| {
@@ -2732,11 +2736,11 @@ fn select_named_graphics_image_source(
         });
         let mut candidate = None;
         for source in &candidates {
-            if let Some(path) = find_classic_named_entry(&source.registration.group, &filename)? {
+            if let Some(entry) = find_classic_named_entry(&source.registration.group, &filename)? {
                 candidate = Some((
                     source.registration.priority,
                     source.registration.group.clone(),
-                    path,
+                    entry,
                     source.from_registration,
                 ));
                 break;
@@ -2749,10 +2753,10 @@ fn select_named_graphics_image_source(
             selected = Some((candidate.1, candidate.2, candidate.3));
         }
     }
-    let (group, filename, from_registration) =
+    let (group, entry, from_registration) =
         selected.with_context(|| format!("classic graphics resource `{name}` is unavailable"))?;
     Ok(SelectedGraphicsImageSource {
-        source: SelectedLoaderSource { group, filename },
+        source: SelectedLoaderSource { group, entry },
         from_registration,
     })
 }
@@ -2776,10 +2780,10 @@ fn select_exact_graphics_source(
             .then_with(|| left.registration_order.cmp(&right.registration_order))
     });
     for candidate in candidates {
-        if let Some(path) = find_classic_named_entry(&candidate.group, filename)? {
+        if let Some(entry) = find_classic_named_entry(&candidate.group, filename)? {
             return Ok(SelectedLoaderSource {
                 group: candidate.group.clone(),
-                filename: path,
+                entry,
             });
         }
     }
@@ -2790,16 +2794,12 @@ fn decode_game_graphics_image(
     source: &SelectedLoaderSource,
     palette: &GamePalette,
 ) -> Result<ImageData> {
-    let is_bmp = source
-        .filename
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("bmp"));
+    let is_bmp = source.extension_bytes().eq_ignore_ascii_case(b"bmp");
     if is_bmp {
-        let bytes = source.group.read_file(&source.filename).with_context(|| {
+        let bytes = source.read_bytes().with_context(|| {
             format!(
                 "failed to read game graphic `{}` from {}",
-                source.filename.display(),
+                source.presentation_filename(),
                 source.group.root().display()
             )
         })?;
@@ -2807,13 +2807,14 @@ fn decode_game_graphics_image(
             .get(28..30)
             .map(|value| u16::from_le_bytes([value[0], value[1]]));
         if bit_depth == Some(8) {
-            let bitmap = lc_resources::bitmap::IndexedBitmap::decode(&bytes).with_context(|| {
-                format!(
-                    "failed to decode indexed game graphic `{}` from {}",
-                    source.filename.display(),
-                    source.group.root().display()
-                )
-            })?;
+            let bitmap =
+                lc_resources::bitmap::IndexedBitmap::decode(&bytes).with_context(|| {
+                    format!(
+                        "failed to decode indexed game graphic `{}` from {}",
+                        source.presentation_filename(),
+                        source.group.root().display()
+                    )
+                })?;
             let mut pixels = Vec::with_capacity(bitmap.indices.len() * 4);
             for index in bitmap.indices {
                 let color = palette.color(index);
@@ -2840,20 +2841,17 @@ fn load_game_palette(
     graphics: &Group,
 ) -> Result<GamePalette> {
     let palette_source = select_exact_graphics_source("C4.pal", registrations, graphics)?;
-    let palette_bytes = palette_source
-        .group
-        .read_file(&palette_source.filename)
-        .with_context(|| {
-            format!(
-                "failed to read game palette `{}` from {}",
-                palette_source.filename.display(),
-                palette_source.group.root().display()
-            )
-        })?;
+    let palette_bytes = palette_source.read_bytes().with_context(|| {
+        format!(
+            "failed to read game palette `{}` from {}",
+            palette_source.presentation_filename(),
+            palette_source.group.root().display()
+        )
+    })?;
     GamePalette::from_c4_pal(&palette_bytes).with_context(|| {
         format!(
             "game palette `{}` in {} is shorter than {} bytes",
-            palette_source.filename.display(),
+            palette_source.presentation_filename(),
             palette_source.group.root().display(),
             GamePalette::BYTE_LEN
         )
@@ -3018,10 +3016,10 @@ fn load_classic_bitmap_font_image(
             .then_with(|| left.registration_order.cmp(&right.registration_order))
     });
     for candidate in candidates {
-        if let Some(path) = find_classic_named_entry(&candidate.group, filename)? {
+        if let Some(entry) = find_classic_named_entry(&candidate.group, filename)? {
             return decode_selected_loader(&SelectedLoaderSource {
                 group: candidate.group,
-                filename: path,
+                entry,
             })
             .with_context(|| format!("failed to decode classic bitmap font `{filename}`"));
         }
@@ -3029,20 +3027,21 @@ fn load_classic_bitmap_font_image(
     anyhow::bail!("classic bitmap font `{filename}` is unavailable")
 }
 
-fn find_classic_named_entry(group: &Group, filename: &str) -> Result<Option<PathBuf>> {
-    for entry in group.entries()? {
-        let candidate = entry.relative_path.to_str().with_context(|| {
-            format!(
-                "classic graphics entry in {} is not UTF-8",
-                group.root().display()
-            )
-        })?;
-        if entry.relative_path.components().count() == 1 && candidate.eq_ignore_ascii_case(filename)
-        {
-            return Ok(Some(entry.relative_path));
-        }
-    }
-    Ok(None)
+fn find_classic_named_entry(group: &Group, filename: &str) -> Result<Option<GroupEntry>> {
+    let filename = lc_script::c4_string_bytes(filename);
+    Ok(find_classic_named_entry_from_entries(
+        group.entries()?,
+        &filename,
+    ))
+}
+
+fn find_classic_named_entry_from_entries(
+    entries: Vec<GroupEntry>,
+    filename: &[u8],
+) -> Option<GroupEntry> {
+    entries
+        .into_iter()
+        .find(|entry| classic_wildcard_match(filename, &entry.name_bytes))
 }
 
 fn loader_graphics_registrations(
@@ -3092,7 +3091,7 @@ fn classic_global_gui_runtime_overrides(
                     format!(
                         "{}:{}",
                         selected.source.group.root().display(),
-                        selected.source.filename.display()
+                        selected.source.presentation_filename()
                     ),
                 );
             }
@@ -4582,11 +4581,7 @@ fn build_startup_loader(paths: &AppPaths, assets: &FrontendAssets) -> Result<Cla
     validate_loader_graphics_font_sources(&registrations)?;
     let tier = highest_loader_tier(&registrations)?;
     let selected = select_loader_with_safe_random(&tier, &graphics, STARTUP_LOADER_SPECIFICATION)?;
-    let selected_filename = selected
-        .filename
-        .to_str()
-        .context("selected startup loader filename is not UTF-8")?
-        .to_string();
+    let selected_filename = selected.presentation_filename();
     let selection = LoaderSelection::startup(selected_filename)?;
     let background = decode_selected_loader(&selected)?;
     let resources = classic_loader_resources(assets, &registrations, &graphics)?;
@@ -4636,11 +4631,7 @@ fn build_scenario_loader(
     let tier = highest_loader_tier(&registrations)?;
     let selected =
         select_loader_with_safe_random(&tier, &graphics, head.loader().configured_specification())?;
-    let selected_filename = selected
-        .filename
-        .to_str()
-        .context("selected scenario loader filename is not UTF-8")?
-        .to_string();
+    let selected_filename = selected.presentation_filename();
     let selection =
         LoaderSelection::scenario(head.loader().configured_specification(), selected_filename)?;
     let background = decode_selected_loader(&selected)?;
@@ -133771,7 +133762,7 @@ ScenInfoArea=70,5,25,90
             }
         })
         .expect("select explicit loader");
-        assert_eq!(selected.filename, PathBuf::from("LoaderOne.png"));
+        assert_eq!(selected.entry.relative_path, PathBuf::from("LoaderOne.png"));
         assert_eq!(ranges, [1, 2, 3, 7]);
         assert!(classic_wildcard_match(b"*.*", b"extensionless"));
         assert_eq!(
@@ -133779,6 +133770,124 @@ ScenInfoArea=70,5,25,90
             "LoaderTrailing..png"
         );
         assert!(loader_patterns("Loader\0Hidden").is_err());
+    }
+
+    #[test]
+    fn raw_graphics_and_loader_lookup_ignores_unrelated_opaque_names() {
+        let directory = tempdir().expect("raw graphics fixture");
+        let image_path = directory.path().join("pixel.png");
+        write_preview_png(&image_path, [11, 22, 33, 255]);
+        let image_bytes = fs::read(image_path).expect("fixture PNG bytes");
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt;
+
+            let opaque_path = PathBuf::from(OsStr::from_bytes(b"Opaque\xfe.bin"));
+            assert!(opaque_path.to_str().is_none());
+            let entry = |relative_path: PathBuf, name_bytes: &[u8]| GroupEntry {
+                relative_path,
+                name_bytes: name_bytes.to_vec(),
+                is_directory: false,
+                size: 1,
+                time: 0,
+                executable: false,
+                crc_state: 0,
+                stored_crc: 0,
+            };
+            let raw_entries = vec![
+                entry(opaque_path, b"Opaque\xfe.bin"),
+                entry(PathBuf::from("LoaderGood.png"), b"LoaderGood.png"),
+                entry(PathBuf::from("Player.png"), b"Player.png"),
+            ];
+            assert!(loader_entries_have_content(&raw_entries));
+            let graphic = find_classic_named_entry_from_entries(raw_entries, b"player.PNG")
+                .expect("opaque sibling does not abort named graphics lookup");
+            assert_eq!(graphic.name_bytes, b"Player.png");
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                let raw_directory = directory.path().join("Directory.c4g");
+                fs::create_dir(&raw_directory).expect("directory graphics group");
+                fs::write(
+                    raw_directory.join(OsStr::from_bytes(b"Opaque\xfe.bin")),
+                    b"unrelated",
+                )
+                .expect("opaque directory sibling");
+                fs::write(raw_directory.join("LoaderGood.png"), &image_bytes)
+                    .expect("directory loader");
+                fs::write(raw_directory.join("Player.png"), &image_bytes)
+                    .expect("directory named graphic");
+                let directory_group = Group::open(&raw_directory).expect("open directory group");
+
+                assert!(loader_group_has_content(&directory_group)
+                    .expect("opaque sibling does not abort loader classification"));
+                let selected = select_loader_source(
+                    &[directory_group.clone()],
+                    &directory_group,
+                    "LoaderGood",
+                    |_| 0,
+                )
+                .expect("opaque sibling does not abort loader selection");
+                assert_eq!(selected.filename_bytes(), b"LoaderGood.png");
+                let graphic = find_classic_named_entry(&directory_group, "player.PNG")
+                    .expect("opaque sibling does not abort named graphics lookup")
+                    .expect("case-insensitive directory graphic");
+                assert_eq!(graphic.name_bytes, b"Player.png");
+            }
+        }
+
+        let mut fixture = MutableGroup::new_bytes(b"Fixture.bin".to_vec());
+        fixture
+            .add_file_bytes_with_metadata(
+                b"Opaque\xfe.bin".to_vec(),
+                b"unrelated".to_vec(),
+                1,
+                false,
+            )
+            .expect("opaque sibling");
+        fixture
+            .add_file("LoaderGood.png", image_bytes.clone())
+            .expect("ASCII loader");
+        fixture
+            .add_file_bytes_with_metadata(b"Loader\xff.png".to_vec(), image_bytes.clone(), 1, false)
+            .expect("opaque loader");
+        fixture
+            .add_file("Player.png", image_bytes.clone())
+            .expect("named graphic");
+        let group = Group::from_raw_memory(
+            PathBuf::from("Fixture.bin"),
+            fixture.pack_raw().expect("pack raw lookup fixture"),
+        )
+        .expect("open raw lookup fixture");
+
+        assert!(loader_group_has_content(&group).expect("classify loader group"));
+        let selected = select_loader_source(&[group.clone()], &group, "LoaderGood", |_| 0)
+            .expect("unrelated opaque sibling does not abort loader selection");
+        assert_eq!(selected.filename_bytes(), b"LoaderGood.png");
+        assert_eq!(
+            decode_selected_loader(&selected)
+                .expect("decode selected ASCII loader")
+                .pixels(),
+            [11, 22, 33, 255]
+        );
+
+        let graphic = find_classic_named_entry(&group, "player.PNG")
+            .expect("enumerate named graphics")
+            .expect("case-insensitive named graphic");
+        assert_eq!(graphic.name_bytes, b"Player.png");
+
+        let opaque_specification = lc_script::c4_string_from_bytes(b"Loader\xff.png");
+        let selected = select_loader_source(&[group.clone()], &group, &opaque_specification, |_| 0)
+            .expect("raw wildcard selects an opaque loader filename");
+        assert_eq!(selected.filename_bytes(), b"Loader\xff.png");
+        assert_eq!(
+            decode_selected_loader(&selected)
+                .expect("selected opaque loader is read by exact entry identity")
+                .pixels(),
+            [11, 22, 33, 255]
+        );
     }
 
     #[test]
@@ -133871,7 +133980,10 @@ ScenInfoArea=70,5,25,90
             select_named_graphics_image_source("GUIBigArrows", &registrations, &base_group)
                 .expect("select globally later png");
         assert!(!selected.from_registration);
-        assert_eq!(selected.source.filename, PathBuf::from("GUIBigArrows.png"));
+        assert_eq!(
+            selected.source.entry.relative_path,
+            PathBuf::from("GUIBigArrows.png")
+        );
         assert_eq!(
             decode_selected_loader(&selected.source)
                 .expect("decode selected base png")
@@ -133889,7 +134001,10 @@ ScenInfoArea=70,5,25,90
         let selected =
             select_named_graphics_image_source("GUIBigArrows", &registrations, &base_group)
                 .expect("select equal-priority last extension");
-        assert_eq!(selected.source.filename, PathBuf::from("GUIBigArrows.png"));
+        assert_eq!(
+            selected.source.entry.relative_path,
+            PathBuf::from("GUIBigArrows.png")
+        );
         assert_eq!(
             decode_selected_loader(&selected.source)
                 .expect("decode selected png")
@@ -134359,7 +134474,10 @@ ScenInfoArea=70,5,25,90
         let group = Group::open(directory.path()).expect("loader group");
         let selected = select_loader_source(&[group.clone()], &group, "LoaderRenamed", |_| 0)
             .expect("renamed loader candidate");
-        assert_eq!(selected.filename, PathBuf::from("LoaderRenamed.jpg"));
+        assert_eq!(
+            selected.entry.relative_path,
+            PathBuf::from("LoaderRenamed.jpg")
+        );
         assert!(
             decode_selected_loader(&selected).is_err(),
             "C4Surface dispatches to JPEG for a .jpg entry and rejects PNG bytes"
@@ -134373,10 +134491,11 @@ ScenInfoArea=70,5,25,90
             .expect("rgba image")
             .save(directory.path().join("Loader.png"))
             .expect("write loader png");
-        let selected = SelectedLoaderSource {
-            group: Group::open(directory.path()).expect("loader group"),
-            filename: PathBuf::from("Loader.png"),
-        };
+        let group = Group::open(directory.path()).expect("loader group");
+        let entry = find_classic_named_entry(&group, "Loader.png")
+            .expect("enumerate loader group")
+            .expect("loader entry");
+        let selected = SelectedLoaderSource { group, entry };
 
         assert_eq!(
             decode_selected_loader(&selected)

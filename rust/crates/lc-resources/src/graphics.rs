@@ -1,7 +1,7 @@
-use crate::{Group, GroupError};
+use crate::{Group, GroupEntry, GroupError};
 use image::{self, DynamicImage};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
@@ -71,14 +71,18 @@ pub(crate) fn blacken_fully_transparent_rgba(pixels: &mut [u8]) {
 
 pub struct GraphicsResource {
     group: Group,
-    index: HashMap<String, PathBuf>,
-    cache: Mutex<HashMap<String, Arc<GraphicsImage>>>,
+    index: HashMap<Vec<u8>, GroupEntry>,
+    cache: Mutex<HashMap<Vec<u8>, Arc<GraphicsImage>>>,
 }
 
 impl GraphicsResource {
     pub fn from_group(group: Group) -> Result<Self, GraphicsError> {
         let mut index = HashMap::new();
-        collect_entries(&group, PathBuf::new(), &mut index)?;
+        for entry in group.entries()? {
+            index
+                .entry(fold_ascii_case(&entry.name_bytes))
+                .or_insert(entry);
+        }
         Ok(Self {
             group,
             index,
@@ -92,13 +96,13 @@ impl GraphicsResource {
     }
 
     pub fn contains(&self, name: &str) -> bool {
-        let key = normalize_key(name);
+        let key = fold_ascii_case(&lc_script::c4_string_bytes(name));
         self.index.contains_key(&key)
     }
 
     pub fn load_image(&self, name: &str) -> Result<GraphicsImage, GraphicsError> {
-        let key = normalize_key(name);
-        let path = self
+        let key = fold_ascii_case(&lc_script::c4_string_bytes(name));
+        let entry = self
             .index
             .get(&key)
             .ok_or_else(|| GraphicsError::EntryNotFound {
@@ -114,9 +118,9 @@ impl GraphicsResource {
             return Ok((**cached).clone());
         }
 
-        let data = self.group.read_file(path)?;
+        let data = self.group.read_entry_bytes_exact(entry)?;
         let image = decode_image(&data).map_err(|source| GraphicsError::ImageDecode {
-            name: path.display().to_string(),
+            name: String::from_utf8_lossy(&entry.name_bytes).into_owned(),
             source,
         })?;
         let rgba = image.into_rgba8();
@@ -135,54 +139,29 @@ fn decode_image(bytes: &[u8]) -> Result<DynamicImage, image::ImageError> {
     image::load_from_memory(bytes)
 }
 
-fn collect_entries(
-    group: &Group,
-    base: PathBuf,
-    index: &mut HashMap<String, PathBuf>,
-) -> Result<(), GroupError> {
-    for entry in group.entries()? {
-        let mut relative = base.clone();
-        relative.push(&entry.relative_path);
-        if entry.is_directory {
-            let child = group.open_child(&entry.relative_path)?;
-            collect_entries(&child, relative, index)?;
-        } else {
-            insert_index(index, &relative);
-        }
-    }
-    Ok(())
-}
-
-fn insert_index(index: &mut HashMap<String, PathBuf>, path: &Path) {
-    let normalized = normalize_key(path);
-    index
-        .entry(normalized.clone())
-        .or_insert_with(|| path.to_path_buf());
-    if let Some(name) = path.file_name().and_then(|os| os.to_str()) {
-        let lower = name.to_ascii_lowercase();
-        index.entry(lower).or_insert_with(|| path.to_path_buf());
-    }
-}
-
-fn normalize_key(path: impl AsRef<Path>) -> String {
-    path_as_segments(path.as_ref())
-        .iter()
-        .map(|segment| segment.to_ascii_lowercase())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn path_as_segments(path: &Path) -> Vec<String> {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy().to_string())
-        .collect()
+fn fold_ascii_case(name: &[u8]) -> Vec<u8> {
+    let mut folded = name.to_vec();
+    folded.make_ascii_lowercase();
+    folded
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Cursor;
+    use std::path::PathBuf;
     use tempfile::tempdir;
+
+    fn solid_png(pixel: [u8; 4]) -> Vec<u8> {
+        let image =
+            DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, image::Rgba(pixel)));
+        let mut bytes = Cursor::new(Vec::new());
+        image
+            .write_to(&mut bytes, image::ImageOutputFormat::Png)
+            .expect("encode PNG");
+        bytes.into_inner()
+    }
 
     #[test]
     fn loads_png_image_from_directory() {
@@ -233,5 +212,77 @@ mod tests {
             image.pixels(),
             "cache hits retain the canonical loaded surface"
         );
+    }
+
+    #[test]
+    fn graphics_lookup_is_top_level_and_ignores_unrelated_opaque_names() {
+        let mut nested = crate::MutableGroup::new_bytes(b"Nested.c4g".to_vec());
+        nested
+            .add_file("Player.png", solid_png([200, 10, 20, 255]))
+            .expect("nested collision");
+        nested
+            .add_file("OnlyNested.png", solid_png([210, 30, 40, 255]))
+            .expect("nested-only image");
+
+        let mut root = crate::MutableGroup::new_bytes(b"Fixture.bin".to_vec());
+        root.add_child("Nested.c4g", nested)
+            .expect("nested graphics group");
+        root.add_packed_child_bytes_with_metadata(
+            b"Broken.c4g".to_vec(),
+            b"not a C4Group".to_vec(),
+            0,
+            1,
+            false,
+        )
+        .expect("malformed child");
+        root.add_file_bytes_with_metadata(
+            b"Opaque\xff.bin".to_vec(),
+            b"unrelated".to_vec(),
+            1,
+            false,
+        )
+        .expect("opaque sibling");
+        root.add_file("pLaYeR.PnG", solid_png([10, 20, 30, 255]))
+            .expect("top-level image");
+
+        let group = Group::from_raw_memory(
+            PathBuf::from("Fixture.bin"),
+            root.pack_raw().expect("pack graphics fixture"),
+        )
+        .expect("open graphics fixture");
+        let resource = GraphicsResource::from_group(group)
+            .expect("unrelated malformed child and opaque name are not opened or decoded");
+
+        assert!(resource.contains("PLAYER.PNG"));
+        assert!(!resource.contains("Nested.c4g/Player.png"));
+        assert!(!resource.contains("OnlyNested.png"));
+        assert_eq!(
+            resource
+                .load_image("player.png")
+                .expect("case-insensitive top-level image")
+                .pixels(),
+            [10, 20, 30, 255]
+        );
+        assert!(matches!(
+            resource.load_image("OnlyNested.png"),
+            Err(GraphicsError::EntryNotFound { .. })
+        ));
+
+        let mut matching_child = crate::MutableGroup::new_bytes(b"Fixture.bin".to_vec());
+        matching_child
+            .add_packed_child_with_metadata("Player.png", b"not an image".to_vec(), 0, 1, false)
+            .expect("matching child entry");
+        let matching_child = Group::from_raw_memory(
+            PathBuf::from("Fixture.bin"),
+            matching_child
+                .pack_raw()
+                .expect("pack matching child fixture"),
+        )
+        .expect("open matching child fixture");
+        let resource = GraphicsResource::from_group(matching_child).expect("index matching child");
+        assert!(matches!(
+            resource.load_image("Player.png"),
+            Err(GraphicsError::ImageDecode { .. })
+        ));
     }
 }
