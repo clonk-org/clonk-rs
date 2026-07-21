@@ -59251,6 +59251,62 @@ impl GameApp {
         self.finish_startup_network_restart(purpose)
     }
 
+    fn present_startup_restart_diagnostics(&mut self) -> Result<(), EngineError> {
+        self.status_text.clear();
+        let caption = self.runtime_resource_text("IDS_DLG_LOG", "Error Log");
+        self.runtime_client_list = None;
+        self.runtime_client_list_consumed_keys.clear();
+        self.runtime_client_list_above_game_over = false;
+        let presentation = self
+            .startup_restart_diagnostics
+            .take_presentation()
+            .expect("startup restart is entered only after an error flag or fatal diagnostic");
+        let entries = match presentation {
+            StartupRestartPresentation::Fatal(message) => {
+                return self.push_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                        message,
+                        caption,
+                        lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                    ),
+                    MessageDialogContinuation::None,
+                );
+            }
+            StartupRestartPresentation::Empty => {
+                return self.push_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                        "(no error)",
+                        caption,
+                        lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                    ),
+                    MessageDialogContinuation::None,
+                );
+            }
+            StartupRestartPresentation::Ringbuffer(entries) => entries,
+        };
+
+        Self::guard_gui_overlay_result(
+            "C4GUI::InfoDialog",
+            self.assets
+                .static_info_dialog_resources()
+                .context("exact C4GUI::InfoDialog resource set is absent")
+                .and_then(|resources| resources.validate()),
+        )?;
+        let text = entries.join("|");
+        let close_label = self.runtime_resource_text("IDS_DLG_CLOSE", "&Close");
+        self.cancel_underlying_interaction();
+        self.runtime_client_list = Some(
+            lc_frontend::runtime_client_list::RuntimeClientListDialog::new_static_info(
+                caption,
+                10,
+                &text,
+                close_label,
+            ),
+        );
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
     fn finish_startup_network_restart(
         &mut self,
         purpose: StartupNetworkPurpose,
@@ -59340,59 +59396,7 @@ impl GameApp {
         }
         // NetDlg discovery startup has its own native row presentation. It
         // must not displace the fatal diagnostic with a generic overlay.
-        self.status_text.clear();
-        let caption = self.runtime_resource_text("IDS_DLG_LOG", "Error Log");
-        self.runtime_client_list = None;
-        self.runtime_client_list_consumed_keys.clear();
-        self.runtime_client_list_above_game_over = false;
-        let presentation = self
-            .startup_restart_diagnostics
-            .take_presentation()
-            .expect("startup restart is entered only after an error flag or fatal diagnostic");
-        let entries = match presentation {
-            StartupRestartPresentation::Fatal(message) => {
-                return self.push_message_dialog(
-                    lc_frontend::message_dialog::MessageDialogState::regular_ok(
-                        message,
-                        caption,
-                        lc_frontend::message_dialog::MessageDialogIcon::ERROR,
-                    ),
-                    MessageDialogContinuation::None,
-                );
-            }
-            StartupRestartPresentation::Empty => {
-                return self.push_message_dialog(
-                    lc_frontend::message_dialog::MessageDialogState::regular_ok(
-                        "(no error)",
-                        caption,
-                        lc_frontend::message_dialog::MessageDialogIcon::ERROR,
-                    ),
-                    MessageDialogContinuation::None,
-                );
-            }
-            StartupRestartPresentation::Ringbuffer(entries) => entries,
-        };
-
-        Self::guard_gui_overlay_result(
-            "C4GUI::InfoDialog",
-            self.assets
-                .static_info_dialog_resources()
-                .context("exact C4GUI::InfoDialog resource set is absent")
-                .and_then(|resources| resources.validate()),
-        )?;
-        let text = entries.join("|");
-        let close_label = self.runtime_resource_text("IDS_DLG_CLOSE", "&Close");
-        self.cancel_underlying_interaction();
-        self.runtime_client_list = Some(
-            lc_frontend::runtime_client_list::RuntimeClientListDialog::new_static_info(
-                caption,
-                10,
-                &text,
-                close_label,
-            ),
-        );
-        self.mark_menu_dirty();
-        Ok(())
+        self.present_startup_restart_diagnostics()
     }
 
     fn poll_startup_network_connection(&mut self) -> Result<(), EngineError> {
@@ -74316,6 +74320,42 @@ impl GameApp {
         Ok(())
     }
 
+    fn finish_scenario_loading_failure(
+        &mut self,
+        message: String,
+        prepared_go: bool,
+    ) -> Result<(), EngineError> {
+        let returns_to_startup = self.failed_open_game_returns_to_startup();
+        if !prepared_go && self.network.is_none() && returns_to_startup {
+            // C4Application::OpenGame marks a failed ordinary fullscreen
+            // local start, clears the partial game, enters PreInit, restores
+            // the remembered startup dialog and only then presents its log.
+            self.startup_restart_diagnostics.mark_quit_with_error();
+            self.startup_restart_diagnostics.add_fatal_error(message);
+            self.loader_screen = None;
+            self.loader_error = None;
+            self.return_to_menu();
+            return self.present_startup_restart_diagnostics();
+        }
+
+        // Explicit command-line/developer-console starts and an already
+        // prepared network GO do not enter another startup generation.
+        self.active_global_gui_overrides.clear();
+        self.status_text = message;
+        self.loading_state = None;
+        self.network_start_wait = None;
+        self.mode = AppMode::Menu;
+        self.restore_startup_fonts();
+        if returns_to_startup {
+            if let Some(audio) = self.audio.as_mut() {
+                audio.configure_scenario(None);
+            }
+            self.reconstruct_music_system_at_preinit();
+            self.begin_frontend_music_entry();
+        }
+        Ok(())
+    }
+
     fn poll_loading(&mut self) -> Result<(), EngineError> {
         self.apply_pending_loading_resource_refresh()?;
         let mut completion: Option<(FrontendScenario, Result<Scenario, String>, bool)> = None;
@@ -74370,23 +74410,7 @@ impl GameApp {
                             ScenarioActivationError::Recoverable(message) => message,
                         };
                         tracing::error!(scenario = %scenario.title, error = %message, "failed to start scenario");
-                        self.active_global_gui_overrides.clear();
-                        self.status_text = message;
-                        self.loading_state = None;
-                        self.network_start_wait = None;
-                        self.mode = AppMode::Menu;
-                        self.restore_startup_fonts();
-                        if self.failed_open_game_returns_to_startup() {
-                            // Failed C4Application::OpenGame routes through
-                            // QuitGame and another application PreInit. The
-                            // developer console and explicit command-line
-                            // failures do not return to startup.
-                            if let Some(audio) = self.audio.as_mut() {
-                                audio.configure_scenario(None);
-                            }
-                            self.reconstruct_music_system_at_preinit();
-                            self.begin_frontend_music_entry();
-                        }
+                        self.finish_scenario_loading_failure(message, prepared_go)?;
                     } else if prepared_go {
                         // C4Game::InitGameFinal calls CheckStatusReached only
                         // after the already-opened scenario has initialized.
@@ -74457,19 +74481,7 @@ impl GameApp {
                 }
                 Err(message) => {
                     tracing::error!(scenario = %scenario.title, error = %message, "failed to load scenario");
-                    self.active_global_gui_overrides.clear();
-                    self.status_text = message;
-                    self.loading_state = None;
-                    self.network_start_wait = None;
-                    self.mode = AppMode::Menu;
-                    self.restore_startup_fonts();
-                    if self.failed_open_game_returns_to_startup() {
-                        if let Some(audio) = self.audio.as_mut() {
-                            audio.configure_scenario(None);
-                        }
-                        self.reconstruct_music_system_at_preinit();
-                        self.begin_frontend_music_entry();
-                    }
+                    self.finish_scenario_loading_failure(message, prepared_go)?;
                 }
             }
         }
@@ -104759,9 +104771,13 @@ func Award()
             thread::sleep(Duration::from_millis(2));
         }
         assert!(matches!(app.mode, AppMode::Menu));
-        assert!(app
-            .status_text
-            .contains("Fullscreen mode requires at least one participating player"));
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert!(app.loading_state.is_none());
+        assert!(app.loader_screen.is_none());
+        assert_startup_error_log(
+            &app,
+            "Failed to start Two players: Fullscreen mode requires at least one participating player.",
+        );
         assert!(app.engine.snapshot().players.is_empty());
         assert_eq!(app.control_player_infos.player_count(), 0);
         reset_cached_app_paths();
@@ -115996,6 +116012,79 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(dialog.state.size(), MessageDialogSize::Regular);
         assert!(matches!(dialog.continuation, MessageDialogContinuation::None));
         assert!(app.status_text.is_empty());
+    }
+
+    #[test]
+    fn local_scenario_load_failure_returns_to_remembered_selector_with_error_log() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let user_data = tempdir().expect("isolated local-start failure user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        let StagedNetworkHostScenario {
+            frontend,
+            loader_screen,
+            loader_refreshed_resources,
+            ..
+        } = prepare_tutorial_host_lobby(&app, repository);
+        app.open_scenario_browser();
+        wait_for_scenario_selector_discovery(&mut app);
+
+        let (sender, receiver) = mpsc::channel();
+        app.loader_screen = loader_screen;
+        app.loading_state = Some(ScenarioLoadingState::new(
+            frontend,
+            loader_refreshed_resources,
+            HashMap::new(),
+            receiver,
+        ));
+        app.mode = AppMode::Loading;
+        sender
+            .send(ScenarioLoadingEvent::Finished(Err(
+                "controlled local load failure".to_string(),
+            )))
+            .expect("queue controlled local load failure");
+
+        app.poll_loading()
+            .expect("failed local load restarts the startup selector");
+
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert_eq!(app.scenario_selector_mode, ScenarioSelectorMode::Local);
+        assert_eq!(
+            app.last_startup_dialog,
+            StartupDialog::ScenarioBrowser(ScenarioSelectorMode::Local)
+        );
+        assert_eq!(app.startup_scenario_back_dialog, None);
+        assert!(app.loading_state.is_none());
+        assert!(app.loader_screen.is_none());
+        assert!(app.loader_error.is_none());
+        assert!(app.active_scenario.is_none());
+        assert!(app.active_definition_load.is_none());
+        assert!(app.active_global_gui_overrides.is_empty());
+        assert!(app.runtime_client_list.is_none());
+        assert_startup_error_log(&app, "controlled local load failure");
+        assert_eq!(
+            app.startup_restart_diagnostics,
+            StartupRestartDiagnostics::default()
+        );
+
+        let mut frame = vec![0x4c; 800 * 600 * 4];
+        app.render(&mut frame)
+            .expect("render restored local selector and Error Log");
+        assert!(frame.iter().any(|byte| *byte != 0x4c));
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss local startup Error Log");
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert_eq!(app.scenario_selector_mode, ScenarioSelectorMode::Local);
+        assert_eq!(app.startup_scenario_back_dialog, None);
+        reset_cached_app_paths();
     }
 
     #[test]
@@ -135939,17 +136028,16 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(failure.mode, AppMode::Menu);
         assert_eq!(failure.startup_view, StartupView::MainMenu);
         assert!(failure.loading_state.is_none());
+        assert!(failure.loader_screen.is_none());
+        assert!(failure.loader_error.is_none());
         assert!(failure.active_global_gui_overrides.is_empty());
-        assert!(failure.status_text.contains("missing a filesystem path"));
-        assert!(
-            failure
-                .loader_screen
-                .as_ref()
-                .expect("failed loader retained")
-                .state()
-                .progress()
-                < 100,
-            "failed activation must not publish the terminal loader frame"
+        assert_startup_error_log(
+            &failure,
+            "Scenario `Rust Sandbox` is missing a filesystem path",
+        );
+        assert_eq!(
+            failure.startup_restart_diagnostics,
+            StartupRestartDiagnostics::default()
         );
     }
 
