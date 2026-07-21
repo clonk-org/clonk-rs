@@ -9100,7 +9100,12 @@ struct AudioContext {
     music_load_pending: Arc<AtomicU64>,
     #[cfg(test)]
     controlled_music_loads: Option<ControlledMusicLoads>,
+    /// Successfully decoded samples in native C4SoundSystem list order.
+    playable_sounds: Vec<PlayableSound>,
+    /// Mirror used by existing diagnostics to report the prepared sample
+    /// handles. Playback resolves the ordered catalog above directly.
     loaded_sounds: HashMap<String, SoundHandle>,
+    next_sound_sample_order: usize,
     active_channels: HashMap<SoundInstanceKey, ChannelInfo>,
     next_sound_instance_order: u64,
     resolver: SoundResolver,
@@ -9142,7 +9147,7 @@ impl AudioContext {
         };
         #[cfg(not(test))]
         let (resolver, music_resolver) = (SoundResolver::new(), MusicResolver::discover());
-        Ok(Self {
+        let mut context = Self {
             system,
             options,
             music_control,
@@ -9150,13 +9155,17 @@ impl AudioContext {
             music_load_pending: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             controlled_music_loads: None,
+            playable_sounds: Vec::new(),
             loaded_sounds: HashMap::new(),
+            next_sound_sample_order: 0,
             active_channels: HashMap::new(),
             next_sound_instance_order: 1,
             resolver,
             music_resolver,
             missing_sounds: HashSet::new(),
-        })
+        };
+        context.refresh_sound_catalog();
+        Ok(context)
     }
 
     #[cfg(test)]
@@ -9348,21 +9357,17 @@ impl AudioContext {
 
     fn reset_sound_system_generation(&mut self) {
         self.reset_sfx();
+        self.playable_sounds.clear();
         self.loaded_sounds.clear();
         self.missing_sounds.clear();
+        self.next_sound_sample_order = 0;
         self.next_sound_instance_order = 1;
         self.resolver.reset_dynamic_catalog();
+        self.refresh_sound_catalog();
     }
 
     fn clear_object_sound_instances(&mut self) {
         self.remove_sound_instances_matching(|info| info.target.is_some());
-    }
-
-    fn invalidate_reloaded_sound_samples(&mut self, sample_names: &HashSet<String>) {
-        if sample_names.is_empty() {
-            return;
-        }
-        self.remove_sound_instances_matching(|info| sample_names.contains(&info.sample_name));
     }
 
     fn remove_sound_instances_matching(
@@ -9393,41 +9398,29 @@ impl AudioContext {
         definition_roots: Option<&[Group]>,
         sound_effect_groups: Option<&[Group]>,
     ) {
-        let (sound_catalog_changed, reloaded_samples) = match sound_effect_groups {
+        let (sound_catalog_changed, candidates) = match sound_effect_groups {
             Some(sound_effect_groups) => {
                 let changed = self
                     .resolver
                     .configure_scenario_with_sound_effect_groups(path, sound_effect_groups);
-                let reloaded = self
-                    .resolver
-                    .scenario_sample_loads
-                    .iter()
-                    .cloned()
-                    .collect::<HashSet<_>>();
-                (changed, reloaded)
+                (
+                    changed,
+                    sound_catalog_candidates_for_groups(sound_effect_groups, "load"),
+                )
             }
             None => {
                 let changed = self.resolver.configure_scenario(path);
-                let reloaded = if changed && path.is_some() {
-                    self.resolver
-                        .scenario_sample_loads
-                        .iter()
-                        .cloned()
-                        .collect()
+                let candidates = if changed && path.is_some() {
+                    self.resolver.scenario_load_candidates()
                 } else {
-                    HashSet::new()
+                    Vec::new()
                 };
-                (changed, reloaded)
+                (changed, candidates)
             }
         };
-        if sound_catalog_changed || !reloaded_samples.is_empty() {
-            self.loaded_sounds.clear();
-            self.missing_sounds.clear();
+        if sound_catalog_changed || !candidates.is_empty() {
+            self.apply_sound_candidates(candidates);
         }
-        // C4SoundSystem keeps its application-global sample list across game
-        // transitions. LoadEffects destroys instances only when a newly
-        // loaded sample replaces the same case-insensitive filename.
-        self.invalidate_reloaded_sound_samples(&reloaded_samples);
         let configured = match definition_roots {
             Some(definition_roots) => self
                 .music_resolver
@@ -9514,18 +9507,21 @@ impl AudioContext {
     }
 
     fn register_definition_sounds(&mut self, definition_id: &str, group: &Group) {
-        let reloaded_samples = direct_sound_sample_loads(group)
-            .into_iter()
-            .collect::<HashSet<_>>();
         self.resolver
             .register_definition_group(definition_id, group);
-        self.loaded_sounds.clear();
-        self.missing_sounds.clear();
-        self.invalidate_reloaded_sound_samples(&reloaded_samples);
+        let label = format!("definition::{definition_id}");
+        let candidates = sound_catalog_candidates_for_groups(std::slice::from_ref(group), &label);
+        self.apply_sound_candidates(candidates);
     }
 
     fn available_sound_samples(&self) -> Vec<String> {
-        self.resolver.sample_names()
+        let mut names = self
+            .playable_sounds
+            .iter()
+            .map(|sound| sound.sample_name.clone())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names
     }
 
     fn available_music_tracks(&self) -> Vec<String> {
@@ -10106,49 +10102,110 @@ impl AudioContext {
         }
     }
 
+    fn refresh_sound_catalog(&mut self) {
+        let candidates = self.resolver.load_candidates();
+        self.reset_sfx();
+        self.playable_sounds.clear();
+        self.loaded_sounds.clear();
+        self.missing_sounds.clear();
+        self.next_sound_sample_order = 0;
+        self.apply_sound_candidates(candidates);
+    }
+
+    fn apply_sound_candidates(&mut self, candidates: Vec<SoundCatalogCandidate>) {
+        for candidate in candidates {
+            let missing_key = format!("asset::{}", candidate.cache_marker);
+            let bytes = match candidate.load_audio() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.missing_sounds.insert(missing_key);
+                    tracing::warn!(
+                        sound = %candidate.file_name,
+                        library = %candidate.description,
+                        %error,
+                        "failed to read sound candidate; keeping previous decoded sample"
+                    );
+                    continue;
+                }
+            };
+            let handle = match self.system.load_sound(&bytes) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    self.missing_sounds.insert(missing_key);
+                    tracing::warn!(
+                        sound = %candidate.file_name,
+                        library = %candidate.description,
+                        %error,
+                        "failed to decode sound candidate; keeping previous decoded sample"
+                    );
+                    continue;
+                }
+            };
+            self.missing_sounds.remove(&missing_key);
+            // LoadEffects appends the new Sample and only then erases the
+            // previous case-insensitive filename match. A failed later load
+            // therefore leaves the prior handle, list position and instances.
+            if let Some(old_index) = self
+                .playable_sounds
+                .iter()
+                .position(|sound| sound.sample_name == candidate.file_name)
+            {
+                self.remove_sound_instances_matching(|info| {
+                    info.sample_name == candidate.file_name
+                });
+                self.playable_sounds.remove(old_index);
+            }
+            let sample_order = self.next_sound_sample_order;
+            self.next_sound_sample_order = self
+                .next_sound_sample_order
+                .checked_add(1)
+                .expect("sound sample insertion order overflowed");
+            self.playable_sounds.push(PlayableSound {
+                handle,
+                sample_key: candidate.cache_key,
+                sample_name: candidate.file_name,
+                sample_order,
+            });
+        }
+
+        self.loaded_sounds.clear();
+        for sound in &self.playable_sounds {
+            self.loaded_sounds
+                .insert(sound.sample_key.clone(), sound.handle.clone());
+        }
+    }
+
     fn ensure_sound_with_key(
         &mut self,
         name: &str,
     ) -> Result<Option<LoadedSound>, AudioError> {
         let request_key = name.to_ascii_lowercase();
-        if let Some(resolved) = self.resolver.resolve_entry(name) {
-            let cache_key = resolved.cache_key();
-            let sample_name = resolved.file_name().to_string();
-            let sample_order = self.resolver.sample_order(&sample_name);
-            if let Some(handle) = self.loaded_sounds.get(&cache_key) {
-                return Ok(Some(LoadedSound {
-                    handle: handle.clone(),
-                    sample_key: cache_key,
-                    sample_name,
-                    sample_order,
-                }));
-            }
-            match resolved.load_audio() {
-                Ok(bytes) => {
-                    let handle = self.system.load_sound(bytes.as_slice())?;
-                    self.loaded_sounds.insert(cache_key.clone(), handle.clone());
-                    return Ok(Some(LoadedSound {
-                        handle,
-                        sample_key: cache_key,
-                        sample_name,
-                        sample_order,
-                    }));
-                }
-                Err(err) => {
-                    if self
-                        .missing_sounds
-                        .insert(format!("asset::{}", resolved.cache_marker()))
-                    {
-                        tracing::warn!(
-                            sound = %name,
-                            library = %resolved.describe(),
-                            error = %err,
-                            "failed to load sound asset"
-                        );
-                    }
-                    return Ok(None);
-                }
-            }
+        let terms = SoundSearchTerms::new(name);
+        let selected_index = if let Some(pattern) = terms.wildcard_pattern.as_deref() {
+            let matches = self
+                .playable_sounds
+                .iter()
+                .enumerate()
+                .filter_map(|(index, sound)| {
+                    matches_sound_pattern(pattern, &sound.sample_name).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            (!matches.is_empty()).then(|| matches[classic_safe_random(matches.len())])
+        } else {
+            terms.search_names.iter().find_map(|search_name| {
+                self.playable_sounds
+                    .iter()
+                    .position(|sound| sound.sample_name == *search_name)
+            })
+        };
+        if let Some(selected_index) = selected_index {
+            let sound = &self.playable_sounds[selected_index];
+            return Ok(Some(LoadedSound {
+                handle: sound.handle.clone(),
+                sample_key: sound.sample_key.clone(),
+                sample_name: sound.sample_name.clone(),
+                sample_order: sound.sample_order,
+            }));
         }
 
         if self
@@ -10201,6 +10258,13 @@ impl SoundInstanceKey {
             discriminator: 0,
         }
     }
+}
+
+struct PlayableSound {
+    handle: SoundHandle,
+    sample_key: String,
+    sample_name: String,
+    sample_order: usize,
 }
 
 struct LoadedSound {
@@ -10429,6 +10493,26 @@ impl SoundResolver {
         names
     }
 
+    fn load_candidates(&self) -> Vec<SoundCatalogCandidate> {
+        let mut candidates = Vec::new();
+        // Resolver precedence is newest-first. Native LoadEffects order is
+        // the reverse: global bank, definition groups in traversal order,
+        // then scenario-local groups. Within one group it performs complete
+        // WAV, OGG and MP3 scans in that order.
+        for library in self.global.iter().rev().chain(self.scenario.iter().rev()) {
+            candidates.extend(library.catalog_candidates());
+        }
+        candidates
+    }
+
+    fn scenario_load_candidates(&self) -> Vec<SoundCatalogCandidate> {
+        self.scenario
+            .iter()
+            .rev()
+            .flat_map(SoundLibrary::catalog_candidates)
+            .collect()
+    }
+
     fn sample_order(&self, file_name: &str) -> usize {
         *self
             .sample_ranks
@@ -10599,6 +10683,41 @@ impl SoundLibrary {
 
     fn read_bytes(&self, index: usize) -> Result<Vec<u8>, lc_resources::GroupError> {
         self.source.read_file(&self.entries[index].relative_path)
+    }
+
+    fn catalog_candidate(&self, index: usize) -> SoundCatalogCandidate {
+        SoundCatalogCandidate {
+            cache_key: self.cache_key(index),
+            cache_marker: self.cache_marker(index),
+            file_name: self.entries[index].file_name.clone(),
+            description: self.describe_entry(index),
+            source: Arc::clone(&self.source),
+            relative_path: self.entries[index].relative_path.clone(),
+        }
+    }
+
+    fn catalog_candidates(&self) -> Vec<SoundCatalogCandidate> {
+        let mut indices = (0..self.entries.len()).collect::<Vec<_>>();
+        indices.sort_by_key(|index| (self.entries[*index].extension_rank, *index));
+        indices
+            .into_iter()
+            .map(|index| self.catalog_candidate(index))
+            .collect()
+    }
+}
+
+struct SoundCatalogCandidate {
+    cache_key: String,
+    cache_marker: String,
+    file_name: String,
+    description: String,
+    source: Arc<Group>,
+    relative_path: PathBuf,
+}
+
+impl SoundCatalogCandidate {
+    fn load_audio(&self) -> Result<Vec<u8>, lc_resources::GroupError> {
+        self.source.read_file(&self.relative_path)
     }
 }
 
@@ -10779,6 +10898,22 @@ fn collect_direct_sound_library(group: &Group, label: String) -> Option<SoundLib
         }
     }
     (!library.is_empty()).then_some(library)
+}
+
+fn sound_catalog_candidates_for_groups(
+    groups: &[Group],
+    label_prefix: &str,
+) -> Vec<SoundCatalogCandidate> {
+    groups
+        .iter()
+        .enumerate()
+        .flat_map(|(index, group)| {
+            let label = format!("{label_prefix}::{index}::{}", group.root().display());
+            collect_direct_sound_library(group, label)
+                .map(|library| library.catalog_candidates())
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 fn collect_path_sound_effect_groups(scenario_path: &Path) -> Vec<Group> {
@@ -102641,7 +102776,7 @@ func Award()
             ..AudioOptions::default()
         })
         .expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
         (dir, audio, make_snapshot(Vec::new(), Vec::new()))
     }
 
@@ -103158,6 +103293,149 @@ func Award()
         assert!(audio.music_resolver.extra.is_none());
     }
 
+    fn empty_test_audio_context() -> AudioContext {
+        AudioContext::try_new(AudioOptions {
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..AudioOptions::default()
+        })
+        .expect("deferred test audio context")
+    }
+
+    #[test]
+    fn invalid_sound_override_keeps_previous_decoded_sample() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Sound.c4g");
+        let scenario = dir.path().join("Override.c4s");
+        fs::create_dir_all(&global).expect("global sound group");
+        fs::create_dir_all(&scenario).expect("scenario sound group");
+        fs::write(global.join("Voice.wav"), silent_pcm_wav(1_000))
+            .expect("valid global sample");
+        fs::write(scenario.join("VOICE.WAV"), b"not an audio stream")
+            .expect("invalid later override");
+
+        let mut audio = empty_test_audio_context();
+        audio.resolver.global = collect_sound_libraries_for_path(&global);
+        audio.resolver.scenario = collect_sound_libraries_for_path(&scenario);
+        audio.refresh_sound_catalog();
+
+        assert_eq!(audio.available_sound_samples(), ["voice.wav"]);
+        let resolved = audio
+            .ensure_sound_with_key("Voice")
+            .expect("validated catalog lookup")
+            .expect("the earlier valid sample survives");
+        assert_eq!(resolved.handle.duration_ms(), Some(1_000));
+        assert!(
+            resolved.sample_key.contains("sound.c4g"),
+            "the undecodable scenario entry must not replace the global handle"
+        );
+        assert_eq!(resolved.sample_order, 0);
+        assert!(
+            audio
+                .missing_sounds
+                .iter()
+                .any(|key| key.starts_with("asset::") && key.contains("voice.wav")),
+            "the rejected decode is retained in diagnostics"
+        );
+    }
+
+    #[test]
+    fn unreadable_sound_override_keeps_previous_decoded_sample() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Sound.c4g");
+        let scenario = dir.path().join("Unreadable.c4s");
+        fs::create_dir_all(&global).expect("global sound group");
+        fs::create_dir_all(&scenario).expect("scenario sound group");
+        fs::write(global.join("Alert.wav"), silent_pcm_wav(750))
+            .expect("valid global sample");
+        let override_path = scenario.join("ALERT.WAV");
+        fs::write(&override_path, silent_pcm_wav(1_500)).expect("temporary override sample");
+
+        let global_libraries = collect_sound_libraries_for_path(&global);
+        let scenario_libraries = collect_sound_libraries_for_path(&scenario);
+        fs::remove_file(&override_path).expect("make catalogued override unreadable");
+
+        let mut audio = empty_test_audio_context();
+        audio.resolver.global = global_libraries;
+        audio.resolver.scenario = scenario_libraries;
+        audio.refresh_sound_catalog();
+
+        let resolved = audio
+            .ensure_sound_with_key("Alert")
+            .expect("validated catalog lookup")
+            .expect("the earlier readable sample survives");
+        assert_eq!(resolved.handle.duration_ms(), Some(750));
+        assert!(resolved.sample_key.contains("sound.c4g"));
+        assert!(
+            audio
+                .missing_sounds
+                .iter()
+                .any(|key| key.starts_with("asset::") && key.contains("alert.wav")),
+            "the rejected read is retained in diagnostics"
+        );
+    }
+
+    #[test]
+    fn undecodable_speech_sample_does_not_suppress_text_fallback() {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("Speech.c4s");
+        fs::create_dir_all(&scenario).expect("scenario sound group");
+        fs::write(scenario.join("BrokenSpeech.wav"), b"corrupt speech")
+            .expect("corrupt speech fixture");
+
+        let mut audio = empty_test_audio_context();
+        audio.resolver.scenario = collect_sound_libraries_for_path(&scenario);
+        audio.refresh_sound_catalog();
+        let advertised = audio.available_sound_samples();
+        assert!(advertised.is_empty(), "undecodable speech is not advertised");
+
+        for (script, expected, expected_kind) in [
+            (
+                r#"Message("Message text$BrokenSpeech")"#,
+                "Message text",
+                MessageKind::Global,
+            ),
+            (
+                r#"PlayerMessage(0,"Player text$BrokenSpeech")"#,
+                "Player text",
+                MessageKind::GlobalPlayer,
+            ),
+            (
+                r#"PlrMessage("Plr text$BrokenSpeech",0)"#,
+                "Plr text",
+                MessageKind::GlobalPlayer,
+            ),
+        ] {
+            let mut engine = Engine::with_seed(1);
+            engine
+                .register_player(
+                    PlayerConfig::new(0, "Player").with_viewports([
+                        lc_engine::PlayerViewport::new(Vector2::ZERO),
+                    ]),
+                )
+                .expect("speech fixture player");
+            engine.configure_sound_samples(advertised.iter());
+            let control = lc_engine::ScriptControlData {
+                script: LegacyCString::from_bytes(script.as_bytes().to_vec())
+                    .expect("speech script has no NUL"),
+                by_client: 0,
+                ..lc_engine::ScriptControlData::default()
+            };
+            engine
+                .execute_script_control(&control, ScriptControlPolicy::live(false))
+                .expect("message script executes")
+                .expect("host script is accepted");
+
+            assert!(engine.pending_audio.is_empty());
+            let messages = engine.snapshot().hud.messages;
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].kind, expected_kind);
+            assert_eq!(messages[0].lines, [expected]);
+        }
+    }
+
     #[test]
     fn matches_sound_pattern_uses_cpp_prepared_question_wildcards() {
         assert!(matches_sound_pattern("sound?.wav", "sound1.wav"));
@@ -103556,6 +103834,7 @@ func Award()
 
         let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
         audio.resolver = SoundResolver::empty();
+        audio.refresh_sound_catalog();
         let advertised =
             configure_scenario_sound_samples(Some(&mut audio), &scenario, &scenario_path);
         assert!(advertised.iter().any(|name| name == "drink.wav"));
@@ -103581,6 +103860,7 @@ func Award()
         let mut engine = Engine::new();
         let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
         audio.resolver = SoundResolver::empty();
+        audio.refresh_sound_catalog();
         load_definitions_from_group(
             &mut engine,
             &group,
@@ -104158,7 +104438,7 @@ func Award()
             ..AudioOptions::default()
         })
         .expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
 
         let listener = make_object(1, "LIST", Vector2::ZERO);
         let first = make_object(2, "SND1", Vector2::new(1_000, 0));
@@ -104225,7 +104505,7 @@ func Award()
             ..AudioOptions::default()
         })
         .expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
 
         let listener = make_object(1, "LIST", Vector2::ZERO);
         let source = make_object(2, "SNDS", Vector2::new(100, 0));
@@ -104431,7 +104711,7 @@ func Award()
             ..AudioOptions::default()
         })
         .expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
         let snapshot = make_snapshot(Vec::new(), Vec::new());
         let key = SoundInstanceKey::new("CloseViewport", None);
 
@@ -104474,7 +104754,7 @@ func Award()
             ..AudioOptions::default()
         })
         .expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
         let snapshot = make_snapshot(Vec::new(), Vec::new());
         let key = SoundInstanceKey::new("ArrowHit", None);
 
@@ -104555,14 +104835,17 @@ func Award()
         let dir = tempdir().expect("GUI transition fixture");
         let scenario = dir.path().join("First.c4s");
         let unrelated = dir.path().join("Unrelated.c4d");
+        let invalid_replacement = dir.path().join("Invalid.c4d");
         let replacement = dir.path().join("Replacement.c4d");
-        for path in [&scenario, &unrelated, &replacement] {
+        for path in [&scenario, &unrelated, &invalid_replacement, &replacement] {
             fs::create_dir_all(path).expect("create sound group");
         }
         fs::write(scenario.join("Click.wav"), silent_pcm_wav(1_000))
             .expect("write initial GUI sample");
         fs::write(unrelated.join("Command.wav"), silent_pcm_wav(1_000))
             .expect("write unrelated sample");
+        fs::write(invalid_replacement.join("CLICK.WAV"), b"not an audio stream")
+            .expect("write invalid replacement sample");
         fs::write(replacement.join("Click.wav"), silent_pcm_wav(1_000))
             .expect("write replacement GUI sample");
 
@@ -104582,6 +104865,7 @@ func Award()
         let snapshot = make_snapshot(Vec::new(), Vec::new());
         let key = SoundInstanceKey::new("Click", None);
         audio.play_gui_sound("Click", false, &snapshot);
+        let original_sample_order = audio.active_channels[&key].sample_order;
         let frontend_channel = audio.active_channels[&key]
             .channel
             .expect("FESamples starts the frontend channel");
@@ -104604,12 +104888,30 @@ func Award()
             .channel
             .expect("RXSound restores the shared instance");
 
+        let invalid_group =
+            Group::open(&invalid_replacement).expect("open invalid replacement group");
+        audio.register_definition_sounds("INVALID", &invalid_group);
+        assert!(
+            audio.active_channels.contains_key(&key),
+            "an undecodable replacement leaves the prior sample instance alive"
+        );
+        assert_eq!(
+            audio.active_channels[&key].sample_order,
+            original_sample_order,
+            "a failed replacement does not move the prior sample in catalog order"
+        );
+        assert!(audio.system.channel_is_playing(restored_channel));
+
         let replacement_group = Group::open(&replacement).expect("open replacement group");
         audio.register_definition_sounds("TEST", &replacement_group);
         assert!(!audio.active_channels.contains_key(&key));
         assert!(!audio.system.channel_is_playing(restored_channel));
 
         audio.play_gui_sound("Click", false, &snapshot);
+        assert!(
+            audio.active_channels[&key].sample_order > original_sample_order,
+            "a successful replacement appends the new sample at the catalog tail"
+        );
         let reloaded_channel = audio.active_channels[&key]
             .channel
             .expect("registered sample restarts");
@@ -104644,7 +104946,7 @@ func Award()
             ..AudioOptions::default()
         })
         .expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
         let snapshot = make_snapshot(Vec::new(), Vec::new());
         let key = SoundInstanceKey::new("Click", None);
 
@@ -104786,7 +105088,7 @@ func Award()
             .expect("write object sound");
 
         let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
 
         let source = make_object(1, "SNDS", Vector2::new(350, 100));
         let listener = make_object(2, "LIST", Vector2::new(500, 100));
@@ -104896,7 +105198,7 @@ func Award()
             ..AudioOptions::default()
         };
         let mut audio = AudioContext::try_new(options).expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
 
         let listener = make_object(1, "Listener", Vector2::new(1000, 1000));
         let mut snapshot = make_snapshot(vec![listener.clone()], Vec::new());
@@ -104950,7 +105252,7 @@ func Award()
             .expect("write fire sound");
 
         let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
         let source = make_object(1, "FIRE", Vector2::new(100, 100));
         let snapshot = make_snapshot(vec![source.clone()], Vec::new());
         audio
@@ -104995,7 +105297,7 @@ func Award()
             ..AudioOptions::default()
         };
         let mut audio = AudioContext::try_new(options).expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&first_scenario)));
+        audio.configure_scenario(Some(&first_scenario));
         let source = make_object(1, "BLST", Vector2::new(100, 100));
         let snapshot = make_snapshot(vec![source.clone()], Vec::new());
         assert!(
@@ -105013,7 +105315,7 @@ func Award()
                 .expect("concrete blast starts")
         );
 
-        assert!(audio.resolver.configure_scenario(Some(&second_scenario)));
+        audio.configure_scenario(Some(&second_scenario));
         assert!(
             !audio
                 .try_start_sound(
@@ -105049,7 +105351,7 @@ func Award()
             ..AudioOptions::default()
         };
         let mut audio = AudioContext::try_new(options).expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
         let source = make_object(1, "FIRE", Vector2::new(100, 100));
         let snapshot = make_snapshot(vec![source.clone()], Vec::new());
         let start = |audio: &mut AudioContext| {
@@ -105113,7 +105415,7 @@ func Award()
             ..AudioOptions::default()
         };
         let mut audio = AudioContext::try_new(options).expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
         let first = make_object(1, "FIRE", Vector2::new(100, 100));
         let second = make_object(2, "FIRE", Vector2::new(300, 100));
         let snapshot = make_snapshot(vec![first.clone(), second.clone()], Vec::new());
@@ -105168,7 +105470,7 @@ func Award()
             ..AudioOptions::default()
         };
         let mut audio = AudioContext::try_new(options).expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
         let source = make_object(1, "TONE", Vector2::new(100, 100));
         let snapshot = make_snapshot(vec![source.clone()], Vec::new());
         let (lower_name, higher_name) = if audio.resolver.sample_order("tone1.wav")
@@ -105221,7 +105523,7 @@ func Award()
             .expect("write loop sound");
 
         let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
         let listener = make_object(1, "LIST", Vector2::new(1000, 1000));
         let source = make_object(2, "FIRE", Vector2::new(1350, 1000));
         let initial = make_snapshot(
@@ -105287,7 +105589,7 @@ func Award()
             .expect("write one-shot sound");
 
         let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
         let listener = make_object(1, "LIST", Vector2::new(1000, 1000));
         let source = make_object(2, "IMPT", Vector2::new(1350, 1000));
         let initial = make_snapshot(
@@ -105386,7 +105688,7 @@ func Award()
             ..AudioOptions::default()
         };
         let mut audio = AudioContext::try_new(options).expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
 
         let horse = make_object(1, "HORS", Vector2::new(100, 100));
         let snapshot = make_snapshot(vec![horse.clone()], Vec::new());
@@ -105423,7 +105725,7 @@ func Award()
             ..AudioOptions::default()
         };
         let mut audio = AudioContext::try_new(options).expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
 
         let left = make_object(1, "HORS", Vector2::new(100, 100));
         let right = make_object(2, "HORS", Vector2::new(149, 100));
@@ -105471,7 +105773,7 @@ func Award()
             ..AudioOptions::default()
         };
         let mut audio = AudioContext::try_new(options).expect("audio context");
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+        audio.configure_scenario(Some(&scenario));
 
         let horses: Vec<_> = (0..21)
             .map(|index| {
@@ -140267,8 +140569,7 @@ ScenInfoArea=70,5,25,90
         let expected_games = app.startup_network_dialog.as_ref().unwrap().games().to_vec();
         let audio = app.audio.as_mut().expect("menu audio context");
         audio.options.menu_sound_enabled = true;
-        assert!(audio.resolver.configure_scenario(Some(&scenario)));
-        audio.loaded_sounds.clear();
+        audio.configure_scenario(Some(&scenario));
         audio.missing_sounds.clear();
 
         app.request_startup_network_refresh_at(now + Duration::from_millis(999))
@@ -140285,7 +140586,6 @@ ScenInfoArea=70,5,25,90
         assert_eq!(app.netdlg_last_click, Some((0, now)));
         assert!(app.message_dialogs.is_empty());
         let audio = app.audio.as_ref().unwrap();
-        assert_eq!(audio.loaded_sounds.len(), 1);
         assert!(
             audio
                 .loaded_sounds
@@ -163343,8 +163643,7 @@ ScenInfoArea=70,5,25,90
         .expect("write SyncError fixture");
         let audio = app.audio.as_mut().expect("sandbox audio context");
         audio.options.sound_enabled = true;
-        assert!(audio.resolver.configure_scenario(Some(&sound_scenario)));
-        let loaded_before = audio.loaded_sounds.len();
+        audio.configure_scenario(Some(&sound_scenario));
         assert!(app.snapshot.audio.is_empty());
         app.ui_sound_log.clear();
         let local_player = app.local_owner;
@@ -163435,14 +163734,14 @@ ScenInfoArea=70,5,25,90
             app.engine.snapshot().round_results,
             "the presentation snapshot exposes the verdict immediately"
         );
-        assert_eq!(
+        assert!(
             app.audio
                 .as_ref()
                 .expect("sandbox audio context remains")
                 .loaded_sounds
-                .len(),
-            loaded_before + 1,
-            "SyncError is resolved and played immediately"
+                .keys()
+                .any(|key| key.to_ascii_lowercase().contains("syncerror.wav")),
+            "SyncError is eagerly decoded and played immediately"
         );
         assert_eq!(
             app.ui_sound_log
