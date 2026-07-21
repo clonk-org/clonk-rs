@@ -90783,18 +90783,14 @@ fn build_scenario_music_catalog(
     }
 
     let mut has_local_sources = scenario_has_tracks;
-    if let Some(group) = open_music_child(&scenario)? {
-        has_local_sources = true;
-        catalog.extend_group(group)?;
-    }
+    has_local_sources |=
+        extend_direct_music_child(&mut catalog, &scenario, "scenario Music.c4g");
 
     let mut parent = path.parent();
     while let Some(folder_path) = parent.filter(|parent| has_extension(parent, "c4f")) {
         let folder = Group::open(folder_path)?;
-        if let Some(group) = open_music_child(&folder)? {
-            has_local_sources = true;
-            catalog.extend_group(group)?;
-        }
+        has_local_sources |=
+            extend_direct_music_child(&mut catalog, &folder, "parent Music.c4g");
         parent = folder_path.parent();
     }
 
@@ -90893,6 +90889,55 @@ fn build_scenario_music_catalog(
     }
 
     Ok((catalog, has_local_sources))
+}
+
+fn extend_music_source(catalog: &mut MusicCatalog, group: Group, source: &'static str) {
+    let root = group.root().to_path_buf();
+    if let Err(error) = catalog.extend_group(group) {
+        tracing::warn!(
+            root = %root.display(),
+            %source,
+            %error,
+            "failed to enumerate local music source"
+        );
+    }
+}
+
+fn extend_direct_music_child(
+    catalog: &mut MusicCatalog,
+    group: &Group,
+    source: &'static str,
+) -> bool {
+    let child_path = match music_child_path(group) {
+        Ok(Some(path)) => path,
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::warn!(
+                root = %group.root().display(),
+                %source,
+                %error,
+                "failed to inspect local music source"
+            );
+            return false;
+        }
+    };
+
+    // CheckGroupContents marks the owning group as a music source from the
+    // direct entry alone. PlayScenarioMusic clears the old song list before
+    // LoadDir tries to open that child, so a malformed Music.c4g still counts.
+    match group.open_child(&child_path) {
+        Ok(child) => extend_music_source(catalog, child, source),
+        Err(error) => {
+            tracing::warn!(
+                root = %group.root().display(),
+                child = %child_path.display(),
+                %source,
+                %error,
+                "failed to open local Music.c4g source"
+            );
+        }
+    }
+    true
 }
 
 fn open_music_child(group: &Group) -> Result<Option<Group>, lc_resources::GroupError> {
@@ -124182,6 +124227,103 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         assert!(resolver.resolve("Global").is_none());
         assert!(resolver.active_filenames().is_empty());
+    }
+
+    #[test]
+    fn malformed_scenario_music_child_clears_global_and_keeps_valid_root_tracks() {
+        let dir = tempdir().expect("malformed scenario music fixture");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("global music group");
+        fs::write(global.join("Global.ogg"), b"global").expect("global track");
+
+        // LoadDir handles every path independently. A bad scenario child and
+        // a bad inner .c4f child therefore cannot discard the scenario-root
+        // track or the valid outer .c4f sibling that follows them.
+        let outer = dir.path().join("Outer.c4f");
+        let inner = outer.join("Inner.c4f");
+        let scenario = inner.join("Scenario.c4s");
+        let outer_music = outer.join("Music.c4g");
+        fs::create_dir_all(&scenario).expect("scenario group");
+        fs::create_dir_all(&outer_music).expect("outer music group");
+        fs::write(scenario.join("Scenario Root.ogg"), b"scenario")
+            .expect("scenario-root track");
+        fs::write(scenario.join("Music.c4g"), b"not a group")
+            .expect("malformed scenario child");
+        fs::write(inner.join("Music.c4g"), b"also not a group")
+            .expect("malformed parent child");
+        fs::write(outer_music.join("Outer.ogg"), b"outer").expect("outer sibling track");
+
+        let mut resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("global music root"),
+        )
+        .expect("global resolver");
+        resolver
+            .configure_scenario(Some(&scenario))
+            .expect("malformed local children are isolated");
+
+        assert!(resolver.resolve("Global").is_none());
+        assert_eq!(
+            resolver.active_filenames(),
+            ["Scenario Root.ogg", "Outer.ogg"],
+            "valid sources retain native scenario-to-parent order"
+        );
+        assert_eq!(
+            resolver
+                .resolve("Scenario Root")
+                .expect("scenario-root track retained")
+                .load_audio()
+                .expect("scenario-root bytes"),
+            b"scenario"
+        );
+        assert_eq!(
+            resolver
+                .resolve("Outer")
+                .expect("outer parent track retained")
+                .load_audio()
+                .expect("outer parent bytes"),
+            b"outer"
+        );
+
+        // Presence, not successful opening, is the local-source signal for a
+        // direct scenario child and for a registered .c4f parent child.
+        let bad_scenario = dir.path().join("OnlyBroken.c4s");
+        fs::create_dir_all(&bad_scenario).expect("standalone scenario group");
+        fs::write(bad_scenario.join("Music.c4g"), b"broken")
+            .expect("standalone malformed child");
+        resolver
+            .configure_scenario(Some(&bad_scenario))
+            .expect("standalone malformed scenario child");
+        assert!(resolver.resolve("Global").is_none());
+        assert!(resolver.active_filenames().is_empty());
+
+        let bad_parent = dir.path().join("OnlyBroken.c4f");
+        let child_scenario = bad_parent.join("Child.c4s");
+        fs::create_dir_all(&child_scenario).expect("parent-child scenario group");
+        fs::write(bad_parent.join("Music.c4g"), b"broken parent")
+            .expect("standalone malformed parent child");
+        resolver
+            .configure_scenario(Some(&child_scenario))
+            .expect("standalone malformed parent child");
+        assert!(resolver.resolve("Global").is_none());
+        assert!(resolver.active_filenames().is_empty());
+    }
+
+    #[test]
+    fn local_music_source_enumeration_failure_is_isolated() {
+        let dir = tempdir().expect("music enumeration fixture");
+        let source_path = dir.path().join("Music.c4g");
+        fs::create_dir_all(&source_path).expect("music source");
+        fs::write(source_path.join("Track.ogg"), b"track").expect("music track");
+        let source = Group::open(&source_path).expect("open music source");
+        fs::remove_dir_all(&source_path).expect("invalidate opened directory source");
+        assert!(
+            source.entries().is_err(),
+            "fixture must exercise lazy source-enumeration failure"
+        );
+
+        let mut catalog = MusicCatalog::empty();
+        extend_music_source(&mut catalog, source, "test source");
+        assert!(catalog.filenames().is_empty());
     }
 
     #[test]
