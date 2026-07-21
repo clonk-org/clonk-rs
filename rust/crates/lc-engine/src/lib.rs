@@ -9666,7 +9666,7 @@ impl ScriptGlobalState {
     }
 }
 
-fn denumerate_script_value(value: &Value, object_numbers: &HashSet<u64>) -> Value {
+pub(crate) fn denumerate_script_value(value: &Value, object_numbers: &HashSet<u64>) -> Value {
     match value {
         Value::Object(id) => object_numbers
             .get(id)
@@ -52713,13 +52713,14 @@ impl Engine {
                 .target2
                 .map(object_reference_value)
                 .unwrap_or(Value::Nil),
-            command.legacy_data.map(Value::Int).unwrap_or_else(|| {
-                match &command.data {
-                    CommandData::Integer(value) => Value::Int(*value),
+            match command.legacy_data {
+                Some(value) => compat::command_data_any_value(value),
+                None => match &command.data {
+                    CommandData::Integer(value) => compat::command_data_any_value(*value),
                     CommandData::Text(value) => Value::String(value.clone().into()),
                     CommandData::None => Value::Nil,
-                }
-            }),
+                },
+            },
         ];
         if let Some(index) = self
             .find_object_index(object_id)

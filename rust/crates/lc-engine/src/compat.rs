@@ -4603,15 +4603,15 @@ fn parse_command_request(
 
     let data_value = args.get(data_slot).unwrap_or(&Value::Nil);
     let data = match (id, data_value) {
-        (CommandId::Call, Value::String(text)) => CommandData::Text(text.as_ref().to_owned()),
-        (CommandId::Call, Value::Nil) => CommandData::Text(String::new()),
-        (CommandId::Call, other) => {
-            return Err(RuntimeError::new(format!(
-                "{}: expected string for data when command is Call, got {}",
-                function,
-                other.type_name()
-            )));
+        (CommandId::Call, Value::String(text)) => {
+            let text = text.as_ref();
+            let nul = text.as_bytes().iter().position(|byte| *byte == 0);
+            CommandData::Text(text[..nul.unwrap_or(text.len())].to_owned())
         }
+        // C4Value::getStr() returns null for every failed strict conversion,
+        // and FnStringPar maps that null to an empty function name. Native
+        // still queues the Call; C4Command::Call fails it during execution.
+        (CommandId::Call, _) => CommandData::Text(String::new()),
         (_, Value::Nil) => CommandData::Integer(0),
         (_, Value::C4Id(id)) => CommandData::Integer(cast_c4id_payload(id) as i32),
         (_, other) => CommandData::Integer(value_to_i32(other, function, "data")?),
@@ -26826,8 +26826,7 @@ fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
                     CommandData::Integer(data) => Some(data),
                     CommandData::Text(_) | CommandData::None => None,
                 })
-                .filter(|data| *data != 0)
-                .map(Value::Int)
+                .map(command_data_any_value)
                 .unwrap_or(Value::Nil)),
             _ => Ok(Value::Nil),
         }
@@ -32685,9 +32684,29 @@ fn get_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+pub(crate) fn command_data_any_value(value: i32) -> Value {
+    if value == 0 {
+        return Value::Nil;
+    }
+    // C4Value(Data, C4V_Any) lazily runs GuessType. Packed four-byte IDs
+    // win over the integer fallback; 1..9999 deliberately stay integers
+    // despite LooksLikeID accepting their decimal-ID representation.
+    let raw = value as u32;
+    if raw >= 10_000
+        && raw
+            .to_le_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+    {
+        Value::C4Id(lc_script::c4_id_from_raw(raw as usize))
+    } else {
+        Value::Int(value)
+    }
+}
+
 fn command_data_value(data: &CommandData) -> Value {
     match data {
-        CommandData::Integer(value) => Value::Int(*value),
+        CommandData::Integer(value) => command_data_any_value(*value),
         CommandData::Text(value) => Value::String(value.clone().into()),
         CommandData::None => Value::Nil,
     }
@@ -32703,10 +32722,10 @@ fn command_view_tx_value(command: &CommandView) -> Value {
 }
 
 fn command_view_data_value(command: &CommandView) -> Value {
-    command
-        .legacy_data
-        .map(Value::Int)
-        .unwrap_or_else(|| command_data_value(&command.data))
+    match command.legacy_data {
+        Some(value) => command_data_any_value(value),
+        None => command_data_value(&command.data),
+    }
 }
 
 /// Host-preview twin of C4Command::Fail's ExecFail tail. ExecuteCommand runs
@@ -72105,6 +72124,117 @@ func Probe(state) {
             }
             other => panic!("expected PushFront operation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn call_command_wrappers_queue_non_string_data_as_an_empty_function_name() {
+        // FnStringPar(data.getStr()) maps every non-string Call data value
+        // to "". Set/Add/Append still queue the command, preserving the
+        // untouched C4Value Tx for GetCommand and the normal failure path
+        // (C4Script.cpp:79-82,840-916).
+        let this = object_reference_value(ObjectId::new(1));
+        let tx = Value::Array(vec![Value::Bool(false), this.clone()]);
+
+        let set_args = vec![
+            this.clone(),
+            Value::String("Call".into()),
+            this.clone(),
+            tx.clone(),
+            Value::Int(17),
+            Value::Nil,
+            Value::Int(99),
+        ];
+        let (set_result, set_outcome) = with_object_host_context(|| set_command(&set_args));
+        assert_eq!(set_result.expect("SetCommand succeeds"), Value::Bool(true));
+        let set_request = set_outcome
+            .command_operations
+            .iter()
+            .find_map(|operation| match operation {
+                CommandOperation::PushFront(request) => Some(request),
+                _ => None,
+            })
+            .expect("SetCommand queues Call");
+        assert_eq!(set_request.data, CommandData::Text(String::new()));
+        assert_eq!(set_request.tx_value.as_ref(), Some(&tx));
+
+        let add_args = vec![
+            this.clone(),
+            Value::String("Call".into()),
+            this.clone(),
+            tx.clone(),
+            Value::Int(17),
+            Value::Nil,
+            Value::Int(0),
+            Value::Array(Vec::new()),
+            Value::Int(0),
+            Value::Int(1),
+        ];
+        let (add_result, add_outcome) = with_object_host_context(|| add_command(&add_args));
+        assert_eq!(add_result.expect("AddCommand succeeds"), Value::Bool(true));
+        let CommandOperation::PushFront(add_request) = &add_outcome.command_operations[0] else {
+            panic!("expected AddCommand PushFront");
+        };
+        assert_eq!(add_request.data, CommandData::Text(String::new()));
+        assert_eq!(add_request.tx_value.as_ref(), Some(&tx));
+
+        let append_args = vec![
+            this.clone(),
+            Value::String("Call".into()),
+            this,
+            tx.clone(),
+            Value::Int(17),
+            Value::Nil,
+            Value::Int(0),
+            Value::Bool(true),
+            Value::Int(0),
+            Value::Int(1),
+        ];
+        let (append_result, append_outcome) =
+            with_object_host_context(|| append_command(&append_args));
+        assert_eq!(
+            append_result.expect("AppendCommand succeeds"),
+            Value::Bool(true)
+        );
+        let CommandOperation::PushBack(append_request) = &append_outcome.command_operations[0]
+        else {
+            panic!("expected AppendCommand PushBack");
+        };
+        assert_eq!(append_request.data, CommandData::Text(String::new()));
+        assert_eq!(append_request.tx_value.as_ref(), Some(&tx));
+    }
+
+    #[test]
+    fn call_command_function_text_uses_the_native_nul_terminated_prefix() {
+        let parse = |text: &str| {
+            parse_command_request(
+                CommandId::Call,
+                &[
+                    Value::String("Call".into()),
+                    Value::Nil,
+                    Value::Int(7),
+                    Value::Int(0),
+                    Value::Nil,
+                    Value::Int(0),
+                    Value::String(text.into()),
+                ],
+                CommandArgLayout::Add,
+                "AddCommand",
+            )
+            .expect("Call parses")
+            .data
+        };
+
+        assert_eq!(parse("Work\0ignored"), CommandData::Text("Work".into()));
+        assert_eq!(parse("\0Work"), CommandData::Text(String::new()));
+    }
+
+    #[test]
+    fn command_data_any_value_matches_c4value_guess_type() {
+        let wood = definition_id_to_c4id("WOOD").expect("four-byte definition id");
+        assert_eq!(command_data_any_value(0), Value::Nil);
+        assert_eq!(command_data_any_value(9_999), Value::Int(9_999));
+        assert_eq!(command_data_any_value(wood), Value::C4Id("WOOD".into()));
+        assert_eq!(command_data_any_value(-1), Value::Int(-1));
     }
 
     #[test]

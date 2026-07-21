@@ -9976,9 +9976,61 @@ mod tests {
     }
 
     #[test]
-    fn call_requires_function_name() {
-        let request = CommandRequest::new(CommandId::Call).with_target(Some(ObjectId::new(99)));
-        assert!(CallState::from_request(&request).is_err());
+    fn call_accepts_empty_function_name_and_fails_during_execution() {
+        let actor = snapshot_with_id(1);
+        let target = snapshot_with_id(2);
+        let objects = HashMap::from([(actor.id, actor.clone()), (target.id, target.clone())]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let request = CommandRequest::new(CommandId::Call).with_target(Some(target.id));
+        let mut state = CallState::from_request(&request).expect("textless Call materializes");
+
+        let result = state.step(&ctx);
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result.update.is_none());
+        assert!(result.events.is_empty());
+    }
+
+    #[test]
+    fn call_restore_without_exact_tx_value_uses_the_legacy_integer_projection() {
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::Call)
+                    .with_target(Some(ObjectId::new(2)))
+                    .with_tx(Some(37))
+                    .with_data(CommandData::Text("Work".into())),
+            )
+            .expect("Call queues");
+
+        fn remove_exact_tx_values(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    fields.remove("tx_value");
+                    for value in fields.values_mut() {
+                        remove_exact_tx_values(value);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        remove_exact_tx_values(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut encoded = serde_json::to_value(stack.snapshot()).expect("snapshot serializes");
+        remove_exact_tx_values(&mut encoded);
+        let decoded: CommandStackSnapshot =
+            serde_json::from_value(encoded).expect("legacy snapshot deserializes");
+        let mut restored = CommandStack::new();
+        restored.restore_from_snapshot(&decoded);
+
+        let view = &restored.command_views()[0];
+        assert_eq!(view.tx, Some(37));
+        assert_eq!(view.tx_value, Some(lc_script::Value::Int(37)));
     }
 
     #[test]
@@ -9991,10 +10043,12 @@ mod tests {
         builder.command_direction = CommandDirection::Right;
 
         // C4Command::Call only requires a non-null Target pointer; it does
-        // not require Alive (C4Command.cpp:2355-2365). Real targets include
+        // not require Alive or C4OS_NORMAL (C4Command.cpp:2355-2365,
+        // C4Object.cpp:2224-2227). Real targets include inactive objects and
         // nonliving structures such as Tutorial07's WRKS.
         let mut target = snapshot_with_id(target_id.as_u64());
         target.alive = false;
+        target.status = crate::ObjectStatus::Inactive;
 
         let mut objects = HashMap::new();
         objects.insert(builder.id, builder.clone());
@@ -10034,8 +10088,7 @@ mod tests {
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
         assert!(result.operations.is_empty());
-        let update = result.update.expect("call should stop builder");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert!(result.update.is_none(), "successful Call does not stop ComDir");
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
             CommandEvent::CallObjectFunction {
@@ -14129,7 +14182,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_pushed_command_materializes_before_parent_failure_handling() {
+    fn targetless_call_materializes_before_parent_failure_handling() {
         let actor = snapshot_with_id(2);
         let objects = HashMap::from([(actor.id, actor.clone())]);
         let players = HashMap::new();
@@ -14140,22 +14193,22 @@ mod tests {
         stack
             .push_back(CommandRequest::new(CommandId::Wait).with_mode(CommandMode::Base))
             .expect("parent queues");
-        let malformed = CommandRequest::new(CommandId::Call)
+        let call = CommandRequest::new(CommandId::Call)
             .with_data(CommandData::Text("Work".into()))
             .with_mode(CommandMode::SilentSub);
         let mut parent_result = CommandStepResult::running(None)
-            .with_operations(vec![CommandOperation::PushFront(malformed.clone())]);
+            .with_operations(vec![CommandOperation::PushFront(call.clone())]);
         stack.apply_result_operations(&mut parent_result);
 
         let snapshot = stack.snapshot();
         assert_eq!(snapshot.command_names(), vec!["Call", "Wait"]);
         assert!(matches!(
             snapshot.commands[0].state,
-            CommandState::Malformed(CommandId::Call)
+            CommandState::Call(_)
         ));
-        assert_eq!(snapshot.command_views()[0].data, malformed.data);
+        assert_eq!(snapshot.command_views()[0].data, call.data);
 
-        // The materialized failure state and its native command identity
+        // The materialized Call and its native command identity
         // survive save/restore, so a parent latch can never outlive a child
         // merely because typed request conversion rejected its fields.
         let encoded = serde_json::to_value(&snapshot).expect("snapshot serializes");
@@ -16518,7 +16571,9 @@ impl CommandView {
             data: request
                 .map(|request| request.data.clone())
                 .unwrap_or(CommandData::None),
-            legacy_data: None,
+            legacy_data: request
+                .filter(|request| request.id == CommandId::Call)
+                .map(|_| 0),
             finished,
         };
         state.apply_live_overrides(&mut view);
@@ -17280,6 +17335,9 @@ impl CommandStack {
             if let Some(request) = &mut entry.request {
                 denumerate_object_reference(&mut request.target, object_numbers);
                 denumerate_object_reference(&mut request.target2, object_numbers);
+                if let Some(value) = &mut request.tx_value {
+                    *value = crate::denumerate_script_value(value, object_numbers);
+                }
             }
             entry.state.denumerate_object_references(object_numbers);
         }
@@ -22872,13 +22930,14 @@ impl AttackState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct CallState {
-    target: ObjectId,
+    target: Option<ObjectId>,
     function: String,
     tx: Option<i32>,
     /// Exact C4Value payload. `tx`/`tx_definition` are compatibility
-    /// projections for older snapshots and non-Call command consumers.
-    #[serde(default = "default_call_tx_value")]
-    tx_value: lc_script::Value,
+    /// projections for older snapshots and non-Call command consumers. An
+    /// absent field means an older snapshot and is reconstructed from them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tx_value: Option<lc_script::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tx_definition: Option<DefinitionId>,
     ty: Option<i32>,
@@ -22890,32 +22949,17 @@ struct CallState {
     executed: bool,
 }
 
-fn default_call_tx_value() -> lc_script::Value {
-    lc_script::Value::Nil
-}
-
 impl CallState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
-        let target = request.target.ok_or(CommandError::Unsupported)?;
         let function = match &request.data {
-            CommandData::Text(text) if !text.is_empty() => text.clone(),
-            _ => return Err(CommandError::Unsupported),
+            CommandData::Text(text) => text.clone(),
+            CommandData::Integer(_) | CommandData::None => String::new(),
         };
         Ok(Self {
-            target,
+            target: request.target,
             function,
             tx: request.tx,
-            tx_value: request
-                .tx_value
-                .clone()
-                .or_else(|| {
-                    request
-                        .tx_definition
-                        .as_ref()
-                        .map(|value| lc_script::Value::C4Id(value.clone()))
-                })
-                .or_else(|| request.tx.map(lc_script::Value::Int))
-                .unwrap_or(lc_script::Value::Nil),
+            tx_value: request.tx_value.clone(),
             tx_definition: request.tx_definition.clone(),
             ty: request.ty,
             target2: request.target2,
@@ -22924,41 +22968,47 @@ impl CallState {
         })
     }
 
+    fn effective_tx_value(&self) -> lc_script::Value {
+        self.tx_value
+            .clone()
+            .or_else(|| {
+                self.tx_definition
+                    .as_ref()
+                    .map(|value| lc_script::Value::C4Id(value.clone()))
+            })
+            .or_else(|| self.tx.map(lc_script::Value::Int))
+            .unwrap_or(lc_script::Value::Nil)
+    }
+
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         if self.executed {
             return CommandStepResult::completed(None);
         }
 
-        let Some(target_snapshot) = ctx.resolve(self.target) else {
-            self.executed = true;
-            return CommandStepResult::failed(None);
-        };
-
-        if !target_snapshot.is_status_active() {
-            self.executed = true;
+        self.executed = true;
+        if self.function.is_empty() {
             return CommandStepResult::failed(None);
         }
-
-        self.executed = true;
-
-        let mut update = None;
-        if ctx.object.command_direction != CommandDirection::Stop {
-            update = Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop));
+        let Some(target) = self.target else {
+            return CommandStepResult::failed(None);
+        };
+        if ctx.resolve(target).is_none() {
+            return CommandStepResult::failed(None);
         }
 
         let event = CommandEvent::CallObjectFunction {
-            object_id: self.target,
+            object_id: target,
             function: self.function.clone(),
             caller: ctx.object.id,
             tx: self.tx,
-            tx_value: Some(self.tx_value.clone()),
+            tx_value: Some(self.effective_tx_value()),
             tx_definition: self.tx_definition.clone(),
             ty: self.ty,
             target2: self.target2,
             on_result: None,
         };
 
-        CommandStepResult::completed(update).with_events(vec![event])
+        CommandStepResult::completed(None).with_events(vec![event])
     }
 }
 
@@ -24136,9 +24186,11 @@ impl CommandState {
                 view.tx = (state.remaining != 0).then_some(state.remaining);
             }
             CommandState::Call(state) => {
+                view.target = state.target;
                 view.tx = state.tx;
-                view.tx_value = Some(state.tx_value.clone());
+                view.tx_value = Some(state.effective_tx_value());
                 view.tx_definition = state.tx_definition.clone();
+                view.target2 = state.target2;
                 view.legacy_data = Some(state.legacy_data);
             }
             _ => {}
@@ -24189,7 +24241,11 @@ impl CommandState {
                 denumerate_object_reference(&mut state.target, object_numbers);
             }
             CommandState::Call(state) => {
+                denumerate_object_reference(&mut state.target, object_numbers);
                 denumerate_object_reference(&mut state.target2, object_numbers);
+                if let Some(value) = &mut state.tx_value {
+                    *value = crate::denumerate_script_value(value, object_numbers);
+                }
             }
             CommandState::Acquire(state) => {
                 denumerate_object_reference(&mut state.target, object_numbers);
@@ -24242,8 +24298,11 @@ impl CommandState {
             }
             CommandState::Throw(state) => clear(&mut state.target),
             CommandState::Call(state) => {
-                clear(&mut state.target2)
-                    | clear_value_object_reference(&mut state.tx_value, removed)
+                let tx_changed = state
+                    .tx_value
+                    .as_mut()
+                    .is_some_and(|value| clear_value_object_reference(value, removed));
+                clear(&mut state.target) | clear(&mut state.target2) | tx_changed
             }
             CommandState::Acquire(state) => {
                 clear(&mut state.target) | clear(&mut state.ignore_container)

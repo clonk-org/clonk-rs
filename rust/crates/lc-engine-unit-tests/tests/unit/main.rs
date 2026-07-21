@@ -28049,6 +28049,284 @@ protected func WorkFailed(caller, tx, ty, other)
     }
 
     #[test]
+    fn call_command_preserves_arbitrary_tx_value_through_get_execute_failure_and_restore() {
+        let actor_script = r#"#strict 3
+local finished_count, finished_tx, finished_ty, finished_target2, finished_data;
+
+public func Queue(target, tx, target2)
+{
+  return AddCommand(this(), "Call", target, tx, 17, target2, 0, "Work", 0, 1);
+}
+
+public func QueueData(target, tx, target2, data)
+{
+  return AddCommand(this(), "Call", target, tx, 17, target2, 0, data, 0, 1);
+}
+
+public func ReadTx() { return GetCommand(this(), 2, 0); }
+
+protected func ControlCommandFinished(command, target, tx, ty, target2, data)
+{
+  finished_count++;
+  finished_tx = tx;
+  finished_ty = ty;
+  finished_target2 = target2;
+  finished_data = data;
+}
+"#;
+        let target_script = r#"#strict 3
+local success_count, success_tx, failed_count, failed_tx, last_ty, last_target2;
+
+protected func Work(caller, tx, ty, target2)
+{
+  success_count++;
+  success_tx = tx;
+  last_ty = ty;
+  last_target2 = target2;
+  return true;
+}
+
+protected func WorkFailed(caller, tx, ty, target2)
+{
+  failed_count++;
+  failed_tx = tx;
+  last_ty = ty;
+  last_target2 = target2;
+  return true;
+}
+"#;
+        let register = |engine: &mut Engine| {
+            let mut actor =
+                Definition::from_script("CTXA", "Call actor", actor_script).expect("actor compiles");
+            actor.set_crew_member(true);
+            engine
+                .register_definition(actor)
+                .expect("actor definition registers");
+            engine
+                .register_definition(
+                    Definition::from_script("CTXT", "Call target", target_script)
+                        .expect("target compiles"),
+                )
+                .expect("target definition registers");
+            engine
+                .register_definition(simple_definition("CTXM"))
+                .expect("marker definition registers");
+            engine
+                .register_definition(simple_definition("CTXD"))
+                .expect("doomed definition registers");
+        };
+
+        let mut engine = Engine::with_seed(312);
+        register(&mut engine);
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("CTXA")
+                    .with_alive(true)
+                    .with_crew_member(true)
+                    .with_command_direction(CommandDirection::Right),
+            )
+            .expect("actor spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("CTXT").with_status(ObjectStatus::Inactive))
+            .expect("inactive target spawns");
+        let marker = engine
+            .spawn_object(SpawnConfig::new("CTXM"))
+            .expect("marker spawns");
+        let doomed = engine
+            .spawn_object(SpawnConfig::new("CTXD"))
+            .expect("doomed object spawns");
+
+        let queue = |engine: &mut Engine, tx: Value| {
+            let actor_index = engine.find_object_index(actor).expect("actor exists");
+            assert_eq!(
+                engine
+                    .call_object_function(
+                        actor_index,
+                        "Queue",
+                        vec![
+                            object_reference_value(target),
+                            tx,
+                            object_reference_value(marker),
+                        ],
+                    )
+                    .expect("Call queues"),
+                Value::Bool(true)
+            );
+        };
+        let read_tx = |engine: &mut Engine| {
+            let actor_index = engine.find_object_index(actor).expect("actor exists");
+            engine
+                .call_object_function(actor_index, "ReadTx", Vec::new())
+                .expect("GetCommand reads Tx")
+        };
+        let round_trip = |engine: &Engine| {
+            let json = engine
+                .capture_state()
+                .to_json_string()
+                .expect("engine state serializes");
+            let state = EngineState::from_json_str(&json).expect("engine state deserializes");
+            let mut restored = Engine::with_seed(0);
+            register(&mut restored);
+            restored.restore_state(&state).expect("engine state restores");
+            restored
+        };
+
+        let mut map = lc_script::ValueMap::new();
+        map.insert_key(
+            Value::Object(marker.as_u64()),
+            Value::Object(target.as_u64()),
+        );
+        map.insert(
+            "nested".into(),
+            Value::Array(vec![Value::Object(marker.as_u64()), Value::Bool(false)]),
+        );
+        let payloads = vec![
+            Value::Nil,
+            Value::Int(0),
+            Value::Bool(false),
+            Value::RawBool(7),
+            Value::C4Id("WOOD".into()),
+            Value::String("Call Tx".into()),
+            Value::Object(marker.as_u64()),
+            Value::Array(vec![
+                Value::Object(marker.as_u64()),
+                Value::Nil,
+                Value::Int(0),
+                Value::Bool(false),
+            ]),
+            Value::Proplist(map),
+        ];
+
+        for (index, payload) in payloads.into_iter().enumerate() {
+            queue(&mut engine, payload.clone());
+            assert_eq!(read_tx(&mut engine), payload, "live GetCommand tag {index}");
+            engine = round_trip(&engine);
+            assert_eq!(
+                read_tx(&mut engine),
+                payload,
+                "restored GetCommand tag {index}"
+            );
+
+            engine
+                .tick_without_snapshot()
+                .expect("successful restored Call executes");
+            let target_state = engine.object_snapshot(target).expect("target remains");
+            assert_eq!(
+                target_state.local_vars.get("success_count"),
+                Some(&Value::Int(index as i32 + 1))
+            );
+            assert_eq!(target_state.local_vars.get("success_tx"), Some(&payload));
+            assert_eq!(target_state.local_vars.get("last_ty"), Some(&Value::Int(17)));
+            assert_eq!(
+                target_state.local_vars.get("last_target2"),
+                Some(&Value::Object(marker.as_u64()))
+            );
+            let actor_state = engine.object_snapshot(actor).expect("actor remains");
+            assert_eq!(
+                actor_state.local_vars.get("finished_count"),
+                Some(&Value::Int(index as i32 * 2 + 1))
+            );
+            assert_eq!(actor_state.local_vars.get("finished_tx"), Some(&payload));
+            assert_eq!(actor_state.local_vars.get("finished_data"), Some(&Value::Nil));
+            assert_eq!(
+                actor_state.command_direction,
+                CommandDirection::Right,
+                "successful Call does not stop ComDir"
+            );
+
+            queue(&mut engine, payload.clone());
+            engine = round_trip(&engine);
+            assert_eq!(
+                read_tx(&mut engine),
+                payload,
+                "failure-side restored GetCommand tag {index}"
+            );
+            let actor_index = engine.find_object_index(actor).expect("actor exists");
+            assert!(engine.objects[actor_index]
+                .commands
+                .fail_front_if(CommandId::Call));
+            engine.refresh_object_ocf(actor_index);
+            engine
+                .tick_without_snapshot()
+                .expect("failed restored Call executes");
+
+            let target_state = engine.object_snapshot(target).expect("target remains");
+            assert_eq!(
+                target_state.local_vars.get("failed_count"),
+                Some(&Value::Int(index as i32 + 1))
+            );
+            assert_eq!(target_state.local_vars.get("failed_tx"), Some(&payload));
+            let actor_state = engine.object_snapshot(actor).expect("actor remains");
+            assert_eq!(
+                actor_state.local_vars.get("finished_count"),
+                Some(&Value::Int(index as i32 * 2 + 2))
+            );
+            assert_eq!(actor_state.local_vars.get("finished_tx"), Some(&payload));
+            assert_eq!(actor_state.local_vars.get("finished_data"), Some(&Value::Nil));
+            assert_eq!(actor_state.command_direction, CommandDirection::Right);
+        }
+
+        let textless_tx = Value::Array(vec![Value::String("textless".into()), Value::Int(0)]);
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    actor_index,
+                    "QueueData",
+                    vec![
+                        object_reference_value(target),
+                        textless_tx.clone(),
+                        object_reference_value(marker),
+                        Value::Int(99),
+                    ],
+                )
+                .expect("non-string Call data queues"),
+            Value::Bool(true)
+        );
+        assert_eq!(read_tx(&mut engine), textless_tx);
+        engine = round_trip(&engine);
+        assert_eq!(read_tx(&mut engine), textless_tx);
+        engine
+            .tick_without_snapshot()
+            .expect("textless Call follows the normal failure path");
+        let target_state = engine.object_snapshot(target).expect("target remains");
+        assert_eq!(target_state.local_vars.get("success_count"), Some(&Value::Int(9)));
+        assert_eq!(target_state.local_vars.get("failed_count"), Some(&Value::Int(9)));
+        let actor_state = engine.object_snapshot(actor).expect("actor remains");
+        assert_eq!(
+            actor_state.local_vars.get("finished_count"),
+            Some(&Value::Int(19))
+        );
+        assert_eq!(actor_state.local_vars.get("finished_tx"), Some(&textless_tx));
+        assert_eq!(actor_state.local_vars.get("finished_data"), Some(&Value::Nil));
+        assert_eq!(
+            actor_state.command_direction,
+            CommandDirection::Stop,
+            "an unhandled empty-name failure runs the common failure tail"
+        );
+
+        let missing_payload = Value::Array(vec![
+            Value::Object(doomed.as_u64()),
+            Value::Object(marker.as_u64()),
+        ]);
+        queue(&mut engine, missing_payload);
+        let mut state = engine.capture_state();
+        state
+            .objects
+            .retain(|object| object.snapshot.id != doomed);
+        let json = state.to_json_string().expect("trimmed state serializes");
+        let state = EngineState::from_json_str(&json).expect("trimmed state deserializes");
+        let mut restored = Engine::with_seed(0);
+        register(&mut restored);
+        restored.restore_state(&state).expect("trimmed state restores");
+        assert_eq!(
+            read_tx(&mut restored),
+            Value::Array(vec![Value::Nil, Value::Object(marker.as_u64())]),
+            "missing saved object references denumerate recursively without changing survivors"
+        );
+    }
+
+    #[test]
     fn build_without_can_construct_reports_cantbuild_message() {
         let script = r#"#strict 3
 local needs_material_called;
