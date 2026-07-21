@@ -695,14 +695,7 @@ impl PackedGroup {
             .get(&case_fold_group_path(relative))
             .copied()
             .ok_or_else(|| GroupError::EntryNotFound(relative.to_path_buf()))?;
-        let entry = &self.entries[entry_index];
-        if entry.is_directory {
-            return Err(GroupError::InvalidGroup(format!(
-                "entry '{}' is a child group",
-                relative.display()
-            )));
-        }
-        self.read_entry_bytes(entry)
+        self.read_entry_bytes(&self.entries[entry_index])
     }
 
     fn read_entry_bytes(&self, entry: &PackedEntry) -> Result<Vec<u8>, GroupError> {
@@ -2004,6 +1997,44 @@ mod tests {
             error,
             GroupError::InvalidGroup(message) if message.contains("not a child group")
         ));
+    }
+
+    #[test]
+    fn child_marked_file_loads_physical_payload_like_cpp() {
+        // C4Group::LoadEntry and LoadEntryString read an entry's declared
+        // bytes without consulting ChildGroup. OpenAsChild remains the API
+        // that validates the flag and interprets those bytes as a group
+        // (src/C4Group.cpp:1917-1937,2214-2270).
+        let payload = b"child-marked\0physical payload";
+        let outer = packed_group_image_with_entry("payload.bin", true, payload);
+        let group =
+            Group::from_memory(PathBuf::from("outer.c4group"), outer).expect("valid outer group");
+        let entry = group
+            .entries()
+            .expect("enumerate outer group")
+            .into_iter()
+            .next()
+            .expect("child-marked entry");
+
+        assert!(entry.is_directory);
+        assert_eq!(group.read_file("PAYLOAD.BIN").unwrap(), payload);
+        assert_eq!(group.load_entry_string("payload.bin").unwrap(), payload);
+        assert_eq!(group.read_entry_bytes("payload.bin").unwrap(), payload);
+        assert_eq!(group.read_entry_bytes_exact(&entry).unwrap(), payload);
+
+        for error in [
+            group
+                .open_child("payload.bin")
+                .expect_err("malformed child payload must still fail path-based group parsing"),
+            group
+                .open_child_entry_exact(&entry)
+                .expect_err("malformed child payload must still fail exact group parsing"),
+        ] {
+            assert!(matches!(
+                error,
+                GroupError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof
+            ));
+        }
     }
 
     #[test]
