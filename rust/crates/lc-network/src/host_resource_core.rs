@@ -142,8 +142,6 @@ pub enum HostResourceCoreError {
     NonUtf8EntryName(PathBuf),
     #[error("packed child groups cannot yet be imported byte-for-byte: {0}")]
     PackedChildGroupUnsupported(PathBuf),
-    #[error("directory entry has the C++-significant zero timestamp: {0}")]
-    ZeroTimestampUnsupported(PathBuf),
     #[error("no free local resource standalone filename from 1 through 999")]
     NoStandaloneFilename,
 }
@@ -213,12 +211,7 @@ pub fn build_host_resource_core(
         {
             return Err(HostResourceCoreError::TemporaryDirectoryUnsupported);
         }
-        let filename = source_path
-            .file_name()
-            .map(|filename| filename.as_encoded_bytes().to_vec())
-            .ok_or_else(|| HostResourceCoreError::NonUtf8EntryName(source_path.clone()))?;
-        let mutable = mutable_directory(&source_path, filename, spec.group_maker.as_bytes())?;
-        let packed = mutable.pack()?;
+        let packed = pack_directory_standalone(&source_path, spec.group_maker.as_bytes())?;
         let path = if spec.source_ownership == ResourceFileOwnership::Temporary {
             // A temporary directory is destructively packed in place before
             // OptimizeStandalone, just like C4Group_PackDirectory.
@@ -501,6 +494,19 @@ fn directory_size_exceeds(path: &Path, limit: u64) -> Result<bool, io::Error> {
     Ok(false)
 }
 
+pub(crate) fn pack_directory_standalone(
+    path: &Path,
+    group_maker: &[u8],
+) -> Result<Vec<u8>, HostResourceCoreError> {
+    let filename = path
+        .file_name()
+        .map(|filename| filename.as_encoded_bytes().to_vec())
+        .ok_or_else(|| HostResourceCoreError::NonUtf8EntryName(path.to_path_buf()))?;
+    mutable_directory(path, filename, group_maker)?
+        .pack()
+        .map_err(Into::into)
+}
+
 fn mutable_directory(
     path: &Path,
     filename: Vec<u8>,
@@ -536,10 +542,7 @@ fn mutable_directory(
                 )?;
                 continue;
             }
-            if timestamp == 0 {
-                return Err(HostResourceCoreError::ZeroTimestampUnsupported(entry_path));
-            }
-            group.add_file_bytes_with_metadata(
+            group.add_disk_file_bytes_with_metadata(
                 name,
                 fs::read(entry_path)?,
                 timestamp,

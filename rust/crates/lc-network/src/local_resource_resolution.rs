@@ -3,12 +3,9 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 use lc_engine::NetworkResourceCore;
-use lc_resources::{
-    compress_c4group_image, Group, GroupError, MutableGroup, MutableGroupError,
-};
+use lc_resources::{compress_c4group_image, Group, GroupError, MutableGroupError};
 use thiserror::Error;
 
 use crate::{
@@ -155,12 +152,13 @@ where
         }
 
         let standalone_result = if metadata.as_ref().is_some_and(fs::Metadata::is_dir) {
-            pack_directory(path, group_maker)
+            crate::host_resource_core::pack_directory_standalone(path, group_maker)
+                .ok()
                 .and_then(|packed| {
                     write_standalone(standalone_directory, path, &packed)
                         .map(|path| (path, ResourceFileOwnership::Temporary))
+                        .ok()
                 })
-                .ok()
         } else if metadata.as_ref().is_some_and(fs::Metadata::is_file) {
             Some((path.to_path_buf(), ResourceFileOwnership::Persistent))
         } else if let Some(group) = opened_group.as_ref() {
@@ -261,73 +259,6 @@ fn open_group_candidate(path: &Path) -> Option<Group> {
         let relative = path.strip_prefix(mother).ok()?;
         Group::open(mother).ok()?.open_child(relative).ok()
     })
-}
-
-fn pack_directory(
-    path: &Path,
-    group_maker: &[u8],
-) -> Result<Vec<u8>, LocalResourceResolutionError> {
-    let filename = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let group = mutable_directory(path, &filename, group_maker)?;
-    group.pack().map_err(Into::into)
-}
-
-fn mutable_directory(
-    path: &Path,
-    filename: &str,
-    group_maker: &[u8],
-) -> Result<MutableGroup, LocalResourceResolutionError> {
-    let mut group = MutableGroup::new(filename);
-    if !group_maker.is_empty() {
-        group.set_maker_bytes(group_maker);
-    }
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if ignored_group_entry(&name) {
-            continue;
-        }
-        let entry_path = entry.path();
-        let metadata = fs::metadata(&entry_path)?;
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs() as u32)
-            .unwrap_or(0);
-        if metadata.is_dir() {
-            let child = mutable_directory(&entry_path, &name, group_maker)?;
-            group.add_child_with_metadata(name, child, modified, executable(&metadata))?;
-        } else if metadata.is_file() {
-            group.add_file_with_metadata(
-                name,
-                fs::read(entry_path)?,
-                modified,
-                executable(&metadata),
-            )?;
-        }
-    }
-    Ok(group)
-}
-
-fn ignored_group_entry(name: &str) -> bool {
-    (name.starts_with('.') && name != ".legacyclonk")
-        || name.eq_ignore_ascii_case("cvs")
-        || name.eq_ignore_ascii_case("Thumbs.db")
-}
-
-#[cfg(unix)]
-fn executable(metadata: &fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn executable(_metadata: &fs::Metadata) -> bool {
-    false
 }
 
 fn write_standalone(

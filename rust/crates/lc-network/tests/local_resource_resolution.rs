@@ -338,7 +338,9 @@ fn cpp_set_by_core_packs_a_player_directory_with_the_local_group_maker() {
         let before = unix_time_now();
         let publication = build_host_resource_core(
             &player,
-            directory.path().join(format!("HostDirectoryNetwork{attempt}")),
+            directory
+                .path()
+                .join(format!("HostDirectoryNetwork{attempt}")),
             HostResourceCoreSpec::new(
                 HostResourceType::Player,
                 8,
@@ -350,7 +352,9 @@ fn cpp_set_by_core_packs_a_player_directory_with_the_local_group_maker() {
         let resolution = resolve_local_resource_with_group_maker(
             &publication.core,
             [&player],
-            directory.path().join(format!("LocalDirectoryNetwork{attempt}")),
+            directory
+                .path()
+                .join(format!("LocalDirectoryNetwork{attempt}")),
             b"Shared Player",
         )
         .unwrap();
@@ -377,6 +381,165 @@ fn cpp_set_by_core_packs_a_player_directory_with_the_local_group_maker() {
             .maker(),
         Some("Shared Player")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn network_directory_standalone_matches_cpp_group_packer() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    // Both GetStandalone paths call C4Group_PackDirectoryTo. Preserve the
+    // native entry names and AddEntryOnDisk metadata, and classify only a
+    // wrapped top-level C4Group as a child (src/C4Group.cpp:260-320,
+    // 1462-1514; src/C4Network2Res.cpp:588-631).
+    let directory = TestDirectory::new();
+    let candidate = directory.path().join("Directory.c4d");
+    fs::create_dir(&candidate).unwrap();
+
+    let epoch = candidate.join("Epoch.dat");
+    fs::write(&epoch, b"epoch").unwrap();
+    let epoch_file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&epoch)
+        .unwrap();
+    epoch_file
+        .set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH))
+        .unwrap();
+    assert_eq!(fs::metadata(&epoch).unwrap().mtime(), 0);
+
+    // Darwin rejects invalid UTF-8 pathnames with EILSEQ. Other Unix hosts,
+    // including Linux, exercise the exact non-UTF-8 byte path.
+    #[cfg(target_os = "macos")]
+    let native_name = b"Legacy.bin".to_vec();
+    #[cfg(not(target_os = "macos"))]
+    let native_name = b"Legacy\xff.bin".to_vec();
+    fs::write(
+        candidate.join(OsString::from_vec(native_name.clone())),
+        b"native",
+    )
+    .unwrap();
+
+    let executable = candidate.join("Run.bin");
+    fs::write(&executable, b"run").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+
+    fs::write(candidate.join("Script.c"), b"func Initialize() {}\n").unwrap();
+    fs::write(candidate.join("DefCore.txt"), b"[DefCore]\n").unwrap();
+
+    let nested = candidate.join("Nested.c4d");
+    fs::create_dir(&nested).unwrap();
+    fs::write(nested.join("Leaf.txt"), b"nested").unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o755)).unwrap();
+    let nested_directory = std::fs::File::open(&nested).unwrap();
+    nested_directory
+        .set_times(
+            std::fs::FileTimes::new().set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1)),
+        )
+        .unwrap();
+    assert_eq!(fs::metadata(&nested).unwrap().mtime(), 1);
+
+    let mut wrapped = MutableGroup::new("Wrapped.c4g");
+    wrapped
+        .add_file_with_metadata("Child.txt", b"wrapped".to_vec(), 7, false)
+        .unwrap();
+    fs::write(candidate.join("Wrapped.c4g"), wrapped.pack().unwrap()).unwrap();
+
+    let mut raw = MutableGroup::new("Raw.c4g");
+    raw.add_file_with_metadata("Child.txt", b"raw".to_vec(), 8, false)
+        .unwrap();
+    fs::write(candidate.join("Raw.c4g"), raw.pack_raw().unwrap()).unwrap();
+
+    let mut matched = None;
+    for attempt in 0..8 {
+        let before = unix_time_now();
+        let publication = build_host_resource_core(
+            &candidate,
+            directory.path().join(format!("HostNetwork{attempt}")),
+            HostResourceCoreSpec::new(
+                HostResourceType::Definitions,
+                84,
+                LegacyCString::from_bytes(b"Directory.c4d".to_vec()).unwrap(),
+                "Shared Maker",
+            ),
+        )
+        .unwrap();
+        let resolution = resolve_local_resource_with_group_maker(
+            &publication.core,
+            [&candidate],
+            directory.path().join(format!("LocalNetwork{attempt}")),
+            b"Shared Maker",
+        )
+        .unwrap();
+        let after = unix_time_now();
+        if before != after {
+            continue;
+        }
+        let LocalResourceResolution::Local(local) = resolution else {
+            panic!("contents-identical directory should remain local");
+        };
+        assert!(local.binary_compatible());
+        let host_bytes = fs::read(publication.standalone_path.as_ref().unwrap()).unwrap();
+        let local_bytes = fs::read(local.standalone_path().unwrap()).unwrap();
+        assert_eq!(local_bytes, host_bytes);
+        matched = Some((
+            local.standalone_path().unwrap().to_path_buf(),
+            before as u32,
+        ));
+        break;
+    }
+
+    let (standalone, packed_at) =
+        matched.expect("could not pack both directories in one timestamp second");
+    let packed = Group::open(standalone).unwrap();
+    assert_eq!(packed.maker(), Some("Shared Maker"));
+    let entries = packed.entries().unwrap();
+    let epoch = entries
+        .iter()
+        .find(|entry| entry.name_bytes == b"Epoch.dat")
+        .unwrap();
+    assert_eq!(epoch.time, 0);
+    assert!(entries.iter().any(|entry| entry.name_bytes == native_name));
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.name_bytes == b"Wrapped.c4g")
+            .unwrap()
+            .is_directory
+    );
+    assert!(
+        !entries
+            .iter()
+            .find(|entry| entry.name_bytes == b"Raw.c4g")
+            .unwrap()
+            .is_directory
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .find(|entry| entry.name_bytes == b"Run.bin")
+            .unwrap()
+            .executable,
+        cfg!(target_os = "linux")
+    );
+    let nested = entries
+        .iter()
+        .find(|entry| entry.name_bytes == b"Nested.c4d")
+        .unwrap();
+    assert!(nested.is_directory);
+    assert_eq!(nested.time, packed_at);
+    assert!(!nested.executable);
+    let def_core = entries
+        .iter()
+        .position(|entry| entry.name_bytes == b"DefCore.txt")
+        .unwrap();
+    let script = entries
+        .iter()
+        .position(|entry| entry.name_bytes == b"Script.c")
+        .unwrap();
+    assert!(def_core < script);
+    assert!(candidate.is_dir());
 }
 
 #[test]

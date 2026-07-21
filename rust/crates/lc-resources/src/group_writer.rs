@@ -208,6 +208,24 @@ impl MutableGroup {
         )
     }
 
+    /// Adds bytes read from an on-disk file while retaining the literal
+    /// metadata supplied by C++'s `AddEntryOnDisk` path, including a zero
+    /// timestamp that the regular mutable-group metadata helpers normalize.
+    pub fn add_disk_file_bytes_with_metadata(
+        &mut self,
+        name: impl Into<Vec<u8>>,
+        data: Vec<u8>,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
+        self.add_entry_bytes(
+            name.into(),
+            MutableGroupEntryData::File(data),
+            time,
+            executable,
+        )
+    }
+
     /// Imports an existing file whose supplied CRC is already a trusted
     /// `C4GECS_New` entry checksum. The otherwise-special zero timestamp is
     /// retained verbatim.
