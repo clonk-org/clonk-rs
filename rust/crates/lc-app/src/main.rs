@@ -9100,6 +9100,8 @@ struct AudioContext {
     music_load_pending: Arc<AtomicU64>,
     #[cfg(test)]
     controlled_music_loads: Option<ControlledMusicLoads>,
+    #[cfg(test)]
+    music_fade_requests: Vec<u32>,
     /// Successfully decoded samples in native C4SoundSystem list order.
     playable_sounds: Vec<PlayableSound>,
     /// Mirror used by existing diagnostics to report the prepared sample
@@ -9155,6 +9157,8 @@ impl AudioContext {
             music_load_pending: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             controlled_music_loads: None,
+            #[cfg(test)]
+            music_fade_requests: Vec::new(),
             playable_sounds: Vec::new(),
             loaded_sounds: HashMap::new(),
             next_sound_sample_order: 0,
@@ -9284,6 +9288,8 @@ impl AudioContext {
     }
 
     fn fade_out_music(&mut self, duration_ms: u32) -> bool {
+        #[cfg(test)]
+        self.music_fade_requests.push(duration_ms);
         // C4MusicSystem::Stop(fadeoutMS) retains its current song state and is
         // a strict no-op when SDL_mixer has no active music. A Rust-only
         // pending decode represents the song that C++ would already have
@@ -9365,6 +9371,17 @@ impl AudioContext {
         self.next_sound_instance_order = 1;
         self.resolver.reset_dynamic_catalog();
         self.refresh_sound_catalog();
+    }
+
+    fn reset_music_system_generation(&mut self) {
+        // C4Application::PreInit replaces the C4MusicSystem object while the
+        // process audio backend survives. Invalidate the shared generation
+        // rather than replacing it so an older Rust decode worker can never
+        // become current again after this boundary.
+        self.stop_music();
+        lock_unpoisoned(&self.music_control).most_recently_played = None;
+        self.set_scenario_music_level(None);
+        self.music_resolver.set_playlist(None);
     }
 
     fn clear_object_sound_instances(&mut self) {
@@ -14106,8 +14123,9 @@ struct GameApp {
     /// `C4Game::IsMusicEnabled`; runtime playback ownership remains distinct
     /// from persisted RXMusic while a game is running.
     runtime_music_enabled: bool,
-    /// A game-transition fade is still owning the mixer. Startup music is
-    /// requested once after that fade completes instead of hard-replacing it.
+    /// A frontend-to-scenario fade still owns the mixer. Scenario-load failure
+    /// may return to Menu and wait for it; game teardown instead clears this at
+    /// the following PreInit reconstruction before entering startup.
     resume_frontend_music_after_fade: bool,
     /// `C4Startup::DoStartup` calls PlayFrontendMusic exactly once per startup
     /// entry. Dialog navigation must not restart a non-looping track after it
@@ -81699,11 +81717,17 @@ impl GameApp {
         self.loading_state = None;
         self.runtime_music_enabled = false;
         if let Some(audio) = self.audio.as_mut() {
-            // C4Application::QuitGame enters PreInit, which reconstructs the
-            // process sound system before showing startup again.
+            // Game.Clear has already requested its 2s fade above. On the next
+            // C4AS_PreInit, MusicSystem.emplace() replaces the still-engaged
+            // C4MusicSystem; its destructor performs Stop(0), so startup never
+            // waits for that fade to finish. Keep the audio backend, but cancel
+            // both live playback and any stale asynchronous Rust decode now.
+            audio.reset_music_system_generation();
+            // The same PreInit reconstructs the process sound system.
             audio.reset_sound_system_generation();
             audio.configure_scenario(None);
         }
+        self.resume_frontend_music_after_fade = false;
 
         self.fallback_ground = DEFAULT_GROUND_HEIGHT;
         self.scenario_label = self.menu_state.label_path();
@@ -81749,13 +81773,16 @@ impl GameApp {
         if restore_dialog {
             self.restore_startup_dialog(last_startup_dialog);
             self.begin_startup_dialog_fade_in();
+            // C4Startup::DoStartup follows successful PreInit and requests one
+            // non-looping Frontend.* song without polling the old fade.
+            self.begin_frontend_music_entry();
         } else {
             // Restart/Next Mission immediately opens another game. Retain the
-            // eventual startup destination without constructing a dialog (or
-            // starting network discovery) behind that new round.
+            // eventual startup destination without constructing a dialog,
+            // starting network discovery, or playing frontend music behind
+            // that new round (PreInit proceeds directly to C4AS_StartGame).
             self.last_startup_dialog = last_startup_dialog;
         }
-        self.begin_frontend_music_entry();
     }
 
     fn begin_frontend_music_entry(&mut self) {
@@ -124992,7 +125019,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn menu_music_runs_in_menu_cycle() {
+    fn return_to_menu_recreates_music_before_teardown_fade_finishes_like_cpp() {
         lc_logging::init();
         assert_eq!(GAME_MUSIC_FADE_OUT_MS, 2_000);
 
@@ -125075,40 +125102,18 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .complete_next_controlled_music_load()
                 .expect("complete sandbox music load")
         );
-
         app.return_to_menu();
-        assert!(
-            app.audio
-                .as_ref()
-                .expect("test audio")
-                .controlled_music_loads
-                .as_ref()
-                .expect("controlled music loading")
-                .requests
-                .is_empty(),
-            "the fading game song is not replaced before fade completion"
-        );
-        assert!(
-            app.audio
-                .as_ref()
-                .expect("test audio")
-                .system
-                .music_is_playing(),
-            "game teardown must leave the current song active while it fades"
-        );
-        assert!(app.resume_frontend_music_after_fade);
-
-        // Complete the asynchronous fade without making this regression wait
-        // two wall-clock seconds. The menu cycle must then request frontend
-        // music once instead of replacing the fading game song immediately.
-        app.audio
-            .as_ref()
-            .expect("test audio")
-            .system
-            .halt_music();
-        app.update().expect("poll completed teardown fade");
-        assert!(!app.resume_frontend_music_after_fade);
         let audio = app.audio.as_ref().expect("test audio");
+        assert!(
+            !audio.system.music_is_playing(),
+            "PreInit reconstruction hard-stops the fading game song"
+        );
+        assert!(!app.resume_frontend_music_after_fade);
+        assert_eq!(
+            audio.music_fade_requests,
+            [GAME_MUSIC_FADE_OUT_MS],
+            "Game.Clear still requests its 2s fade before PreInit cancels it"
+        );
         let controlled = audio
             .controlled_music_loads
             .as_ref()
@@ -125117,21 +125122,62 @@ public func Grant(password) { return GainMissionAccess(password); }
         let frontend = controlled
             .requests
             .front()
-            .expect("resumed frontend music request");
-        assert!(!frontend.looped, "resumed frontend music is non-looping");
-        assert!(frontend.identity.is_some(), "resumed music came from the catalog");
+            .expect("PreInit frontend music request");
+        assert!(!frontend.looped, "returned frontend music is non-looping");
+        assert!(frontend.identity.is_some(), "returned music came from the catalog");
         assert_eq!(audio.music_resolver.playlist.as_deref(), Some("Frontend.*"));
-        assert!(!audio.system.music_is_playing());
         assert!(
             app.audio
                 .as_mut()
                 .expect("test audio")
                 .complete_next_controlled_music_load()
-                .expect("complete resumed frontend music load")
+                .expect("complete returned frontend music load")
         );
         let audio = app.audio.as_ref().expect("test audio");
         assert!(audio.system.music_is_playing());
         assert_eq!(audio.music_load_pending.load(AtomicOrdering::Acquire), 0);
+        assert!(audio
+            .controlled_music_loads
+            .as_ref()
+            .expect("controlled music loading")
+            .requests
+            .is_empty());
+
+        // Restart/Next Mission also reconstructs at PreInit, but skips
+        // C4Startup::DoStartup and therefore must not enqueue Frontend.*.
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start relaunch source scenario");
+        assert!(
+            app.audio
+                .as_mut()
+                .expect("test audio")
+                .complete_next_controlled_music_load()
+                .expect("complete relaunch source music")
+        );
+        app.audio
+            .as_mut()
+            .expect("test audio")
+            .set_scenario_music_level(Some(25));
+        app.return_to_menu_for_relaunch();
+        let audio = app.audio.as_ref().expect("test audio");
+        assert!(!audio.system.music_is_playing());
+        assert!(!app.resume_frontend_music_after_fade);
+        assert_eq!(
+            audio.music_fade_requests,
+            [GAME_MUSIC_FADE_OUT_MS, GAME_MUSIC_FADE_OUT_MS],
+            "each Game.Clear requests its fade before the next PreInit"
+        );
+        assert!(
+            lock_unpoisoned(&audio.music_control)
+                .most_recently_played
+                .is_none(),
+            "the direct-relaunch PreInit generation has no prior song identity"
+        );
+        assert_eq!(
+            lock_unpoisoned(&audio.music_control).scenario_level,
+            None,
+            "Game.Clear and the reconstructed music system discard scenario volume"
+        );
         assert!(audio
             .controlled_music_loads
             .as_ref()
