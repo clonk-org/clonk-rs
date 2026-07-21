@@ -8354,39 +8354,67 @@ fn parse_legacy_bool(value: &str) -> Option<bool> {
     }
 }
 
+/// `C4ComponentHost::LoadAppend` copies at most two native bytes from each
+/// comma-separated language segment (C4ComponentHost.cpp:174-184).
+fn legacy_script_language_code(language: &str) -> String {
+    let code = lc_script::c4_string_bytes(language);
+    let visible = code
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(code.len());
+    lc_script::c4_string_from_bytes(&code[..visible.min(2)])
+}
+
 fn load_legacy_scenario_script<S: AsRef<str>>(
     group: &Group,
     components: &ComponentGroups,
     languages: &[S],
 ) -> Result<Option<ScenarioScriptSource>, ScenarioError> {
-    const SCRIPT_CANDIDATES: [&str; 1] = ["Script.c"];
-    for candidate in SCRIPT_CANDIDATES {
-        if !group.exists(candidate) {
+    // C4CFN_Script is three independent LoadAppend segments. Each localized
+    // segment restarts LanguageEx priority, and a failed read advances to the
+    // next language without making scenario startup fail. The empty language
+    // string still contributes one empty code, selecting Script.c a second
+    // time through the Script{}.c segment (C4Components.h:55;
+    // C4ComponentHost.cpp:155-220).
+    const SCRIPT_SEGMENTS: [&str; 3] = ["Script.c", "Script{}.c", "C4Script{}.c"];
+    let language_codes = languages
+        .iter()
+        .map(|language| legacy_script_language_code(language.as_ref()))
+        .collect::<Vec<_>>();
+    let mut assembled = Vec::new();
+    for segment in SCRIPT_SEGMENTS {
+        let selected = if segment.contains("{}") {
+            if language_codes.is_empty() {
+                group.read_file(segment.replacen("{}", "", 1)).ok()
+            } else {
+                language_codes
+                    .iter()
+                    .find_map(|code| group.read_file(segment.replacen("{}", &code, 1)).ok())
+            }
+        } else {
+            group.read_file(segment).ok()
+        };
+        let Some(bytes) = selected else {
             continue;
-        }
-        let bytes = group.read_file(candidate)?;
-        let source = lc_script::c4_string_from_bytes(&bytes);
-        let source = localize_script_source_with_components(components, &source, languages)?;
-        return Ok(Some(ScenarioScriptSource {
-            name: group
-                .root()
-                .join(candidate)
-                .to_string_lossy()
-                .into_owned(),
-            source,
-            c4_args: true,
-        }));
+        };
+
+        // LoadAppend prefixes every successfully read component, including
+        // an empty one, and SCopy truncates only that component at its first
+        // NUL before later segments are appended.
+        assembled.push(b'\n');
+        assembled.extend_from_slice(bytes.split(|byte| *byte == 0).next().unwrap_or_default());
     }
-    // C4GameScriptHost exists and receives its full ScriptName even when the
-    // optional component is absent. Retain that empty host so DirectExec/eval
-    // diagnostics do not fall back to a basename or Game.ScriptEngine.
+
+    let source = lc_script::c4_string_from_bytes(&assembled);
+    // C4ScriptHost passes the same two-byte LanguageEx segments to its
+    // C4LangStringTable after component assembly.
+    let source = localize_script_source_with_components(components, &source, &language_codes)?;
+    // C4GameScriptHost exists even when every optional component is absent.
+    // Retain that empty host and the canonical Script.c diagnostic name so
+    // DirectExec/eval does not fall back to Game.ScriptEngine.
     Ok(Some(ScenarioScriptSource {
-        name: group
-            .root()
-            .join("Script.c")
-            .to_string_lossy()
-            .into_owned(),
-        source: String::new(),
+        name: group.root().join("Script.c").to_string_lossy().into_owned(),
+        source,
         c4_args: true,
     }))
 }
@@ -22502,6 +22530,91 @@ global func Step(state, frame, random)
 
         assert!(script.contains("\"Komm mit mir, Prinzessin!\""));
         assert!(!script.contains("\"Come with me, princess!\""));
+    }
+
+    #[test]
+    fn scenario_script_assembly_uses_all_c4cfn_script_segments_in_language_order() {
+        fn loaded_source(
+            root: &std::path::Path,
+            scenario_dir: &std::path::Path,
+            languages: &[&str],
+        ) -> String {
+            let resolver = FileSystemResolver {
+                roots: vec![root.to_path_buf()],
+            };
+            Scenario::load_from_path_with_languages(scenario_dir, &resolver, languages)
+                .expect("scenario components load")
+                .script
+                .expect("scenario host exists")
+                .source
+        }
+
+        // A scenario may consist only of a localized Script{}.c component;
+        // each LanguageEx segment is narrowed to two native bytes.
+        let localized = tempdir().expect("localized tempdir");
+        let localized_scenario = write_resilience_fixture(localized.path(), None, "// remove me\n");
+        std::fs::remove_file(localized_scenario.join("Script.c")).expect("remove base script");
+        std::fs::write(
+            localized_scenario.join("ScriptDE.c"),
+            b"// $Assembly$\0ignored localized tail",
+        )
+        .expect("write localized-only script");
+        std::fs::write(
+            localized_scenario.join("StringTblDE.txt"),
+            b"Assembly=localized only\n",
+        )
+        .expect("write two-byte-code string table");
+        std::fs::write(
+            localized_scenario.join("ScriptOld.c"),
+            b"// must stay excluded",
+        )
+        .expect("write unrelated script");
+        let source = loaded_source(localized.path(), &localized_scenario, &["DE-extra", "US"]);
+        assert_eq!(lc_script::c4_string_bytes(&source), b"\n// localized only");
+
+        // The preferred ScriptDE.c exists but is not readable as a file, so
+        // its segment falls through to US. C4Script restarts at the empty DE
+        // file, which still contributes one LF and suppresses US. Every
+        // successful component gets its own leading LF and its own NUL bound.
+        let assembled = tempdir().expect("assembled tempdir");
+        let assembled_scenario =
+            write_resilience_fixture(assembled.path(), None, "// base\0hidden base");
+        std::fs::create_dir(assembled_scenario.join("ScriptDE.c"))
+            .expect("create unreadable preferred component");
+        std::fs::write(
+            assembled_scenario.join("ScriptUS.c"),
+            b"// localized US\0hidden localized tail",
+        )
+        .expect("write fallback localized component");
+        std::fs::write(assembled_scenario.join("C4ScriptDE.c"), b"")
+            .expect("write empty preferred legacy component");
+        std::fs::write(
+            assembled_scenario.join("C4ScriptUS.c"),
+            b"// losing legacy component",
+        )
+        .expect("write losing legacy component");
+        std::fs::write(
+            assembled_scenario.join("ScriptOld.c"),
+            b"// must stay excluded",
+        )
+        .expect("write unrelated script");
+        let source = loaded_source(assembled.path(), &assembled_scenario, &["DE", "US"]);
+        assert_eq!(
+            lc_script::c4_string_bytes(&source),
+            b"\n// base\n// localized US\n"
+        );
+
+        // SCopySegment over an empty LanguageEx still yields one empty code:
+        // Script.c is selected by both the first and second template segment.
+        let empty = tempdir().expect("empty-language tempdir");
+        let empty_scenario = write_resilience_fixture(empty.path(), None, "// base");
+        std::fs::write(empty_scenario.join("C4Script.c"), b"// legacy")
+            .expect("write empty-code legacy component");
+        let source = loaded_source(empty.path(), &empty_scenario, &[]);
+        assert_eq!(
+            lc_script::c4_string_bytes(&source),
+            b"\n// base\n// base\n// legacy"
+        );
     }
 
     /// Joins a default test player: the fixture's `[Player1] Crew=GOOD=1`
