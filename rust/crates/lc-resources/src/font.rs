@@ -1,4 +1,4 @@
-use crate::{Group, GroupError};
+use crate::{definition::parse_action_i32_prefix, Group, GroupError};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -348,7 +348,11 @@ fn parse_font_definitions(bytes: &[u8]) -> Vec<FontDefinition> {
         }
         match key {
             "Name" => definition.name = value.to_string(),
-            "Size" => definition.size = value.parse().unwrap_or(1),
+            "Size" => {
+                definition.size = parse_action_i32_prefix(&lc_script::c4_string_bytes(value))
+                    .map(|(size, _)| size)
+                    .unwrap_or(1)
+            }
             "LogFont" => definition.log_font = value.to_string(),
             "SmallFont" => definition.small_font = value.to_string(),
             "Font" => definition.font = value.to_string(),
@@ -702,5 +706,81 @@ TitleFont=LaterTitle
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0].name, "Kept ");
         assert_eq!(definitions[0].size, 16);
+    }
+
+    #[test]
+    fn fonts_txt_size_uses_stdcompiler_numeric_prefix_and_error_semantics() {
+        fn packed_fonts_group(name: &str, fonts: &[u8]) -> Group {
+            let mut packed = MutableGroup::new(name);
+            packed
+                .add_file_with_metadata("Fonts.txt", fonts.to_vec(), 1, false)
+                .expect("add Fonts.txt");
+            Group::from_memory(
+                std::path::PathBuf::from(name),
+                packed.pack().expect("pack font group"),
+            )
+            .expect("open packed font group")
+        }
+
+        let prior = packed_fonts_group("font-size-prior.c4g", b"[Font]\nName=Prior\nSize=9\n");
+        let later = packed_fonts_group(
+            "font-size-later.c4g",
+            br#"[Font]
+Name=DecimalPrefix
+Size=14junk
+[Font]
+Name=HexPrefix
+Size=0X10tail
+[Font]
+Name=PositivePrefix
+Size=+15tail
+[Font]
+Name=NegativeLeadingZeroDecimal
+Size=-014tail
+[Font]
+Name=ConsumedZero
+Size=0junk
+[Font]
+Name=SignedHexMarker
+Size=-0X10
+[Font]
+Name=BareHexMarker
+Size=0X
+[Font]
+Name=Defaulted
+Size=not-a-number
+[Font]
+Name=AfterDefaulted
+Size=17tail
+[Font]
+Name=Omitted
+"#,
+        );
+
+        let mut catalog = FontCatalog::default();
+        catalog.load_group(&prior).expect("load prior definitions");
+        catalog
+            .load_group(&later)
+            .expect("defaulted Size keeps the later definitions");
+        assert_eq!(
+            catalog
+                .definitions()
+                .iter()
+                .map(|definition| (definition.name.as_str(), definition.size))
+                .collect::<Vec<_>>(),
+            [
+                ("Prior", 9),
+                ("DecimalPrefix", 14),
+                ("HexPrefix", 16),
+                ("PositivePrefix", 15),
+                ("NegativeLeadingZeroDecimal", -14),
+                ("ConsumedZero", 0),
+                ("SignedHexMarker", 0),
+                ("BareHexMarker", 0),
+                ("Defaulted", 1),
+                ("AfterDefaulted", 17),
+                ("Omitted", 1),
+            ]
+        );
     }
 }
