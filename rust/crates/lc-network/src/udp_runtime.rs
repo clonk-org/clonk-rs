@@ -32,7 +32,6 @@ pub const RELIABLE_UDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 pub const RELIABLE_UDP_CONNECT_RETRIES: u8 = 5;
 pub const RELIABLE_UDP_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 pub const RELIABLE_UDP_OUTGOING_PACKET_CAPACITY: usize = 10_000;
-const UDP_STATISTICS_CONNECTION_ID: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReliableUdpPeerStatus {
@@ -686,7 +685,8 @@ pub struct ReliableUdpSocketDriver {
     socket: UdpSocket,
     core: ReliableUdpEndpointCore,
     punchers: ReliableUdpPuncherRoutes,
-    statistics: Option<AttachedUdpConnectionStatistics>,
+    statistics: Option<crate::NetworkIoStatistics>,
+    peer_statistics: BTreeMap<SocketAddr, ReliableUdpPeerStatistics>,
     started_at: Instant,
     receive_buffer: Vec<u8>,
     last_send: Option<ReliableUdpLastSend>,
@@ -707,6 +707,82 @@ impl Drop for AttachedUdpConnectionStatistics {
     fn drop(&mut self) {
         self.0.close();
     }
+}
+
+#[derive(Debug)]
+struct ReliableUdpPeerStatistics {
+    sampled_at_ms: u64,
+    pending_input_bytes: u64,
+    pending_output_bytes: u64,
+    recorder: Option<AttachedUdpConnectionStatistics>,
+}
+
+impl ReliableUdpPeerStatistics {
+    fn new(sampled_at_ms: u64) -> Self {
+        Self {
+            sampled_at_ms,
+            pending_input_bytes: 0,
+            pending_output_bytes: 0,
+            recorder: None,
+        }
+    }
+
+    fn bind(&mut self, recorder: crate::ConnectionStatisticsRecorder, sampled_at_ms: u64) {
+        self.advance_sample(sampled_at_ms);
+        self.recorder = Some(AttachedUdpConnectionStatistics(recorder));
+    }
+
+    fn record_input(&mut self, payload_bytes: usize, sampled_at_ms: u64) {
+        let sampled_at_ms = match &self.recorder {
+            Some(recorder) => {
+                let Some(sampled_at_ms) = recorder.record_input_at_current_sample(payload_bytes)
+                else {
+                    return;
+                };
+                sampled_at_ms
+            }
+            None => sampled_at_ms,
+        };
+        self.advance_sample(sampled_at_ms);
+        self.pending_input_bytes = self
+            .pending_input_bytes
+            .saturating_add(udp_accounted_bytes(payload_bytes));
+    }
+
+    fn record_output(&mut self, payload_bytes: usize, sampled_at_ms: u64) {
+        let sampled_at_ms = match &self.recorder {
+            Some(recorder) => {
+                let Some(sampled_at_ms) = recorder.record_output_at_current_sample(payload_bytes)
+                else {
+                    return;
+                };
+                sampled_at_ms
+            }
+            None => sampled_at_ms,
+        };
+        self.advance_sample(sampled_at_ms);
+        self.pending_output_bytes = self
+            .pending_output_bytes
+            .saturating_add(udp_accounted_bytes(payload_bytes));
+    }
+
+    fn unbind(&mut self) {
+        self.recorder = None;
+    }
+
+    fn advance_sample(&mut self, sampled_at_ms: u64) {
+        if self.sampled_at_ms != sampled_at_ms {
+            self.sampled_at_ms = sampled_at_ms;
+            self.pending_input_bytes = 0;
+            self.pending_output_bytes = 0;
+        }
+    }
+}
+
+fn udp_accounted_bytes(payload_bytes: usize) -> u64 {
+    u64::try_from(payload_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(crate::UDP_STATISTICS_HEADER_BYTES)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -795,6 +871,7 @@ impl ReliableUdpSocketDriver {
             core: ReliableUdpEndpointCore::new_at(Duration::ZERO),
             punchers: ReliableUdpPuncherRoutes::default(),
             statistics: None,
+            peer_statistics: BTreeMap::new(),
             started_at,
             receive_buffer: vec![0; u16::MAX as usize + 1],
             last_send: None,
@@ -809,11 +886,47 @@ impl ReliableUdpSocketDriver {
         statistics: crate::NetworkIoStatistics,
     ) -> io::Result<Self> {
         let mut driver = Self::bind(bind_address)?;
-        driver.statistics = Some(AttachedUdpConnectionStatistics(statistics.open_connection(
-            UDP_STATISTICS_CONNECTION_ID,
-            crate::NetworkProtocol::Udp,
-        )));
+        driver.statistics = Some(statistics);
         Ok(driver)
+    }
+
+    /// Associates one live low-level peer with its high-level Network2
+    /// connection. Bytes collected during this peer's handshake are retained
+    /// until the next statistics sample and transferred into the real route.
+    pub fn bind_peer_statistics(&mut self, peer: SocketAddr, connection_id: u32) -> io::Result<()> {
+        let peer = canonical_reliable_udp_peer_address(peer);
+        let peer_key = self.core.peer_key(peer).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                format!("reliable-UDP peer {peer} is no longer connected"),
+            )
+        })?;
+        let Some(statistics) = self.statistics.clone() else {
+            return Ok(());
+        };
+        let sampled_at_ms = statistics.last_statistics_ms();
+        let peer_statistics = self
+            .peer_statistics
+            .entry(peer_key)
+            .or_insert_with(|| ReliableUdpPeerStatistics::new(sampled_at_ms));
+        if let Some(recorder) = &peer_statistics.recorder {
+            if recorder.key().connection_id == connection_id {
+                return Ok(());
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("reliable-UDP peer {peer} already has a statistics connection"),
+            ));
+        }
+        let (recorder, sampled_at_ms) = statistics.open_connection_with_raw_if_current(
+            connection_id,
+            crate::NetworkProtocol::Udp,
+            peer_statistics.sampled_at_ms,
+            peer_statistics.pending_input_bytes,
+            peer_statistics.pending_output_bytes,
+        );
+        peer_statistics.bind(recorder, sampled_at_ms);
+        Ok(())
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -898,12 +1011,9 @@ impl ReliableUdpSocketDriver {
         let sent_at_ms = self.elapsed().as_millis() as u32;
         let wire = encode_netpuncher_punch(sent_at_ms);
         self.last_send = Some(ReliableUdpLastSend::BestEffort);
-        let sent = self.socket
+        self.socket
             .send_to(&wire, reliable_udp_send_address(punchee_address))
             .await?;
-        if let Some(statistics) = &self.statistics {
-            statistics.record_output(sent);
-        }
         Ok(())
     }
 
@@ -929,12 +1039,7 @@ impl ReliableUdpSocketDriver {
         tokio::select! {
             result = self.socket.recv_from(&mut self.receive_buffer) => {
                 match result {
-                    Ok((length, source)) => {
-                        if let Some(statistics) = &self.statistics {
-                            statistics.record_input(length);
-                        }
-                        ReliableUdpPollReady::Datagram(length, source)
-                    }
+                    Ok((length, source)) => ReliableUdpPollReady::Datagram(length, source),
                     Err(error) => ReliableUdpPollReady::SocketError(error),
                 }
             }
@@ -953,6 +1058,9 @@ impl ReliableUdpSocketDriver {
         let received_datagram = matches!(ready, ReliableUdpPollReady::Datagram(_, _));
         let mut step = match ready {
             ReliableUdpPollReady::Datagram(length, source) => {
+                if reliable_udp_peer_input_is_accounted(&self.receive_buffer[..length]) {
+                    self.record_peer_input(source, length);
+                }
                 self.core
                     .receive_at(source, &self.receive_buffer[..length], now)
             }
@@ -1003,6 +1111,64 @@ impl ReliableUdpSocketDriver {
 
     fn elapsed(&self) -> Duration {
         Instant::now().saturating_duration_since(self.started_at)
+    }
+
+    fn record_peer_input(&mut self, peer: SocketAddr, payload_bytes: usize) {
+        let Some(statistics) = &self.statistics else {
+            return;
+        };
+        let Some(peer_key) = self.core.peer_key(peer) else {
+            return;
+        };
+        let sampled_at_ms = statistics.last_statistics_ms();
+        self.peer_statistics
+            .entry(peer_key)
+            .or_insert_with(|| ReliableUdpPeerStatistics::new(sampled_at_ms))
+            .record_input(payload_bytes, sampled_at_ms);
+    }
+
+    fn record_peer_output(&mut self, peer: SocketAddr, payload_bytes: usize) {
+        let Some(statistics) = &self.statistics else {
+            return;
+        };
+        let peer = canonical_reliable_udp_peer_address(peer);
+        let peer_key = self
+            .core
+            .peer_key(peer)
+            .or_else(|| self.peer_statistics.contains_key(&peer).then_some(peer));
+        let Some(peer_key) = peer_key else {
+            return;
+        };
+        let sampled_at_ms = statistics.last_statistics_ms();
+        self.peer_statistics
+            .entry(peer_key)
+            .or_insert_with(|| ReliableUdpPeerStatistics::new(sampled_at_ms))
+            .record_output(payload_bytes, sampled_at_ms);
+    }
+
+    fn close_absent_peer_statistics(&mut self) {
+        self.peer_statistics.retain(|peer, _| {
+            self.core
+                .peers
+                .get(peer)
+                .is_some_and(|peer| peer.status != ReliableUdpPeerStatus::Closed)
+        });
+    }
+
+    fn unbind_reconnected_peer_statistics(&mut self, events: &[ReliableUdpEvent]) {
+        for event in events {
+            let ReliableUdpEvent::Disconnected {
+                peer,
+                reason: ReliableUdpDisconnectReason::Reconnect,
+            } = event
+            else {
+                continue;
+            };
+            let peer = canonical_reliable_udp_peer_address(*peer);
+            if let Some(peer_statistics) = self.peer_statistics.get_mut(&peer) {
+                peer_statistics.unbind();
+            }
+        }
     }
 
     async fn finish_step(
@@ -1093,27 +1259,44 @@ impl ReliableUdpSocketDriver {
         Ok(routed)
     }
 
+    async fn send_planned_datagram(
+        &mut self,
+        datagram: &ReliableUdpDatagram,
+    ) -> (SocketAddr, bool, io::Result<usize>) {
+        let peer = canonical_reliable_udp_peer_address(datagram.destination);
+        let peer_backed = !reliable_udp_send_is_best_effort(&datagram.payload)
+            && self.core.peer_status(peer).is_some();
+        self.last_send = Some(if peer_backed {
+            ReliableUdpLastSend::Peer(peer)
+        } else {
+            ReliableUdpLastSend::BestEffort
+        });
+        // Native charges both buckets before sendto: every peer-originated
+        // datagram hits that peer, and flagged multicast hits broadcast too.
+        self.record_peer_output(peer, datagram.payload.len());
+        if datagram
+            .payload
+            .first()
+            .is_some_and(|status| status & 0x80 != 0)
+        {
+            if let Some(statistics) = &self.statistics {
+                statistics
+                    .record_broadcast_datagram(crate::NetworkProtocol::Udp, datagram.payload.len());
+            }
+        }
+        let result = self
+            .socket
+            .send_to(&datagram.payload, datagram.destination)
+            .await;
+        (peer, peer_backed, result)
+    }
+
     async fn flush_step(&mut self, mut step: ReliableUdpStep) -> io::Result<Vec<ReliableUdpEvent>> {
         let mut first_send_error = None;
         for datagram in step.datagrams {
-            let peer = canonical_reliable_udp_peer_address(datagram.destination);
-            let peer_backed = !reliable_udp_send_is_best_effort(&datagram.payload)
-                && self.core.peer_status(peer).is_some();
-            self.last_send = Some(if peer_backed {
-                ReliableUdpLastSend::Peer(peer)
-            } else {
-                ReliableUdpLastSend::BestEffort
-            });
-            match self
-                .socket
-                .send_to(&datagram.payload, datagram.destination)
-                .await
-            {
-                Ok(sent) => {
-                    if let Some(statistics) = &self.statistics {
-                        statistics.record_output(sent);
-                    }
-                }
+            let (peer, peer_backed, result) = self.send_planned_datagram(&datagram).await;
+            match result {
+                Ok(_) => {}
                 Err(error) => {
                     if peer_backed {
                         first_send_error.get_or_insert((error, peer));
@@ -1126,13 +1309,19 @@ impl ReliableUdpSocketDriver {
         // the same receive transition.
         if let Some((error, peer)) = first_send_error {
             if reliable_udp_unreachable_error(&error) {
-                let disconnected = self.core.report_unreachable(peer);
-                step.events.extend(disconnected.events);
+                let ReliableUdpStep { datagrams, events } = self.core.report_unreachable(peer);
+                for close in datagrams {
+                    let _ = self.send_planned_datagram(&close).await;
+                }
+                step.events.extend(events);
             }
             if step.events.is_empty() {
+                self.close_absent_peer_statistics();
                 return Err(error);
             }
         }
+        self.unbind_reconnected_peer_statistics(&step.events);
+        self.close_absent_peer_statistics();
         Ok(step.events)
     }
 }
@@ -1179,6 +1368,16 @@ fn reliable_udp_send_is_best_effort(payload: &[u8]) -> bool {
     )
 }
 
+fn reliable_udp_peer_input_is_accounted(payload: &[u8]) -> bool {
+    match reliable_udp_packet_kind(payload) {
+        None | Some(ReliableUdpPacketKind::Test) => false,
+        Some(ReliableUdpPacketKind::AddAddress) => {
+            payload.first().is_some_and(|status| status & 0x80 != 0)
+        }
+        Some(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1209,6 +1408,57 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    async fn next_driver_datagram(driver: &mut ReliableUdpSocketDriver) -> Vec<ReliableUdpEvent> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let ready = driver.wait_ready().await;
+                let received = matches!(ready, ReliableUdpPollReady::Datagram(_, _));
+                let events = driver.process_ready(ready).await.unwrap();
+                if received {
+                    return events;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn recv_spy_kind(
+        spy: &UdpSocket,
+        buffer: &mut [u8],
+        expected: ReliableUdpPacketKind,
+    ) -> (usize, SocketAddr) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let received = spy.recv_from(buffer).await.unwrap();
+                if reliable_udp_packet_kind(&buffer[..received.0]) == Some(expected) {
+                    return received;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn connect_spy(driver: &mut ReliableUdpSocketDriver, spy: &UdpSocket) -> SocketAddr {
+        let spy_address = spy.local_addr().unwrap();
+        assert!(driver.connect(spy_address).await.unwrap().is_empty());
+        let mut buffer = [0_u8; 512];
+        let (_, driver_address) =
+            recv_spy_kind(spy, &mut buffer, ReliableUdpPacketKind::Connect).await;
+        let connect_ok = encode_reliable_udp_connect_ok(&ReliableUdpConnectOk {
+            packet_number: 0,
+            multicast_mode: ReliableUdpMulticastMode::NoMulticast,
+            observed_address: canonical_reliable_udp_peer_address(driver_address),
+        });
+        spy.send_to(&connect_ok, driver_address).await.unwrap();
+        assert!(matches!(
+            next_driver_events(driver).await.as_slice(),
+            [ReliableUdpEvent::Connected { peer, .. }] if *peer == spy_address
+        ));
+        canonical_reliable_udp_peer_address(driver_address)
     }
 
     #[test]
@@ -2226,14 +2476,18 @@ mod tests {
     #[tokio::test]
     async fn l143_socket_driver_drop_closes_statistics_route() {
         let statistics = crate::NetworkIoStatistics::new(0);
-        let key = crate::ConnectionStatisticsKey::new(
-            UDP_STATISTICS_CONNECTION_ID,
-            crate::NetworkProtocol::Udp,
-        );
+        let key = crate::ConnectionStatisticsKey::new(17, crate::NetworkProtocol::Udp);
         let wildcard = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
-
-        let driver =
+        let mut driver =
             ReliableUdpSocketDriver::bind_with_statistics(wildcard, statistics.clone()).unwrap();
+        let spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+
+        connect_spy(&mut driver, &spy).await;
+        driver
+            .bind_peer_statistics(spy.local_addr().unwrap(), key.connection_id)
+            .unwrap();
         assert!(statistics.connection_statistics(key).is_some());
         drop(driver);
 
@@ -2250,23 +2504,192 @@ mod tests {
         let spy = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
             .await
             .unwrap();
-        let mut buffer = [0; 64];
-
-        driver.punch(spy.local_addr().unwrap()).await.unwrap();
-        let (_, driver_address) =
-            tokio::time::timeout(Duration::from_secs(2), spy.recv_from(&mut buffer))
-                .await
-                .unwrap()
-                .unwrap();
-        spy.send_to(&[0x7f], driver_address).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(2), driver.poll())
-            .await
-            .unwrap()
-            .unwrap();
-
+        let spy_address = spy.local_addr().unwrap();
+        let driver_address = connect_spy(&mut driver, &spy).await;
+        driver.bind_peer_statistics(spy_address, 23).unwrap();
         assert!(statistics.generate_statistics(1_001));
+
+        driver
+            .send_packet(spy_address, b"physical UDP")
+            .await
+            .unwrap();
+        let mut buffer = [0; 64];
+        let _ = recv_spy_kind(&spy, &mut buffer, ReliableUdpPacketKind::Data).await;
+        spy.send_to(&[0x7f, 0x42], driver_address).await.unwrap();
+        next_driver_datagram(&mut driver).await;
+
+        assert!(statistics.generate_statistics(2_002));
         let udp = statistics.protocol_statistics(crate::NetworkProtocol::Udp);
         assert!(udp.input_rate > 0);
         assert!(udp.output_rate > 0);
+    }
+
+    #[tokio::test]
+    async fn udp_statistics_are_attributed_to_each_peer_route() {
+        fn normalize(bytes: u64) -> u64 {
+            bytes.saturating_mul(crate::NETWORK_STATISTICS_INTERVAL_MS) / 1_001
+        }
+
+        let statistics = crate::NetworkIoStatistics::new(0);
+        let wildcard = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
+        let mut driver =
+            ReliableUdpSocketDriver::bind_with_statistics(wildcard, statistics.clone()).unwrap();
+        let first = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let second = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        let first_address = first.local_addr().unwrap();
+        let second_address = second.local_addr().unwrap();
+        let driver_address = connect_spy(&mut driver, &first).await;
+        assert_eq!(connect_spy(&mut driver, &second).await, driver_address);
+        let first_key = crate::ConnectionStatisticsKey::new(7, crate::NetworkProtocol::Udp);
+        let second_key = crate::ConnectionStatisticsKey::new(9, crate::NetworkProtocol::Udp);
+        driver
+            .bind_peer_statistics(first_address, first_key.connection_id)
+            .unwrap();
+        driver
+            .bind_peer_statistics(second_address, second_key.connection_id)
+            .unwrap();
+
+        // Handshake traffic accumulated before the real IDs were available is
+        // transferred into those routes, never a synthetic socket key.
+        assert!(statistics.generate_statistics(1_001));
+        for key in [first_key, second_key] {
+            let route = statistics.connection_statistics(key).unwrap();
+            assert!(route.input_rate > 0);
+            assert!(route.output_rate > 0);
+        }
+        assert!(statistics
+            .snapshot()
+            .connections
+            .iter()
+            .all(|(key, _)| key.connection_id != u32::MAX));
+
+        // Two peers sharing this one socket retain independent output buckets
+        // and aggregate exactly once into the UDP protocol total.
+        driver.send_packet(first_address, b"one").await.unwrap();
+        driver
+            .send_packet(second_address, b"a larger second payload")
+            .await
+            .unwrap();
+        let mut first_wire = [0_u8; 128];
+        let mut second_wire = [0_u8; 128];
+        let (first_length, _) =
+            recv_spy_kind(&first, &mut first_wire, ReliableUdpPacketKind::Data).await;
+        let (second_length, _) =
+            recv_spy_kind(&second, &mut second_wire, ReliableUdpPacketKind::Data).await;
+        assert!(statistics.generate_statistics(2_002));
+        let first_output = normalize(udp_accounted_bytes(first_length));
+        let second_output = normalize(udp_accounted_bytes(second_length));
+        assert_eq!(
+            statistics
+                .connection_statistics(first_key)
+                .unwrap()
+                .output_rate,
+            first_output
+        );
+        assert_eq!(
+            statistics
+                .connection_statistics(second_key)
+                .unwrap()
+                .output_rate,
+            second_output
+        );
+        assert_ne!(first_output, second_output);
+        assert_eq!(
+            statistics
+                .protocol_statistics(crate::NetworkProtocol::Udp)
+                .output_rate,
+            normalize(first_output.saturating_add(second_output))
+        );
+
+        // Known-peer datagrams count before validation. Broadcast remains a
+        // separate low-level bucket and never inflates either route.
+        first.send_to(&[0x7f, 0x11], driver_address).await.unwrap();
+        assert!(next_driver_datagram(&mut driver).await.is_empty());
+        second
+            .send_to(&[0x7e, 0x22, 0x33], driver_address)
+            .await
+            .unwrap();
+        assert!(next_driver_datagram(&mut driver).await.is_empty());
+        let connectionless = UdpSocket::bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .await
+            .unwrap();
+        connectionless
+            .send_to(&[0x80], driver_address)
+            .await
+            .unwrap();
+        assert!(next_driver_datagram(&mut driver).await.is_empty());
+        let mut broadcast_wire = [0_u8; 16];
+        let (broadcast_length, _) = recv_spy_kind(
+            &connectionless,
+            &mut broadcast_wire,
+            ReliableUdpPacketKind::Ping,
+        )
+        .await;
+        assert!(statistics.generate_statistics(3_003));
+        let first_input = normalize(udp_accounted_bytes(2));
+        let second_input = normalize(udp_accounted_bytes(3));
+        assert_eq!(
+            statistics
+                .connection_statistics(first_key)
+                .unwrap()
+                .input_rate,
+            first_input
+        );
+        assert_eq!(
+            statistics
+                .connection_statistics(second_key)
+                .unwrap()
+                .input_rate,
+            second_input
+        );
+        assert_eq!(
+            statistics
+                .protocol_statistics(crate::NetworkProtocol::Udp)
+                .input_rate,
+            normalize(first_input.saturating_add(second_input))
+        );
+        assert_eq!(
+            statistics
+                .protocol_statistics(crate::NetworkProtocol::Udp)
+                .broadcast_rate,
+            normalize(udp_accounted_bytes(broadcast_length))
+        );
+
+        // Closing removes only that route. Reopening the same endpoint may
+        // safely reuse its real key without disturbing the surviving peer.
+        driver.close_peer(first_address).await.unwrap();
+        let _ = recv_spy_kind(&first, &mut first_wire, ReliableUdpPacketKind::Close).await;
+        assert_eq!(statistics.connection_statistics(first_key), None);
+        assert!(statistics.connection_statistics(second_key).is_some());
+        connect_spy(&mut driver, &first).await;
+        driver
+            .bind_peer_statistics(first_address, first_key.connection_id)
+            .unwrap();
+        assert!(statistics.connection_statistics(first_key).is_some());
+        assert!(statistics.generate_statistics(4_004));
+        first
+            .send_to(&[0x7d, 0x44, 0x55, 0x66], driver_address)
+            .await
+            .unwrap();
+        assert!(next_driver_datagram(&mut driver).await.is_empty());
+        assert!(statistics.generate_statistics(5_005));
+        assert_eq!(
+            statistics
+                .connection_statistics(first_key)
+                .unwrap()
+                .input_rate,
+            normalize(udp_accounted_bytes(4))
+        );
+        assert_eq!(
+            statistics
+                .connection_statistics(second_key)
+                .unwrap()
+                .input_rate,
+            0
+        );
     }
 }

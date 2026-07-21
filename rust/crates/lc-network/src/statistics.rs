@@ -156,21 +156,48 @@ impl NetworkIoStatistics {
         connection_id: u32,
         protocol: NetworkProtocol,
     ) -> ConnectionStatisticsRecorder {
+        self.open_connection_with_raw_if_current(connection_id, protocol, 0, 0, 0)
+            .0
+    }
+
+    /// Opens a route and transfers pre-route bytes only if they still belong
+    /// to the current sample. The epoch check and transfer are atomic with
+    /// `generate_statistics`.
+    pub(crate) fn open_connection_with_raw_if_current(
+        &self,
+        connection_id: u32,
+        protocol: NetworkProtocol,
+        pending_sample_ms: u64,
+        pending_input_bytes: u64,
+        pending_output_bytes: u64,
+    ) -> (ConnectionStatisticsRecorder, u64) {
         let key = ConnectionStatisticsKey::new(connection_id, protocol);
         let mut state = self.state.lock().expect("network statistics lock poisoned");
+        let sampled_at_ms = state.last_statistics_ms;
         let generation = state.next_connection_generation;
         state.next_connection_generation = state.next_connection_generation.wrapping_add(1);
         let connection = state.connections.entry(key).or_default();
         connection.generation = generation;
         connection.open = true;
-        connection.raw = RawConnectionStatistics::default();
+        connection.raw = if pending_sample_ms == sampled_at_ms {
+            RawConnectionStatistics {
+                input_bytes: pending_input_bytes,
+                output_bytes: pending_output_bytes,
+                packet_loss: 0,
+            }
+        } else {
+            RawConnectionStatistics::default()
+        };
         connection.cached = ConnectionRateStatistics::default();
         drop(state);
-        ConnectionStatisticsRecorder {
-            statistics: self.clone(),
-            key,
-            generation,
-        }
+        (
+            ConnectionStatisticsRecorder {
+                statistics: self.clone(),
+                key,
+                generation,
+            },
+            sampled_at_ms,
+        )
     }
 
     /// Stops a connection contributing to later protocol totals.
@@ -312,19 +339,27 @@ impl ConnectionStatisticsRecorder {
     /// Records one successful socket receive/datagram, including C++'s fixed
     /// IP+transport header allowance.
     pub fn record_input(&self, payload_bytes: usize) {
+        let _ = self.record_input_at_current_sample(payload_bytes);
+    }
+
+    pub(crate) fn record_input_at_current_sample(&self, payload_bytes: usize) -> Option<u64> {
         let bytes = accounted_bytes(self.key.protocol, payload_bytes);
-        self.with_open_connection(|connection| {
+        self.with_open_connection_at_current_sample(|connection| {
             connection.raw.input_bytes = connection.raw.input_bytes.saturating_add(bytes);
-        });
+        })
     }
 
     /// Records one successful socket send/datagram, including C++'s fixed
     /// IP+transport header allowance.
     pub fn record_output(&self, payload_bytes: usize) {
+        let _ = self.record_output_at_current_sample(payload_bytes);
+    }
+
+    pub(crate) fn record_output_at_current_sample(&self, payload_bytes: usize) -> Option<u64> {
         let bytes = accounted_bytes(self.key.protocol, payload_bytes);
-        self.with_open_connection(|connection| {
+        self.with_open_connection_at_current_sample(|connection| {
             connection.raw.output_bytes = connection.raw.output_bytes.saturating_add(bytes);
-        });
+        })
     }
 
     /// Records bytes that already include any low-level header allowance.
@@ -368,16 +403,26 @@ impl ConnectionStatisticsRecorder {
     }
 
     fn with_open_connection(&self, update: impl FnOnce(&mut ConnectionStatisticsState)) {
+        let _ = self.with_open_connection_at_current_sample(update);
+    }
+
+    fn with_open_connection_at_current_sample(
+        &self,
+        update: impl FnOnce(&mut ConnectionStatisticsState),
+    ) -> Option<u64> {
         let mut state = self
             .statistics
             .state
             .lock()
             .expect("network statistics lock poisoned");
+        let sampled_at_ms = state.last_statistics_ms;
         if let Some(connection) = state.connections.get_mut(&self.key) {
             if connection.open && connection.generation == self.generation {
                 update(connection);
+                return Some(sampled_at_ms);
             }
         }
+        None
     }
 }
 
@@ -614,6 +659,52 @@ mod tests {
                 input_rate: 1_000,
                 ..ConnectionRateStatistics::default()
             })
+        );
+    }
+
+    #[test]
+    fn pending_route_transfer_is_conditioned_on_the_atomic_sample_epoch() {
+        let statistics = NetworkIoStatistics::new(0);
+        let (first, sampled_at_ms) = statistics.open_connection_with_raw_if_current(
+            8,
+            NetworkProtocol::Udp,
+            0,
+            1_001,
+            2_002,
+        );
+        assert_eq!(sampled_at_ms, 0);
+        assert!(statistics.generate_statistics(1_001));
+        assert_eq!(
+            statistics.connection_statistics(first.key()),
+            Some(ConnectionRateStatistics {
+                input_rate: 1_000,
+                output_rate: 2_000,
+                ..ConnectionRateStatistics::default()
+            })
+        );
+
+        let (current, sampled_at_ms) = statistics.open_connection_with_raw_if_current(
+            8,
+            NetworkProtocol::Udp,
+            0,
+            10_000,
+            20_000,
+        );
+        assert_eq!(sampled_at_ms, 1_001);
+        assert!(statistics.generate_statistics(2_002));
+        assert_eq!(
+            statistics.connection_statistics(current.key()),
+            Some(ConnectionRateStatistics::default())
+        );
+
+        assert_eq!(current.record_input_at_current_sample(969), Some(2_002));
+        assert!(statistics.generate_statistics(3_003));
+        assert_eq!(
+            statistics
+                .connection_statistics(current.key())
+                .unwrap()
+                .input_rate,
+            1_000
         );
     }
 }

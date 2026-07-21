@@ -66,6 +66,12 @@ enum HubCommand {
         peer: SocketAddr,
         response: oneshot::Sender<io::Result<ReliableUdpPeerStream>>,
     },
+    BindStatistics {
+        peer: SocketAddr,
+        generation: u64,
+        connection_id: u32,
+        response: oneshot::Sender<io::Result<()>>,
+    },
     Send {
         peer: SocketAddr,
         generation: u64,
@@ -203,6 +209,47 @@ impl ReliableUdpPeerStream {
 
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer
+    }
+
+    /// Binds this physical UDP peer to its high-level Network2 connection ID.
+    /// The hub keeps accounting below the synthetic stream framing layer.
+    pub fn bind_statistics_connection(
+        &self,
+        connection_id: u32,
+    ) -> impl Future<Output = io::Result<()>> + Send + 'static {
+        let terminal_closed = self.terminal.is_closed();
+        let commands = self.commands.clone();
+        let peer = self.peer;
+        let generation = self.generation;
+        async move {
+            if terminal_closed {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "reliable-UDP peer stream is closed",
+                ));
+            }
+            let (response, completed) = oneshot::channel();
+            commands
+                .send(HubCommand::BindStatistics {
+                    peer,
+                    generation,
+                    connection_id,
+                    response,
+                })
+                .await
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "reliable-UDP session hub stopped while binding statistics",
+                    )
+                })?;
+            completed.await.map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "reliable-UDP session hub stopped while binding statistics",
+                )
+            })?
+        }
     }
 
     fn buffered_frame_size(&self) -> io::Result<Option<usize>> {
@@ -921,6 +968,23 @@ async fn run_hub(
                                 fail_pending_connect(&mut pending_connects, peer, error);
                             }
                         }
+                    }
+                    HubCommand::BindStatistics {
+                        peer,
+                        generation,
+                        connection_id,
+                        response,
+                    } => {
+                        let peer = canonical_reliable_udp_peer_address(peer);
+                        let result = if peer_generation_matches(&peers, peer, generation) {
+                            driver.bind_peer_statistics(peer, connection_id)
+                        } else {
+                            Err(io::Error::new(
+                                io::ErrorKind::NotConnected,
+                                format!("reliable-UDP peer {peer} is no longer connected"),
+                            ))
+                        };
+                        let _ = response.send(result);
                     }
                     HubCommand::Send {
                         peer,

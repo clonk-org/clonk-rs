@@ -1959,17 +1959,24 @@ pub async fn connect_client_addresses(
             }
             ClientDialStream::Udp(stream) => {
                 let peer_addr = stream.peer_addr();
-                connect_client_stream_attempt(
-                    stream,
-                    Some(peer_addr),
-                    crate::NetworkProtocol::Udp,
-                    config.clone(),
-                    None,
-                    None,
-                    secondary_tcp_addr,
-                    &mut client_mesh,
-                )
-                .await
+                match stream.bind_statistics_connection(0).await {
+                    Ok(()) => {
+                        connect_client_stream_attempt(
+                            stream,
+                            Some(peer_addr),
+                            crate::NetworkProtocol::Udp,
+                            config.clone(),
+                            None,
+                            None,
+                            secondary_tcp_addr,
+                            &mut client_mesh,
+                        )
+                        .await
+                    }
+                    Err(error) => {
+                        Err(ClientAttemptError::Retryable(ClientError::Connect(error)))
+                    }
+                }
             }
         };
         match admission {
@@ -2641,6 +2648,10 @@ async fn connect_mesh_udp_route(
             ))
         })?
         .map_err(ClientError::Connect)?;
+    stream
+        .bind_statistics_connection(connection_id)
+        .await
+        .map_err(ClientError::Connect)?;
     let peer_addr = stream.peer_addr();
     let mut transport = crate::ControlTransport::new(stream);
     let handshake = crate::connection_handshake::run_known_peer_connection_handshake(
@@ -2792,6 +2803,10 @@ async fn accept_mesh_udp_route(
     password: lc_engine::LegacyCString,
     connection_id: u32,
 ) -> Result<ConnectedMeshRoute, ClientError> {
+    stream
+        .bind_statistics_connection(connection_id)
+        .await
+        .map_err(ClientError::Connect)?;
     let peer_addr = stream.peer_addr();
     let mut transport = crate::ControlTransport::new(stream);
     let handshake = crate::connection_handshake::run_registered_peer_connection_handshake(
@@ -3221,6 +3236,10 @@ async fn connect_secondary_udp_route(
                 "secondary reliable-UDP connection attempt timed out",
             ))
         })?
+        .map_err(ClientError::Connect)?;
+    stream
+        .bind_statistics_connection(connection_id)
+        .await
         .map_err(ClientError::Connect)?;
     let peer_addr = stream.peer_addr();
     let mut transport = crate::ControlTransport::new(stream);
@@ -5759,6 +5778,17 @@ async fn run_host(
                         let addr = stream.peer_addr();
                         let connection_id = state.next_connection_id;
                         state.next_connection_id = state.next_connection_id.wrapping_add(1);
+                        if let Err(error) = stream.bind_statistics_connection(connection_id).await {
+                            let _ = state.event_tx
+                                .send(HostEvent::TransportError {
+                                    client_id: None,
+                                    error: format!(
+                                        "failed to bind reliable-UDP connection statistics: {error}"
+                                    ),
+                                })
+                                .await;
+                            continue;
+                        }
                         state.pending_route_peers.insert(connection_id, addr);
                         spawn_host_transport(
                             &mut route_tasks,
@@ -13898,6 +13928,25 @@ mod tests {
             .unwrap();
         let packet = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(control_commands(&packet), vec![0x34, 0x12]);
+
+        let udp_key = crate::ConnectionStatisticsKey::new(0, crate::NetworkProtocol::Udp);
+        assert!(host.io_statistics().connection_statistics(udp_key).is_some());
+        assert!(client
+            .io_statistics()
+            .connection_statistics(udp_key)
+            .is_some());
+        assert!(host
+            .io_statistics()
+            .snapshot()
+            .connections
+            .iter()
+            .all(|(key, _)| key.connection_id != u32::MAX));
+        assert!(client
+            .io_statistics()
+            .snapshot()
+            .connections
+            .iter()
+            .all(|(key, _)| key.connection_id != u32::MAX));
 
         client.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
