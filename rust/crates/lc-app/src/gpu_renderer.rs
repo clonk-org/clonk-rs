@@ -14,14 +14,15 @@
 //! also the screenshot and deterministic-test readback source.
 
 use lc_graphics::{
-    GpuBlend, GpuCommand, GpuGammaMode, GpuPresentation, GpuPrimitiveTopology, GpuSampler,
-    GpuScene, GpuTextureFormat, GpuTextureId, GpuTextureResource, GpuVertex, Rect,
+    ClipperProjection, GpuBlend, GpuCommand, GpuGammaMode, GpuPresentation, GpuPrimitiveTopology,
+    GpuSampler, GpuScene, GpuSolidAlphaMode, GpuSolidVertex, GpuTextureFormat, GpuTextureId,
+    GpuTextureResource, GpuVertex, Rect,
 };
 use pixels::wgpu;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use thiserror::Error;
 
 const PACKED_VERTEX_FLOATS: usize = 18;
@@ -345,8 +346,123 @@ fn fs_monitor_srgb(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Recovery decision published by the wgpu 0.16 uncaptured-error hook.
+///
+/// That wgpu release has no public `Device::lost` future or callback. Native
+/// `DeviceError::Lost` values which reach ordinary resource operations are
+/// instead formatted as validation errors, so this monitor recognizes that
+/// specific diagnostic. Loss reported directly by `Queue::submit` or
+/// `Device::poll` is converted to an upstream panic; the application catches
+/// that one documented loss diagnostic at the presentation boundary and
+/// routes it through the same full-device recreation path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RetainedGpuRendererHealth {
+    Healthy,
+    RecreateRequired {
+        reason: RetainedGpuRecreateReason,
+        detail: String,
+    },
+    Fatal {
+        reason: RetainedGpuFatalReason,
+        detail: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetainedGpuRecreateReason {
+    DeviceLost,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetainedGpuFatalReason {
+    OutOfMemory,
+    Validation,
+}
+
+#[derive(Clone, Debug)]
+struct RetainedGpuHealthMonitor {
+    state: Arc<Mutex<RetainedGpuRendererHealth>>,
+}
+
+impl RetainedGpuHealthMonitor {
+    fn install(device: &wgpu::Device) -> Self {
+        let state = Arc::new(Mutex::new(RetainedGpuRendererHealth::Healthy));
+        let callback_state = Arc::clone(&state);
+        device.on_uncaptured_error(Box::new(move |error| {
+            let health = classify_uncaptured_wgpu_error(&error);
+            tracing::error!(%error, ?health, "uncaptured retained GPU device error");
+            record_renderer_health(&callback_state, health);
+        }));
+        Self { state }
+    }
+
+    fn current(&self) -> RetainedGpuRendererHealth {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+fn classify_uncaptured_wgpu_error(error: &wgpu::Error) -> RetainedGpuRendererHealth {
+    match error {
+        wgpu::Error::OutOfMemory { .. } => RetainedGpuRendererHealth::Fatal {
+            reason: RetainedGpuFatalReason::OutOfMemory,
+            detail: error.to_string(),
+        },
+        wgpu::Error::Validation { description, .. } => {
+            classify_wgpu_validation_description(description)
+        }
+    }
+}
+
+fn classify_wgpu_validation_description(description: &str) -> RetainedGpuRendererHealth {
+    let normalized = description.to_ascii_lowercase();
+    if normalized.contains("device is lost")
+        || normalized.contains("device was lost")
+        || normalized.contains("device has been lost")
+    {
+        RetainedGpuRendererHealth::RecreateRequired {
+            reason: RetainedGpuRecreateReason::DeviceLost,
+            detail: description.to_owned(),
+        }
+    } else {
+        RetainedGpuRendererHealth::Fatal {
+            reason: RetainedGpuFatalReason::Validation,
+            detail: description.to_owned(),
+        }
+    }
+}
+
+fn record_renderer_health(
+    state: &Mutex<RetainedGpuRendererHealth>,
+    reported: RetainedGpuRendererHealth,
+) {
+    let mut current = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let replace = matches!(&*current, RetainedGpuRendererHealth::Healthy)
+        || matches!(&reported, RetainedGpuRendererHealth::Fatal { .. })
+            && !matches!(&*current, RetainedGpuRendererHealth::Fatal { .. });
+    if replace {
+        *current = reported;
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum GpuRendererError {
+    #[error("retained GPU composition requires at least one ordered scene layer")]
+    NoSceneLayers,
+    #[error("GPU layer {layer} uses physical extent {actual:?}, expected {expected:?}")]
+    LayerPhysicalExtentMismatch {
+        layer: usize,
+        expected: [u32; 2],
+        actual: [u32; 2],
+    },
+    #[error("GPU layer {layer} uses a different gamma ramp or placement mode")]
+    LayerGammaMismatch { layer: usize },
+    #[error("GPU layers publish conflicting complete backing for texture {0:?}")]
+    LayerTextureConflict(GpuTextureId),
     #[error("invalid GPU presentation: logical={logical:?}, physical={physical:?}, scale={scale}, crop_top={crop_top}")]
     InvalidPresentation {
         logical: [u32; 2],
@@ -370,6 +486,8 @@ pub enum GpuRendererError {
         rect: Rect,
         extent: [u32; 2],
     },
+    #[error("texture {id:?} publishes dirty data without advancing revision {revision}")]
+    DirtyRevisionNotAdvanced { id: GpuTextureId, revision: u64 },
     #[error("draw command references missing texture {0:?}")]
     MissingTexture(GpuTextureId),
     #[error("draw command expected texture {id:?} to be {expected:?}, found {actual:?}")]
@@ -397,6 +515,16 @@ pub enum GpuRendererError {
     ReadbackCallbackDropped,
     #[error("GPU readback mapping failed: {0}")]
     ReadbackMap(String),
+    #[error("retained GPU device recreation required after {reason:?}: {detail}")]
+    DeviceRecreationRequired {
+        reason: RetainedGpuRecreateReason,
+        detail: String,
+    },
+    #[error("retained GPU device is unusable after {reason:?}: {detail}")]
+    DeviceFatal {
+        reason: RetainedGpuFatalReason,
+        detail: String,
+    },
 }
 
 /// Per-frame evidence that source retention and dirty updates are working.
@@ -408,6 +536,28 @@ pub struct GpuRendererStats {
     pub dirty_upload_bytes: u64,
     pub draw_calls: usize,
     pub composition_recreated: bool,
+}
+
+/// One painter-ordered retained scene and its coordinate transform.
+///
+/// Layers share a physical composition target. A logical game/UI layer uses
+/// the application's scaled/cropped presentation, while scale-native text or
+/// another physical-resolution overlay uses `GpuPresentation::identity` for
+/// the same physical extent. This keeps the native order without forcing all
+/// layers through one coordinate space.
+#[derive(Clone, Copy, Debug)]
+pub struct GpuSceneLayer<'a> {
+    pub scene: &'a GpuScene,
+    pub presentation: GpuPresentation,
+}
+
+impl<'a> GpuSceneLayer<'a> {
+    pub const fn new(scene: &'a GpuScene, presentation: GpuPresentation) -> Self {
+        Self {
+            scene,
+            presentation,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -442,11 +592,22 @@ struct Scissor {
     height: u32,
 }
 
+/// C++ installs one rounded viewport and clip-relative projection every time
+/// the primary clipper changes. Keep those two halves together so the draw
+/// geometry and hardware scissor cannot disagree at fractional scales.
+#[derive(Clone, Copy, Debug)]
+struct DrawProjection {
+    clipper: ClipperProjection,
+    physical_extent: [u32; 2],
+    line_width: f32,
+    scissor: Scissor,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum DrawKind {
     Quad(QuadBindingKey),
     Landscape(LandscapeBindingKey),
-    Solid(GpuPrimitiveTopology),
+    Solid { alpha_mode: GpuSolidAlphaMode },
 }
 
 #[derive(Clone, Debug)]
@@ -529,6 +690,7 @@ impl GpuReadbackTicket {
 pub struct RetainedGpuRenderer {
     surface_format: wgpu::TextureFormat,
     generation: u64,
+    health: RetainedGpuHealthMonitor,
     texture_epoch: u64,
     textures: HashMap<GpuTextureId, CachedTexture>,
     quad_bind_groups: HashMap<QuadBindingKey, wgpu::BindGroup>,
@@ -546,9 +708,10 @@ pub struct RetainedGpuRenderer {
     quad_normal_pipeline: wgpu::RenderPipeline,
     quad_additive_pipeline: wgpu::RenderPipeline,
     landscape_pipeline: wgpu::RenderPipeline,
-    solid_replace_pipelines: [wgpu::RenderPipeline; 3],
-    solid_normal_pipelines: [wgpu::RenderPipeline; 3],
-    solid_additive_pipelines: [wgpu::RenderPipeline; 3],
+    solid_replace_pipeline: wgpu::RenderPipeline,
+    solid_over_normal_pipeline: wgpu::RenderPipeline,
+    solid_non_separate_normal_pipeline: wgpu::RenderPipeline,
+    solid_additive_pipeline: wgpu::RenderPipeline,
     monitor_gamma_pipeline: wgpu::RenderPipeline,
     present_pipeline: wgpu::RenderPipeline,
 
@@ -585,6 +748,7 @@ impl RetainedGpuRenderer {
         surface_format: wgpu::TextureFormat,
         generation: u64,
     ) -> Self {
+        let health = RetainedGpuHealthMonitor::install(device);
         let gamma_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("lc_gpu_gamma_layout"),
@@ -650,7 +814,6 @@ impl RetainedGpuRenderer {
                     sampler_layout_entry(1),
                 ],
             });
-
         let quad_shader = shader(device, "lc_gpu_quad_shader", QUAD_SHADER);
         let landscape_shader = shader(device, "lc_gpu_landscape_shader", LANDSCAPE_SHADER);
         let solid_shader = shader(device, "lc_gpu_solid_shader", SOLID_SHADER);
@@ -693,6 +856,7 @@ impl RetainedGpuRenderer {
             &quad_shader,
             wgpu::PrimitiveTopology::TriangleList,
             GpuBlend::Replace,
+            GpuSolidAlphaMode::SourceOver,
         );
         let quad_normal_pipeline = scene_pipeline(
             device,
@@ -701,6 +865,7 @@ impl RetainedGpuRenderer {
             &quad_shader,
             wgpu::PrimitiveTopology::TriangleList,
             GpuBlend::Normal,
+            GpuSolidAlphaMode::SourceOver,
         );
         let quad_additive_pipeline = scene_pipeline(
             device,
@@ -709,6 +874,7 @@ impl RetainedGpuRenderer {
             &quad_shader,
             wgpu::PrimitiveTopology::TriangleList,
             GpuBlend::Additive,
+            GpuSolidAlphaMode::SourceOver,
         );
         let landscape_pipeline = scene_pipeline(
             device,
@@ -717,24 +883,45 @@ impl RetainedGpuRenderer {
             &landscape_shader,
             wgpu::PrimitiveTopology::TriangleList,
             GpuBlend::Normal,
+            GpuSolidAlphaMode::SourceOver,
         );
-        let solid_replace_pipelines = solid_pipelines(
+        // Point and line commands are expanded to physical triangle quads
+        // before submission, so every solid uses one TriangleList pipeline.
+        let solid_replace_pipeline = scene_pipeline(
             device,
+            "lc_gpu_solid_replace",
             &solid_pipeline_layout,
             &solid_shader,
+            wgpu::PrimitiveTopology::TriangleList,
             GpuBlend::Replace,
+            GpuSolidAlphaMode::SourceOver,
         );
-        let solid_normal_pipelines = solid_pipelines(
+        let solid_over_normal_pipeline = scene_pipeline(
             device,
+            "lc_gpu_solid_over_normal",
             &solid_pipeline_layout,
             &solid_shader,
+            wgpu::PrimitiveTopology::TriangleList,
             GpuBlend::Normal,
+            GpuSolidAlphaMode::SourceOver,
         );
-        let solid_additive_pipelines = solid_pipelines(
+        let solid_non_separate_normal_pipeline = scene_pipeline(
             device,
+            "lc_gpu_solid_non_separate_normal",
             &solid_pipeline_layout,
             &solid_shader,
+            wgpu::PrimitiveTopology::TriangleList,
+            GpuBlend::Normal,
+            GpuSolidAlphaMode::NonSeparate,
+        );
+        let solid_additive_pipeline = scene_pipeline(
+            device,
+            "lc_gpu_solid_additive",
+            &solid_pipeline_layout,
+            &solid_shader,
+            wgpu::PrimitiveTopology::TriangleList,
             GpuBlend::Additive,
+            GpuSolidAlphaMode::SourceOver,
         );
         let monitor_gamma_pipeline = present_pipeline(
             device,
@@ -816,6 +1003,7 @@ impl RetainedGpuRenderer {
         Self {
             surface_format,
             generation,
+            health,
             texture_epoch: 0,
             textures: HashMap::new(),
             quad_bind_groups: HashMap::new(),
@@ -831,9 +1019,10 @@ impl RetainedGpuRenderer {
             quad_normal_pipeline,
             quad_additive_pipeline,
             landscape_pipeline,
-            solid_replace_pipelines,
-            solid_normal_pipelines,
-            solid_additive_pipelines,
+            solid_replace_pipeline,
+            solid_over_normal_pipeline,
+            solid_non_separate_normal_pipeline,
+            solid_additive_pipeline,
             monitor_gamma_pipeline,
             present_pipeline,
             nearest_sampler,
@@ -854,18 +1043,61 @@ impl RetainedGpuRenderer {
         }
     }
 
+    /// Rebuild every device-owned object after the application has replaced
+    /// the `Pixels` device and queue.
+    ///
+    /// `pixels` already reconfigures and retries an acquired surface once, so
+    /// an ordinary `SurfaceError::Lost`/`Outdated` does not require this. Call
+    /// this only after constructing a replacement `Pixels`; the next validated
+    /// scene carries complete CPU backing for every referenced texture and
+    /// therefore repopulates this empty cache without a CPU-frame fallback.
     pub fn recreate(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
-    ) {
+    ) -> u64 {
         let generation = self.generation.wrapping_add(1).max(1);
         *self = Self::build(device, queue, surface_format, generation);
+        generation
     }
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub fn health(&self) -> RetainedGpuRendererHealth {
+        self.health.current()
+    }
+
+    /// Refuse further work after an observed device fault. A recognized native
+    /// device-loss diagnostic is recoverable by rebuilding `Pixels` and calling
+    /// [`Self::recreate`]; validation and OOM failures remain fatal.
+    pub fn check_health(&self) -> Result<(), GpuRendererError> {
+        match self.health() {
+            RetainedGpuRendererHealth::Healthy => Ok(()),
+            RetainedGpuRendererHealth::RecreateRequired { reason, detail } => {
+                Err(GpuRendererError::DeviceRecreationRequired { reason, detail })
+            }
+            RetainedGpuRendererHealth::Fatal { reason, detail } => {
+                Err(GpuRendererError::DeviceFatal { reason, detail })
+            }
+        }
+    }
+
+    /// Validate a scene as a self-contained recovery unit before touching GPU
+    /// state. In particular, command resources must be declared in this scene,
+    /// even if an earlier frame left a texture with the same id in the cache.
+    pub fn validate_scene(
+        scene: &GpuScene,
+        presentation: &GpuPresentation,
+    ) -> Result<(), GpuRendererError> {
+        validate_scene(scene, presentation)
+    }
+
+    /// Validate ordered logical/physical layers without touching device state.
+    pub fn validate_layers(layers: &[GpuSceneLayer<'_>]) -> Result<(), GpuRendererError> {
+        validate_layers(layers).map(drop)
     }
 
     pub fn surface_format(&self) -> wgpu::TextureFormat {
@@ -907,13 +1139,39 @@ impl RetainedGpuRenderer {
         presentation: &GpuPresentation,
         request_readback: bool,
     ) -> Result<Option<GpuReadbackTicket>, GpuRendererError> {
-        validate_presentation(scene, presentation)?;
+        let layer = GpuSceneLayer::new(scene, *presentation);
+        self.render_layers(
+            device,
+            queue,
+            encoder,
+            surface_view,
+            std::slice::from_ref(&layer),
+            request_readback,
+        )
+    }
+
+    /// Compose ordered scenes that may use different coordinate spaces into
+    /// one physical frame, then apply monitor gamma/readback/presentation once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_layers(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        surface_view: &wgpu::TextureView,
+        layers: &[GpuSceneLayer<'_>],
+        request_readback: bool,
+    ) -> Result<Option<GpuReadbackTicket>, GpuRendererError> {
+        self.check_health()?;
+        let resources = validate_layers(layers)?;
+        let base = layers.first().ok_or(GpuRendererError::NoSceneLayers)?;
+        let scene = base.scene;
         self.last_stats = GpuRendererStats::default();
         self.texture_epoch = self.texture_epoch.wrapping_add(1).max(1);
         self.sync_gamma(queue, scene);
-        self.sync_textures(device, queue, &scene.textures)?;
+        self.sync_textures(device, queue, &resources)?;
 
-        let (vertices, calls) = self.build_draw_stream(scene, presentation)?;
+        let (vertices, calls) = self.build_layered_draw_stream(layers)?;
         let vertex_bytes = packed_vertex_bytes(&vertices);
         self.ensure_bind_groups(device, &calls)?;
         let mut used_quad_bindings = HashSet::new();
@@ -926,7 +1184,7 @@ impl RetainedGpuRenderer {
                 DrawKind::Landscape(key) => {
                     used_landscape_bindings.insert(key);
                 }
-                DrawKind::Solid(_) => {}
+                DrawKind::Solid { .. } => {}
             }
         }
         // Bind groups are cheap to recreate and can otherwise grow with every
@@ -944,7 +1202,7 @@ impl RetainedGpuRenderer {
         self.last_stats.draw_calls = calls.len();
         self.last_stats.resident_source_textures = self.textures.len();
 
-        self.ensure_composition(device, presentation.physical_extent);
+        self.ensure_composition(device, base.presentation.physical_extent);
         let composition = self.composition.as_ref().expect("composition was created");
         let clear = scene.clear;
         {
@@ -970,44 +1228,7 @@ impl RetainedGpuRenderer {
                 pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                 pass.set_bind_group(0, &self.gamma_bind_group, &[]);
             }
-            for call in &calls {
-                pass.set_scissor_rect(
-                    call.scissor.x,
-                    call.scissor.y,
-                    call.scissor.width,
-                    call.scissor.height,
-                );
-                match call.kind {
-                    DrawKind::Quad(key) => {
-                        pass.set_pipeline(match call.blend {
-                            GpuBlend::Replace => &self.quad_replace_pipeline,
-                            GpuBlend::Normal => &self.quad_normal_pipeline,
-                            GpuBlend::Additive => &self.quad_additive_pipeline,
-                        });
-                        pass.set_bind_group(
-                            1,
-                            self.quad_bind_groups
-                                .get(&key)
-                                .expect("quad binding was prepared"),
-                            &[],
-                        );
-                    }
-                    DrawKind::Landscape(key) => {
-                        pass.set_pipeline(&self.landscape_pipeline);
-                        pass.set_bind_group(
-                            1,
-                            self.landscape_bind_groups
-                                .get(&key)
-                                .expect("landscape binding was prepared"),
-                            &[],
-                        );
-                    }
-                    DrawKind::Solid(topology) => {
-                        pass.set_pipeline(self.solid_pipeline(call.blend, topology));
-                    }
-                }
-                pass.draw(call.vertices.clone(), 0..1);
-            }
+            self.encode_draw_calls(&mut pass, &calls);
         }
 
         if scene.gamma_mode.monitor_postpass() {
@@ -1064,6 +1285,7 @@ impl RetainedGpuRenderer {
 
         self.vertex_scratch = vertices;
         self.draw_call_scratch = calls;
+        self.check_health()?;
         Ok(readback)
     }
 
@@ -1154,36 +1376,35 @@ impl RetainedGpuRenderer {
                 .get_mut(&resource.id)
                 .expect("non-recreated texture exists");
             cached.last_used_epoch = self.texture_epoch;
-            if cached.revision == resource.revision {
-                // A recorder may encounter the same retained surface more than
-                // once and repeat the delta that was already consumed above.
-                continue;
-            }
-
-            let can_apply_delta =
-                !resource.dirty.is_empty() && resource.base_revision == Some(cached.revision);
-            if !can_apply_delta || dirty_upload_prefers_full(resource) {
-                // The CPU backing is complete.  If presentation skipped one
-                // or more produced revisions (or this delta has no declared
-                // base), replace the GPU contents rather than layering a
-                // newer dirty rectangle over stale texels.
-                upload_full(queue, &cached._texture, resource);
-                self.last_stats.full_upload_bytes = self
-                    .last_stats
-                    .full_upload_bytes
-                    .saturating_add(resource.pixels.len() as u64);
-            } else {
-                for &rect in &resource.dirty {
-                    validate_dirty(resource, rect)?;
-                    if rect.width == 0 || rect.height == 0 {
-                        continue;
+            match texture_upload_plan(Some(cached.revision), resource) {
+                TextureUploadPlan::Unchanged => {
+                    // A recorder may encounter the same retained surface more
+                    // than once and repeat the delta already consumed above.
+                    continue;
+                }
+                TextureUploadPlan::Full => {
+                    // The CPU backing is complete. If presentation skipped one
+                    // or more produced revisions (including time spent in
+                    // another application mode), replace the GPU contents
+                    // rather than applying a delta to stale texels.
+                    upload_full(queue, &cached._texture, resource);
+                    self.last_stats.full_upload_bytes = self
+                        .last_stats
+                        .full_upload_bytes
+                        .saturating_add(resource.pixels.len() as u64);
+                }
+                TextureUploadPlan::Dirty => {
+                    for &rect in &resource.dirty {
+                        if rect.width == 0 || rect.height == 0 {
+                            continue;
+                        }
+                        upload_dirty(queue, &cached._texture, resource, rect);
+                        let bytes = u64::from(rect.width)
+                            .saturating_mul(u64::from(rect.height))
+                            .saturating_mul(resource.format.bytes_per_pixel() as u64);
+                        self.last_stats.dirty_upload_bytes =
+                            self.last_stats.dirty_upload_bytes.saturating_add(bytes);
                     }
-                    upload_dirty(queue, &cached._texture, resource, rect);
-                    let bytes = u64::from(rect.width)
-                        .saturating_mul(u64::from(rect.height))
-                        .saturating_mul(resource.format.bytes_per_pixel() as u64);
-                    self.last_stats.dirty_upload_bytes =
-                        self.last_stats.dirty_upload_bytes.saturating_add(bytes);
                 }
             }
             cached.revision = resource.revision;
@@ -1225,16 +1446,28 @@ impl RetainedGpuRenderer {
         Ok(())
     }
 
-    fn build_draw_stream(
+    fn build_layered_draw_stream(
         &mut self,
-        scene: &GpuScene,
-        presentation: &GpuPresentation,
+        layers: &[GpuSceneLayer<'_>],
     ) -> Result<(Vec<PackedVertex>, Vec<DrawCall>), GpuRendererError> {
         let mut vertices = std::mem::take(&mut self.vertex_scratch);
         let mut calls = std::mem::take(&mut self.draw_call_scratch);
         vertices.clear();
         calls.clear();
-        calls.reserve(scene.commands.len());
+        calls.reserve(layers.iter().map(|layer| layer.scene.commands.len()).sum());
+        for layer in layers {
+            self.append_draw_stream(layer.scene, &layer.presentation, &mut vertices, &mut calls)?;
+        }
+        Ok((vertices, calls))
+    }
+
+    fn append_draw_stream(
+        &self,
+        scene: &GpuScene,
+        presentation: &GpuPresentation,
+        vertices: &mut Vec<PackedVertex>,
+        calls: &mut Vec<DrawCall>,
+    ) -> Result<(), GpuRendererError> {
         for command in &scene.commands {
             match command {
                 GpuCommand::Quad {
@@ -1252,26 +1485,28 @@ impl RetainedGpuRenderer {
                         return Err(GpuRendererError::OwnerMaskNotLowered);
                     }
                     self.require_format(*texture, GpuTextureFormat::Rgba8)?;
-                    let Some(scissor) = physical_scissor(*clip, presentation)? else {
+                    let Some(projection) =
+                        draw_projection(*clip, scene.logical_extent, presentation)?
+                    else {
                         continue;
                     };
                     let start = vertex_count(&vertices)?;
                     for index in [0, 1, 2, 2, 1, 3] {
                         let vertex = quad[index];
                         append_vertex(
-                            &mut vertices,
+                            vertices,
                             packed_quad_vertex(
                                 vertex,
                                 *base_mod2,
                                 fragment_gamma_flag(scene.gamma_mode, *gamma),
-                                presentation,
+                                &projection,
                             )?,
                         );
                     }
                     let end = vertex_count(&vertices)?;
                     calls.push(DrawCall {
                         vertices: start..end,
-                        scissor,
+                        scissor: projection.scissor,
                         blend: *blend,
                         kind: DrawKind::Quad(QuadBindingKey {
                             texture: *texture,
@@ -1298,7 +1533,9 @@ impl RetainedGpuRenderer {
                     if let Some(liquid) = liquid {
                         self.require_format(*liquid, GpuTextureFormat::Rgba8)?;
                     }
-                    let Some(scissor) = physical_scissor(*clip, presentation)? else {
+                    let Some(projection) =
+                        draw_projection(*clip, scene.logical_extent, presentation)?
+                    else {
                         continue;
                     };
                     let base_extent = self
@@ -1320,20 +1557,20 @@ impl RetainedGpuRenderer {
                     let start = vertex_count(&vertices)?;
                     for index in [0, 1, 2, 2, 1, 3] {
                         append_vertex(
-                            &mut vertices,
+                            vertices,
                             packed_landscape_vertex(
                                 quad[index],
                                 liquid_scale,
                                 *phase,
                                 fragment_gamma_flag(scene.gamma_mode, *gamma),
-                                presentation,
+                                &projection,
                             )?,
                         );
                     }
                     let end = vertex_count(&vertices)?;
                     calls.push(DrawCall {
                         vertices: start..end,
-                        scissor,
+                        scissor: projection.scissor,
                         blend: GpuBlend::Normal,
                         kind: DrawKind::Landscape(LandscapeBindingKey {
                             base: *base,
@@ -1345,6 +1582,7 @@ impl RetainedGpuRenderer {
                 GpuCommand::Solid {
                     vertices: solid,
                     topology,
+                    alpha_mode,
                     clip,
                     blend,
                     gamma,
@@ -1353,69 +1591,70 @@ impl RetainedGpuRenderer {
                     if solid.is_empty() {
                         continue;
                     }
-                    let Some(scissor) = physical_scissor(*clip, presentation)? else {
+                    let Some(projection) =
+                        draw_projection(*clip, scene.logical_extent, presentation)?
+                    else {
                         continue;
                     };
-                    let draw_topology = match topology {
-                        // wgpu points are always one physical pixel, whereas
-                        // C++ uses glPointSize(Application.GetScale()).  The
-                        // producers place points at logical pixel centers, so
-                        // expand them to logical 1x1 quads before projection.
-                        GpuPrimitiveTopology::PointList => GpuPrimitiveTopology::TriangleList,
-                        // C++ scales line width too.  No retained-scene
-                        // producer currently emits LineList; preserve the
-                        // native topology until geometry expansion is needed.
-                        GpuPrimitiveTopology::LineList => GpuPrimitiveTopology::LineList,
-                        GpuPrimitiveTopology::TriangleList => GpuPrimitiveTopology::TriangleList,
-                    };
                     let start = vertex_count(&vertices)?;
-                    for vertex in solid {
-                        if !vertex.color.iter().all(|value| value.is_finite()) {
-                            return Err(GpuRendererError::NonFiniteCoordinate);
+                    if !solid
+                        .iter()
+                        .flat_map(|vertex| vertex.color)
+                        .all(f32::is_finite)
+                    {
+                        return Err(GpuRendererError::NonFiniteCoordinate);
+                    }
+                    match topology {
+                        GpuPrimitiveTopology::PointList => {
+                            for vertex in solid {
+                                if let Some(point) = packed_point_rect(
+                                    *vertex,
+                                    fragment_gamma_flag(scene.gamma_mode, *gamma),
+                                    &projection,
+                                )? {
+                                    vertices.extend(point);
+                                }
+                            }
                         }
-                        if *topology == GpuPrimitiveTopology::PointList {
-                            let [x, y, w] = vertex.position;
-                            for [offset_x, offset_y] in [
-                                [-0.5, -0.5],
-                                [0.5, -0.5],
-                                [-0.5, 0.5],
-                                [-0.5, 0.5],
-                                [0.5, -0.5],
-                                [0.5, 0.5],
-                            ] {
+                        GpuPrimitiveTopology::LineList => {
+                            for pair in solid.chunks_exact(2) {
+                                vertices.extend(packed_line_fragments(
+                                    pair[0],
+                                    pair[1],
+                                    fragment_gamma_flag(scene.gamma_mode, *gamma),
+                                    &projection,
+                                )?);
+                            }
+                        }
+                        GpuPrimitiveTopology::TriangleList => {
+                            for vertex in solid {
                                 append_vertex(
-                                    &mut vertices,
+                                    vertices,
                                     packed_solid_vertex(
-                                        [x + offset_x * w, y + offset_y * w, w],
+                                        vertex.position,
                                         vertex.color,
                                         fragment_gamma_flag(scene.gamma_mode, *gamma),
-                                        presentation,
+                                        &projection,
                                     )?,
                                 );
                             }
-                        } else {
-                            append_vertex(
-                                &mut vertices,
-                                packed_solid_vertex(
-                                    vertex.position,
-                                    vertex.color,
-                                    fragment_gamma_flag(scene.gamma_mode, *gamma),
-                                    presentation,
-                                )?,
-                            );
                         }
                     }
                     let end = vertex_count(&vertices)?;
-                    calls.push(DrawCall {
-                        vertices: start..end,
-                        scissor,
-                        blend: *blend,
-                        kind: DrawKind::Solid(draw_topology),
-                    });
+                    if start != end {
+                        calls.push(DrawCall {
+                            vertices: start..end,
+                            scissor: projection.scissor,
+                            blend: *blend,
+                            kind: DrawKind::Solid {
+                                alpha_mode: *alpha_mode,
+                            },
+                        });
+                    }
                 }
             }
         }
-        Ok((vertices, calls))
+        Ok(())
     }
 
     fn require_format(
@@ -1619,13 +1858,62 @@ impl RetainedGpuRenderer {
     fn solid_pipeline(
         &self,
         blend: GpuBlend,
-        topology: GpuPrimitiveTopology,
+        alpha_mode: GpuSolidAlphaMode,
     ) -> &wgpu::RenderPipeline {
-        let index = topology_index(topology);
         match blend {
-            GpuBlend::Replace => &self.solid_replace_pipelines[index],
-            GpuBlend::Normal => &self.solid_normal_pipelines[index],
-            GpuBlend::Additive => &self.solid_additive_pipelines[index],
+            GpuBlend::Replace => &self.solid_replace_pipeline,
+            GpuBlend::Normal => match alpha_mode {
+                GpuSolidAlphaMode::SourceOver => &self.solid_over_normal_pipeline,
+                GpuSolidAlphaMode::NonSeparate => &self.solid_non_separate_normal_pipeline,
+            },
+            // The CPU reference preserves destination alpha for every
+            // additive producer, so one additive state serves both modes.
+            GpuBlend::Additive => &self.solid_additive_pipeline,
+        }
+    }
+
+    fn encode_draw_calls<'pass>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        calls: &'pass [DrawCall],
+    ) {
+        for call in calls {
+            pass.set_scissor_rect(
+                call.scissor.x,
+                call.scissor.y,
+                call.scissor.width,
+                call.scissor.height,
+            );
+            match call.kind {
+                DrawKind::Quad(key) => {
+                    pass.set_pipeline(match call.blend {
+                        GpuBlend::Replace => &self.quad_replace_pipeline,
+                        GpuBlend::Normal => &self.quad_normal_pipeline,
+                        GpuBlend::Additive => &self.quad_additive_pipeline,
+                    });
+                    pass.set_bind_group(
+                        1,
+                        self.quad_bind_groups
+                            .get(&key)
+                            .expect("quad binding was prepared"),
+                        &[],
+                    );
+                }
+                DrawKind::Landscape(key) => {
+                    pass.set_pipeline(&self.landscape_pipeline);
+                    pass.set_bind_group(
+                        1,
+                        self.landscape_bind_groups
+                            .get(&key)
+                            .expect("landscape binding was prepared"),
+                        &[],
+                    );
+                }
+                DrawKind::Solid { alpha_mode } => {
+                    pass.set_pipeline(self.solid_pipeline(call.blend, alpha_mode));
+                }
+            }
+            pass.draw(call.vertices.clone(), 0..1);
         }
     }
 }
@@ -1644,7 +1932,7 @@ fn packed_quad_vertex(
     vertex: GpuVertex,
     mod2: bool,
     gamma: bool,
-    presentation: &GpuPresentation,
+    projection: &DrawProjection,
 ) -> Result<PackedVertex, GpuRendererError> {
     if !vertex
         .uv
@@ -1656,7 +1944,7 @@ fn packed_quad_vertex(
         return Err(GpuRendererError::NonFiniteCoordinate);
     }
     Ok(PackedVertex {
-        clip: clip_position(vertex.position, presentation)?,
+        clip: clip_position(vertex.position, projection)?,
         uv: vertex.uv,
         data0: vertex.modulation,
         data1: [flag(mod2), flag(gamma), 0.0, 0.0],
@@ -1669,7 +1957,7 @@ fn packed_landscape_vertex(
     liquid_scale: [f32; 2],
     phase: [f32; 3],
     gamma: bool,
-    presentation: &GpuPresentation,
+    projection: &DrawProjection,
 ) -> Result<PackedVertex, GpuRendererError> {
     if !vertex
         .uv
@@ -1682,7 +1970,7 @@ fn packed_landscape_vertex(
         return Err(GpuRendererError::NonFiniteCoordinate);
     }
     Ok(PackedVertex {
-        clip: clip_position(vertex.position, presentation)?,
+        clip: clip_position(vertex.position, projection)?,
         uv: vertex.uv,
         data0: vertex.modulation,
         data1: [liquid_scale[0], liquid_scale[1], 0.0, 0.0],
@@ -1694,10 +1982,463 @@ fn packed_solid_vertex(
     position: [f32; 3],
     color: [f32; 4],
     gamma: bool,
-    presentation: &GpuPresentation,
+    projection: &DrawProjection,
 ) -> Result<PackedVertex, GpuRendererError> {
     Ok(PackedVertex {
-        clip: clip_position(position, presentation)?,
+        clip: clip_position(position, projection)?,
+        uv: [0.0, 0.0],
+        data0: color,
+        data1: [flag(gamma), 0.0, 0.0, 0.0],
+        data2: [0.0; 4],
+    })
+}
+
+fn rounded_raster_width(projection: &DrawProjection) -> i64 {
+    let maximum = projection.physical_extent.into_iter().max().unwrap_or(1);
+    projection
+        .line_width
+        .round()
+        .max(1.0)
+        .min(maximum.max(1) as f32) as i64
+}
+
+fn floor_i64(value: f64) -> Result<i64, GpuRendererError> {
+    if !value.is_finite() || value < i64::MIN as f64 || value >= i64::MAX as f64 {
+        return Err(GpuRendererError::NonFiniteCoordinate);
+    }
+    Ok(value.floor() as i64)
+}
+
+fn packed_point_rect(
+    point: GpuSolidVertex,
+    gamma: bool,
+    projection: &DrawProjection,
+) -> Result<Option<[PackedVertex; 6]>, GpuRendererError> {
+    let [logical_x, logical_y, logical_w] = point.position;
+    if logical_w == 0.0 {
+        return Err(GpuRendererError::NonFiniteCoordinate);
+    }
+    if logical_w < 0.0 {
+        return Ok(None);
+    }
+    // Preserve the renderer's finite clip-coordinate validation even when
+    // the point center will subsequently be clipped away.
+    let _ = clip_position(point.position, projection)?;
+    let center_x = f64::from(logical_x) / f64::from(logical_w);
+    let center_y = f64::from(logical_y) / f64::from(logical_w);
+    let logical_clip = projection.clipper.logical_clip();
+    let clip_left = f64::from(logical_clip.x);
+    let clip_top = f64::from(logical_clip.y);
+    let clip_right = clip_left + f64::from(logical_clip.width);
+    let clip_bottom = clip_top + f64::from(logical_clip.height);
+    // GL clips the point vertex before applying PointSize. A wide point whose
+    // center is outside the clip volume must not leak back through the scissor;
+    // centers exactly on a clip plane remain inside.
+    if center_x < clip_left
+        || center_x > clip_right
+        || center_y < clip_top
+        || center_y > clip_bottom
+    {
+        return Ok(None);
+    }
+    let [x, top] = projected_physical_position(point.position, projection)?;
+    let height = f64::from(projection.physical_extent[1]);
+    let gl_y = height - top;
+    let width = rounded_raster_width(projection);
+    let half = width / 2;
+    // OpenGL 2.1 section 3.3.1 centers odd point widths on the truncated
+    // window coordinate and even widths on floor(window + 1/2). Work in GL's
+    // bottom-up coordinates, then reflect the aligned rectangle once.
+    let (gl_left, gl_bottom) = if width % 2 == 0 {
+        (
+            floor_i64(x + 0.5)?.saturating_sub(half),
+            floor_i64(gl_y + 0.5)?.saturating_sub(half),
+        )
+    } else {
+        (
+            floor_i64(x)?.saturating_sub(half),
+            floor_i64(gl_y)?.saturating_sub(half),
+        )
+    };
+    let gl_right = gl_left.saturating_add(width);
+    let gl_top = gl_bottom.saturating_add(width);
+    let framebuffer_height = i64::from(projection.physical_extent[1]);
+    let left = gl_left;
+    let right = gl_right;
+    let top = framebuffer_height.saturating_sub(gl_top);
+    let bottom = framebuffer_height.saturating_sub(gl_bottom);
+    let scissor_right = i64::from(projection.scissor.x) + i64::from(projection.scissor.width);
+    let scissor_bottom = i64::from(projection.scissor.y) + i64::from(projection.scissor.height);
+    if right <= i64::from(projection.scissor.x)
+        || left >= scissor_right
+        || bottom <= i64::from(projection.scissor.y)
+        || top >= scissor_bottom
+    {
+        return Ok(None);
+    }
+    let positions = [
+        [left as f64, top as f64],
+        [right as f64, top as f64],
+        [left as f64, bottom as f64],
+        [left as f64, bottom as f64],
+        [right as f64, top as f64],
+        [right as f64, bottom as f64],
+    ];
+    Ok(Some([
+        packed_solid_physical_vertex(positions[0], point.color, gamma, projection)?,
+        packed_solid_physical_vertex(positions[1], point.color, gamma, projection)?,
+        packed_solid_physical_vertex(positions[2], point.color, gamma, projection)?,
+        packed_solid_physical_vertex(positions[3], point.color, gamma, projection)?,
+        packed_solid_physical_vertex(positions[4], point.color, gamma, projection)?,
+        packed_solid_physical_vertex(positions[5], point.color, gamma, projection)?,
+    ]))
+}
+
+fn next_down(value: f64) -> f64 {
+    if value.is_nan() || value == f64::NEG_INFINITY {
+        return value;
+    }
+    if value == 0.0 {
+        return -f64::from_bits(1);
+    }
+    let bits = value.to_bits();
+    if value > 0.0 {
+        f64::from_bits(bits - 1)
+    } else {
+        f64::from_bits(bits + 1)
+    }
+}
+
+fn perturb_down(value: f64, amount: f64) -> f64 {
+    let perturbed = value - amount;
+    if perturbed < value {
+        perturbed
+    } else {
+        next_down(value)
+    }
+}
+
+fn l1_distance(point: [f64; 2], center: [f64; 2]) -> f64 {
+    (point[0] - center[0]).abs() + (point[1] - center[1]).abs()
+}
+
+fn segment_diamond_distance(start: [f64; 2], end: [f64; 2], center: [f64; 2]) -> f64 {
+    let delta = [end[0] - start[0], end[1] - start[1]];
+    let mut minimum = l1_distance(start, center).min(l1_distance(end, center));
+    for axis in 0..2 {
+        if delta[axis] != 0.0 {
+            let t = ((center[axis] - start[axis]) / delta[axis]).clamp(0.0, 1.0);
+            let point = [start[0] + delta[0] * t, start[1] + delta[1] * t];
+            minimum = minimum.min(l1_distance(point, center));
+        }
+    }
+    minimum
+}
+
+fn clip_directed_line(
+    start: [f64; 2],
+    end: [f64; 2],
+    bounds: [f64; 4],
+) -> Option<([f64; 2], [f64; 2])> {
+    let delta = [end[0] - start[0], end[1] - start[1]];
+    let mut enter = 0.0_f64;
+    let mut exit = 1.0_f64;
+    for (p, q) in [
+        (-delta[0], start[0] - bounds[0]),
+        (delta[0], bounds[1] - start[0]),
+        (-delta[1], start[1] - bounds[2]),
+        (delta[1], bounds[3] - start[1]),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+            continue;
+        }
+        let ratio = q / p;
+        if p < 0.0 {
+            enter = enter.max(ratio);
+        } else {
+            exit = exit.min(ratio);
+        }
+        if enter > exit {
+            return None;
+        }
+    }
+    if enter >= exit {
+        return None;
+    }
+    Some((
+        [start[0] + delta[0] * enter, start[1] + delta[1] * enter],
+        [start[0] + delta[0] * exit, start[1] + delta[1] * exit],
+    ))
+}
+
+fn line_color_at_parameter(
+    start: GpuSolidVertex,
+    end: GpuSolidVertex,
+    t: f64,
+) -> Result<[f32; 4], GpuRendererError> {
+    let start_w = f64::from(start.position[2]);
+    let end_w = f64::from(end.position[2]);
+    let denominator = (1.0 - t) / start_w + t / end_w;
+    if !denominator.is_finite() || denominator == 0.0 {
+        return Err(GpuRendererError::NonFiniteCoordinate);
+    }
+    let color = std::array::from_fn(|channel| {
+        (((1.0 - t) * f64::from(start.color[channel]) / start_w
+            + t * f64::from(end.color[channel]) / end_w)
+            / denominator) as f32
+    });
+    color
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(color)
+        .ok_or(GpuRendererError::NonFiniteCoordinate)
+}
+
+fn walk_aliased_line_fragments(
+    start: GpuSolidVertex,
+    end: GpuSolidVertex,
+    projection: &DrawProjection,
+    mut emit: impl FnMut(i64, i64, f64) -> Result<(), GpuRendererError>,
+) -> Result<u64, GpuRendererError> {
+    let [start_x, start_top] = projected_physical_position(start.position, projection)?;
+    let [end_x, end_top] = projected_physical_position(end.position, projection)?;
+    let framebuffer_height = f64::from(projection.physical_extent[1]);
+    let original_start = [start_x, framebuffer_height - start_top];
+    let original_end = [end_x, framebuffer_height - end_top];
+    let physical_clip = projection.clipper.physical_clip();
+    let clip_left = f64::from(physical_clip.x);
+    let clip_right = clip_left + f64::from(physical_clip.width);
+    let clip_top = f64::from(physical_clip.y);
+    let clip_bottom = clip_top + f64::from(physical_clip.height);
+    let Some((clipped_start, clipped_end)) = clip_directed_line(
+        original_start,
+        original_end,
+        [
+            clip_left,
+            clip_right,
+            framebuffer_height - clip_bottom,
+            framebuffer_height - clip_top,
+        ],
+    ) else {
+        return Ok(0);
+    };
+    let delta = [
+        clipped_end[0] - clipped_start[0],
+        clipped_end[1] - clipped_start[1],
+    ];
+    if delta == [0.0, 0.0] {
+        return Ok(0);
+    }
+    let x_major = delta[0].abs() >= delta[1].abs();
+    let line_width = rounded_raster_width(projection);
+    let minor_offset = (line_width - 1) as f64 * 0.5;
+    let mut base_start = clipped_start;
+    let mut base_end = clipped_end;
+    let mut attribute_start = original_start;
+    let mut attribute_end = original_end;
+    let minor_axis = usize::from(x_major);
+    base_start[minor_axis] -= minor_offset;
+    base_end[minor_axis] -= minor_offset;
+    attribute_start[minor_axis] -= minor_offset;
+    attribute_end[minor_axis] -= minor_offset;
+
+    // Section 3.4.1 defines the ideal tie break by translating both endpoints
+    // by (-epsilon, -epsilon^2) in GL window coordinates. Inputs originate as
+    // f32; this bias is below one f32 ulp at unit magnitude, while next_down
+    // keeps the epsilon^2 term observable at large physical coordinates.
+    const EPSILON: f64 = f32::EPSILON as f64 * 0.25;
+    let epsilon_squared = EPSILON * EPSILON;
+    let raster_start = [
+        perturb_down(base_start[0], EPSILON),
+        perturb_down(base_start[1], epsilon_squared),
+    ];
+    let raster_end = [
+        perturb_down(base_end[0], EPSILON),
+        perturb_down(base_end[1], epsilon_squared),
+    ];
+    let major_axis = usize::from(!x_major);
+    let major_delta = raster_end[major_axis] - raster_start[major_axis];
+    let (clip_start, clip_end) = if x_major {
+        (
+            i64::from(projection.scissor.x),
+            i64::from(projection.scissor.x) + i64::from(projection.scissor.width),
+        )
+    } else {
+        let height = i64::from(projection.physical_extent[1]);
+        (
+            height - i64::from(projection.scissor.y) - i64::from(projection.scissor.height),
+            height - i64::from(projection.scissor.y),
+        )
+    };
+    let segment_min = raster_start[major_axis].min(raster_end[major_axis]);
+    let segment_max = raster_start[major_axis].max(raster_end[major_axis]);
+    let first_major = (segment_min.floor() - 1.0)
+        .max(clip_start as f64)
+        .min(clip_end as f64) as i64;
+    let end_major = (segment_max.ceil() + 1.0)
+        .max(clip_start as f64)
+        .min(clip_end as f64) as i64;
+    if first_major >= end_major {
+        return Ok(0);
+    }
+
+    let span = u64::try_from(end_major - first_major)
+        .map_err(|_| GpuRendererError::VertexRangeOverflow)?;
+    let mut fragment_count = 0_u64;
+    for offset in 0..span {
+        let offset = i64::try_from(offset).map_err(|_| GpuRendererError::VertexRangeOverflow)?;
+        let major_pixel = if major_delta > 0.0 {
+            first_major + offset
+        } else {
+            end_major - 1 - offset
+        };
+        let major_center = major_pixel as f64 + 0.5;
+        let guess_t = ((major_center - raster_start[major_axis]) / major_delta).clamp(0.0, 1.0);
+        let guess_minor = raster_start[minor_axis]
+            + (raster_end[minor_axis] - raster_start[minor_axis]) * guess_t;
+        let guess_pixel = guess_minor.floor() as i64;
+        let mut base_fragment = None::<(i64, f64)>;
+        for minor_pixel in guess_pixel.saturating_sub(2)..=guess_pixel.saturating_add(2) {
+            let center = if x_major {
+                [major_center, minor_pixel as f64 + 0.5]
+            } else {
+                [minor_pixel as f64 + 0.5, major_center]
+            };
+            if l1_distance(raster_end, center) < 0.5 {
+                continue;
+            }
+            let distance = segment_diamond_distance(raster_start, raster_end, center);
+            if distance < 0.5
+                && base_fragment.is_none_or(|(_, best_distance)| distance < best_distance)
+            {
+                base_fragment = Some((minor_pixel, distance));
+            }
+        }
+        let Some((base_minor, _)) = base_fragment else {
+            continue;
+        };
+        let base_center = if x_major {
+            [major_center, base_minor as f64 + 0.5]
+        } else {
+            [base_minor as f64 + 0.5, major_center]
+        };
+        let attribute_delta = [
+            attribute_end[0] - attribute_start[0],
+            attribute_end[1] - attribute_start[1],
+        ];
+        let denominator =
+            attribute_delta[0] * attribute_delta[0] + attribute_delta[1] * attribute_delta[1];
+        let t = ((base_center[0] - attribute_start[0]) * attribute_delta[0]
+            + (base_center[1] - attribute_start[1]) * attribute_delta[1])
+            / denominator;
+
+        for width_offset in 0..line_width {
+            let replicated_minor = base_minor.saturating_add(width_offset);
+            let (x, gl_y) = if x_major {
+                (major_pixel, replicated_minor)
+            } else {
+                (replicated_minor, major_pixel)
+            };
+            let y = i64::from(projection.physical_extent[1]) - 1 - gl_y;
+            let scissor_right =
+                i64::from(projection.scissor.x) + i64::from(projection.scissor.width);
+            let scissor_bottom =
+                i64::from(projection.scissor.y) + i64::from(projection.scissor.height);
+            if x < i64::from(projection.scissor.x)
+                || x >= scissor_right
+                || y < i64::from(projection.scissor.y)
+                || y >= scissor_bottom
+            {
+                continue;
+            }
+            fragment_count = fragment_count
+                .checked_add(1)
+                .ok_or(GpuRendererError::VertexRangeOverflow)?;
+            emit(x, y, t)?;
+        }
+    }
+    Ok(fragment_count)
+}
+
+fn packed_line_fragments(
+    start: GpuSolidVertex,
+    end: GpuSolidVertex,
+    gamma: bool,
+    projection: &DrawProjection,
+) -> Result<Vec<PackedVertex>, GpuRendererError> {
+    // OpenGL 2.1 section 3.4 rasterizes an aliased x-major line into at
+    // most one fragment per physical column (one per row for y-major), omits
+    // the directed final fragment, and implements a wide line by replicating
+    // that base fragment in the minor direction. An oriented rectangle is
+    // observably wrong: it is direction-invariant and can cover two pixels in
+    // one major column on a diagonal. Generate the exact half-open fragment
+    // stream, then lower each physical fragment to a 1x1 triangle pair.
+    let mut packed = Vec::new();
+    walk_aliased_line_fragments(start, end, projection, |x, y, t| {
+        let color = line_color_at_parameter(start, end, t)?;
+        let left = x as f64;
+        let top = y as f64;
+        for position in [
+            [left, top],
+            [left + 1.0, top],
+            [left, top + 1.0],
+            [left, top + 1.0],
+            [left + 1.0, top],
+            [left + 1.0, top + 1.0],
+        ] {
+            packed.push(packed_solid_physical_vertex(
+                position, color, gamma, projection,
+            )?);
+        }
+        Ok(())
+    })?;
+    Ok(packed)
+}
+
+fn projected_physical_position(
+    position: [f32; 3],
+    projection: &DrawProjection,
+) -> Result<[f64; 2], GpuRendererError> {
+    if !position.iter().all(|value| value.is_finite()) || position[2] == 0.0 {
+        return Err(GpuRendererError::NonFiniteCoordinate);
+    }
+    let logical_x = f64::from(position[0] / position[2]);
+    let logical_y = f64::from(position[1] / position[2]);
+    let (physical_x, physical_y) = projection.clipper.logical_to_physical(logical_x, logical_y);
+    [physical_x, physical_y]
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some([physical_x, physical_y])
+        .ok_or(GpuRendererError::NonFiniteCoordinate)
+}
+
+fn packed_solid_physical_vertex(
+    position: [f64; 2],
+    color: [f32; 4],
+    gamma: bool,
+    projection: &DrawProjection,
+) -> Result<PackedVertex, GpuRendererError> {
+    if !position.iter().all(|value| value.is_finite())
+        || !color.iter().all(|value| value.is_finite())
+    {
+        return Err(GpuRendererError::NonFiniteCoordinate);
+    }
+    let width = f64::from(projection.physical_extent[0]);
+    let height = f64::from(projection.physical_extent[1]);
+    let clip = [
+        (2.0 * position[0] / width - 1.0) as f32,
+        (1.0 - 2.0 * position[1] / height) as f32,
+        0.0,
+        1.0,
+    ];
+    if !clip.iter().all(|value| value.is_finite()) {
+        return Err(GpuRendererError::NonFiniteCoordinate);
+    }
+    Ok(PackedVertex {
+        clip,
         uv: [0.0, 0.0],
         data0: color,
         data1: [flag(gamma), 0.0, 0.0, 0.0],
@@ -1707,66 +2448,83 @@ fn packed_solid_vertex(
 
 fn clip_position(
     position: [f32; 3],
-    presentation: &GpuPresentation,
+    projection: &DrawProjection,
 ) -> Result<[f32; 4], GpuRendererError> {
     if !position.iter().all(|value| value.is_finite()) {
         return Err(GpuRendererError::NonFiniteCoordinate);
     }
     let [x, y, w] = position;
-    let width = presentation.physical_extent[0] as f32;
-    let height = presentation.physical_extent[1] as f32;
-    let scale = presentation.scale;
-    let crop = presentation.crop_top as f32;
-    let clip = [
-        2.0 * x * scale / width - w,
-        w - 2.0 * (y * scale - crop * w) / height,
+    let logical = projection.clipper.logical_clip();
+    let physical = projection.clipper.physical_clip();
+    let (scale_x, scale_y) = projection.clipper.scale();
+    let x = f64::from(x);
+    let y = f64::from(y);
+    let w = f64::from(w);
+
+    // Preserve homogeneous W while applying the affine mapping installed by
+    // gluOrtho2D over this command's logical clip. The rounded viewport extent
+    // intentionally supplies independent X/Y scales.
+    let physical_x = f64::from(physical.x) * w + (x - f64::from(logical.x) * w) * scale_x;
+    let physical_y = f64::from(physical.y) * w + (y - f64::from(logical.y) * w) * scale_y;
+    let width = f64::from(projection.physical_extent[0]);
+    let height = f64::from(projection.physical_extent[1]);
+    let clip64 = [
+        2.0 * physical_x / width - w,
+        w - 2.0 * physical_y / height,
         0.0,
         w,
     ];
+    let clip = clip64.map(|value| value as f32);
     clip.iter()
         .all(|value| value.is_finite())
         .then_some(clip)
         .ok_or(GpuRendererError::NonFiniteCoordinate)
 }
 
-fn physical_scissor(
+fn draw_projection(
     clip: Option<Rect>,
+    logical_extent: [u32; 2],
     presentation: &GpuPresentation,
-) -> Result<Option<Scissor>, GpuRendererError> {
-    let [width, height] = presentation.physical_extent;
-    let Some(clip) = clip else {
-        return Ok(Some(Scissor {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        }));
-    };
-    let scale = f64::from(presentation.scale);
-    let crop = f64::from(presentation.crop_top);
-    let left = (f64::from(clip.x) * scale).floor();
-    let top = (f64::from(clip.y) * scale - crop).floor();
-    let right = ((f64::from(clip.x) + f64::from(clip.width)) * scale).ceil();
-    let bottom = ((f64::from(clip.y) + f64::from(clip.height)) * scale - crop).ceil();
-    if ![left, top, right, bottom]
-        .iter()
-        .all(|value| value.is_finite())
-    {
-        return Err(GpuRendererError::NonFiniteCoordinate);
-    }
-    let left = left.clamp(0.0, f64::from(width)) as u32;
-    let top = top.clamp(0.0, f64::from(height)) as u32;
-    let right = right.clamp(0.0, f64::from(width)) as u32;
-    let bottom = bottom.clamp(0.0, f64::from(height)) as u32;
-    if right <= left || bottom <= top {
+) -> Result<Option<DrawProjection>, GpuRendererError> {
+    let logical_clip =
+        clip.unwrap_or_else(|| Rect::new(0, 0, logical_extent[0], logical_extent[1]));
+    let viewport_height = ((logical_extent[1] as f32) * presentation.scale)
+        .ceil()
+        .clamp(0.0, u32::MAX as f32) as u32;
+    let projection_height = viewport_height.saturating_sub(presentation.crop_top);
+    let clipper = ClipperProjection::new(
+        presentation.scale,
+        (logical_extent[0], logical_extent[1]),
+        projection_height,
+        logical_clip,
+    );
+    let Some(scissor) = physical_scissor(clipper.physical_clip(), presentation.physical_extent)
+    else {
         return Ok(None);
-    }
-    Ok(Some(Scissor {
-        x: left,
-        y: top,
-        width: right - left,
-        height: bottom - top,
+    };
+    Ok(Some(DrawProjection {
+        clipper,
+        physical_extent: presentation.physical_extent,
+        line_width: presentation.scale,
+        scissor,
     }))
+}
+
+fn physical_scissor(clip: Rect, extent: [u32; 2]) -> Option<Scissor> {
+    let [width, height] = extent;
+    let left = i64::from(clip.x).clamp(0, i64::from(width));
+    let top = i64::from(clip.y).clamp(0, i64::from(height));
+    let right = (i64::from(clip.x) + i64::from(clip.width)).clamp(0, i64::from(width));
+    let bottom = (i64::from(clip.y) + i64::from(clip.height)).clamp(0, i64::from(height));
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(Scissor {
+        x: left as u32,
+        y: top as u32,
+        width: (right - left) as u32,
+        height: (bottom - top) as u32,
+    })
 }
 
 fn validate_presentation(
@@ -1784,6 +2542,258 @@ fn validate_presentation(
             scale: presentation.scale,
             crop_top: presentation.crop_top,
         });
+    }
+    Ok(())
+}
+
+fn validate_scene(
+    scene: &GpuScene,
+    presentation: &GpuPresentation,
+) -> Result<(), GpuRendererError> {
+    validate_presentation(scene, presentation)?;
+
+    let mut resources = HashMap::with_capacity(scene.textures.len());
+    for resource in &scene.textures {
+        if resources.insert(resource.id, resource).is_some() {
+            return Err(GpuRendererError::DuplicateTexture(resource.id));
+        }
+        if !resource.is_valid() {
+            return Err(GpuRendererError::InvalidTextureData {
+                id: resource.id,
+                format: resource.format,
+                extent: resource.extent,
+                expected: resource.expected_len(),
+                actual: resource.pixels.len(),
+            });
+        }
+        if !resource.dirty.is_empty() && resource.base_revision == Some(resource.revision) {
+            return Err(GpuRendererError::DirtyRevisionNotAdvanced {
+                id: resource.id,
+                revision: resource.revision,
+            });
+        }
+        for &rect in &resource.dirty {
+            validate_dirty(resource, rect)?;
+        }
+    }
+
+    let mut packed_vertices = 0_u64;
+    for command in &scene.commands {
+        match command {
+            GpuCommand::Quad {
+                texture,
+                owner_mask,
+                vertices,
+                clip,
+                ..
+            } => {
+                if owner_mask.is_some() {
+                    return Err(GpuRendererError::OwnerMaskNotLowered);
+                }
+                require_declared_format(&resources, *texture, GpuTextureFormat::Rgba8)?;
+                let projection = draw_projection(*clip, scene.logical_extent, presentation)?;
+                for vertex in vertices {
+                    validate_gpu_vertex(vertex, projection.as_ref())?;
+                }
+                packed_vertices = packed_vertices.saturating_add(6);
+            }
+            GpuCommand::Landscape {
+                base,
+                liquid_mask,
+                liquid,
+                vertices,
+                clip,
+                phase,
+                ..
+            } => {
+                require_declared_format(&resources, *base, GpuTextureFormat::Rgba8)?;
+                if liquid_mask.is_some() != liquid.is_some() {
+                    return Err(GpuRendererError::IncompleteLandscapeLiquid);
+                }
+                if let Some(mask) = liquid_mask {
+                    require_declared_format(&resources, *mask, GpuTextureFormat::R8)?;
+                }
+                if let Some(liquid) = liquid {
+                    require_declared_format(&resources, *liquid, GpuTextureFormat::Rgba8)?;
+                }
+                if !phase.iter().all(|value| value.is_finite()) {
+                    return Err(GpuRendererError::NonFiniteCoordinate);
+                }
+                let projection = draw_projection(*clip, scene.logical_extent, presentation)?;
+                for vertex in vertices {
+                    validate_gpu_vertex(vertex, projection.as_ref())?;
+                }
+                packed_vertices = packed_vertices.saturating_add(6);
+            }
+            GpuCommand::Solid {
+                vertices,
+                topology,
+                clip,
+                ..
+            } => {
+                validate_primitive_count(*topology, vertices.len())?;
+                let projection = draw_projection(*clip, scene.logical_extent, presentation)?;
+                let mut expanded_line_vertices = 0_u64;
+                for vertex in vertices {
+                    if !vertex
+                        .position
+                        .iter()
+                        .chain(vertex.color.iter())
+                        .all(|value| value.is_finite())
+                    {
+                        return Err(GpuRendererError::NonFiniteCoordinate);
+                    }
+                    if *topology == GpuPrimitiveTopology::PointList {
+                        if let Some(projection) = projection.as_ref() {
+                            let _ = packed_point_rect(*vertex, false, projection)?;
+                        }
+                    } else if *topology == GpuPrimitiveTopology::TriangleList {
+                        if let Some(projection) = projection.as_ref() {
+                            let _ = clip_position(vertex.position, projection)?;
+                        }
+                    }
+                }
+                if *topology == GpuPrimitiveTopology::LineList {
+                    for pair in vertices.chunks_exact(2) {
+                        if pair[0].position[2] == 0.0 || pair[1].position[2] == 0.0 {
+                            return Err(GpuRendererError::NonFiniteCoordinate);
+                        }
+                        if let Some(projection) = projection.as_ref() {
+                            let fragment_count = walk_aliased_line_fragments(
+                                pair[0],
+                                pair[1],
+                                projection,
+                                |_, _, _| Ok(()),
+                            )?;
+                            expanded_line_vertices = expanded_line_vertices
+                                .checked_add(
+                                    fragment_count
+                                        .checked_mul(6)
+                                        .ok_or(GpuRendererError::VertexRangeOverflow)?,
+                                )
+                                .ok_or(GpuRendererError::VertexRangeOverflow)?;
+                        }
+                    }
+                }
+                let count = u64::try_from(vertices.len())
+                    .map_err(|_| GpuRendererError::VertexRangeOverflow)?;
+                let expanded = match topology {
+                    GpuPrimitiveTopology::PointList => count.saturating_mul(6),
+                    GpuPrimitiveTopology::LineList => expanded_line_vertices,
+                    GpuPrimitiveTopology::TriangleList => count,
+                };
+                packed_vertices = packed_vertices.saturating_add(expanded);
+            }
+        }
+        if packed_vertices > u64::from(u32::MAX) {
+            return Err(GpuRendererError::VertexRangeOverflow);
+        }
+    }
+    Ok(())
+}
+
+fn validate_layers(
+    layers: &[GpuSceneLayer<'_>],
+) -> Result<Vec<GpuTextureResource>, GpuRendererError> {
+    let first = layers.first().ok_or(GpuRendererError::NoSceneLayers)?;
+    let physical_extent = first.presentation.physical_extent;
+    let gamma_mode = first.scene.gamma_mode;
+    let gamma_revision = first.scene.gamma.revision;
+    let gamma_channels = &first.scene.gamma.channels;
+    let mut resources = HashMap::<GpuTextureId, GpuTextureResource>::new();
+
+    for (index, layer) in layers.iter().enumerate() {
+        validate_scene(layer.scene, &layer.presentation)?;
+        if layer.presentation.physical_extent != physical_extent {
+            return Err(GpuRendererError::LayerPhysicalExtentMismatch {
+                layer: index,
+                expected: physical_extent,
+                actual: layer.presentation.physical_extent,
+            });
+        }
+        if layer.scene.gamma_mode != gamma_mode
+            || layer.scene.gamma.revision != gamma_revision
+            || layer.scene.gamma.channels.as_ref() != gamma_channels.as_ref()
+        {
+            return Err(GpuRendererError::LayerGammaMismatch { layer: index });
+        }
+
+        for resource in &layer.scene.textures {
+            match resources.entry(resource.id) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(resource.clone());
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let current = entry.get_mut();
+                    if current.extent != resource.extent
+                        || current.format != resource.format
+                        || current.revision != resource.revision
+                        || current.pixels.as_ref() != resource.pixels.as_ref()
+                    {
+                        return Err(GpuRendererError::LayerTextureConflict(resource.id));
+                    }
+
+                    // Texture id + revision is the producer's content identity.
+                    // Preserve a usable delta when only one capture consumed it;
+                    // incompatible deltas fall back to the complete backing.
+                    match (current.dirty.is_empty(), resource.dirty.is_empty()) {
+                        (true, false) => {
+                            current.base_revision = resource.base_revision;
+                            current.dirty.clone_from(&resource.dirty);
+                        }
+                        (false, false)
+                            if current.base_revision != resource.base_revision
+                                || current.dirty != resource.dirty =>
+                        {
+                            current.base_revision = None;
+                            current.dirty.clear();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    let mut resources = resources.into_values().collect::<Vec<_>>();
+    resources.sort_by_key(|resource| resource.id);
+    Ok(resources)
+}
+
+fn require_declared_format(
+    resources: &HashMap<GpuTextureId, &GpuTextureResource>,
+    id: GpuTextureId,
+    expected: GpuTextureFormat,
+) -> Result<(), GpuRendererError> {
+    let resource = resources
+        .get(&id)
+        .ok_or(GpuRendererError::MissingTexture(id))?;
+    if resource.format != expected {
+        return Err(GpuRendererError::TextureFormatMismatch {
+            id,
+            expected,
+            actual: resource.format,
+        });
+    }
+    Ok(())
+}
+
+fn validate_gpu_vertex(
+    vertex: &GpuVertex,
+    projection: Option<&DrawProjection>,
+) -> Result<(), GpuRendererError> {
+    vertex
+        .position
+        .iter()
+        .chain(vertex.uv.iter())
+        .chain(vertex.modulation.iter())
+        .chain(vertex.owner_modulation.iter())
+        .chain(vertex.sample_tile.iter())
+        .all(|value| value.is_finite())
+        .then_some(())
+        .ok_or(GpuRendererError::NonFiniteCoordinate)?;
+    if let Some(projection) = projection {
+        let _ = clip_position(vertex.position, projection)?;
     }
     Ok(())
 }
@@ -1818,6 +2828,33 @@ fn dirty_upload_prefers_full(resource: &GpuTextureResource) -> bool {
     // is both smaller in call overhead and close enough in byte volume to the
     // native renderer's coalesced locked-surface upload.
     dirty_pixels.saturating_mul(4) >= full_pixels.saturating_mul(3)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextureUploadPlan {
+    Unchanged,
+    Full,
+    Dirty,
+}
+
+fn texture_upload_plan(
+    cached_revision: Option<u64>,
+    resource: &GpuTextureResource,
+) -> TextureUploadPlan {
+    let Some(cached_revision) = cached_revision else {
+        return TextureUploadPlan::Full;
+    };
+    if cached_revision == resource.revision {
+        return TextureUploadPlan::Unchanged;
+    }
+    if resource.dirty.is_empty()
+        || resource.base_revision != Some(cached_revision)
+        || dirty_upload_prefers_full(resource)
+    {
+        TextureUploadPlan::Full
+    } else {
+        TextureUploadPlan::Dirty
+    }
 }
 
 fn validate_primitive_count(
@@ -1876,22 +2913,6 @@ const fn flag(value: bool) -> f32 {
 
 const fn fragment_gamma_flag(mode: GpuGammaMode, command_gamma: bool) -> bool {
     mode.fragment_lookup() && command_gamma
-}
-
-fn topology_index(topology: GpuPrimitiveTopology) -> usize {
-    match topology {
-        GpuPrimitiveTopology::TriangleList => 0,
-        GpuPrimitiveTopology::LineList => 1,
-        GpuPrimitiveTopology::PointList => 2,
-    }
-}
-
-fn wgpu_topology(topology: GpuPrimitiveTopology) -> wgpu::PrimitiveTopology {
-    match topology {
-        GpuPrimitiveTopology::TriangleList => wgpu::PrimitiveTopology::TriangleList,
-        GpuPrimitiveTopology::LineList => wgpu::PrimitiveTopology::LineList,
-        GpuPrimitiveTopology::PointList => wgpu::PrimitiveTopology::PointList,
-    }
 }
 
 fn create_source_texture(device: &wgpu::Device, resource: &GpuTextureResource) -> wgpu::Texture {
@@ -2120,11 +3141,12 @@ fn scene_pipeline(
     shader: &wgpu::ShaderModule,
     topology: wgpu::PrimitiveTopology,
     blend: GpuBlend,
+    alpha_mode: GpuSolidAlphaMode,
 ) -> wgpu::RenderPipeline {
     let vertex_layouts = [packed_vertex_layout()];
     let targets = [Some(wgpu::ColorTargetState {
         format: wgpu::TextureFormat::Rgba8Unorm,
-        blend: Some(blend_state(blend)),
+        blend: Some(blend_state(blend, alpha_mode)),
         write_mask: wgpu::ColorWrites::ALL,
     })];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -2148,51 +3170,6 @@ fn scene_pipeline(
             targets: &targets,
         }),
         multiview: None,
-    })
-}
-
-fn solid_pipelines(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    blend: GpuBlend,
-) -> [wgpu::RenderPipeline; 3] {
-    [
-        GpuPrimitiveTopology::TriangleList,
-        GpuPrimitiveTopology::LineList,
-        GpuPrimitiveTopology::PointList,
-    ]
-    .map(|topology| {
-        scene_pipeline(
-            device,
-            match (blend, topology) {
-                (GpuBlend::Replace, GpuPrimitiveTopology::TriangleList) => {
-                    "lc_gpu_solid_replace_triangles"
-                }
-                (GpuBlend::Replace, GpuPrimitiveTopology::LineList) => "lc_gpu_solid_replace_lines",
-                (GpuBlend::Replace, GpuPrimitiveTopology::PointList) => {
-                    "lc_gpu_solid_replace_points"
-                }
-                (GpuBlend::Normal, GpuPrimitiveTopology::TriangleList) => {
-                    "lc_gpu_solid_normal_triangles"
-                }
-                (GpuBlend::Normal, GpuPrimitiveTopology::LineList) => "lc_gpu_solid_normal_lines",
-                (GpuBlend::Normal, GpuPrimitiveTopology::PointList) => "lc_gpu_solid_normal_points",
-                (GpuBlend::Additive, GpuPrimitiveTopology::TriangleList) => {
-                    "lc_gpu_solid_additive_triangles"
-                }
-                (GpuBlend::Additive, GpuPrimitiveTopology::LineList) => {
-                    "lc_gpu_solid_additive_lines"
-                }
-                (GpuBlend::Additive, GpuPrimitiveTopology::PointList) => {
-                    "lc_gpu_solid_additive_points"
-                }
-            },
-            layout,
-            shader,
-            wgpu_topology(topology),
-            blend,
-        )
     })
 }
 
@@ -2237,10 +3214,30 @@ fn present_pipeline(
     })
 }
 
-fn blend_state(blend: GpuBlend) -> wgpu::BlendState {
+/// wgpu translation of the deterministic CPU-reference blend equations.
+///
+/// Native GL never reads framebuffer alpha back (no `GL_DST_ALPHA` factor in
+/// CStdGL), so the CPU oracle's destination-alpha conventions are
+/// authoritative: normal primitive draws keep source-over alpha, sampled
+/// fragment recovery shares the non-separate colour factors, and additive
+/// draws preserve destination alpha entirely.
+fn blend_state(blend: GpuBlend, alpha_mode: GpuSolidAlphaMode) -> wgpu::BlendState {
     match blend {
         GpuBlend::Replace => wgpu::BlendState::REPLACE,
-        GpuBlend::Normal => wgpu::BlendState::ALPHA_BLENDING,
+        GpuBlend::Normal => match alpha_mode {
+            GpuSolidAlphaMode::SourceOver => wgpu::BlendState::ALPHA_BLENDING,
+            GpuSolidAlphaMode::NonSeparate => {
+                let component = wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::SrcAlpha,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                };
+                wgpu::BlendState {
+                    color: component,
+                    alpha: component,
+                }
+            }
+        },
         GpuBlend::Additive => wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::SrcAlpha,
@@ -2304,10 +3301,535 @@ mod tests {
     }
 
     #[test]
+    fn source_over_normal_blend_matches_cpu_reference_alpha() {
+        let blend = blend_state(GpuBlend::Normal, GpuSolidAlphaMode::SourceOver);
+
+        assert_eq!(blend, wgpu::BlendState::ALPHA_BLENDING);
+        assert_eq!(blend.color.src_factor, wgpu::BlendFactor::SrcAlpha);
+        assert_eq!(blend.color.dst_factor, wgpu::BlendFactor::OneMinusSrcAlpha);
+        assert_eq!(blend.alpha.src_factor, wgpu::BlendFactor::One);
+        assert_eq!(blend.alpha.dst_factor, wgpu::BlendFactor::OneMinusSrcAlpha);
+    }
+
+    #[test]
+    fn non_separate_normal_blend_shares_color_factors_with_alpha() {
+        let blend = blend_state(GpuBlend::Normal, GpuSolidAlphaMode::NonSeparate);
+
+        assert_eq!(blend.color, blend.alpha);
+        assert_eq!(blend.color.src_factor, wgpu::BlendFactor::SrcAlpha);
+        assert_eq!(blend.color.dst_factor, wgpu::BlendFactor::OneMinusSrcAlpha);
+        assert_eq!(blend.color.operation, wgpu::BlendOperation::Add);
+    }
+
+    #[test]
+    fn additive_blend_preserves_destination_alpha_for_both_modes() {
+        for alpha_mode in [
+            GpuSolidAlphaMode::SourceOver,
+            GpuSolidAlphaMode::NonSeparate,
+        ] {
+            let blend = blend_state(GpuBlend::Additive, alpha_mode);
+
+            assert_eq!(blend.color.src_factor, wgpu::BlendFactor::SrcAlpha);
+            assert_eq!(blend.color.dst_factor, wgpu::BlendFactor::One);
+            assert_eq!(blend.color.operation, wgpu::BlendOperation::Add);
+            assert_eq!(blend.alpha.src_factor, wgpu::BlendFactor::Zero);
+            assert_eq!(blend.alpha.dst_factor, wgpu::BlendFactor::One);
+            assert_eq!(blend.alpha.operation, wgpu::BlendOperation::Add);
+        }
+    }
+
+    #[test]
+    fn device_health_distinguishes_recoverable_loss_from_fatal_validation() {
+        let lost = classify_wgpu_validation_description(
+            "Queue::submit failed because the Parent device is lost",
+        );
+        assert!(matches!(
+            lost,
+            RetainedGpuRendererHealth::RecreateRequired {
+                reason: RetainedGpuRecreateReason::DeviceLost,
+                ..
+            }
+        ));
+
+        let validation = classify_wgpu_validation_description("invalid bind group layout");
+        assert!(matches!(
+            validation,
+            RetainedGpuRendererHealth::Fatal {
+                reason: RetainedGpuFatalReason::Validation,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn fatal_device_health_supersedes_a_pending_recreation() {
+        let state = Mutex::new(RetainedGpuRendererHealth::Healthy);
+        record_renderer_health(
+            &state,
+            RetainedGpuRendererHealth::RecreateRequired {
+                reason: RetainedGpuRecreateReason::DeviceLost,
+                detail: "lost".to_owned(),
+            },
+        );
+        record_renderer_health(
+            &state,
+            RetainedGpuRendererHealth::Fatal {
+                reason: RetainedGpuFatalReason::OutOfMemory,
+                detail: "oom".to_owned(),
+            },
+        );
+        record_renderer_health(
+            &state,
+            RetainedGpuRendererHealth::RecreateRequired {
+                reason: RetainedGpuRecreateReason::DeviceLost,
+                detail: "later loss".to_owned(),
+            },
+        );
+
+        assert!(matches!(
+            &*state.lock().expect("health state"),
+            RetainedGpuRendererHealth::Fatal {
+                reason: RetainedGpuFatalReason::OutOfMemory,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn fractional_clipper_rounds_viewport_then_projects_relative_coordinates() {
+        let presentation = GpuPresentation {
+            physical_extent: [5, 4],
+            scale: 1.5,
+            crop_top: 1,
+        };
+        let projection = draw_projection(Some(Rect::new(1, 1, 2, 1)), [4, 3], &presentation)
+            .expect("valid fractional presentation")
+            .expect("clip intersects the physical framebuffer");
+
+        assert_eq!(projection.clipper.logical_clip(), Rect::new(1, 1, 2, 1));
+        assert_eq!(projection.clipper.physical_clip(), Rect::new(1, 1, 3, 2));
+        assert_eq!(
+            projection.scissor,
+            Scissor {
+                x: 1,
+                y: 1,
+                width: 3,
+                height: 2,
+            }
+        );
+        assert_eq!(
+            clip_position([2.0, 1.0, 1.0], &projection).unwrap(),
+            [0.0, 0.5, 0.0, 1.0]
+        );
+        assert_eq!(
+            clip_position([4.0, 2.0, 2.0], &projection).unwrap(),
+            [0.0, 1.0, 0.0, 2.0],
+            "homogeneous W must preserve the same Euclidean coordinate"
+        );
+    }
+
+    #[test]
+    fn wide_point_is_center_clipped_before_physical_rasterization() {
+        let presentation = GpuPresentation {
+            physical_extent: [8, 8],
+            scale: 2.0,
+            crop_top: 0,
+        };
+        let projection = draw_projection(Some(Rect::new(0, 0, 2, 2)), [4, 4], &presentation)
+            .expect("valid point presentation")
+            .expect("point clip intersects the framebuffer");
+        let color = [1.0; 4];
+
+        assert!(
+            packed_point_rect(solid_vertex(0.0, 1.0, color), false, &projection)
+                .expect("left clip-plane point")
+                .is_some()
+        );
+        assert!(
+            packed_point_rect(solid_vertex(2.0, 1.0, color), false, &projection)
+                .expect("right clip-plane point")
+                .is_some()
+        );
+        assert!(
+            packed_point_rect(solid_vertex(-0.001, 1.0, color), false, &projection)
+                .expect("outside left point")
+                .is_none()
+        );
+        assert!(
+            packed_point_rect(solid_vertex(2.001, 1.0, color), false, &projection)
+                .expect("outside right point")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn logical_line_pair_expands_to_cpp_application_scale_in_physical_space() {
+        let presentation = GpuPresentation {
+            physical_extent: [12, 8],
+            scale: 2.0,
+            crop_top: 0,
+        };
+        let projection = draw_projection(None, [6, 4], &presentation)
+            .expect("valid line presentation")
+            .expect("line clip intersects the framebuffer");
+        let color = [1.0, 0.0, 0.0, 1.0];
+        let expanded = packed_line_fragments(
+            solid_vertex(1.5, 1.5, color),
+            solid_vertex(4.5, 1.5, color),
+            false,
+            &projection,
+        )
+        .expect("expand line pair");
+        let physical = |vertex: PackedVertex| {
+            [
+                ((f64::from(vertex.clip[0]) + 1.0) * 6.0).round(),
+                ((1.0 - f64::from(vertex.clip[1])) * 4.0).round(),
+            ]
+        };
+
+        let mut origins = expanded
+            .chunks_exact(6)
+            .map(|fragment| physical(fragment[0]))
+            .collect::<Vec<_>>();
+        origins.sort_by(|left, right| left.partial_cmp(right).expect("finite physical origin"));
+        let mut expected = (2..8)
+            .flat_map(|x| (2..4).map(move |y| [f64::from(x), f64::from(y)]))
+            .collect::<Vec<_>>();
+        expected.sort_by(|left, right| left.partial_cmp(right).expect("finite expected origin"));
+        assert_eq!(origins, expected);
+        assert_eq!(expanded.len(), 6 * 2 * 6);
+        assert!(expanded.iter().all(|vertex| vertex.data0 == color));
+    }
+
+    #[test]
+    fn diagonal_line_color_uses_cpp_window_space_projection_parameter() {
+        let presentation = GpuPresentation::identity(5, 4);
+        let projection = draw_projection(None, [5, 4], &presentation)
+            .expect("valid line presentation")
+            .expect("line clip intersects the framebuffer");
+        let expanded = packed_line_fragments(
+            solid_vertex(0.5, 0.5, [0.0, 0.0, 0.0, 1.0]),
+            solid_vertex(4.5, 2.5, [1.0, 0.0, 0.0, 1.0]),
+            false,
+            &projection,
+        )
+        .expect("expand diagonal line");
+        let physical = |vertex: PackedVertex| {
+            [
+                ((f64::from(vertex.clip[0]) + 1.0) * 2.5).round(),
+                ((1.0 - f64::from(vertex.clip[1])) * 2.0).round(),
+            ]
+        };
+        let fragment = expanded
+            .chunks_exact(6)
+            .find(|fragment| physical(fragment[0]) == [1.0, 1.0])
+            .expect("slope-one-half line covers physical pixel (1,1)");
+        assert!((fragment[0].data0[0] - 0.3).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn line_clipping_preserves_directed_entry_and_exit_endpoints() {
+        let presentation = GpuPresentation::identity(6, 4);
+        let projection = draw_projection(Some(Rect::new(2, 0, 2, 4)), [6, 4], &presentation)
+            .expect("valid clipped-line presentation")
+            .expect("line clip intersects the framebuffer");
+        let color = [1.0; 4];
+        let collect = |start, end| {
+            let mut fragments = Vec::new();
+            walk_aliased_line_fragments(
+                solid_vertex(start, 1.5, color),
+                solid_vertex(end, 1.5, color),
+                &projection,
+                |x, y, _| {
+                    fragments.push((x, y));
+                    Ok(())
+                },
+            )
+            .expect("walk clipped line");
+            fragments
+        };
+
+        assert_eq!(collect(0.5, 5.5), vec![(2, 1)]);
+        assert_eq!(collect(5.5, 0.5), vec![(3, 1), (2, 1)]);
+        assert!(collect(0.5, 2.0).is_empty(), "clip-point degeneracy");
+    }
+
+    #[test]
     fn disabled_gamma_mode_clears_requested_fragment_gamma_flag() {
         assert!(fragment_gamma_flag(GpuGammaMode::Fragment, true));
         assert!(!fragment_gamma_flag(GpuGammaMode::Disabled, true));
         assert!(!fragment_gamma_flag(GpuGammaMode::Monitor, true));
+    }
+
+    #[test]
+    fn recovery_validation_requires_every_command_texture_in_the_current_scene() {
+        let texture = GpuTextureId::fresh();
+        let identity = [1.0, 1.0, 1.0, 0.0];
+        let mut scene = GpuScene {
+            logical_extent: [2, 2],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Fragment,
+            textures: Vec::new(),
+            commands: vec![GpuCommand::Quad {
+                texture,
+                owner_mask: None,
+                vertices: quad(0.0, 0.0, 2.0, 2.0, 1.0, identity),
+                clip: None,
+                blend: GpuBlend::Normal,
+                base_mod2: false,
+                owner_mod2: false,
+                sampler: GpuSampler::Nearest,
+                gamma: false,
+            }],
+        };
+        assert!(matches!(
+            RetainedGpuRenderer::validate_scene(&scene, &GpuPresentation::identity(2, 2)),
+            Err(GpuRendererError::MissingTexture(id)) if id == texture
+        ));
+
+        scene
+            .textures
+            .push(rgba_resource(texture, [10, 20, 30, 255]));
+        assert!(
+            RetainedGpuRenderer::validate_scene(&scene, &GpuPresentation::identity(2, 2)).is_ok()
+        );
+    }
+
+    #[test]
+    fn recovery_validation_checks_all_deltas_before_gpu_mutation() {
+        let id = GpuTextureId::fresh();
+        let mut resource = rgba_resource_2x1(id, [0, 0, 0, 255], [1, 1, 1, 255]);
+        resource.revision = 4;
+        resource.base_revision = Some(4);
+        resource.dirty = vec![Rect::new(0, 0, 1, 1)];
+        let mut scene = GpuScene {
+            logical_extent: [2, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Fragment,
+            textures: vec![resource],
+            commands: Vec::new(),
+        };
+        assert!(matches!(
+            RetainedGpuRenderer::validate_scene(&scene, &GpuPresentation::identity(2, 1)),
+            Err(GpuRendererError::DirtyRevisionNotAdvanced {
+                id: invalid,
+                revision: 4
+            }) if invalid == id
+        ));
+
+        scene.textures[0].base_revision = Some(3);
+        scene.textures[0].dirty = vec![Rect::new(2, 0, 1, 1)];
+        assert!(matches!(
+            RetainedGpuRenderer::validate_scene(&scene, &GpuPresentation::identity(2, 1)),
+            Err(GpuRendererError::InvalidDirtyRect { id: invalid, .. }) if invalid == id
+        ));
+    }
+
+    #[test]
+    fn recovery_validation_rejects_projection_overflow_before_gpu_mutation() {
+        let scene = GpuScene {
+            logical_extent: [2, 2],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Fragment,
+            textures: Vec::new(),
+            commands: vec![GpuCommand::Solid {
+                vertices: vec![GpuSolidVertex {
+                    position: [f32::MAX, 0.5, 1.0],
+                    color: [1.0, 1.0, 1.0, 1.0],
+                    outer_modulation: lc_graphics::GpuSolidOuterModulation::PackedC4,
+                }],
+                topology: GpuPrimitiveTopology::PointList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Replace,
+                gamma: false,
+            }],
+        };
+        assert!(matches!(
+            RetainedGpuRenderer::validate_scene(
+                &scene,
+                &GpuPresentation {
+                    physical_extent: [2, 2],
+                    scale: 2.0,
+                    crop_top: 0,
+                }
+            ),
+            Err(GpuRendererError::NonFiniteCoordinate)
+        ));
+    }
+
+    #[test]
+    fn layered_validation_rejects_conflicting_complete_texture_backing() {
+        let id = GpuTextureId::fresh();
+        let scene = |pixel| GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Fragment,
+            textures: vec![rgba_resource(id, pixel)],
+            commands: Vec::new(),
+        };
+        let first = scene([1, 2, 3, 255]);
+        let second = scene([4, 5, 6, 255]);
+        let presentation = GpuPresentation::identity(1, 1);
+        assert!(matches!(
+            RetainedGpuRenderer::validate_layers(&[
+                GpuSceneLayer::new(&first, presentation),
+                GpuSceneLayer::new(&second, presentation),
+            ]),
+            Err(GpuRendererError::LayerTextureConflict(conflict)) if conflict == id
+        ));
+    }
+
+    #[test]
+    fn mode_and_device_generation_gaps_choose_safe_texture_uploads() {
+        let id = GpuTextureId::fresh();
+        let mut resource = rgba_resource_2x1(id, [1, 2, 3, 255], [4, 5, 6, 255]);
+        resource.revision = 1;
+        resource.base_revision = Some(0);
+        resource.dirty = vec![Rect::new(1, 0, 1, 1)];
+
+        assert_eq!(
+            texture_upload_plan(None, &resource),
+            TextureUploadPlan::Full,
+            "a replacement device has no retained texture to patch"
+        );
+        assert_eq!(
+            texture_upload_plan(Some(0), &resource),
+            TextureUploadPlan::Dirty
+        );
+        assert_eq!(
+            texture_upload_plan(Some(1), &resource),
+            TextureUploadPlan::Unchanged
+        );
+
+        // Mode transitions may suppress presentation for several producer
+        // revisions. A delta based on revision 2 cannot patch cached revision
+        // 1, but its complete backing remains a safe full upload.
+        resource.revision = 3;
+        resource.base_revision = Some(2);
+        assert_eq!(
+            texture_upload_plan(Some(1), &resource),
+            TextureUploadPlan::Full
+        );
+        assert_eq!(
+            texture_upload_plan(Some(2), &resource),
+            TextureUploadPlan::Dirty
+        );
+    }
+
+    #[test]
+    fn layered_presentations_preserve_physical_painter_order() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build Tokio runtime for layered renderer test");
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            dx12_shader_compiler: wgpu::Dx12Compiler::default(),
+        });
+        let adapter = runtime
+            .block_on(async {
+                let primary = instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        compatible_surface: None,
+                        force_fallback_adapter: false,
+                    })
+                    .await;
+                if primary.is_some() {
+                    primary
+                } else {
+                    instance
+                        .request_adapter(&wgpu::RequestAdapterOptions {
+                            power_preference: wgpu::PowerPreference::LowPower,
+                            compatible_surface: None,
+                            force_fallback_adapter: true,
+                        })
+                        .await
+                }
+            })
+            .expect("layered renderer test requires a working wgpu adapter");
+        let descriptor = wgpu::DeviceDescriptor {
+            label: Some("lc_gpu_layered_test_device"),
+            features: wgpu::Features::empty(),
+            limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+        };
+        let (device, queue) = runtime
+            .block_on(adapter.request_device(&descriptor, None))
+            .expect("request layered renderer test device");
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+        let gamma = GpuGammaLut::from_ramp(&GammaRamp::standard());
+        let base = GpuScene {
+            logical_extent: [4, 3],
+            clear: Color::opaque(10, 20, 30),
+            gamma: gamma.clone(),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: Vec::new(),
+            commands: vec![GpuCommand::Solid {
+                vertices: vec![solid_vertex(2.5, 1.5, rgba_f32(POINT))],
+                topology: GpuPrimitiveTopology::PointList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Replace,
+                gamma: false,
+            }],
+        };
+        let physical_text = GpuScene {
+            logical_extent: [8, 6],
+            clear: Color::transparent(),
+            gamma,
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: Vec::new(),
+            commands: vec![GpuCommand::Solid {
+                vertices: vec![solid_vertex(5.5, 2.5, rgba_f32(MAGENTA))],
+                topology: GpuPrimitiveTopology::PointList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Replace,
+                gamma: false,
+            }],
+        };
+        let physical_extent = [8, 6];
+        let layers = [
+            GpuSceneLayer::new(
+                &base,
+                GpuPresentation {
+                    physical_extent,
+                    scale: 2.0,
+                    crop_top: 0,
+                },
+            ),
+            GpuSceneLayer::new(
+                &physical_text,
+                GpuPresentation::identity(physical_extent[0], physical_extent[1]),
+            ),
+        ];
+        let mut renderer =
+            RetainedGpuRenderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm);
+        assert_eq!(renderer.health(), RetainedGpuRendererHealth::Healthy);
+        let frame = render_layers_readback(&mut renderer, &device, &queue, &layers);
+
+        assert_eq!(
+            readback_pixel(&frame, 4, 2),
+            POINT,
+            "the scaled logical point covers a 2x2 physical block"
+        );
+        assert_eq!(
+            readback_pixel(&frame, 5, 2),
+            MAGENTA,
+            "the later identity-space layer paints one native pixel over it"
+        );
+        assert_eq!(readback_pixel(&frame, 6, 2), [10, 20, 30, 255]);
+        let validation = runtime.block_on(device.pop_error_scope());
+        assert!(
+            validation.is_none(),
+            "layered renderer reported wgpu validation error: {validation:?}"
+        );
     }
 
     const LOGICAL: [u32; 2] = [8, 6];
@@ -2519,6 +4041,419 @@ mod tests {
         }
         assert_eq!(readback_pixel(&scaled, 14, 8), CLEAR);
 
+        let point_scene = GpuScene {
+            logical_extent: LOGICAL,
+            clear: Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
+            gamma: scene.gamma.clone(),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: Vec::new(),
+            commands: vec![scene.commands.last().expect("point command").clone()],
+        };
+        for (label, presentation, x_range, y_range) in [
+            (
+                "scale-1.5",
+                GpuPresentation {
+                    physical_extent: [12, 9],
+                    scale: 1.5,
+                    crop_top: 0,
+                },
+                9..11,
+                6..8,
+            ),
+            (
+                "scale-2",
+                GpuPresentation {
+                    physical_extent: [16, 12],
+                    scale: 2.0,
+                    crop_top: 0,
+                },
+                12..14,
+                8..10,
+            ),
+        ] {
+            let point =
+                render_readback(&mut renderer, &device, &queue, &point_scene, &presentation);
+            for y in 0..presentation.physical_extent[1] {
+                for x in 0..presentation.physical_extent[0] {
+                    let expected = if x_range.contains(&x) && y_range.contains(&y) {
+                        POINT
+                    } else {
+                        CLEAR
+                    };
+                    assert_eq!(
+                        readback_pixel(&point, x, y),
+                        expected,
+                        "{label} even-width GL point footprint ({x}, {y})"
+                    );
+                }
+            }
+        }
+
+        let line_scene = GpuScene {
+            logical_extent: [6, 4],
+            clear: Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: Vec::new(),
+            commands: vec![GpuCommand::Solid {
+                // DrawLineDw adds 0.5 before GL_LINES and installs
+                // glLineWidth(Application.GetScale()).
+                vertices: vec![
+                    solid_vertex(1.5, 1.5, rgba_f32(SOLID)),
+                    solid_vertex(4.5, 1.5, rgba_f32(SOLID)),
+                ],
+                topology: GpuPrimitiveTopology::LineList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Replace,
+                gamma: false,
+            }],
+        };
+        let scaled_line = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &line_scene,
+            &GpuPresentation {
+                physical_extent: [12, 8],
+                scale: 2.0,
+                crop_top: 0,
+            },
+        );
+        for y in 0..8 {
+            for x in 0..12 {
+                let expected = if (2..8).contains(&x) && (2..4).contains(&y) {
+                    SOLID
+                } else {
+                    CLEAR
+                };
+                assert_eq!(
+                    readback_pixel(&scaled_line, x, y),
+                    expected,
+                    "scale-two C++ line footprint ({x}, {y})"
+                );
+            }
+        }
+
+        let mut reverse_line_scene = line_scene.clone();
+        let GpuCommand::Solid { vertices, .. } = &mut reverse_line_scene.commands[0] else {
+            unreachable!("line fixture is solid");
+        };
+        vertices.reverse();
+        let scaled_reverse_line = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &reverse_line_scene,
+            &GpuPresentation {
+                physical_extent: [12, 8],
+                scale: 2.0,
+                crop_top: 0,
+            },
+        );
+        for y in 0..8 {
+            for x in 0..12 {
+                let expected = if (3..9).contains(&x) && (2..4).contains(&y) {
+                    SOLID
+                } else {
+                    CLEAR
+                };
+                assert_eq!(
+                    readback_pixel(&scaled_reverse_line, x, y),
+                    expected,
+                    "reverse scale-two C++ line footprint ({x}, {y})"
+                );
+            }
+        }
+
+        let diagonal_line_scene = GpuScene {
+            logical_extent: [5, 4],
+            clear: Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: Vec::new(),
+            commands: vec![GpuCommand::Solid {
+                vertices: vec![
+                    solid_vertex(0.5, 0.5, rgba_f32(SOLID)),
+                    solid_vertex(4.5, 2.5, rgba_f32(SOLID)),
+                ],
+                topology: GpuPrimitiveTopology::LineList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Replace,
+                gamma: false,
+            }],
+        };
+        let negative_diagonal_line_scene = GpuScene {
+            commands: vec![GpuCommand::Solid {
+                vertices: vec![
+                    solid_vertex(0.5, 2.5, rgba_f32(SOLID)),
+                    solid_vertex(4.5, 0.5, rgba_f32(SOLID)),
+                ],
+                topology: GpuPrimitiveTopology::LineList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Replace,
+                gamma: false,
+            }],
+            ..diagonal_line_scene.clone()
+        };
+        for (label, scene, expected_pixels) in [
+            (
+                "forward",
+                diagonal_line_scene.clone(),
+                [(0, 0), (1, 1), (2, 1), (3, 2)],
+            ),
+            (
+                "reverse",
+                {
+                    let mut scene = diagonal_line_scene.clone();
+                    let GpuCommand::Solid { vertices, .. } = &mut scene.commands[0] else {
+                        unreachable!("diagonal fixture is solid");
+                    };
+                    vertices.reverse();
+                    scene
+                },
+                [(4, 2), (3, 2), (2, 1), (1, 1)],
+            ),
+            (
+                "negative forward",
+                negative_diagonal_line_scene.clone(),
+                [(0, 2), (1, 1), (2, 1), (3, 0)],
+            ),
+            (
+                "negative reverse",
+                {
+                    let mut scene = negative_diagonal_line_scene;
+                    let GpuCommand::Solid { vertices, .. } = &mut scene.commands[0] else {
+                        unreachable!("negative diagonal fixture is solid");
+                    };
+                    vertices.reverse();
+                    scene
+                },
+                [(4, 0), (3, 0), (2, 1), (1, 1)],
+            ),
+        ] {
+            let diagonal = render_readback(
+                &mut renderer,
+                &device,
+                &queue,
+                &scene,
+                &GpuPresentation::identity(5, 4),
+            );
+            for y in 0..4 {
+                for x in 0..5 {
+                    let expected = if expected_pixels.contains(&(x, y)) {
+                        SOLID
+                    } else {
+                        CLEAR
+                    };
+                    assert_eq!(
+                        readback_pixel(&diagonal, x, y),
+                        expected,
+                        "{label} slope-one-half C++ line footprint ({x}, {y})"
+                    );
+                }
+            }
+        }
+
+        let frame_scene = GpuScene {
+            logical_extent: [6, 6],
+            clear: Color::transparent(),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: Vec::new(),
+            commands: vec![GpuCommand::Solid {
+                vertices: [
+                    (1.5, 1.5),
+                    (4.5, 1.5),
+                    (4.5, 1.5),
+                    (4.5, 4.5),
+                    (4.5, 4.5),
+                    (1.5, 4.5),
+                    (1.5, 4.5),
+                    (1.5, 1.5),
+                ]
+                .into_iter()
+                .map(|(x, y)| solid_vertex(x, y, rgba_f32([255, 0, 0, 128])))
+                .collect(),
+                topology: GpuPrimitiveTopology::LineList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Normal,
+                gamma: false,
+            }],
+        };
+        let frame = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &frame_scene,
+            &GpuPresentation::identity(6, 6),
+        );
+        for y in 0..6 {
+            for x in 0..6 {
+                let on_frame = (1..=4).contains(&x)
+                    && (1..=4).contains(&y)
+                    && (x == 1 || x == 4 || y == 1 || y == 4);
+                assert_eq!(
+                    readback_pixel(&frame, x, y),
+                    if on_frame { [128, 0, 0, 128] } else { [0; 4] },
+                    "directed DrawFrameDw corner ownership ({x}, {y})"
+                );
+            }
+        }
+
+        let translucent_point_scene = GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::new(0, 0, 0, 128),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: Vec::new(),
+            commands: vec![GpuCommand::Solid {
+                vertices: vec![solid_vertex(0.5, 0.5, rgba_f32([200, 100, 50, 64]))],
+                topology: GpuPrimitiveTopology::PointList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Normal,
+                gamma: false,
+            }],
+        };
+        let translucent_point = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &translucent_point_scene,
+            &GpuPresentation::identity(1, 1),
+        );
+        assert_eq!(
+            readback_pixel(&translucent_point, 0, 0),
+            [50, 25, 13, 160],
+            "translucent points keep the CPU reference's source-over alpha"
+        );
+
+        let additive_scene = GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::new(0, 0, 0, 192),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: Vec::new(),
+            commands: vec![GpuCommand::Solid {
+                vertices: vec![solid_vertex(0.5, 0.5, rgba_f32([200, 100, 50, 64]))],
+                topology: GpuPrimitiveTopology::PointList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Additive,
+                gamma: false,
+            }],
+        };
+        let additive = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &additive_scene,
+            &GpuPresentation::identity(1, 1),
+        );
+        assert_eq!(
+            readback_pixel(&additive, 0, 0),
+            [50, 25, 13, 192],
+            "additive points preserve destination alpha like the CPU reference"
+        );
+
+        let additive_filled_scene = GpuScene {
+            logical_extent: [1, 1],
+            clear: Color::new(0, 0, 0, 192),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: Vec::new(),
+            commands: vec![GpuCommand::Solid {
+                vertices: vec![
+                    solid_vertex(0.0, 0.0, rgba_f32([200, 100, 50, 64])),
+                    solid_vertex(1.0, 0.0, rgba_f32([200, 100, 50, 64])),
+                    solid_vertex(0.0, 1.0, rgba_f32([200, 100, 50, 64])),
+                    solid_vertex(0.0, 1.0, rgba_f32([200, 100, 50, 64])),
+                    solid_vertex(1.0, 0.0, rgba_f32([200, 100, 50, 64])),
+                    solid_vertex(1.0, 1.0, rgba_f32([200, 100, 50, 64])),
+                ],
+                topology: GpuPrimitiveTopology::TriangleList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: None,
+                blend: GpuBlend::Additive,
+                gamma: false,
+            }],
+        };
+        let additive_filled = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &additive_filled_scene,
+            &GpuPresentation::identity(1, 1),
+        );
+        assert_eq!(
+            readback_pixel(&additive_filled, 0, 0),
+            [50, 25, 13, 192],
+            "filled additive draws preserve destination alpha like the CPU reference"
+        );
+
+        // CStdGL rounds this command's 2x1 logical clip to a 3x2 viewport,
+        // then projects relative to that rounded viewport. Absolute x*scale
+        // projection would start half a pixel later and miss this footprint.
+        // The translucent draw also pins the source-over destination alpha.
+        let fractional_clear = [0, 0, 255, 255];
+        let fractional_source = rgba_f32([255, 0, 0, 128]);
+        let fractional_scene = GpuScene {
+            logical_extent: [4, 3],
+            clear: Color::new(
+                fractional_clear[0],
+                fractional_clear[1],
+                fractional_clear[2],
+                fractional_clear[3],
+            ),
+            gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Disabled,
+            textures: Vec::new(),
+            commands: vec![GpuCommand::Solid {
+                vertices: vec![
+                    solid_vertex(1.0, 1.0, fractional_source),
+                    solid_vertex(3.0, 1.0, fractional_source),
+                    solid_vertex(1.0, 2.0, fractional_source),
+                    solid_vertex(1.0, 2.0, fractional_source),
+                    solid_vertex(3.0, 1.0, fractional_source),
+                    solid_vertex(3.0, 2.0, fractional_source),
+                ],
+                topology: GpuPrimitiveTopology::TriangleList,
+                alpha_mode: GpuSolidAlphaMode::SourceOver,
+                clip: Some(Rect::new(1, 1, 2, 1)),
+                blend: GpuBlend::Normal,
+                gamma: false,
+            }],
+        };
+        let fractional = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &fractional_scene,
+            &GpuPresentation {
+                physical_extent: [5, 4],
+                scale: 1.5,
+                crop_top: 1,
+            },
+        );
+        for y in 0..4 {
+            for x in 0..5 {
+                let expected = if (1..4).contains(&x) && (1..3).contains(&y) {
+                    [128, 0, 127, 255]
+                } else {
+                    fractional_clear
+                };
+                assert_eq!(
+                    readback_pixel(&fractional, x, y),
+                    expected,
+                    "fractional clipper pixel ({x}, {y})"
+                );
+            }
+        }
+
         // Exercise the real frontend CPU reference and retained capture for a
         // 5x3 selects four-pixel C4TexRefs: the right column and bottom row
         // therefore expose both native tile seams and 0xffffffff padding.
@@ -2568,6 +4503,7 @@ mod tests {
         }
 
         let resized_extent = [10, 8];
+        let resize_generation = renderer.generation();
         let resized = render_readback(
             &mut renderer,
             &device,
@@ -2584,6 +4520,11 @@ mod tests {
         assert_eq!(renderer.last_stats().full_upload_bytes, 0);
         assert_eq!(renderer.last_stats().dirty_upload_bytes, 0);
         assert!(renderer.last_stats().composition_recreated);
+        assert_eq!(
+            renderer.generation(),
+            resize_generation,
+            "surface resize recreates only the composition target"
+        );
 
         let updated_mutable = [200, 10, 20, 255];
         let mutable = scene
@@ -2624,12 +4565,14 @@ mod tests {
             .expect("request replacement wgpu device");
         replacement_device.push_error_scope(wgpu::ErrorFilter::Validation);
         let previous_generation = renderer.generation();
-        renderer.recreate(
+        let replacement_generation = renderer.recreate(
             &replacement_device,
             &replacement_queue,
             wgpu::TextureFormat::Rgba8Unorm,
         );
-        assert_ne!(renderer.generation(), previous_generation);
+        assert_eq!(renderer.generation(), replacement_generation);
+        assert_ne!(replacement_generation, previous_generation);
+        assert_eq!(renderer.health(), RetainedGpuRendererHealth::Healthy);
         let recreated = render_readback(
             &mut renderer,
             &replacement_device,
@@ -2802,6 +4745,7 @@ mod tests {
                 solid_vertex(6.0, 6.0, color),
             ],
             topology: GpuPrimitiveTopology::TriangleList,
+            alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: None,
             blend: GpuBlend::Replace,
             gamma: false,
@@ -2811,6 +4755,7 @@ mod tests {
             // point expansion preserves homogeneous coordinates.
             vertices: vec![solid_vertex_w(6.5, 4.5, 2.0, rgba_f32(POINT))],
             topology: GpuPrimitiveTopology::PointList,
+            alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: None,
             blend: GpuBlend::Replace,
             gamma: false,
@@ -2927,6 +4872,7 @@ mod tests {
         GpuSolidVertex {
             position: [x * w, y * w, w],
             color,
+            outer_modulation: lc_graphics::GpuSolidOuterModulation::PackedC4,
         }
     }
 
@@ -2941,11 +4887,26 @@ mod tests {
         scene: &GpuScene,
         presentation: &GpuPresentation,
     ) -> GpuReadbackFrame {
+        let layer = GpuSceneLayer::new(scene, *presentation);
+        render_layers_readback(renderer, device, queue, std::slice::from_ref(&layer))
+    }
+
+    fn render_layers_readback(
+        renderer: &mut RetainedGpuRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layers: &[GpuSceneLayer<'_>],
+    ) -> GpuReadbackFrame {
+        let extent = layers
+            .first()
+            .expect("at least one retained test layer")
+            .presentation
+            .physical_extent;
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("lc_gpu_parity_test_surface"),
             size: wgpu::Extent3d {
-                width: presentation.physical_extent[0],
-                height: presentation.physical_extent[1],
+                width: extent[0],
+                height: extent[1],
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -2960,15 +4921,7 @@ mod tests {
             label: Some("lc_gpu_parity_test_encoder"),
         });
         let ticket = renderer
-            .render(
-                device,
-                queue,
-                &mut encoder,
-                &target_view,
-                scene,
-                presentation,
-                true,
-            )
+            .render_layers(device, queue, &mut encoder, &target_view, layers, true)
             .expect("encode retained GPU scene")
             .expect("request readback ticket");
         queue.submit(Some(encoder.finish()));
@@ -3089,7 +5042,10 @@ mod tests {
             (f32::from(source[index]) * alpha + f32::from(destination[index]) * (1.0 - alpha))
                 .round() as u8
         };
-        [channel(0), channel(1), channel(2), 255]
+        let output_alpha = (f32::from(source[3]) + f32::from(destination[3]) * (1.0 - alpha))
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        [channel(0), channel(1), channel(2), output_alpha]
     }
 
     fn additive(source: [u8; 4], destination: [u8; 4]) -> [u8; 4] {

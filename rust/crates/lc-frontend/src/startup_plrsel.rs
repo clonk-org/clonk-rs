@@ -15,9 +15,12 @@ use anyhow::{Context, Result};
 use freetype::face::LoadFlag;
 use freetype::Library;
 use lc_graphics::clonk_font::{line_height_for, ClonkFont, ClonkFontRole, GlyphCell, TextAlign};
-use lc_graphics::{BlitSampling, Color, GammaRamp, Rect as SurfaceRect, Surface};
+use lc_graphics::{
+    BlitSampling, Color, GammaRamp, Rect as SurfaceRect, Surface, SurfaceDrawTarget,
+};
 use lc_gui::Rect as GuiRect;
 use lc_resources::{PhysicalInfo, C4_MAX_PHYSICAL};
+use std::{cell::RefCell, collections::HashMap};
 
 const SCROLLBAR_WIDTH: i32 = 16;
 const SCROLLBAR_PART: i32 = 16;
@@ -503,8 +506,9 @@ fn draw_box_dw(
     clr: u32,
     gamma: Option<&GammaRamp>,
 ) {
-    if crate::active_advanced_renderer_config()
-        .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
+    if surface.is_gpu_scene_capture_active()
+        || crate::active_advanced_renderer_config()
+            .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
     {
         if x2 < x1 || y2 < y1 {
             return;
@@ -567,11 +571,33 @@ fn blend_surface_alpha(opacity: f32, destination: u8) -> u8 {
 /// 0xff000000`, engine inverted alpha). PNGs store transparent texels as
 /// white, which would bleed too bright through GL_LINEAR edge interpolation.
 fn engine_png_texture(image: &ImageData) -> ImageData {
-    let mut px = image.pixels().to_vec();
-    px.chunks_exact_mut(4)
-        .filter(|texel| texel[3] == 0)
-        .for_each(|texel| texel[..3].fill(0));
-    ImageData::new(image.width(), image.height(), px)
+    thread_local! {
+        static ENGINE_PNG_TEXTURES: RefCell<HashMap<lc_graphics::GpuTextureId, ImageData>> =
+            RefCell::new(HashMap::new());
+    }
+    ENGINE_PNG_TEXTURES.with(|textures| {
+        if let Some(image) = textures.borrow().get(&image.gpu_texture_id()).cloned() {
+            return image;
+        }
+        let needs_fixup = image
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[3] == 0 && pixel[..3] != [0, 0, 0]);
+        let canonical = if needs_fixup {
+            let mut pixels = image.pixels().to_vec();
+            pixels
+                .chunks_exact_mut(4)
+                .filter(|texel| texel[3] == 0)
+                .for_each(|texel| texel[..3].fill(0));
+            ImageData::new(image.width(), image.height(), pixels)
+        } else {
+            image.clone()
+        };
+        textures
+            .borrow_mut()
+            .insert(image.gpu_texture_id(), canonical.clone());
+        canonical
+    })
 }
 
 /// `ClrByOwner` (C4Surface.cpp:236-286): HLS-based blue detection with
@@ -616,23 +642,37 @@ fn clr_by_owner_gray(r: u8, g: u8, b: u8) -> Option<u8> {
 /// Fresh overlay texels keep the texture-clear transparent WHITE (memset
 /// 0xff, C4Surface.cpp:1113) — the rgb matters for bilinear edge bleed.
 fn split_color_by_owner(image: &ImageData) -> (ImageData, ImageData) {
-    let px = image.pixels();
-    let mut base = px.to_vec();
-    let mut overlay: Vec<u8> = px
-        .chunks_exact(4)
-        .flat_map(|_| [255u8, 255, 255, 0])
-        .collect();
-    for (i, chunk) in px.chunks_exact(4).enumerate() {
-        if let Some(gray) = clr_by_owner_gray(chunk[0], chunk[1], chunk[2]) {
-            let o = i * 4;
-            overlay[o..o + 4].copy_from_slice(&[gray, gray, gray, chunk[3]]);
-            base[o..o + 4].copy_from_slice(&[0, 0, 0, 0]);
-        }
+    thread_local! {
+        static OWNER_LAYERS: RefCell<
+            HashMap<lc_graphics::GpuTextureId, (ImageData, ImageData)>,
+        > = RefCell::new(HashMap::new());
     }
-    (
-        ImageData::new(image.width(), image.height(), base),
-        ImageData::new(image.width(), image.height(), overlay),
-    )
+    OWNER_LAYERS.with(|layers| {
+        if let Some(layer) = layers.borrow().get(&image.gpu_texture_id()).cloned() {
+            return layer;
+        }
+        let pixels = image.pixels();
+        let mut base = pixels.to_vec();
+        let mut overlay: Vec<u8> = pixels
+            .chunks_exact(4)
+            .flat_map(|_| [255u8, 255, 255, 0])
+            .collect();
+        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+            if let Some(gray) = clr_by_owner_gray(pixel[0], pixel[1], pixel[2]) {
+                let offset = index * 4;
+                overlay[offset..offset + 4].copy_from_slice(&[gray, gray, gray, pixel[3]]);
+                base[offset..offset + 4].copy_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+        let layer = (
+            ImageData::new(image.width(), image.height(), base),
+            ImageData::new(image.width(), image.height(), overlay),
+        );
+        layers
+            .borrow_mut()
+            .insert(image.gpu_texture_id(), layer.clone());
+        layer
+    })
 }
 
 /// 1:1 ColorByOwner overlay blit: `PerformBlt` with `dwModClr = ClrByOwnerClr`
@@ -665,6 +705,28 @@ fn draw_image_strip_modulated(
     ) {
         return;
     }
+    if crate::capture_gpu_gui_image(
+        surface,
+        (
+            dest_x as f32,
+            dest_y as f32,
+            image.width() as f32,
+            image.height() as f32,
+        ),
+        image,
+        crate::FloatSourceRect {
+            x: 0.0,
+            y: 0.0,
+            width: image.width() as f32,
+            height: image.height() as f32,
+        },
+        lc_graphics::GpuSampler::Nearest,
+        crate::BilinearBlend::AlphaOver,
+        Some(if mod_clr == 0 { 0xff } else { mod_clr }),
+        gamma,
+    ) {
+        return;
+    }
     let mod_rgb = [(mod_clr >> 16) as u8, (mod_clr >> 8) as u8, mod_clr as u8];
     let mod_a = (mod_clr >> 24) as u8;
     let px = image.pixels();
@@ -684,6 +746,23 @@ fn draw_image_strip_modulated(
             };
             let a = (f32::from(rgba[3]) + f32::from(mod_a)).min(255.0);
             if a <= 0.0 {
+                continue;
+            }
+            if surface.is_gpu_scene_capture_active() {
+                // Fallback rasterization during capture must stay a
+                // painter-ordered retained fragment instead of blending
+                // against stale CPU backing.
+                let _ = surface.blend_fragment_over(
+                    tx as u32,
+                    ty as u32,
+                    [
+                        f32::from(rgba[0]) * f32::from(mod_rgb[0]) / 255.0,
+                        f32::from(rgba[1]) * f32::from(mod_rgb[1]) / 255.0,
+                        f32::from(rgba[2]) * f32::from(mod_rgb[2]) / 255.0,
+                        a,
+                    ],
+                    gamma,
+                );
                 continue;
             }
             let af = a / 255.0;
@@ -789,6 +868,28 @@ fn draw_image_bilinear_modulated(
     {
         return;
     }
+    if crate::capture_gpu_gui_image(
+        surface,
+        (
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+        ),
+        image,
+        crate::FloatSourceRect {
+            x: 0.0,
+            y: 0.0,
+            width: image.width() as f32,
+            height: image.height() as f32,
+        },
+        lc_graphics::GpuSampler::Linear,
+        crate::BilinearBlend::AlphaOver,
+        Some(if mod_clr == 0 { 0xff } else { mod_clr }),
+        gamma,
+    ) {
+        return;
+    }
     let mod_rgbf = [
         ((mod_clr >> 16) & 0xff) as f32 / 255.0,
         ((mod_clr >> 8) & 0xff) as f32 / 255.0,
@@ -831,6 +932,23 @@ fn draw_image_bilinear_modulated(
                     if a <= 0.0 {
                         continue;
                     }
+                    if surface.is_gpu_scene_capture_active() {
+                        // Fallback rasterization during capture must stay a
+                        // painter-ordered retained fragment instead of
+                        // blending against stale CPU backing.
+                        let _ = surface.blend_fragment_over(
+                            px as u32,
+                            py as u32,
+                            [
+                                s[0] * mod_rgbf[0],
+                                s[1] * mod_rgbf[1],
+                                s[2] * mod_rgbf[2],
+                                a,
+                            ],
+                            gamma,
+                        );
+                        continue;
+                    }
                     let af = (a / 255.0).clamp(0.0, 1.0);
                     let Some(dst) = surface.get_pixel(px as u32, py as u32) else {
                         continue;
@@ -866,12 +984,25 @@ fn draw_image_bilinear_modulated(
 /// 32px tiles), so sampling the standalone copy is bit-identical to sampling
 /// the original tile with GL_CLAMP_TO_EDGE.
 fn extract_region(image: &ImageData, x: u32, y: u32, w: u32, h: u32) -> ImageData {
-    let mut out = Vec::with_capacity((w * h * 4) as usize);
-    for sy in y..y + h {
-        let start = ((sy * image.width() + x) * 4) as usize;
-        out.extend_from_slice(&image.pixels()[start..start + (w * 4) as usize]);
+    thread_local! {
+        static EXTRACTED_REGIONS: RefCell<
+            HashMap<(lc_graphics::GpuTextureId, u32, u32, u32, u32), ImageData>,
+        > = RefCell::new(HashMap::new());
     }
-    ImageData::new(w, h, out)
+    EXTRACTED_REGIONS.with(|regions| {
+        let key = (image.gpu_texture_id(), x, y, w, h);
+        if let Some(region) = regions.borrow().get(&key).cloned() {
+            return region;
+        }
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for source_y in y..y + h {
+            let start = ((source_y * image.width() + x) * 4) as usize;
+            pixels.extend_from_slice(&image.pixels()[start..start + (w * 4) as usize]);
+        }
+        let region = ImageData::new(w, h, pixels);
+        regions.borrow_mut().insert(key, region.clone());
+        region
+    })
 }
 
 /// Aspect-preserving centering of a `src_w`x`src_h` facet inside `dest`,
@@ -3261,6 +3392,35 @@ mod tests {
         (fonts, book)
     }
 
+    #[test]
+    fn retained_player_box_and_owner_portrait_are_two_commands() {
+        let image = ImageData::new(2, 2, [120, 120, 120, 200].repeat(4));
+        let mut surface = Surface::new(200, 120, lc_graphics::PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        draw_box_dw(&mut surface, 1, 2, 180, 100, 0x7f20_4060, None);
+        draw_image_bilinear_modulated(
+            &mut surface,
+            &GuiRect::new(20.0, 10.0, 160.0, 100.0),
+            &image,
+            0x0011_2233,
+            None,
+        );
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([200, 120], Color::transparent(), &GammaRamp::identity());
+        assert_eq!(scene.commands.len(), 2);
+        assert!(matches!(
+            &scene.commands[0],
+            lc_graphics::GpuCommand::Solid { .. }
+        ));
+        let lc_graphics::GpuCommand::Quad { sampler, .. } = &scene.commands[1] else {
+            panic!("owner portrait overlay was not retained as a texture quad");
+        };
+        assert_eq!(*sampler, lc_graphics::GpuSampler::Linear);
+    }
+
     // Pixel-exact C4StartupPlrSelDlg geometry at 1280x720, derived from
     // C4StartupPlrSelDlg.cpp:550-562/636-657, C4GuiDialogs.cpp:819-820 and
     // C4StartupPlrSelDlg.h:221, verified against an F9 screenshot of the C++
@@ -4667,6 +4827,10 @@ mod tests {
         let image = ImageData::new(2, 1, vec![255, 255, 255, 0, 200, 100, 50, 1]);
         let out = engine_png_texture(&image);
         assert_eq!(out.pixels(), &[0, 0, 0, 0, 200, 100, 50, 1]);
+        assert_eq!(
+            out.gpu_texture_id(),
+            engine_png_texture(&image).gpu_texture_id()
+        );
     }
 
     // CreateColorByOwner clears base pixels via SetPixDw(0xffffffff)
@@ -4685,6 +4849,17 @@ mod tests {
         let (base, overlay) = split_color_by_owner(&image);
         assert_eq!(base.pixels(), &[0, 0, 0, 0, 200, 0, 0, 255]);
         assert_eq!(overlay.pixels(), &[255, 255, 255, 255, 255, 255, 255, 0]);
+        let (base_again, overlay_again) = split_color_by_owner(&image);
+        assert_eq!(base.gpu_texture_id(), base_again.gpu_texture_id());
+        assert_eq!(overlay.gpu_texture_id(), overlay_again.gpu_texture_id());
+    }
+
+    #[test]
+    fn extracted_checkbox_region_reuses_texture_identity() {
+        let image = ImageData::new(4, 2, [10, 20, 30, 255].repeat(8));
+        let first = extract_region(&image, 1, 0, 2, 2);
+        let second = extract_region(&image, 1, 0, 2, 2);
+        assert_eq!(first.gpu_texture_id(), second.gpu_texture_id());
     }
 
     #[test]

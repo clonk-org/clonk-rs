@@ -18,6 +18,9 @@ use lc_graphics::{Color, GammaRamp, Rect as SurfaceRect, Surface};
 use lc_gui::Rect as GuiRect;
 use std::path::PathBuf;
 
+/// `C4StartupEditBorderColor` (`src/C4Startup.h:31`).
+const STARTUP_EDIT_BORDER_COLOR: u32 = 0x00a4_947a;
+
 /// `C4PlayerInfoCore::PlayerColors`, in `0x00RRGGBB` form.
 pub const PLAYER_COLORS: [u32; 12] = [
     0x0000e8, 0xf40000, 0x00c800, 0xfcf41c, 0xc48444, 0x784830, 0xa04400, 0xf08050, 0x848484,
@@ -1033,9 +1036,7 @@ impl PlayerPropertiesScreen {
             TextAlign::Left,
             gamma,
         );
-        if highlighted(PlayerPropertiesControl::Name) {
-            draw_outline(surface, layout.name, Color::opaque(255, 240, 90));
-        }
+        draw_name_edit_frames(surface, layout.name, gamma);
 
         if let Some(portrait) = controller.portrait_preview.as_ref() {
             crate::draw_image_bilinear(surface, &gui_rect(layout.portrait), portrait, gamma);
@@ -1290,6 +1291,30 @@ fn fill(surface: &mut Surface, rect: IntRect, color: Color) {
     );
 }
 
+fn draw_name_edit_frames(surface: &mut Surface, rect: IntRect, gamma: Option<&GammaRamp>) {
+    if rect.w <= 1 || rect.h <= 2 {
+        return;
+    }
+    crate::classic_gui::draw_engine_frame(
+        surface,
+        rect.x,
+        rect.y,
+        rect.x + rect.w,
+        rect.y + rect.h - 1,
+        STARTUP_EDIT_BORDER_COLOR,
+        gamma,
+    );
+    crate::classic_gui::draw_engine_frame(
+        surface,
+        rect.x + 1,
+        rect.y + 1,
+        rect.x + rect.w - 1,
+        rect.y + rect.h - 2,
+        STARTUP_EDIT_BORDER_COLOR,
+        gamma,
+    );
+}
+
 fn draw_outline(surface: &mut Surface, rect: IntRect, color: Color) {
     fill(surface, IntRect { h: 1, ..rect }, color);
     fill(
@@ -1316,6 +1341,39 @@ fn draw_outline(surface: &mut Surface, rect: IntRect, color: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_name_edit_keeps_both_native_draw_frame_passes() {
+        let mut surface = Surface::new(32, 16, lc_graphics::PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        draw_name_edit_frames(
+            &mut surface,
+            IntRect {
+                x: 2,
+                y: 2,
+                w: 20,
+                h: 10,
+            },
+            None,
+        );
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([32, 16], Color::transparent(), &GammaRamp::identity());
+        let [lc_graphics::GpuCommand::Solid {
+            vertices,
+            topology,
+            alpha_mode,
+            ..
+        }] = scene.commands.as_slice()
+        else {
+            panic!("both edit frames should coalesce into one retained line batch");
+        };
+        assert_eq!(vertices.len(), 16, "two four-segment DrawFrameDw passes");
+        assert_eq!(*topology, lc_graphics::GpuPrimitiveTopology::LineList);
+        assert_eq!(*alpha_mode, lc_graphics::GpuSolidAlphaMode::SourceOver);
+    }
 
     fn controller() -> PlayerPropertiesController {
         PlayerPropertiesController::edit(3, PlayerFile::default(), "comment", None, None)

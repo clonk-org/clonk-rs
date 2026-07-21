@@ -14,9 +14,13 @@ use lc_graphics::clonk_font::{
     CapturedFontImage, ClonkFont, ClonkFontRole, FontImageProvider, FontImageRef, GlyphCell,
     TextAlign,
 };
-use lc_graphics::{ClipperProjection, Color, GammaRamp, Surface, SurfaceDrawTarget};
+use lc_graphics::{
+    ClipperProjection, Color, GammaRamp, GpuBlend, GpuCommand, GpuOuterModulation, GpuSampler,
+    GpuVertex, Surface, SurfaceDrawTarget,
+};
 use lc_gui::{ImageData, Rect as GuiRect};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Mutex;
 
 /// The five GUI fonts the startup menus draw with.
 pub struct ClonkFontSet {
@@ -45,6 +49,18 @@ pub struct NativeClonkFont {
     logical_height: u32,
     raster_height: u32,
     logical_h_space: i32,
+    /// Stable per-glyph retained resources. C++ keeps these cells resident in
+    /// a font atlas; the Rust backend gives each immutable cell a stable GPU
+    /// identity so replay emits one quad per glyph without CPU resampling.
+    retained_glyph_images: Mutex<HashMap<char, NativeGlyphImages>>,
+}
+
+#[derive(Clone)]
+struct NativeGlyphImages {
+    cpu: ImageData,
+    /// One transparent texel around the cell preserves the C++/software
+    /// bilinear footprint without leaking an adjacent glyph.
+    retained: ImageData,
 }
 
 #[derive(Clone, Copy)]
@@ -167,6 +183,81 @@ impl NativeClonkFont {
 
     pub fn glyph(&self, ch: char) -> Option<&GlyphCell> {
         self.raster.glyph(ch)
+    }
+
+    fn retained_glyph_images(&self, character: char) -> Option<NativeGlyphImages> {
+        // Every unmapped scalar resolves to the same FreeType glyph-zero cell.
+        // Cache that immutable resource once instead of allocating one GPU id
+        // per arbitrary Unicode scalar encountered in chat or scenario text.
+        let cache_key = if self.raster.glyph(character).is_some() {
+            character
+        } else {
+            '\0'
+        };
+        if let Some(images) = self
+            .retained_glyph_images
+            .lock()
+            .expect("native glyph cache poisoned")
+            .get(&cache_key)
+            .cloned()
+        {
+            return Some(images);
+        }
+
+        let glyph = self.raster.rendered_glyph(character)?;
+        let width = u32::try_from(glyph.width.max(0)).ok()?;
+        let height = u32::try_from(self.raster.cell_height.max(0)).ok()?;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let pixel_count = usize::try_from(width)
+            .ok()?
+            .checked_mul(usize::try_from(height).ok()?)?;
+        let mut rgba = Vec::with_capacity(pixel_count.checked_mul(4)?);
+        for index in 0..pixel_count {
+            let pixel = glyph.pixels.get(index).copied().unwrap_or_default();
+            rgba.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+        }
+        let cpu = ImageData::new(width, height, rgba);
+
+        let retained_width = width.checked_add(2)?;
+        let retained_height = height.checked_add(2)?;
+        let retained_len = usize::try_from(retained_width)
+            .ok()?
+            .checked_mul(usize::try_from(retained_height).ok()?)?
+            .checked_mul(4)?;
+        let mut retained_rgba = vec![0_u8; retained_len];
+        for row in 0..height {
+            let source_start = usize::try_from(row)
+                .ok()?
+                .checked_mul(usize::try_from(width).ok()?)?
+                .checked_mul(4)?;
+            let source_end =
+                source_start.checked_add(usize::try_from(width).ok()?.checked_mul(4)?)?;
+            let destination_start = usize::try_from(row.checked_add(1)?)
+                .ok()?
+                .checked_mul(usize::try_from(retained_width).ok()?)?
+                .checked_add(1)?
+                .checked_mul(4)?;
+            let destination_end = destination_start.checked_add(source_end - source_start)?;
+            retained_rgba
+                .get_mut(destination_start..destination_end)?
+                .copy_from_slice(cpu.pixels().get(source_start..source_end)?);
+        }
+        let images = NativeGlyphImages {
+            cpu,
+            retained: ImageData::new(retained_width, retained_height, retained_rgba),
+        };
+        let mut cache = self
+            .retained_glyph_images
+            .lock()
+            .expect("native glyph cache poisoned");
+        Some(
+            cache
+                .entry(cache_key)
+                .or_insert_with(|| images.clone())
+                .clone(),
+        )
     }
 
     /// `CStdFont::GetTextExtent` in GUI units. Each physical glyph width is
@@ -402,9 +493,7 @@ impl NativeClonkFont {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn draw_to_physical_surface_with_clipper_and_images_to<
-        T: SurfaceDrawTarget + ?Sized,
-    >(
+    pub fn draw_to_physical_surface_with_clipper_and_images_to<T: SurfaceDrawTarget + ?Sized>(
         &self,
         surface: &mut T,
         x: i32,
@@ -461,16 +550,11 @@ impl NativeClonkFont {
                 projection.project(logical_left, logical_y)
             })
             .collect::<Vec<_>>();
-        if projection.requires_resampling(self.effective_scale) {
+        if surface.is_gpu_command_capture_active()
+            || projection.requires_resampling(self.effective_scale)
+        {
             self.draw_fractional_lines_at_origins(
-                surface,
-                &origins,
-                text,
-                color,
-                markup,
-                gamma,
-                images,
-                projection,
+                surface, &origins, text, color, markup, gamma, images, projection,
             );
             return;
         }
@@ -483,9 +567,8 @@ impl NativeClonkFont {
                 surface, &origins, text, color, markup, gamma, images,
             );
         } else {
-            self.raster.draw_lines_at_origins_with_gamma_to(
-                surface, &origins, text, color, markup, gamma,
-            );
+            self.raster
+                .draw_lines_at_origins_with_gamma_to(surface, &origins, text, color, markup, gamma);
         }
     }
 
@@ -614,7 +697,9 @@ impl NativeClonkFont {
             TextAlign::Right => logical_width,
         });
         let physical_origin = projection.project(logical_left, y);
-        if projection.requires_resampling(self.effective_scale) {
+        if surface.is_gpu_command_capture_active()
+            || projection.requires_resampling(self.effective_scale)
+        {
             // StringOut invokes one CStdFont::DrawText call. Newlines are
             // ignored by DrawText and markup-enabled pipes remain ordinary
             // glyphs; only GetTextExtent treats them as virtual line breaks.
@@ -696,16 +781,7 @@ impl NativeClonkFont {
             .zip(text.split(|character: char| character == '\n' || (markup && character == '|')))
         {
             self.draw_fractional_line(
-                surface,
-                x,
-                y,
-                line,
-                color,
-                markup,
-                gamma,
-                images,
-                &mut stack,
-                projection,
+                surface, x, y, line, color, markup, gamma, images, &mut stack, projection,
             );
         }
     }
@@ -787,11 +863,13 @@ impl NativeClonkFont {
             let cell = self.raster.rendered_glyph(character);
             let raw_width = cell.map_or(0, |glyph| glyph.width).max(0);
             let raw_height = self.raster.cell_height.max(0);
-            if let Some(cell) = cell.filter(|_| raw_width > 0 && raw_height > 0) {
+            if let Some(images) = (raw_width > 0 && raw_height > 0)
+                .then(|| self.retained_glyph_images(character))
+                .flatten()
+            {
                 blit_scaled_native_glyph(
                     surface,
-                    cell,
-                    raw_height,
+                    &images,
                     self.raster.texture_size(),
                     pen_x,
                     pen_y,
@@ -949,8 +1027,7 @@ fn native_image_modulation_rgb(
 #[allow(clippy::too_many_arguments)]
 fn blit_scaled_native_glyph<T: SurfaceDrawTarget + ?Sized>(
     surface: &mut T,
-    cell: &GlyphCell,
-    source_height: i32,
+    images: &NativeGlyphImages,
     physical_texture_size: i32,
     x: f64,
     y: f64,
@@ -961,16 +1038,10 @@ fn blit_scaled_native_glyph<T: SurfaceDrawTarget + ?Sized>(
     gamma: Option<&GammaRamp>,
     shear: f64,
 ) {
-    let source_width = cell.width.max(0) as u32;
-    let source_height = source_height.max(0) as u32;
-    let pixels = cell
-        .pixels
-        .iter()
-        .flat_map(|pixel| [pixel.r, pixel.g, pixel.b, pixel.a])
-        .collect();
     draw_scaled_native_image(
         surface,
-        ImageData::new(source_width, source_height, pixels),
+        &images.cpu,
+        Some((&images.retained, [1.0, 1.0])),
         x,
         y,
         width,
@@ -997,9 +1068,11 @@ fn blit_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
     shear: f64,
 ) {
     let pixels = image.rgba.chunks_exact(4).flatten().copied().collect();
+    let image = retained_font_image(image.width, image.height, pixels);
     draw_scaled_native_image(
         surface,
-        ImageData::new(image.width, image.height, pixels),
+        &image,
+        None,
         x,
         y,
         width,
@@ -1012,10 +1085,90 @@ fn blit_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
     );
 }
 
+/// Return one stable retained texture identity for immutable font/source RGBA.
+///
+/// Several classic text paths must first build an isolated CPU source before
+/// applying spatial ClrModMap modulation. Canonicalizing that source by exact
+/// dimensions and bytes keeps repeated frames on one renderer-cache entry
+/// without changing the software oracle's pixels.
+pub(crate) fn retained_font_image(width: u32, height: u32, pixels: Vec<u8>) -> ImageData {
+    // ImageData globally interns immutable dimensions + exact RGBA with a
+    // collision check and bounded retention. Keep this helper as the font
+    // boundary without maintaining a second unbounded cache.
+    ImageData::new(width, height, pixels)
+}
+
+/// Add the transparent one-texel font-atlas gutter used by retained glyph
+/// cells. The gutter prevents linear filtering from clamping to the glyph's
+/// last opaque texel when its logical atlas tile is larger than the cell.
+pub(crate) fn retained_padded_font_image(image: &ImageData) -> Option<ImageData> {
+    let width = image.width();
+    let height = image.height();
+    let retained_width = width.checked_add(2)?;
+    let retained_height = height.checked_add(2)?;
+    let retained_len = usize::try_from(retained_width)
+        .ok()?
+        .checked_mul(usize::try_from(retained_height).ok()?)?
+        .checked_mul(4)?;
+    let mut pixels = vec![0_u8; retained_len];
+    for row in 0..height {
+        let source_start = usize::try_from(row)
+            .ok()?
+            .checked_mul(usize::try_from(width).ok()?)?
+            .checked_mul(4)?;
+        let source_end = source_start.checked_add(usize::try_from(width).ok()?.checked_mul(4)?)?;
+        let destination_start = usize::try_from(row.checked_add(1)?)
+            .ok()?
+            .checked_mul(usize::try_from(retained_width).ok()?)?
+            .checked_add(1)?
+            .checked_mul(4)?;
+        let destination_end = destination_start.checked_add(source_end - source_start)?;
+        pixels
+            .get_mut(destination_start..destination_end)?
+            .copy_from_slice(image.pixels().get(source_start..source_end)?);
+    }
+    Some(retained_font_image(retained_width, retained_height, pixels))
+}
+
+/// Retained counterpart of the CStdFont facet draw used by presentation code
+/// that has already resolved markup. GPU targets receive one stable textured
+/// quad; ordinary targets continue through the exact software sampler.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_retained_font_image<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
+    image: &ImageData,
+    retained: Option<(&ImageData, [f32; 2])>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    gamma: Option<&GammaRamp>,
+    shear: f32,
+    modulation: [u8; 3],
+    color_alpha: u8,
+    physical_texture_size: Option<i32>,
+) {
+    draw_scaled_native_image(
+        surface,
+        image,
+        retained,
+        f64::from(x),
+        f64::from(y),
+        f64::from(width),
+        f64::from(height),
+        gamma,
+        f64::from(shear),
+        modulation,
+        color_alpha,
+        physical_texture_size,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
     surface: &mut T,
-    image: ImageData,
+    image: &ImageData,
+    retained: Option<(&ImageData, [f32; 2])>,
     x: f64,
     y: f64,
     width: f64,
@@ -1027,11 +1180,24 @@ fn draw_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
     physical_texture_size: Option<i32>,
 ) {
     let rect = GuiRect::new(x as f32, y as f32, width as f32, height as f32);
+    if capture_scaled_native_image(
+        surface,
+        image,
+        retained,
+        &rect,
+        gamma,
+        shear as f32,
+        modulation,
+        color_alpha,
+        physical_texture_size,
+    ) {
+        return;
+    }
     if let Some(physical_texture_size) = physical_texture_size {
         crate::draw_image_bilinear_sheared_target_on_texture(
             surface,
             &rect,
-            &image,
+            image,
             gamma,
             shear as f32,
             modulation,
@@ -1042,13 +1208,138 @@ fn draw_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
         crate::draw_image_bilinear_sheared_target(
             surface,
             &rect,
-            &image,
+            image,
             gamma,
             shear as f32,
             modulation,
             color_alpha,
         );
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
+    image: &ImageData,
+    retained: Option<(&ImageData, [f32; 2])>,
+    rect: &GuiRect,
+    gamma: Option<&GammaRamp>,
+    shear: f32,
+    modulation: [u8; 3],
+    color_alpha: u8,
+    physical_texture_size: Option<i32>,
+) -> bool {
+    if !surface.is_gpu_command_capture_active()
+        || image.width() == 0
+        || image.height() == 0
+        || rect.size.width <= 0.0
+        || rect.size.height <= 0.0
+        || ![
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+            shear,
+        ]
+        .into_iter()
+        .all(f32::is_finite)
+    {
+        return false;
+    }
+    let expected_len = usize::try_from(image.width())
+        .ok()
+        .and_then(|width| {
+            usize::try_from(image.height())
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4));
+    if expected_len != Some(image.pixels().len()) {
+        return false;
+    }
+
+    let renderer = crate::active_advanced_renderer_config().unwrap_or_default();
+    let destination_offset = renderer.destination_offset();
+    let texture_indent = renderer.texture_indent();
+    let physical_texture_size = physical_texture_size
+        .unwrap_or_else(|| crate::cpp_tex_size(image.width(), image.height()) as i32)
+        .max(1) as f32;
+    let texture_denominator = physical_texture_size + texture_indent * 2.0;
+    if !texture_denominator.is_finite() || texture_denominator == 0.0 {
+        return false;
+    }
+    let texture_scale = physical_texture_size / texture_denominator;
+    let (texture, inset) = retained.unwrap_or((image, [0.0, 0.0]));
+    if texture.width() == 0 || texture.height() == 0 {
+        return false;
+    }
+
+    let tx = rect.origin.x + destination_offset;
+    let ty = rect.origin.y + destination_offset;
+    let center_y = rect.origin.y + rect.size.height / 2.0;
+    let top_shift = shear * (ty - center_y);
+    let bottom_shift = shear * (ty + rect.size.height - center_y);
+    let left = tx;
+    let right = tx + rect.size.width;
+    let top = ty;
+    let bottom = ty + rect.size.height;
+    let positions = [
+        [left + top_shift, top, 1.0],
+        [right + top_shift, top, 1.0],
+        [left + bottom_shift, bottom, 1.0],
+        [right + bottom_shift, bottom, 1.0],
+    ];
+
+    let source_left = inset[0] + texture_indent;
+    let source_top = inset[1] + texture_indent;
+    let source_right = source_left + image.width() as f32 * texture_scale;
+    let source_bottom = source_top + image.height() as f32 * texture_scale;
+    let texture_width = texture.width() as f32;
+    let texture_height = texture.height() as f32;
+    let uv = [
+        [source_left / texture_width, source_top / texture_height],
+        [source_right / texture_width, source_top / texture_height],
+        [source_left / texture_width, source_bottom / texture_height],
+        [source_right / texture_width, source_bottom / texture_height],
+    ];
+    if !uv.iter().flatten().all(|value| value.is_finite()) {
+        return false;
+    }
+
+    let transparency = if !renderer.shader && renderer.no_alpha_add {
+        0
+    } else {
+        255 - color_alpha
+    };
+    let packed_modulation = [
+        f32::from(modulation[0]) / 255.0,
+        f32::from(modulation[1]) / 255.0,
+        f32::from(modulation[2]) / 255.0,
+        f32::from(transparency) / 255.0,
+    ];
+    let vertices = std::array::from_fn(|index| {
+        GpuVertex::new(positions[index], uv[index], packed_modulation)
+            .with_outer_modulation(GpuOuterModulation::Combine)
+            .with_sample_tile(0.0, 0.0, physical_texture_size)
+    });
+    let resource = texture.gpu_texture_resource();
+    if !resource.is_valid() {
+        return false;
+    }
+    surface.capture_gpu_textured_command(
+        resource,
+        GpuCommand::Quad {
+            texture: texture.gpu_texture_id(),
+            owner_mask: None,
+            vertices,
+            clip: surface.clip(),
+            blend: GpuBlend::Normal,
+            base_mod2: false,
+            owner_mod2: false,
+            sampler: GpuSampler::Linear,
+            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+        },
+    )
 }
 
 /// The five GUI fonts rasterized at the application's physical output scale.
@@ -1599,6 +1890,7 @@ fn build_native_font(
         logical_height,
         raster_height,
         logical_h_space: if shadow { -1 } else { 0 },
+        retained_glyph_images: Mutex::new(HashMap::new()),
     })
 }
 
@@ -1954,6 +2246,7 @@ mod tests {
             logical_height: 13,
             raster_height: 19,
             logical_h_space: -1,
+            retained_glyph_images: Mutex::new(HashMap::new()),
         };
         let mut surface = Surface::new(64, 40, lc_graphics::PixelFormat::Rgba8888);
         font.draw_to_physical_surface_with_offset_and_images(
@@ -2029,6 +2322,7 @@ mod tests {
             logical_height: 13,
             raster_height: 19,
             logical_h_space: -1,
+            retained_glyph_images: Mutex::new(HashMap::new()),
         };
         let images = SolidImage(vec![255; 19 * 19 * 4]);
         let projection =
@@ -2197,7 +2491,57 @@ mod tests {
             logical_height: 2,
             raster_height: 3,
             logical_h_space: 0,
+            retained_glyph_images: Mutex::new(HashMap::new()),
         }
+    }
+
+    #[test]
+    fn native_gpu_text_is_one_stable_textured_quad_per_glyph() {
+        let font = solid_fractional_native_font();
+        let capture = || {
+            let mut surface = Surface::new(32, 8, lc_graphics::PixelFormat::Rgba8888);
+            surface.begin_gpu_scene_capture();
+            font.draw_to_physical_surface_with_offset(
+                &mut surface,
+                1,
+                1,
+                "AAA",
+                [255, 255, 255, 255],
+                TextAlign::Left,
+                false,
+                (0, 0),
+                None,
+            );
+            surface
+                .take_gpu_scene_capture()
+                .expect("capture remains active")
+                .into_scene([32, 8], Color::transparent(), &GammaRamp::identity())
+        };
+
+        let first = capture();
+        assert_eq!(first.commands.len(), 3);
+        let textures = first
+            .commands
+            .iter()
+            .map(|command| match command {
+                GpuCommand::Quad { texture, .. } => *texture,
+                other => panic!("native glyph was CPU-rasterized instead of retained: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert!(textures.windows(2).all(|pair| pair[0] == pair[1]));
+
+        let second = capture();
+        let GpuCommand::Quad {
+            texture: second_texture,
+            ..
+        } = second.commands[0]
+        else {
+            panic!("second native glyph capture was not textured");
+        };
+        assert_eq!(
+            textures[0], second_texture,
+            "glyph texture identity churned"
+        );
     }
 
     #[test]
@@ -2248,27 +2592,15 @@ mod tests {
                 [value, value.wrapping_add(19), value.wrapping_add(37), 255]
             })
             .collect::<Vec<_>>();
-        let mut owned = Surface::from_bytes(
-            6,
-            6,
-            lc_graphics::PixelFormat::Rgba8888,
-            initial.clone(),
-        )
-        .expect("valid owned framebuffer");
+        let mut owned =
+            Surface::from_bytes(6, 6, lc_graphics::PixelFormat::Rgba8888, initial.clone())
+                .expect("valid owned framebuffer");
         let mut borrowed = initial;
-        fonts.draw_captured_text(
-            &mut owned,
-            std::slice::from_ref(&replay_command),
-            (4, 4),
-        );
+        fonts.draw_captured_text(&mut owned, std::slice::from_ref(&replay_command), (4, 4));
         {
             let mut view = lc_graphics::RgbaSurfaceViewMut::new(6, 6, &mut borrowed)
                 .expect("valid borrowed framebuffer");
-            fonts.draw_captured_text_to(
-                &mut view,
-                std::slice::from_ref(&replay_command),
-                (4, 4),
-            );
+            fonts.draw_captured_text_to(&mut view, std::slice::from_ref(&replay_command), (4, 4));
         }
         assert_eq!(borrowed, owned.pixels());
     }

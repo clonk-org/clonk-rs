@@ -1,199 +1,222 @@
-# Rendering-layer parity plan
+# Rendering parity
 
-> Goal: bring the Rust render path to parity with the C++ engine. Living doc.
-> Started 2026-05-30.
+> Current architecture and verification snapshot, 2026-07-21. The C++ oracle
+> is `src/StdDDraw2.*`, `src/StdGL.cpp`, `src/C4Surface.cpp`, and the draw sites
+> in `C4GraphicsSystem`, `C4Viewport`, `C4Landscape`, and `C4GUI`.
 
-## What "parity" means here (and what it can't)
+## What parity means
 
-The C++ engine renders through **OpenGL** (`src/StdGL.cpp`) — GPU output that is
-not bit-identical across drivers/GPUs. The Rust port renders through a **CPU
-framebuffer** (`pixels`/wgpu in `lc-app`, software blits in `lc-graphics`).
-Therefore *exact pixel* parity is undefined by construction. The achievable,
-meaningful target is **visual/functional parity**: the same surfaces/facets/
-sprites/landscape drawn at the same positions, with the same transforms, color
-modulation, blend modes, and clipping — verified two ways:
-1. **Code-level fidelity** to the C++ draw algorithm (cite `file:line`).
-2. **Visual spot-checks** (screenshot the Rust frame, compare to the C++ frame).
+LegacyClonk uses a process-global OpenGL renderer. The Rust port uses wgpu, but
+the backend API is not the behavior: parity requires the same painter order,
+coordinates, sampling, packed-C4 modulation, blending, clipping, gamma
+placement, and visible resources.
 
-A pixel-exact differential test against the GL renderer is unsound (GPU-dependent),
-so rendering changes are verified by (1) exactness unit tests against the C++
-*formulas* where they are integer/deterministic (modulation, blend math), and (2)
-visual comparison for composed scenes.
+Cross-driver GL output is not generally bit-identical. Integer color formulas
+and resource state transitions are therefore tested exactly; GPU sampling and
+composed frames are checked by readback against the software oracle, allowing a
+one-byte tolerance only where the native GL filter itself is driver-dependent.
+The software renderer remains useful as an oracle, not as the normal windowed
+presentation path.
 
-## Empirical starting state (2026-05-30, measured side-by-side)
+## Current windowed architecture
 
-- 2D asset blitting works (menu background + logo render correctly).
-- Menu/scenario-browser chrome **diverges** (C++ large wooden buttons + GL 3D book;
-  Rust flat panel). See `PORT_STATUS.md` "Graphical parity (empirical)".
-- The core blit (`lc-graphics/src/surface.rs::blit_region`) was a bare 1:1
-  alpha-over copy — **no modulation, blend modes, stretch, transform, or clip**.
-- `lc-graphics` ≈ 1,276 LOC vs the C++ render core
-  (`StdDDraw2`+`StdGL`+`C4Surface`+facets+graphics system) ≈ 6,800 LOC, plus
-  scene drawing scattered across viewport/object/landscape code.
+Normal graphical presentation is retained and GPU-composed:
 
-## Prioritized phases
+1. `lc-graphics::Surface` records painter-ordered `GpuCommand`s while ordinary
+   frontend code draws. Textures carry a stable id, current revision, complete
+   CPU regeneration backing, and optional dirty rectangles.
+2. `lc-frontend` lowers sky, landscape/liquid, sprites, particles, HUD, GUI,
+   menus, and solid primitives into those commands.
+3. `lc-app` builds an ordered `RetainedGpuFrame`. Logical game/chrome layers use
+   the scaled and cropped presentation transform. Scale-native font layers use
+   an identity transform at the same physical extent.
+4. `RetainedGpuRenderer::render_layers` validates the complete frame before GPU
+   mutation, merges compatible retained resources, appends every layer to one
+   command stream, and composes once into a physical `Rgba8Unorm` target.
+5. Fragment or monitor gamma is applied in the C++-selected location. The final
+   composition is then presented, or copied for screenshots/save thumbnails.
 
-### R1 — rendering primitives (foundation; everything draws through these)
-All done + unit-tested against the C++ formulas, 2026-05-30 (`lc-graphics`, 33 tests).
-- [x] **Color modulation** (`dwModClr`): `Color::modulate_clr` / `modulate_clr_mod2`
-      mirroring C++ `ModulateClr`/`ModulateClrMOD2` (`src/StdColors.h:159,183`),
-      incl. the `(255*255)>>8=254` `>>8` quirk. Opaque-white = GL identity.
-- [x] **Blit modes**: `BlitMode::{Normal,Additive,Mod2}` (`src/C4Surface.h:39`).
-      Additive = `dst + src·srcAlpha` per `glBlendFunc(GL_SRC_ALPHA, GL_ONE)`
-      (`StdGL.cpp:908`); Mod2 = alpha-weighted `modulate_clr_mod2` combine.
-      `Surface::blit_region_ex(src, rect, dest, modulation, mode)`.
-- [x] **Stretched blit** (`blit_stretched`) — nearest-neighbour facet scaling.
-- [x] **`CBltTransform`** affine transform — `transform.rs::Transform` ports
-      `SetRotate`/`SetMoveScale`/`TransformPoint`/`*=`/inverse exactly
-      (`src/StdDDraw2.{h,cpp}`); `Surface::blit_transformed` inverse-maps
-      destination pixels (rotation/scale/mirror).
-- [x] **Clipping rect** (`set_clip`/`clear_clip`, `SetPrimaryClipper`) honoured by
-      every blit + `fill_rect`.
-- [x] **Filled box** (`fill_rect`, `DrawBoxDw`) — alpha-blended, clip-aware.
-- [ ] **Lines / gradient quads** (`DrawLineDw`, `DrawQuadDw` with per-vertex
-      colour) — needs the C++ DDA/scanline formula verified before asserting;
-      lower priority (used for debug overlays + a few HUD gradients).
+`pixels` is deliberately kept at a 1x1 logical buffer during retained
+presentation so it cannot upload a full software frame before `render_with`.
+Menu, loading, running, and graphical console modes all enter the retained
+capture path. A render error is recovered or reported; it does not silently
+switch the current frame to software composition.
 
-### R2 — GUI / menu chrome (most visible divergence; no simulation dependency)
-- [x] **`Graphics.Scale` honoured (2026-06-12).** The shared config's
-      `ResolutionX/ResolutionY/Scale` keys are read with the C++ names
-      (C4Config.cpp:440-442; the Rust app previously read nonexistent
-      `ResX/ResY` and ignored Scale at render time, so menus laid out 1:1
-      over the physical window — the wrong zoom and dialog proportions).
-      The window asks for `ResX*Scale` output pixels (C4Application.cpp:183),
-      the app renders at `ceil(pixels/scale)` logical
-      (C4Application::SetResolution), `lc-scaling::FramePresenter`
-      bilinear-upscales the finished frame, and mouse input divides by the
-      scale (C4MouseControl.cpp:185). KNOWN GAP at Scale != 100: C++
-      rasterizes fonts at `size*scale` (C4Fonts.cpp:172) and stretches each
-      texture directly to the output, so its text stays crisp; the Rust
-      frame upscale is geometrically identical but softer. Per-renderer
-      scale-aware rasterization is the follow-up if crispness matters.
-- [x] Main-menu labels match C++ (`startup_main_menu.rs`: "Start Game" /
-      "Start Network Game"), verified live via screenshot 2026-05-30.
-- [x] Startup main-menu layout matches `C4StartupMainDlg` (`C4StartupMainDlg.cpp:44`):
-      buttons fill the right 2/5 (`GetFromRight(Wdt*2/5)`), inset `Wdt/26` /
-      `40+Hgt/8`, stacked from the top; the blue panel backdrop + footer box were
-      removed (C++ has neither) and the participants label is plain right-aligned
-      text at `(Wdt*39/40, Hgt*9/10)`. Button captions centred. Verified live
-      2026-05-30 — full-width wooden planks on the loader background.
-- [x] Button caption colour matches C++ exactly: `C4GUI_ButtonFontClr = 0xffffff00`
-      (yellow) when active, `C4GUI_InactCaptionFontClr = 0xffafafaf` when disabled
-      (`src/C4Gui.h:53-56`). Verified live 2026-05-30.
-- [x] **Startup main menu pixel-exact vs C++ (2026-06-10).** Measured against an
-      F9 GL-backbuffer capture of the C++ engine at windowed 1280x720:
-      **99.80% of pixels bit-identical**; the residual is ±1-LSB GPU filter
-      rounding under the focus highlight (invisible) plus the mouse-cursor
-      sprite baked into the C++ capture. What it took (all cited in code):
-      * Exact `C4StartupMainDlg` integer geometry incl. fullscreen-dialog client
-        margins (`main_menu_layout`, unit-tested: buttons at (842,201+44i,414,40)
-        @720p); 3-slice `DrawBar` planks; additive `GUIButtonHighlight`
-        focus/hover overlay; trademark line; `"Players: none selected"`;
-        version string from `C4VERSION`.
-      * **CStdFont-faithful fonts**: FreeType `FT_LOAD_RENDER|FT_LOAD_NO_HINTING`
-        at `FT_Set_Pixel_Sizes(h,h)` (same rasterizer family as the vendored
-        2.14.x), atlas-cell composition with the baked blur shadow + BltAlpha
-        `>>8` quirk (`lc-graphics/src/clonk_font.rs`), sizes 12/13/14/16/22,
-        `<c>` markup + `&` hotkey highlight (renders pale, NOT underlined),
-        glyph-exact captions/labels.
-      * **Gamma**: the blit shader's per-fragment ramp lookup (`CGammaControl`
-        formula, NEAREST 1D-texture index = `floor(c*256/255)`, black floor
-        0→1) — `lc-graphics/src/gamma.rs`.
-      * **Blits**: `CStdDDraw::Blit`-faithful per-texture-tile quads
-        (pow2-of-min-dim tiles, `GL_CLAMP_TO_EDGE` per C4Surface.cpp:1102),
-        GL_LINEAR bilinear in f32, float blend, single store rounding.
-- [x] Verification: `lc-app --dump-menu-frame <png>` renders the startup menu
-      headlessly at 1280x720. Compare against `build/Screenshots/*.png` shifted
-      **one row up** — C++ `C4Surface::SavePNG` has an off-by-one in its
-      `glReadPixels` readback loop (`realHgt - y`, C4Surface.cpp:434), so every
-      F9 screenshot is one row off and its top row is undefined. (Upstream C++
-      bug worth fixing; the live window is NOT shifted.)
-- [ ] Remaining menu polish: none known at the main menu beyond the ±1-LSB GPU
-      filter residual.
-- [x] **About, Scenario-Selection book, Network dialogs pixel-exact
-      (2026-06-10).** App-level `--dump-menu-frame --menu-view about|scenarios|net`
-      vs F9 refs (`build/Screenshots/ref-*.png`, row-shift + masks applied):
-      about **96.15%**, scensel **95.56%**, net **97.36%** bit-identical, and in
-      all three EVERY residual pixel is channel-delta 1 (GPU bilinear rounding
-      on the stretched 800x600 backgrounds) — zero structural diffs.
-      Renderers: `lc-frontend/src/startup_{about_dlg,scensel,netdlg}.rs`
-      (spec-driven, every formula cited; specs in `target/parity-specs/`).
-      New empirics baked in: `DrawLineDw` drops its end pixel (GL_LINES
-      diamond-exit) so `Draw3DFrame` corners blend once; shadowless book fonts
-      (`build_book_font_set`); zoomed `DrawBar` branch for the 23px GUICaption
-      bar. Masks: cursor sprite baked into refs at ~(637,356); scensel list +
-      right page (live entries differ from the ref's empty exe-dir scan); net
-      list client (nondeterministic masterserver content).
-- [x] **Options and Player-Selection dialogs pixel-exact (2026-06-10).**
-      App-level dumps vs F9 refs: options **98.69%**, plrsel **95.63%**
-      bit-identical, all residuals channel-delta 1; zero structural diffs
-      outside masks (cursor sprite; plrsel list content — the app has no
-      packed-`.c4p` player discovery yet, so the live dialog shows the empty
-      state while the ref shows Tyler). Renderers
-      `startup_options_dlg.rs` / `startup_plrsel.rs`. More engine quirks
-      pinned with tests: `ReadPNG` and `SetPixDw` squash fully-transparent
-      texels to BLACK (C4Surface.cpp:972,733 — GL tile padding stays
-      transparent WHITE), which bleeds through GL_LINEAR on alpha-edged
-      stretched assets; `fill_quad_dw` scanline ties are
-      left-inclusive/right-exclusive.
-- [ ] Player discovery for the plrsel dialog: read packed `.c4p` groups
-      (portrait/BigIcon/Player.txt) in lc-resources, feed `PlrSelPlayer`s.
-- [ ] Options interactivity: the parity sheet is display-only; control
-      clicks still route to the old keyboard-rebind UI semantics (ESC works).
-- [ ] Consolidate the three duplicated shadowless book-font builders and the
-      per-dialog draw helpers (box/3D-frame/caption-bar/scrollbar) into one
-      shared module (deliberate duplication from parallel agent ownership).
-- [ ] Scen-sel interactivity beyond select/open/back clicks: search filter,
-      scrollbar drag, right-page selection info, folder icons from
-      Folder.txt/Icon assets (list rows currently use kind-default icons).
+The CPU path is intentionally retained for headless dumps, deterministic
+reference tests, resource preprocessing, and private scratch surfaces. Those
+uses do not make the visible window a CPU-frame upload renderer.
 
-### R3 — in-game scene (largest; depends on simulation correctness)
-- [x] **Verification capability**: `lc-app --dump-frame <png> [--sandbox] --test-frames N`
-      renders one in-game frame headlessly (no window) to PNG, sidestepping the
-      window-focus problem. Plus `--sandbox` boots straight into the sandbox.
-      *Done 2026-05-30 — this unblocks all R3 visual checks.*
+Native GL never reads framebuffer alpha back (CStdGL uses no `GL_DST_ALPHA`
+factor and screenshots drop alpha), so the deterministic CPU reference is the
+authority for destination alpha. Its conventions are per producer and the
+retained GPU target reproduces them exactly: primitive quads, boxes, lines,
+and points blend alpha source-over; sampled-fragment recovery through
+`blend_fragment` applies the same non-separate factor to alpha as to RGB; and
+additive draws preserve destination alpha while adding source-alpha-weighted
+RGB. Private premultiplied text scratch layers accumulate source-over and are
+unpremultiplied once before retained upload. Every retained solid carries its
+destination-alpha provenance (`GpuSolidAlphaMode`) so recorder coalescing
+cannot mix the source-over and non-separate equations, and the classic
+startup/loader rasterizers keep their byte-exact quantize-before-blend CPU
+loops while capture reroutes the same fragments into painter-ordered retained
+commands.
 
-The first headless dump (1280x720, sandbox) shows the current Rust in-game render,
-and confirms R3 is substantially incomplete vs C++:
-- [ ] Sky / parallax not visible in-game (scene is mostly black). `draw_sky`
-      exists but the sandbox frame shows no gradient/ground — investigate camera
-      framing + sky for the flat sandbox landscape.
-- [ ] Landscape rendering — flat/segment model, no material/texture-mapped terrain
-      (`C4Landscape::Draw`). Sandbox ground not visibly drawn.
-- [ ] **Command/HUD icons render as solid owner-colour (red) silhouettes** — the
-      ColorByOwner/`dwModClr` modulation is applied to the whole icon instead of
-      only the team-colour mask pixels. Concrete bug, ties to R1 modulation
-      (`blend_color_by_owner` `lib.rs:133`; sprite path `lib.rs:1854`).
-- [x] **Object faces anchored + con-scaled like C4Object::Draw** *(2026-07-03)* —
-      sprites now take precedence over the debug vertex polygon (GoldRush trees
-      rendered as flat hash-coloured triangles before); faces anchor at the
-      shape top-left `x+Shape.x`/`y+Shape.y` (`C4Object.cpp:2231`) with
-      `C4Shape::Stretch`/`Jolt` con-scaling (`C4Shape.cpp:103-128`); idle/
-      FacetBase base faces implement DrawFace growth + construction display
-      (`C4Object.cpp:438-467`); action facets place at `cox+FacetX`/`coy+FacetY`
-      at full con and stretch over the con-scaled shape while growing
-      (`C4Object.cpp:2450-2467`); FlipDir mirrors and rotation orbit the shape
-      center; facet sources clamp to the sheet (Tree1 `Still` is 73x73 on a
-      71px sheet). Base-graphics variants (`SetGraphics`) honored + pinned.
-      Remaining: draw transforms are reduced to scale+offset (no full 2x3
-      matrix), rotated shapes anchor with the unrotated shape bbox (C++
-      rotates `Shape` in UpdateShape), MODE_Base overlays still draw the
-      whole sheet centered.
-- [ ] Object sprites — owner-colour only via the ColorByOwner mask.
-- [ ] Particles (`C4Particles` draw).
-- [ ] HUD: Rust draws a debug overlay (FRAME/POS/VEL); C++ has the upper board with
-      crew portraits + wealth + scoreboard.
+### Painter order and scale-native text
 
-**Caveat:** even once these are drawn correctly, the in-game frame cannot match
-C++ pixel-for-position until the determinism-critical simulation gaps (integer
-coords, ChaCha8 RNG — see `PORT_STATUS.md`) are fixed, since those decide where
-every object/material is.
+One frame may contain several coordinate spaces without introducing an
+offscreen-opacity approximation. `GpuSceneLayer` associates each scene with its
+own `GpuPresentation`, while all layers share one physical target and one gamma
+snapshot. Commands remain in the exact layer order supplied by the app.
 
-## Verification capability still TODO
+C++ dialog fading is not group opacity. `C4GUI::Dialog::Draw` activates packed
+`0xTTRRGGBB` blit modulation while each child draws. The retained equivalent
+records whether each texture inherits, combines, or suppresses the enclosing
+state, matching the distinct native call sites:
 
-- A deterministic **frame-dump** (`lc-app` render-state → PNG) so any scene can be
-  captured headlessly and compared to a C++ reference frame without window/grant
-  issues. (Blocked the live in-game capture this session; see `PORT_STATUS.md`.)
-- `~/Applications/ClonkRust.app` exists (bundled `lc-app` with content paths in
-  `Info.plist`); on a fresh session it is grantable to computer-use, enabling
-  automated side-by-side capture of both engines.
+- an ordinary unmodulated base blit inherits the active value directly, so an
+  outer white stays 255 rather than being rounded to 254;
+- local, fog, owner, solid, and semantic-text colors combine through
+  `ModulateClr`: RGB is `(destination * source) >> 8` and transparency is
+  `dst + src - ((dst * src) >> 8)`;
+- `C4GFXBLIT_CLRSFC_OWNCLR` owner passes and explicit nested overrides suppress
+  the enclosing value;
+- byte-derived solid RGBA is converted to C4 transparency and back, while an
+  already-filtered recovery fragment receives the equivalent float shader
+  operation without byte quantization;
+- replacement quads/solids become normal blends when modulation adds
+  transparency, preserving the already-painted underlay;
+- semantic text uses `modulate_rgba8_by_packed_c4` before retained glyph-quad
+  capture.
+
+Packed colors that cannot be recovered as exact bytes are rejected with a
+typed error. The recorder validates the whole stream before changing any
+command, so failure cannot leave a partially faded scene.
+
+## Implemented retained semantics
+
+| Area | Current retained behavior |
+| --- | --- |
+| Textures | Stable identities, copy-on-write forks, complete recovery backing, sparse revision deltas, bounded resident cache, and bounded content interning for immutable derived images. |
+| Sampling | Nearest and linear sampling, native independent `C4TexRef` tile clamps/padding, stretch and projective transforms. |
+| Color | Packed-C4 modulation, MOD2, normal/replace/additive blending, owner-color passes, spatial fog modulation. |
+| Geometry | Triangles plus physical fragments for OpenGL 2.1 points and lines: center-clipped odd/even point snapping, directed clip-volume clipping, diamond-exit coverage, endpoint exclusion, rounded-width replication, and perspective color interpolation. Logical clips retain C++'s independently rounded, clip-relative projection and physical scissor. |
+| World | Sky gradients/images, textured or fallback landscape, liquid mask animation, objects, PXS and definition particles. |
+| UI | Startup/loading chrome, options/player/scenario screens, in-game HUD and menus, dialogs, cursors, scoreboard markup, and stable scale-native glyph/inline-image quads. |
+| Gamma | Disabled, per-fragment lookup, and completed-frame monitor postpass follow the active renderer switches. |
+| Output | Physical presentation, resize, screenshot readback, save-thumbnail readback, sRGB-surface byte preservation. |
+
+Advanced renderer switches (`Shader`, `UseShaderGamma`, `NoAlphaAdd`,
+`PointFiltering`, `NoBoxFades`, and related texture behavior) are snapshotted by
+the frontend and reflected by command preparation rather than guessed in the
+backend.
+
+## Validation, cache, and recovery contract
+
+A `GpuScene` is a self-contained recovery unit. Every texture referenced by a
+command must be declared in that scene even when the renderer cache happens to
+contain the same id. Before uploads or cache mutation, validation checks:
+
+- nonzero finite presentations and finite projected coordinates;
+- unique, correctly sized resources and every dirty rectangle;
+- revision advancement for deltas;
+- declared texture formats and complete liquid pairs;
+- lowered owner masks, valid primitive counts, scissors, and vertex ranges;
+- compatible physical extent, gamma snapshot, and shared texture backing across
+  ordered layers.
+
+A cache hit at the declared base revision receives only the dirty rectangles.
+Skipped producer revisions, mode transitions, incompatible deltas, and a new
+device use the complete backing instead. Resize recreates only the physical
+composition target and preserves the renderer generation and source cache. The
+cache is bounded to 256 MiB and 4096 entries, evicting least-recently-used
+resources that are not referenced by the current frame. Separately, immutable
+frontend images are content-interned with dimensions and collision-checked RGBA
+bytes, bounded to 16,384 entries/128 MiB, so repeatedly derived carets, game-over
+facets, refresh phases, inventory chrome, glyphs, and inline images retain one
+GPU identity instead of forcing uploads every frame.
+
+`pixels` already reconfigures the surface and retries acquisition once. A
+`Lost` or `Outdated` error returned after that retry causes `lc-app` to rebuild
+`Pixels`, then call `RetainedGpuRenderer::recreate` with the replacement device,
+queue, and surface format. The renderer also records uncaptured wgpu validation
+and allocation failures. Pinned wgpu 0.16 reports some native device-loss paths
+by panicking in queue submission or polling; the presentation/readback boundary
+catches only those recognized diagnostics and converts them to the same typed
+recreation request, while unrelated panics resume unwinding. The next
+self-contained scene repopulates every device resource. `Timeout` schedules
+another presentation; `OutOfMemory` and unrelated validation/parity errors
+remain fatal. There is no CPU-frame recovery fallback.
+
+## Executable evidence
+
+Renderer and scene tests pin the backend boundary:
+
+- `gpu_renderer_matches_cpu_reference_frame` exercises textured normal,
+  replace, additive, MOD2, clipping, projective coordinates, native tiled
+  linear filtering, landscape/liquid, owner overlays, solids, points, gamma,
+  resize, dirty upload, cache residency, and explicit device recreation.
+- `layered_presentations_preserve_physical_painter_order` performs real GPU
+  readback with a scaled logical layer and an overlapping identity-space layer.
+- `recovery_validation_requires_every_command_texture_in_the_current_scene`,
+  `recovery_validation_checks_all_deltas_before_gpu_mutation`,
+  `recovery_validation_rejects_projection_overflow_before_gpu_mutation`, and
+  `mode_and_device_generation_gaps_choose_safe_texture_uploads` pin recovery
+  preconditions.
+- `semantic_text_style_combines_with_cpp_shift_and_transparency_screen`,
+  `direct_textured_inherit_uses_outer_color_without_white_rounding`,
+  `combined_texture_fog_and_owner_use_cpp_modulate_clr`, and
+  `recorder_modulation_validates_all_commands_before_mutating_any` pin exact
+  dialog/text modulation and atomic failure.
+- `source_over_normal_blend_matches_cpu_reference_alpha`,
+  `non_separate_normal_blend_shares_color_factors_with_alpha`,
+  `additive_blend_preserves_destination_alpha_for_both_modes`,
+  `fractional_clipper_rounds_viewport_then_projects_relative_coordinates`, and
+  `logical_line_pair_expands_to_cpp_application_scale_in_physical_space` pin
+  the CPU-reference alpha translation, fractional clip projection, and scaled
+  line width.
+- `line_clipping_preserves_directed_entry_and_exit_endpoints`,
+  `diagonal_line_color_uses_cpp_window_space_projection_parameter`,
+  `wide_point_is_center_clipped_before_physical_rasterization`, and the real-GPU
+  reference frame pin directed OpenGL 2.1 line/point fragments and interpolation.
+- `native_gpu_text_is_one_stable_textured_quad_per_glyph` prevents regression
+  to CPU-sampled, point-per-pixel scale-native text.
+- `retained_fogged_cursor_text_is_one_textured_gamma_quad_per_glyph`,
+  `retained_fogged_markup_text_is_a_stable_textured_draw_not_point_coverage`,
+  `retained_moving_pxs_is_one_gpu_line_not_one_point_per_covered_pixel`, and the
+  retained CONNECT/selection/bolt tests pin formerly rasterized running draws.
+- `identical_immutable_images_reuse_retained_gpu_identity`, the scoreboard
+  texture/markup tests, and the loader/sky/caret/refresh resource tests pin
+  stable derived resources and revisioned dynamic uploads.
+- Surface tests pin retained alpha/additive fragments, gamma capture,
+  copy-on-write revisions, projective rejection, child clipping, and semantic
+  text capture.
+- App tests `m06_l033_all_graphical_modes_produce_retained_scenes`,
+  `m06_l033_scale_native_text_keeps_logical_physical_painter_order`, and
+  `m06_l033_surface_error_policy_rebuilds_or_retries_only_recoverable_errors`
+  cover mode integration and recovery policy. The scale-one and every-scale
+  startup-font tests ensure reachable retained text cannot fall back to a
+  point-rasterized or mismatched atlas.
+
+The measured Deep Sea retained-GPU reference is documented in `PERFORMANCE.md`:
+Apple M4 Max/Metal, 800x600 at 100% scale, 20.002 seconds after warmup, 1,077
+presentations, 5.794 ms average and 9.202 ms maximum graphics-pass time, with no
+automatic graphics skips. This is a fingerprinted reference, not a universal
+60 FPS claim.
+
+## Remaining limits and review rules
+
+- A true operating-system/device-loss injection test is not portable. Direct
+  replacement-device recreation, uncaptured-error classification, recognized
+  native device-loss conversion, and the app's surface-error policy test cover
+  the deterministic portions; live recovery still needs platform smoke tests.
+- New draw code must not read the destination CPU pixels during active capture.
+  It must emit a blend command, use an isolated CPU scratch resource before
+  capture, or return a typed parity error. Tests that only inspect a completed
+  software oracle do not prove the retained path.
+- Visual/content parity remains an oracle-by-oracle concern. A missing sprite,
+  menu behavior, or simulation state should be tracked in its owning milestone;
+  it is not evidence that the window has fallen back from GPU composition.
+
+When changing this boundary, retain both the software oracle and real GPU
+readback coverage. Do not add a generic CPU-frame fallback to make an
+unsupported command appear to work.

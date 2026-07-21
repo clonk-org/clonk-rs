@@ -2350,6 +2350,24 @@ mod tests {
         )
     }
 
+    #[test]
+    fn derived_game_over_facets_reuse_retained_texture_identity() {
+        let source = solid_image(4, 4, [120, 80, 40, 255]);
+        let rect = IntRect {
+            x: 1,
+            y: 1,
+            w: 2,
+            h: 2,
+        };
+        let first_crop = crop_image(&source, rect).expect("valid crop");
+        let second_crop = crop_image(&source, rect).expect("valid crop");
+        assert_eq!(first_crop.gpu_texture_id(), second_crop.gpu_texture_id());
+
+        let first_gray = grayscale_image(&source, 30);
+        let second_gray = grayscale_image(&source, 30);
+        assert_eq!(first_gray.gpu_texture_id(), second_gray.gpu_texture_id());
+    }
+
     fn entry(id: i32, name: &str, outcome: GameOverOutcome, is_local: bool) -> GameOverEntry {
         GameOverEntry {
             player_id: id,

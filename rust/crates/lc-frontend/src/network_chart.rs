@@ -9,8 +9,8 @@ use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{GammaRamp, Surface};
 
 use crate::classic_gui::{
-    draw_3d_frame, draw_clipped_text, draw_engine_box, draw_facet_stretch, ClassicGuiSkin,
-    IntRect,
+    draw_3d_frame, draw_clipped_text, draw_engine_box,
+    draw_engine_line as draw_retained_engine_line, draw_facet_stretch, ClassicGuiSkin, IntRect,
 };
 use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode};
 
@@ -922,6 +922,26 @@ fn draw_engine_line(
     gamma: Option<&GammaRamp>,
     clip: IntRect,
 ) {
+    if surface.is_gpu_scene_capture_active() {
+        if clip.w <= 0 || clip.h <= 0 {
+            return;
+        }
+        let previous_clip = surface.clip();
+        let chart_clip = lc_graphics::Rect::new(clip.x, clip.y, clip.w as u32, clip.h as u32);
+        let effective_clip =
+            previous_clip.map_or(Some(chart_clip), |current| current.intersection(chart_clip));
+        let Some(effective_clip) = effective_clip else {
+            return;
+        };
+        surface.set_clip(effective_clip);
+        draw_retained_engine_line(surface, x0, y0, x1, y1, color, gamma);
+        match previous_clip {
+            Some(previous) => surface.set_clip(previous),
+            None => surface.clear_clip(),
+        }
+        return;
+    }
+
     let dx = (x1 - x0).abs();
     let sx = if x0 < x1 { 1 } else { -1 };
     let dy = -(y1 - y0).abs();
@@ -956,6 +976,48 @@ fn contains(rect: IntRect, point: GuiPoint) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_chart_lines_keep_native_geometry_and_alpha_provenance() {
+        let mut surface = Surface::new(12, 8, lc_graphics::PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        draw_engine_line(
+            &mut surface,
+            2,
+            2,
+            9,
+            5,
+            0x7f20_4060,
+            None,
+            IntRect {
+                x: 1,
+                y: 1,
+                w: 10,
+                h: 6,
+            },
+        );
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene(
+                [12, 8],
+                lc_graphics::Color::transparent(),
+                &GammaRamp::identity(),
+            );
+        let [lc_graphics::GpuCommand::Solid {
+            topology,
+            alpha_mode,
+            clip,
+            ..
+        }] = scene.commands.as_slice()
+        else {
+            panic!("chart line did not remain one retained solid command");
+        };
+        assert_eq!(*topology, lc_graphics::GpuPrimitiveTopology::LineList);
+        assert_eq!(*alpha_mode, lc_graphics::GpuSolidAlphaMode::SourceOver);
+        assert_eq!(*clip, Some(lc_graphics::Rect::new(1, 1, 10, 6)));
+    }
 
     #[test]
     fn l143_native_tab_order_only_includes_pings_for_network_games() {

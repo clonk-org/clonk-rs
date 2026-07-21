@@ -175,8 +175,9 @@ use lc_graphics::clonk_font::{
     font_image_lookup_tag, inline_image_token, FontImageProvider, FontImageRef,
 };
 use lc_graphics::{
-    BitmapFont, BlitMode, Color, GpuGammaMode, PixelFormat, Point as SurfacePoint, Rect,
-    RgbaSurfaceViewMut, Surface, TextFont, Transform, TrueTypeFont,
+    BitmapFont, BlitMode, Color, GpuGammaMode, GpuPresentation, GpuScene, GpuSceneRecorder,
+    PixelFormat, Point as SurfacePoint, Rect, RgbaSurfaceViewMut, Surface, TextFont, Transform,
+    TrueTypeFont,
 };
 use lc_gui::{ButtonTextures, Rect as GuiRect};
 use lc_network::{
@@ -8452,7 +8453,7 @@ fn main() -> Result<()> {
             Event::RedrawRequested(id) if id == window.id() => {
                 let graphics_started = Instant::now();
                 app.graphics.set_presentation_scale(presenter.scale());
-                if app.mode == AppMode::Running && !app.console_mode {
+                if matches!(app.mode, AppMode::Menu | AppMode::Loading | AppMode::Running) {
                     app.retained_gpu_presentation_active = true;
                     if pixels.context().texture_extent.width != 1
                         || pixels.context().texture_extent.height != 1
@@ -8463,14 +8464,16 @@ fn main() -> Result<()> {
                             return;
                         }
                     }
-                    match render_retained_gpu_running_frame(
+                    match present_retained_gpu_frame(
                         &mut app,
                         &pixels,
                         &presenter,
                         &mut retained_gpu_renderer,
                     ) {
                         Ok(()) => {
-                            app.finish_rendered_object_audibility_pass();
+                            if app.mode == AppMode::Running && !app.console_mode {
+                                app.finish_rendered_object_audibility_pass();
+                            }
                             let graphics_duration = graphics_started.elapsed();
                             automatic_frame_skip.finish_graphics_pass(
                                 app.auto_frame_skip,
@@ -8484,8 +8487,11 @@ fn main() -> Result<()> {
                                     graphics_duration,
                                     true,
                                 );
-                                if let Some(report) =
-                                    benchmark.poll(true, completed_at, app.engine.frame())
+                                if let Some(report) = benchmark.poll(
+                                    app.mode == AppMode::Running,
+                                    completed_at,
+                                    app.engine.frame(),
+                                )
                                 {
                                     finish_presentation_benchmark(
                                         control_flow,
@@ -8496,8 +8502,39 @@ fn main() -> Result<()> {
                             }
                         }
                         Err(error) => {
-                            tracing::error!(?error, "retained GPU render failed");
-                            control_flow.set_exit();
+                            match retained_gpu_present_recovery(&error) {
+                                RetainedGpuPresentRecovery::RebuildDevice => {
+                                    tracing::warn!(
+                                        ?error,
+                                        "retained GPU device or surface requires recreation"
+                                    );
+                                    match rebuild_retained_gpu_device(
+                                        &window,
+                                        &mut pixels,
+                                        &mut retained_gpu_renderer,
+                                    ) {
+                                        Ok(()) => window.request_redraw(),
+                                        Err(rebuild_error) => {
+                                            tracing::error!(
+                                                ?rebuild_error,
+                                                "retained GPU recovery failed"
+                                            );
+                                            control_flow.set_exit();
+                                        }
+                                    }
+                                }
+                                RetainedGpuPresentRecovery::Retry => {
+                                    tracing::warn!(
+                                        ?error,
+                                        "retained GPU surface timed out; retrying presentation"
+                                    );
+                                    window.request_redraw();
+                                }
+                                RetainedGpuPresentRecovery::Fatal => {
+                                    tracing::error!(?error, "retained GPU render failed");
+                                    control_flow.set_exit();
+                                }
+                            }
                         }
                     }
                     window.set_cursor_visible(app.platform_cursor_visible());
@@ -8711,13 +8748,92 @@ fn retained_gpu_gamma_mode(config: lc_frontend::AdvancedRendererConfig) -> GpuGa
     }
 }
 
-fn render_retained_gpu_running_frame(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetainedGpuPresentRecovery {
+    RebuildDevice,
+    Retry,
+    Fatal,
+}
+
+fn wgpu_device_loss_panic_detail(payload: &(dyn std::any::Any + Send)) -> Option<String> {
+    let detail = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&'static str>().map(|detail| (*detail).to_owned()))?;
+    let normalized = detail.to_ascii_lowercase();
+    (normalized.contains("parent device is lost")
+        || normalized.contains("device was lost")
+        || normalized.contains("device has been lost"))
+    .then_some(detail)
+}
+
+fn retained_gpu_device_loss_error(detail: String) -> anyhow::Error {
+    gpu_renderer::GpuRendererError::DeviceRecreationRequired {
+        reason: gpu_renderer::RetainedGpuRecreateReason::DeviceLost,
+        detail,
+    }
+    .into()
+}
+
+fn retained_gpu_present_recovery(error: &anyhow::Error) -> RetainedGpuPresentRecovery {
+    if error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<gpu_renderer::GpuRendererError>(),
+            Some(gpu_renderer::GpuRendererError::DeviceRecreationRequired { .. })
+        )
+    }) {
+        return RetainedGpuPresentRecovery::RebuildDevice;
+    }
+    match error.downcast_ref::<pixels::Error>() {
+        Some(pixels::Error::Surface(pixels::wgpu::SurfaceError::Lost | pixels::wgpu::SurfaceError::Outdated)) => {
+            RetainedGpuPresentRecovery::RebuildDevice
+        }
+        Some(pixels::Error::Surface(pixels::wgpu::SurfaceError::Timeout)) => {
+            RetainedGpuPresentRecovery::Retry
+        }
+        Some(pixels::Error::Surface(pixels::wgpu::SurfaceError::OutOfMemory)) | None => {
+            RetainedGpuPresentRecovery::Fatal
+        }
+        Some(_) => RetainedGpuPresentRecovery::Fatal,
+    }
+}
+
+fn rebuild_retained_gpu_device(
+    window: &Window,
+    pixels: &mut Pixels,
+    renderer: &mut gpu_renderer::RetainedGpuRenderer,
+) -> Result<()> {
+    let size = enforce_min_size(window.inner_size());
+    let surface = SurfaceTexture::new(size.width, size.height, window);
+    let mut replacement = PixelsBuilder::new(size.width, size.height, surface)
+        .wgpu_backend(
+            pixels::wgpu::util::backend_bits_from_env()
+                .unwrap_or(pixels::wgpu::Backends::PRIMARY),
+        )
+        .enable_vsync(false)
+        .build()
+        .context("failed to rebuild retained GPU surface")?;
+    replacement
+        .resize_buffer(1, 1)
+        .context("failed to restore retained GPU presentation buffer")?;
+    renderer.recreate(
+        replacement.device(),
+        replacement.queue(),
+        replacement.surface_texture_format(),
+    );
+    renderer
+        .check_health()
+        .context("replacement retained GPU device failed initialization")?;
+    *pixels = replacement;
+    Ok(())
+}
+
+fn present_retained_gpu_frame(
     app: &mut GameApp,
     pixels: &Pixels,
     presenter: &lc_scaling::FramePresenter,
     renderer: &mut gpu_renderer::RetainedGpuRenderer,
 ) -> Result<()> {
-    let scene = app.render_running_gpu_scene()?;
     let geometry = presenter.presentation_geometry();
     let (physical_width, physical_height) = geometry.physical_size();
     let presentation = lc_graphics::GpuPresentation {
@@ -8725,70 +8841,116 @@ fn render_retained_gpu_running_frame(
         scale: geometry.scale(),
         crop_top: geometry.crop_top(),
     };
+    let frame = app.render_retained_gpu_frame(presentation)?;
+    let layers = frame
+        .layers
+        .iter()
+        .map(|layer| gpu_renderer::GpuSceneLayer::new(&layer.scene, layer.presentation))
+        .collect::<Vec<_>>();
     let request_native_save_readback = !app.pending_native_save_thumbnails.is_empty();
     let request_current_readback =
         !app.pending_screenshots.is_empty() || !app.pending_gpu_thumbnail_paths.is_empty();
     let mut previous_native_readback = None;
     let mut readback = None;
-    pixels
-        .render_with(|encoder, surface_view, context| {
+    let submission = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pixels.render_with(|encoder, surface_view, context| {
             if request_native_save_readback {
                 previous_native_readback =
                     renderer.readback_last_presentation(&context.device, encoder)?;
             }
-            readback = renderer.render(
+            readback = renderer.render_layers(
                 &context.device,
                 &context.queue,
                 encoder,
                 surface_view,
-                &scene,
-                &presentation,
+                &layers,
                 request_current_readback
                     || (request_native_save_readback && previous_native_readback.is_none()),
             )?;
             Ok(())
         })
-        .context("failed to submit retained GPU frame")?;
-
-    let previous_native_frame = match previous_native_readback {
-        Some(ticket) => match ticket.read(pixels.device()) {
-            Ok(frame) => Some(frame),
-            Err(error) => {
-                tracing::warn!(
-                    saves = app.pending_native_save_thumbnails.len(),
-                    ?error,
-                    "failed to read previous retained GPU frame for native saves"
-                );
-                None
+    }));
+    match submission {
+        Ok(result) => result.context("failed to submit retained GPU frame")?,
+        Err(payload) => {
+            if let Some(detail) = wgpu_device_loss_panic_detail(payload.as_ref()) {
+                return Err(retained_gpu_device_loss_error(detail));
             }
-        },
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    let had_gpu_readback = previous_native_readback.is_some() || readback.is_some();
+    let previous_native_frame = match previous_native_readback {
+        Some(ticket) => {
+            let read_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ticket.read(pixels.device())
+            })) {
+                Ok(result) => result,
+                Err(payload) => {
+                    if let Some(detail) = wgpu_device_loss_panic_detail(payload.as_ref()) {
+                        return Err(retained_gpu_device_loss_error(detail));
+                    }
+                    std::panic::resume_unwind(payload);
+                }
+            };
+            match read_result {
+                Ok(frame) => Some(frame),
+                Err(error) => {
+                    tracing::warn!(
+                        saves = app.pending_native_save_thumbnails.len(),
+                        ?error,
+                        "failed to read previous retained GPU frame for native saves"
+                    );
+                    None
+                }
+            }
+        }
         None => None,
     };
     let mut current_frame = match readback {
-        Some(ticket) => match ticket.read(pixels.device()) {
-            Ok(frame) => Some(frame),
-            Err(error) => {
-                while let Some(path) = app.pending_gpu_thumbnail_paths.pop_front() {
-                    tracing::warn!(
-                        path = %path.display(),
-                        ?error,
-                        "failed to read retained GPU save thumbnail"
-                    );
+        Some(ticket) => {
+            let read_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ticket.read(pixels.device())
+            })) {
+                Ok(result) => result,
+                Err(payload) => {
+                    if let Some(detail) = wgpu_device_loss_panic_detail(payload.as_ref()) {
+                        return Err(retained_gpu_device_loss_error(detail));
+                    }
+                    std::panic::resume_unwind(payload);
                 }
-                while !app.pending_screenshots.is_empty() {
-                    let result = app.save_next_screenshot(
-                        None,
-                        physical_width,
-                        physical_height,
-                        presenter.scale(),
-                    );
-                    app.report_screenshot_result(result);
+            };
+            match read_result {
+                Ok(frame) => Some(frame),
+                Err(error) => {
+                    while let Some(path) = app.pending_gpu_thumbnail_paths.pop_front() {
+                        tracing::warn!(
+                            path = %path.display(),
+                            ?error,
+                            "failed to read retained GPU save thumbnail"
+                        );
+                    }
+                    while !app.pending_screenshots.is_empty() {
+                        let result = app.save_next_screenshot(
+                            None,
+                            physical_width,
+                            physical_height,
+                            presenter.scale(),
+                        );
+                        app.report_screenshot_result(result);
+                    }
+                    None
                 }
-                None
             }
-        },
+        }
         None => None,
     };
+    if had_gpu_readback {
+        renderer
+            .check_health()
+            .context("retained GPU device failed while completing readback")?;
+    }
 
     if !app.pending_native_save_thumbnails.is_empty() {
         let title_png = previous_native_frame
@@ -14702,6 +14864,11 @@ struct GameApp {
     keyboard_modifiers: ModifiersState,
     pending_screenshots: VecDeque<ScreenshotRequest>,
     retained_gpu_presentation_active: bool,
+    /// While scale-native text is captured, split the retained command stream
+    /// at the same painter-order boundaries as `NativePresentationPlan`.
+    retained_gpu_ordered_capture_active: bool,
+    /// Reused command-only target for scale-native physical text layers.
+    retained_native_capture_surface: Option<Surface>,
     pending_gpu_thumbnail_paths: VecDeque<PathBuf>,
     pending_native_save_thumbnails: VecDeque<PendingNativeSaveThumbnail>,
     pending_options_display_requests: VecDeque<OptionsDisplayRequest>,
@@ -15404,6 +15571,9 @@ struct MenuFrameCache {
 struct StartupBackdropCache {
     key: Option<StartupBackdropKey>,
     pixels: Vec<u8>,
+    /// Stable retained resource for graphical presentation. Keeping the same
+    /// Surface identity lets the backend reuse the uploaded backdrop.
+    retained: Option<Surface>,
 }
 
 /// Everything the static layer's pixels depend on.
@@ -15425,14 +15595,40 @@ fn restore_or_render_backdrop(
     surface: &mut Surface,
     render: impl FnOnce(&mut Surface),
 ) {
-    if cache.key == Some(key) && cache.pixels.len() == surface.pixels().len() {
-        surface.pixels_mut().copy_from_slice(&cache.pixels);
-        return;
+    let cache_hit = cache.key == Some(key) && cache.pixels.len() == surface.pixels().len();
+    if !cache_hit {
+        let mut retained = Surface::new(surface.width(), surface.height(), surface.format());
+        if surface.is_clonk_text_capture_active() {
+            retained.begin_clonk_text_capture();
+        }
+        render(&mut retained);
+        let _ = retained.take_clonk_text_capture();
+        cache.key = Some(key);
+        cache.pixels.clear();
+        cache.pixels.extend_from_slice(retained.pixels());
+        cache.retained = Some(retained);
+    } else if cache.retained.is_none() {
+        cache.retained = Surface::from_bytes(
+            surface.width(),
+            surface.height(),
+            surface.format(),
+            cache.pixels.clone(),
+        )
+        .ok();
     }
-    render(surface);
-    cache.key = Some(key);
-    cache.pixels.clear();
-    cache.pixels.extend_from_slice(surface.pixels());
+
+    if surface.is_gpu_scene_capture_active() {
+        if let Some(retained) = cache.retained.as_ref() {
+            let _ = surface.copy_transformed(
+                retained,
+                retained.bounds(),
+                SurfacePoint::new(0, 0),
+                &Transform::identity(),
+            );
+        }
+    } else {
+        surface.pixels_mut().copy_from_slice(&cache.pixels);
+    }
 }
 
 struct RecordingTemplate {
@@ -18023,6 +18219,8 @@ struct StartupDialogFade {
     outgoing_native_frame: Option<Vec<u8>>,
     outgoing_native_text: Vec<lc_graphics::clonk_font::CapturedClonkText>,
     outgoing_native_fonts: Option<Arc<lc_frontend::clonk_fonts::NativeClonkFontSet>>,
+    underlay_gpu_recorder: Option<GpuSceneRecorder>,
+    outgoing_gpu_plan: Option<NativePresentationPlan>,
 }
 
 struct StartupDialogFadeLayers {
@@ -18032,6 +18230,8 @@ struct StartupDialogFadeLayers {
     outgoing_frame: Vec<u8>,
     outgoing_native_frame: Vec<u8>,
     outgoing_native_text: Vec<lc_graphics::clonk_font::CapturedClonkText>,
+    underlay_gpu_recorder: Option<GpuSceneRecorder>,
+    outgoing_gpu_plan: Option<NativePresentationPlan>,
 }
 
 #[cfg(test)]
@@ -27748,6 +27948,8 @@ impl GameApp {
             keyboard_modifiers: ModifiersState::empty(),
             pending_screenshots: VecDeque::new(),
             retained_gpu_presentation_active: false,
+            retained_gpu_ordered_capture_active: false,
+            retained_native_capture_surface: None,
             pending_gpu_thumbnail_paths: VecDeque::new(),
             pending_native_save_thumbnails: VecDeque::new(),
             pending_options_display_requests: VecDeque::new(),
@@ -29793,7 +29995,7 @@ impl GameApp {
                 self.loader_render_error = Some(error.to_string());
             }
         }
-        if scale <= 0.0 || scale == 1.0 || !scale.is_finite() {
+        if scale <= 0.0 || !scale.is_finite() {
             self.native_startup_fonts = None;
             return;
         }
@@ -29823,7 +30025,7 @@ impl GameApp {
         source: Option<&ClassicNativeFontSource>,
     ) -> Option<Arc<lc_frontend::clonk_fonts::NativeClonkFontSet>> {
         let scale = self.loader_render_config?.application_scale();
-        if scale <= 0.0 || scale == 1.0 || !scale.is_finite() {
+        if scale <= 0.0 || !scale.is_finite() {
             return None;
         }
         let source = source?;
@@ -29861,7 +30063,6 @@ impl GameApp {
                 .as_ref()
                 .is_some_and(|wait| wait.visible)
             && scale > 0.0
-            && scale != 1.0
             && scale.is_finite()
             && self
                 .loader_render_config
@@ -29875,7 +30076,6 @@ impl GameApp {
     fn can_defer_native_game_messages(&self, scale: f32) -> bool {
         self.mode == AppMode::Running
             && scale > 0.0
-            && scale != 1.0
             && scale.is_finite()
             // The physical commit point is after the filtered logical frame.
             // Keep C4Viewport/C4GUI z-order authoritative whenever a layer
@@ -29912,7 +30112,6 @@ impl GameApp {
                 .is_some_and(|config| config.application_scale() == scale);
         (matches!(self.mode, AppMode::Menu | AppMode::Running) || ordered_loading_overlay)
             && scale > 0.0
-            && scale != 1.0
             && scale.is_finite()
             && self
                 .native_startup_fonts
@@ -29923,19 +30122,26 @@ impl GameApp {
     fn begin_native_text_capture(&mut self, clear_to_transparent: bool) {
         let surface = self.graphics.surface_mut();
         surface.clear_clip();
-        if clear_to_transparent {
+        if clear_to_transparent && !self.retained_gpu_ordered_capture_active {
             surface.fill(Color::transparent());
         }
         surface.begin_clonk_text_capture();
+        if self.retained_gpu_ordered_capture_active {
+            debug_assert!(!surface.is_gpu_scene_capture_active());
+            surface.begin_gpu_scene_capture();
+        }
     }
 
     fn finish_native_base_batch(&mut self, frame: &mut [u8], plan: &mut NativePresentationPlan) {
         let surface = self.graphics.surface_mut();
         let text = surface.take_clonk_text_capture();
-        if surface.pixels().len() == frame.len() {
-            frame.copy_from_slice(surface.pixels());
-        } else {
-            copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
+        let gpu_recorder = surface.take_gpu_scene_capture();
+        if gpu_recorder.is_none() {
+            if surface.pixels().len() == frame.len() {
+                frame.copy_from_slice(surface.pixels());
+            } else {
+                copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
+            }
         }
         plan.batches.push(NativePresentationBatch {
             logical_layer: None,
@@ -29943,6 +30149,7 @@ impl GameApp {
             native_loader_text: false,
             text,
             fonts: None,
+            gpu_recorder,
         });
     }
 
@@ -29956,10 +30163,15 @@ impl GameApp {
         isolated_clip: Option<Rect>,
     ) {
         let text = surface.take_clonk_text_capture();
+        let gpu_recorder = surface.take_gpu_scene_capture();
         // Additive passes can contribute RGB while preserving a transparent
         // destination alpha. Retain those bytes for ordered replay too.
-        let has_raster = surface.pixels().iter().any(|byte| *byte != 0);
-        if has_raster || !text.is_empty() {
+        let has_raster = gpu_recorder.is_none()
+            && surface.pixels().iter().any(|byte| *byte != 0);
+        let has_gpu_commands = gpu_recorder
+            .as_ref()
+            .is_some_and(|recorder| !recorder.is_empty());
+        if has_raster || has_gpu_commands || !text.is_empty() {
             let clip = isolated_clip.filter(|clip| {
                 has_raster
                     && !text.is_empty()
@@ -29973,6 +30185,7 @@ impl GameApp {
                 native_loader_text: false,
                 text,
                 fonts: None,
+                gpu_recorder,
             });
         }
     }
@@ -30001,14 +30214,21 @@ impl GameApp {
     fn next_native_overlay_parts(
         graphics: &mut GraphicsSystem,
         pending_native_presentation: &mut Option<NativePresentationPlan>,
+        retained_gpu_capture: bool,
     ) {
-        Self::next_native_overlay_parts_with_clip(graphics, pending_native_presentation, None);
+        Self::next_native_overlay_parts_with_clip(
+            graphics,
+            pending_native_presentation,
+            None,
+            retained_gpu_capture,
+        );
     }
 
     fn next_native_overlay_parts_with_clip(
         graphics: &mut GraphicsSystem,
         pending_native_presentation: &mut Option<NativePresentationPlan>,
         isolated_clip: Option<Rect>,
+        retained_gpu_capture: bool,
     ) {
         let mut plan = pending_native_presentation.take().unwrap_or_default();
         {
@@ -30018,14 +30238,21 @@ impl GameApp {
         *pending_native_presentation = Some(plan);
         let surface = graphics.surface_mut();
         surface.clear_clip();
-        surface.fill(Color::transparent());
+        if !retained_gpu_capture {
+            surface.fill(Color::transparent());
+        }
         surface.begin_clonk_text_capture();
+        if retained_gpu_capture {
+            debug_assert!(!surface.is_gpu_scene_capture_active());
+            surface.begin_gpu_scene_capture();
+        }
     }
 
     fn next_pending_native_overlay(&mut self) {
         Self::next_native_overlay_parts(
             &mut self.graphics,
             &mut self.pending_native_presentation,
+            self.retained_gpu_ordered_capture_active,
         );
     }
 
@@ -30034,6 +30261,7 @@ impl GameApp {
             &mut self.graphics,
             &mut self.pending_native_presentation,
             Some(isolated_clip),
+            self.retained_gpu_ordered_capture_active,
         );
     }
 
@@ -72289,11 +72517,44 @@ impl GameApp {
         let mut outgoing = vec![0_u8; underlay.len()];
         self.render_inactive_startup_dialog_layer(&mut outgoing)?;
 
-        self.begin_native_text_capture(false);
-        let mut outgoing_native = vec![0_u8; underlay.len()];
-        let native_result = self.render_inactive_startup_dialog_layer(&mut outgoing_native);
-        let outgoing_native_text = self.graphics.surface_mut().take_clonk_text_capture();
-        native_result?;
+        let (outgoing_native, outgoing_native_text) = if self.native_startup_fonts.is_some() {
+            self.begin_native_text_capture(false);
+            let mut outgoing_native = vec![0_u8; underlay.len()];
+            let native_result = self.render_inactive_startup_dialog_layer(&mut outgoing_native);
+            let outgoing_native_text = self.graphics.surface_mut().take_clonk_text_capture();
+            native_result?;
+            (outgoing_native, outgoing_native_text)
+        } else {
+            // A headless/logical CPU fade never replays physical glyphs. Do
+            // not precompute a semantic layer that cannot be presented; an
+            // actual retained request will still fail its capture preflight.
+            (outgoing.clone(), Vec::new())
+        };
+
+        self.graphics.begin_gpu_scene_capture();
+        let mut ignored_underlay_pixel = [0_u8; 4];
+        render_startup_underlay(
+            &mut self.graphics,
+            self.assets.as_ref(),
+            &gamma,
+            &mut ignored_underlay_pixel,
+        );
+        let underlay_gpu_recorder = self.graphics.surface_mut().take_gpu_scene_capture();
+
+        self.pending_native_presentation = None;
+        let mut ignored_outgoing_pixel = [0_u8; 4];
+        let outgoing_gpu_plan = if self.native_startup_fonts.is_some() {
+            self.retained_gpu_ordered_capture_active = true;
+            let retained_result = self.render_ordered_native_base(&mut ignored_outgoing_pixel);
+            self.retained_gpu_ordered_capture_active = false;
+            if let Err(error) = retained_result {
+                self.pending_native_presentation = None;
+                return Err(error);
+            }
+            self.pending_native_presentation.take()
+        } else {
+            None
+        };
 
         Ok(StartupDialogFadeLayers {
             width,
@@ -72302,6 +72563,8 @@ impl GameApp {
             outgoing_frame: outgoing,
             outgoing_native_frame: outgoing_native,
             outgoing_native_text,
+            underlay_gpu_recorder,
+            outgoing_gpu_plan,
         })
     }
 
@@ -72331,6 +72594,8 @@ impl GameApp {
             outgoing_native_frame: Some(layers.outgoing_native_frame),
             outgoing_native_text: layers.outgoing_native_text,
             outgoing_native_fonts: self.native_startup_fonts.clone(),
+            underlay_gpu_recorder: layers.underlay_gpu_recorder,
+            outgoing_gpu_plan: layers.outgoing_gpu_plan,
         });
         self.startup_tooltip.pointer_left();
         self.menu_frame_cache = None;
@@ -72356,6 +72621,15 @@ impl GameApp {
             &gamma,
             &mut underlay,
         );
+        self.graphics.begin_gpu_scene_capture();
+        let mut ignored_underlay_pixel = [0_u8; 4];
+        render_startup_underlay(
+            &mut self.graphics,
+            self.assets.as_ref(),
+            &gamma,
+            &mut ignored_underlay_pixel,
+        );
+        let underlay_gpu_recorder = self.graphics.surface_mut().take_gpu_scene_capture();
         self.startup_dialog_fade = Some(StartupDialogFade {
             outgoing: None,
             incoming,
@@ -72367,6 +72641,8 @@ impl GameApp {
             outgoing_native_frame: None,
             outgoing_native_text: Vec::new(),
             outgoing_native_fonts: None,
+            underlay_gpu_recorder,
+            outgoing_gpu_plan: None,
         });
         self.startup_tooltip.pointer_left();
         self.menu_frame_cache = None;
@@ -81227,6 +81503,7 @@ impl GameApp {
         if let Err(error) = self.render_for_presentation(frame, false, false, false) {
             let surface = self.graphics.surface_mut();
             let _ = surface.take_clonk_text_capture();
+            let _ = surface.take_gpu_scene_capture();
             surface.clear_clip();
             self.pending_native_presentation = None;
             return Err(error);
@@ -81279,10 +81556,12 @@ impl GameApp {
                 .render(self.graphics.surface_mut(), font.as_ref());
             self.render_message_dialogs(None)?;
             let surface = self.graphics.surface();
-            if surface.pixels().len() == frame.len() {
-                frame.copy_from_slice(surface.pixels());
-            } else {
-                copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
+            if !surface.is_gpu_scene_capture_active() {
+                if surface.pixels().len() == frame.len() {
+                    frame.copy_from_slice(surface.pixels());
+                } else {
+                    copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
+                }
             }
             return Ok(true);
         }
@@ -81435,7 +81714,9 @@ impl GameApp {
                     if self.render_context_menu_tooltip(gamma.as_ref()) && ordered_native {
                         self.next_pending_native_overlay();
                     }
-                    if !ordered_native {
+                    if !ordered_native
+                        && !self.graphics.surface().is_gpu_scene_capture_active()
+                    {
                         let surface = self.graphics.surface();
                         if surface.pixels().len() == frame.len() {
                             frame.copy_from_slice(surface.pixels());
@@ -81461,9 +81742,10 @@ impl GameApp {
                 };
                 let expected_len = width as usize * height as usize * 4;
                 let visible_dialog = self.visible_startup_dialog();
+                let retained_fade = self.graphics.surface().is_gpu_scene_capture_active();
                 let fade_compatible = self.startup_dialog_fade.as_ref().is_some_and(|fade| {
                     Some(fade.incoming) == visible_dialog
-                        && frame.len() == expected_len
+                        && (frame.len() == expected_len || retained_fade)
                         && fade.width == width
                         && fade.height == height
                         && fade.underlay.len() == expected_len
@@ -81476,6 +81758,10 @@ impl GameApp {
                                 .outgoing_native_frame
                                 .as_ref()
                                 .is_none_or(|outgoing| outgoing.len() == expected_len))
+                        && (!retained_fade
+                            || (fade.underlay_gpu_recorder.is_some()
+                                && (fade.outgoing.is_none()
+                                    || fade.outgoing_gpu_plan.is_some())))
                 });
                 if self.startup_dialog_fade.is_some() && !fade_compatible {
                     self.startup_dialog_fade = None;
@@ -81493,6 +81779,7 @@ impl GameApp {
                     .is_some_and(|fade| fade.step < STARTUP_DIALOG_FADE_STEPS);
                 let startup_tooltip_pending = self.startup_element_tooltip_pending();
                 let cache_eligible = !ordered_native
+                    && !self.graphics.surface().is_gpu_scene_capture_active()
                     && !fade_was_active
                     // A retained lobby advances held scrollbars, expires
                     // transient status icons, and matures its own 500 ms
@@ -81592,52 +81879,97 @@ impl GameApp {
                         .startup_dialog_fade
                         .take()
                         .expect("compatible startup fade must still be present");
-                    if ordered_native {
-                        let incoming_frame = frame.to_vec();
-                        let incoming_text =
-                            self.graphics.surface_mut().take_clonk_text_capture();
+                    if ordered_native || retained_fade {
+                        let incoming_text = if ordered_native {
+                            self.graphics.surface_mut().take_clonk_text_capture()
+                        } else {
+                            Vec::new()
+                        };
+                        let incoming_gpu_recorder =
+                            self.graphics.surface_mut().take_gpu_scene_capture();
                         let incoming_opacity =
                             startup_dialog_fade_opacity(fade.step.saturating_mul(10));
                         let outgoing_opacity = startup_dialog_fade_opacity(
                             100_u8.saturating_sub(fade.step.saturating_mul(10)),
                         );
-                        frame.copy_from_slice(&fade.underlay);
                         let mut plan = NativePresentationPlan::default();
                         plan.monitor_gamma = monitor_gamma.clone();
-                        if outgoing_opacity != 0 {
-                            if let Some(outgoing) = fade.outgoing_native_frame.as_deref() {
+                        if retained_fade {
+                            plan.batches.push(NativePresentationBatch {
+                                logical_layer: None,
+                                clip: None,
+                                native_loader_text: false,
+                                text: Vec::new(),
+                                fonts: None,
+                                gpu_recorder: fade.underlay_gpu_recorder.clone(),
+                            });
+                            if outgoing_opacity != 0 {
+                                if let Some(outgoing) = fade.outgoing_gpu_plan.as_ref() {
+                                    for mut batch in outgoing.batches.clone() {
+                                        apply_startup_fade_to_batch(
+                                            &mut batch,
+                                            outgoing_opacity,
+                                        )?;
+                                        plan.batches.push(batch);
+                                    }
+                                }
+                            }
+                            if incoming_opacity != 0 {
+                                let mut incoming = NativePresentationBatch {
+                                    logical_layer: None,
+                                    clip: None,
+                                    native_loader_text: false,
+                                    text: incoming_text,
+                                    fonts: None,
+                                    gpu_recorder: incoming_gpu_recorder,
+                                };
+                                apply_startup_fade_to_batch(&mut incoming, incoming_opacity)?;
+                                plan.batches.push(incoming);
+                            }
+                        } else {
+                            let incoming_frame = frame.to_vec();
+                            frame.copy_from_slice(&fade.underlay);
+                            if outgoing_opacity != 0 {
+                                if let Some(outgoing) = fade.outgoing_native_frame.as_deref() {
+                                    plan.batches.push(NativePresentationBatch {
+                                        logical_layer: Some(startup_fade_native_layer(
+                                            outgoing,
+                                            outgoing_opacity,
+                                        )),
+                                        clip: None,
+                                        native_loader_text: false,
+                                        text: startup_fade_native_text(
+                                            &fade.outgoing_native_text,
+                                            outgoing_opacity,
+                                        ),
+                                        fonts: fade.outgoing_native_fonts.clone(),
+                                        gpu_recorder: None,
+                                    });
+                                }
+                            }
+                            if incoming_opacity != 0 {
                                 plan.batches.push(NativePresentationBatch {
                                     logical_layer: Some(startup_fade_native_layer(
-                                        outgoing,
-                                        outgoing_opacity,
+                                        &incoming_frame,
+                                        incoming_opacity,
                                     )),
                                     clip: None,
                                     native_loader_text: false,
                                     text: startup_fade_native_text(
-                                        &fade.outgoing_native_text,
-                                        outgoing_opacity,
+                                        &incoming_text,
+                                        incoming_opacity,
                                     ),
-                                    fonts: fade.outgoing_native_fonts.clone(),
+                                    fonts: None,
+                                    gpu_recorder: None,
                                 });
                             }
                         }
-                        if incoming_opacity != 0 {
-                            plan.batches.push(NativePresentationBatch {
-                                logical_layer: Some(startup_fade_native_layer(
-                                    &incoming_frame,
-                                    incoming_opacity,
-                                )),
-                                clip: None,
-                                native_loader_text: false,
-                                text: startup_fade_native_text(
-                                    &incoming_text,
-                                    incoming_opacity,
-                                ),
-                                fonts: None,
-                            });
-                        }
                         self.pending_native_presentation = Some(plan);
-                        self.begin_native_text_capture(true);
+                        if ordered_native {
+                            self.begin_native_text_capture(true);
+                        } else {
+                            self.graphics.begin_gpu_scene_capture();
+                        }
                     } else {
                         if fade.step < STARTUP_DIALOG_FADE_STEPS {
                             blend_startup_dialog_frames(
@@ -81751,6 +82083,7 @@ impl GameApp {
                     self.next_pending_native_overlay();
                 }
                 if !ordered_native
+                    && !self.graphics.surface().is_gpu_scene_capture_active()
                     && (fade_was_active
                         || self.startup_player_properties_dialog.is_some()
                         || definition_selector_open
@@ -82053,26 +82386,30 @@ impl GameApp {
 
     fn reject_classic_startup_bootstrap(&self) -> Result<()> {
         let mut issues = self.assets.classic_startup_bootstrap_issues();
+        // A plain logical CPU render uses the already loaded CStdFont cells
+        // directly and is also the headless/menu-dump oracle. Scale-native
+        // atlases become mandatory only when retained/semantic capture must
+        // lower text to stable textured glyph quads.
+        let retained_text_capture = self.graphics.surface().is_clonk_text_capture_active()
+            || self.graphics.surface().is_gpu_scene_capture_active();
         let scaled_output = self
             .loader_render_config
             .as_ref()
             .map(|config| (*config).application_scale())
-            .filter(|scale| scale.is_finite() && *scale > 0.0 && *scale != 1.0);
-        if self.startup_view == StartupView::MainMenu {
-            if let Some(scale) = scaled_output {
-                match self.native_startup_fonts.as_deref() {
-                    None => issues.push(ClassicStartupBootstrapIssue::missing(
+            .filter(|scale| scale.is_finite() && *scale > 0.0 && retained_text_capture);
+        if let Some(scale) = scaled_output {
+            match self.native_startup_fonts.as_deref() {
+                None => issues.push(ClassicStartupBootstrapIssue::missing(
+                    "ScaleNativeStartupFonts",
+                )),
+                Some(fonts) if fonts.scale() != scale => {
+                    issues.push(ClassicStartupBootstrapIssue::malformed(
                         "ScaleNativeStartupFonts",
-                    )),
-                    Some(fonts) if fonts.scale() != scale => {
-                        issues.push(ClassicStartupBootstrapIssue::malformed(
-                            "ScaleNativeStartupFonts",
-                            "a font atlas matching the application scale",
-                            format!("font scale {} for application scale {scale}", fonts.scale()),
-                        ));
-                    }
-                    Some(_) => {}
+                        "a font atlas matching the application scale",
+                        format!("font scale {} for application scale {scale}", fonts.scale()),
+                    ));
                 }
+                Some(_) => {}
             }
         }
         if issues.is_empty() {
@@ -82240,6 +82577,7 @@ impl GameApp {
         let gamma = &gamma_value;
         let monitor_gamma = self.startup_monitor_gamma();
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+        let retained_gpu = self.graphics.surface().is_gpu_scene_capture_active();
         if ordered_native {
             self.pending_native_presentation
                 .as_mut()
@@ -82268,7 +82606,7 @@ impl GameApp {
             .checked_mul(height as usize)
             .and_then(|pixels| pixels.checked_mul(4))
             .ok_or_else(|| self.loader_boundary("loader frame dimensions overflow"))?;
-        if frame.len() != expected_len {
+        if frame.len() != expected_len && !retained_gpu {
             return Err(self.loader_boundary(format!(
                 "loader frame has {} bytes, expected {expected_len}",
                 frame.len()
@@ -82326,6 +82664,41 @@ impl GameApp {
             {
                 self.next_pending_native_overlay();
             }
+            self.render_message_dialog_tooltip(Some(gamma))
+                .map_err(|error| self.loader_boundary(error.to_string()))?;
+            return Ok(());
+        }
+
+        if retained_gpu {
+            let render = self
+                .loader_screen
+                .as_ref()
+                .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?
+                .render_with_config(self.graphics.surface_mut(), config, Some(gamma));
+            render.map_err(|error| self.loader_boundary(error.to_string()))?;
+            if self
+                .network_start_wait
+                .as_ref()
+                .is_some_and(|wait| wait.visible)
+            {
+                let resources = self
+                    .assets
+                    .network_start_wait_resources()
+                    .map_err(|error| self.loader_boundary(error.to_string()))?;
+                self.network_start_wait
+                    .as_ref()
+                    .expect("visibility was checked above")
+                    .controller
+                    .render(self.graphics.surface_mut(), &resources, true, Some(gamma))
+                    .map_err(|error| self.loader_boundary(error.to_string()))?;
+            }
+            self.render_league_signup_dialog(Some(gamma))
+                .map_err(|error| self.loader_boundary(error.to_string()))?;
+            self.render_message_dialogs(Some(gamma))
+                .map_err(|error| self.loader_boundary(error.to_string()))?;
+            self.draw_classic_gui_cursor(Some(gamma));
+            self.render_league_signup_tooltip(Some(gamma))
+                .map_err(|error| self.loader_boundary(error.to_string()))?;
             self.render_message_dialog_tooltip(Some(gamma))
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
             return Ok(());
@@ -82711,17 +83084,53 @@ impl GameApp {
         Some(format_resource_string(template, &[&name]))
     }
 
-    fn render_running_gpu_scene(&mut self) -> Result<lc_graphics::GpuScene> {
-        let gamma = self
-            .graphics
-            .active_gamma_ramp(&self.snapshot.environment.gamma);
+    fn retained_gpu_frame_gamma(&self) -> lc_graphics::GammaRamp {
+        match self.mode {
+            AppMode::Menu | AppMode::Loading => self.startup_active_gamma(),
+            AppMode::Running => self
+                .graphics
+                .active_gamma_ramp(&self.snapshot.environment.gamma),
+        }
+    }
+
+    fn render_retained_gpu_frame(
+        &mut self,
+        presentation: GpuPresentation,
+    ) -> Result<RetainedGpuFrame> {
+        let gamma = self.retained_gpu_frame_gamma();
         let renderer_config = self.graphics.advanced_renderer_config();
         let gamma_mode = retained_gpu_gamma_mode(renderer_config);
+        let ordered_native = !self.console_mode
+            && (self.can_present_ordered_native_text(presentation.scale)
+                || self.can_defer_native_loader_text(presentation.scale));
+
+        if ordered_native {
+            self.retained_gpu_ordered_capture_active = true;
+            let mut ignored_cpu_pixel = [0_u8; 4];
+            let render = self.render_ordered_native_base(&mut ignored_cpu_pixel);
+            self.retained_gpu_ordered_capture_active = false;
+            render?;
+            let plan = self
+                .pending_native_presentation
+                .take()
+                .ok_or_else(|| anyhow!("ordered GPU presentation ended without a layer plan"))?;
+            return self.retained_gpu_frame_from_native_plan(
+                plan,
+                presentation,
+                &gamma,
+                gamma_mode,
+            );
+        }
+
         self.graphics.begin_gpu_scene_capture();
         let mut ignored_cpu_pixel = [0_u8; 4];
-        if let Err(error) =
-            self.render_running_for_presentation(&mut ignored_cpu_pixel, false, true)
-        {
+        if let Err(error) = self.render_for_presentation_with_monitor_defer(
+            &mut ignored_cpu_pixel,
+            false,
+            false,
+            false,
+            true,
+        ) {
             let _ = self.graphics.finish_gpu_scene_capture(&gamma);
             return Err(error);
         }
@@ -82730,7 +83139,132 @@ impl GameApp {
             .finish_gpu_scene_capture(&gamma)
             .ok_or_else(|| anyhow!("GPU scene capture ended before presentation"))?;
         scene.gamma_mode = gamma_mode;
-        Ok(scene)
+        if let Some(plan) = self.pending_native_presentation.take() {
+            let mut frame = self.retained_gpu_frame_from_native_plan(
+                plan,
+                presentation,
+                &gamma,
+                gamma_mode,
+            )?;
+            if !scene.commands.is_empty() {
+                frame.layers.push(RetainedGpuFrameLayer {
+                    scene,
+                    presentation,
+                });
+            }
+            return Ok(frame);
+        }
+        Ok(RetainedGpuFrame {
+            layers: vec![RetainedGpuFrameLayer {
+                scene,
+                presentation,
+            }],
+        })
+    }
+
+    fn retained_gpu_frame_from_native_plan(
+        &mut self,
+        plan: NativePresentationPlan,
+        logical_presentation: GpuPresentation,
+        gamma: &lc_graphics::GammaRamp,
+        gamma_mode: GpuGammaMode,
+    ) -> Result<RetainedGpuFrame> {
+        let logical_extent = [
+            self.graphics.surface().width(),
+            self.graphics.surface().height(),
+        ];
+        let [physical_width, physical_height] = logical_presentation.physical_extent;
+        let default_fonts = self.native_startup_fonts.clone();
+        let mut physical_surface = self
+            .retained_native_capture_surface
+            .take()
+            .filter(|surface| {
+                surface.width() == physical_width && surface.height() == physical_height
+            })
+            .unwrap_or_else(|| Surface::new(physical_width, physical_height, PixelFormat::Rgba8888));
+        let mut layers = Vec::new();
+        let result = (|| -> Result<()> {
+            for batch in plan.batches {
+                anyhow::ensure!(
+                    batch.logical_layer.is_none(),
+                    "ordered retained GPU capture produced a CPU logical layer"
+                );
+                if let Some(recorder) = batch.gpu_recorder {
+                    let mut scene = recorder.into_scene(
+                        logical_extent,
+                        Color::opaque(8, 12, 24),
+                        gamma,
+                    );
+                    scene.gamma_mode = gamma_mode;
+                    layers.push(RetainedGpuFrameLayer {
+                        scene,
+                        presentation: logical_presentation,
+                    });
+                }
+
+                if !batch.native_loader_text && batch.text.is_empty() {
+                    continue;
+                }
+                physical_surface.clear_clip();
+                debug_assert!(!physical_surface.is_gpu_scene_capture_active());
+                physical_surface.begin_gpu_scene_capture();
+                if batch.native_loader_text {
+                    let default_fonts = default_fonts.as_deref().context(
+                        "scale-native loader font bundle disappeared during GPU capture",
+                    )?;
+                    let loader = self.loader_screen.as_ref().ok_or_else(|| {
+                        self.loader_boundary(
+                            "selected classic loader disappeared during retained presentation",
+                        )
+                    })?;
+                    loader
+                        .render_native_text_to(
+                            &mut physical_surface,
+                            default_fonts,
+                            logical_extent[0],
+                            logical_extent[1],
+                            Some(&self.startup_fragment_gamma()),
+                        )
+                        .map_err(|error| self.loader_boundary(error.to_string()))?;
+                }
+                if !batch.text.is_empty() {
+                    let fonts = batch
+                        .fonts
+                        .as_deref()
+                        .or(default_fonts.as_deref())
+                        .context("scale-native font bundle disappeared during GPU capture")?;
+                    fonts.draw_captured_text_to(
+                        &mut physical_surface,
+                        &batch.text,
+                        (logical_extent[0], logical_extent[1]),
+                    );
+                }
+                let recorder = physical_surface.take_gpu_scene_capture().ok_or_else(|| {
+                    anyhow!("scale-native GPU text capture ended before presentation")
+                })?;
+                if recorder.is_empty() {
+                    continue;
+                }
+                let mut scene = recorder.into_scene(
+                    [physical_width, physical_height],
+                    Color::transparent(),
+                    gamma,
+                );
+                scene.gamma_mode = gamma_mode;
+                layers.push(RetainedGpuFrameLayer {
+                    scene,
+                    presentation: GpuPresentation::identity(physical_width, physical_height),
+                });
+            }
+            anyhow::ensure!(!layers.is_empty(), "retained GPU frame has no ordered layers");
+            Ok(())
+        })();
+        if physical_surface.is_gpu_scene_capture_active() {
+            let _ = physical_surface.take_gpu_scene_capture();
+        }
+        self.retained_native_capture_surface = Some(physical_surface);
+        result?;
+        Ok(RetainedGpuFrame { layers })
     }
 
     fn render_running(&mut self, frame: &mut [u8], defer_native_game_messages: bool) -> Result<()> {
@@ -83026,25 +83560,35 @@ impl GameApp {
                     native_loader_text: false,
                     text,
                     fonts: None,
+                    gpu_recorder: surface.take_gpu_scene_capture(),
                 });
             surface.clear_clip();
-            surface.fill(Color::transparent());
+            if !self.retained_gpu_ordered_capture_active {
+                surface.fill(Color::transparent());
+            }
             surface.begin_clonk_text_capture();
+            if self.retained_gpu_ordered_capture_active {
+                debug_assert!(!surface.is_gpu_scene_capture_active());
+                surface.begin_gpu_scene_capture();
+            }
             self.graphics.render_frame_foreground(&pending_hud);
             Self::next_native_overlay_parts(
                 &mut self.graphics,
                 &mut self.pending_native_presentation,
+                self.retained_gpu_ordered_capture_active,
             );
             let pending_chrome = self.graphics.render_frame_hud_players(pending_hud);
             Self::next_native_overlay_parts(
                 &mut self.graphics,
                 &mut self.pending_native_presentation,
+                self.retained_gpu_ordered_capture_active,
             );
             self.graphics
                 .render_frame_hud_chrome_without_atlas_deferred_monitor_gamma(pending_chrome);
             Self::next_native_overlay_parts(
                 &mut self.graphics,
                 &mut self.pending_native_presentation,
+                self.retained_gpu_ordered_capture_active,
             );
         } else {
             self.graphics
@@ -89458,6 +90002,15 @@ struct NativePresentationPlan {
     monitor_gamma: Option<lc_graphics::GammaRamp>,
 }
 
+struct RetainedGpuFrame {
+    layers: Vec<RetainedGpuFrameLayer>,
+}
+
+struct RetainedGpuFrameLayer {
+    scene: GpuScene,
+    presentation: GpuPresentation,
+}
+
 #[derive(Clone)]
 struct NativePresentationBatch {
     /// `None` for text attached directly to FramePresenter's already-scaled
@@ -89472,6 +90025,9 @@ struct NativePresentationBatch {
     text: Vec<lc_graphics::clonk_font::CapturedClonkText>,
     /// A fading outgoing dialog retains the font bundle it was captured with.
     fonts: Option<Arc<lc_frontend::clonk_fonts::NativeClonkFontSet>>,
+    /// Painter-ordered logical commands recorded for this exact batch. CPU
+    /// presentation leaves this empty and replays `logical_layer` instead.
+    gpu_recorder: Option<GpuSceneRecorder>,
 }
 
 /// Config-driven bits the startup parity renderers display.
@@ -89494,29 +90050,7 @@ fn fill_engine_box(
     clr: u32,
     gamma: &lc_graphics::GammaRamp,
 ) {
-    let opacity = (255 - (clr >> 24)) as f32 / 255.0;
-    let rgb = [
-        f32::from(gamma.encode_float(((clr >> 16) & 0xff) as f32)),
-        f32::from(gamma.encode_float(((clr >> 8) & 0xff) as f32)),
-        f32::from(gamma.encode_float((clr & 0xff) as f32)),
-    ];
-    for y in y0.max(0)..=y1.min(surface.height() as i32 - 1) {
-        for x in x0.max(0)..=x1.min(surface.width() as i32 - 1) {
-            let dst = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
-            let blend = |src: f32, dst: u8| -> u8 {
-                (src * opacity + f32::from(dst) * (1.0 - opacity))
-                    .round()
-                    .clamp(0.0, 255.0) as u8
-            };
-            let out = Color::new(
-                blend(rgb[0], dst.r),
-                blend(rgb[1], dst.g),
-                blend(rgb[2], dst.b),
-                dst.a,
-            );
-            let _ = surface.set_pixel(x as u32, y as u32, out);
-        }
-    }
+    lc_frontend::classic_gui::draw_engine_box(surface, x0, y0, x1, y1, clr, Some(gamma));
 }
 
 /// The list icon of an entry, mirroring the C++ defaults: scenarios use
@@ -90212,10 +90746,12 @@ fn render_startup_underlay(
     } else {
         surface.fill(Color::opaque(0, 0, 0));
     }
-    if surface.pixels().len() == frame.len() {
-        frame.copy_from_slice(surface.pixels());
-    } else {
-        copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
+    if !surface.is_gpu_scene_capture_active() {
+        if surface.pixels().len() == frame.len() {
+            frame.copy_from_slice(surface.pixels());
+        } else {
+            copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
+        }
     }
 }
 
@@ -90493,11 +91029,13 @@ fn render_startup_frame(
                 context_menu.render_panels(surface, Some(gamma))?;
             }
             let surface = graphics.surface();
-            let pixels = surface.pixels();
-            if pixels.len() == frame.len() {
-                frame.copy_from_slice(pixels);
-            } else {
-                copy_surface(pixels, surface.width(), surface.height(), frame);
+            if !surface.is_gpu_scene_capture_active() {
+                let pixels = surface.pixels();
+                if pixels.len() == frame.len() {
+                    frame.copy_from_slice(pixels);
+                } else {
+                    copy_surface(pixels, surface.width(), surface.height(), frame);
+                }
             }
             return Ok(());
         }
@@ -90601,11 +91139,13 @@ fn render_startup_frame(
 
     }
     let surface = graphics.surface();
-    let pixels = surface.pixels();
-    if pixels.len() == frame.len() {
-        frame.copy_from_slice(pixels);
-    } else {
-        copy_surface(pixels, surface.width(), surface.height(), frame);
+    if !surface.is_gpu_scene_capture_active() {
+        let pixels = surface.pixels();
+        if pixels.len() == frame.len() {
+            frame.copy_from_slice(pixels);
+        } else {
+            copy_surface(pixels, surface.width(), surface.height(), frame);
+        }
     }
     Ok(())
 }
@@ -90633,6 +91173,31 @@ fn startup_dialog_fade_opacity(fade: u8) -> u8 {
     255 - (u16::from(100 - fade) * 255 / 100) as u8
 }
 
+/// C4GUI expresses dialog fades as one active packed-C4 blit modulation.
+/// Packed alpha is transparency, so it is the inverse of straight opacity.
+fn startup_fade_packed_modulation(opacity: u8) -> u32 {
+    (u32::from(255_u8.saturating_sub(opacity)) << 24) | 0x00ff_ffff
+}
+
+fn apply_startup_fade_to_batch(
+    batch: &mut NativePresentationBatch,
+    opacity: u8,
+) -> Result<()> {
+    // `C4GUI::Dialog::Draw` switches to eFadeNone at the fully visible
+    // endpoint and therefore does not activate even a white modulation.
+    if opacity == u8::MAX {
+        return Ok(());
+    }
+    let modulation = startup_fade_packed_modulation(opacity);
+    if let Some(recorder) = batch.gpu_recorder.as_mut() {
+        recorder
+            .apply_packed_c4_modulation(modulation)
+            .context("startup fade command is not exactly representable as packed C4 color")?;
+    }
+    batch.text = startup_fade_native_text(&batch.text, opacity);
+    Ok(())
+}
+
 fn startup_fade_native_layer(pixels: &[u8], opacity: u8) -> Vec<u8> {
     pixels
         .iter()
@@ -90644,12 +91209,16 @@ fn startup_fade_native_text(
     commands: &[lc_graphics::clonk_font::CapturedClonkText],
     opacity: u8,
 ) -> Vec<lc_graphics::clonk_font::CapturedClonkText> {
+    if opacity == u8::MAX {
+        return commands.to_vec();
+    }
+    let modulation = startup_fade_packed_modulation(opacity);
     commands
         .iter()
         .cloned()
         .map(|mut command| {
-            command.color[3] = ((u16::from(command.color[3]) * u16::from(opacity) + 127) / 255)
-                as u8;
+            command.color =
+                lc_graphics::gpu_scene::modulate_rgba8_by_packed_c4(command.color, modulation);
             command
         })
         .collect()
@@ -113878,6 +114447,12 @@ func Award()
     }
 
     fn install_native_test_fonts(app: &mut GameApp, scale: f32) {
+        app.graphics.set_runtime_sprite_filtering(scale, false);
+        app.loader_render_config = Some(
+            LoaderRenderConfig::new(scale, false)
+                .expect("install scale-native test render configuration"),
+        );
+        app.loader_render_error = None;
         let font_path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../planet/System.c4g/Endeavour.ttf");
         let bytes = fs::read(font_path).expect("read Endeavour.ttf");
@@ -141009,6 +141584,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 network_host_selector: false,
             }),
             pixels: vec![1],
+            retained: None,
         };
         app.startup_dialog_fade = Some(StartupDialogFade {
             outgoing: None,
@@ -141021,6 +141597,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             outgoing_native_frame: None,
             outgoing_native_text: Vec::new(),
             outgoing_native_fonts: None,
+            underlay_gpu_recorder: None,
+            outgoing_gpu_plan: None,
         });
         let version = app.menu_render_version;
 
@@ -142587,7 +143165,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn integer_scale_main_requires_matching_native_fonts_before_cache_selection() {
+    fn retained_main_requires_matching_native_fonts_but_headless_cpu_does_not() {
         let mut app = new_real_classic_menu_app(320, 200);
         Arc::make_mut(&mut app.assets).startup_native_font_source = None;
         let cached = vec![0x42; 320 * 200 * 4];
@@ -142603,24 +143181,63 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(app.native_startup_fonts.is_none());
 
         let mut frame = vec![0xb4; 320 * 200 * 4];
+        assert!(
+            !app.render(&mut frame)
+                .expect("headless CPU rendering keeps exact logical font cells")
+        );
+        assert_eq!(frame, cached);
+
         let error = app
-            .render(&mut frame)
-            .expect_err("scale-three logical-font approximation must fail closed");
+            .render_retained_gpu_frame(GpuPresentation {
+                physical_extent: [960, 600],
+                scale: 3.0,
+                crop_top: 0,
+            })
+            .err()
+            .expect("scaled retained text must not fall back to point-rasterized glyphs");
         assert_startup_bootstrap_boundary(
             &error,
             vec![ClassicStartupBootstrapIssue::missing(
                 "ScaleNativeStartupFonts",
             )],
         );
-        assert!(frame.iter().all(|byte| *byte == 0xb4));
         assert_eq!(
             app.menu_frame_cache.as_ref().expect("cache retained").frame,
             cached
         );
 
         app.configure_native_startup_fonts(1.0, false);
-        app.render(&mut frame)
-            .expect("scale one intentionally uses logical startup fonts");
+        assert!(
+            !app.render(&mut frame)
+                .expect("scale-one headless CPU rendering uses exact logical font cells")
+        );
+        assert_eq!(frame, cached);
+
+        let error = app
+            .render_retained_gpu_frame(GpuPresentation::identity(320, 200))
+            .err()
+            .expect("scale-one retained text must not fall back to point-rasterized glyphs");
+        assert_startup_bootstrap_boundary(
+            &error,
+            vec![ClassicStartupBootstrapIssue::missing(
+                "ScaleNativeStartupFonts",
+            )],
+        );
+    }
+
+    #[test]
+    fn scale_one_builds_native_fonts_and_enables_ordered_text_capture() {
+        let mut app = new_real_classic_menu_app(320, 200);
+        app.configure_native_startup_fonts(1.0, false);
+        let fonts = app
+            .native_startup_fonts
+            .as_ref()
+            .expect("scale one keeps a retained native atlas");
+        assert_eq!(fonts.scale(), 1.0);
+        assert!(app.can_present_ordered_native_text(1.0));
+
+        app.mode = AppMode::Running;
+        assert!(app.can_present_ordered_native_text(1.0));
     }
 
     #[test]
@@ -144125,6 +144742,253 @@ ScenInfoArea=70,5,25,90
         assert_eq!(
             next_screenshot_path(directory.path()),
             directory.path().join("Screenshot002.png")
+        );
+    }
+
+    fn retained_test_presentation(app: &GameApp) -> GpuPresentation {
+        GpuPresentation::identity(
+            app.graphics.surface().width(),
+            app.graphics.surface().height(),
+        )
+    }
+
+    fn assert_retained_frame_has_commands(label: &str, frame: &RetainedGpuFrame) {
+        assert!(!frame.layers.is_empty(), "{label} produced no GPU layers");
+        assert!(
+            frame
+                .layers
+                .iter()
+                .any(|layer| !layer.scene.commands.is_empty()),
+            "{label} produced no retained GPU commands"
+        );
+    }
+
+    #[test]
+    fn m06_l033_all_graphical_modes_produce_retained_scenes() {
+        let mut menu = new_real_menu_app(320, 200);
+        menu.startup_dialog_fade = None;
+        menu.graphics.set_runtime_sprite_filtering(1.0, false);
+        menu.configure_native_startup_fonts(1.0, false);
+        let menu_presentation = retained_test_presentation(&menu);
+        let menu_frame = menu
+            .render_retained_gpu_frame(menu_presentation)
+            .expect("retain startup menu");
+        assert_retained_frame_has_commands("menu", &menu_frame);
+
+        let mut loading = new_real_menu_app(320, 200);
+        loading.graphics.set_runtime_sprite_filtering(1.0, false);
+        loading.configure_native_startup_fonts(1.0, false);
+        let fonts = loading
+            .assets
+            .clonk_fonts
+            .clone()
+            .expect("classic loader fonts");
+        loading.loader_screen = Some(
+            LoaderScreen::new(
+                LoaderSelection::startup("LoaderRetained.png")
+                    .expect("valid retained loader selection"),
+                ImageData::new(1, 1, vec![7, 8, 9, 255]),
+                LoaderResources::new(fonts, ImageData::new(3, 1, vec![255; 12]))
+                    .expect("valid retained loader resources"),
+                LoaderState::initial("Loading"),
+            )
+            .expect("valid retained loader screen"),
+        );
+        loading.loader_error = None;
+        loading.loader_render_error = None;
+        loading.mode = AppMode::Loading;
+        let loading_presentation = retained_test_presentation(&loading);
+        let loading_frame = loading
+            .render_retained_gpu_frame(loading_presentation)
+            .expect("retain loader");
+        assert_retained_frame_has_commands("loading", &loading_frame);
+
+        let mut running = new_classic_running_sandbox_app();
+        running.graphics.set_runtime_sprite_filtering(1.0, false);
+        running.configure_native_startup_fonts(1.0, false);
+        let running_presentation = retained_test_presentation(&running);
+        let running_frame = running
+            .render_retained_gpu_frame(running_presentation)
+            .expect("retain running game");
+        assert_retained_frame_has_commands("running", &running_frame);
+
+        let mut console = new_state_only_menu_app(320, 200);
+        console.console_mode = true;
+        let console_presentation = retained_test_presentation(&console);
+        let console_frame = console
+            .render_retained_gpu_frame(console_presentation)
+            .expect("retain developer console");
+        assert_retained_frame_has_commands("console", &console_frame);
+    }
+
+    #[test]
+    fn m06_l033_scale_native_text_keeps_logical_physical_painter_order() {
+        let mut app = new_real_menu_app(320, 200);
+        app.startup_dialog_fade = None;
+        app.graphics.set_runtime_sprite_filtering(2.0, false);
+        app.configure_native_startup_fonts(2.0, false);
+        let presentation = GpuPresentation {
+            physical_extent: [640, 400],
+            scale: 2.0,
+            crop_top: 0,
+        };
+
+        let frame = app
+            .render_retained_gpu_frame(presentation)
+            .expect("retain ordered scale-native menu");
+        assert_retained_frame_has_commands("scale-native menu", &frame);
+        let logical = frame
+            .layers
+            .iter()
+            .position(|layer| layer.presentation == presentation)
+            .expect("logical menu layer");
+        let physical = frame
+            .layers
+            .iter()
+            .position(|layer| {
+                layer.presentation == GpuPresentation::identity(640, 400)
+            })
+            .expect("physical native-text layer");
+        assert!(
+            logical < physical,
+            "native text must follow the logical chrome batch that produced it"
+        );
+        assert!(frame.layers.iter().all(|layer| {
+            layer.presentation.physical_extent == presentation.physical_extent
+        }));
+    }
+
+    #[test]
+    fn m06_l033_startup_fade_modulates_retained_draws_and_text_like_cpp() {
+        let source = [200_u8, 100, 50, 128];
+        let faded_batch = |opacity| {
+            let mut surface = Surface::new(2, 2, PixelFormat::Rgba8888);
+            surface.begin_gpu_scene_capture();
+            surface.fill(Color::new(source[0], source[1], source[2], source[3]));
+            let mut batch = NativePresentationBatch {
+                logical_layer: None,
+                clip: None,
+                native_loader_text: false,
+                text: vec![lc_graphics::clonk_font::CapturedClonkText {
+                    role: lc_graphics::clonk_font::ClonkFontRole::GuiText,
+                    x: 0,
+                    y: 0,
+                    text: "fade".to_owned(),
+                    color: source,
+                    align: lc_graphics::clonk_font::TextAlign::Left,
+                    markup: false,
+                    clip: None,
+                    gamma: None,
+                    images: Vec::new(),
+                }],
+                fonts: None,
+                gpu_recorder: surface.take_gpu_scene_capture(),
+            };
+            apply_startup_fade_to_batch(&mut batch, opacity)
+                .expect("byte-derived fade colors are exactly representable");
+            let scene = batch
+                .gpu_recorder
+                .take()
+                .expect("captured fade command")
+                .into_scene([2, 2], Color::transparent(), &startup_gamma());
+            let lc_graphics::GpuCommand::Solid { vertices, .. } = &scene.commands[0] else {
+                panic!("fill did not produce a retained solid command");
+            };
+            (
+                vertices[0]
+                    .color
+                    .map(|channel| (channel * 255.0).round() as u8),
+                batch.text[0].color,
+            )
+        };
+
+        let incoming = startup_dialog_fade_opacity(10);
+        let outgoing = startup_dialog_fade_opacity(90);
+        for opacity in [outgoing, incoming] {
+            let expected = lc_graphics::gpu_scene::modulate_rgba8_by_packed_c4(
+                source,
+                startup_fade_packed_modulation(opacity),
+            );
+            let (draw, text) = faded_batch(opacity);
+            assert_eq!(draw, expected, "retained draw at opacity {opacity}");
+            assert_eq!(text, expected, "semantic text at opacity {opacity}");
+        }
+        assert_ne!(faded_batch(outgoing), faded_batch(incoming));
+        assert_eq!(
+            faded_batch(u8::MAX),
+            (source, source),
+            "C4GUI disables modulation at the fully visible endpoint"
+        );
+
+        let mut app = new_real_menu_app(320, 200);
+        app.startup_dialog_fade = None;
+        app.graphics.set_runtime_sprite_filtering(1.0, false);
+        app.configure_native_startup_fonts(1.0, false);
+        app.handle_main_menu_activation(MainMenuItem::About)
+            .expect("start retained Main-to-About transition");
+        let presentation = retained_test_presentation(&app);
+        let frame = app
+            .render_retained_gpu_frame(presentation)
+            .expect("retain first startup fade frame");
+        assert_retained_frame_has_commands("startup fade", &frame);
+        assert!(
+            frame.layers.len() >= 3,
+            "startup fade must retain underlay, outgoing, and incoming painter layers"
+        );
+    }
+
+    #[test]
+    fn m06_l033_surface_error_policy_rebuilds_or_retries_only_recoverable_errors() {
+        let classify = |surface| {
+            retained_gpu_present_recovery(
+                &anyhow::Error::new(pixels::Error::Surface(surface))
+                    .context("retained presentation"),
+            )
+        };
+        assert_eq!(
+            classify(pixels::wgpu::SurfaceError::Lost),
+            RetainedGpuPresentRecovery::RebuildDevice
+        );
+        assert_eq!(
+            classify(pixels::wgpu::SurfaceError::Outdated),
+            RetainedGpuPresentRecovery::RebuildDevice
+        );
+        assert_eq!(
+            classify(pixels::wgpu::SurfaceError::Timeout),
+            RetainedGpuPresentRecovery::Retry
+        );
+        assert_eq!(
+            classify(pixels::wgpu::SurfaceError::OutOfMemory),
+            RetainedGpuPresentRecovery::Fatal
+        );
+        let observed_device_loss = anyhow::Error::new(
+            gpu_renderer::GpuRendererError::DeviceRecreationRequired {
+                reason: gpu_renderer::RetainedGpuRecreateReason::DeviceLost,
+                detail: "Parent device is lost".to_owned(),
+            },
+        )
+        .context("retained presentation");
+        assert_eq!(
+            retained_gpu_present_recovery(&observed_device_loss),
+            RetainedGpuPresentRecovery::RebuildDevice
+        );
+        let queue_submit_loss =
+            "Error in Queue::submit: Validation Error: Parent device is lost".to_owned();
+        let detail = wgpu_device_loss_panic_detail(&queue_submit_loss)
+            .expect("wgpu 0.16 fatal submit loss remains recoverable");
+        assert_eq!(
+            retained_gpu_present_recovery(&retained_gpu_device_loss_error(detail)),
+            RetainedGpuPresentRecovery::RebuildDevice
+        );
+        let unrelated_panic = "index out of bounds".to_owned();
+        assert_eq!(wgpu_device_loss_panic_detail(&unrelated_panic), None);
+        let validation = anyhow::Error::new(gpu_renderer::GpuRendererError::DeviceFatal {
+            reason: gpu_renderer::RetainedGpuFatalReason::Validation,
+            detail: "invalid bind group".to_owned(),
+        });
+        assert_eq!(
+            retained_gpu_present_recovery(&validation),
+            RetainedGpuPresentRecovery::Fatal
         );
     }
 
@@ -147274,7 +148138,8 @@ ScenInfoArea=70,5,25,90
     #[test]
     fn scale_three_open_startup_dialog_keeps_native_text_in_z_order() {
         let mut app = new_real_classic_menu_app(640, 480);
-        install_native_test_fonts(&mut app, 3.0);
+        app.graphics.set_runtime_sprite_filtering(3.0, false);
+        app.configure_native_startup_fonts(3.0, false);
         for label in ["LOWER", "H"] {
             app.push_message_dialog(
                 lc_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -156638,8 +157503,8 @@ ScenInfoArea=70,5,25,90
     fn startup_dialog_fade_preserves_ordered_native_text_at_scaled_output() {
         let scale = 1.5;
         let mut app = new_real_classic_menu_app(320, 200);
-        install_native_test_fonts(&mut app, scale);
-        app.graphics.set_presentation_scale(scale);
+        app.graphics.set_runtime_sprite_filtering(scale, false);
+        app.configure_native_startup_fonts(scale, false);
         let _ = render_ordered_test_frame(&mut app, scale, 480, 300);
 
         app.handle_main_menu_activation(MainMenuItem::About)
@@ -156857,8 +157722,8 @@ ScenInfoArea=70,5,25,90
         app.show_main_menu();
         assert_eq!(app.startup_view, StartupView::MainMenu);
 
-        install_native_test_fonts(&mut app, 3.0);
-        app.graphics.set_presentation_scale(3.0);
+        app.graphics.set_runtime_sprite_filtering(3.0, false);
+        app.configure_native_startup_fonts(3.0, false);
         let mut logical_frame = vec![0_u8; 1152 * 723 * 4];
         app.render_ordered_native_base(&mut logical_frame)
             .expect("capture the production Main presentation after boot");
@@ -199671,6 +200536,19 @@ func ControlDig() { dig_count = 1; return(1); }
 
     #[test]
     fn l031_debug_key_gates_remaps_and_native_priority_are_nonfatal() {
+        // Thirteen sandbox apps live in this one debug-build frame; their
+        // combined O0 stack slots sit right at the default test-thread stack.
+        // Run the unchanged body on an explicitly sized thread so GameApp
+        // growth cannot tip this test over the guard page.
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(l031_debug_key_gates_remaps_and_native_priority_body)
+            .expect("spawn l031 debug-key worker")
+            .join()
+            .expect("l031 debug-key worker completes");
+    }
+
+    fn l031_debug_key_gates_remaps_and_native_priority_body() {
         for key in [VirtualKeyCode::F6, VirtualKeyCode::F7, VirtualKeyCode::F8] {
             let mut app = new_running_sandbox_app();
             app.handle_modifiers_changed(ModifiersState::CTRL)

@@ -1,8 +1,8 @@
 use crate::clonk_font::CapturedClonkText;
 use crate::color::Color;
 use crate::gpu_scene::{
-    GpuBlend, GpuCommand, GpuPrimitiveTopology, GpuSampler, GpuSceneRecorder, GpuSolidVertex,
-    GpuTextureId, GpuTextureResource, GpuVertex,
+    GpuBlend, GpuCommand, GpuPrimitiveTopology, GpuSampler, GpuSceneRecorder, GpuSolidAlphaMode,
+    GpuSolidOuterModulation, GpuSolidVertex, GpuTextureId, GpuTextureResource, GpuVertex,
 };
 use crate::snapshot::{checksum_update, SurfaceSnapshot, FNV_OFFSET};
 use std::cell::Cell;
@@ -208,6 +208,7 @@ fn solid_rect_vertices(rect: Rect, color: Color) -> Vec<GpuSolidVertex> {
     let vertex = |x, y| GpuSolidVertex {
         position: [x, y, 1.0],
         color: rgba(color),
+        outer_modulation: GpuSolidOuterModulation::PackedC4,
     };
     vec![
         vertex(left, top),
@@ -245,6 +246,26 @@ pub trait SurfaceDrawTarget {
     fn get_pixel(&self, x: u32, y: u32) -> Option<Color>;
     fn set_pixel(&mut self, x: u32, y: u32, color: Color) -> Result<(), SurfaceError>;
 
+    /// Whether this target is currently retaining painter commands for the
+    /// native GPU backend. Generic draw code uses this to choose a bounded
+    /// textured primitive instead of first rasterizing the same primitive
+    /// into thousands of destination-dependent point fragments.
+    #[doc(hidden)]
+    fn is_gpu_command_capture_active(&self) -> bool {
+        false
+    }
+
+    /// Retain one self-contained textured painter command. CPU targets return
+    /// `false` and keep using their byte-exact raster path.
+    #[doc(hidden)]
+    fn capture_gpu_textured_command(
+        &mut self,
+        _texture: GpuTextureResource,
+        _command: GpuCommand,
+    ) -> bool {
+        false
+    }
+
     /// Blend one straight-alpha fragment whose channels are expressed in the
     /// native shader's 0..=255 float domain. Owned GPU-recording surfaces can
     /// retain this operation without first reading a stale CPU destination;
@@ -279,6 +300,81 @@ pub trait SurfaceDrawTarget {
                 (source[3].clamp(0.0, 255.0) * alpha + f32::from(destination.a) * (1.0 - alpha))
                     .round()
                     .clamp(0.0, 255.0) as u8,
+            ),
+        )
+    }
+
+    /// Blend one straight-alpha fragment whose CPU reference keeps
+    /// source-over framebuffer alpha (`Aout = As + Ad*(1-As)`), the equation
+    /// shared by the primitive box/line/point rasterizers. Owned
+    /// GPU-recording surfaces retain the unblended source instead of reading
+    /// a stale CPU destination.
+    fn blend_fragment_over(
+        &mut self,
+        x: u32,
+        y: u32,
+        source: [f32; 4],
+        gamma: Option<&crate::GammaRamp>,
+    ) -> Result<(), SurfaceError> {
+        let Some(destination) = self.get_pixel(x, y) else {
+            return Ok(());
+        };
+        let alpha = (source[3] / 255.0).clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            return Ok(());
+        }
+        let channel = |channel, value: f32, destination: u8| {
+            let value = gamma.map_or(value, |ramp| ramp.sample_channel_float(channel, value));
+            (value * alpha + f32::from(destination) * (1.0 - alpha))
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        self.set_pixel(
+            x,
+            y,
+            Color::new(
+                channel(crate::gamma::GammaChannel::Red, source[0], destination.r),
+                channel(crate::gamma::GammaChannel::Green, source[1], destination.g),
+                channel(crate::gamma::GammaChannel::Blue, source[2], destination.b),
+                (source[3].clamp(0.0, 255.0) + f32::from(destination.a) * (1.0 - alpha))
+                    .round()
+                    .clamp(0.0, 255.0) as u8,
+            ),
+        )
+    }
+
+    /// Add one straight-alpha fragment using the native
+    /// `GL_SRC_ALPHA, GL_ONE` colour equation while preserving framebuffer
+    /// alpha. Retained targets record the unblended source; CPU targets use
+    /// the same gamma-before-blend reference equation.
+    fn blend_fragment_additive(
+        &mut self,
+        x: u32,
+        y: u32,
+        source: [f32; 4],
+        gamma: Option<&crate::GammaRamp>,
+    ) -> Result<(), SurfaceError> {
+        let Some(destination) = self.get_pixel(x, y) else {
+            return Ok(());
+        };
+        let alpha = (source[3] / 255.0).clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            return Ok(());
+        }
+        let channel = |channel, value: f32, destination_channel: u8| {
+            let value = gamma.map_or(value, |ramp| ramp.sample_channel_float(channel, value));
+            (f32::from(destination_channel) + value * alpha)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        self.set_pixel(
+            x,
+            y,
+            Color::new(
+                channel(crate::gamma::GammaChannel::Red, source[0], destination.r),
+                channel(crate::gamma::GammaChannel::Green, source[1], destination.g),
+                channel(crate::gamma::GammaChannel::Blue, source[2], destination.b),
+                destination.a,
             ),
         )
     }
@@ -528,6 +624,7 @@ impl Surface {
         &mut self,
         vertex: GpuSolidVertex,
         topology: GpuPrimitiveTopology,
+        alpha_mode: GpuSolidAlphaMode,
         clip: Option<Rect>,
         blend: GpuBlend,
         gamma: bool,
@@ -535,7 +632,7 @@ impl Surface {
         let Some(scene) = self.gpu_scene.as_mut() else {
             return false;
         };
-        scene.push_solid_vertex(vertex, topology, clip, blend, gamma);
+        scene.push_solid_vertex(vertex, topology, alpha_mode, clip, blend, gamma);
         true
     }
 
@@ -599,9 +696,12 @@ impl Surface {
             command.x = command.x.saturating_add(offset.x);
             command.y = command.y.saturating_add(offset.y);
             let mut clip = match command.clip {
-                Some(clip) => clip
-                    .intersection(child_bounds)
-                    .unwrap_or(Rect::new(child_bounds.x, child_bounds.y, 0, 0)),
+                Some(clip) => clip.intersection(child_bounds).unwrap_or(Rect::new(
+                    child_bounds.x,
+                    child_bounds.y,
+                    0,
+                    0,
+                )),
                 None => child_bounds,
             };
             clip.x = clip.x.saturating_add(offset.x);
@@ -635,9 +735,12 @@ impl Surface {
             command.x = command.x.saturating_add(offset.x);
             command.y = command.y.saturating_add(offset.y);
             let mut clip = match command.clip {
-                Some(clip) => clip
-                    .intersection(child_bounds)
-                    .unwrap_or(Rect::new(child_bounds.x, child_bounds.y, 0, 0)),
+                Some(clip) => clip.intersection(child_bounds).unwrap_or(Rect::new(
+                    child_bounds.x,
+                    child_bounds.y,
+                    0,
+                    0,
+                )),
                 None => child_bounds,
             };
             clip.x = clip.x.saturating_add(offset.x);
@@ -654,8 +757,8 @@ impl Surface {
             command.color = [color.r, color.g, color.b, color.a];
             for image in &mut command.images {
                 for pixel in image.rgba.chunks_exact_mut(4) {
-                    let color = Color::new(pixel[0], pixel[1], pixel[2], pixel[3])
-                        .modulate_clr(modulation);
+                    let color =
+                        Color::new(pixel[0], pixel[1], pixel[2], pixel[3]).modulate_clr(modulation);
                     pixel.copy_from_slice(&[color.r, color.g, color.b, color.a]);
                 }
             }
@@ -786,6 +889,7 @@ impl Surface {
         if self.push_gpu_command(GpuCommand::Solid {
             vertices: solid_rect_vertices(bounds, color),
             topology: GpuPrimitiveTopology::TriangleList,
+            alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip: None,
             blend: GpuBlend::Replace,
             gamma: false,
@@ -812,6 +916,7 @@ impl Surface {
         if self.push_gpu_command(GpuCommand::Solid {
             vertices: solid_rect_vertices(region, color),
             topology: GpuPrimitiveTopology::TriangleList,
+            alpha_mode: GpuSolidAlphaMode::SourceOver,
             clip,
             blend: GpuBlend::Normal,
             gamma: false,
@@ -851,8 +956,10 @@ impl Surface {
             GpuSolidVertex {
                 position: [x as f32 + 0.5, y as f32 + 0.5, 1.0],
                 color: rgba(color),
+                outer_modulation: GpuSolidOuterModulation::SampledTexture,
             },
             GpuPrimitiveTopology::PointList,
+            GpuSolidAlphaMode::SourceOver,
             clip,
             GpuBlend::Replace,
             false,
@@ -884,8 +991,10 @@ impl Surface {
             GpuSolidVertex {
                 position: [x as f32 + 0.5, y as f32 + 0.5, 1.0],
                 color: rgba(color),
+                outer_modulation: GpuSolidOuterModulation::SampledTexture,
             },
             GpuPrimitiveTopology::PointList,
+            GpuSolidAlphaMode::SourceOver,
             clip,
             GpuBlend::Normal,
             false,
@@ -1461,6 +1570,23 @@ impl SurfaceDrawTarget for Surface {
         Surface::set_pixel(self, x, y, color)
     }
 
+    fn is_gpu_command_capture_active(&self) -> bool {
+        self.is_gpu_scene_capture_active()
+    }
+
+    fn capture_gpu_textured_command(
+        &mut self,
+        texture: GpuTextureResource,
+        command: GpuCommand,
+    ) -> bool {
+        let Some(scene) = self.gpu_scene.as_mut() else {
+            return false;
+        };
+        scene.add_texture(texture);
+        scene.push(command);
+        true
+    }
+
     fn blend_fragment(
         &mut self,
         x: u32,
@@ -1484,8 +1610,10 @@ impl SurfaceDrawTarget for Surface {
             GpuSolidVertex {
                 position: [x as f32 + 0.5, y as f32 + 0.5, 1.0],
                 color: source.map(|component| (component / 255.0).clamp(0.0, 1.0)),
+                outer_modulation: GpuSolidOuterModulation::SampledTexture,
             },
             GpuPrimitiveTopology::PointList,
+            GpuSolidAlphaMode::NonSeparate,
             clip,
             GpuBlend::Normal,
             gamma.is_some_and(|ramp| !ramp.is_passthrough()),
@@ -1511,6 +1639,116 @@ impl SurfaceDrawTarget for Surface {
                 (source[3].clamp(0.0, 255.0) * alpha + f32::from(destination.a) * (1.0 - alpha))
                     .round()
                     .clamp(0.0, 255.0) as u8,
+            ),
+        )
+    }
+
+    fn blend_fragment_over(
+        &mut self,
+        x: u32,
+        y: u32,
+        source: [f32; 4],
+        gamma: Option<&crate::GammaRamp>,
+    ) -> Result<(), SurfaceError> {
+        if x >= self.width || y >= self.height {
+            return Err(SurfaceError::OutOfBounds {
+                x,
+                y,
+                width: self.width,
+                height: self.height,
+            });
+        }
+        if !self.pixel_in_clip(x, y) || source[3] <= 0.0 {
+            return Ok(());
+        }
+        let clip = self.clip;
+        if self.push_gpu_solid_vertex(
+            GpuSolidVertex {
+                position: [x as f32 + 0.5, y as f32 + 0.5, 1.0],
+                color: source.map(|component| (component / 255.0).clamp(0.0, 1.0)),
+                outer_modulation: GpuSolidOuterModulation::SampledTexture,
+            },
+            GpuPrimitiveTopology::PointList,
+            GpuSolidAlphaMode::SourceOver,
+            clip,
+            GpuBlend::Normal,
+            gamma.is_some_and(|ramp| !ramp.is_passthrough()),
+        ) {
+            return Ok(());
+        }
+
+        let destination = self.get_pixel(x, y).unwrap_or_default();
+        let alpha = (source[3] / 255.0).clamp(0.0, 1.0);
+        let channel = |channel, value: f32, destination: u8| {
+            let value = gamma.map_or(value, |ramp| ramp.sample_channel_float(channel, value));
+            (value * alpha + f32::from(destination) * (1.0 - alpha))
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        self.set_pixel(
+            x,
+            y,
+            Color::new(
+                channel(crate::gamma::GammaChannel::Red, source[0], destination.r),
+                channel(crate::gamma::GammaChannel::Green, source[1], destination.g),
+                channel(crate::gamma::GammaChannel::Blue, source[2], destination.b),
+                (source[3].clamp(0.0, 255.0) + f32::from(destination.a) * (1.0 - alpha))
+                    .round()
+                    .clamp(0.0, 255.0) as u8,
+            ),
+        )
+    }
+
+    fn blend_fragment_additive(
+        &mut self,
+        x: u32,
+        y: u32,
+        source: [f32; 4],
+        gamma: Option<&crate::GammaRamp>,
+    ) -> Result<(), SurfaceError> {
+        if x >= self.width || y >= self.height {
+            return Err(SurfaceError::OutOfBounds {
+                x,
+                y,
+                width: self.width,
+                height: self.height,
+            });
+        }
+        if !self.pixel_in_clip(x, y) || source[3] <= 0.0 {
+            return Ok(());
+        }
+        let clip = self.clip;
+        if self.push_gpu_solid_vertex(
+            GpuSolidVertex {
+                position: [x as f32 + 0.5, y as f32 + 0.5, 1.0],
+                color: source.map(|component| (component / 255.0).clamp(0.0, 1.0)),
+                outer_modulation: GpuSolidOuterModulation::SampledTexture,
+            },
+            GpuPrimitiveTopology::PointList,
+            GpuSolidAlphaMode::NonSeparate,
+            clip,
+            GpuBlend::Additive,
+            gamma.is_some_and(|ramp| !ramp.is_passthrough()),
+        ) {
+            return Ok(());
+        }
+
+        let destination = self.get_pixel(x, y).unwrap_or_default();
+        let alpha = (source[3] / 255.0).clamp(0.0, 1.0);
+        let channel = |channel, value: f32, destination_channel: u8| {
+            let value = gamma.map_or(value, |ramp| ramp.sample_channel_float(channel, value));
+            (f32::from(destination_channel) + value * alpha)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        self.set_pixel(
+            x,
+            y,
+            Color::new(
+                channel(crate::gamma::GammaChannel::Red, source[0], destination.r),
+                channel(crate::gamma::GammaChannel::Green, source[1], destination.g),
+                channel(crate::gamma::GammaChannel::Blue, source[2], destination.b),
+                destination.a,
             ),
         )
     }
@@ -1589,6 +1827,7 @@ mod tests {
         let GpuCommand::Solid {
             vertices,
             topology,
+            alpha_mode,
             blend,
             gamma,
             ..
@@ -1597,6 +1836,7 @@ mod tests {
             panic!("text fragment did not lower to a solid point");
         };
         assert_eq!(*topology, GpuPrimitiveTopology::PointList);
+        assert_eq!(*alpha_mode, GpuSolidAlphaMode::NonSeparate);
         assert_eq!(*blend, GpuBlend::Normal);
         assert!(*gamma);
         assert_eq!(vertices.len(), 1);
@@ -1626,6 +1866,106 @@ mod tests {
             panic!("text fragment did not lower to a solid point");
         };
         assert!(!*gamma);
+    }
+
+    #[test]
+    fn cpu_fragment_alpha_matches_cpp_non_separate_gpu_blend_equation() {
+        let mut destination = Surface::new(1, 1, PixelFormat::Rgba8888);
+        destination
+            .set_pixel(0, 0, Color::new(10, 20, 30, 40))
+            .unwrap();
+        SurfaceDrawTarget::blend_fragment(
+            &mut destination,
+            0,
+            0,
+            [200.0, 100.0, 50.0, 128.0],
+            None,
+        )
+        .unwrap();
+        // CStdGL installs the same SrcAlpha/OneMinusSrcAlpha factors for the
+        // alpha channel, so source alpha contributes alpha squared.
+        assert_eq!(destination.get_pixel(0, 0).map(|pixel| pixel.a), Some(84));
+    }
+
+    #[test]
+    fn cpu_additive_fragment_preserves_destination_alpha() {
+        let mut destination = Surface::new(1, 1, PixelFormat::Rgba8888);
+        destination
+            .set_pixel(0, 0, Color::new(10, 20, 30, 200))
+            .unwrap();
+        SurfaceDrawTarget::blend_fragment_additive(
+            &mut destination,
+            0,
+            0,
+            [200.0, 100.0, 50.0, 128.0],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            destination.get_pixel(0, 0),
+            Some(Color::new(110, 70, 55, 200))
+        );
+    }
+
+    #[test]
+    fn cpu_over_fragment_keeps_source_over_destination_alpha() {
+        let mut destination = Surface::new(1, 1, PixelFormat::Rgba8888);
+        destination
+            .set_pixel(0, 0, Color::new(10, 20, 30, 100))
+            .unwrap();
+        SurfaceDrawTarget::blend_fragment_over(
+            &mut destination,
+            0,
+            0,
+            [200.0, 100.0, 50.0, 128.0],
+            None,
+        )
+        .unwrap();
+        // Source-over alpha: 128 + 100*(1-128/255) = 177.8 -> 178, while the
+        // sampled-recovery equation would give 128*128/255 + 49.8 = 114.
+        assert_eq!(
+            destination.get_pixel(0, 0),
+            Some(Color::new(105, 60, 40, 178))
+        );
+    }
+
+    #[test]
+    fn gpu_capture_retains_additive_fragment_after_prior_painter_command() {
+        let mut destination = Surface::new(2, 2, PixelFormat::Rgba8888);
+        destination.begin_gpu_scene_capture();
+        destination.set_pixel(0, 0, Color::opaque(1, 2, 3)).unwrap();
+        let gamma = crate::GammaRamp::from_control_points([0, 0x40_60_80, 0xff_ff_ff]);
+        SurfaceDrawTarget::blend_fragment_additive(
+            &mut destination,
+            1,
+            0,
+            [40.0, 80.0, 120.0, 128.0],
+            Some(&gamma),
+        )
+        .unwrap();
+
+        let scene = finish_gpu_scene(&mut destination);
+        assert_eq!(scene.commands.len(), 2);
+        let GpuCommand::Solid {
+            vertices,
+            topology,
+            alpha_mode,
+            blend,
+            gamma,
+            ..
+        } = &scene.commands[1]
+        else {
+            panic!("additive fragment did not remain a solid point");
+        };
+        assert_eq!(*topology, GpuPrimitiveTopology::PointList);
+        assert_eq!(*alpha_mode, GpuSolidAlphaMode::NonSeparate);
+        assert_eq!(*blend, GpuBlend::Additive);
+        assert!(*gamma);
+        assert_eq!(vertices[0].position, [1.5, 0.5, 1.0]);
+        assert_eq!(
+            vertices[0].color,
+            [40.0 / 255.0, 80.0 / 255.0, 120.0 / 255.0, 128.0 / 255.0]
+        );
     }
 
     #[test]
@@ -1691,9 +2031,13 @@ mod tests {
         parent.begin_gpu_scene_capture();
         assert!(parent.append_gpu_scene_from(&child, Point::new(3, 4)));
         let scene = finish_gpu_scene(&mut parent);
-        let GpuCommand::Solid { clip, .. } = &scene.commands[0] else {
+        let GpuCommand::Solid {
+            alpha_mode, clip, ..
+        } = &scene.commands[0]
+        else {
             panic!("child fill did not remain a solid command");
         };
+        assert_eq!(*alpha_mode, GpuSolidAlphaMode::SourceOver);
         assert_eq!(*clip, Some(Rect::new(5, 6, 4, 3)));
     }
 
@@ -1705,10 +2049,7 @@ mod tests {
 
         let mut destination = Surface::new(30, 30, PixelFormat::Rgba8888);
         destination.begin_clonk_text_capture();
-        assert!(destination.extend_clonk_text_capture_from(
-            &mut child,
-            Point::new(10, 7),
-        ));
+        assert!(destination.extend_clonk_text_capture_from(&mut child, Point::new(10, 7),));
 
         let commands = destination.take_clonk_text_capture();
         assert_eq!(commands.len(), 1);
@@ -1725,10 +2066,7 @@ mod tests {
 
         let mut destination = Surface::new(30, 30, PixelFormat::Rgba8888);
         destination.begin_clonk_text_capture();
-        assert!(destination.extend_clonk_text_capture_from(
-            &mut child,
-            Point::new(10, 7),
-        ));
+        assert!(destination.extend_clonk_text_capture_from(&mut child, Point::new(10, 7),));
 
         let commands = destination.take_clonk_text_capture();
         assert_eq!(commands.len(), 1);

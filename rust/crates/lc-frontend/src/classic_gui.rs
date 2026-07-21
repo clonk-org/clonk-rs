@@ -5,8 +5,9 @@ use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 pub use crate::startup_main_menu::IntRect;
 use crate::ImageData;
 use lc_graphics::clonk_font::{ClonkFont, TextAlign};
-use lc_graphics::{Color, GammaRamp, PixelFormat, Surface};
+use lc_graphics::{Color, GammaRamp, PixelFormat, Surface, SurfaceDrawTarget};
 use lc_gui::Rect as GuiRect;
+use std::{cell::RefCell, collections::HashMap};
 
 /// `C4GUI_StandardBGColor` (`C4Gui.h:80`). Box and line alpha in the C++
 /// renderer is inverted: `0x00` is opaque and `0xff` transparent.
@@ -385,6 +386,23 @@ pub fn draw_facet_stretch(
     ) {
         return;
     }
+    if crate::capture_gpu_gui_image(
+        surface,
+        (target_x, target_y, target_width, target_height),
+        image,
+        crate::FloatSourceRect {
+            x: source_x,
+            y: source_y,
+            width: source_width,
+            height: source_height,
+        },
+        lc_graphics::GpuSampler::Linear,
+        crate::BilinearBlend::AlphaOver,
+        None,
+        gamma,
+    ) {
+        return;
+    }
     if source_width <= 0.0 || source_height <= 0.0 || target_width <= 0.0 || target_height <= 0.0 {
         return;
     }
@@ -442,6 +460,18 @@ pub fn draw_facet_stretch(
                     if sample[3] <= 0.0 {
                         continue;
                     }
+                    if surface.is_gpu_scene_capture_active() {
+                        // Fallback rasterization during capture must stay a
+                        // painter-ordered retained fragment instead of
+                        // blending against stale CPU backing.
+                        let _ = surface.blend_fragment_over(
+                            pixel_x as u32,
+                            pixel_y as u32,
+                            sample,
+                            gamma,
+                        );
+                        continue;
+                    }
                     let alpha = (sample[3] / 255.0).clamp(0.0, 1.0);
                     let destination = surface
                         .get_pixel(pixel_x as u32, pixel_y as u32)
@@ -463,6 +493,137 @@ pub fn draw_facet_stretch(
                         ),
                     );
                 }
+            }
+        }
+    }
+}
+
+fn encode_filtered_channel(gamma: Option<&GammaRamp>, channel: f32) -> f32 {
+    gamma
+        .map(|ramp| f32::from(ramp.encode_float(channel)))
+        .unwrap_or_else(|| channel.round().clamp(0.0, 255.0))
+}
+
+/// Alpha-channel counterpart of the live source-over framebuffer blend.
+/// Keeping the destination alpha matters for transparent ordered layers:
+/// their RGB is already premultiplied by the same opacity and must not turn
+/// into an opaque replacement when the layer is presented later.
+fn alpha_over_alpha(source_opacity: f32, destination_alpha: u8) -> u8 {
+    (255.0 * source_opacity + f32::from(destination_alpha) * (1.0 - source_opacity))
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+/// Nearest-neighbour `C4Facet::DrawX` for an integer source and destination
+/// rectangle. Retained targets receive one textured painter command instead
+/// of a precomposited replacement copied from the CPU backing store.
+pub fn draw_facet_nearest(
+    surface: &mut Surface,
+    image: &ImageData,
+    source: lc_graphics::Rect,
+    destination: lc_graphics::Rect,
+    gamma: Option<&GammaRamp>,
+) {
+    if source.width == 0 || source.height == 0 || destination.width == 0 || destination.height == 0
+    {
+        return;
+    }
+    let target = GuiRect::new(
+        destination.x as f32,
+        destination.y as f32,
+        destination.width as f32,
+        destination.height as f32,
+    );
+    let source_float = (
+        source.x as f32,
+        source.y as f32,
+        source.width as f32,
+        source.height as f32,
+    );
+    if crate::draw_image_source_with_active_renderer_config(
+        surface,
+        &target,
+        image,
+        source_float,
+        lc_graphics::BlitSampling::Nearest,
+        gamma,
+    ) {
+        return;
+    }
+    if crate::capture_gpu_gui_image(
+        surface,
+        (
+            destination.x as f32,
+            destination.y as f32,
+            destination.width as f32,
+            destination.height as f32,
+        ),
+        image,
+        crate::FloatSourceRect {
+            x: source.x as f32,
+            y: source.y as f32,
+            width: source.width as f32,
+            height: source.height as f32,
+        },
+        lc_graphics::GpuSampler::Nearest,
+        crate::BilinearBlend::AlphaOver,
+        None,
+        gamma,
+    ) {
+        return;
+    }
+
+    let bounds = surface.bounds();
+    let pixels = image.pixels();
+    for dy in 0..destination.height {
+        let target_y = destination.y + dy as i32;
+        if target_y < bounds.y || target_y >= bounds.y + bounds.height as i32 {
+            continue;
+        }
+        let source_y = source.y
+            + ((u64::from(dy) * u64::from(source.height)) / u64::from(destination.height)) as i32;
+        if source_y < 0 || source_y >= image.height() as i32 {
+            continue;
+        }
+        for dx in 0..destination.width {
+            let target_x = destination.x + dx as i32;
+            if target_x < bounds.x || target_x >= bounds.x + bounds.width as i32 {
+                continue;
+            }
+            let source_x = source.x
+                + ((u64::from(dx) * u64::from(source.width)) / u64::from(destination.width)) as i32;
+            if source_x < 0 || source_x >= image.width() as i32 {
+                continue;
+            }
+            let offset = ((source_y as u32 * image.width() + source_x as u32) * 4) as usize;
+            let Some(pixel) = pixels.get(offset..offset + 4) else {
+                continue;
+            };
+            if pixel[3] == 0 {
+                continue;
+            }
+            let color = Color::new(pixel[0], pixel[1], pixel[2], pixel[3]);
+            let result = if let Some(gamma) = gamma {
+                let destination = surface
+                    .get_pixel(target_x as u32, target_y as u32)
+                    .unwrap_or_default();
+                let output = if color.a == 255 {
+                    crate::gamma_encode_fragment(color, gamma)
+                } else {
+                    crate::gamma_blend_fragment_over(color, destination, gamma)
+                };
+                surface.set_pixel(target_x as u32, target_y as u32, output)
+            } else if color.a == 255 {
+                surface.set_pixel(target_x as u32, target_y as u32, color)
+            } else {
+                // Keep the established software/headless byte oracle. The
+                // retained branch above submits the unblended source quad;
+                // the legacy CPU path deliberately truncates its integer
+                // source-over products through `Surface::blend_pixel`.
+                surface.blend_pixel(target_x as u32, target_y as u32, color)
+            };
+            if result.is_err() {
+                return;
             }
         }
     }
@@ -516,22 +677,6 @@ fn bilinear_sample_tile(
     })
 }
 
-fn encode_filtered_channel(gamma: Option<&GammaRamp>, channel: f32) -> f32 {
-    gamma
-        .map(|ramp| f32::from(ramp.encode_float(channel)))
-        .unwrap_or_else(|| channel.round().clamp(0.0, 255.0))
-}
-
-/// Alpha-channel counterpart of the live source-over framebuffer blend.
-/// Keeping the destination alpha matters for transparent ordered layers:
-/// their RGB is already premultiplied by the same opacity and must not turn
-/// into an opaque replacement when the layer is presented later.
-fn alpha_over_alpha(source_opacity: f32, destination_alpha: u8) -> u8 {
-    (255.0 * source_opacity + f32::from(destination_alpha) * (1.0 - source_opacity))
-        .round()
-        .clamp(0.0, 255.0) as u8
-}
-
 /// `CStdDDraw::DrawBoxDw`: inclusive coordinates and engine AARRGGBB color
 /// with inverted alpha (`StdDDraw2.cpp:1401-1404`, `StdGL.cpp:846-891`).
 #[allow(clippy::too_many_arguments)]
@@ -544,14 +689,15 @@ pub fn draw_engine_box(
     color: u32,
     gamma: Option<&GammaRamp>,
 ) {
-    if crate::active_advanced_renderer_config()
-        .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
+    if x2 < x1 || y2 < y1 {
+        return;
+    }
+    let width = i64::from(x2) - i64::from(x1) + 1;
+    let height = i64::from(y2) - i64::from(y1) + 1;
+    if surface.is_gpu_scene_capture_active()
+        || crate::active_advanced_renderer_config()
+            .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
     {
-        if x2 < x1 || y2 < y1 {
-            return;
-        }
-        let width = i64::from(x2) - i64::from(x1) + 1;
-        let height = i64::from(y2) - i64::from(y1) + 1;
         crate::draw_color_rect(
             surface,
             lc_graphics::Rect::new(
@@ -570,6 +716,10 @@ pub fn draw_engine_box(
         );
         return;
     }
+
+    // Preserve the byte-exact compatibility rasterizer for CPU/headless
+    // callers. In particular, native GL's final RGBA8 store rounds these
+    // products; the older generic `blend_colors` helper truncates them.
     let opacity = (255 - ((color >> 24) & 0xff)) as f32 / 255.0;
     if opacity <= 0.0 {
         return;
@@ -594,7 +744,9 @@ pub fn draw_engine_box(
                     blend(red, destination.r),
                     blend(green, destination.g),
                     blend(blue, destination.b),
-                    alpha_over_alpha(opacity, destination.a),
+                    (255.0 * opacity + f32::from(destination.a) * (1.0 - opacity))
+                        .round()
+                        .clamp(0.0, 255.0) as u8,
                 ),
             );
         }
@@ -615,12 +767,8 @@ pub fn draw_engine_frame(
 ) {
     draw_engine_line(surface, x1, y1, x2, y1, color, gamma);
     draw_engine_line(surface, x2, y1, x2, y2, color, gamma);
-    if x2 > x1 {
-        draw_engine_box(surface, x1 + 1, y2, x2, y2, color, gamma);
-    }
-    if y2 > y1 {
-        draw_engine_box(surface, x1, y1 + 1, x1, y2, color, gamma);
-    }
+    draw_engine_line(surface, x2, y2, x1, y2, color, gamma);
+    draw_engine_line(surface, x1, y2, x1, y1, color, gamma);
 }
 
 /// Default `C4GUI::Element::Draw3DFrame`, preserving C++ draw order and the
@@ -692,7 +840,7 @@ pub fn draw_clipped_text_with_markup(
         return;
     }
     let (width, height) = ((cx1 - cx0) as u32, (cy1 - cy0) as u32);
-    if surface.is_clonk_text_capture_active() {
+    if surface.is_clonk_text_capture_active() || surface.is_gpu_scene_capture_active() {
         // A private scratch Surface cannot share the semantic capture sink.
         // During native presentation, draw against the original surface with
         // the equivalent primary clipper so the recorded command retains its
@@ -700,7 +848,17 @@ pub fn draw_clipped_text_with_markup(
         // logical glyph pixels; untagged fonts still rasterize through the
         // ordinary clipped Surface operations.
         let saved_clip = surface.clip();
-        surface.set_clip(lc_graphics::Rect::new(cx0, cy0, width, height));
+        let requested_clip = lc_graphics::Rect::new(cx0, cy0, width, height);
+        let draw_clip = match saved_clip {
+            Some(saved_clip) => {
+                let Some(draw_clip) = requested_clip.intersection(saved_clip) else {
+                    return;
+                };
+                draw_clip
+            }
+            None => requested_clip,
+        };
+        surface.set_clip(draw_clip);
         font.draw_with_gamma(surface, x, y, text, color, align, markup, gamma);
         match saved_clip {
             Some(clip) => surface.set_clip(clip),
@@ -739,21 +897,45 @@ pub fn draw_clipped_text_with_markup(
 /// Clears RGB values hidden by zero alpha before bilinear filtering, avoiding
 /// colored fringes while preserving every visible source pixel.
 pub fn blacken_transparent_pixels(image: &ImageData) -> ImageData {
-    let pixels = image
-        .pixels()
-        .chunks_exact(4)
-        .flat_map(|pixel| {
-            if pixel[3] == 0 {
-                [0, 0, 0, 0]
-            } else {
-                [pixel[0], pixel[1], pixel[2], pixel[3]]
-            }
-        })
-        .collect();
-    ImageData::new(image.width(), image.height(), pixels)
+    thread_local! {
+        static BLACKENED_IMAGES: RefCell<HashMap<lc_graphics::GpuTextureId, ImageData>> =
+            RefCell::new(HashMap::new());
+    }
+    BLACKENED_IMAGES.with(|images| {
+        if let Some(image) = images.borrow().get(&image.gpu_texture_id()).cloned() {
+            return image;
+        }
+        let needs_fixup = image
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[3] == 0 && pixel[..3] != [0, 0, 0]);
+        let blackened = if needs_fixup {
+            let pixels = image
+                .pixels()
+                .chunks_exact(4)
+                .flat_map(|pixel| {
+                    if pixel[3] == 0 {
+                        [0, 0, 0, 0]
+                    } else {
+                        [pixel[0], pixel[1], pixel[2], pixel[3]]
+                    }
+                })
+                .collect();
+            ImageData::new(image.width(), image.height(), pixels)
+        } else {
+            image.clone()
+        };
+        images
+            .borrow_mut()
+            .insert(image.gpu_texture_id(), blackened.clone());
+        blackened
+    })
 }
 
-fn draw_engine_line(
+/// `CStdGL::DrawLineDw`: center-shifted line geometry with a half-open final
+/// endpoint and the native line-specific packed-alpha conversion.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_engine_line(
     surface: &mut Surface,
     x1: i32,
     y1: i32,
@@ -762,13 +944,62 @@ fn draw_engine_line(
     color: u32,
     gamma: Option<&GammaRamp>,
 ) {
-    if y1 == y2 && x2 > x1 {
-        draw_engine_box(surface, x1, y1, x2 - 1, y2, color, gamma);
-    } else if x1 == x2 && y2 > y1 {
-        draw_engine_box(surface, x1, y1, x2, y2 - 1, color, gamma);
-    } else {
-        draw_engine_box(surface, x1, y1, x2, y2, color, gamma);
+    if surface.is_gpu_scene_capture_active() {
+        let rgba = [
+            ((color >> 16) & 0xff) as f32 / 255.0,
+            ((color >> 8) & 0xff) as f32 / 255.0,
+            (color & 0xff) as f32 / 255.0,
+            (255 - ((color >> 24) & 0xff)) as f32 / 255.0,
+        ];
+        let vertex = |x: i32, y: i32| lc_graphics::GpuSolidVertex {
+            // Unlike DrawQuadDw, CStdGL::DrawLineDw never applies the device
+            // `blitOffset`; it only shifts to the logical pixel center.
+            position: [x as f32 + 0.5, y as f32 + 0.5, 1.0],
+            color: rgba,
+            outer_modulation: lc_graphics::GpuSolidOuterModulation::PackedC4,
+        };
+        surface.push_gpu_command(lc_graphics::GpuCommand::Solid {
+            // GL_LINES remains a line even when both endpoints coincide.  In
+            // that case the diamond-exit rule excludes the final endpoint and
+            // produces no fragment; lowering it to GL_POINTS would invent one.
+            vertices: vec![vertex(x1, y1), vertex(x2, y2)],
+            topology: lc_graphics::GpuPrimitiveTopology::LineList,
+            alpha_mode: lc_graphics::GpuSolidAlphaMode::SourceOver,
+            clip: surface.clip(),
+            blend: lc_graphics::GpuBlend::Normal,
+            gamma: gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+        });
+        return;
     }
+
+    if x1 == x2 && y1 == y2 {
+        return;
+    }
+
+    if y1 == y2 && x2 > x1 {
+        draw_engine_line_box(surface, x1, y1, x2 - 1, y1, color, gamma);
+    } else if y1 == y2 && x2 < x1 {
+        draw_engine_line_box(surface, x2 + 1, y1, x1, y1, color, gamma);
+    } else if x1 == x2 && y2 > y1 {
+        draw_engine_line_box(surface, x1, y1, x1, y2 - 1, color, gamma);
+    } else if x1 == x2 && y2 < y1 {
+        draw_engine_line_box(surface, x1, y2 + 1, x1, y1, color, gamma);
+    } else {
+        draw_engine_line_box(surface, x1, y1, x2, y2, color, gamma);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_engine_line_box(
+    surface: &mut Surface,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    color: u32,
+    gamma: Option<&GammaRamp>,
+) {
+    draw_engine_box(surface, x1, y1, x2, y2, color, gamma);
 }
 
 const fn inclusive_clip(rect: IntRect) -> IntRect {
@@ -889,6 +1120,162 @@ mod tests {
         let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
         draw_engine_box(&mut surface, 0, 0, 0, 0, 0x7f00_ff00, None);
         assert_eq!(surface.get_pixel(0, 0), Some(Color::new(0, 128, 0, 128)));
+    }
+
+    #[test]
+    fn retained_engine_box_stays_alpha_over_after_prior_replace() {
+        let mut surface = Surface::new(3, 2, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        surface.set_pixel(0, 0, Color::opaque(1, 2, 3)).unwrap();
+        draw_engine_box(&mut surface, 0, 0, 1, 1, 0x7f20_4060, None);
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([3, 2], Color::transparent(), &GammaRamp::identity());
+        assert_eq!(scene.commands.len(), 2);
+        let lc_graphics::GpuCommand::Solid { blend, .. } = &scene.commands[0] else {
+            panic!("prior pixel did not remain a painter command");
+        };
+        assert_eq!(*blend, lc_graphics::GpuBlend::Replace);
+        let lc_graphics::GpuCommand::Solid {
+            blend, alpha_mode, ..
+        } = &scene.commands[1]
+        else {
+            panic!("engine box did not remain a solid painter command");
+        };
+        assert_eq!(*blend, lc_graphics::GpuBlend::Normal);
+        assert_eq!(
+            *alpha_mode,
+            lc_graphics::GpuSolidAlphaMode::SourceOver,
+            "DrawBoxDw retains packed C4 alpha provenance"
+        );
+    }
+
+    #[test]
+    fn retained_engine_frame_keeps_draw_line_alpha_provenance() {
+        let mut surface = Surface::new(8, 8, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        draw_engine_frame(&mut surface, 1, 1, 6, 6, 0x7f20_4060, None);
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([8, 8], Color::transparent(), &GammaRamp::identity());
+        assert!(!scene.commands.is_empty());
+        for command in &scene.commands {
+            let lc_graphics::GpuCommand::Solid {
+                topology,
+                alpha_mode,
+                ..
+            } = command
+            else {
+                panic!("engine frame did not remain solid painter commands");
+            };
+            assert_eq!(*topology, lc_graphics::GpuPrimitiveTopology::LineList);
+            assert_eq!(
+                *alpha_mode,
+                lc_graphics::GpuSolidAlphaMode::SourceOver,
+                "DrawFrameDw is composed from DrawLineDw segments"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_length_engine_line_stays_a_fragmentless_gl_line() {
+        let background = Color::opaque(9, 8, 7);
+        let mut cpu = Surface::new(4, 4, PixelFormat::Rgba8888);
+        cpu.fill(background);
+        draw_engine_line(&mut cpu, 2, 1, 2, 1, 0x0020_4060, None);
+        assert_eq!(cpu.get_pixel(2, 1), Some(background));
+
+        let mut retained = Surface::new(4, 4, PixelFormat::Rgba8888);
+        retained.begin_gpu_scene_capture();
+        draw_engine_line(&mut retained, 2, 1, 2, 1, 0x7f20_4060, None);
+        let scene = retained
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([4, 4], Color::transparent(), &GammaRamp::identity());
+        let [lc_graphics::GpuCommand::Solid {
+            vertices,
+            topology,
+            alpha_mode,
+            ..
+        }] = scene.commands.as_slice()
+        else {
+            panic!("zero-length DrawLineDw did not remain one line primitive");
+        };
+        assert_eq!(*topology, lc_graphics::GpuPrimitiveTopology::LineList);
+        assert_eq!(*alpha_mode, lc_graphics::GpuSolidAlphaMode::SourceOver);
+        assert_eq!(vertices.len(), 2);
+        assert_eq!(vertices[0].position, vertices[1].position);
+    }
+
+    #[test]
+    fn retained_engine_line_ignores_quad_only_blit_offset() {
+        let _renderer = crate::activate_advanced_renderer_config(crate::AdvancedRendererConfig {
+            blit_offset: 100,
+            ..crate::AdvancedRendererConfig::DEFAULT
+        });
+        let mut surface = Surface::new(8, 6, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        draw_engine_line(&mut surface, 1, 2, 5, 2, 0x0020_4060, None);
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([8, 6], Color::transparent(), &GammaRamp::identity());
+        let [lc_graphics::GpuCommand::Solid { vertices, .. }] = scene.commands.as_slice() else {
+            panic!("DrawLineDw did not remain one line command");
+        };
+        assert_eq!(vertices[0].position, [1.5, 2.5, 1.0]);
+        assert_eq!(vertices[1].position, [5.5, 2.5, 1.0]);
+    }
+
+    #[test]
+    fn retained_nearest_facet_is_one_ordered_textured_command() {
+        let image = ImageData::new(2, 1, vec![10, 20, 30, 255, 40, 50, 60, 128]);
+        let mut surface = Surface::new(5, 3, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        surface.set_pixel(0, 0, Color::opaque(1, 2, 3)).unwrap();
+        draw_facet_nearest(
+            &mut surface,
+            &image,
+            lc_graphics::Rect::new(0, 0, 2, 1),
+            lc_graphics::Rect::new(1, 1, 4, 2),
+            None,
+        );
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([5, 3], Color::transparent(), &GammaRamp::identity());
+        assert_eq!(scene.commands.len(), 2);
+        let lc_graphics::GpuCommand::Quad {
+            blend,
+            sampler,
+            gamma,
+            ..
+        } = &scene.commands[1]
+        else {
+            panic!("nearest facet did not remain a textured painter command");
+        };
+        assert_eq!(*blend, lc_graphics::GpuBlend::Normal);
+        assert_eq!(*sampler, lc_graphics::GpuSampler::Nearest);
+        assert!(!*gamma);
+    }
+
+    #[test]
+    fn nearest_facet_preserves_legacy_cpu_truncation() {
+        let image = ImageData::new(1, 1, vec![1, 3, 5, 128]);
+        let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
+        draw_facet_nearest(
+            &mut surface,
+            &image,
+            lc_graphics::Rect::new(0, 0, 1, 1),
+            lc_graphics::Rect::new(0, 0, 1, 1),
+            None,
+        );
+        assert_eq!(surface.get_pixel(0, 0), Some(Color::new(0, 1, 2, 128)));
     }
 
     #[test]
@@ -1024,6 +1411,10 @@ mod tests {
         let button_down = load_graphics_png("GUIButtonDown.png");
         let raw_highlight = load_graphics_png("GUIButtonHighlight.png");
         let highlight = blacken_transparent_pixels(&raw_highlight);
+        assert_eq!(
+            highlight.gpu_texture_id(),
+            blacken_transparent_pixels(&raw_highlight).gpu_texture_id()
+        );
         let caption = load_graphics_png("GUICaption.png");
         let fonts = endeavour_font_set();
         let rect = IntRect {

@@ -10,12 +10,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Result};
 use lc_engine::ScoreboardState;
-use lc_graphics::clonk_font::{markup_blit_color, ClonkFont, GlyphCell, TextAlign};
-use lc_graphics::gamma::GammaChannel;
-use lc_graphics::Color;
+use lc_graphics::clonk_font::{
+    markup_blit_color, ClonkFont, FontImageProvider, FontImageRef, GlyphCell, TextAlign,
+};
 #[cfg(test)]
-use lc_graphics::PixelFormat;
-use lc_graphics::{GammaRamp, Surface};
+use lc_graphics::{Color, PixelFormat};
+use lc_graphics::{GammaRamp, Surface, SurfaceDrawTarget};
 
 use crate::classic_gui::{
     draw_3d_frame, draw_bar, draw_engine_box, draw_facet_stretch, IntRect,
@@ -955,6 +955,26 @@ fn draw_scoreboard_text(
     align: TextAlign,
     gamma: Option<&GammaRamp>,
 ) {
+    // Preserve the original markup stream for the scale-native replay. In
+    // particular, resolving it into one upright command per character loses
+    // CMarkupTagItalic's destination-space shear, while drawing custom images
+    // here leaves them in the logical layer. CPU rendering still follows the
+    // byte-exact parser below.
+    if font.role().is_some() && surface.is_clonk_text_capture_active() {
+        font.draw_with_gamma_and_images(
+            surface,
+            x,
+            y,
+            text,
+            [255, 255, 255, 255],
+            align,
+            true,
+            gamma,
+            &ScoreboardFontImages(images),
+        );
+        return;
+    }
+
     let mut markup = Vec::new();
     for (line_index, line) in text.split(['\n', '|']).enumerate() {
         let line_width = scoreboard_line_width(line, font, images);
@@ -1012,7 +1032,10 @@ fn draw_scoreboard_text(
                 let native_capture =
                     font.role().is_some() && surface.is_clonk_text_capture_active();
                 let integral_pen = pen_x.fract() == 0.0;
-                if (native_capture || (shear == 0.0 && color[3] == 255)) && integral_pen {
+                if !surface.is_gpu_scene_capture_active()
+                    && (native_capture || (shear == 0.0 && color[3] == 255))
+                    && integral_pen
+                {
                     font.draw_with_gamma(
                         surface,
                         pen_x as i32,
@@ -1095,6 +1118,14 @@ fn draw_scoreboard_font_image(
     shear: f32,
     gamma: Option<&GammaRamp>,
 ) {
+    let retained = surface.is_gpu_scene_capture_active().then(|| {
+        crate::clonk_fonts::retained_font_image(
+            image.width(),
+            image.height(),
+            image.pixels().to_vec(),
+        )
+    });
+    let image = retained.as_ref().unwrap_or(image);
     if modulation == [255, 255, 255, 255] && shear == 0.0 {
         draw_facet_stretch(
             surface,
@@ -1131,6 +1162,38 @@ fn draw_sheared_glyph(
     gamma: Option<&GammaRamp>,
 ) {
     let width = glyph.width as f32;
+    if surface.is_gpu_scene_capture_active() {
+        let cell_width = usize::try_from(glyph.width.max(0)).unwrap_or(0);
+        let cell_height = usize::try_from(height.max(0)).unwrap_or(0);
+        if cell_width == 0 || cell_height == 0 {
+            return;
+        }
+        let mut rgba = Vec::with_capacity(cell_width.saturating_mul(cell_height).saturating_mul(4));
+        for index in 0..cell_width.saturating_mul(cell_height) {
+            let pixel = glyph.pixels.get(index).copied().unwrap_or_default();
+            rgba.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+        }
+        let image =
+            crate::clonk_fonts::retained_font_image(cell_width as u32, cell_height as u32, rgba);
+        let Some(retained) = crate::clonk_fonts::retained_padded_font_image(&image) else {
+            return;
+        };
+        crate::clonk_fonts::draw_retained_font_image(
+            surface,
+            &image,
+            Some((&retained, [1.0, 1.0])),
+            x,
+            y as f32,
+            width,
+            height as f32,
+            gamma,
+            shear,
+            [modulation[0], modulation[1], modulation[2]],
+            modulation[3],
+            Some(physical_texture_size),
+        );
+        return;
+    }
     if crate::active_advanced_renderer_config().is_some_and(|config| {
         config.tex_indent != 0 || config.blit_offset != 0 || (!config.shader && config.no_alpha_add)
     }) {
@@ -1175,36 +1238,17 @@ fn draw_sheared_glyph(
             if sample[3] <= 0.0 {
                 continue;
             }
-            let destination = surface
-                .get_pixel(target_x as u32, target_y as u32)
-                .unwrap_or_default();
             let source_alpha = markup_sample_alpha(sample[3], modulation[3]);
-            let alpha = (source_alpha / 255.0).clamp(0.0, 1.0);
-            let source_channel = |channel: GammaChannel, value: f32, tint: u8| {
-                let value = value * f32::from(tint) / 255.0;
-                gamma.map_or(value, |ramp| ramp.sample_channel_float(channel, value))
-            };
-            let blend = |source: f32, destination: u8| {
-                store_sample(source * alpha + f32::from(destination) * (1.0 - alpha))
-            };
-            let _ = surface.set_pixel(
+            let _ = surface.blend_fragment(
                 target_x as u32,
                 target_y as u32,
-                Color::new(
-                    blend(
-                        source_channel(GammaChannel::Red, sample[0], modulation[0]),
-                        destination.r,
-                    ),
-                    blend(
-                        source_channel(GammaChannel::Green, sample[1], modulation[1]),
-                        destination.g,
-                    ),
-                    blend(
-                        source_channel(GammaChannel::Blue, sample[2], modulation[2]),
-                        destination.b,
-                    ),
-                    blend(source_alpha, destination.a),
-                ),
+                [
+                    sample[0] * f32::from(modulation[0]) / 255.0,
+                    sample[1] * f32::from(modulation[1]) / 255.0,
+                    sample[2] * f32::from(modulation[2]) / 255.0,
+                    source_alpha,
+                ],
+                gamma,
             );
         }
     }
@@ -1225,6 +1269,23 @@ fn draw_sheared_font_image(
     shear: f32,
     gamma: Option<&GammaRamp>,
 ) {
+    if surface.is_gpu_scene_capture_active() {
+        crate::clonk_fonts::draw_retained_font_image(
+            surface,
+            image,
+            None,
+            x,
+            y as f32,
+            width,
+            height as f32,
+            gamma,
+            shear,
+            [modulation[0], modulation[1], modulation[2]],
+            modulation[3],
+            None,
+        );
+        return;
+    }
     if crate::active_advanced_renderer_config().is_some_and(|config| {
         config.tex_indent != 0 || config.blit_offset != 0 || (!config.shader && config.no_alpha_add)
     }) {
@@ -1261,39 +1322,20 @@ fn draw_sheared_font_image(
             if sample[3] <= 0.0 {
                 continue;
             }
-            let destination = surface
-                .get_pixel(target_x as u32, target_y as u32)
-                .unwrap_or_default();
             let source_alpha = markup_sample_alpha(sample[3], modulation[3]);
             if source_alpha <= 0.0 {
                 continue;
             }
-            let alpha = (source_alpha / 255.0).clamp(0.0, 1.0);
-            let source_channel = |channel: GammaChannel, value: f32, tint: u8| {
-                let value = value * f32::from(tint) / 255.0;
-                gamma.map_or(value, |ramp| ramp.sample_channel_float(channel, value))
-            };
-            let blend = |source: f32, destination: u8| {
-                store_sample(source * alpha + f32::from(destination) * (1.0 - alpha))
-            };
-            let _ = surface.set_pixel(
+            let _ = surface.blend_fragment(
                 target_x as u32,
                 target_y as u32,
-                Color::new(
-                    blend(
-                        source_channel(GammaChannel::Red, sample[0], modulation[0]),
-                        destination.r,
-                    ),
-                    blend(
-                        source_channel(GammaChannel::Green, sample[1], modulation[1]),
-                        destination.g,
-                    ),
-                    blend(
-                        source_channel(GammaChannel::Blue, sample[2], modulation[2]),
-                        destination.b,
-                    ),
-                    blend(source_alpha, destination.a),
-                ),
+                [
+                    sample[0] * f32::from(modulation[0]) / 255.0,
+                    sample[1] * f32::from(modulation[1]) / 255.0,
+                    sample[2] * f32::from(modulation[2]) / 255.0,
+                    source_alpha,
+                ],
+                gamma,
             );
         }
     }
@@ -1422,10 +1464,6 @@ fn bilinear_sample(sample_x: f32, sample_y: f32, texel: impl Fn(i32, i32) -> [f3
     })
 }
 
-fn store_sample(value: f32) -> u8 {
-    value.round().clamp(0.0, 255.0) as u8
-}
-
 fn scaled_font_image_width(font: &ClonkFont, image: &ImageData) -> f32 {
     if image.height() == 0 {
         return 0.0;
@@ -1438,6 +1476,19 @@ fn font_image<'a>(images: &'a HashMap<String, ImageData>, spec: &str) -> Option<
     images
         .get(key)
         .filter(|image| image.width() > 0 && image.height() > 0)
+}
+
+struct ScoreboardFontImages<'a>(&'a HashMap<String, ImageData>);
+
+impl FontImageProvider for ScoreboardFontImages<'_> {
+    fn font_image(&self, tag: &str) -> Option<FontImageRef<'_>> {
+        let image = font_image(self.0, tag)?;
+        Some(FontImageRef {
+            width: image.width(),
+            height: image.height(),
+            rgba: image.pixels(),
+        })
+    }
 }
 
 fn truncate_utf8_bytes(text: &str, max: usize) -> &str {
@@ -2329,7 +2380,7 @@ mod tests {
     }
 
     #[test]
-    fn italic_translucent_scoreboard_glyphs_still_enter_native_capture() {
+    fn native_scoreboard_capture_retains_original_italic_and_color_markup() {
         let fonts = endeavour_font_set();
         let caption = load_graphics_png("GUICaption.png");
         let icons = load_graphics_png("GUIIcons.png");
@@ -2342,15 +2393,89 @@ mod tests {
 
         let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
         surface.begin_clonk_text_capture();
-        render_scoreboard_body(&mut surface, preferred(), &board, &resources, None)
-            .expect("body");
+        render_scoreboard_body(&mut surface, preferred(), &board, &resources, None).expect("body");
         let commands = surface.take_clonk_text_capture();
         let glyph = commands
             .iter()
-            .find(|command| command.text == "X")
-            .expect("resolved italic glyph remains a semantic native command");
-        assert_eq!(glyph.color, [254, 0, 0, 128]);
-        assert!(!glyph.markup);
+            .find(|command| command.text == "<i><c 80ff0000>X</c></i>")
+            .expect("original italic run remains one semantic native command");
+        assert_eq!(glyph.color, [255, 255, 255, 255]);
+        assert!(glyph.markup);
+    }
+
+    #[test]
+    fn direct_gpu_scoreboard_fallback_uses_stable_textured_quads() {
+        let font = solid_test_font();
+        let images = HashMap::new();
+        let capture = || {
+            let mut surface = Surface::new(64, 32, PixelFormat::Rgba8888);
+            surface.begin_gpu_scene_capture();
+            draw_scoreboard_text(
+                &mut surface,
+                20,
+                6,
+                "<i>X",
+                &font,
+                &images,
+                TextAlign::Left,
+                None,
+            );
+            surface
+                .take_gpu_scene_capture()
+                .expect("GPU capture remains active")
+                .into_scene([64, 32], Color::transparent(), &GammaRamp::identity())
+        };
+
+        let first = capture();
+        let second = capture();
+        assert_eq!(first.commands.len(), 1);
+        let lc_graphics::GpuCommand::Quad {
+            texture: first_texture,
+            ..
+        } = &first.commands[0]
+        else {
+            panic!("italic glyph was rasterized instead of retained as a quad");
+        };
+        let lc_graphics::GpuCommand::Quad {
+            texture: second_texture,
+            ..
+        } = &second.commands[0]
+        else {
+            panic!("repeated italic glyph was not retained as a quad");
+        };
+        assert_eq!(first_texture, second_texture);
+    }
+
+    #[test]
+    fn direct_gpu_custom_images_canonicalize_fresh_source_ids() {
+        let capture = || {
+            let image = ImageData::new(2, 2, [20, 40, 60, 255].repeat(4));
+            let mut surface = Surface::new(16, 16, PixelFormat::Rgba8888);
+            surface.begin_gpu_scene_capture();
+            draw_scoreboard_font_image(
+                &mut surface,
+                &image,
+                0.0,
+                0,
+                8.0,
+                8,
+                [255, 255, 255, 255],
+                0.0,
+                None,
+            );
+            surface
+                .take_gpu_scene_capture()
+                .expect("GPU capture remains active")
+                .into_scene([16, 16], Color::transparent(), &GammaRamp::identity())
+        };
+
+        let first = capture();
+        let second = capture();
+        let texture = |scene: &lc_graphics::GpuScene| match scene.commands.as_slice() {
+            [lc_graphics::GpuCommand::Quad { texture, .. }] => *texture,
+            commands => panic!("expected one retained custom-image quad, got {commands:?}"),
+        };
+        assert_eq!(texture(&first), texture(&second));
     }
 
     #[test]

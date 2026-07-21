@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap};
 
 use lc_engine::{
     CommandKind, ContextMenuEntry, ControlCommand, DefinitionPictureImage, Engine, EngineError,
@@ -971,17 +971,30 @@ fn precompose_definition_menu_title_icon(icon: &ImageData) -> ImageData {
     // both stages matters for non-square definition pictures such as CLNK
     // (C4Script.cpp:1420-1450; C4Def.cpp:813-837;
     // C4GuiLabels.cpp:168-208).
-    let side = CLASSIC_ITEM_SIZE as u32;
-    let mut symbol = Surface::new(side, side, PixelFormat::Rgba8888);
-    draw_image_region_aspect(
-        &mut symbol,
-        icon,
-        Rect::new(0, 0, icon.width(), icon.height()),
-        Rect::new(0, 0, side, side),
-        false,
-        None,
-    );
-    ImageData::new(side, side, symbol.pixels().to_vec())
+    thread_local! {
+        static TITLE_ICONS: RefCell<HashMap<lc_graphics::GpuTextureId, ImageData>> =
+            RefCell::new(HashMap::new());
+    }
+    TITLE_ICONS.with(|icons| {
+        if let Some(icon) = icons.borrow().get(&icon.gpu_texture_id()).cloned() {
+            return icon;
+        }
+        let side = CLASSIC_ITEM_SIZE as u32;
+        let mut symbol = Surface::new(side, side, PixelFormat::Rgba8888);
+        draw_image_region_aspect(
+            &mut symbol,
+            icon,
+            Rect::new(0, 0, icon.width(), icon.height()),
+            Rect::new(0, 0, side, side),
+            false,
+            None,
+        );
+        let composed = ImageData::new(side, side, symbol.pixels().to_vec());
+        icons
+            .borrow_mut()
+            .insert(icon.gpu_texture_id(), composed.clone());
+        composed
+    })
 }
 
 fn command_image_for_menu_symbol(
@@ -3858,61 +3871,13 @@ fn build_definition_summary(engine: &Engine, definition_id: &str) -> Option<Stri
 }
 
 fn draw_menu_icon(surface: &mut Surface, rect: Rect, icon: &ImageData, gamma: Option<&GammaRamp>) {
-    if rect.width == 0 || rect.height == 0 {
-        return;
-    }
-    let bounds = surface.bounds();
-    let src_width = icon.width();
-    let src_height = icon.height();
-    if src_width == 0 || src_height == 0 {
-        return;
-    }
-    let pixels = icon.pixels();
-    for dy in 0..rect.height {
-        let target_y = rect.y + dy as i32;
-        if target_y < bounds.y || target_y >= bounds.y + bounds.height as i32 {
-            continue;
-        }
-        let src_y = ((dy as u64) * src_height as u64 / rect.height as u64) as u32;
-        for dx in 0..rect.width {
-            let target_x = rect.x + dx as i32;
-            if target_x < bounds.x || target_x >= bounds.x + bounds.width as i32 {
-                continue;
-            }
-            let src_x = ((dx as u64) * src_width as u64 / rect.width as u64) as u32;
-            let idx = ((src_y * src_width + src_x) * 4) as usize;
-            if idx + 3 >= pixels.len() {
-                continue;
-            }
-            let color = Color::new(
-                pixels[idx],
-                pixels[idx + 1],
-                pixels[idx + 2],
-                pixels[idx + 3],
-            );
-            if color.a == 0 {
-                continue;
-            }
-            let result = if let Some(gamma) = gamma {
-                let destination = surface
-                    .get_pixel(target_x as u32, target_y as u32)
-                    .unwrap_or_default();
-                let output = if color.a == 255 {
-                    lc_frontend::gamma_encode_fragment(color, gamma)
-                } else {
-                    lc_frontend::gamma_blend_fragment_over(color, destination, gamma)
-                };
-                surface.set_pixel(target_x as u32, target_y as u32, output)
-            } else if color.a == 255 {
-                surface.set_pixel(target_x as u32, target_y as u32, color)
-            } else {
-                surface.blend_pixel(target_x as u32, target_y as u32, color)
-            };
-            if result.is_err() {
-                break;
-            }
-        }
-    }
+    lc_frontend::classic_gui::draw_facet_nearest(
+        surface,
+        icon,
+        Rect::new(0, 0, icon.width(), icon.height()),
+        rect,
+        gamma,
+    );
 }
 
 fn fill_rect(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&GammaRamp>) {
@@ -3921,6 +3886,24 @@ fn fill_rect(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&Gam
 
 fn draw_border(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&GammaRamp>) {
     if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    if surface.is_gpu_scene_capture_active() {
+        // Retained capture keeps the native DrawFrameDw line primitives; the
+        // software oracle below keeps its pinned strip blend.
+        let packed = (u32::from(255 - color.a) << 24)
+            | (u32::from(color.r) << 16)
+            | (u32::from(color.g) << 8)
+            | u32::from(color.b);
+        lc_frontend::classic_gui::draw_engine_frame(
+            surface,
+            rect.x,
+            rect.y,
+            rect.x + rect.width as i32 - 1,
+            rect.y + rect.height as i32 - 1,
+            packed,
+            gamma,
+        );
         return;
     }
     let top = Rect::new(rect.x, rect.y, rect.width, 1);

@@ -18,7 +18,7 @@ use lc_graphics::{
     stdgl_blit_sampling, BlitSampling, ClipperProjection, Color, GammaRamp, Rect, Surface,
     SurfaceDrawTarget,
 };
-use std::sync::Arc;
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 /// `C4CFN_StartupBackgroundMain` (`src/C4Startup.h`).
 pub const STARTUP_LOADER_SPECIFICATION: &str = "LoaderGoldmine1";
@@ -1030,8 +1030,9 @@ fn draw_box_dw(
     if surface.width() == 0 || surface.height() == 0 || x2 < x1 || y2 < y1 {
         return;
     }
-    if crate::active_advanced_renderer_config()
-        .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
+    if surface.is_gpu_scene_capture_active()
+        || crate::active_advanced_renderer_config()
+            .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
     {
         crate::draw_color_rect(
             surface,
@@ -1222,6 +1223,60 @@ struct FloatRect {
     height: f32,
 }
 
+/// The shared retained sprite path has the same physical-tile sampling as
+/// this compatibility rasterizer whenever C++ would submit every intersecting
+/// texture tile. Loaded fully-transparent texels are first blackened, while
+/// the sprite sampler independently preserves C4TexRef's untouched transparent
+/// white padding. The historical undersized final-tile omission remains on
+/// the CPU oracle.
+fn retained_loader_facet_image(image: &ImageData, source: FloatRect) -> Option<ImageData> {
+    if image.width() == 0
+        || image.height() == 0
+        || !source.x.is_finite()
+        || !source.y.is_finite()
+        || !source.width.is_finite()
+        || !source.height.is_finite()
+        || source.x < 0.0
+        || source.y < 0.0
+        || source.width <= 0.0
+        || source.height <= 0.0
+        || source.x + source.width > image.width() as f32
+        || source.y + source.height > image.height() as f32
+    {
+        return None;
+    }
+    thread_local! {
+        static COMPATIBLE_IMAGES: RefCell<HashMap<lc_graphics::GpuTextureId, bool>> =
+            RefCell::new(HashMap::new());
+    }
+    let compatible = COMPATIBLE_IMAGES.with(|images| {
+        if let Some(&compatible) = images.borrow().get(&image.gpu_texture_id()) {
+            return compatible;
+        }
+        let expected_len = usize::try_from(image.width())
+            .ok()
+            .and_then(|width| {
+                usize::try_from(image.height())
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(4));
+        let base = texture_size(image.width(), image.height());
+        let (tiles_x, tiles_y) = tile_dimensions(image.width(), image.height(), base);
+        let compatible = expected_len == Some(image.pixels().len())
+            && (0..tiles_y).all(|tile_y| {
+                (0..tiles_x).all(|tile_x| {
+                    tile_has_cpp_blit_chunks(image.width(), image.height(), base, tile_x, tile_y)
+                })
+            });
+        images
+            .borrow_mut()
+            .insert(image.gpu_texture_id(), compatible);
+        compatible
+    });
+    compatible.then(|| crate::classic_gui::blacken_transparent_pixels(image))
+}
+
 impl FloatRect {
     fn with_scaling_correction(mut self, enabled: bool) -> Self {
         if enabled {
@@ -1246,6 +1301,8 @@ fn draw_surface_facet(
     gamma: Option<&GammaRamp>,
     sampling: LoaderSampling,
 ) {
+    let retained_image = retained_loader_facet_image(image, source_rect);
+    let configured_image = retained_image.as_ref().unwrap_or(image);
     if crate::draw_image_source_with_active_renderer_config(
         surface,
         &lc_gui::Rect::new(
@@ -1254,7 +1311,7 @@ fn draw_surface_facet(
             target.width as f32,
             target.height as f32,
         ),
-        image,
+        configured_image,
         (
             source_rect.x,
             source_rect.y,
@@ -1271,6 +1328,33 @@ fn draw_surface_facet(
         || target.width <= 0
         || target.height <= 0
     {
+        return;
+    }
+    if retained_image.as_ref().is_some_and(|retained_image| {
+        crate::capture_gpu_gui_image(
+            surface,
+            (
+                target.x as f32,
+                target.y as f32,
+                target.width as f32,
+                target.height as f32,
+            ),
+            retained_image,
+            crate::FloatSourceRect {
+                x: source_rect.x,
+                y: source_rect.y,
+                width: source_rect.width,
+                height: source_rect.height,
+            },
+            match sampling {
+                LoaderSampling::Nearest => lc_graphics::GpuSampler::Nearest,
+                LoaderSampling::Linear => lc_graphics::GpuSampler::Linear,
+            },
+            crate::BilinearBlend::AlphaOver,
+            None,
+            gamma,
+        )
+    }) {
         return;
     }
     let scale_x = target.width as f32 / source_rect.width;
@@ -1444,6 +1528,12 @@ fn blend_fragment(
     gamma: Option<&GammaRamp>,
 ) {
     if source[3] <= 0.0 {
+        return;
+    }
+    if surface.is_gpu_scene_capture_active() {
+        // Fallback rasterization during capture must stay a painter-ordered
+        // retained fragment instead of blending against stale CPU backing.
+        let _ = surface.blend_fragment_over(x as u32, y as u32, source, gamma);
         return;
     }
     let alpha = (source[3] / 255.0).clamp(0.0, 1.0);
@@ -1668,6 +1758,98 @@ mod tests {
         for scale in [0.0, -1.0, f32::INFINITY, f32::NAN] {
             assert!(LoaderRenderConfig::new(scale, false).is_err());
         }
+    }
+
+    #[test]
+    fn retained_opaque_loader_facet_is_one_textured_command() {
+        let image = ImageData::new(8, 8, [20, 40, 60, 255].repeat(64));
+        let mut surface = Surface::new(320, 180, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        draw_surface_facet(
+            &mut surface,
+            &image,
+            FloatRect {
+                x: 0.0,
+                y: 0.0,
+                width: 8.0,
+                height: 8.0,
+            },
+            LoaderRect {
+                x: 0,
+                y: 0,
+                width: 320,
+                height: 180,
+            },
+            None,
+            LoaderSampling::Linear,
+        );
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([320, 180], Color::transparent(), &GammaRamp::identity());
+        assert_eq!(scene.commands.len(), 1);
+        let lc_graphics::GpuCommand::Quad { sampler, .. } = &scene.commands[0] else {
+            panic!("opaque loader background was not retained as a texture quad");
+        };
+        assert_eq!(*sampler, lc_graphics::GpuSampler::Linear);
+    }
+
+    #[test]
+    fn retained_translucent_loader_facet_reuses_blackened_texture() {
+        let mut pixels = [40, 80, 120, 180].repeat(64);
+        pixels[..4].copy_from_slice(&[250, 10, 20, 0]);
+        let image = ImageData::new(8, 8, pixels);
+        let capture = || {
+            let mut surface = Surface::new(160, 90, PixelFormat::Rgba8888);
+            surface.begin_gpu_scene_capture();
+            draw_surface_facet(
+                &mut surface,
+                &image,
+                FloatRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 8.0,
+                    height: 8.0,
+                },
+                LoaderRect {
+                    x: 0,
+                    y: 0,
+                    width: 160,
+                    height: 90,
+                },
+                None,
+                LoaderSampling::Linear,
+            );
+            surface
+                .take_gpu_scene_capture()
+                .expect("capture remains active")
+                .into_scene([160, 90], Color::transparent(), &GammaRamp::identity())
+        };
+
+        let first = capture();
+        let second = capture();
+        assert_eq!(first.commands.len(), 1);
+        assert_eq!(first.textures.len(), 1);
+        assert_eq!(first.textures[0].id, second.textures[0].id);
+        assert_eq!(&first.textures[0].pixels[..4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn retained_loader_box_is_one_solid_command() {
+        let mut surface = Surface::new(320, 180, PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        draw_box_dw(&mut surface, 10, 12, 300, 160, 0x7f20_4060, None);
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([320, 180], Color::transparent(), &GammaRamp::identity());
+        assert_eq!(scene.commands.len(), 1);
+        assert!(matches!(
+            &scene.commands[0],
+            lc_graphics::GpuCommand::Solid { .. }
+        ));
     }
 
     #[test]

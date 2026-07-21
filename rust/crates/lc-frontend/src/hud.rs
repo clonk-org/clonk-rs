@@ -16,16 +16,17 @@
 //!   — hidden, fading single-line, and continuous multi-line layouts over the
 //!   tiled background strip at the screen bottom.
 
-use crate::{
-    draw_image_bilinear, draw_image_bilinear_additive, draw_image_bilinear_owner,
-    draw_image_strip, ClonkFontSet, HudGraphics, ImageData, InventoryOverlay,
-    MessageBoardMode, MessageBoardOverlay,
-};
 #[cfg(test)]
 use crate::fill_rect;
-use lc_graphics::{
-    clonk_font::TextAlign, Color, GammaRamp, Rect as SurfaceRect, Surface, TextFont,
+use crate::{
+    draw_image_bilinear, draw_image_bilinear_additive, draw_image_bilinear_owner, draw_image_strip,
+    ClonkFontSet, HudGraphics, ImageData, InventoryOverlay, MessageBoardMode, MessageBoardOverlay,
 };
+use lc_graphics::{
+    clonk_font::TextAlign, Color, GammaRamp, Rect as SurfaceRect, Surface, SurfaceDrawTarget,
+    TextFont,
+};
+use std::{cell::RefCell, collections::HashMap};
 
 /// `C4UpperBoardHeight` (src/C4Constants.h:77): the screen strip reserved
 /// above the viewports in `C4GraphicsSystem::RecalculateViewports`
@@ -625,8 +626,21 @@ fn colorize_by_owner_with(
 /// their gray value. This is the display/GPU form where full white remains
 /// 255 (`src/C4Surface.cpp:288-318`, `src/StdGL.cpp:488-503`).
 pub fn colorize_by_owner(image: &ImageData, owner: Color) -> ImageData {
-    colorize_by_owner_with(image, owner, |channel, gray| {
-        (u16::from(channel) * u16::from(gray) / 255) as u8
+    thread_local! {
+        static OWNER_IMAGES: RefCell<
+            HashMap<(lc_graphics::GpuTextureId, Color), ImageData>,
+        > = RefCell::new(HashMap::new());
+    }
+    OWNER_IMAGES.with(|images| {
+        let key = (image.gpu_texture_id(), owner);
+        if let Some(image) = images.borrow().get(&key).cloned() {
+            return image;
+        }
+        let colored = colorize_by_owner_with(image, owner, |channel, gray| {
+            (u16::from(channel) * u16::from(gray) / 255) as u8
+        });
+        images.borrow_mut().insert(key, colored.clone());
+        colored
     })
 }
 
@@ -1574,21 +1588,38 @@ fn draw_scaled_region(
             if tx < 0 || ty < 0 {
                 continue;
             }
-            let _ = if let Some(gamma) = gamma {
-                let destination = surface
-                    .get_pixel(tx as u32, ty as u32)
-                    .unwrap_or_default();
-                let blended = if color.a == 255 {
+            let result = if surface.is_gpu_scene_capture_active() {
+                // Invalid/partially out-of-bounds source rectangles cannot
+                // become one retained texture quad. Keep their recovery
+                // fragments ordered in the GPU scene without changing the
+                // byte-exact software oracle below.
+                surface.blend_fragment(
+                    tx as u32,
+                    ty as u32,
+                    [
+                        f32::from(color.r),
+                        f32::from(color.g),
+                        f32::from(color.b),
+                        f32::from(color.a),
+                    ],
+                    gamma,
+                )
+            } else if let Some(gamma) = gamma {
+                let destination = surface.get_pixel(tx as u32, ty as u32).unwrap_or_default();
+                let output = if color.a == 255 {
                     crate::gamma_encode_fragment(color, gamma)
                 } else {
                     crate::gamma_blend_fragment_over(color, destination, gamma)
                 };
-                surface.set_pixel(tx as u32, ty as u32, blended)
+                surface.set_pixel(tx as u32, ty as u32, output)
             } else if color.a == 255 {
                 surface.set_pixel(tx as u32, ty as u32, color)
             } else {
                 surface.blend_pixel(tx as u32, ty as u32, color)
             };
+            if result.is_err() {
+                return;
+            }
         }
     }
 }
@@ -2796,6 +2827,20 @@ mod tests {
         assert_eq!(vertices[3].uv, [0.75, 1.0]);
     }
 
+    #[test]
+    fn scaled_command_region_preserves_legacy_cpu_truncation() {
+        let image = ImageData::new(1, 1, vec![1, 3, 5, 128]);
+        let mut surface = Surface::new(1, 1, PixelFormat::Rgba8888);
+        draw_scaled_region(
+            &mut surface,
+            &image,
+            SurfaceRect::new(0, 0, 1, 1),
+            SurfaceRect::new(0, 0, 1, 1),
+            None,
+        );
+        assert_eq!(surface.get_pixel(0, 0), Some(Color::new(0, 1, 2, 128)));
+    }
+
     fn paint_rect(
         pixels: &mut [u8],
         width: u32,
@@ -3935,6 +3980,10 @@ mod tests {
         let image = solid_image(1, 1, [0, 0, 255, 255]);
         let colored = colorize_by_owner(&image, Color::opaque(255, 0, 0));
         assert_eq!(&colored.pixels()[..4], &[255, 0, 0, 255]);
+        assert_eq!(
+            colored.gpu_texture_id(),
+            colorize_by_owner(&image, Color::opaque(255, 0, 0)).gpu_texture_id()
+        );
         // Non-blue pixels pass through untouched.
         let image = solid_image(1, 1, [200, 30, 30, 255]);
         let colored = colorize_by_owner(&image, Color::opaque(255, 0, 0));

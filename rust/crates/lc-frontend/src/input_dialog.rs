@@ -3134,6 +3134,42 @@ mod tests {
     }
 
     #[test]
+    fn retained_input_caret_reuses_texture_identity() {
+        let fonts = endeavour_font_set();
+        let capture = || {
+            let mut surface = Surface::new(80, 40, PixelFormat::Rgba8888);
+            surface.begin_gpu_scene_capture();
+            draw_scaled_caret(
+                &mut surface,
+                &fonts.text,
+                10,
+                8,
+                IntRect {
+                    x: 0,
+                    y: 0,
+                    w: 80,
+                    h: 40,
+                },
+                None,
+            );
+            surface
+                .take_gpu_scene_capture()
+                .expect("capture remains active")
+                .into_scene(
+                    [80, 40],
+                    Color::transparent(),
+                    &lc_graphics::GammaRamp::identity(),
+                )
+        };
+
+        let first = capture();
+        let second = capture();
+        assert_eq!(first.commands.len(), 1);
+        assert_eq!(first.textures.len(), 1);
+        assert_eq!(first.textures[0].id, second.textures[0].id);
+    }
+
+    #[test]
     fn real_assets_render_and_missing_classic_assets_fail_fast() {
         let fonts = endeavour_font_set();
         let (caption, button, button_down, highlight) = skin_assets();

@@ -15,8 +15,8 @@ use lc_graphics::{Color, GammaRamp, PixelFormat, Surface};
 use lc_gui::Rect as GuiRect;
 
 use crate::classic_gui::{
-    blacken_transparent_pixels, draw_3d_frame, draw_engine_box, draw_facet_stretch,
-    ClassicButtonState, ClassicGuiSkin, IntRect, STANDARD_BACKGROUND_COLOR,
+    blacken_transparent_pixels, draw_3d_frame, draw_engine_box, draw_engine_line,
+    draw_facet_stretch, ClassicButtonState, ClassicGuiSkin, IntRect, STANDARD_BACKGROUND_COLOR,
 };
 use crate::context_menu::draw_classic_tooltip;
 use crate::game_option_buttons::{
@@ -5434,11 +5434,11 @@ impl GameLobby {
                 if y >= layout.roster_client.y
                     && y < layout.roster_client.y + layout.roster_client.h
                 {
-                    draw_engine_box(
+                    draw_engine_line(
                         surface,
                         row_layout.rect.x + 10,
                         y,
-                        row_layout.rect.x + layout.roster_client.w - 11,
+                        row_layout.rect.x + layout.roster_client.w - 10,
                         y,
                         LIST_SEPARATOR,
                         gamma,

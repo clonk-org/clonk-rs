@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crate::classic_gui::{
     blacken_transparent_pixels, draw_3d_frame, draw_clipped_text, draw_engine_box,
-    draw_facet_stretch, ClassicButtonState, ClassicGuiSkin,
+    draw_engine_line, draw_facet_stretch, ClassicButtonState, ClassicGuiSkin,
 };
 use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 use crate::message_dialog::break_message;
@@ -5400,15 +5400,7 @@ impl NetDlgScreen {
             return;
         }
         let y = rect.y + height - 2;
-        draw_engine_box(
-            surface,
-            rect.x,
-            y,
-            rect.x + width - 1,
-            y,
-            0x0080_80ff,
-            gamma,
-        );
+        draw_engine_line(surface, rect.x, y, rect.x + width, y, 0x0080_80ff, gamma);
     }
 
     fn draw_scrollbar(
@@ -6106,6 +6098,15 @@ mod tests {
             gui_icons: load("GUIIcons.png"),
             gui_icons_ex: load("GUIIcons2.png"),
         }
+    }
+
+    #[test]
+    fn network_refresh_phases_reuse_retained_texture_identity() {
+        let assets = net_assets();
+        let first = net_get_ref_phase(&assets.net_get_ref, 17);
+        let second = net_get_ref_phase(&assets.net_get_ref, 17);
+        assert_eq!(first.gpu_texture_id(), second.gpu_texture_id());
+        assert_eq!(first.pixels(), second.pixels());
     }
 
     fn rich_game(index: usize) -> NetDlgGameEntry {

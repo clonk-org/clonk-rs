@@ -15,8 +15,11 @@ use anyhow::{ensure, Context, Result};
 use freetype::face::LoadFlag;
 use freetype::Library;
 use lc_graphics::clonk_font::{line_height_for, ClonkFont, ClonkFontRole, GlyphCell, TextAlign};
-use lc_graphics::{BlitSampling, Color, GammaRamp, Rect as SurfaceRect, Surface};
+use lc_graphics::{
+    BlitSampling, Color, GammaRamp, Rect as SurfaceRect, Surface, SurfaceDrawTarget,
+};
 use lc_gui::Rect as GuiRect;
+use std::{cell::RefCell, collections::HashMap};
 
 // ---------------------------------------------------------------------------
 // Assets (planet/Graphics.c4g)
@@ -723,14 +726,6 @@ fn bilinear_sample_tile(
     })
 }
 
-/// The blit shader's per-fragment gamma encode (StdGL.cpp:1082-1086), or
-/// plain rounding without a ramp.
-fn encode_channel(gamma: Option<&GammaRamp>, x: f32) -> f32 {
-    gamma
-        .map(|ramp| f32::from(ramp.encode_float(x)))
-        .unwrap_or_else(|| x.round().clamp(0.0, 255.0))
-}
-
 /// Stretch-blit of an `image` subregion, mirroring `CStdDDraw::Blit`
 /// (StdDDraw2.cpp:637-786): one quad per power-of-two texture tile
 /// overlapping the source rect, GL_LINEAR sampling per tile, the blit
@@ -755,6 +750,23 @@ fn draw_facet_stretch(
         return;
     }
     if fwdt <= 0.0 || fhgt <= 0.0 || twdt <= 0.0 || thgt <= 0.0 {
+        return;
+    }
+    if crate::capture_gpu_gui_image(
+        surface,
+        (tx, ty, twdt, thgt),
+        image,
+        crate::FloatSourceRect {
+            x: fx,
+            y: fy,
+            width: fwdt,
+            height: fhgt,
+        },
+        lc_graphics::GpuSampler::Linear,
+        crate::BilinearBlend::AlphaOver,
+        None,
+        gamma,
+    ) {
         return;
     }
     let scale_x = twdt / fwdt;
@@ -799,6 +811,13 @@ fn draw_facet_stretch(
                     let v_rel = fy - blit_y as f32 + (py as f32 + 0.5 - ty) / scale_y - 0.5;
                     let s = bilinear_sample_tile(image, blit_x, blit_y, ts, u_rel, v_rel);
                     if s[3] <= 0.0 {
+                        continue;
+                    }
+                    if surface.is_gpu_scene_capture_active() {
+                        // Fallback rasterization during capture must stay a
+                        // painter-ordered retained fragment instead of
+                        // blending against stale CPU backing.
+                        let _ = surface.blend_fragment_over(px as u32, py as u32, s, gamma);
                         continue;
                     }
                     let af = (s[3] / 255.0).clamp(0.0, 1.0);
@@ -860,8 +879,7 @@ fn draw_box_dw(
     draw_box_dw_unconfigured(surface, x1, y1, x2, y2, clr, gamma);
 }
 
-/// Compatibility rasterizer used both outside a configured renderer scope and
-/// by native lines, which intentionally ignore BlitOffset and NoBoxFades.
+/// Compatibility box rasterizer used outside a configured renderer scope.
 fn draw_box_dw_unconfigured(
     surface: &mut Surface,
     x1: i32,
@@ -871,6 +889,33 @@ fn draw_box_dw_unconfigured(
     clr: u32,
     gamma: Option<&GammaRamp>,
 ) {
+    if surface.is_gpu_scene_capture_active() {
+        if x2 < x1 || y2 < y1 {
+            return;
+        }
+        let color = Color::new(
+            (clr >> 16) as u8,
+            (clr >> 8) as u8,
+            clr as u8,
+            255 - (clr >> 24) as u8,
+        );
+        if color.a == 0 {
+            return;
+        }
+        crate::record_gpu_solid_quad(
+            surface,
+            (
+                x1 as f32,
+                y1 as f32,
+                x2.saturating_add(1) as f32,
+                y2.saturating_add(1) as f32,
+            ),
+            [color; 4],
+            lc_graphics::GpuBlend::Normal,
+            gamma.is_some_and(|gamma| !gamma.is_passthrough()),
+        );
+        return;
+    }
     let a = (clr >> 24) & 0xff;
     let opacity = (255 - a) as f32 / 255.0;
     if opacity <= 0.0 {
@@ -897,6 +942,18 @@ fn draw_box_dw_unconfigured(
     }
 }
 
+fn encode_channel(gamma: Option<&GammaRamp>, x: f32) -> f32 {
+    gamma
+        .map(|ramp| f32::from(ramp.encode_float(x)))
+        .unwrap_or_else(|| x.round().clamp(0.0, 255.0))
+}
+
+fn blend_surface_alpha(opacity: f32, destination: u8) -> u8 {
+    (255.0 * opacity + f32::from(destination) * (1.0 - opacity))
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
 /// `CStdGL::DrawLineDw` (StdGL.cpp:893-934) for the axis-aligned lines of
 /// `Draw3DFrame`: an aliased GL_LINES segment from (x1+0.5,y1+0.5) to
 /// (x2+0.5,y2+0.5). With both endpoints on pixel centers the diamond-exit
@@ -912,6 +969,14 @@ fn draw_line_dw(
     clr: u32,
     gamma: Option<&GammaRamp>,
 ) {
+    if surface.is_gpu_scene_capture_active() {
+        // Keep native line geometry until the backend knows the physical
+        // viewport. Projecting a one-logical-pixel box is not equivalent to
+        // glLineWidth(Application.GetScale()) at fractional scales.
+        crate::classic_gui::draw_engine_line(surface, x1, y1, x2, y2, clr, gamma);
+        return;
+    }
+
     if x1 == x2 {
         // vertical: y1..y2 excluding the end pixel
         draw_box_dw_unconfigured(surface, x1, y1.min(y2), x1, y1.max(y2) - 1, clr, gamma);
@@ -919,12 +984,6 @@ fn draw_line_dw(
         debug_assert_eq!(y1, y2);
         draw_box_dw_unconfigured(surface, x1.min(x2), y1, x1.max(x2) - 1, y1, clr, gamma);
     }
-}
-
-fn blend_surface_alpha(opacity: f32, destination: u8) -> u8 {
-    (255.0 * opacity + f32::from(destination) * (1.0 - opacity))
-        .round()
-        .clamp(0.0, 255.0) as u8
 }
 
 fn with_surface_clip(
@@ -1530,24 +1589,44 @@ fn draw_scaled_search_caret(
     }
 
     let atlas_width = width.max(height).next_power_of_two();
-    let mut pixels = vec![255_u8; atlas_width as usize * height as usize * 4];
-    for pixel in pixels.chunks_exact_mut(4) {
-        pixel[3] = 0;
-    }
-    for row in 0..height as usize {
-        for column in 0..width as usize {
-            let pixel = glyph.pixels[row * width as usize + column];
-            let destination = (row * atlas_width as usize + column) * 4;
-            let (red, green, blue) = if pixel.a == 0 {
-                (255, 255, 255)
-            } else {
-                (pixel.r, pixel.g, pixel.b)
-            };
-            pixels[destination..destination + 4]
-                .copy_from_slice(&[red, green, blue, pixel.a]);
+    let mut glyph_hash = 0xcbf2_9ce4_8422_2325_u64;
+    for pixel in &glyph.pixels {
+        for byte in [pixel.r, pixel.g, pixel.b, pixel.a] {
+            glyph_hash = (glyph_hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
-    let image = ImageData::new(atlas_width, height, pixels);
+    thread_local! {
+        /// The caret atlas is immutable for a given rasterized font. Reusing
+        /// its ImageData identity keeps the retained renderer from allocating
+        /// a fresh GPU texture cache entry on every blinking frame.
+        static CARET_ATLASES: RefCell<HashMap<(u32, u32, u64), ImageData>> =
+            RefCell::new(HashMap::new());
+    }
+    let image = CARET_ATLASES.with(|atlases| {
+        let key = (width, height, glyph_hash);
+        if let Some(image) = atlases.borrow().get(&key).cloned() {
+            return image;
+        }
+        let mut pixels = vec![255_u8; atlas_width as usize * height as usize * 4];
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[3] = 0;
+        }
+        for row in 0..height as usize {
+            for column in 0..width as usize {
+                let pixel = glyph.pixels[row * width as usize + column];
+                let destination = (row * atlas_width as usize + column) * 4;
+                let (red, green, blue) = if pixel.a == 0 {
+                    (255, 255, 255)
+                } else {
+                    (pixel.r, pixel.g, pixel.b)
+                };
+                pixels[destination..destination + 4].copy_from_slice(&[red, green, blue, pixel.a]);
+            }
+        }
+        let image = ImageData::new(atlas_width, height, pixels);
+        atlases.borrow_mut().insert(key, image.clone());
+        image
+    });
     let destination = (
         x as f32,
         y as f32,
@@ -2092,6 +2171,96 @@ mod tests {
         assert_eq!(fonts.title.role(), Some(ClonkFontRole::BookTitle));
         assert_eq!(fonts.caption.role(), Some(ClonkFontRole::BookCaption));
         assert_eq!(fonts.text.role(), Some(ClonkFontRole::BookText));
+    }
+
+    #[test]
+    fn retained_scenario_image_and_box_are_two_commands() {
+        let image = ImageData::new(4, 4, [30, 60, 90, 255].repeat(16));
+        let mut surface = Surface::new(220, 160, lc_graphics::PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        draw_facet_stretch(
+            &mut surface,
+            &image,
+            (0.0, 0.0, 4.0, 4.0),
+            (10.0, 12.0, 200.0, 130.0),
+            None,
+        );
+        draw_box_dw(&mut surface, 8, 10, 211, 143, 0x7f20_4060, None);
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([220, 160], Color::transparent(), &GammaRamp::identity());
+        assert_eq!(scene.commands.len(), 2);
+        let lc_graphics::GpuCommand::Quad { sampler, .. } = &scene.commands[0] else {
+            panic!("scenario picture was not retained as a texture quad");
+        };
+        assert_eq!(*sampler, lc_graphics::GpuSampler::Linear);
+        assert!(matches!(
+            &scene.commands[1],
+            lc_graphics::GpuCommand::Solid { .. }
+        ));
+    }
+
+    #[test]
+    fn retained_scensel_line_defers_scaled_diamond_rasterization() {
+        let _renderer = crate::activate_advanced_renderer_config(crate::AdvancedRendererConfig {
+            blit_offset: 100,
+            ..crate::AdvancedRendererConfig::DEFAULT
+        });
+        let mut surface = Surface::new(8, 8, lc_graphics::PixelFormat::Rgba8888);
+        surface.begin_gpu_scene_capture();
+        draw_line_dw(&mut surface, 3, 6, 3, 1, 0x7f20_4060, None);
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([8, 8], Color::transparent(), &GammaRamp::identity());
+        let [lc_graphics::GpuCommand::Solid {
+            vertices,
+            topology,
+            alpha_mode,
+            ..
+        }] = scene.commands.as_slice()
+        else {
+            panic!("DrawLineDw was lowered before presentation scale was known");
+        };
+        assert_eq!(*topology, lc_graphics::GpuPrimitiveTopology::LineList);
+        assert_eq!(*alpha_mode, lc_graphics::GpuSolidAlphaMode::SourceOver);
+        assert_eq!(vertices.len(), 2);
+        assert_eq!(vertices[0].position, [3.5, 6.5, 1.0]);
+        assert_eq!(vertices[1].position, [3.5, 1.5, 1.0]);
+    }
+
+    #[test]
+    fn retained_search_caret_reuses_texture_identity() {
+        let fonts = endeavour_font_set();
+        let render = || {
+            let mut surface = Surface::new(80, 40, lc_graphics::PixelFormat::Rgba8888);
+            surface.begin_gpu_scene_capture();
+            draw_scaled_search_caret(
+                &mut surface,
+                &fonts.text,
+                10,
+                8,
+                IntRect {
+                    x: 0,
+                    y: 0,
+                    w: 80,
+                    h: 40,
+                },
+                None,
+            );
+            surface
+                .take_gpu_scene_capture()
+                .expect("capture remains active")
+                .into_scene([80, 40], Color::transparent(), &GammaRamp::identity())
+        };
+        let first = render();
+        let second = render();
+        assert_eq!(first.commands.len(), 1);
+        assert_eq!(second.commands.len(), 1);
+        assert_eq!(first.textures[0].id, second.textures[0].id);
     }
 
     #[test]

@@ -2,8 +2,9 @@ pub mod ffi;
 mod scenario_browser;
 
 use lc_graphics::{Color, TextFont};
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub use scenario_browser::{
     ScenarioBrowser, ScenarioBrowserMessage, ScenarioBrowserResponse, ScenarioEntry,
@@ -497,6 +498,119 @@ pub struct ImageData {
     gpu_texture_id: lc_graphics::GpuTextureId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ImageContentKey {
+    width: u32,
+    height: u32,
+    byte_len: usize,
+    hash: u64,
+}
+
+struct InternedImageData {
+    pixels: Arc<[u8]>,
+    gpu_texture_id: lc_graphics::GpuTextureId,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct ImageDataInterner {
+    entries: HashMap<ImageContentKey, Vec<InternedImageData>>,
+    entry_count: usize,
+    retained_bytes: usize,
+    clock: u64,
+}
+
+const IMAGE_DATA_INTERNER_MAX_ENTRIES: usize = 16_384;
+const IMAGE_DATA_INTERNER_MAX_BYTES: usize = 128 * 1024 * 1024;
+const IMAGE_DATA_INTERNER_MAX_ENTRY_BYTES: usize = 8 * 1024 * 1024;
+
+fn image_content_hash(pixels: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    pixels.iter().fold(FNV_OFFSET, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+    })
+}
+
+fn intern_image_data(
+    width: u32,
+    height: u32,
+    pixels: Arc<[u8]>,
+) -> (Arc<[u8]>, lc_graphics::GpuTextureId) {
+    // One unusually large runtime image must not evict the reusable UI and
+    // definition working set. It still receives a valid process-local ID.
+    if pixels.len() > IMAGE_DATA_INTERNER_MAX_ENTRY_BYTES {
+        return (pixels, lc_graphics::GpuTextureId::fresh());
+    }
+    let key = ImageContentKey {
+        width,
+        height,
+        byte_len: pixels.len(),
+        hash: image_content_hash(&pixels),
+    };
+    static INTERNER: OnceLock<Mutex<ImageDataInterner>> = OnceLock::new();
+    let mut interner = INTERNER
+        .get_or_init(|| Mutex::new(ImageDataInterner::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    interner.clock = interner.clock.wrapping_add(1).max(1);
+    let last_used = interner.clock;
+    if let Some(entry) = interner
+        .entries
+        .get_mut(&key)
+        .and_then(|entries| entries.iter_mut().find(|entry| entry.pixels == pixels))
+    {
+        entry.last_used = last_used;
+        return (Arc::clone(&entry.pixels), entry.gpu_texture_id);
+    }
+
+    let gpu_texture_id = lc_graphics::GpuTextureId::fresh();
+    interner
+        .entries
+        .entry(key)
+        .or_default()
+        .push(InternedImageData {
+            pixels: Arc::clone(&pixels),
+            gpu_texture_id,
+            last_used,
+        });
+    interner.entry_count += 1;
+    interner.retained_bytes = interner.retained_bytes.saturating_add(pixels.len());
+
+    while interner.entry_count > IMAGE_DATA_INTERNER_MAX_ENTRIES
+        || interner.retained_bytes > IMAGE_DATA_INTERNER_MAX_BYTES
+    {
+        let oldest = interner
+            .entries
+            .iter()
+            .flat_map(|(key, entries)| {
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, entry)| (*key, index, entry.last_used))
+            })
+            .min_by_key(|(_, _, last_used)| *last_used);
+        let Some((oldest_key, oldest_index, _)) = oldest else {
+            break;
+        };
+        let (removed_bytes, remove_bucket) = {
+            let entries = interner
+                .entries
+                .get_mut(&oldest_key)
+                .expect("oldest interned image bucket remains present");
+            let removed = entries.swap_remove(oldest_index);
+            (removed.pixels.len(), entries.is_empty())
+        };
+        if remove_bucket {
+            interner.entries.remove(&oldest_key);
+        }
+        interner.entry_count -= 1;
+        interner.retained_bytes = interner.retained_bytes.saturating_sub(removed_bytes);
+    }
+
+    (pixels, gpu_texture_id)
+}
+
 impl PartialEq for ImageData {
     fn eq(&self, other: &Self) -> bool {
         self.width == other.width && self.height == other.height && self.pixels == other.pixels
@@ -505,15 +619,32 @@ impl PartialEq for ImageData {
 
 impl ImageData {
     pub fn new(width: u32, height: u32, pixels: Vec<u8>) -> Self {
+        let (pixels, gpu_texture_id) =
+            intern_image_data(width, height, Arc::from(pixels.into_boxed_slice()));
         Self {
             width,
             height,
-            pixels: Arc::from(pixels.into_boxed_slice()),
-            gpu_texture_id: lc_graphics::GpuTextureId::fresh(),
+            pixels,
+            gpu_texture_id,
         }
     }
 
     pub fn from_arc(width: u32, height: u32, pixels: Arc<[u8]>) -> Self {
+        let (pixels, gpu_texture_id) = intern_image_data(width, height, pixels);
+        Self {
+            width,
+            height,
+            pixels,
+            gpu_texture_id,
+        }
+    }
+
+    /// Creates a short-lived image view without retaining it in the immutable
+    /// content interner. Use this only when another retained producer supplies
+    /// the real GPU resource identity and this wrapper exists for geometry or
+    /// CPU replay: interning the producer's `Arc` would keep it shared and
+    /// force its next mutable update to fork through copy-on-write.
+    pub fn transient_from_arc(width: u32, height: u32, pixels: Arc<[u8]>) -> Self {
         Self {
             width,
             height,
@@ -1239,6 +1370,46 @@ mod tests {
 
     fn test_font() -> Arc<dyn TextFont> {
         Arc::new(BitmapFont::new())
+    }
+
+    #[test]
+    fn identical_immutable_images_reuse_retained_gpu_identity() {
+        let pixels = (1..=16).collect::<Vec<u8>>();
+        let first = ImageData::new(2, 2, pixels.clone());
+        let second = ImageData::from_arc(2, 2, Arc::from(pixels));
+
+        assert_eq!(first, second);
+        assert_eq!(first.gpu_texture_id(), second.gpu_texture_id());
+        assert!(Arc::ptr_eq(&first.pixels, &second.pixels));
+    }
+
+    #[test]
+    fn retained_gpu_identity_includes_dimensions_and_collision_checked_bytes() {
+        let baseline = ImageData::new(2, 1, vec![10, 20, 30, 40, 50, 60, 70, 80]);
+        let different_dimensions = ImageData::new(1, 2, vec![10, 20, 30, 40, 50, 60, 70, 80]);
+        let different_pixels = ImageData::new(2, 1, vec![10, 20, 30, 40, 50, 60, 70, 81]);
+
+        assert_ne!(
+            baseline.gpu_texture_id(),
+            different_dimensions.gpu_texture_id()
+        );
+        assert_ne!(baseline.gpu_texture_id(), different_pixels.gpu_texture_id());
+    }
+
+    #[test]
+    fn transient_image_view_does_not_pin_or_intern_mutable_backing() {
+        let pixels: Arc<[u8]> = Arc::from([10, 20, 30, 255]);
+        assert_eq!(Arc::strong_count(&pixels), 1);
+        let first = ImageData::transient_from_arc(1, 1, Arc::clone(&pixels));
+        let first_id = first.gpu_texture_id();
+        assert_eq!(Arc::strong_count(&pixels), 2);
+        drop(first);
+        assert_eq!(Arc::strong_count(&pixels), 1);
+
+        let second = ImageData::transient_from_arc(1, 1, Arc::clone(&pixels));
+        assert_ne!(second.gpu_texture_id(), first_id);
+        drop(second);
+        assert_eq!(Arc::strong_count(&pixels), 1);
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::classic_gui::{
 use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode, StartupTooltip};
 use anyhow::{ensure, Result};
 use lc_graphics::clonk_font::{ClonkFont, TextAlign};
-use lc_graphics::{GammaRamp, PixelFormat, Surface};
+use lc_graphics::{GammaRamp, PixelFormat, Point, Surface};
 use lc_gui::Rect as GuiRect;
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -1292,7 +1292,16 @@ impl DefinitionSelController {
             layout.list_client.h as u32,
             PixelFormat::Rgba8888,
         );
-        copy_surface_region(surface, &mut clipped, layout.list_client, false);
+        let capture_gpu_scene = surface.is_gpu_scene_capture_active();
+        let capture_clonk_text = surface.is_clonk_text_capture_active();
+        if capture_gpu_scene {
+            clipped.begin_gpu_scene_capture();
+        } else {
+            copy_surface_region(surface, &mut clipped, layout.list_client, false);
+        }
+        if capture_clonk_text {
+            clipped.begin_clonk_text_capture();
+        }
 
         if let Some(index) = self.selected.filter(|index| *index < self.rows.len()) {
             let y = index as i32 * layout.row_pitch - self.scroll_y;
@@ -1400,7 +1409,15 @@ impl DefinitionSelController {
                 );
             }
         }
-        copy_surface_region(surface, &mut clipped, layout.list_client, true);
+        let offset = Point::new(layout.list_client.x, layout.list_client.y);
+        if capture_gpu_scene {
+            let _ = surface.append_gpu_scene_from(&clipped, offset);
+        } else {
+            copy_surface_region(surface, &mut clipped, layout.list_client, true);
+        }
+        if capture_clonk_text {
+            let _ = surface.extend_clonk_text_capture_from(&mut clipped, offset);
+        }
         Ok(())
     }
 

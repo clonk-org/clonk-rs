@@ -1,5 +1,5 @@
-pub mod clonk_font;
 pub mod clip_projection;
+pub mod clonk_font;
 pub mod color;
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -11,14 +11,15 @@ pub mod snapshot;
 pub mod surface;
 pub mod transform;
 
-pub use color::Color;
 pub use clip_projection::ClipperProjection;
-pub use gamma::GammaRamp;
+pub use color::Color;
 pub use font::{BitmapFont, FontMetrics, TextFont, TrueTypeFont, TrueTypeFontError};
+pub use gamma::GammaRamp;
 pub use gpu_scene::{
-    GpuBlend, GpuCommand, GpuGammaLut, GpuGammaMode, GpuOwnerMask, GpuPresentation,
-    GpuPrimitiveTopology, GpuSampler, GpuScene, GpuSceneRecorder, GpuSolidVertex, GpuTextureFormat,
-    GpuTextureId, GpuTextureResource, GpuVertex,
+    GpuBlend, GpuCommand, GpuGammaLut, GpuGammaMode, GpuOuterModulation, GpuOwnerMask,
+    GpuPresentation, GpuPrimitiveTopology, GpuSampler, GpuScene, GpuSceneRecorder,
+    GpuSolidAlphaMode, GpuSolidOuterModulation, GpuSolidVertex, GpuTextureFormat, GpuTextureId,
+    GpuTextureResource, GpuVertex,
 };
 pub use sampling::{stdgl_blit_sampling, BlitSampling};
 pub use snapshot::{SnapshotHasher, SurfaceSnapshot};
