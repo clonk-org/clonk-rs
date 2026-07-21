@@ -8724,11 +8724,17 @@ fn render_retained_gpu_running_frame(
         scale: geometry.scale(),
         crop_top: geometry.crop_top(),
     };
-    let request_readback =
+    let request_native_save_readback = !app.pending_native_save_thumbnails.is_empty();
+    let request_current_readback =
         !app.pending_screenshots.is_empty() || !app.pending_gpu_thumbnail_paths.is_empty();
+    let mut previous_native_readback = None;
     let mut readback = None;
     pixels
         .render_with(|encoder, surface_view, context| {
+            if request_native_save_readback {
+                previous_native_readback =
+                    renderer.readback_last_presentation(&context.device, encoder)?;
+            }
             readback = renderer.render(
                 &context.device,
                 &context.queue,
@@ -8736,15 +8742,30 @@ fn render_retained_gpu_running_frame(
                 surface_view,
                 &scene,
                 &presentation,
-                request_readback,
+                request_current_readback
+                    || (request_native_save_readback && previous_native_readback.is_none()),
             )?;
             Ok(())
         })
         .context("failed to submit retained GPU frame")?;
 
-    if let Some(ticket) = readback {
-        let mut frame = match ticket.read(pixels.device()) {
-            Ok(frame) => frame,
+    let previous_native_frame = match previous_native_readback {
+        Some(ticket) => match ticket.read(pixels.device()) {
+            Ok(frame) => Some(frame),
+            Err(error) => {
+                tracing::warn!(
+                    saves = app.pending_native_save_thumbnails.len(),
+                    ?error,
+                    "failed to read previous retained GPU frame for native saves"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    let mut current_frame = match readback {
+        Some(ticket) => match ticket.read(pixels.device()) {
+            Ok(frame) => Some(frame),
             Err(error) => {
                 while let Some(path) = app.pending_gpu_thumbnail_paths.pop_front() {
                     tracing::warn!(
@@ -8762,9 +8783,37 @@ fn render_retained_gpu_running_frame(
                     );
                     app.report_screenshot_result(result);
                 }
-                return Ok(());
+                None
             }
-        };
+        },
+        None => None,
+    };
+
+    if !app.pending_native_save_thumbnails.is_empty() {
+        let title_png = previous_native_frame
+            .as_ref()
+            .or(current_frame.as_ref())
+            .and_then(|frame| {
+                match encode_presented_save_thumbnail(
+                    frame.extent[0],
+                    frame.extent[1],
+                    &frame.rgba,
+                ) {
+                    Ok(encoded) => Some(encoded),
+                    Err(error) => {
+                        tracing::warn!(
+                            saves = app.pending_native_save_thumbnails.len(),
+                            ?error,
+                            "failed to encode retained GPU frame for native saves"
+                        );
+                        None
+                    }
+                }
+            });
+        app.finish_pending_native_save_thumbnails(title_png.as_deref());
+    }
+
+    if let Some(frame) = current_frame.as_mut() {
         if !app.pending_gpu_thumbnail_paths.is_empty() {
             match encode_presented_save_thumbnail(frame.extent[0], frame.extent[1], &frame.rgba) {
                 Ok(encoded) => {
@@ -9235,6 +9284,9 @@ fn handle_window_event(
             window.request_redraw();
         }
         _ => {}
+    }
+    if !app.pending_native_save_thumbnails.is_empty() {
+        window.request_redraw();
     }
     if app.take_exit_request() {
         control_flow.set_exit();
@@ -14274,6 +14326,12 @@ struct ScreenshotRequest {
 }
 
 #[derive(Debug)]
+struct PendingNativeSaveThumbnail {
+    path: PathBuf,
+    packed_group: Vec<u8>,
+}
+
+#[derive(Debug)]
 struct ScreenshotSaveOutcome {
     kind: ScreenshotKind,
     path: PathBuf,
@@ -14644,6 +14702,7 @@ struct GameApp {
     pending_screenshots: VecDeque<ScreenshotRequest>,
     retained_gpu_presentation_active: bool,
     pending_gpu_thumbnail_paths: VecDeque<PathBuf>,
+    pending_native_save_thumbnails: VecDeque<PendingNativeSaveThumbnail>,
     pending_options_display_requests: VecDeque<OptionsDisplayRequest>,
     /// Current `Config.General.GamepadEnabled` value used by each new
     /// `C4Player::InitControl` analogue.
@@ -22229,6 +22288,41 @@ fn classic_savegame_slot_path(root: &Path, scenario_name: &str, slot: u8) -> Pat
         .join(format!("{scenario_name}{slot}.c4s"))
 }
 
+fn c4group_is_group(path: &Path) -> bool {
+    Group::open(path).is_ok()
+}
+
+fn classic_save_folder_language(paths: Option<&AppPaths>) -> Vec<u8> {
+    let config = load_native_config_bytes(paths);
+    lc_app::configured_native_value(&config, "General", "Language")
+        .filter(|language| !language.is_empty())
+        .map(|language| language.as_bytes().iter().copied().take(2).collect())
+        .unwrap_or_else(|| {
+            classic_loader_system_language()
+                .unwrap_or("US")
+                .as_bytes()
+                .to_vec()
+        })
+}
+
+fn ensure_classic_save_folder(path: &Path, language: &[u8], title: &[u8]) -> Result<()> {
+    fs::create_dir_all(path)
+        .with_context(|| format!("create classic save folder {}", path.display()))?;
+    let title_path = path.join("Title.txt");
+    if title_path.exists() {
+        return Ok(());
+    }
+    let mut payload = language.iter().copied().take(2).collect::<Vec<_>>();
+    payload.push(b':');
+    payload.extend_from_slice(title);
+    let mut file = File::create(&title_path)
+        .with_context(|| format!("create classic save title {}", title_path.display()))?;
+    file.write_all(&payload)
+        .with_context(|| format!("write classic save title {}", title_path.display()))?;
+    file.flush()
+        .with_context(|| format!("flush classic save title {}", title_path.display()))
+}
+
 fn ensure_save_directory() -> Result<PathBuf> {
     let dir = resolve_save_directory();
     fs::create_dir_all(&dir)
@@ -27210,6 +27304,7 @@ impl GameApp {
             pending_screenshots: VecDeque::new(),
             retained_gpu_presentation_active: false,
             pending_gpu_thumbnail_paths: VecDeque::new(),
+            pending_native_save_thumbnails: VecDeque::new(),
             pending_options_display_requests: VecDeque::new(),
             gamepads_enabled,
             gamepad_input_enabled: gamepads_enabled,
@@ -28324,22 +28419,65 @@ impl GameApp {
         kind: ConsoleSaveKind,
         requested_target: Option<&Path>,
     ) -> Result<bool> {
+        self.save_native_c4_game(kind, requested_target, true, None)
+    }
+
+    fn save_main_menu_slot_game(
+        &mut self,
+        requested_target: &Path,
+        title_png: Option<&[u8]>,
+    ) -> Result<bool> {
+        self.save_native_c4_game(
+            ConsoleSaveKind::Savegame,
+            Some(requested_target),
+            false,
+            title_png,
+        )
+    }
+
+    fn save_native_c4_game(
+        &mut self,
+        kind: ConsoleSaveKind,
+        requested_target: Option<&Path>,
+        retarget_active_scenario: bool,
+        title_png: Option<&[u8]>,
+    ) -> Result<bool> {
         anyhow::ensure!(
             self.mode == AppMode::Running,
-            "cannot save while no developer-console game is running"
+            "cannot save while no game is running"
         );
         let active = self
             .active_scenario
             .clone()
             .ok_or_else(|| anyhow!("active scenario metadata is unavailable"))?;
-        let mut source_path = active
-            .path
-            .clone()
-            .ok_or_else(|| anyhow!("active scenario has no filesystem path"))?;
+        let mut source_path = if retarget_active_scenario {
+            active.path.clone()
+        } else {
+            self.live_save_seed
+                .as_ref()
+                .map(|seed| seed.scenario_source_path.clone())
+                .or_else(|| active.path.clone())
+        }
+        .ok_or_else(|| anyhow!("active scenario has no filesystem path"))?;
+        let retained_origin = (!retarget_active_scenario).then(|| {
+            self.live_save_seed
+                .as_ref()
+                .map(|seed| seed.scenario_origin.clone())
+                .unwrap_or_else(|| {
+                    record_scenario_origin(
+                        &source_path,
+                        self.app_paths.as_ref(),
+                        &active.identifier,
+                    )
+                })
+        });
 
         // FileSave's overwrite guard precedes SaveGame's host/child guards;
         // FileSaveAs deliberately bypasses it by copying to a fresh target.
-        if kind == ConsoleSaveKind::Savegame && requested_target.is_none() {
+        if retarget_active_scenario
+            && kind == ConsoleSaveKind::Savegame
+            && requested_target.is_none()
+        {
             let source = open_group_path_for_folder_map(&source_path)
                 .with_context(|| format!("open {}", source_path.display()))?;
             if !ScenarioLoaderHead::load_from_group(&source)?.is_save_game() {
@@ -28362,24 +28500,47 @@ impl GameApp {
         }
 
         if requested_target.is_some() {
+            if !retarget_active_scenario
+                && cpp_loader_items_identical(&source_path, &destination)?
+            {
+                anyhow::bail!(
+                    "cannot save the running scenario over itself: {}",
+                    destination.display()
+                );
+            }
+            if !retarget_active_scenario {
+                match fs::symlink_metadata(&destination) {
+                    Ok(_) => remove_file_or_directory(&destination).with_context(|| {
+                        format!("erase previous quick-save slot {}", destination.display())
+                    })?,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("inspect quick-save slot {}", destination.display())
+                        });
+                    }
+                }
+            }
             // FileSaveAs closes the current group, copies the complete source
             // with C4Group_CopyItem, changes ScenarioFilename/caption, and
             // reopens the copy *before* SaveGame applies its host guard.
             // Preserve unpacked directories just as CopyDirectory does.
-            if let Some(active) = self.active_scenario.as_mut() {
-                active.identifier = destination.to_string_lossy().into_owned();
-                active.path = Some(destination.clone());
-                active.source_paths = vec![destination.clone()];
+            if retarget_active_scenario {
+                if let Some(active) = self.active_scenario.as_mut() {
+                    active.identifier = destination.to_string_lossy().into_owned();
+                    active.path = Some(destination.clone());
+                    active.source_paths = vec![destination.clone()];
+                }
+                if let Some(seed) = self.live_save_seed.as_mut() {
+                    seed.scenario_source_path = destination.clone();
+                    seed.scenario_origin = record_scenario_origin(
+                        &destination,
+                        self.app_paths.as_ref(),
+                        &active.identifier,
+                    );
+                }
+                self.classic_command_line.scenario = Some(destination.clone());
             }
-            if let Some(seed) = self.live_save_seed.as_mut() {
-                seed.scenario_source_path = destination.clone();
-                seed.scenario_origin = record_scenario_origin(
-                    &destination,
-                    self.app_paths.as_ref(),
-                    &active.identifier,
-                );
-            }
-            self.classic_command_line.scenario = Some(destination.clone());
             let copy_result = (|| -> Result<()> {
                 let source = open_group_path_for_folder_map(&source_path).with_context(|| {
                     format!("open source scenario {}", source_path.display())
@@ -28387,11 +28548,18 @@ impl GameApp {
                 let copy = MutableGroup::from_group(&source).with_context(|| {
                     format!("copy source scenario {}", source_path.display())
                 })?;
-                persist_console_save_group(&copy, &destination, source_path.is_dir())
-                    .with_context(|| format!("copy scenario to {}", destination.display()))
+                persist_console_save_group(
+                    &copy,
+                    &destination,
+                    retarget_active_scenario && source_path.is_dir(),
+                )
+                .with_context(|| format!("copy scenario to {}", destination.display()))
             })();
             if let Err(error) = copy_result {
-                tracing::error!(%error, target = %destination.display(), "developer-console Save As copy failed");
+                tracing::error!(%error, target = %destination.display(), "native C4Group save copy failed");
+                if !retarget_active_scenario {
+                    return Err(error);
+                }
                 let target = destination.to_string_lossy();
                 let message = format_resource_string(
                     self.runtime_resource_text(
@@ -28436,6 +28604,20 @@ impl GameApp {
         }
         let source = open_group_path_for_folder_map(&source_path)
             .with_context(|| format!("open source scenario {}", source_path.display()))?;
+        let save_title_components = if kind == ConsoleSaveKind::Savegame {
+            if self.engine.frame() == 0 {
+                ["Title.bmp", "Title.png"]
+                    .into_iter()
+                    .filter_map(|name| source.read_file(name).ok().map(|payload| (name, payload)))
+                    .collect::<Vec<_>>()
+            } else {
+                title_png
+                    .map(|payload| vec![("Title.png", payload.to_vec())])
+                    .unwrap_or_default()
+            }
+        } else {
+            Vec::new()
+        };
         let mut group = MutableGroup::from_group(&source)
             .with_context(|| format!("copy source scenario {}", source_path.display()))?;
         let preserve_folder_group = source_path.is_dir();
@@ -28458,9 +28640,15 @@ impl GameApp {
 
         if kind == ConsoleSaveKind::Savegame {
             if let Some(network) = self.network.as_ref() {
-                network
-                    .submit_queued_synchronize(self.local_control_submission_tick(), true, false)
-                    .context("queue savegame player synchronization")?;
+                if let Err(error) = network.submit_queued_synchronize(
+                    self.local_control_submission_tick(),
+                    true,
+                    false,
+                ) {
+                    // Native unconditionally continues after adding the
+                    // synchronization control to its queue.
+                    tracing::warn!(%error, "failed to queue savegame player synchronization");
+                }
             } else {
                 // C4GameSaveSavegame::OnSaving synchronizes offline players
                 // even when the running game is a replay.
@@ -28498,9 +28686,15 @@ impl GameApp {
             .host_join_snapshot
             .as_ref()
             .map(|snapshot| native_bytes_as_legacy_text(snapshot.parameters.title.as_bytes()))
+            .or_else(|| {
+                self.live_save_seed
+                    .as_ref()
+                    .map(|seed| native_bytes_as_legacy_text(seed.scenario_title.as_bytes()))
+            })
             .unwrap_or_else(|| active.title.clone());
-        let origin =
-            record_scenario_origin(&destination, self.app_paths.as_ref(), &active.identifier);
+        let origin = retained_origin.unwrap_or_else(|| {
+            record_scenario_origin(&destination, self.app_paths.as_ref(), &active.identifier)
+        });
         let destination_name = destination.to_string_lossy().into_owned();
         let force_exact_landscape = self
             .engine
@@ -28676,6 +28870,18 @@ impl GameApp {
                     tracing::warn!(%error, "failed to write live save description");
                 }
             }
+            for (name, payload) in save_title_components {
+                folder_save_journal.put_file(
+                    name,
+                    &payload,
+                    developer_console_save::FolderSaveAddFailure::Ignore,
+                );
+                if let Err(error) = group.add_file(name, payload) {
+                    // SaveGameTitle failure is logged but never makes the
+                    // enclosing C4GameSaveSavegame fail.
+                    tracing::warn!(%error, component = name, "failed to write live save title");
+                }
+            }
             Ok(())
         })();
         if let Err(error) = mutation_result {
@@ -28702,15 +28908,17 @@ impl GameApp {
             &folder_save_journal,
             self.process_group_maker.as_bytes(),
         )?;
-        let success = match kind {
-            ConsoleSaveKind::Scenario => {
-                self.runtime_resource_text("IDS_CNS_SCENARIOSAVED", "Scenario saved.")
-            }
-            ConsoleSaveKind::Savegame => {
-                self.runtime_resource_text("IDS_CNS_GAMESAVED", "Game saved.")
-            }
-        };
-        self.developer_console.out(&success);
+        if retarget_active_scenario {
+            let success = match kind {
+                ConsoleSaveKind::Scenario => {
+                    self.runtime_resource_text("IDS_CNS_SCENARIOSAVED", "Scenario saved.")
+                }
+                ConsoleSaveKind::Savegame => {
+                    self.runtime_resource_text("IDS_CNS_GAMESAVED", "Game saved.")
+                }
+            };
+            self.developer_console.out(&success);
+        }
         Ok(true)
     }
 
@@ -41785,9 +41993,12 @@ impl GameApp {
             .unwrap_or(0)
     }
 
-    /// `C4Game::CanQuickSave` (C4Game.cpp:2205-2223): network hosts only.
+    /// `C4Game::CanQuickSave` (C4Game.cpp:2205-2223): network hosts only, and
+    /// running league rounds only when they are replays.
     fn can_quick_save(&self) -> bool {
-        self.network.is_none() || matches!(self.network_mode, Some(NetworkMode::Host(_)))
+        self.network.is_none()
+            || (matches!(self.network_mode, Some(NetworkMode::Host(_)))
+                && (!self.network_is_league || self.engine.replay()))
     }
 
     fn available_runtime_player_files(&self) -> Vec<NewPlayerEntry> {
@@ -42143,8 +42354,12 @@ impl GameApp {
         let scenario_name = self.savegame_slot_base();
         let mut slots = [SaveSlotState { free: true }; 10];
         for (index, slot) in slots.iter_mut().enumerate() {
-            slot.free = !classic_savegame_slot_path(&root, &scenario_name, (index + 1) as u8)
-                .exists();
+            let slot_number = (index + 1) as u8;
+            slot.free = !c4group_is_group(&classic_savegame_slot_path(
+                &root,
+                &scenario_name,
+                slot_number,
+            ));
         }
         slots
     }
@@ -42268,20 +42483,128 @@ impl GameApp {
     }
 
     /// `Game.QuickSave(strFilename, strTitle)` for a menu slot
-    /// (C4MainMenu.cpp:797-804) via the existing save plumbing.
+    /// (C4MainMenu.cpp:797-804). Unlike the Rust-only quick/custom save flow,
+    /// this writes the copied scenario as a native C4Group.
     fn save_to_slot(&mut self, slot: u8) {
-        // begin_loading_scenario retains the language-resolved Title.txt
-        // value here, matching Game.Parameters.ScenarioTitle.
-        let label = self
-            .active_scenario
-            .as_ref()
-            .map(|scenario| scenario.title.clone())
-            .unwrap_or_else(|| self.scenario_label.clone());
-        let path = self.savegame_slot_path(slot);
-        if let Err(err) = self.perform_named_save_with_exact_label(&label, Some(path)) {
+        let capture_title = self.engine.frame() != 0 && !self.console_mode && self.window_active;
+        let title_png = if capture_title && !self.retained_gpu_presentation_active {
+            let surface = self.graphics.surface();
+            match encode_presented_save_thumbnail(
+                surface.width(),
+                surface.height(),
+                surface.pixels(),
+            ) {
+                Ok(encoded) => Some(encoded),
+                Err(error) => {
+                    tracing::warn!(?error, "failed to encode native savegame Title.png");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let saved_path = self.save_to_slot_with_title_png(slot, title_png.as_deref());
+        if capture_title && self.retained_gpu_presentation_active {
+            if let Some(path) = saved_path {
+                match fs::read(&path) {
+                    Ok(packed_group) => {
+                        self.pending_native_save_thumbnails
+                            .retain(|request| request.path != path);
+                        self.pending_native_save_thumbnails
+                            .push_back(PendingNativeSaveThumbnail { path, packed_group });
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            ?error,
+                            "failed to retain native save generation for GPU thumbnail"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish_pending_native_save_thumbnails(&mut self, title_png: Option<&[u8]>) {
+        while let Some(request) = self.pending_native_save_thumbnails.pop_front() {
+            let Some(title_png) = title_png else {
+                continue;
+            };
+            match replace_native_save_title_png_if_unchanged(
+                &request,
+                title_png,
+                self.process_group_maker.as_bytes(),
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        path = %request.path.display(),
+                        "skipped stale retained GPU native-save thumbnail"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        path = %request.path.display(),
+                        ?error,
+                        "failed to persist retained GPU native-save thumbnail"
+                    );
+                }
+            }
+        }
+    }
+
+    fn save_to_slot_with_title_png(
+        &mut self,
+        slot: u8,
+        title_png: Option<&[u8]>,
+    ) -> Option<PathBuf> {
+        let result = (|| -> Result<PathBuf> {
+            anyhow::ensure!((1..=10).contains(&slot), "invalid savegame slot {slot}");
+            anyhow::ensure!(self.can_quick_save(), "quick saving is not allowed");
+
+            // QuickSave receives Game.Parameters.ScenarioTitle, which remains
+            // stable even if later UI metadata changes.
+            let label = self
+                .host_join_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.parameters.title.as_bytes().to_vec())
+                .or_else(|| {
+                    self.live_save_seed
+                        .as_ref()
+                        .map(|seed| seed.scenario_title.as_bytes().to_vec())
+                })
+                .or_else(|| {
+                    self.active_scenario
+                        .as_ref()
+                        .map(|scenario| lc_script::c4_string_bytes(&scenario.title))
+                })
+                .unwrap_or_else(|| lc_script::c4_string_bytes(&self.scenario_label));
+            let status_label = lc_resources::decode_legacy_script_text(&label);
+            let root = configured_savegame_directory(self.app_paths.as_ref());
+            let language = classic_save_folder_language(self.app_paths.as_ref());
+            let root_title = self.runtime_resource_bytes_with_fallback(
+                "IDS_GAME_SAVEGAMESTITLE",
+                "Savegames",
+            );
+            ensure_classic_save_folder(&root, &language, &root_title)?;
+
+            let path = self.savegame_slot_path(slot);
+            let scenario_folder = path
+                .parent()
+                .context("classic savegame slot has no scenario folder")?;
+            ensure_classic_save_folder(scenario_folder, &language, &label)?;
+
+            let saved = self.save_main_menu_slot_game(&path, title_png)?;
+            anyhow::ensure!(saved, "native savegame write was rejected");
+            self.status_text = format!("Saved {status_label}");
+            Ok(path)
+        })();
+
+        if let Err(err) = &result {
             tracing::error!(error = ?err, slot, "slot save failed");
             self.status_text = format!("Save failed: {err:#}");
         }
+        result.ok()
     }
 
     fn prepare_runtime_music_flash(
@@ -42826,14 +43149,6 @@ impl GameApp {
 
     fn perform_named_save(&mut self, label: &str, target: Option<PathBuf>) -> Result<PathBuf> {
         self.perform_named_save_with_label_policy(label, target, false)
-    }
-
-    fn perform_named_save_with_exact_label(
-        &mut self,
-        label: &str,
-        target: Option<PathBuf>,
-    ) -> Result<PathBuf> {
-        self.perform_named_save_with_label_policy(label, target, true)
     }
 
     fn perform_named_save_with_label_policy(
@@ -83873,6 +84188,10 @@ impl GameApp {
     }
 
     fn return_to_menu_with_dialog_restore(&mut self, restore_dialog: bool) {
+        // The save itself is already durable. If teardown wins the screenshot
+        // readback race, discard its guarded thumbnail update so a later round
+        // can never mutate this save.
+        self.finish_pending_native_save_thumbnails(None);
         let last_startup_dialog = self.last_startup_dialog;
         self.abort_restart_pending = false;
         self.finalize_pending_league_end_for_teardown();
@@ -84149,13 +84468,17 @@ impl GameApp {
     }
 
     fn runtime_resource_bytes(&self, key: &str) -> Vec<u8> {
+        self.runtime_resource_bytes_with_fallback(key, &format!("[Undefined: {key}]"))
+    }
+
+    fn runtime_resource_bytes_with_fallback(&self, key: &str, fallback: &str) -> Vec<u8> {
         let Ok(table) = load_runtime_language_table(self.app_paths.as_ref())
             .or_else(|_| load_runtime_language_table(None))
         else {
-            return format!("[Undefined: {key}]").into_bytes();
+            return fallback.as_bytes().to_vec();
         };
         let Some(value) = table.entries.get(key) else {
-            return format!("[Undefined: {key}]").into_bytes();
+            return fallback.as_bytes().to_vec();
         };
         match table.charset {
             RuntimeHelpCharset::Windows1252 => value
@@ -92832,6 +93155,31 @@ fn persist_console_save_group(
             .with_context(|| format!("create save parent {}", parent.display()))?;
     }
     replace_file_from_same_directory(destination, &packed)
+}
+
+fn replace_native_save_title_png_if_unchanged(
+    request: &PendingNativeSaveThumbnail,
+    png: &[u8],
+    maker: &[u8],
+) -> Result<bool> {
+    let current = fs::read(&request.path)
+        .with_context(|| format!("read native savegame {}", request.path.display()))?;
+    if current != request.packed_group {
+        return Ok(false);
+    }
+    let source = Group::from_memory(request.path.clone(), current)
+        .with_context(|| format!("open native savegame {}", request.path.display()))?;
+    let mut group = MutableGroup::from_group(&source)
+        .with_context(|| format!("copy native savegame {}", request.path.display()))?;
+    group
+        .add_file("Title.png", png.to_vec())
+        .context("replace native savegame Title.png")?;
+    if !maker.is_empty() {
+        group.set_maker_bytes_recursively(maker);
+    }
+    persist_console_save_group(&group, &request.path, false)
+        .with_context(|| format!("persist native savegame {}", request.path.display()))?;
+    Ok(true)
 }
 
 /// C4Record::Start unpacks only the record's top-level group. Nested group
@@ -201885,36 +202233,325 @@ func ControlDig() { dig_count = 1; return(1); }
         )
         .expect("restore absolute savegame folder");
 
-        app.active_scenario = Some({
-            let mut scenario = FrontendScenario::fallback();
-            scenario.identifier = "Missions.c4f/01.c4s".to_string();
-            scenario.path = Some(
-                paths
-                    .install_root()
-                    .join("planet/Missions.c4f/01.c4s"),
-            );
-            scenario.title = localized_title.to_string();
-            scenario
-        });
-        app.save_to_slot(1);
-        let saved: SavedGameFile = serde_json::from_reader(
-            File::open(&old_slot).expect("classic-named Rust slot payload"),
-        )
-        .expect("deserialize saved slot");
-        assert_eq!(saved.user_label.as_deref(), Some(localized_title));
-        assert_eq!(saved.scenario.title, localized_title);
-        assert_eq!(
-            load_save_entry(&old_slot)
-                .expect("load classic-named Rust slot metadata")
-                .display_name,
-            localized_title
-        );
-        assert!(
-            !paths.user_data_dir().join(SAVE_DIR_NAME).exists(),
-            "slot save must not create the hardcoded Rust save directory"
-        );
         assert!(looks_like_cpp_integer("+999999999999999999999999"));
         assert!(looks_like_cpp_integer("-01"));
+    }
+
+    #[test]
+    fn save_to_slot_writes_native_c4group_savegame() {
+        let fixture = tempdir().expect("native slot fixture");
+        let user_data = fixture.path().join("user-data");
+        let save_root = fixture.path().join("Savegames.c4f");
+        let (_guard, paths) = exact_loader_test_paths(&user_data, None);
+        persist_config_value(
+            &paths,
+            "General",
+            "SaveGameFolder",
+            save_root.to_string_lossy().into_owned(),
+        )
+        .expect("configure native savegame folder");
+        persist_config_value(&paths, "General", "Language", "US")
+            .expect("configure native savegame language");
+
+        let scenario_path = fixture
+            .path()
+            .join("Missions.c4f")
+            .join("01.c4s");
+        install_record_test_definitions(&fixture.path().join("Missions.c4f"));
+        fs::create_dir_all(&scenario_path).expect("create source scenario group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            b"[Head]\nTitle=Source scenario\nIcon=4\nMaxPlayer=4\n\n[Definitions]\nDefinition1=Objects.c4d\n",
+        )
+        .expect("write source Scenario.txt");
+        fs::write(scenario_path.join("Source.bin"), b"copied source sentinel")
+            .expect("write source sentinel");
+        fs::write(scenario_path.join("Title.bmp"), b"stale bitmap title")
+            .expect("write stale bitmap title");
+        fs::write(scenario_path.join("Title.png"), b"stale png title")
+            .expect("write stale png title");
+        fs::write(scenario_path.join("Icon.bmp"), b"stale bitmap icon")
+            .expect("write stale bitmap icon");
+        fs::write(scenario_path.join("DescDE.rtf"), b"stale description")
+            .expect("write stale description");
+        fs::write(scenario_path.join("TitleUS.txt"), b"US:Stale title")
+            .expect("write stale title text");
+
+        let title = "Höhlenübung";
+        let frontend = FrontendScenario {
+            identifier: "Missions.c4f/01.c4s".to_string(),
+            title: title.to_string(),
+            path: Some(scenario_path.clone()),
+            source_paths: vec![scenario_path.clone()],
+            ..FrontendScenario::fallback()
+        };
+        let scenario_data = Scenario::load_from_path_with(
+            &scenario_path,
+            &InstallDefinitionResolver::new(None),
+        )
+        .expect("load source scenario");
+        let mut app = new_state_only_running_sandbox_app();
+        app.app_paths = Some(paths.clone());
+        app.active_scenario = Some(frontend.clone());
+        let player_info_id = app
+            .engine
+            .player(app.local_owner)
+            .expect("sandbox player")
+            .player_info_id();
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: player_info_id,
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                    game_number: app.local_owner,
+                    name: LegacyCString::from_bytes(b"Slot player".to_vec())
+                        .expect("slot player name"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        app.prepare_recording_for(&frontend, &scenario_data, None, None, None)
+            .expect("prepare live save seed");
+        app.save_description_language = b"US".to_vec();
+        let mut landscape = lc_engine::Landscape::flat(2, 1);
+        assert!(landscape.set_mode(lc_engine::LANDSCAPE_MODE_EXACT));
+        landscape.set_pixel_grid(lc_engine::landscape::PixelGrid::new(
+            2,
+            1,
+            vec![0, 1],
+            vec![0; 256],
+            vec![None; 256],
+            vec![None; 256],
+        ));
+        app.engine.set_landscape(landscape);
+        let mut state = app.engine.capture_state();
+        state.frame = 37;
+        state.game_time = 12;
+        app.engine
+            .restore_state(&state)
+            .expect("install noninitial save state");
+        app.snapshot = app.engine.snapshot();
+
+        let slot = save_root.join("Missions.c4f").join("Missions10.c4s");
+        fs::create_dir_all(slot.parent().expect("slot parent"))
+            .expect("create stale slot parent");
+        let mut stale = MutableGroup::new("Missions10.c4s");
+        stale
+            .add_file("Stale.txt", b"must be erased".to_vec())
+            .expect("compose stale slot");
+        fs::write(&slot, stale.pack().expect("pack stale slot"))
+            .expect("write stale slot");
+
+        let player_infos = app.recording_player_info_snapshot();
+        assert_eq!(player_infos.clients.len(), 1);
+        assert_eq!(player_infos.clients[0].players.len(), 1);
+        let restore_plan = runtime_join_save::set_as_live_save_restore_infos(
+            &app.control_clients.snapshot(),
+            &player_infos,
+            false,
+            lc_engine::LiveC4SavePolicy::Savegame {
+                target_group_name: "Missions10.c4s",
+            }
+            .player_policy(),
+        );
+        assert_eq!(restore_plan.restore_infos.clients.len(), 1);
+
+        app.save_to_slot(10);
+
+        assert!(
+            !app.status_text.starts_with("Save failed:"),
+            "{}",
+            app.status_text
+        );
+        assert!(slot.is_file(), "numbered save must be a packed file");
+        let saved = Group::open(&slot).expect("open numbered native C4Group");
+        assert_eq!(
+            saved.read_file("Source.bin").expect("copied source entry"),
+            b"copied source sentinel"
+        );
+        assert!(!saved.exists("Stale.txt"));
+        for component in [
+            "Parameters.txt",
+            "Scenario.txt",
+            "Game.txt",
+            "SavePlayerInfos.txt",
+            "DescUS.rtf",
+            "Title.png",
+        ] {
+            assert!(saved.exists(component), "missing native {component}");
+        }
+        for stale in ["Title.bmp", "Icon.bmp", "DescDE.rtf", "TitleUS.txt"] {
+            assert!(!saved.exists(stale), "stale component survived: {stale}");
+        }
+        let scenario = String::from_utf8(
+            saved
+                .read_file("Scenario.txt")
+                .expect("read saved Scenario.txt"),
+        )
+        .expect("saved Scenario.txt is textual");
+        assert!(scenario.contains("SaveGame=1\r\n"));
+        assert!(scenario.contains("NoInitialize=1\r\n"));
+        assert!(scenario.contains("Icon=11\r\n"));
+        let game = lc_engine::parse_initial_network_game_data(
+            &saved.read_file("Game.txt").expect("read saved Game.txt"),
+        );
+        assert_eq!(game.frame, 37);
+        assert_eq!(game.time, 12);
+
+        let title_png = saved.read_file("Title.png").expect("read saved Title.png");
+        let decoder = Decoder::new(io::Cursor::new(title_png));
+        let reader = decoder.read_info().expect("decode saved Title.png");
+        assert_eq!(
+            (reader.info().width, reader.info().height),
+            (SAVE_THUMBNAIL_WIDTH, SAVE_THUMBNAIL_HEIGHT)
+        );
+        assert!(
+            !slot.with_extension("png").exists(),
+            "native slot must not write a sidecar thumbnail"
+        );
+        assert_eq!(
+            fs::read(save_root.join("Title.txt")).expect("read root save title"),
+            b"US:Savegames"
+        );
+        assert_eq!(
+            fs::read(save_root.join("Missions.c4f/Title.txt"))
+                .expect("read scenario save title"),
+            b"US:H\xc3\xb6hlen\xc3\xbcbung"
+        );
+        assert_eq!(
+            app.active_scenario
+                .as_ref()
+                .and_then(|scenario| scenario.path.as_deref()),
+            Some(scenario_path.as_path()),
+            "QuickSave must not retarget the running scenario"
+        );
+
+        app.retained_gpu_presentation_active = true;
+        let gpu_slot = save_root.join("Missions.c4f").join("Missions9.c4s");
+        app.save_to_slot(9);
+        assert_eq!(app.pending_native_save_thumbnails.len(), 1);
+        assert_eq!(app.pending_native_save_thumbnails[0].path, gpu_slot);
+        assert!(
+            gpu_slot.exists(),
+            "the game state save must remain synchronous"
+        );
+        assert!(!app.savegame_slots()[8].free);
+        let mut later_state = app.engine.capture_state();
+        later_state.frame = 91;
+        app.engine
+            .restore_state(&later_state)
+            .expect("advance after synchronous GPU save");
+        let gpu_title = encode_presented_save_thumbnail(
+            2,
+            1,
+            &[255, 0, 0, 255, 0, 0, 255, 255],
+        )
+        .expect("encode retained GPU fixture");
+        app.finish_pending_native_save_thumbnails(Some(&gpu_title));
+        assert!(app.pending_native_save_thumbnails.is_empty());
+        let gpu_saved = Group::open(&gpu_slot).expect("open retained GPU slot");
+        assert_eq!(
+            gpu_saved
+                .read_file("Title.png")
+                .expect("read retained GPU title"),
+            gpu_title
+        );
+        assert_eq!(
+            lc_engine::parse_initial_network_game_data(
+                &gpu_saved
+                    .read_file("Game.txt")
+                    .expect("read GPU save game"),
+            )
+            .frame,
+            37,
+            "thumbnail completion must not recapture later simulation state"
+        );
+
+        let guarded_slot = save_root.join("Missions.c4f").join("Missions8.c4s");
+        app.save_to_slot(8);
+        let mut replacement = MutableGroup::new("Missions8.c4s");
+        replacement
+            .add_file("External.txt", b"new generation".to_vec())
+            .expect("compose external replacement");
+        fs::write(
+            &guarded_slot,
+            replacement.pack().expect("pack external replacement"),
+        )
+        .expect("replace queued GPU save generation");
+        app.finish_pending_native_save_thumbnails(Some(&gpu_title));
+        let guarded = Group::open(&guarded_slot).expect("open guarded replacement");
+        assert!(guarded.exists("External.txt"));
+        assert!(!guarded.exists("Title.png"));
+
+        let teardown_slot = save_root.join("Missions.c4f").join("Missions7.c4s");
+        app.save_to_slot(7);
+        assert_eq!(
+            app.pending_native_save_thumbnails
+                .front()
+                .map(|request| request.path.as_path()),
+            Some(teardown_slot.as_path())
+        );
+        app.return_to_menu();
+        assert!(app.pending_native_save_thumbnails.is_empty());
+        assert_eq!(
+            Group::open(&teardown_slot)
+                .expect("open teardown-flushed slot")
+                .read_file("Title.png")
+                .expect("read preserved source title"),
+            b"stale png title"
+        );
+    }
+
+    #[test]
+    fn savegame_slot_probe_uses_c4group_validity() {
+        let fixture = tempdir().expect("slot validity fixture");
+        let user_data = fixture.path().join("user-data");
+        let save_root = fixture.path().join("Savegames.c4f");
+        let (_guard, paths) = exact_loader_test_paths(&user_data, None);
+        persist_config_value(
+            &paths,
+            "General",
+            "SaveGameFolder",
+            save_root.to_string_lossy().into_owned(),
+        )
+        .expect("configure slot validity folder");
+
+        let mut app = new_state_only_lightweight_running_sandbox_app();
+        app.app_paths = Some(paths);
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "Probe.c4s".to_string();
+        scenario.path = Some(fixture.path().join("Probe.c4s"));
+        app.active_scenario = Some(scenario);
+        app.network_is_league = true;
+        assert!(
+            app.can_quick_save(),
+            "offline saves ignore retained league state"
+        );
+
+        let slot_root = save_root.join("Probe.c4f");
+        fs::create_dir_all(&slot_root).expect("create slot validity folder");
+        fs::write(slot_root.join("Probe1.c4s"), b"{\"not\":\"a group\"}")
+            .expect("write malformed slot");
+        let mut packed = MutableGroup::new("Probe2.c4s");
+        packed
+            .add_file("Scenario.txt", b"[Head]\nTitle=Packed\n".to_vec())
+            .expect("compose packed group");
+        fs::write(
+            slot_root.join("Probe2.c4s"),
+            packed.pack().expect("pack valid slot"),
+        )
+        .expect("write valid packed slot");
+        fs::create_dir(slot_root.join("Probe3.c4s")).expect("create valid folder group");
+        fs::write(slot_root.join("Probe4.c4s"), [0x1f, 0x8b, 0x08])
+            .expect("write truncated packed slot");
+
+        let slots = app.savegame_slots();
+        assert!(slots[0].free, "plain files are not occupied C4Groups");
+        assert!(!slots[1].free, "packed C4Groups occupy slots");
+        assert!(!slots[2].free, "folder C4Groups occupy slots");
+        assert!(slots[3].free, "malformed packed files remain free");
+        assert!(slots[4..].iter().all(|slot| slot.free));
     }
 
     #[test]

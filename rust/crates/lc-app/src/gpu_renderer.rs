@@ -566,6 +566,7 @@ pub struct RetainedGpuRenderer {
     vertex_scratch: Vec<PackedVertex>,
     draw_call_scratch: Vec<DrawCall>,
     composition: Option<CompositionTarget>,
+    last_presented_monitor_gamma: Option<bool>,
     last_stats: GpuRendererStats,
 }
 
@@ -848,6 +849,7 @@ impl RetainedGpuRenderer {
             vertex_scratch: Vec::new(),
             draw_call_scratch: Vec::new(),
             composition: None,
+            last_presented_monitor_gamma: None,
             last_stats: GpuRendererStats::default(),
         }
     }
@@ -872,6 +874,26 @@ impl RetainedGpuRenderer {
 
     pub fn last_stats(&self) -> GpuRendererStats {
         self.last_stats
+    }
+
+    /// Encodes a copy of the most recently presented composition before the
+    /// next render pass overwrites its retained target.
+    pub fn readback_last_presentation(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<Option<GpuReadbackTicket>, GpuRendererError> {
+        let (Some(composition), Some(monitor_gamma)) =
+            (self.composition.as_ref(), self.last_presented_monitor_gamma)
+        else {
+            return Ok(None);
+        };
+        let texture = if monitor_gamma {
+            &composition.gamma_resolved_texture
+        } else {
+            &composition.texture
+        };
+        encode_readback(device, encoder, texture, composition.extent).map(Some)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1016,6 +1038,7 @@ impl RetainedGpuRenderer {
         } else {
             (&composition.texture, &composition.present_bind_group)
         };
+        self.last_presented_monitor_gamma = Some(scene.gamma_mode.monitor_postpass());
         let readback = request_readback
             .then(|| encode_readback(device, encoder, presented_texture, composition.extent))
             .transpose()?;
@@ -2404,6 +2427,11 @@ mod tests {
         assert_eq!(renderer.last_stats().full_upload_bytes, 46);
         assert_eq!(renderer.last_stats().dirty_upload_bytes, 0);
         assert!(renderer.last_stats().composition_recreated);
+        assert_eq!(
+            readback_last_presentation(&renderer, &device, &queue),
+            initial,
+            "save capture must read the retained frame before a later render overwrites it",
+        );
 
         let monitor_ramp = GammaRamp::from_control_points([0x102030, 0x708090, 0xd0e0f0]);
         let mut raw_scene = scene.clone();
@@ -2431,6 +2459,11 @@ mod tests {
         assert_eq!(
             monitor.rgba, expected_monitor,
             "monitor gamma must resolve the complete composition before readback",
+        );
+        assert_eq!(
+            readback_last_presentation(&renderer, &device, &queue),
+            monitor,
+            "previous-frame capture must retain the presented monitor-gamma target",
         );
 
         let hidden = GpuScene {
@@ -2521,11 +2554,8 @@ mod tests {
             &GpuPresentation::identity(10, 6),
         );
         assert_eq!(tiled_gpu.rgba.len(), cpu_tiled.pixels().len());
-        for (index, (&actual, &expected)) in tiled_gpu
-            .rgba
-            .iter()
-            .zip(cpu_tiled.pixels())
-            .enumerate()
+        for (index, (&actual, &expected)) in
+            tiled_gpu.rgba.iter().zip(cpu_tiled.pixels()).enumerate()
         {
             if index % 4 == 3 {
                 assert_eq!(actual, expected, "tile alpha byte {index}");
@@ -2694,14 +2724,7 @@ mod tests {
                 // A constant source texel keeps the output unambiguous while
                 // unequal positive W values exercise perspective-correct
                 // captured transforms all the way through the backend.
-                vertices: projective_quad(
-                    4.0,
-                    2.0,
-                    6.0,
-                    4.0,
-                    [1.0, 1.5, 2.0, 2.5],
-                    identity,
-                ),
+                vertices: projective_quad(4.0, 2.0, 6.0, 4.0, [1.0, 1.5, 2.0, 2.5], identity),
                 clip: None,
                 blend: GpuBlend::Replace,
                 base_mod2: false,
@@ -2877,11 +2900,7 @@ mod tests {
             GpuVertex::new([left * w[0], top * w[0], w[0]], [0.0, 0.0], modulation),
             GpuVertex::new([right * w[1], top * w[1], w[1]], [1.0, 0.0], modulation),
             GpuVertex::new([left * w[2], bottom * w[2], w[2]], [0.0, 1.0], modulation),
-            GpuVertex::new(
-                [right * w[3], bottom * w[3], w[3]],
-                [1.0, 1.0],
-                modulation,
-            ),
+            GpuVertex::new([right * w[3], bottom * w[3], w[3]], [1.0, 1.0], modulation),
         ]
     }
 
@@ -2956,6 +2975,24 @@ mod tests {
         ticket.read(device).expect("map retained GPU frame")
     }
 
+    fn readback_last_presentation(
+        renderer: &RetainedGpuRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> GpuReadbackFrame {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("lc_gpu_previous_frame_test_encoder"),
+        });
+        let ticket = renderer
+            .readback_last_presentation(device, &mut encoder)
+            .expect("encode previous retained GPU frame")
+            .expect("previous retained GPU frame exists");
+        queue.submit(Some(encoder.finish()));
+        ticket
+            .read(device)
+            .expect("map previous retained GPU frame")
+    }
+
     fn expected_frame(extent: [u32; 2], mutable: [u8; 4], gamma: &GpuGammaLut) -> Vec<u8> {
         let mut frame = vec![0; extent[0] as usize * extent[1] as usize * 4];
         for pixel in frame.chunks_exact_mut(4) {
@@ -2986,8 +3023,7 @@ mod tests {
                 let owner_red = f32::from(OWNER_OVERLAY[0]) * (1.0 - 0.5 * u);
                 let alpha = f32::from(OWNER_OVERLAY[3]) / 255.0;
                 let owner = [
-                    (owner_red * alpha + f32::from(base[0]) * (1.0 - alpha)).round()
-                        as u8,
+                    (owner_red * alpha + f32::from(base[0]) * (1.0 - alpha)).round() as u8,
                     (f32::from(base[1]) * (1.0 - alpha)).round() as u8,
                     (f32::from(base[2]) * (1.0 - alpha)).round() as u8,
                     255,
