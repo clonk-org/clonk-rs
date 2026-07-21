@@ -1983,9 +1983,13 @@ impl Engine {
         let Some(global_functions) = self.global_script_functions.as_deref() else {
             return Vec::new();
         };
-        let mut functions = global_functions
-            .values()
-            .filter(|function| function.name.starts_with(prefix))
+        let mut seen = HashSet::new();
+        self.global_script_function_order
+            .iter()
+            .rev()
+            .filter(|name| seen.insert(name.as_str()))
+            .filter(|name| name.starts_with(prefix))
+            .filter_map(|name| global_functions.get(name))
             .map(|function| {
                 let mut metadata = crate::script_context_function_metadata(function);
                 if metadata.condition.as_ref().is_some_and(|condition| {
@@ -1995,12 +1999,7 @@ impl Engine {
                 }
                 metadata
             })
-            .collect::<Vec<_>>();
-        // The global table does not retain source offsets. Keep enumeration
-        // deterministic; ordinary definition hosts use exact reverse source
-        // order through Definition::script_menu_functions.
-        functions.sort_by(|left, right| left.function.cmp(&right.function));
-        functions
+            .collect()
     }
 
     /// All native classes of `C4ObjectMenu::AddContextFunctions`, in their
@@ -14485,6 +14484,246 @@ func DeleteHost(target, number, menu, image) {
             )
         );
         assert!(engine.objects[engine.find_object_index(host).expect("host slot")].destroyed);
+    }
+
+    #[test]
+    fn linked_context_menu_functions_preserve_cpp_func_list_order() {
+        fn layer_functions(
+            prefix: &str,
+            parameters: &str,
+            class: &str,
+            function_layer: &str,
+            caption_layer: &str,
+        ) -> String {
+            format!(
+                r#"
+func {prefix}{function_layer}First({parameters}) {{ [{class} {caption_layer} first] return 1; }}
+func {prefix}Shared({parameters}) {{ [{class} {caption_layer} shared] return 1; }}
+func {prefix}{function_layer}Last({parameters}) {{ [{class} {caption_layer} last] return 1; }}
+"#,
+            )
+        }
+
+        fn expected_linked_rows(class: &str) -> Vec<String> {
+            [
+                format!("{class} append last"),
+                format!("{class} append shared"),
+                format!("{class} append first"),
+                format!("{class} local last"),
+                format!("{class} local first"),
+                format!("{class} include last"),
+                format!("{class} include first"),
+            ]
+            .into_iter()
+            .collect()
+        }
+
+        // C4AulScript::AppendTo copies appends at FuncL and includes at
+        // Func0. GetSFunc then walks FuncL backwards, skipping every node
+        // overloaded by a later same-name function. Exercise that one linked
+        // order through each AddContextFunctions class, rather than merely
+        // checking a declaration-only projection (C4AulLink.cpp:113-141;
+        // C4Aul.cpp:357-379; C4ObjectMenu.cpp:558-685).
+        let classes = [
+            ("ActionContext", "menu, image, target", "Action"),
+            ("FxGlowContext", "target, number, menu, image", "Effect"),
+            ("AttachContext", "menu, image, target", "Attach"),
+            ("Context", "menu", "Context"),
+        ];
+
+        let mut include_source = "#strict 2\n".to_owned();
+        let mut append_source =
+            "#strict 2\n#appendto AHST\n#appendto EHST\n#appendto ATCH\n#appendto TARG\n"
+                .to_owned();
+        for (prefix, parameters, class) in classes {
+            include_source.push_str(&layer_functions(
+                prefix, parameters, class, "Include", "include",
+            ));
+            append_source.push_str(&layer_functions(
+                prefix, parameters, class, "Append", "append",
+            ));
+        }
+
+        let global_early = r#"
+#strict 2
+global func FxWorldContextEarlyFirst(target, number, menu, image) { [Global early first] return 1; }
+global func FxWorldContextShared(target, number, menu, image) { [Global early shared] return 1; }
+global func FxWorldContextEarlyLast(target, number, menu, image) { [Global early last] return 1; }
+"#;
+        let global_late = r#"
+#strict 2
+global func FxWorldContextLateFirst(target, number, menu, image) { [Global late first] return 1; }
+global func FxWorldContextShared(target, number, menu, image) { [Global late shared] return 1; }
+global func FxWorldContextLateLast(target, number, menu, image) { [Global late last] return 1; }
+"#;
+
+        let mut engine = Engine::new();
+        assert_eq!(
+            engine.install_global_scripts(&[
+                ("System.c4g/Early.c".to_owned(), global_early.to_owned()),
+                ("System.c4g/Late.c".to_owned(), global_late.to_owned()),
+            ]),
+            2
+        );
+        register_clonk(&mut engine, "CLNK", "#strict 2\n");
+        engine
+            .register_definition(
+                Definition::from_script("INCL", "Include", &include_source)
+                    .expect("include host compiles"),
+            )
+            .expect("register include host");
+
+        let action_source = format!(
+            "#strict 2\n#include INCL\n{}",
+            layer_functions(
+                "ActionContext",
+                "menu, image, target",
+                "Action",
+                "Local",
+                "local",
+            )
+        );
+        engine
+            .register_definition(
+                Definition::from_script("AHST", "Action host", &action_source)
+                    .expect("action host compiles"),
+            )
+            .expect("register action host");
+
+        let effect_source = format!(
+            "#strict 2\n#include INCL\n{}",
+            layer_functions(
+                "FxGlowContext",
+                "target, number, menu, image",
+                "Effect",
+                "Local",
+                "local",
+            )
+        );
+        engine
+            .register_definition(
+                Definition::from_script("EHST", "Effect host", &effect_source)
+                    .expect("effect host compiles"),
+            )
+            .expect("register effect host");
+
+        let attached_source = format!(
+            "#strict 2\n#include INCL\n{}",
+            layer_functions(
+                "AttachContext",
+                "menu, image, target",
+                "Attach",
+                "Local",
+                "local",
+            )
+        );
+        let mut attached_definition =
+            Definition::from_script("ATCH", "Attachment", &attached_source)
+                .expect("attachment compiles");
+        attached_definition.configure_actions(
+            None,
+            HashMap::from([(
+                "Attached".to_owned(),
+                ActionSpec::default().with_procedure("attach"),
+            )]),
+        );
+        engine
+            .register_definition(attached_definition)
+            .expect("register attachment");
+
+        let target_source = format!(
+            "#strict 2\n#include INCL\n{}",
+            layer_functions("Context", "menu", "Context", "Local", "local")
+        );
+        let mut target_definition =
+            Definition::from_script("TARG", "Target", &target_source).expect("target compiles");
+        target_definition.configure_actions(
+            None,
+            HashMap::from([("Use".to_owned(), ActionSpec::default())]),
+        );
+        engine
+            .register_definition(target_definition)
+            .expect("register target");
+        engine
+            .register_definition(
+                Definition::from_script("APND", "Appender", &append_source)
+                    .expect("appender compiles"),
+            )
+            .expect("register appender");
+        engine.relink_scripts().expect("linked scripts rebuild");
+
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let action_host = engine
+            .spawn_object(SpawnConfig::new("AHST"))
+            .expect("action host");
+        let effect_host = engine
+            .spawn_object(SpawnConfig::new("EHST"))
+            .expect("effect host");
+        let mut target_action = ActionState::new("Use");
+        target_action.target = Some(action_host);
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("TARG")
+                    .with_container(crew)
+                    .with_action(target_action),
+            )
+            .expect("target");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        let mut glow = crate::EffectState::new("Glow");
+        glow.number = 7;
+        glow.command_target = Some(effect_host.as_u64() as i32);
+        let mut world = crate::EffectState::new("World");
+        world.number = 11;
+        engine.objects[target_index].state.effects = vec![glow, world];
+        let mut attached_action = ActionState::new("Attached");
+        attached_action.target = Some(target);
+        engine
+            .spawn_object(SpawnConfig::new("ATCH").with_action(attached_action))
+            .expect("attached object");
+
+        let menu = open_native_context(&mut engine, crew, target);
+        let mut expected = expected_linked_rows("Action");
+        expected.extend(expected_linked_rows("Effect"));
+        expected.extend([
+            "Global late last".to_owned(),
+            "Global late shared".to_owned(),
+            "Global late first".to_owned(),
+            "Global early last".to_owned(),
+            "Global early first".to_owned(),
+        ]);
+        expected.extend(expected_linked_rows("Attach"));
+        expected.extend(expected_linked_rows("Context"));
+        assert_eq!(
+            menu.items
+                .iter()
+                .map(|item| item.caption.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for class in ["Action", "Effect", "Attach", "Context"] {
+            assert!(
+                menu.items
+                    .iter()
+                    .any(|item| item.caption == format!("{class} append shared")),
+                "the appended same-name function wins for {class}"
+            );
+            assert!(
+                menu.items.iter().all(|item| {
+                    item.caption != format!("{class} local shared")
+                        && item.caption != format!("{class} include shared")
+                }),
+                "overloaded {class} rows stay hidden"
+            );
+        }
+        assert!(
+            menu.items
+                .iter()
+                .all(|item| item.caption != "Global early shared"),
+            "the later engine-global same-name function wins"
+        );
     }
 
     #[test]

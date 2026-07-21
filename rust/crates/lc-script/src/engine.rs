@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use indexmap::IndexMap;
@@ -709,9 +709,51 @@ fn register_global_declarations_inner(
     first_error.map_or(Ok(()), Err)
 }
 
+fn latest_function_with_access(function: &Function, global: bool) -> Option<&Function> {
+    std::iter::successors(Some(function), |function| function.overloaded.as_deref())
+        .find(|function| (function.access == crate::ast::AccessLevel::Global) == global)
+}
+
+/// Append every physical function-list node at `FuncL`. Duplicate names stay
+/// in the ledger because their position determines which overload is visible
+/// when `GetSFunc` later walks backward.
+fn append_function_order(destination: &mut Vec<String>, source: &[String]) {
+    destination.extend_from_slice(source);
+}
+
+/// Include copies are inserted at `Func0` in full physical source order.
+fn prepend_function_order(destination: &mut Vec<String>, source: &[String]) {
+    let mut imported = source.to_vec();
+    imported.append(destination);
+    *destination = imported;
+}
+
+/// Return the visible node for each exact name in physical `Func0 -> FuncL`
+/// order. The backward first-win pass mirrors `!OverloadedBy`; reversing its
+/// result restores the order needed while constructing overload tables.
+fn visible_function_names_in_physical_order(order: &[String]) -> Vec<&String> {
+    let mut seen = HashSet::new();
+    let mut visible = order
+        .iter()
+        .rev()
+        .filter(|name| seen.insert(name.as_str()))
+        .collect::<Vec<_>>();
+    visible.reverse();
+    visible
+}
+
 #[derive(Clone, Default)]
 pub struct Script {
     functions: HashMap<String, Function>,
+    /// Every named script-function node in C4Aul's physical `Func0 -> FuncL`
+    /// order, including same-name overloaded nodes. Global declarations are
+    /// omitted because their declaring host keeps only an unnamed `FnLink`,
+    /// whose `SFunc()` is null.
+    local_function_order: Vec<String>,
+    /// `global func` declarations in their physical engine-list insertion
+    /// order. The higher-level linker uses this order when it builds the
+    /// shared Game.ScriptEngine overload table.
+    global_function_order: Vec<String>,
     includes: Vec<String>,
     appends: Vec<crate::ast::AppendTo>,
     strict_level: Option<u8>,
@@ -754,6 +796,8 @@ impl Script {
 
     fn from_ast(ast: AstScript, parse_diagnostics: Vec<ParseError>) -> Self {
         let mut functions: HashMap<String, Function> = HashMap::new();
+        let mut local_function_order = Vec::new();
+        let mut global_function_order = Vec::new();
         for mut function in ast.functions {
             // Each function carries its owning script's #strict level so the VM
             // can apply level-correct `==`/`!=` (C++ uses Fn->pOrgScript->Strict).
@@ -762,6 +806,12 @@ impl Script {
             // as its `inherited` target (`Fn->OwnerOverloaded =
             // Fn->Owner->GetOverloadedFunc(Fn)`, C4AulParse.cpp:1404-1406) —
             // the Coach.c4d menu-description wrappers forward through it.
+            let order = if function.access == crate::ast::AccessLevel::Global {
+                &mut global_function_order
+            } else {
+                &mut local_function_order
+            };
+            order.push(function.name.clone());
             if let Some(previous) = functions.remove(&function.name) {
                 function.push_overload(previous);
             }
@@ -769,6 +819,8 @@ impl Script {
         }
         Self {
             functions,
+            local_function_order,
+            global_function_order,
             includes: ast.includes,
             appends: ast.appends,
             strict_level: ast.strict_level,
@@ -783,9 +835,12 @@ impl Script {
     }
 
     pub fn global_access_functions(&self) -> impl Iterator<Item = (&String, &Function)> {
-        self.functions
-            .iter()
-            .filter(|(_, function)| function.access == crate::ast::AccessLevel::Global)
+        visible_function_names_in_physical_order(&self.global_function_order)
+            .into_iter()
+            .filter_map(|name| {
+                latest_function_with_access(self.functions.get(name)?, true)
+                    .map(|function| (name, function))
+            })
     }
 
     pub fn includes(&self) -> &[String] {
@@ -825,6 +880,14 @@ impl Script {
 #[derive(Clone)]
 pub struct Engine {
     functions: HashMap<String, Function>,
+    /// Every named script-function node in physical `Func0 -> FuncL` order.
+    /// `GetSFunc(index)` enumerates this ledger backward and skips nodes with
+    /// a same-name successor (`OverloadedBy`).
+    local_function_order: Vec<String>,
+    /// This host's `global func` declarations in physical insertion order.
+    /// They live on Game.ScriptEngine in C++, while this host retains unnamed
+    /// links for local lookup provenance.
+    global_function_order: Vec<String>,
     /// Stable identity of this C4AulScript destination host. It survives
     /// Rust moves and copy-on-write Engine clones so global Function
     /// `LinkedTo` provenance never depends on a HashMap's address.
@@ -919,6 +982,8 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             functions: HashMap::new(),
+            local_function_order: Vec::new(),
+            global_function_order: Vec::new(),
             host_identity: crate::vm::ScriptHostIdentity::fresh(),
             script_name: None,
             definition_name: None,
@@ -1062,6 +1127,11 @@ impl Engine {
         if self.owner_strict_level.is_none() {
             self.owner_strict_level = Some(script.strict_level);
         }
+        append_function_order(&mut self.local_function_order, &script.local_function_order);
+        append_function_order(
+            &mut self.global_function_order,
+            &script.global_function_order,
+        );
         for (name, mut function) in script.functions.into_iter() {
             // A redefinition overloads the earlier function: `inherited`
             // reaches it (C++ Fn->OwnerOverloaded).
@@ -1122,6 +1192,10 @@ impl Engine {
         }
         self.owner_strict_level = Some(script.strict_level);
         self.functions.clear();
+        self.local_function_order
+            .clone_from(&script.local_function_order);
+        self.global_function_order
+            .clone_from(&script.global_function_order);
         self.var_decls.clear();
         self.static_const_link_errors.clear();
 
@@ -1171,16 +1245,21 @@ impl Engine {
     /// Script-level variable declarations join too: appended code reads
     /// object locals by name, which must resolve on the target.
     pub fn append_overrides_from(&mut self, other: &Engine) {
-        for (name, function) in other.functions.iter() {
-            if function.access == crate::ast::AccessLevel::Global {
+        for name in visible_function_names_in_physical_order(&other.local_function_order) {
+            let Some(function) = other
+                .functions
+                .get(name)
+                .and_then(|function| latest_function_with_access(function, false))
+            else {
                 continue;
-            }
+            };
             let mut function = function.clone();
             if let Some(previous) = self.functions.remove(name) {
                 function.push_overload(previous);
             }
             self.functions.insert(name.clone(), function);
         }
+        append_function_order(&mut self.local_function_order, &other.local_function_order);
         for var_decl in other.var_decls.iter() {
             if !self.var_decls.iter().any(|v| v.name == var_decl.name) {
                 self.var_decls.push(var_decl.clone());
@@ -1189,13 +1268,17 @@ impl Engine {
     }
 
     pub fn merge_from(&mut self, other: &Engine) {
-        for (name, function) in other.functions.iter() {
+        for name in visible_function_names_in_physical_order(&other.local_function_order) {
             // Includes are AppendTo with bHighPrio=false in C++ — global
             // funcs are never copied (C4AulLink.cpp:127); they stay
             // reachable through the engine table.
-            if function.access == crate::ast::AccessLevel::Global {
+            let Some(function) = other
+                .functions
+                .get(name)
+                .and_then(|function| latest_function_with_access(function, false))
+            else {
                 continue;
-            }
+            };
             match self.functions.get_mut(name) {
                 // Child overrides parent, but the parent's function stays
                 // reachable as the child's `inherited` target (C++ include
@@ -1206,6 +1289,7 @@ impl Engine {
                 }
             }
         }
+        prepend_function_order(&mut self.local_function_order, &other.local_function_order);
 
         // Merge local variable declarations from parent
         // Child definitions inherit parent's local variables
@@ -1218,11 +1302,41 @@ impl Engine {
     }
 
     /// The script's `global func` declarations (AA_GLOBAL): C4Aul
-    /// registers these at the script ENGINE, not the local host.
+    /// registers these at the script ENGINE, not the local host. Enumeration
+    /// follows physical declaration order because callers build the engine's
+    /// overload chain from oldest to newest.
     pub fn global_access_functions(&self) -> impl Iterator<Item = (&String, &Function)> {
-        self.functions
+        visible_function_names_in_physical_order(&self.global_function_order)
+            .into_iter()
+            .filter_map(|name| {
+                latest_function_with_access(self.functions.get(name)?, true)
+                    .map(|function| (name, function))
+            })
+    }
+
+    /// Every physical `global func` node declared by this host, from
+    /// `Func0` to `FuncL`, including same-name nodes hidden by a later
+    /// overload. Embedders concatenate these ledgers in script-link order,
+    /// then apply the same backward exact-name dedupe as [`Self::global_functions_in_get_sfunc_order`].
+    pub fn global_function_names_in_link_order(&self) -> impl Iterator<Item = &str> {
+        self.global_function_order.iter().map(String::as_str)
+    }
+
+    /// This host's active global declarations in
+    /// `C4AulScript::GetSFunc(index)` order (`FuncL -> Func0`). This is the
+    /// per-host contribution to Game.ScriptEngine's context-function rows.
+    pub fn global_functions_in_get_sfunc_order(
+        &self,
+    ) -> impl Iterator<Item = (&String, &Function)> {
+        let mut seen = HashSet::new();
+        self.global_function_order
             .iter()
-            .filter(|(_, function)| function.access == crate::ast::AccessLevel::Global)
+            .rev()
+            .filter(move |name| seen.insert(name.as_str()))
+            .filter_map(|name| {
+                latest_function_with_access(self.functions.get(name)?, true)
+                    .map(|function| (name, function))
+            })
     }
 
     /// Repoints a declaring script's local global-function link at the
@@ -2290,6 +2404,23 @@ impl Engine {
         &self.functions
     }
 
+    /// Active named script functions in C4Aul's indexed enumeration order.
+    /// `FuncL` is visited first, so appended functions precede declarations
+    /// in this host, which in turn precede low-priority include copies.
+    /// Engine-global declarations are absent because their local `FnLink`s
+    /// are unnamed and therefore have no `SFunc()` result.
+    pub fn local_functions_in_get_sfunc_order(&self) -> impl Iterator<Item = (&String, &Function)> {
+        let mut seen = HashSet::new();
+        self.local_function_order
+            .iter()
+            .rev()
+            .filter(move |name| seen.insert(name.as_str()))
+            .filter_map(|name| {
+                latest_function_with_access(self.functions.get(name)?, false)
+                    .map(|function| (name, function))
+            })
+    }
+
     /// Own functions OR the engine-global table. Object callbacks
     /// (Initialize/TimerCall/…) resolve own-script only, but EFFECT
     /// callbacks recurse up the C4Aul tree to the script engine
@@ -2468,6 +2599,90 @@ mod tests {
 
     fn compile(source: &str) -> Script {
         Script::compile(source).expect("test script compiles")
+    }
+
+    fn local_get_sfunc_names(engine: &Engine) -> Vec<&str> {
+        engine
+            .local_functions_in_get_sfunc_order()
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    fn global_declaration_names(engine: &Engine) -> Vec<&str> {
+        engine
+            .global_access_functions()
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn linked_function_order_tracks_append_local_and_include_layers() {
+        let mut included = Engine::new();
+        included
+            .load_script(
+                "func IncludedEarly() { return 1; }\n\
+                 func IncludedLate() { return 2; }",
+            )
+            .expect("included script compiles");
+
+        let mut destination = Engine::new();
+        destination
+            .load_script(
+                "func LocalEarly() { return 3; }\n\
+                 func LocalLate() { return 4; }",
+            )
+            .expect("destination script compiles");
+
+        let mut appended = Engine::new();
+        appended
+            .load_script(
+                "func AppendedEarly() { return 5; }\n\
+                 func AppendedLate() { return 6; }",
+            )
+            .expect("append script compiles");
+
+        // C4Aul resolves high-priority appends before low-priority includes.
+        destination.append_overrides_from(&appended);
+        destination.merge_from(&included);
+
+        assert_eq!(
+            local_get_sfunc_names(&destination),
+            [
+                "AppendedLate",
+                "AppendedEarly",
+                "LocalLate",
+                "LocalEarly",
+                "IncludedLate",
+                "IncludedEarly",
+            ]
+        );
+    }
+
+    #[test]
+    fn local_and_global_orders_survive_same_name_links_independently() {
+        let mut host = Engine::new();
+        host.load_script(
+            "func Shared() { return 1; }\n\
+             global func GlobalEarly() { return 2; }\n\
+             func Shared() { return 20; }\n\
+             global func Shared() { return 3; }\n\
+             global func GlobalEarly() { return 30; }\n\
+             func LocalLate() { return 4; }\n\
+             global func GlobalLate() { return 5; }",
+        )
+        .expect("mixed script compiles");
+
+        assert_eq!(local_get_sfunc_names(&host), ["LocalLate", "Shared"]);
+        assert_eq!(
+            global_declaration_names(&host),
+            ["Shared", "GlobalEarly", "GlobalLate"]
+        );
+        assert_eq!(
+            host.global_functions_in_get_sfunc_order()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["GlobalLate", "GlobalEarly", "Shared"]
+        );
     }
 
     #[test]

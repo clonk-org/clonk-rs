@@ -729,71 +729,6 @@ fn script_context_function_metadata(function: &lc_script::Function) -> ScriptCon
     }
 }
 
-fn script_function_declaration_position(source: &str, name: &str) -> Option<usize> {
-    fn identifier_byte(byte: u8) -> bool {
-        byte.is_ascii_alphanumeric() || byte == b'_'
-    }
-
-    let bytes = source.as_bytes();
-    let mut position = 0;
-    let mut found = None;
-    while position < bytes.len() {
-        if bytes[position] == b'"' {
-            position += 1;
-            while position < bytes.len() {
-                if bytes[position] == b'\\' {
-                    position = position.saturating_add(2);
-                } else if bytes[position] == b'"' {
-                    position += 1;
-                    break;
-                } else {
-                    position += 1;
-                }
-            }
-            continue;
-        }
-        if bytes.get(position..position + 2) == Some(b"//") {
-            position += 2;
-            while bytes.get(position).is_some_and(|byte| *byte != b'\n') {
-                position += 1;
-            }
-            continue;
-        }
-        if bytes.get(position..position + 2) == Some(b"/*") {
-            position += 2;
-            while position + 1 < bytes.len()
-                && bytes.get(position..position + 2) != Some(b"*/")
-            {
-                position += 1;
-            }
-            position = position.saturating_add(2).min(bytes.len());
-            continue;
-        }
-        if bytes.get(position..position + 4) == Some(b"func")
-            && (position == 0 || !identifier_byte(bytes[position - 1]))
-            && bytes
-                .get(position + 4)
-                .is_some_and(u8::is_ascii_whitespace)
-        {
-            let mut cursor = position + 4;
-            while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
-                cursor += 1;
-            }
-            let identifier_start = cursor;
-            while bytes.get(cursor).is_some_and(|byte| identifier_byte(*byte)) {
-                cursor += 1;
-            }
-            if &source[identifier_start..cursor] == name {
-                found = Some(position);
-            }
-            position = cursor;
-            continue;
-        }
-        position += 1;
-    }
-    found
-}
-
 use command::{
     definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandData,
     CommandDefinitionSnapshot, CommandEvent, CommandFailureFeedback, CommandId,
@@ -12320,17 +12255,12 @@ impl Definition {
     /// prefix). Unlike the public Context-menu projection above, native
     /// AddContextFunctions also enumerates functions with no description.
     pub(crate) fn script_menu_functions(&self, prefix: &str) -> Vec<ScriptContextFunction> {
-        let mut functions = self
+        self
             .script
-            .functions()
-            .keys()
-            .filter(|name| name.starts_with(prefix))
-            .filter_map(|name| self.script.resolve_function(name, false))
-            .map(|resolution| {
-                let function = resolution.function;
-                let declaration_position =
-                    script_function_declaration_position(&self.script_source, &function.name);
-                let mut metadata = script_context_function_metadata(function.as_ref());
+            .local_functions_in_get_sfunc_order()
+            .filter(|(name, _)| name.starts_with(prefix))
+            .map(|(_, function)| {
+                let mut metadata = script_context_function_metadata(function);
                 if metadata.condition.as_ref().is_some_and(|condition| {
                     self.script.resolve_function(condition, true).is_none()
                 }) {
@@ -12339,17 +12269,8 @@ impl Definition {
                     // to omitting Condition, not a deferred failing call.
                     metadata.condition = None;
                 }
-                (declaration_position, metadata)
+                metadata
             })
-            .collect::<Vec<_>>();
-        functions.sort_by(|(left_position, left), (right_position, right)| {
-            right_position
-                .cmp(left_position)
-                .then_with(|| left.function.cmp(&right.function))
-        });
-        functions
-            .into_iter()
-            .map(|(_, function)| function)
             .collect()
     }
 
@@ -16742,23 +16663,13 @@ impl ScenarioScript {
             .collect()
     }
 
-    /// `C4AulScript::GetSFunc(index)` walks the script function list from its
-    /// tail, so the console sees later declarations before earlier ones.
+    /// `C4AulScript::GetSFunc(index)` walks the linked function list from its
+    /// tail, including append/include copies in their resolved positions.
     fn local_function_names_in_get_sfunc_order(&self) -> Vec<String> {
-        let mut functions = self
-            .script
-            .functions()
-            .iter()
-            .filter(|(name, _)| self.script.has_local_function(name))
-            .map(|(name, function)| (function.source_line(), name.clone()))
-            .collect::<Vec<_>>();
-        functions.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then_with(|| left.1.cmp(&right.1))
-        });
-        functions.into_iter().map(|(_, name)| name).collect()
+        self.script
+            .local_functions_in_get_sfunc_order()
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -18014,6 +17925,10 @@ pub struct Engine {
     /// The System.c4g global-function table (Game.ScriptEngine in C++),
     /// shared into every script host.
     #[doc(hidden)] pub global_script_functions: Option<Arc<HashMap<String, lc_script::Function>>>,
+    /// Physical `Game.ScriptEngine` SFunc insertion order (`Func0` to
+    /// `FuncL`). Context menus enumerate this ledger backward and suppress
+    /// older exact-name overloads just like `C4AulScript::GetSFunc`.
+    global_script_function_order: Vec<String>,
     next_mission: NextMissionState,
     /// `Game.RestartRestoreInfos.What`: a process-runtime mask for the next
     /// network restart. C++ does not compile it into save/snapshot state.
@@ -20218,6 +20133,7 @@ impl Engine {
             weather_events: Vec::new(),
             scenario_script: None,
             global_script_functions: None,
+            global_script_function_order: Vec::new(),
             next_mission: NextMissionState::default(),
             restart_restore_info_mask: 0,
             game_over_triggered: false,
@@ -26789,6 +26705,11 @@ impl Engine {
             .global_access_functions()
             .map(|(name, function)| (name.clone(), function.clone()))
             .collect();
+        let scenario_global_order = script
+            .script
+            .global_function_names_in_link_order()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         if !self
             .script_link_sources
             .iter()
@@ -26817,7 +26738,9 @@ impl Engine {
         }
         if changed {
             let table = Some(Arc::new(functions));
-            self.distribute_global_script_functions(table);
+            let mut function_order = self.global_script_function_order.clone();
+            function_order.extend(scenario_global_order);
+            self.distribute_global_script_functions(table, function_order);
             self.definition_metadata_cache.borrow_mut().take();
             self.solid_mask_metadata_cache.borrow_mut().take();
         }
@@ -28833,6 +28756,11 @@ impl Engine {
             .map(|(name, function)| (name.clone(), function.clone()))
             .collect();
         if !def_globals.is_empty() {
+            let def_global_order = definition
+                .script
+                .global_function_names_in_link_order()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
             let mut functions: HashMap<String, lc_script::Function> = self
                 .global_script_functions
                 .as_deref()
@@ -28847,7 +28775,9 @@ impl Engine {
                 functions.insert(function_name, function);
             }
             let table = Some(Arc::new(functions));
-            self.distribute_global_script_functions(table);
+            let mut function_order = self.global_script_function_order.clone();
+            function_order.extend(def_global_order);
+            self.distribute_global_script_functions(table, function_order);
         }
         definition.set_global_functions(self.global_script_functions.clone());
         let definition_id = DefinitionId::from(id.as_str());
@@ -28878,8 +28808,10 @@ impl Engine {
     fn distribute_global_script_functions(
         &mut self,
         table: Option<Arc<HashMap<String, lc_script::Function>>>,
+        function_order: Vec<String>,
     ) {
         self.global_script_functions = table.clone();
+        self.global_script_function_order = function_order;
         for definition in self.definitions.values_mut() {
             definition.set_global_functions(table.clone());
         }
@@ -28928,6 +28860,7 @@ impl Engine {
 
     pub fn install_global_scripts(&mut self, sources: &[(String, String)]) -> usize {
         self.global_script_functions = None;
+        self.global_script_function_order.clear();
         self.script_link_sources
             .retain(|source| !matches!(source, ScriptLinkSource::Script { .. }));
         self.install_additional_global_scripts(sources)
@@ -28958,6 +28891,7 @@ impl Engine {
             .as_deref()
             .cloned()
             .unwrap_or_default();
+        let mut function_order = self.global_script_function_order.clone();
         let mut loaded = 0usize;
         for (name, source) in sources {
             match lc_script::Script::compile_global_c4_string(source) {
@@ -29001,6 +28935,11 @@ impl Engine {
                         .global_access_functions()
                         .map(|(function_name, function)| (function_name.clone(), function.clone()))
                         .collect::<Vec<_>>();
+                    function_order.extend(
+                        script
+                            .global_function_names_in_link_order()
+                            .map(str::to_owned),
+                    );
                     for (function_name, mut function) in declarations {
                         if let Some(previous) = functions.remove(&function_name) {
                             function.push_overload(previous);
@@ -29027,7 +28966,7 @@ impl Engine {
             }
         }
         let table = (!functions.is_empty()).then(|| Arc::new(functions));
-        self.distribute_global_script_functions(table);
+        self.distribute_global_script_functions(table, function_order);
         loaded
     }
 
@@ -29170,10 +29109,16 @@ impl Engine {
         );
 
         let mut functions = HashMap::new();
+        let mut function_order = Vec::new();
         for source in sources {
             match source {
                 ScriptLinkSource::Script { script, .. } => {
                     let host_identity = script.host_identity();
+                    function_order.extend(
+                        script
+                            .global_function_names_in_link_order()
+                            .map(str::to_owned),
+                    );
                     let declarations = script
                         .global_access_functions()
                         .map(|(name, function)| (name.clone(), function.clone()))
@@ -29198,15 +29143,25 @@ impl Engine {
                     }
                 }
                 ScriptLinkSource::Definition(id) => {
-                    let Some(declarations) = self.definitions.get(&id).map(|definition| {
-                        definition
-                            .script
-                            .global_access_functions()
-                            .map(|(name, function)| (name.clone(), function.clone()))
-                            .collect::<Vec<_>>()
-                    }) else {
+                    let Some((declarations, declaration_order)) =
+                        self.definitions.get(&id).map(|definition| {
+                            (
+                                definition
+                                    .script
+                                    .global_access_functions()
+                                    .map(|(name, function)| (name.clone(), function.clone()))
+                                    .collect::<Vec<_>>(),
+                                definition
+                                    .script
+                                    .global_function_names_in_link_order()
+                                    .map(str::to_owned)
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                    else {
                         continue;
                     };
+                    function_order.extend(declaration_order);
                     for (name, function) in declarations {
                         let linked = chain_function(&mut functions, name.clone(), function);
                         if let Some(definition) = self.definitions.get_mut(&id) {
@@ -29216,15 +29171,25 @@ impl Engine {
                     }
                 }
                 ScriptLinkSource::Scenario => {
-                    let Some(declarations) = self.scenario_script.as_ref().map(|scenario| {
-                        scenario
-                            .script
-                            .global_access_functions()
-                            .map(|(name, function)| (name.clone(), function.clone()))
-                            .collect::<Vec<_>>()
-                    }) else {
+                    let Some((declarations, declaration_order)) =
+                        self.scenario_script.as_ref().map(|scenario| {
+                            (
+                                scenario
+                                    .script
+                                    .global_access_functions()
+                                    .map(|(name, function)| (name.clone(), function.clone()))
+                                    .collect::<Vec<_>>(),
+                                scenario
+                                    .script
+                                    .global_function_names_in_link_order()
+                                    .map(str::to_owned)
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                    else {
                         continue;
                     };
+                    function_order.extend(declaration_order);
                     for (name, function) in declarations {
                         let linked = chain_function(&mut functions, name.clone(), function);
                         if let Some(scenario) = self.scenario_script.as_mut() {
@@ -29237,7 +29202,7 @@ impl Engine {
         }
 
         let table = (!functions.is_empty()).then(|| Arc::new(functions));
-        self.distribute_global_script_functions(table);
+        self.distribute_global_script_functions(table, function_order);
         self.definition_metadata_cache.borrow_mut().take();
         self.solid_mask_metadata_cache.borrow_mut().take();
     }
