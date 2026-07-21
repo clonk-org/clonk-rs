@@ -11846,6 +11846,9 @@ struct LegacyObjectRecord {
     graphics_overlays: Option<Vec<SerializedObjectGraphicsOverlay>>,
     temporary_physical: Option<crate::PhysicalInfo>,
     physical_changes: Vec<(String, i32)>,
+    /// StdCompilerINIRead removes the first matching naming node after it is
+    /// consumed, so duplicate C4PhysicalInfo names never overwrite it.
+    physical_fields_seen: HashSet<String>,
     commands: BTreeMap<usize, SerializedLegacyCommand>,
     /// Saved C4Object::Component (`Component=WOOD=5;METL=1;`).
     components: Option<Vec<(DefinitionId, i32)>>,
@@ -11985,7 +11988,6 @@ impl LegacyObjectRecord {
     }
 
     fn apply_property(&mut self, key: &str, value: &str) -> Result<(), ScenarioError> {
-        let key = key.trim();
         // StdCompilerINIRead looks up naming nodes byte-for-byte. Map only
         // the exact spellings used by C4Object::CompileFunc; a wrong-case
         // line is an unused naming and leaves the compile default intact.
@@ -12469,11 +12471,9 @@ impl LegacyObjectRecord {
                 self.entrance_status = Some(entrance_status);
             }
             "physicaltemporary" => {
-                self.physical_temporary = Some(parse_object_bool(
-                    trimmed_value,
-                    self.line,
-                    "PhysicalTemporary",
-                )?);
+                if self.physical_temporary.is_none() {
+                    self.physical_temporary = Some(parse_object_compiler_bool(value));
+                }
             }
             "ocf" => {
                 self.ocf = Some(parse_object_u32(trimmed_value, self.line, "OCF")?);
@@ -12686,20 +12686,32 @@ impl LegacyObjectRecord {
     }
 
     fn begin_physical_section(&mut self) {
-        self.temporary_physical
-            .get_or_insert_with(crate::PhysicalInfo::default);
+        if self.physical_temporary == Some(true) {
+            self.temporary_physical
+                .get_or_insert_with(crate::PhysicalInfo::default);
+        }
     }
 
     fn apply_physical_property(
         &mut self,
         key: &str,
         value: &str,
-        line: usize,
+        _line: usize,
     ) -> Result<(), ScenarioError> {
-        let key = key.trim();
-        let value = value.trim();
+        // C4Object::CompileFunc never follows this sibling section while the
+        // flag is false or absent. Its contents are unused namings, including
+        // malformed values, rather than parse errors.
+        if self.physical_temporary != Some(true) {
+            return Ok(());
+        }
+        if key != "Changes" && !is_legacy_physical_name(key) {
+            return Ok(());
+        }
+        if !self.physical_fields_seen.insert(key.to_string()) {
+            return Ok(());
+        }
         if key == "Changes" {
-            self.physical_changes = parse_legacy_physical_changes(value, line)?;
+            self.physical_changes = parse_legacy_physical_changes(value);
             return Ok(());
         }
 
@@ -12711,10 +12723,11 @@ impl LegacyObjectRecord {
             | "Swim" | "Throw" | "Push" | "Fight" | "Magic" | "Float" | "CanScale"
             | "CanHangle" | "CanDig" | "CanConstruct" | "CanChop" | "CanFly"
             | "CorrosionResist" | "BreatheWater" => {
-                parse_object_i32(value, line, key)?
+                // Every physical field is wrapped in mkNamingAdapt(..., 0).
+                // A malformed first naming is consumed and defaults to zero.
+                parse_std_i32(value).unwrap_or_default()
             }
-            // Unknown names are not consumed by C4PhysicalInfo::CompileFunc.
-            _ => return Ok(()),
+            _ => unreachable!("unknown physical names returned before parsing"),
         };
         match key {
             "Energy" => physical.energy = parsed,
@@ -12749,7 +12762,6 @@ impl LegacyObjectRecord {
         value: &str,
         line: usize,
     ) -> Result<(), ScenarioError> {
-        let key = key.trim();
         let Some(index) = key.strip_prefix("Command") else {
             return Ok(());
         };
@@ -12852,6 +12864,7 @@ impl LegacyObjectRecord {
             graphics_overlays,
             temporary_physical,
             physical_changes,
+            physical_fields_seen: _,
             commands,
             components,
             contained,
@@ -13276,52 +13289,141 @@ enum LegacyObjectParseSection {
     Other,
 }
 
+fn parse_legacy_ini_section_name(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    if bytes.first() != Some(&b'[') || !bytes.get(1).is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let mut position = 1usize;
+    while bytes.get(position).is_some_and(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(*byte, b' ' | b'_')
+    }) {
+        position += 1;
+    }
+    let name_end = position;
+    while bytes
+        .get(position)
+        .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+    {
+        position += 1;
+    }
+    (bytes.get(position) == Some(&b']')).then(|| &line[1..name_end])
+}
+
+fn parse_legacy_ini_property(line: &str) -> Option<(&str, &str)> {
+    let bytes = line.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let mut position = 0usize;
+    while bytes.get(position).is_some_and(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(*byte, b' ' | b'_')
+    }) {
+        position += 1;
+    }
+    let name_end = position;
+    while bytes
+        .get(position)
+        .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+    {
+        position += 1;
+    }
+    if bytes.get(position) != Some(&b'=') {
+        return None;
+    }
+    Some((&line[..name_end], &line[position + 1..]))
+}
+
 fn parse_legacy_objects(text: &str) -> Result<Vec<LegacyObjectRecord>, ScenarioError> {
     let mut records = Vec::new();
     let mut current: Option<LegacyObjectRecord> = None;
-    let mut section = LegacyObjectParseSection::Other;
+    let mut section_stack: Vec<(usize, LegacyObjectParseSection)> = Vec::new();
+    let mut object_indent = None;
+    // FollowName("Physical") only sees the next sibling of [Object]. A child
+    // section does not consume that position, but a same-level (or outer)
+    // section does, even when its name is otherwise unknown.
+    let mut physical_may_follow_object = false;
 
     for (index, raw_line) in text.lines().enumerate() {
         // StdCompilerINIRead does not have an inline-comment syntax. In
         // particular, `//` inside RCT_All values (Info and command Text) is
         // ordinary persisted data. Retain the right-hand end of every line.
-        let line = raw_line
-            .trim_start_matches('\u{feff}')
-            .trim_start_matches([' ', '\t']);
+        let raw_line = raw_line.trim_start_matches('\u{feff}');
+        let indent = raw_line
+            .as_bytes()
+            .iter()
+            .take_while(|byte| matches!(**byte, b' ' | b'\t'))
+            .count();
+        let line = raw_line.trim_start_matches([' ', '\t']);
         if line.trim().is_empty() {
             continue;
         }
         if line.starts_with("//") || line.starts_with(';') {
             continue;
         }
-        let structural_line = line.trim_end();
-        if structural_line.starts_with('[') && structural_line.ends_with(']') {
-            let section_name = &structural_line[1..structural_line.len() - 1];
+        if let Some(section_name) = parse_legacy_ini_section_name(line) {
+            while section_stack
+                .last()
+                .is_some_and(|(section_indent, _)| *section_indent >= indent)
+            {
+                section_stack.pop();
+            }
+            let has_parent_section = !section_stack.is_empty();
             // Only [Object] creates a row. Nested naming environments belong
             // to that row and must route their properties to their own
             // compiler instead of falling through to C4Object::CompileFunc.
-            if section_name == "Object" {
+            let parsed_section = if section_name == "Object" && !has_parent_section {
                 if let Some(record) = current.take() {
                     records.push(record);
                 }
                 current = Some(LegacyObjectRecord::new(index + 1));
-                section = LegacyObjectParseSection::Object;
-            } else if section_name == "Physical" {
+                object_indent = Some(indent);
+                physical_may_follow_object = true;
+                LegacyObjectParseSection::Object
+            } else if section_name == "Physical"
+                && current.is_some()
+                && !has_parent_section
+                && physical_may_follow_object
+            {
                 if let Some(record) = current.as_mut() {
                     record.begin_physical_section();
                 }
-                section = LegacyObjectParseSection::Physical;
+                physical_may_follow_object = false;
+                LegacyObjectParseSection::Physical
             } else if section_name == "Commands" {
-                section = LegacyObjectParseSection::Commands;
+                if object_indent.is_some_and(|object_indent| indent <= object_indent) {
+                    physical_may_follow_object = false;
+                }
+                LegacyObjectParseSection::Commands
             } else {
-                section = LegacyObjectParseSection::Other;
-            }
+                if object_indent.is_some_and(|object_indent| indent <= object_indent) {
+                    physical_may_follow_object = false;
+                }
+                LegacyObjectParseSection::Other
+            };
+            section_stack.push((indent, parsed_section));
             continue;
         }
-        let Some((key, value)) = line.split_once('=') else {
+        let Some((key, value)) = parse_legacy_ini_property(line) else {
             continue;
         };
 
+        // Native INI values receive one implicit indentation level. Pop any
+        // child sections the value has left, revealing its enclosing naming.
+        while section_stack
+            .last()
+            .is_some_and(|(section_indent, _)| *section_indent > indent)
+        {
+            section_stack.pop();
+        }
+        let section = section_stack
+            .last()
+            .map_or(LegacyObjectParseSection::Other, |(_, section)| *section);
+        if section == LegacyObjectParseSection::Other
+            && object_indent.is_some_and(|object_indent| indent < object_indent)
+        {
+            physical_may_follow_object = false;
+        }
         match section {
             LegacyObjectParseSection::Object => {
                 let record = current.as_mut().expect("Object section creates a record");
@@ -13370,6 +13472,27 @@ fn parse_object_u32(value: &str, line: usize, key: &str) -> Result<u32, Scenario
 fn parse_object_bool(value: &str, line: usize, key: &str) -> Result<bool, ScenarioError> {
     parse_bool(value)
         .ok_or_else(|| object_property_error(line, key, value, "expected a boolean value"))
+}
+
+/// StdCompilerINIRead::Boolean reads directly after `=` without skipping
+/// whitespace. It accepts the exact lowercase prefixes `true` and `false`, or
+/// a leading 0/1 not followed by another digit. Invalid input is caught by the
+/// surrounding default adaptor and becomes false.
+fn parse_object_compiler_bool(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.first() == Some(&b'1')
+        && !bytes.get(1).is_some_and(u8::is_ascii_digit)
+    {
+        true
+    } else if bytes.first() == Some(&b'0')
+        && !bytes.get(1).is_some_and(u8::is_ascii_digit)
+    {
+        false
+    } else if value.starts_with("true") {
+        true
+    } else {
+        false
+    }
 }
 
 fn parse_legacy_object_graphics(
@@ -13529,38 +13652,38 @@ fn parse_legacy_graphics_overlay(
     })
 }
 
-fn parse_legacy_physical_changes(
-    value: &str,
-    line: usize,
-) -> Result<Vec<(String, i32)>, ScenarioError> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| {
-            let (name, previous) = entry.split_once('=').ok_or_else(|| {
-                object_property_error(
-                    line,
-                    "Physical Changes",
-                    entry,
-                    "expected PhysicalName=PreviousValue",
-                )
-            })?;
-            let name = name.trim();
-            if !is_legacy_physical_name(name) {
-                return Err(object_property_error(
-                    line,
-                    "Physical Changes",
-                    entry,
-                    "unknown physical name",
-                ));
-            }
-            Ok((
-                name.to_string(),
-                parse_object_i32(previous.trim(), line, "Physical Changes")?,
-            ))
-        })
-        .collect()
+fn parse_legacy_physical_changes(value: &str) -> Vec<(String, i32)> {
+    let mut changes = Vec::new();
+    let mut position = 0usize;
+    loop {
+        skip_std_whitespace(value, &mut position);
+        let name_start = position;
+        while value
+            .as_bytes()
+            .get(position)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-'))
+        {
+            position += 1;
+        }
+        if position == name_start {
+            break;
+        }
+        let name = &value[name_start..position];
+        if !is_legacy_physical_name(name) {
+            break;
+        }
+        if !consume_std_separator(value, &mut position, b'=') {
+            break;
+        }
+        let Some(previous) = parse_std_i32_prefix_at(value, &mut position) else {
+            break;
+        };
+        changes.push((name.to_string(), previous));
+        if !consume_std_separator(value, &mut position, b',') {
+            break;
+        }
+    }
+    changes
 }
 
 fn is_legacy_physical_name(name: &str) -> bool {
@@ -27617,6 +27740,306 @@ public func ActualizePhase(pClonk)
                 ("NEGA".to_owned(), -3),
             ]
         );
+    }
+
+    #[test]
+    fn legacy_objects_restore_temporary_physicals_without_parent_field_leakage() {
+        let source = concat!(
+            "[Object]\n",
+            "id=GOOD\n",
+            "Number=1\n",
+            "Energy=9001\n",
+            "Breath=9002\n",
+            "Damage=9003\n",
+            "PhysicalTemporary=1\n",
+            // The first matching naming node wins, including the flag.
+            "PhysicalTemporary=false\n",
+            "[Physical]\n",
+            "Energy=101\n",
+            "Breath=102\n",
+            "Walk=103\n",
+            "Jump=104\n",
+            "Scale=105\n",
+            "Hangle=106\n",
+            "Dig=107\n",
+            "Swim=108\n",
+            "Throw=109\n",
+            "Push=110\n",
+            "Fight=111\n",
+            "Magic=112\n",
+            "Float=113\n",
+            "CanScale=114\n",
+            "CanHangle=115\n",
+            "CanDig=116\n",
+            "CanConstruct=117\n",
+            "CanChop=118\n",
+            "CanFly=119\n",
+            "CorrosionResist=120\n",
+            "BreatheWater=121\n",
+            "Energy=999999\n",
+            "Changes=Walk=10,Energy=20,Walk=30\n",
+            "Changes=Energy=999\n",
+            // Not a C4PhysicalInfo naming: it must not reach the parent.
+            "Damage=9999\n",
+            // FollowName consumes only the first sibling Physical section.
+            "[Physical]\n",
+            "Energy=not-an-integer\n",
+        );
+        let mut records = parse_legacy_objects(source).expect("temporary physical object parses");
+        assert_eq!(records.len(), 1);
+        let record = records.remove(0);
+        let expected = crate::PhysicalInfo {
+            energy: 101,
+            breath: 102,
+            walk: 103,
+            jump: 104,
+            scale: 105,
+            hangle: 106,
+            dig: 107,
+            swim: 108,
+            throw: 109,
+            push: 110,
+            fight: 111,
+            magic: 112,
+            float: 113,
+            can_scale: 114,
+            can_hangle: 115,
+            can_dig: 116,
+            can_construct: 117,
+            can_chop: 118,
+            can_fly: 119,
+            corrosion_resist: 120,
+            breathe_water: 121,
+        };
+        assert_eq!(
+            (record.energy, record.breath, record.damage),
+            (Some(9001), Some(9002), Some(9003))
+        );
+        assert_eq!(record.temporary_physical, Some(expected));
+        assert_eq!(
+            record.physical_changes,
+            vec![
+                ("Walk".to_string(), 10),
+                ("Energy".to_string(), 20),
+                ("Walk".to_string(), 30),
+            ]
+        );
+
+        let definition_ids = HashSet::from(["GOOD"]);
+        let object_numbers = HashSet::from([1_u64]);
+        let string_registrations = lc_script::new_string_registrations();
+        let resolution = SerializedC4ValueResolution {
+            object_numbers: &object_numbers,
+            string_registrations: &string_registrations,
+        };
+        let config = record
+            .into_spawn(&definition_ids, &resolution)
+            .expect("record converts")
+            .expect("known definition spawns")
+            .config;
+        assert_eq!(
+            (config.energy, config.breath, config.damage),
+            (Some(9001), Some(9002), Some(9003))
+        );
+        assert_eq!(config.temporary_physical, Some(expected));
+
+        let mut definition =
+            Definition::from_script("GOOD", "Good", "").expect("definition compiles");
+        definition.set_physical(crate::PhysicalInfo {
+            energy: 77_001,
+            breath: 77_002,
+            walk: 77_003,
+            ..crate::PhysicalInfo::default()
+        });
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let object_id = engine.spawn_object(config).expect("loaded object spawns");
+        let object_index = engine
+            .find_object_index(object_id)
+            .expect("loaded object remains live");
+        let snapshot = engine.snapshot();
+        let object = snapshot
+            .objects
+            .iter()
+            .find(|object| object.id == object_id)
+            .expect("loaded object is snapshotted");
+        assert_eq!(
+            (object.energy, object.breath, object.damage),
+            (9001, 9002, 9003)
+        );
+        assert_eq!(object.temporary_physical, Some(expected));
+        assert_eq!(
+            object.physical_changes,
+            vec![
+                ("Walk".to_string(), 10),
+                ("Energy".to_string(), 20),
+                ("Walk".to_string(), 30),
+            ]
+        );
+        assert_eq!(engine.object_physical(object_index), expected);
+    }
+
+    #[test]
+    fn legacy_objects_ignore_disabled_and_out_of_scope_physical_sections() {
+        let source = concat!(
+            "[Object]\n",
+            "id=GOOD\n",
+            "Number=2\n",
+            "Energy=2001\n",
+            "Breath=2002\n",
+            "PhysicalTemporary=0\n",
+            "PhysicalTemporary=true\n",
+            "[Physical]\n",
+            "Energy=not-an-integer\n",
+            "[Object]\n",
+            "id=GOOD\n",
+            "Number=3\n",
+            "Energy=3001\n",
+            "Breath=3002\n",
+            "[Physical]\n",
+            "Changes=NoSuchPhysical=7\n",
+            "[Object]\n",
+            "id=GOOD\n",
+            "Number=4\n",
+            "Energy=4001\n",
+            "Breath=4002\n",
+            "PhysicalTemporary=true\n",
+            // A child section is not the FollowName sibling.
+            "  [Physical]\n",
+            "  Energy=still-not-an-integer\n",
+            // This same-level sibling consumes the position Physical needed.
+            "[Unrelated]\n",
+            "[Physical]\n",
+            "Changes=also-not-compiled\n",
+            "[Object]\n",
+            "id=GOOD\n",
+            "Number=5\n",
+            "PhysicalTemporary=true\n",
+            "[Object]\n",
+            "id=GOOD\n",
+            "Number=6\n",
+            // Boolean does not skip whitespace after `=`; the default adaptor
+            // turns this malformed first value into false.
+            "PhysicalTemporary= true\n",
+            "PhysicalTemporary=1\n",
+            "[Physical]\n",
+            "Energy=not-an-integer\n",
+            "[Object]\n",
+            "id=GOOD\n",
+            "Number=7\n",
+            // Scenario.txt's extended boolean words are malformed here and
+            // likewise default to false instead of failing the object load.
+            "PhysicalTemporary=yes\n",
+            "[Physical]\n",
+            "Changes=not-compiled\n",
+            "[Object]\n",
+            "id=GOOD\n",
+            "Number=8\n",
+            // Outdenting a value leaves the child naming and resumes Object.
+            "  [Child]\n",
+            "  PhysicalTemporary=false\n",
+            // Spaces are part of the native naming key; this is unused.
+            "PhysicalTemporary =false\n",
+            "PhysicalTemporary=true\n",
+            // A malformed would-be section creates no naming node and cannot
+            // consume Object's next root sibling.
+            "[123]\n",
+            // The child section did not consume Object's root-level sibling.
+            "[Physical]\tignored trailing text\n",
+            "Walk =999999\n",
+            "Walk=808\n",
+            "  [Nested]\n",
+            "  Breath=999999\n",
+            // The same indentation rule resumes the Physical naming.
+            "Breath=809\n",
+        );
+        let records = parse_legacy_objects(source).expect("unused physical sections are ignored");
+        let definition_ids = HashSet::from(["GOOD"]);
+        let object_numbers = HashSet::from([2_u64, 3, 4, 5, 6, 7, 8]);
+        let string_registrations = lc_script::new_string_registrations();
+        let resolution = SerializedC4ValueResolution {
+            object_numbers: &object_numbers,
+            string_registrations: &string_registrations,
+        };
+        let configs = records
+            .into_iter()
+            .map(|record| {
+                record
+                    .into_spawn(&definition_ids, &resolution)
+                    .expect("record converts")
+                    .expect("known definition spawns")
+                    .config
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(configs.len(), 7);
+        assert_eq!(
+            (configs[0].energy, configs[0].breath),
+            (Some(2001), Some(2002))
+        );
+        assert_eq!(
+            (configs[1].energy, configs[1].breath),
+            (Some(3001), Some(3002))
+        );
+        assert_eq!(
+            (configs[2].energy, configs[2].breath),
+            (Some(4001), Some(4002))
+        );
+        assert_eq!(configs[0].temporary_physical, None);
+        assert_eq!(configs[1].temporary_physical, None);
+        assert_eq!(
+            configs[2].temporary_physical,
+            Some(crate::PhysicalInfo::default())
+        );
+        assert_eq!(
+            configs[3].temporary_physical,
+            Some(crate::PhysicalInfo::default())
+        );
+        assert_eq!(configs[4].temporary_physical, None);
+        assert_eq!(configs[5].temporary_physical, None);
+        assert_eq!(
+            configs[6].temporary_physical,
+            Some(crate::PhysicalInfo {
+                walk: 808,
+                breath: 809,
+                ..crate::PhysicalInfo::default()
+            })
+        );
+        assert!(
+            configs
+                .iter()
+                .all(|config| config.physical_changes.is_empty())
+        );
+    }
+
+    #[test]
+    fn legacy_objects_default_malformed_temporary_physical_values_like_cpp() {
+        let source = concat!(
+            // Raw indentation may decrease between root siblings; their
+            // common name-tree parent, not equal columns, controls FollowName.
+            "  [Object]\n",
+            "  id=GOOD\n",
+            "  Number=9\n",
+            "  PhysicalTemporary=true\n",
+            "[Physical]\n",
+            // The default adaptor consumes this first naming as zero, so the
+            // later duplicate cannot replace it.
+            "Energy=not-an-integer\n",
+            "Energy=123\n",
+            // The STL adaptor retains its valid prefix and stops on the first
+            // invalid element. The duplicate Changes naming is then unused.
+            "Changes=Walk=10,NoSuchPhysical=20,Energy=30\n",
+            "Changes=Energy=40\n",
+        );
+        let mut records = parse_legacy_objects(source).expect("default adaptors do not abort");
+        assert_eq!(records.len(), 1);
+        let record = records.remove(0);
+        assert_eq!(
+            record.temporary_physical,
+            Some(crate::PhysicalInfo::default())
+        );
+        assert_eq!(record.physical_changes, vec![("Walk".to_string(), 10)]);
     }
 
     #[test]

@@ -1916,8 +1916,13 @@ fn serialize_object(
         );
     }
     if let Some(physical) = state.temporary_physical.as_ref() {
-        writer.section(2, "Physical");
-        serialize_physical(writer, 2, physical, &state.physical_changes);
+        // C4Object::CompileFunc reaches this naming through FollowName, so it
+        // is a same-level sibling of [Object], not a nested child section.
+        // StdCompilerINIWrite also suppresses an entirely empty naming.
+        if *physical != PhysicalInfo::default() || !state.physical_changes.is_empty() {
+            writer.section(0, "Physical");
+            serialize_physical(writer, 0, physical, &state.physical_changes);
+        }
     }
     let commands = object.commands.legacy_save_commands();
     if !commands.is_empty() {
@@ -3245,6 +3250,54 @@ mod tests {
             writer.finish(),
             b"[Physical]\r\nChanges=Walk=10,Energy=20,Walk=30\r\n"
         );
+    }
+
+    #[test]
+    fn object_temporary_physical_section_is_follow_name_sibling() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                crate::Definition::from_script("PHYS", "Physical", "")
+                    .expect("definition compiles"),
+            )
+            .expect("definition registers");
+        let mut config = crate::SpawnConfig::new("PHYS");
+        config.temporary_physical = Some(PhysicalInfo {
+            energy: 123,
+            ..PhysicalInfo::default()
+        });
+        config.physical_changes = vec![("Energy".to_owned(), 77)];
+        engine.spawn_object(config).expect("object spawns");
+
+        let objects = String::from_utf8(serialize_objects(
+            &engine,
+            &mut LegacyStringTable::default(),
+        ))
+        .expect("Objects.txt is UTF-8");
+        assert!(objects.contains("\r\n[Physical]\r\nEnergy=123\r\nChanges=Energy=77\r\n"));
+        assert!(!objects.contains("\r\n  [Physical]"));
+    }
+
+    #[test]
+    fn object_empty_temporary_physical_omits_empty_follow_name_section() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                crate::Definition::from_script("ZERO", "Zero", "")
+                    .expect("definition compiles"),
+            )
+            .expect("definition registers");
+        let mut config = crate::SpawnConfig::new("ZERO");
+        config.temporary_physical = Some(PhysicalInfo::default());
+        engine.spawn_object(config).expect("object spawns");
+
+        let objects = String::from_utf8(serialize_objects(
+            &engine,
+            &mut LegacyStringTable::default(),
+        ))
+        .expect("Objects.txt is UTF-8");
+        assert!(objects.contains("\r\nPhysicalTemporary=true\r\n"));
+        assert!(!objects.contains("[Physical]"));
     }
 
     #[test]
