@@ -25426,7 +25426,7 @@ fn fire_effect_start_core(
                 .and_then(|landscape| landscape.material_at(position.x, position.y))
                 .zip(context.world.materials())
                 .and_then(|(material_id, materials)| materials.get_by_id(material_id))
-                .map(|material| material.extinguisher() > 0)
+                .map(|material| material.extinguisher() != 0)
                 .unwrap_or(false);
             let fire_caused = !in_extinguisher;
             let fire_meta = effective_definition_id(context, target)
@@ -25952,7 +25952,7 @@ fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
                     .and_then(|landscape| landscape.material_at(state.position.x, state.position.y))
                     .zip(context.world.materials())
                     .and_then(|(material_id, materials)| materials.get_by_id(material_id))
-                    .map(|material| material.extinguisher() > 0)
+                    .map(|material| material.extinguisher() != 0)
             })
         });
         if let Some(extinguisher) = material_extinguisher {

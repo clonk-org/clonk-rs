@@ -45643,7 +45643,7 @@ impl Engine {
                 let extinguisher = self
                     .materials
                     .get_by_id(material_id)
-                    .map(|material| material.extinguisher() > 0)
+                    .map(|material| material.extinguisher() != 0)
                     .unwrap_or(false);
                 if extinguisher {
                     // Extinguish(iFireNumber) kills THIS fire effect

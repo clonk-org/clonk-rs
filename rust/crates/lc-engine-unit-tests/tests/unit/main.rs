@@ -4347,7 +4347,7 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
             Name=Water
             Density=25
             Friction=0
-            Extinguisher=1
+            Extinguisher=-1
 
             [Material Earth]
             Name=Earth
@@ -4594,51 +4594,83 @@ func Entrance(pContainer) { entrance_count += 1; return(1); }
         // C4Object::Extinguish in extinguishing material, which kills the
         // fire effect (C4Object.cpp:1269-1301) — FnFxFireStop clears the
         // OnFire flag (C4Effect.cpp:787). The Random(3) inflame draw still
-        // runs after the extinguish (C4Object.cpp:803-804).
-        let library = MaterialLibrary::parse(
-            r#"
-            [Material Water]
-            Name=Water
-            Density=25
-            Friction=0
-            Extinguisher=1
-        "#,
-        )
-        .expect("material library parses");
-        let materials = MaterialSet::from_resource_library(&library);
-        let water = materials.id_of("Water").expect("water exists");
-        let mut engine = Engine::with_seed(31);
-        engine.set_materials(materials);
-        let mut hut_definition = simple_definition("Hut");
-        hut_definition.set_physical(PhysicalInfo {
-            energy: 100_000,
-            ..PhysicalInfo::default()
-        });
-        engine.register_definition(hut_definition)?;
-        let hut =
-            engine.spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(10, 10)))?;
-        let idx = engine.find_object_index(hut).expect("hut exists");
-        assert!(engine.incinerate_object(idx, 1, false, None)?);
-        // flood the spot AFTER ignition
-        let mut landscape = Landscape::flat_with_material(40, 30, None);
-        landscape.set_liquid_column(10, vec![LiquidSegment::with_material(5, 12, Some(water))]);
-        engine.set_landscape(landscape);
-        // run to the next Tick5 frame
-        while engine.frame % 5 != 4 {
+        // runs after the extinguish (C4Object.cpp:803-804). Cover both the
+        // direct native timer and a global script override that reaches the
+        // engine FxFireTimer through inherited().
+        fn run(inherited_timer: bool) -> Result<(), EngineError> {
+            let library = MaterialLibrary::parse(
+                r#"
+                [Material Water]
+                Name=Water
+                Density=25
+                Friction=0
+                Extinguisher=-1
+                "#,
+            )
+            .expect("material library parses");
+            let materials = MaterialSet::from_resource_library(&library);
+            let water = materials.id_of("Water").expect("water exists");
+            let mut engine = Engine::with_seed(31);
+            engine.set_materials(materials);
+            let mut hut_definition = if inherited_timer {
+                let mut definition = Definition::from_script(
+                    "Hut",
+                    "Hut",
+                    "#strict\nglobal func FxFireTimer(target, number, time) { return inherited(target, number, time); }\n",
+                )?;
+                definition.set_c4_callback_convention(true);
+                definition
+            } else {
+                simple_definition("Hut")
+            };
+            hut_definition.set_physical(PhysicalInfo {
+                energy: 100_000,
+                ..PhysicalInfo::default()
+            });
+            engine.register_definition(hut_definition)?;
+            let hut = engine
+                .spawn_object(SpawnConfig::new("Hut").with_position(Vector2::new(10, 10)))?;
+            let idx = engine.find_object_index(hut).expect("hut exists");
+            assert!(engine.incinerate_object(idx, 1, false, None)?);
+
+            // Flood the spot after ignition, then run to the next Tick5.
+            let mut landscape = Landscape::flat_with_material(40, 30, None);
+            landscape
+                .set_liquid_column(10, vec![LiquidSegment::with_material(5, 12, Some(water))]);
+            engine.set_landscape(landscape);
+            while engine.frame % 5 != 4 {
+                engine.tick_without_snapshot()?;
+            }
             engine.tick_without_snapshot()?;
+
+            let path = if inherited_timer { "inherited" } else { "native" };
+            let idx = engine.find_object_index(hut).expect("hut survives");
+            assert!(!engine.objects[idx].state.on_fire, "{path}: extinguished");
+            if inherited_timer {
+                assert!(
+                    engine.objects[idx]
+                        .state
+                        .effects
+                        .iter()
+                        .any(|effect| effect.name == "Fire" && effect.priority == 0),
+                    "inherited: the killed callback node remains linked dead until execute",
+                );
+                engine.tick_without_snapshot()?;
+            }
+            let idx = engine.find_object_index(hut).expect("hut survives");
+            assert!(
+                !engine.objects[idx]
+                    .state
+                    .effects
+                    .iter()
+                    .any(|effect| effect.name == "Fire"),
+                "{path}: the fire effect was killed by the extinguish",
+            );
+            Ok(())
         }
-        engine.tick_without_snapshot()?;
-        let idx = engine.find_object_index(hut).expect("hut survives");
-        assert!(!engine.objects[idx].state.on_fire, "extinguished");
-        assert!(
-            !engine.objects[idx]
-                .state
-                .effects
-                .iter()
-                .any(|effect| effect.name == "Fire"),
-            "the fire effect was killed by the extinguish"
-        );
-        Ok(())
+
+        run(false)?;
+        run(true)
     }
 
     #[test]
@@ -5754,7 +5786,7 @@ func Incineration(iCause) { return 1; }
             Name=Water
             Density=25
             Friction=0
-            Extinguisher=1
+            Extinguisher=-1
         "#,
         )
         .expect("material library parses");
@@ -6753,6 +6785,223 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
             }],
             "SoundLevel(0) always attempts StopSoundEffect"
         );
+    }
+
+    #[test]
+    fn negative_material_reaction_flags_are_truthy_like_cpp() {
+        use material::{MaterialReactionKind, evaluate_corrosion};
+
+        let natural = MaterialSet::from_resource_library(
+            &MaterialLibrary::parse(
+                r#"
+                [Material IL]
+                Name=IL
+                Density=10
+                Incindiary=-1
+
+                [Material EH]
+                Name=EH
+                Density=20
+                Extinguisher=-2
+
+                [Material EL]
+                Name=EL
+                Density=10
+                Extinguisher=-3
+
+                [Material IH]
+                Name=IH
+                Density=20
+                Incindiary=-4
+
+                [Material FH]
+                Name=FH
+                Density=20
+                Inflammable=-5
+
+                [Material FL]
+                Name=FL
+                Density=10
+                Inflammable=-6
+
+                [Material AC]
+                Name=AC
+                Density=10
+                Corrosive=-7
+
+                [Material RH]
+                Name=RH
+                Density=20
+                Corrode=-8
+                "#,
+            )
+            .expect("natural materials parse"),
+        );
+        let id = |name| natural.id_of(name).expect("natural material exists");
+        assert_eq!(
+            natural.reaction(Some(id("IL")), Some(id("EH"))).kind,
+            MaterialReactionKind::Poof,
+        );
+        assert_eq!(
+            natural.reaction(Some(id("EL")), Some(id("IH"))).kind,
+            MaterialReactionKind::Poof,
+        );
+        assert_eq!(
+            natural.reaction(Some(id("IL")), Some(id("FH"))).kind,
+            MaterialReactionKind::Incinerate,
+        );
+        assert_eq!(
+            natural.reaction(Some(id("FL")), Some(id("IH"))).kind,
+            MaterialReactionKind::Incinerate,
+        );
+        assert_eq!(
+            natural.reaction(Some(id("AC")), Some(id("RH"))).kind,
+            MaterialReactionKind::Corrode {
+                corrosive_strength: -7,
+                corrode_resistance: -8,
+                corrosion_probability: None,
+            },
+        );
+
+        // The flags select the reaction by raw C++ integer truthiness, but
+        // their signed values remain the probability thresholds. A negative
+        // first threshold short-circuits after one draw; a negative second
+        // threshold is reached after a guaranteed first success.
+        let mut negative_first = LcgRng::new(67);
+        let mut one_draw = negative_first.clone();
+        let _ = one_draw.random(100);
+        assert!(!evaluate_corrosion(-7, -8, None, &mut negative_first));
+        assert_eq!(negative_first, one_draw);
+
+        let mut negative_second = LcgRng::new(68);
+        let mut two_draws = negative_second.clone();
+        let _ = two_draws.random(100);
+        let _ = two_draws.random(100);
+        assert!(!evaluate_corrosion(100, -8, None, &mut negative_second));
+        assert_eq!(negative_second, two_draws);
+
+        let categories = MaterialSet::from_resource_library(
+            &MaterialLibrary::parse(
+                r#"
+                [Material RI]
+                Name=RI
+                Density=10
+
+                [Reaction]
+                Type=Poof
+                TargetSpec=Incindiary
+
+                [Material RE]
+                Name=RE
+                Density=10
+
+                [Reaction]
+                Type=Poof
+                TargetSpec=Extinguisher
+
+                [Material RF]
+                Name=RF
+                Density=10
+
+                [Reaction]
+                Type=Poof
+                TargetSpec=Inflammable
+
+                [Material RC]
+                Name=RC
+                Density=10
+
+                [Reaction]
+                Type=Poof
+                TargetSpec=Corrosive
+
+                [Material RR]
+                Name=RR
+                Density=10
+
+                [Reaction]
+                Type=Poof
+                TargetSpec=Corrode
+
+                [Material IV]
+                Name=IV
+                Density=10
+
+                [Reaction]
+                Type=Poof
+                TargetSpec=Incindiary
+                InverseSpec=1
+
+                [Material Rate]
+                Name=Rate
+                Density=10
+
+                [Reaction]
+                Type=Corrode
+                TargetSpec=Zero
+                CorrosionRate=-9
+
+                [Material Neg]
+                Name=Neg
+                Density=20
+                Incindiary=-1
+                Extinguisher=-2
+                Inflammable=-3
+                Corrosive=-4
+                Corrode=-5
+
+                [Material Zero]
+                Name=Zero
+                Density=20
+                "#,
+            )
+            .expect("category materials parse"),
+        );
+        let neg = categories.id_of("Neg").expect("negative target exists");
+        let zero = categories.id_of("Zero").expect("zero target exists");
+        for source_name in ["RI", "RE", "RF", "RC", "RR"] {
+            let source = categories
+                .id_of(source_name)
+                .expect("category source exists");
+            let reaction = categories.reaction(Some(source), Some(neg));
+            assert!(reaction.user_defined, "{source_name} matched its category");
+            assert_eq!(reaction.kind, MaterialReactionKind::Poof);
+        }
+
+        let inverse = categories.id_of("IV").expect("inverse source exists");
+        assert!(
+            !categories
+                .reaction(Some(inverse), Some(neg))
+                .user_defined,
+            "a nonzero negative flag is excluded from the inverse category",
+        );
+        assert!(
+            categories
+                .reaction(Some(inverse), Some(zero))
+                .user_defined,
+            "a zero flag matches the inverse category",
+        );
+        assert!(
+            categories.reaction(Some(inverse), None).user_defined,
+            "sky matches an inverse flag category",
+        );
+
+        let rate = categories.id_of("Rate").expect("rate source exists");
+        let rate_reaction = categories.reaction(Some(rate), Some(zero));
+        assert_eq!(
+            rate_reaction.kind,
+            MaterialReactionKind::Corrode {
+                corrosive_strength: -9,
+                corrode_resistance: 100,
+                corrosion_probability: Some(-9),
+            },
+            "custom CorrosionRate remains a raw signed threshold",
+        );
+        let mut custom_rng = LcgRng::new(69);
+        let mut custom_one_draw = custom_rng.clone();
+        let _ = custom_one_draw.random(100);
+        assert!(!evaluate_corrosion(-9, 100, Some(-9), &mut custom_rng));
+        assert_eq!(custom_rng, custom_one_draw);
     }
 
     #[test]
@@ -21260,7 +21509,7 @@ func Trigger() {
             Name=Oil
             Density=100
             Friction=25
-            Inflammable=1
+            Inflammable=-1
         "#,
         )
         .expect("material library parses");

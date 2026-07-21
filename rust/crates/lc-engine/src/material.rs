@@ -1378,17 +1378,17 @@ impl MaterialSet {
         if pxs_mat.density() > landscape.density() {
             return MaterialReactionKind::None;
         }
-        if (pxs_mat.incindiary() > 0 && landscape.extinguisher() > 0)
-            || (pxs_mat.extinguisher() > 0 && landscape.incindiary() > 0)
+        if (pxs_mat.incindiary() != 0 && landscape.extinguisher() != 0)
+            || (pxs_mat.extinguisher() != 0 && landscape.incindiary() != 0)
         {
             return MaterialReactionKind::Poof;
         }
-        if (pxs_mat.incindiary() > 0 && landscape.inflammable() > 0)
-            || (pxs_mat.inflammable() > 0 && landscape.incindiary() > 0)
+        if (pxs_mat.incindiary() != 0 && landscape.inflammable() != 0)
+            || (pxs_mat.inflammable() != 0 && landscape.incindiary() != 0)
         {
             return MaterialReactionKind::Incinerate;
         }
-        if pxs_mat.corrosive() > 0 && landscape.corrode() > 0 {
+        if pxs_mat.corrosive() != 0 && landscape.corrode() != 0 {
             return MaterialReactionKind::Corrode {
                 corrosive_strength: pxs_mat.corrosive(),
                 corrode_resistance: landscape.corrode(),
@@ -1734,7 +1734,7 @@ fn parse_custom_reaction_kind(
         "poof" => Some(MaterialReactionKind::Poof),
         "insert" => Some(MaterialReactionKind::Insert),
         "corrode" => {
-            let rate = definition.int("corrosionrate").unwrap_or(100).clamp(0, 100);
+            let rate = definition.int("corrosionrate").unwrap_or(100);
             Some(MaterialReactionKind::Corrode {
                 corrosive_strength: rate,
                 corrode_resistance: 100,
@@ -1816,19 +1816,19 @@ fn resolve_reaction_targets(
             }
         }
         "incindiary" => {
-            collect_targets_by_predicate(materials, inverse, true, |mat| mat.incindiary() > 0)
+            collect_targets_by_predicate(materials, inverse, true, |mat| mat.incindiary() != 0)
         }
         "extinguisher" => {
-            collect_targets_by_predicate(materials, inverse, true, |mat| mat.extinguisher() > 0)
+            collect_targets_by_predicate(materials, inverse, true, |mat| mat.extinguisher() != 0)
         }
         "inflammable" => {
-            collect_targets_by_predicate(materials, inverse, true, |mat| mat.inflammable() > 0)
+            collect_targets_by_predicate(materials, inverse, true, |mat| mat.inflammable() != 0)
         }
         "corrosive" => {
-            collect_targets_by_predicate(materials, inverse, true, |mat| mat.corrosive() > 0)
+            collect_targets_by_predicate(materials, inverse, true, |mat| mat.corrosive() != 0)
         }
         "corrode" => {
-            collect_targets_by_predicate(materials, inverse, true, |mat| mat.corrode() > 0)
+            collect_targets_by_predicate(materials, inverse, true, |mat| mat.corrode() != 0)
         }
         _ => Vec::new(),
     }

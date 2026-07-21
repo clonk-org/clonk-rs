@@ -5144,7 +5144,7 @@ impl Landscape {
         // (C4Landscape.cpp:1417-1426).
         self.border_material_at(x, y)
             .and_then(|material| materials.get_by_id(material))
-            .is_some_and(|material| material.inflammable() > 0)
+            .is_some_and(|material| material.inflammable() != 0)
     }
 
     pub fn surface_height(&self, x: i32) -> Option<i32> {
@@ -11323,7 +11323,7 @@ func TransactionThenRaw()
             Density=90
             Friction=15
             BlastFree=1
-            Inflammable=50
+            Inflammable=-50
 
             [Material Stone]
             Name=Stone
