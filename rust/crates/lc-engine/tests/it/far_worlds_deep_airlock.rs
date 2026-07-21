@@ -1,4 +1,5 @@
-use crate::support::real_scenario::load_installed_scenario;
+use crate::far_worlds_deep_lorry_acquire::deep_hydroclonk_finds_coral_inside_a_submerged_lorry;
+use crate::support::real_scenario::{prepare_installed_scenario, PreparedInstalledScenario};
 use lc_engine::landscape::PixelGrid;
 use lc_engine::{Landscape, MaterialId, SpawnConfig, Vector2};
 
@@ -52,7 +53,40 @@ fn live_material_count(engine: &lc_engine::Engine, material: MaterialId) -> usiz
 }
 
 #[test]
-fn deep_sea_airlock_pumping_does_not_duplicate_repeatedly_sampled_liquid() {
+fn far_worlds_deep_shared_scenario_subcases() {
+    let prepared = prepare_installed_scenario("FarWorlds.c4f/Deep.c4s", 0);
+    let subcases: &[(&str, fn(&PreparedInstalledScenario))] = &[
+        (
+            "deep_sea_airlock_pumping_does_not_duplicate_repeatedly_sampled_liquid",
+            deep_sea_airlock_pumping_does_not_duplicate_repeatedly_sampled_liquid,
+        ),
+        (
+            "deep_hydroclonk_finds_coral_inside_a_submerged_lorry",
+            deep_hydroclonk_finds_coral_inside_a_submerged_lorry,
+        ),
+    ];
+    let mut failures = Vec::new();
+
+    for &(name, subcase) in subcases {
+        eprintln!("running shared Deep Sea subcase `{name}`");
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subcase(&prepared))).is_err() {
+            eprintln!("shared Deep Sea subcase `{name}` failed; continuing batch");
+            failures.push(name);
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "{} shared Deep Sea subcase(s) failed: {}",
+            failures.len(),
+            failures.join(", ")
+        );
+    }
+}
+
+fn deep_sea_airlock_pumping_does_not_duplicate_repeatedly_sampled_liquid(
+    prepared: &PreparedInstalledScenario,
+) {
     // AIRL::Pumping performs twenty paired
     // InsertMaterial(ExtractLiquid(0, RandomX(13,15)), 0, -50) calls
     // (FarWorlds.c4d/Deep.c4d/Structures.c4d/Airlock.c4d/Script.c:53-65).
@@ -61,7 +95,7 @@ fn deep_sea_airlock_pumping_does_not_duplicate_repeatedly_sampled_liquid() {
     // FnInsertMaterial runs (src/C4Script.cpp:2194-2204). A stale host-world
     // copy instead returns the same three source pixels all twenty times and
     // creates liquid that never existed.
-    let mut engine = load_installed_scenario("FarWorlds.c4f/Deep.c4s", 0);
+    let mut engine = prepared.instantiate();
     let airlock = engine
         .spawn_object(
             SpawnConfig::new("AIRL").with_position(Vector2::new(AIRLOCK_X, REQUESTED_AIRLOCK_Y)),

@@ -197,6 +197,16 @@ forward with the merge lock, and omits the redundant whole-crate working-phase
 suite before that final gate. Scoped diagnostics do not acquire a second lock,
 but do not start while a landing gate owns the machine.
 
+A live follow-up exposed the remaining release/acquire race: scoped work could
+start just after one landing released the lock while the next landing acquired
+it, causing both to run together. One nearly cached 8,120-test gate then took
+129.299s to execute, versus 61.360s for a nearby 8,112-test gate; the samples
+differ by eight tests and are directional contention evidence, not a test-code
+A/B. After acquiring the existing merge lock, a landing worker now polls at
+5ms until pre-existing Cargo, rustc, and nextest processes drain. The held lock
+prevents new compliant diagnostics from starting, without introducing another
+lock or adding a redundant test pass.
+
 With the host build slot isolated, a same-source, one-line incremental app
 change compared warmed test-profile artifacts (`n = 1` each):
 
@@ -359,6 +369,32 @@ engine, environment guard, and temporary user-data tree, while the 9.178s
 physical Tutorial01 route stays standalone. Retained pre-change samples for
 the four batched assertions totaled 20.428s; that aggregate identifies the
 duplicated work and is not claimed as a same-command elapsed speedup.
+
+### Remaining two-case scenario preparation follow-up
+
+Four more two-case families loaded the same immutable installed scenario in
+separate nextest processes. Jungle amulets, the Deep Sea airlock/lorry pair,
+the Arctic kayak pair, and two Tutorial09 app assertions now prepare their
+scenario once per family and instantiate a fresh engine or app for every
+unchanged assertion body. Each batch catches subcase panics and reports every
+failed subcase name; the Arctic batch retains the kayak-rowing regression's
+executable test ID. The batches also start in the existing real-scenario
+priority tiers so their sequential subcases do not become a late suite tail.
+
+Retained pre-change samples total 27.360s for seven of the eight assertions:
+8.135s for Jungle, 8.009s for Deep Sea, 7.116s for Tutorial09, and 4.100s for
+the Arctic cargo case. The newer Arctic rowing regression has no retained
+pre-change profile sample. These totals identify four redundant preparations;
+they are not an elapsed A/B because the old test processes ran concurrently.
+
+The same pass tested a package-only `lc-engine` test-profile reduction from
+optimization level 3 to 2 in an isolated target. Its two unit samples took
+33.80s and 37.36s, versus a 35.56s level-3 workspace reference; fleet overlap
+invalidated the requested brackets, so none is promoted to a clean A/B. Even
+the favorable sample saved only 1.76s, below the 3s acceptance threshold, and
+the candidate rlib was only 0.63% smaller. Since level 2 lacked evidence of a
+material compile win and could slow simulation-heavy tests, the override was
+not adopted and no runtime tradeoff was taken.
 
 The first local reference baseline was recorded on 2026-07-12 from
 `dd32e5d3` with content `67a54d0`, Rust 1.87.0, macOS/Darwin arm64, and an

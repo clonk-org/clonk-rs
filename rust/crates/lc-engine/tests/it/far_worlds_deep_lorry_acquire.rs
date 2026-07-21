@@ -1,16 +1,17 @@
-use crate::support::real_scenario::load_installed_scenario;
+use crate::support::real_scenario::PreparedInstalledScenario;
 use lc_engine::{ocf, Landscape, LiquidSegment, SpawnConfig, Vector2};
 use lc_script::Value;
 
-#[test]
-fn deep_hydroclonk_finds_coral_inside_a_submerged_lorry() {
+pub(super) fn deep_hydroclonk_finds_coral_inside_a_submerged_lorry(
+    prepared: &PreparedInstalledScenario,
+) {
     // HCLK::GetAvailableObject has a second search specifically for objects
     // hidden inside submerged containers. C++ accepts the candidate only when
     // its container's DefCore GrabPutGet contains C4D_GrabGet (or the
     // container has OCF_Entrance)
     // (FarWorlds.c4d/Deep.c4d/Crew.c4d/HydroClonk.c4d/Script.c:43-71;
     // src/C4Script.cpp:4170-4180). LORY is GrabGet|GrabPut and has no entrance.
-    let mut engine = load_installed_scenario("FarWorlds.c4f/Deep.c4s", 0);
+    let mut engine = prepared.instantiate();
     assert_eq!(
         engine.debug_definition_has_function("HCLK", "GetAvailableObject"),
         Some(true),

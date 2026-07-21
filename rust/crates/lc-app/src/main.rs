@@ -106971,14 +106971,53 @@ func Award()
     }
 
     #[test]
-    fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar() {
+    fn real_tutorial09_hud_names_subcases_batch() {
+        let prepared =
+            PreparedRealInstalledScenario::new("Tutorial.c4f/Tutorial09.c4s");
+        let mut failures = Vec::new();
+        run_real_tutorial09_app_subcase(
+            "temporary_breath_physical_renders_the_cpp_hud_bar",
+            &mut failures,
+            || tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(&prepared),
+        );
+        run_real_tutorial09_app_subcase(
+            "system_names_preserve_cpp_ready_conkit_route",
+            &mut failures,
+            || app_tutorial09_system_names_preserve_cpp_ready_conkit_route(&prepared),
+        );
+        assert_no_real_tutorial09_app_subcase_failures(failures);
+    }
+
+    fn run_real_tutorial09_app_subcase(
+        name: &'static str,
+        failures: &mut Vec<&'static str>,
+        subcase: impl FnOnce(),
+    ) {
+        eprintln!("running Tutorial09 app subcase `{name}`");
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(subcase)).is_err() {
+            eprintln!("Tutorial09 app subcase `{name}` failed; continuing batch");
+            failures.push(name);
+        }
+    }
+
+    fn assert_no_real_tutorial09_app_subcase_failures(failures: Vec<&str>) {
+        assert!(
+            failures.is_empty(),
+            "Tutorial09 app subcase(s) failed: {}",
+            failures.join(", ")
+        );
+    }
+
+    fn tutorial09_real_temporary_breath_physical_renders_the_cpp_hud_bar(
+        prepared: &PreparedRealInstalledScenario,
+    ) {
         // Tutorial09 raises the ready CLNK's temporary Breath physical to
         // 250000 without rewriting its current 50000 breath
         // (Tutorial09.c4s/Script.c:18-23; C4Script.cpp:584-598;
         // C4Object.cpp:192-195). C4Viewport therefore draws the cyan breath
         // bar because 0 < Breath < GetPhysical()->Breath
         // (C4Viewport.cpp:920-943; C4Object.cpp:2728-2731).
-        let mut app = real_tutorial_app(9, "Breath HUD parity");
+        let mut app = prepared.instantiate("Breath HUD parity", false);
         wait_for_running(&mut app);
         app.update().expect("Tutorial09 first running frame");
 
@@ -176831,15 +176870,16 @@ protected func InputCallback(string answer, int player)
         );
     }
 
-    #[test]
-    fn app_tutorial09_system_names_preserve_cpp_ready_conkit_route() {
+    fn app_tutorial09_system_names_preserve_cpp_ready_conkit_route(
+        prepared: &PreparedRealInstalledScenario,
+    ) {
         // C4Game::InitScriptEngine loads System.c4g/Names.txt before players
         // join. C4ObjectInfoCore::Default consumes its synchronized name draw
         // before PlaceReadyCrew's position draw, leaving the seed-zero CLNK
         // just left of CNKT so the shipped rightward lesson route collects it
         // (C4Game.cpp:2767-2792; C4InfoCore.cpp:34-55;
         // C4Player.cpp:481-520).
-        let mut app = real_tutorial_app(9, "Tutorial 9 app name parity");
+        let mut app = prepared.instantiate("Tutorial 9 app name parity", false);
         let clonk = app
             .engine
             .crew_cursor(app.local_owner)

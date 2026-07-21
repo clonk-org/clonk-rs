@@ -1,4 +1,6 @@
-use crate::support::real_scenario::{join_local_player, load_installed_scenario};
+use crate::support::real_scenario::{
+    join_local_player, prepare_installed_scenario, PreparedInstalledScenario,
+};
 use lc_engine::{
     CommandDirection, Direction, ObjectId, ObjectUpdate, SpawnConfig, COM_LEFT, COM_RELEASE_OFFSET,
     COM_THROW,
@@ -17,12 +19,45 @@ fn fill_kayak(engine: &mut lc_engine::Engine, kayak: ObjectId, cargo_count: usiz
 
 #[test]
 fn arctic_occupied_kayak_rows_with_jump_and_run_direction_updates() {
+    let prepared = prepare_installed_scenario("FarWorlds.c4f/Arctic.c4s", 0);
+    let subcases: &[(&str, fn(&PreparedInstalledScenario))] = &[
+        (
+            "rows_with_jump_and_run_direction_updates",
+            arctic_occupied_kayak_rows_with_jump_and_run_direction_updates_subcase,
+        ),
+        (
+            "opens_grouped_cargo_only_at_collection_limit",
+            arctic_occupied_kayak_opens_grouped_cargo_only_at_collection_limit,
+        ),
+    ];
+    let mut failures = Vec::new();
+
+    for &(name, subcase) in subcases {
+        eprintln!("running Arctic kayak subcase `{name}`");
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subcase(&prepared))).is_err() {
+            eprintln!("Arctic kayak subcase `{name}` failed; continuing batch");
+            failures.push(name);
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "{} Arctic kayak subcase(s) failed: {}",
+            failures.len(),
+            failures.join(", ")
+        );
+    }
+}
+
+fn arctic_occupied_kayak_rows_with_jump_and_run_direction_updates_subcase(
+    prepared: &PreparedInstalledScenario,
+) {
     // C4Object::ContainedControl dispatches PSF_ContainedControlUpdate, whose
     // script name is `~ContainedUpdate` (C4Script.h:74; C4Object.cpp:3253-3263).
     // Shipped KAJO deliberately defers Jump'n'Run direction handling from
     // ContainedLeft to ContainedUpdate, which starts/stops its Paddle action
     // (Occupied.c4d/Script.c:25-52,54-100).
-    let mut engine = load_installed_scenario("FarWorlds.c4f/Arctic.c4s", 0);
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Arctic kayak rowing parity");
     engine
         .player_mut(owner)
@@ -73,8 +108,9 @@ fn arctic_occupied_kayak_rows_with_jump_and_run_direction_updates() {
     assert_eq!(stopped.command_direction, CommandDirection::Stop);
 }
 
-#[test]
-fn arctic_occupied_kayak_opens_grouped_cargo_only_at_collection_limit() {
+fn arctic_occupied_kayak_opens_grouped_cargo_only_at_collection_limit(
+    prepared: &PreparedInstalledScenario,
+) {
     // Shipped KAJO::ContainedThrow falls through to the ordinary hardcoded
     // Throw below its DefCore CollectionLimit=5, but queues Activate on the
     // contained Clonk once ContentsCount reaches five
@@ -82,7 +118,7 @@ fn arctic_occupied_kayak_opens_grouped_cargo_only_at_collection_limit() {
     // Occupied.c4d/Script.c:123-133; Occupied.c4d/DefCore.txt:20-22;
     // C4Object.cpp:3246-3282). The driver's own slot counts toward KAJO's
     // contents, so three cargo objects remain below the limit and four hit it.
-    let mut engine = load_installed_scenario("FarWorlds.c4f/Arctic.c4s", 0);
+    let mut engine = prepared.instantiate();
     let owner = join_local_player(&mut engine, "Arctic kayak cargo parity");
     let crew = engine
         .crew_cursor(owner)

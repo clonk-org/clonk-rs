@@ -1,16 +1,49 @@
-use crate::support::real_scenario::load_installed_scenario;
+use crate::support::real_scenario::{prepare_installed_scenario, PreparedInstalledScenario};
 use lc_engine::{SpawnConfig, Vector2};
 use lc_script::Value;
 
 #[test]
-fn jungle_amulet_upgrade_initializes_the_new_definition_inline() {
+fn jungle_amulet_real_scenario_subcases() {
+    let prepared = prepare_installed_scenario("FarWorlds.c4f/Jungle.c4s", 0);
+    let subcases: &[(&str, fn(&PreparedInstalledScenario))] = &[
+        (
+            "upgrade_initializes_the_new_definition_inline",
+            jungle_amulet_upgrade_initializes_the_new_definition_inline,
+        ),
+        (
+            "poison_amulet_denies_the_shipped_poison_arrow_curse_inline",
+            jungle_poison_amulet_denies_the_shipped_poison_arrow_curse_inline,
+        ),
+    ];
+    let mut failures = Vec::new();
+
+    for &(name, subcase) in subcases {
+        eprintln!("running Jungle amulet subcase `{name}`");
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subcase(&prepared))).is_err() {
+            eprintln!("Jungle amulet subcase `{name}` failed; continuing batch");
+            failures.push(name);
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "{} Jungle amulet subcase(s) failed: {}",
+            failures.len(),
+            failures.join(", ")
+        );
+    }
+}
+
+fn jungle_amulet_upgrade_initializes_the_new_definition_inline(
+    prepared: &PreparedInstalledScenario,
+) {
     // AMUL::Upgrade changes its own definition and immediately calls
     // `this()->~Initialize()`. C++ resolves that arrow call against the
     // object's live, newly installed Def, so every upgraded amulet performs
     // its new Initialize before Upgrade returns
     // (FarWorlds.c4d/Jungle.c4d/Items.c4d/Tools.c4d/Amulet.c4d/Script.c:42-46;
     // src/C4Object.cpp:1205-1231; src/C4AulExec.cpp:1216-1305).
-    let mut engine = load_installed_scenario("FarWorlds.c4f/Jungle.c4s", 0);
+    let mut engine = prepared.instantiate();
 
     for (offset, upgraded, effect, action) in [
         (0, "AMPH", Some("PhysicalBless"), None),
@@ -114,8 +147,9 @@ fn jungle_amulet_upgrade_initializes_the_new_definition_inline() {
     }
 }
 
-#[test]
-fn jungle_poison_amulet_denies_the_shipped_poison_arrow_curse_inline() {
+fn jungle_poison_amulet_denies_the_shipped_poison_arrow_curse_inline(
+    prepared: &PreparedInstalledScenario,
+) {
     // PARW::HitTarget adds PoisonCurse at priority 182. C++ asks every
     // existing effect with at least that priority before validating the new
     // effect; AMPO's priority-242 FxBanPoisonEffect returns -1, so the curse
@@ -123,7 +157,7 @@ fn jungle_poison_amulet_denies_the_shipped_poison_arrow_curse_inline() {
     // PoisonArrowPack.c4d/PoisonArrow.c4d/Script.c:20-25;
     // FarWorlds.c4d/Jungle.c4d/Items.c4d/Tools.c4d/Amulet.c4d/Immun.c4d/
     // Script.c:20-31; src/C4Effect.cpp:97-116,271-285).
-    let mut engine = load_installed_scenario("FarWorlds.c4f/Jungle.c4s", 0);
+    let mut engine = prepared.instantiate();
     let protected = engine
         .spawn_object(SpawnConfig::new("JCLK").with_position(Vector2::new(100, 100)))
         .expect("the protected shipped Jungle Clonk spawns");
