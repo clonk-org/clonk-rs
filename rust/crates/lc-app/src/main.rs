@@ -9285,7 +9285,15 @@ struct AudioContext {
 }
 
 impl AudioContext {
+    #[cfg(test)]
     fn try_new(options: AudioOptions) -> Result<Self, AudioError> {
+        Self::try_new_with_paths(options, None)
+    }
+
+    fn try_new_with_paths(
+        options: AudioOptions,
+        paths: Option<&AppPaths>,
+    ) -> Result<Self, AudioError> {
         let music_control = Arc::new(std::sync::Mutex::new(MusicControlState::new(
             options.music_volume,
         )));
@@ -9309,7 +9317,10 @@ impl AudioContext {
         let system = AudioSystem::new_with_resampling(options.max_channels, resampling_mode)?;
         #[cfg(test)]
         let (resolver, music_resolver) = if audio_resources_enabled {
-            (SoundResolver::new(), MusicResolver::discover())
+            (
+                SoundResolver::new(),
+                MusicResolver::discover_for_paths(paths),
+            )
         } else {
             // Silent app fixtures exercise audio state and fail-closed UI
             // routes, but never resolve install media. Avoid walking every
@@ -9317,7 +9328,10 @@ impl AudioContext {
             (SoundResolver::empty(), MusicResolver::empty())
         };
         #[cfg(not(test))]
-        let (resolver, music_resolver) = (SoundResolver::new(), MusicResolver::discover());
+        let (resolver, music_resolver) = (
+            SoundResolver::new(),
+            MusicResolver::discover_for_paths(paths),
+        );
         let mut context = Self {
             system,
             options,
@@ -9693,7 +9707,7 @@ impl AudioContext {
         self.refresh_sound_catalog();
     }
 
-    fn reset_music_system_generation(&mut self) {
+    fn reset_music_system_generation(&mut self, paths: Option<&AppPaths>) {
         // C4Application::PreInit replaces the C4MusicSystem object while the
         // process audio backend survives. Invalidate the shared generation
         // rather than replacing it so an older Rust decode worker can never
@@ -9701,7 +9715,22 @@ impl AudioContext {
         self.stop_music();
         lock_unpoisoned(&self.music_control).most_recently_played = None;
         self.set_scenario_music_level(None);
-        self.music_resolver.set_playlist(None);
+        #[cfg(test)]
+        let music_resolver = if self.options.sound_enabled
+            || self.options.music_enabled
+            || self.options.menu_music_enabled
+            || self.options.menu_sound_enabled
+        {
+            MusicResolver::discover_for_paths(paths)
+        } else {
+            // Silent app fixtures deliberately avoid install-media discovery
+            // at construction and must retain that test-only shortcut across
+            // their modeled PreInit transitions.
+            MusicResolver::empty()
+        };
+        #[cfg(not(test))]
+        let music_resolver = MusicResolver::discover_for_paths(paths);
+        self.music_resolver = music_resolver;
     }
 
     fn clear_object_sound_instances(&mut self) {
@@ -26420,7 +26449,7 @@ impl GameApp {
             load_sound_command_cooldown(paths),
             audio_options.mute_sound_command,
         );
-        let audio = match AudioContext::try_new(audio_options) {
+        let audio = match AudioContext::try_new_with_paths(audio_options, paths) {
             Ok(ctx) => Some(ctx),
             Err(err) => {
                 tracing::warn!(error = %err, "audio initialisation failed");
@@ -58733,7 +58762,6 @@ impl GameApp {
         &mut self,
         purpose: StartupNetworkPurpose,
     ) -> Result<(), EngineError> {
-
         // Failed C4Game::Init returns through QuitGame and constructs the
         // remembered startup dialog again in the same process. Clear every
         // partially installed network-game projection before doing likewise.
@@ -58795,6 +58823,12 @@ impl GameApp {
         self.active_definition_load = None;
         self.mode = AppMode::Menu;
         self.status_text.clear();
+
+        // C4Application::QuitGame returns an ordinary failed startup host/join
+        // through PreInit before C4Startup::DoStartup reconstructs the
+        // remembered dialog. Explicit command-line and developer-console
+        // starts have no such second application generation.
+        self.resume_startup_music_after_failed_open_game();
 
         match purpose {
             StartupNetworkPurpose::StagedHost => {
@@ -66368,7 +66402,7 @@ impl GameApp {
                     self.play_classic_lobby_sounds();
                     self.restart_restore_roster_items.clear();
                     self.show_main_menu();
-                    self.begin_frontend_music_entry();
+                    self.resume_startup_music_after_failed_open_game();
                     return Ok(());
                 }
                 ClassicLobbyAction::StartRequested {
@@ -73840,7 +73874,17 @@ impl GameApp {
                         self.network_start_wait = None;
                         self.mode = AppMode::Menu;
                         self.restore_startup_fonts();
-                        self.begin_frontend_music_entry();
+                        if self.failed_open_game_returns_to_startup() {
+                            // Failed C4Application::OpenGame routes through
+                            // QuitGame and another application PreInit. The
+                            // developer console and explicit command-line
+                            // failures do not return to startup.
+                            if let Some(audio) = self.audio.as_mut() {
+                                audio.configure_scenario(None);
+                            }
+                            self.reconstruct_music_system_at_preinit();
+                            self.begin_frontend_music_entry();
+                        }
                     } else if prepared_go {
                         // C4Game::InitGameFinal calls CheckStatusReached only
                         // after the already-opened scenario has initialized.
@@ -73917,7 +73961,13 @@ impl GameApp {
                     self.network_start_wait = None;
                     self.mode = AppMode::Menu;
                     self.restore_startup_fonts();
-                    self.begin_frontend_music_entry();
+                    if self.failed_open_game_returns_to_startup() {
+                        if let Some(audio) = self.audio.as_mut() {
+                            audio.configure_scenario(None);
+                        }
+                        self.reconstruct_music_system_at_preinit();
+                        self.begin_frontend_music_entry();
+                    }
                 }
             }
         }
@@ -74964,6 +75014,7 @@ impl GameApp {
                             if text.is_empty() {
                                 self.pending_network_join = None;
                                 self.status_text.clear();
+                                self.resume_startup_music_after_failed_open_game();
                                 break;
                             }
                             let Some(password) =
@@ -74972,6 +75023,7 @@ impl GameApp {
                                 self.pending_network_join = None;
                                 self.status_text =
                                     "Network password contains an unsupported NUL byte".to_string();
+                                self.resume_startup_music_after_failed_open_game();
                                 break;
                             };
                             let Some(settings) = self.pending_network_join.as_mut() else {
@@ -75036,6 +75088,7 @@ impl GameApp {
                         PendingInputDialogPurpose::NetworkJoinPassword => {
                             self.pending_network_join = None;
                             self.status_text.clear();
+                            self.resume_startup_music_after_failed_open_game();
                         }
                         PendingInputDialogPurpose::GameOption(kind) => {
                             let actions = self.scenario_game_options.resolve_input_dialog(
@@ -75496,6 +75549,7 @@ impl GameApp {
                     self.startup_network_connection = None;
                     self.pending_network_join = None;
                     self.status_text.clear();
+                    self.resume_startup_music_after_failed_open_game();
                 }
             }
             MessageDialogContinuation::StartupIrcConnectWarning { login } => {
@@ -82204,6 +82258,51 @@ impl GameApp {
         fading
     }
 
+    fn reconstruct_music_system_at_preinit(&mut self) {
+        // The old fade belongs to the object destroyed by MusicSystem.emplace.
+        // Its replacement is immediately eligible for DoStartup playback.
+        self.resume_frontend_music_after_fade = false;
+        if let Some(audio) = self.audio.as_mut() {
+            audio.reset_music_system_generation(self.app_paths.as_ref());
+        }
+    }
+
+    fn failed_open_game_returns_to_startup(&self) -> bool {
+        // C4Game::ParseCommandLine suppresses UseStartupDialog for an explicit
+        // scenario, direct join or record stream. Their failed OpenGame quits;
+        // console `/open` returns directly to C4AS_Startup. Only an ordinary
+        // fullscreen startup lineage reaches QuitGame -> PreInit -> DoStartup.
+        !self.console_mode
+            && self
+                .classic_command_line
+                .scenario
+                .as_ref()
+                .is_none_or(|path| path.as_os_str().is_empty())
+            && self
+                .classic_command_line
+                .direct_join
+                .as_deref()
+                .is_none_or(str::is_empty)
+            && self
+                .classic_command_line
+                .record_stream
+                .as_ref()
+                .is_none_or(|path| path.as_os_str().is_empty())
+            && self
+                .classic_command_line
+                .stream_address
+                .as_deref()
+                .is_none_or(str::is_empty)
+    }
+
+    fn resume_startup_music_after_failed_open_game(&mut self) {
+        if !self.failed_open_game_returns_to_startup() {
+            return;
+        }
+        self.reconstruct_music_system_at_preinit();
+        self.begin_frontend_music_entry();
+    }
+
     fn return_to_menu(&mut self) {
         self.restart_restore_infos = RestartRestoreInfos::default();
         self.return_to_menu_with_dialog_restore(true);
@@ -82362,13 +82461,13 @@ impl GameApp {
         self.active_definition_load = None;
         self.loading_state = None;
         self.runtime_music_enabled = false;
+        self.reconstruct_music_system_at_preinit();
         if let Some(audio) = self.audio.as_mut() {
             // Game.Clear has already requested its 2s fade above. On the next
             // C4AS_PreInit, MusicSystem.emplace() replaces the still-engaged
             // C4MusicSystem; its destructor performs Stop(0), so startup never
             // waits for that fade to finish. Keep the audio backend, but cancel
             // both live playback and any stale asynchronous Rust decode now.
-            audio.reset_music_system_generation();
             // The same PreInit reconstructs the process sound system.
             audio.reset_sound_system_generation();
             audio.configure_scenario(None);
@@ -91328,8 +91427,19 @@ impl MusicResolver {
                 return Self::empty();
             }
         };
+        Self::discover_from_paths(&paths)
+    }
+
+    fn discover_for_paths(paths: Option<&AppPaths>) -> Self {
+        match paths {
+            Some(paths) => Self::discover_from_paths(paths),
+            None => Self::discover(),
+        }
+    }
+
+    fn discover_from_paths(paths: &AppPaths) -> Self {
         let global = (|| -> anyhow::Result<MusicCatalog> {
-            let path = find_music_group(&paths)?;
+            let path = find_music_group(paths)?;
             let group = Group::open(&path)
                 .with_context(|| format!("failed to open music group at {}", path.display()))?;
             MusicCatalog::from_group(group).map_err(anyhow::Error::from)
@@ -91350,7 +91460,7 @@ impl MusicResolver {
                 "MoreMusic discovery skipped"
             );
         }
-        let extra = match mapped_classic_extra_group_path(&paths) {
+        let extra = match mapped_classic_extra_group_path(paths) {
             Ok(Some(path)) => match Group::open(&path) {
                 Ok(extra) => Some(extra),
                 Err(error) => {
@@ -125101,10 +125211,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.begin_frontend_music_entry();
         assert!(app.frontend_music_attempted_for_entry);
         let audio = app.audio.as_ref().expect("test audio");
-        assert_eq!(
-            audio.music_resolver.playlist.as_deref(),
-            Some("Frontend.*")
-        );
+        assert_eq!(audio.music_resolver.playlist.as_deref(), Some("Frontend.*"));
         assert_eq!(
             audio
                 .music_resolver
@@ -125560,59 +125667,291 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
-    fn music_catalog_returns_to_global_for_the_next_preinit_generation() {
-        // QuitGame enters C4AS_PreInit, whose unconditional
-        // MusicSystem.emplace() destroys the local catalog and constructs a
-        // fresh one from Music.c4g before startup or the next full scenario
-        // (C4Application.cpp:373-400,232-293). Local replacement therefore
-        // never survives into a later frontend or music-less game.
+    fn frontend_preinit_reloads_changed_music_and_more_music_catalog() {
+        // QuitGame enters C4AS_PreInit, whose unconditional MusicSystem.emplace()
+        // destroys the local catalog and reconstructs Music.c4g + MoreMusic.txt
+        // before startup or the next full scenario (C4Application.cpp:232-293,
+        // 373-400; C4MusicSystem.cpp:37-45,391-434).
         let dir = tempdir().expect("music lifecycle fixture");
         let global = dir.path().join("Music.c4g");
+        let extras = dir.path().join("Extras");
+        fs::create_dir_all(dir.path().join("planet/System.c4g"))
+            .expect("create minimal install system group");
         fs::create_dir_all(&global).expect("create global music group");
-        fs::write(global.join("Frontend.ogg"), b"frontend").expect("write frontend track");
-        fs::write(global.join("Global Theme.ogg"), b"global").expect("write global track");
+        fs::create_dir_all(&extras).expect("create MoreMusic directory");
+        fs::write(global.join("Old Base.ogg"), b"old base").expect("old global track");
+        fs::write(global.join("Removed.mod"), b"removed").expect("removed global track");
+        fs::write(extras.join("Old Match.mp3"), b"old wildcard").expect("old wildcard track");
+        fs::write(dir.path().join("MoreMusic.txt"), b"Extras/*.mp3\n")
+            .expect("initial MoreMusic manifest");
 
-        let local_scenario = dir.path().join("Fantasy.c4f/Local.c4s");
-        let local_music = dir.path().join("Fantasy.c4f/Music.c4g");
-        fs::create_dir_all(&local_scenario).expect("create local-music scenario");
-        fs::create_dir_all(&local_music).expect("create local music group");
-        fs::write(local_music.join("Local Theme.ogg"), b"local")
-            .expect("write local track");
-        let musicless_scenario = dir.path().join("Tutorial.c4f/Musicless.c4s");
-        fs::create_dir_all(&musicless_scenario).expect("create music-less scenario");
+        let local_scenario = dir.path().join("Local.c4s");
+        fs::create_dir_all(&local_scenario).expect("create local scenario");
+        fs::write(local_scenario.join("Local Theme.ogg"), b"local")
+            .expect("write local scenario track");
 
-        let mut resolver = MusicResolver::with_global_group(
-            Group::open(&global).expect("open global music group"),
+        let user_data = dir.path().join("user");
+        let _env_lock = env_lock().lock();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(dir.path())),
+            ("LC_CONTENT_DIR", Some(dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.as_path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover fixture paths");
+        paths.ensure_user_dirs().expect("create fixture user paths");
+        let mut audio = AudioContext::try_new_with_paths(
+            AudioOptions {
+                max_channels: 1,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
         )
-        .expect("build music resolver");
-        resolver
-            .configure_scenario(Some(&local_scenario))
-            .expect("configure local-music scenario");
-        assert!(resolver.resolve("Frontend").is_none());
-        assert!(resolver.resolve("Local Theme").is_some());
+        .expect("create audio context");
 
-        resolver
-            .configure_scenario(None)
-            .expect("enter the next frontend generation");
-        resolver.set_playlist(Some("Frontend.*".to_string()));
+        let mut initial = audio.music_resolver.global.filenames();
+        initial.sort();
+        assert_eq!(initial, ["Old Base.ogg", "Old Match.mp3", "Removed.mod"]);
+        audio.configure_scenario(Some(&local_scenario));
+        let stale_recent = Arc::clone(
+            &audio
+                .music_resolver
+                .resolve("Local Theme")
+                .expect("local scenario catalog")
+                .identity,
+        );
+        audio
+            .music_resolver
+            .set_playlist(Some("Local.*".to_string()));
+        lock_unpoisoned(&audio.music_control).most_recently_played = Some(stale_recent);
+        audio.set_scenario_music_level(Some(25));
+
+        fs::remove_file(global.join("Old Base.ogg")).expect("remove old global track");
+        fs::remove_file(global.join("Removed.mod")).expect("remove second old track");
+        fs::remove_file(extras.join("Old Match.mp3")).expect("remove old wildcard track");
+        fs::write(global.join("New Base.ogg"), b"new base").expect("new global track");
+        fs::write(global.join("Frontend.ogg"), b"new frontend").expect("new frontend track");
+        fs::write(extras.join("New Match.ogg"), b"new wildcard").expect("new wildcard track");
+        fs::write(
+            dir.path().join("MoreMusic.txt"),
+            b"Extras/*.ogg\n#clear\nMusic.c4g\nExtras/*.ogg\n",
+        )
+        .expect("replacement MoreMusic manifest");
+
+        assert!(
+            audio.music_resolver.global.resolve("New Base").is_none(),
+            "external edits remain invisible until the next PreInit"
+        );
+        audio.reset_music_system_generation(Some(&paths));
+
+        let mut reloaded = audio.music_resolver.active_filenames();
+        reloaded.sort();
+        assert_eq!(reloaded, ["Frontend.ogg", "New Base.ogg", "New Match.ogg"]);
         assert_eq!(
-            resolver
+            audio
+                .music_resolver
+                .resolve("New Base")
+                .expect("reloaded Music.c4g addition")
+                .load_audio()
+                .expect("read reloaded global track"),
+            b"new base"
+        );
+        assert_eq!(
+            audio
+                .music_resolver
+                .resolve("New Match")
+                .expect("changed wildcard match")
+                .load_audio()
+                .expect("read changed wildcard track"),
+            b"new wildcard"
+        );
+        for removed in ["Old Base", "Removed", "Old Match", "Local Theme"] {
+            assert!(
+                audio.music_resolver.resolve(removed).is_none(),
+                "{removed} must not leak into the reconstructed catalog"
+            );
+        }
+        assert!(!audio.music_resolver.scenario_has_local_sources);
+        assert!(audio.music_resolver.scenario_root.is_none());
+        assert!(audio.music_resolver.playlist.is_none());
+        let control = lock_unpoisoned(&audio.music_control);
+        assert!(control.most_recently_played.is_none());
+        assert!(control.scenario_level.is_none());
+        drop(control);
+
+        audio.prepare_frontend_music();
+        assert_eq!(audio.music_resolver.playlist.as_deref(), Some("Frontend.*"));
+        assert_eq!(
+            audio
+                .music_resolver
                 .first_default()
                 .map(|asset| asset.file_name.as_str()),
-            Some("Frontend.ogg")
+            Some("Frontend.ogg"),
+            "the ensuing frontend selection must use the rediscovered catalog"
         );
-        assert!(resolver.resolve("Local Theme").is_none());
 
-        resolver
-            .configure_scenario(Some(&musicless_scenario))
-            .expect("configure later music-less scenario");
+        // A failed startup host/join also runs QuitGame -> PreInit ->
+        // DoStartup. Prove that shortcut performs a third discovery before it
+        // requests frontend music, rather than retaining this second catalog.
+        let controlled_fixture = audio
+            .system
+            .load_music(&silent_pcm_wav(20))
+            .expect("predecode controlled frontend fixture");
+        audio.control_music_loads_with(controlled_fixture);
+        fs::remove_file(global.join("New Base.ogg")).expect("remove second-generation base");
+        fs::remove_file(extras.join("New Match.ogg"))
+            .expect("remove second-generation wildcard match");
+        fs::write(global.join("Final Base.ogg"), b"final base")
+            .expect("third-generation global track");
+        fs::write(extras.join("Final Match.ogg"), b"final wildcard")
+            .expect("third-generation wildcard track");
+
+        let mut app = new_real_classic_menu_app(640, 480);
+        app.app_paths = Some(paths.clone());
+        app.audio = Some(audio);
+        app.resume_frontend_music_after_fade = true;
+        app.startup_restart_diagnostics.mark_quit_with_error();
+        app.startup_restart_diagnostics
+            .add_fatal_error("fixture startup failure");
+        app.finish_startup_network_restart(StartupNetworkPurpose::Join)
+            .expect("failed startup returns through PreInit and DoStartup");
+
+        let audio = app.audio.as_ref().expect("test audio survives PreInit");
+        let mut final_catalog = audio.music_resolver.active_filenames();
+        final_catalog.sort();
         assert_eq!(
-            resolver
-                .first_default()
-                .map(|asset| asset.file_name.as_str()),
-            Some("Global Theme.ogg")
+            final_catalog,
+            ["Final Base.ogg", "Final Match.ogg", "Frontend.ogg"]
         );
-        assert!(resolver.resolve("Local Theme").is_none());
+        assert_eq!(
+            audio.music_resolver.playlist.as_deref(),
+            Some("Frontend.*")
+        );
+        assert!(!app.resume_frontend_music_after_fade);
+        assert!(app.frontend_music_attempted_for_entry);
+        let expected_frontend = audio
+            .music_resolver
+            .first_default()
+            .expect("fresh frontend selection")
+            .identity
+            .clone();
+        let controlled = audio
+            .controlled_music_loads
+            .as_ref()
+            .expect("controlled music loading");
+        assert_eq!(controlled.requests.len(), 1);
+        let request = controlled
+            .requests
+            .front()
+            .expect("DoStartup frontend music request");
+        assert!(!request.looped);
+        assert!(request
+            .identity
+            .as_ref()
+            .is_some_and(|identity| Arc::ptr_eq(identity, &expected_frontend)));
+
+        let pre_console_generation = lock_unpoisoned(&audio.music_control).generation;
+        fs::remove_file(global.join("Final Base.ogg")).expect("remove third-generation base");
+        fs::remove_file(extras.join("Final Match.ogg"))
+            .expect("remove third-generation wildcard match");
+        fs::write(global.join("Console Only.ogg"), b"console").expect("console-only external edit");
+        app.console_mode = true;
+        app.resume_frontend_music_after_fade = true;
+        app.startup_restart_diagnostics.mark_quit_with_error();
+        app.startup_restart_diagnostics
+            .add_fatal_error("fixture console failure");
+        app.finish_startup_network_restart(StartupNetworkPurpose::Join)
+            .expect("console open failure returns without application PreInit");
+
+        let audio = app
+            .audio
+            .as_ref()
+            .expect("console retains audio generation");
+        assert_eq!(
+            lock_unpoisoned(&audio.music_control).generation,
+            pre_console_generation
+        );
+        let mut retained_catalog = audio.music_resolver.active_filenames();
+        retained_catalog.sort();
+        assert_eq!(
+            retained_catalog,
+            ["Final Base.ogg", "Final Match.ogg", "Frontend.ogg"]
+        );
+        assert!(audio.music_resolver.resolve("Console Only").is_none());
+        assert_eq!(
+            audio
+                .controlled_music_loads
+                .as_ref()
+                .expect("controlled music loading")
+                .requests
+                .len(),
+            1,
+            "console failure must not run C4Startup::DoStartup again"
+        );
+        assert!(app.resume_frontend_music_after_fade);
+
+        app.console_mode = false;
+        app.classic_command_line.scenario = Some(dir.path().join("Explicit.c4s"));
+        app.startup_restart_diagnostics.mark_quit_with_error();
+        app.startup_restart_diagnostics
+            .add_fatal_error("fixture command-line failure");
+        app.finish_startup_network_restart(StartupNetworkPurpose::Join)
+            .expect("explicit command-line failure does not enter PreInit");
+        let audio = app
+            .audio
+            .as_ref()
+            .expect("command-line failure retains audio generation");
+        assert_eq!(
+            lock_unpoisoned(&audio.music_control).generation,
+            pre_console_generation
+        );
+        assert!(audio.music_resolver.resolve("Console Only").is_none());
+        assert_eq!(
+            audio
+                .controlled_music_loads
+                .as_ref()
+                .expect("controlled music loading")
+                .requests
+                .len(),
+            1
+        );
+
+        app.classic_command_line.scenario = None;
+        app.classic_command_line.stream_address = Some("record.example:11114".to_string());
+        assert!(!app.failed_open_game_returns_to_startup());
+        app.classic_command_line.stream_address = Some(String::new());
+        app.classic_command_line.direct_join = Some(String::new());
+        assert!(
+            app.failed_open_game_returns_to_startup(),
+            "native suppresses startup only for nonempty command-line buffers"
+        );
+
+        // User-aborting the pre-game lobby also makes OpenGame return false.
+        // Its ordinary startup lineage must run the same QuitGame -> PreInit
+        // reconstruction, while the earlier console edit is still pending.
+        app.classic_command_line = ClassicCommandLine::default();
+        let pre_lobby_generation = lock_unpoisoned(
+            &app.audio
+                .as_ref()
+                .expect("lobby retains audio")
+                .music_control,
+        )
+        .generation;
+        install_test_classic_host_lobby(&mut app);
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::ExitRequested])
+            .expect("lobby abort returns through PreInit and DoStartup");
+        let audio = app.audio.as_ref().expect("lobby abort retains audio");
+        assert!(lock_unpoisoned(&audio.music_control).generation > pre_lobby_generation);
+        assert!(audio.music_resolver.resolve("Console Only").is_some());
+        assert_eq!(
+            audio
+                .controlled_music_loads
+                .as_ref()
+                .expect("controlled music loading")
+                .requests
+                .len(),
+            2,
+            "lobby abort requests frontend music exactly once after rediscovery"
+        );
     }
 
     #[test]
