@@ -151,7 +151,6 @@ struct DiscoveredDevice {
 struct GatewayService {
     control_url: Url,
     service_type: String,
-    supports_add_any_port_mapping: bool,
     local_address: Ipv4Addr,
 }
 
@@ -389,13 +388,10 @@ fn parse_device_description(xml: &[u8], location: &Url) -> UpnpResult<GatewaySer
         }
     }
 
-    let (_, supports_add_any_port_mapping, service) = services
+    let (_, service) = services
         .into_iter()
-        .filter_map(|service| {
-            service_preference(&service.service_type)
-                .map(|(rank, supports_add_any)| (rank, supports_add_any, service))
-        })
-        .min_by_key(|(rank, _, _)| *rank)
+        .filter_map(|service| service_preference(&service.service_type).map(|rank| (rank, service)))
+        .min_by_key(|(rank, _)| *rank)
         .ok_or(UpnpError::InvalidDescription)?;
 
     let base = match url_base {
@@ -411,22 +407,21 @@ fn parse_device_description(xml: &[u8], location: &Url) -> UpnpResult<GatewaySer
     Ok(GatewayService {
         control_url,
         service_type: service.service_type,
-        supports_add_any_port_mapping,
         local_address: Ipv4Addr::UNSPECIFIED,
     })
 }
 
-fn service_preference(service_type: &str) -> Option<(u8, bool)> {
+fn service_preference(service_type: &str) -> Option<u8> {
     let (name, version) = service_type.rsplit_once(':')?;
     let version = version.parse::<u16>().ok()?;
     if name.ends_with(":WANIPConnection") {
         match version {
-            2.. => Some((0, true)),
-            1 => Some((1, false)),
+            2.. => Some(0),
+            1 => Some(1),
             _ => None,
         }
     } else if name.ends_with(":WANPPPConnection") {
-        Some((2, version >= 2))
+        Some(2)
     } else {
         None
     }
@@ -442,7 +437,7 @@ async fn add_port_mapping(
     } else {
         request.external_port
     };
-    let use_add_any = gateway.supports_add_any_port_mapping && request.external_port == 0;
+    let use_add_any = request.external_port == 0;
     let action = if use_add_any {
         "AddAnyPortMapping"
     } else {
@@ -554,7 +549,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
-        sync::{mpsc, Mutex},
+        sync::mpsc,
     };
 
     #[derive(Debug)]
@@ -655,8 +650,103 @@ mod tests {
         http_task.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn upnp_zero_external_port_uses_add_any_on_igd_v1_like_cpp() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_address = listener.local_addr().unwrap();
+        let (request_tx, mut request_rx) = mpsc::unbounded_channel();
+        let description = Arc::new(format!(
+            "<?xml version=\"1.0\"?>\
+             <root><URLBase>http://{http_address}/gateway/</URLBase><device><serviceList>\
+             <service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>\
+             <controlURL>control-v1</controlURL></service>\
+             </serviceList></device></root>"
+        ));
+        let http_task = tokio::spawn(run_fake_gateway(listener, description, request_tx, 6));
+
+        let ssdp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let ssdp_address = match ssdp.local_addr().unwrap() {
+            SocketAddr::V4(address) => address,
+            SocketAddr::V6(_) => unreachable!(),
+        };
+        let location = format!("http://{http_address}/root.xml");
+        let ssdp_task = tokio::spawn(async move {
+            let mut buffer = [0_u8; 2048];
+            let (_, peer) = ssdp.recv_from(&mut buffer).await.unwrap();
+            let response =
+                format!("HTTP/1.1 200 OK\r\nlOcAtIoN: {location}\r\nST: upnp:rootdevice\r\n\r\n");
+            ssdp.send_to(response.as_bytes(), peer).await.unwrap();
+        });
+
+        let active = RealActivePortMappings::spawn(
+            vec![
+                PortMappingRequest {
+                    protocol: PortMappingProtocol::Tcp,
+                    internal_port: 32999,
+                    external_port: 0,
+                },
+                PortMappingRequest {
+                    protocol: PortMappingProtocol::Tcp,
+                    internal_port: 32111,
+                    external_port: 0,
+                },
+                PortMappingRequest {
+                    protocol: PortMappingProtocol::Udp,
+                    internal_port: 32112,
+                    external_port: 40123,
+                },
+            ],
+            UpnpRuntimeConfig {
+                ssdp_target: ssdp_address,
+                discovery_timeout: Duration::from_millis(100),
+                http_timeout: Duration::from_secs(1),
+            },
+        );
+
+        let rejected_add_any = recv_fake_request(&mut request_rx).await;
+        let successful_add_any = recv_fake_request(&mut request_rx).await;
+        let explicit_add = recv_fake_request(&mut request_rx).await;
+        assert_eq!(rejected_add_any.path, "/gateway/control-v1");
+        assert_eq!(rejected_add_any.action, "AddAnyPortMapping");
+        assert!(rejected_add_any
+            .body
+            .contains("<NewExternalPort>32999</NewExternalPort>"));
+        assert_eq!(successful_add_any.path, "/gateway/control-v1");
+        assert_eq!(successful_add_any.action, "AddAnyPortMapping");
+        assert!(successful_add_any
+            .body
+            .contains("<NewExternalPort>32111</NewExternalPort>"));
+        assert_eq!(explicit_add.path, "/gateway/control-v1");
+        assert_eq!(explicit_add.action, "AddPortMapping");
+        assert!(explicit_add
+            .body
+            .contains("<NewExternalPort>40123</NewExternalPort>"));
+
+        Box::new(active).shutdown().await;
+
+        let add_any_delete = recv_fake_request(&mut request_rx).await;
+        let explicit_delete = recv_fake_request(&mut request_rx).await;
+        assert_eq!(add_any_delete.action, "DeletePortMapping");
+        assert!(add_any_delete
+            .body
+            .contains("<NewProtocol>TCP</NewProtocol>"));
+        assert!(add_any_delete
+            .body
+            .contains("<NewExternalPort>45111</NewExternalPort>"));
+        assert_eq!(explicit_delete.action, "DeletePortMapping");
+        assert!(explicit_delete
+            .body
+            .contains("<NewProtocol>UDP</NewProtocol>"));
+        assert!(explicit_delete
+            .body
+            .contains("<NewExternalPort>40123</NewExternalPort>"));
+
+        ssdp_task.await.unwrap();
+        http_task.await.unwrap();
+    }
+
     #[test]
-    fn cpp_upnp_v1_and_ppp_service_fallbacks_resolve_relative_control_urls() {
+    fn cpp_upnp_v1_and_ppp_services_resolve_relative_control_urls() {
         let location = Url::parse("http://192.0.2.10/devices/root.xml").unwrap();
         let description = br#"
             <root><device><serviceList>
@@ -671,7 +761,10 @@ mod tests {
             gateway.control_url.as_str(),
             "http://192.0.2.10/ppp/control"
         );
-        assert!(!gateway.supports_add_any_port_mapping);
+        assert_eq!(
+            gateway.service_type,
+            "urn:schemas-upnp-org:service:WANPPPConnection:1"
+        );
     }
 
     async fn recv_fake_request(
@@ -689,12 +782,11 @@ mod tests {
         requests: mpsc::UnboundedSender<FakeSoapRequest>,
         expected_requests: usize,
     ) {
-        let request_count = Arc::new(Mutex::new(0_usize));
         for _ in 0..expected_requests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut stream).await;
-            let body = if request.action.is_empty() {
-                description.as_bytes().to_vec()
+            let (status, body) = if request.action.is_empty() {
+                ("200 OK", description.as_bytes().to_vec())
             } else {
                 let action = request.action.clone();
                 let protocol = if request.body.contains("<NewProtocol>TCP</NewProtocol>") {
@@ -702,27 +794,43 @@ mod tests {
                 } else {
                     "UDP"
                 };
+                let reject_mapping = request
+                    .body
+                    .contains("<NewInternalPort>32999</NewInternalPort>");
+                let service_version = if request.body.contains("WANIPConnection:1") {
+                    1
+                } else {
+                    2
+                };
                 requests.send(request).unwrap();
-                let mut count = request_count.lock().await;
-                *count += 1;
                 match action.as_str() {
+                    "AddAnyPortMapping" if reject_mapping => (
+                        "500 Internal Server Error",
+                        b"<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body /></s:Envelope>".to_vec(),
+                    ),
                     "AddAnyPortMapping" => {
                         let assigned_port = if protocol == "TCP" { 45111 } else { 45112 };
-                        format!(
-                            "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">\
-                             <s:Body><u:AddAnyPortMappingResponse \
-                             xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:2\">\
-                             <NewReservedPort>{assigned_port}</NewReservedPort>\
-                             </u:AddAnyPortMappingResponse></s:Body></s:Envelope>"
+                        (
+                            "200 OK",
+                            format!(
+                                "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">\
+                                 <s:Body><u:AddAnyPortMappingResponse \
+                                 xmlns:u=\"urn:schemas-upnp-org:service:WANIPConnection:{service_version}\">\
+                                 <NewReservedPort>{assigned_port}</NewReservedPort>\
+                                 </u:AddAnyPortMappingResponse></s:Body></s:Envelope>"
+                            )
+                            .into_bytes(),
                         )
-                        .into_bytes()
                     }
-                    "DeletePortMapping" => b"<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body /></s:Envelope>".to_vec(),
+                    "AddPortMapping" | "DeletePortMapping" => (
+                        "200 OK",
+                        b"<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body /></s:Envelope>".to_vec(),
+                    ),
                     _ => panic!("unexpected SOAP action {action}"),
                 }
             };
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 {status}\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             stream.write_all(response.as_bytes()).await.unwrap();
