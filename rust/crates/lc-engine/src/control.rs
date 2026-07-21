@@ -2330,6 +2330,749 @@ pub fn parse_control_ini(input: &str) -> Result<Vec<ControlPacket>, ControlParse
     Ok(packets)
 }
 
+/// Placement of one control packet in the classic verbose INI compiler.
+///
+/// A control list (`RCT_Ctrl`) uses [`Self::IdPacketSection`], while a single
+/// control packet (`RCT_CtrlPkt`) is compiled [`Self::Inline`] directly into
+/// its parent record section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlIniPacketMode {
+    IdPacketSection,
+    Inline,
+}
+
+/// Failure while producing the classic `StdCompilerINIWrite` representation
+/// of a typed control packet.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ControlIniEncodeError {
+    #[error("control packet {id:#04x} ({name}) has no typed C++ INI serializer")]
+    UnsupportedPacket { id: u8, name: String },
+    #[error("loadable resource core has zero chunk size")]
+    ZeroResourceChunkSize,
+    #[error("player-info packet contains {count} players; C++ permits at most 5000")]
+    TooManyPlayerInfos { count: usize },
+    #[error("{field} contains {count} entries, which cannot fit the C++ signed count field")]
+    CollectionTooLarge { field: &'static str, count: usize },
+    #[error("player-info entry {index} has HasResource set but carries no resource core")]
+    MissingPlayerInfoResource { index: usize },
+}
+
+/// Encode one packet as a top-level classic `[IDPacket]` INI section.
+///
+/// The returned bytes use CRLF, exact C++ field ordering/default omission,
+/// byte-preserving escaped strings, and the indentation emitted by
+/// `StdCompilerINIWrite`.
+pub fn encode_control_packet_ini(packet: &ControlPacket) -> Result<Vec<u8>, ControlIniEncodeError> {
+    let mut output = Vec::new();
+    append_control_packet_ini(
+        &mut output,
+        packet,
+        0,
+        ControlIniPacketMode::IdPacketSection,
+    )?;
+    Ok(output)
+}
+
+/// Append one packet at an existing classic INI compiler depth.
+///
+/// `base_indent` is the indentation, in spaces, of the `[IDPacket]` section
+/// and its `ID` field in section mode, or of the `ID` field in inline mode.
+/// Thus record `RCT_Ctrl` chunks use `(2, IdPacketSection)` and `RCT_CtrlPkt`
+/// chunks use `(0, Inline)`. Output is generated at the requested depth;
+/// callers never need to re-indent escaped or `RCT_All` data after the fact.
+pub fn append_control_packet_ini(
+    output: &mut Vec<u8>,
+    packet: &ControlPacket,
+    base_indent: usize,
+    mode: ControlIniPacketMode,
+) -> Result<(), ControlIniEncodeError> {
+    let (id, packet_name) = control_packet_ini_identity(packet)?;
+    if mode == ControlIniPacketMode::IdPacketSection {
+        append_ini_section_header(output, base_indent, "IDPacket");
+    }
+    append_ini_field_raw(output, base_indent, "ID", id.to_string().as_bytes());
+
+    if let ControlPacket::DebugRecord(data) = packet {
+        let mut value = data.data.len().to_string().into_bytes();
+        value.extend_from_slice(b":");
+        append_ini_escaped(&mut value, &data.data);
+        append_ini_field_raw(output, base_indent, "Debug Rec", &value);
+        return Ok(());
+    }
+
+    let body_indent = base_indent + 2;
+    let body = encode_control_packet_ini_body(packet, body_indent)?;
+    if !body.is_empty() {
+        append_ini_section_header(output, body_indent, packet_name);
+        output.extend_from_slice(&body.bytes);
+    }
+    Ok(())
+}
+
+fn control_packet_ini_identity(
+    packet: &ControlPacket,
+) -> Result<(u8, &'static str), ControlIniEncodeError> {
+    Ok(match packet {
+        ControlPacket::ClientJoin(_) => (0x80, "Client Join"),
+        ControlPacket::ClientUpdate(_) => (0x81, "Client Update"),
+        ControlPacket::ClientRemove(_) => (0x82, "Client Remove"),
+        ControlPacket::Vote(_) => (0x83, "Voting"),
+        ControlPacket::VoteEnd(_) => (0x84, "Voting End"),
+        ControlPacket::SyncCheck(_) => (0x85, "Sync Check"),
+        ControlPacket::Synchronize(_) => (0x86, "Synchronize"),
+        ControlPacket::Set(_) => (0x87, "Set"),
+        ControlPacket::Script(_) => (0x88, "Script"),
+        ControlPacket::PlayerInfo(_) => (0x90, "Player Info"),
+        ControlPacket::JoinPlayer(_) => (0x91, "Join Player"),
+        ControlPacket::RemovePlayer(_) => (0x92, "Remove Player"),
+        ControlPacket::PlayerSelect(_) => (0xa0, "Player Select"),
+        ControlPacket::PlayerControl(_) => (0xa1, "Player Control"),
+        ControlPacket::PlayerCommand(_) => (0xa2, "Player Command"),
+        ControlPacket::Message(_) => (0xa3, "Message"),
+        ControlPacket::EmMoveObject(_) => (0xb0, "EM Move Obj"),
+        ControlPacket::EmDrawTool(_) => (0xb1, "EM Draw Tool"),
+        ControlPacket::EmDropDef(_) => (0xb2, "EM Drop Def"),
+        ControlPacket::DebugRecord(_) => (0xc0, "Debug Rec"),
+        ControlPacket::MessageBoardAnswer(_) => (0xd0, "Message Board Answer"),
+        ControlPacket::CustomCommand(_) => (0xd1, "Custom Command"),
+        ControlPacket::InitScenarioPlayer(_) => (0xd2, "Init Scenario Player"),
+        ControlPacket::ActivateGameGoalMenu(_) => (0xd3, "Activate Game Goal Menu"),
+        ControlPacket::ToggleHostility(_) => (0xd4, "Toggle Hostility"),
+        ControlPacket::SurrenderPlayer(_) => (0xd5, "Surrender Player"),
+        ControlPacket::ActivateGameGoalRule(_) => (0xd6, "Activate Game Goal/Rule"),
+        ControlPacket::SetPlayerTeam(_) => (0xd7, "Set Player Team"),
+        ControlPacket::EliminatePlayer(_) => (0xd8, "Eliminate Player"),
+        ControlPacket::Unknown { id, name, .. } => {
+            return Err(ControlIniEncodeError::UnsupportedPacket {
+                id: id.0,
+                name: name
+                    .clone()
+                    .unwrap_or_else(|| "Unknown Packet Type".to_string()),
+            });
+        }
+    })
+}
+
+#[derive(Default)]
+struct ControlIniBody {
+    indent: usize,
+    bytes: Vec<u8>,
+}
+
+impl ControlIniBody {
+    fn new(indent: usize) -> Self {
+        Self {
+            indent,
+            bytes: Vec::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    fn raw(&mut self, name: &str, value: &[u8]) {
+        append_ini_field_raw(&mut self.bytes, self.indent, name, value);
+    }
+
+    fn int<T: ToString + PartialEq>(&mut self, name: &str, value: T, default: T) {
+        if value != default {
+            self.raw(name, value.to_string().as_bytes());
+        }
+    }
+
+    fn required_int<T: ToString>(&mut self, name: &str, value: T) {
+        self.raw(name, value.to_string().as_bytes());
+    }
+
+    fn boolean(&mut self, name: &str, value: bool, default: bool) {
+        if value != default {
+            self.raw(name, if value { b"true" } else { b"false" });
+        }
+    }
+
+    fn string(&mut self, name: &str, value: &[u8]) {
+        if value.is_empty() {
+            return;
+        }
+        let mut escaped = Vec::new();
+        append_ini_escaped(&mut escaped, value);
+        self.raw(name, &escaped);
+    }
+
+    fn std_buf(&mut self, name: &str, value: &[u8]) {
+        let mut encoded = value.len().to_string().into_bytes();
+        encoded.push(b':');
+        append_ini_escaped(&mut encoded, value);
+        self.raw(name, &encoded);
+    }
+
+    fn section(&mut self, name: &str, child: ControlIniBody) {
+        if child.is_empty() {
+            return;
+        }
+        // The enclosing packet section has already been emitted in the real
+        // writer even when this is its first child, so every nested section
+        // starts with the section separator CRLF.
+        self.bytes.extend_from_slice(b"\r\n");
+        self.bytes.resize(self.bytes.len() + self.indent + 2, b' ');
+        self.bytes.push(b'[');
+        self.bytes.extend_from_slice(name.as_bytes());
+        self.bytes.extend_from_slice(b"]\r\n");
+        self.bytes.extend_from_slice(&child.bytes);
+    }
+}
+
+fn append_ini_section_header(output: &mut Vec<u8>, indent: usize, name: &str) {
+    if !output.is_empty() {
+        output.extend_from_slice(b"\r\n");
+    }
+    output.resize(output.len() + indent, b' ');
+    output.push(b'[');
+    output.extend_from_slice(name.as_bytes());
+    output.extend_from_slice(b"]\r\n");
+}
+
+fn append_ini_field_raw(output: &mut Vec<u8>, indent: usize, name: &str, value: &[u8]) {
+    output.resize(output.len() + indent, b' ');
+    output.extend_from_slice(name.as_bytes());
+    output.push(b'=');
+    output.extend_from_slice(value);
+    output.extend_from_slice(b"\r\n");
+}
+
+fn append_ini_escaped(output: &mut Vec<u8>, value: &[u8]) {
+    output.push(b'"');
+    let mut previous_was_numeric_escape = false;
+    for &byte in value {
+        let must_escape = !(0x20..=0x7e).contains(&byte)
+            || matches!(byte, b'\\' | b'"')
+            || (previous_was_numeric_escape && byte.is_ascii_digit());
+        if !must_escape {
+            output.push(byte);
+            previous_was_numeric_escape = false;
+            continue;
+        }
+        previous_was_numeric_escape = false;
+        match byte {
+            0x07 => output.extend_from_slice(b"\\a"),
+            0x08 => output.extend_from_slice(b"\\b"),
+            0x0c => output.extend_from_slice(b"\\f"),
+            b'\n' => output.extend_from_slice(b"\\n"),
+            b'\r' => output.extend_from_slice(b"\\r"),
+            b'\t' => output.extend_from_slice(b"\\t"),
+            0x0b => output.extend_from_slice(b"\\v"),
+            b'"' => output.extend_from_slice(b"\\\""),
+            b'\\' => output.extend_from_slice(b"\\\\"),
+            other => {
+                output.push(b'\\');
+                output.extend_from_slice(format!("{other:o}").as_bytes());
+                previous_was_numeric_escape = true;
+            }
+        }
+    }
+    output.push(b'"');
+}
+
+fn encode_control_packet_ini_body(
+    packet: &ControlPacket,
+    indent: usize,
+) -> Result<ControlIniBody, ControlIniEncodeError> {
+    let mut body = ControlIniBody::new(indent);
+    match packet {
+        ControlPacket::ClientJoin(data) => {
+            let mut core = ControlIniBody::new(indent + 2);
+            core.int("ID", data.core.client_id, -1);
+            core.boolean("Activated", data.core.activated, false);
+            core.boolean("Observer", data.core.observer, false);
+            core.string("Name", data.core.name.as_bytes());
+            core.string("Nick", data.core.nick.as_bytes());
+            core.boolean("LobbyReady", data.core.lobby_ready, false);
+            body.section("ClientCore", core);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::ClientUpdate(data) => {
+            // Binary compilation casts CUT_None (-1) through uint8_t and
+            // stores enum value 255. That no longer equals the signed enum
+            // default, so C++ ReWriteText emits Type even for byte 255.
+            body.required_int("Type", data.update_type);
+            body.int("ClientID", data.client_id, -1);
+            if data.update_type == CLIENT_UPDATE_ACTIVATE {
+                body.int("Data", data.data, 0);
+            }
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::ClientRemove(data) => {
+            body.int("ClientID", data.client_id, -1);
+            body.string("Reason", data.reason.as_bytes());
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::Set(data) => {
+            body.int("Type", data.value_type, SET_VALUE_NONE);
+            body.int("Data", data.data, 0);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::Vote(data) | ControlPacket::VoteEnd(data) => {
+            encode_vote_ini_body(&mut body, data);
+        }
+        ControlPacket::Script(data) => {
+            body.int("TargetObj", data.target_object, SCRIPT_SCOPE_GLOBAL);
+            body.int(
+                "Strict",
+                data.strictness.raw(),
+                ScriptStrictness::Strict3.raw(),
+            );
+            body.string("Script", data.script.as_bytes());
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::MessageBoardAnswer(data) => {
+            body.int("Object", data.object, 0);
+            body.string("Answer", data.answer.as_bytes());
+            body.int("Plr", data.player, -1);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::CustomCommand(data) => {
+            body.string("Command", data.command.as_bytes());
+            body.string("Argument", data.argument.as_bytes());
+            body.int("Plr", data.player, -1);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::PlayerSelect(data) => {
+            body.int("Player", data.player, -1);
+            let count = i32::try_from(data.objects.len()).map_err(|_| {
+                ControlIniEncodeError::CollectionTooLarge {
+                    field: "PlayerSelect.Objects",
+                    count: data.objects.len(),
+                }
+            })?;
+            body.int("ObjCnt", count, 0);
+            if data.objects.iter().any(|&object| object != 0) {
+                body.raw("Objs", &join_ini_i32(&data.objects));
+            }
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::PlayerControl(data) => {
+            body.int("Player", data.player, -1);
+            body.int("Com", data.command, 0);
+            body.int("Data", data.data, 0);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::PlayerCommand(data) => {
+            body.int("Player", data.player, -1);
+            body.int("Cmd", data.command, 0);
+            body.int("X", data.x, 0);
+            body.int("Y", data.y, 0);
+            body.int("Target", data.target, 0);
+            body.int("Target2", data.target2, 0);
+            body.int("Data", data.data, 0);
+            body.int("AddMode", data.add_mode, 0);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::Message(data) => {
+            body.int("Type", data.message_type, MESSAGE_TYPE_NORMAL);
+            body.int("Player", data.player, -1);
+            if data.message_type == MESSAGE_TYPE_PRIVATE {
+                body.int("ToPlayer", data.to_player, -1);
+            }
+            body.string("Message", data.message.as_bytes());
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::EmMoveObject(data) => {
+            body.required_int("Action", data.action);
+            body.int("tx", data.tx, 0);
+            body.int("ty", data.ty, 0);
+            body.int("TargetObj", data.target_object, -1);
+            let count = i32::try_from(data.objects.len()).map_err(|_| {
+                ControlIniEncodeError::CollectionTooLarge {
+                    field: "EMMoveObject.Objects",
+                    count: data.objects.len(),
+                }
+            })?;
+            body.int("ObjectNum", count, 0);
+            body.int(
+                "Strict",
+                data.strictness.raw(),
+                ScriptStrictness::Strict3.raw(),
+            );
+            if data.objects.iter().any(|&object| object != -1) {
+                body.raw("Objs", &join_ini_i32(&data.objects));
+            }
+            if data.action == EMMO_SCRIPT {
+                body.string("Script", data.script.as_bytes());
+            }
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::EmDrawTool(data) => {
+            body.required_int("Action", data.action);
+            body.int("Mode", data.mode, 0);
+            body.int("X", data.x, 0);
+            body.int("Y", data.y, 0);
+            body.int("X2", data.x2, 0);
+            body.int("Y2", data.y2, 0);
+            body.int("Grade", data.grade, 0);
+            body.boolean("IFT", data.ift, false);
+            body.string("Material", data.material.as_bytes());
+            body.string("Texture", data.texture.as_bytes());
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::EmDropDef(data) => {
+            if c4_id_numeric(&data.id) != 0 {
+                body.raw("ID", &c4_id_text(&data.id));
+            }
+            body.int("X", data.x, 0);
+            body.int("Y", data.y, 0);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::InitScenarioPlayer(data) => {
+            body.int("Team", data.team, 0);
+            body.int("Plr", data.player, -1);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::ActivateGameGoalMenu(data) => {
+            body.int("Plr", data.player, -1);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::ToggleHostility(data) => {
+            body.int("Opponent", data.opponent, -1);
+            body.int("Plr", data.player, -1);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::SurrenderPlayer(data) => {
+            body.int("Plr", data.player, -1);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::ActivateGameGoalRule(data) => {
+            body.int("Object", data.object, 0);
+            body.int("Plr", data.player, -1);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::SetPlayerTeam(data) => {
+            body.int("Team", data.team, 0);
+            body.int("Plr", data.player, -1);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::EliminatePlayer(data) => {
+            body.int("Plr", data.player, -1);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::SyncCheck(data) => {
+            body.int("Frame", data.frame, -1);
+            body.int("ControlTick", data.control_tick, 0);
+            body.int("Random3", data.random3, 0);
+            body.int("RandomCount", data.random_count, 0);
+            body.int("AllCrewPosX", data.crew_positions_sum, 0);
+            body.int("PXSCount", data.pxs_count, 0);
+            body.int("MassMoverIndex", data.mass_mover_index, 0);
+            body.int("ObjectCount", data.object_count, 0);
+            body.int("ObjectEnumerationIndex", data.object_enumeration_index, 0);
+            body.int("SectShapeSum", data.sector_shape_sum, 0);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::Synchronize(data) => {
+            body.boolean("SavePlrs", data.save_player_files, false);
+            body.boolean("SyncClear", data.sync_clearance, false);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::JoinPlayer(data) => {
+            body.string(
+                "Filename",
+                &classic_network_filename(data.filename.as_bytes()),
+            );
+            body.int("AtClient", data.at_client, -1);
+            body.int("InfoID", data.info_id, -1);
+            match &data.source {
+                JoinPlayerSource::Embedded(player_data) => {
+                    body.std_buf("PlrData", player_data);
+                }
+                JoinPlayerSource::Resource(resource) => {
+                    body.boolean("ByRes", true, false);
+                    let resource = encode_network_resource_ini(resource, indent + 2)?;
+                    body.section("ResCore", resource);
+                }
+            }
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::RemovePlayer(data) => {
+            body.int("Plr", data.player, -1);
+            body.boolean("Disconnected", data.disconnected, false);
+            body.int("ByClient", data.by_client, -1);
+        }
+        ControlPacket::PlayerInfo(data) => {
+            encode_player_info_ini_body(&mut body, data)?;
+        }
+        ControlPacket::DebugRecord(_) => unreachable!("handled before body encoding"),
+        ControlPacket::Unknown { id, name, .. } => {
+            return Err(ControlIniEncodeError::UnsupportedPacket {
+                id: id.0,
+                name: name
+                    .clone()
+                    .unwrap_or_else(|| "Unknown Packet Type".to_string()),
+            });
+        }
+    }
+    Ok(body)
+}
+
+fn encode_vote_ini_body(body: &mut ControlIniBody, data: &VoteControlData) {
+    // Like ClientUpdate, VT_None (-1) becomes enum value 255 after the
+    // uint8_t binary adaptor and is therefore not omitted by the INI writer.
+    body.required_int("Type", data.vote_type);
+    body.boolean("Approve", data.approve, true);
+    body.int("Data", data.data, 0);
+    body.int("ByClient", data.by_client, -1);
+}
+
+fn encode_player_info_ini_body(
+    body: &mut ControlIniBody,
+    data: &PlayerInfoControlData,
+) -> Result<(), ControlIniEncodeError> {
+    if data.players.len() > 5_000 {
+        return Err(ControlIniEncodeError::TooManyPlayerInfos {
+            count: data.players.len(),
+        });
+    }
+    body.int("ID", data.client_id, -1);
+    if data.flags != 0 {
+        body.raw(
+            "Flags",
+            &encode_ini_bitfield(
+                data.flags,
+                &[
+                    ("AddPlayers", CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS),
+                    ("Updated", CLIENT_PLAYER_INFO_FLAG_UPDATED),
+                    ("Initial", CLIENT_PLAYER_INFO_FLAG_INITIAL),
+                ],
+            ),
+        );
+    }
+    for (index, player) in data.players.iter().enumerate() {
+        let player_body = encode_player_info_entry_ini(player, body.indent + 2, index)?;
+        body.section("Player", player_body);
+    }
+    body.int("ByClient", data.by_client, -1);
+    Ok(())
+}
+
+fn encode_player_info_entry_ini(
+    player: &ControlPlayerInfoEntry,
+    indent: usize,
+    index: usize,
+) -> Result<ControlIniBody, ControlIniEncodeError> {
+    const SYNC_FLAGS: u16 = PLAYER_INFO_FLAG_JOINED
+        | PLAYER_INFO_FLAG_REMOVED
+        | PLAYER_INFO_FLAG_HAS_RESOURCE
+        | PLAYER_INFO_FLAG_IN_SCENARIO_FILE
+        | PLAYER_INFO_FLAG_SAVEGAME_JOIN
+        | PLAYER_INFO_FLAG_DISCONNECTED
+        | PLAYER_INFO_FLAG_WON
+        | PLAYER_INFO_FLAG_VOTED_OUT
+        | PLAYER_INFO_FLAG_ATTRIBUTES_FIXED
+        | PLAYER_INFO_FLAG_NO_SCENARIO_INIT
+        | PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK
+        | PLAYER_INFO_FLAG_INVISIBLE;
+
+    let mut body = ControlIniBody::new(indent);
+    body.string("Name", player.name.as_bytes());
+    body.string("ForcedName", player.forced_name.as_bytes());
+    body.string("Filename", player.filename.as_bytes());
+
+    let flags = player.flags & SYNC_FLAGS;
+    if flags != 0 {
+        body.raw(
+            "Flags",
+            &encode_ini_bitfield(
+                flags,
+                &[
+                    ("Joined", PLAYER_INFO_FLAG_JOINED),
+                    ("Removed", PLAYER_INFO_FLAG_REMOVED),
+                    ("HasResource", PLAYER_INFO_FLAG_HAS_RESOURCE),
+                    ("JoinIssued", PLAYER_INFO_FLAG_JOIN_ISSUED),
+                    ("SavegameJoin", PLAYER_INFO_FLAG_SAVEGAME_JOIN),
+                    ("Disconnected", PLAYER_INFO_FLAG_DISCONNECTED),
+                    ("VotedOut", PLAYER_INFO_FLAG_VOTED_OUT),
+                    ("Won", PLAYER_INFO_FLAG_WON),
+                    ("AttributesFixed", PLAYER_INFO_FLAG_ATTRIBUTES_FIXED),
+                    ("NoScenarioInit", PLAYER_INFO_FLAG_NO_SCENARIO_INIT),
+                    ("NoEliminationCheck", PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK),
+                    ("Invisible", PLAYER_INFO_FLAG_INVISIBLE),
+                ],
+            ),
+        );
+    }
+    body.int("ID", player.id, 0);
+    match player.player_type {
+        PLAYER_INFO_TYPE_USER => {}
+        PLAYER_INFO_TYPE_SCRIPT => body.raw("Type", b"Script"),
+        other => body.raw("Type", other.to_string().as_bytes()),
+    }
+    body.int("Color", player.color, 0);
+    body.int("OriginalColor", player.original_color, player.color);
+    body.int("SavgamePlayer", player.savegame_player, 0);
+    body.int("Team", player.team, 0);
+    body.string("AUID", player.auth_id.as_bytes());
+    if flags & PLAYER_INFO_FLAG_JOINED != 0 {
+        body.int("GameNumber", player.game_number, -1);
+        body.int("GameJoinFrame", player.game_join_frame, -1);
+    }
+    if flags & PLAYER_INFO_FLAG_REMOVED != 0 {
+        body.int("GamePartFrame", player.game_part_frame, -1);
+    }
+    if c4_id_numeric(&player.extra_data) != 0 {
+        body.raw("ExtraData", &c4_id_text(&player.extra_data));
+    }
+    body.string("LeagueAccount", player.league_account.as_bytes());
+    body.int("LeagueScore", player.league_score, 0);
+    body.int("LeagueRank", player.league_rank, 0);
+    body.int("LeagueRankSymbol", player.league_rank_symbol, 0);
+    body.int("ProjectedGain", player.league_projected_gain, -1);
+    if !player.clan_tag.is_empty() {
+        body.raw("ClanTag", player.clan_tag.as_bytes());
+    }
+    body.int("LeaguePerformance", player.league_performance, 0);
+    body.string("LeagueProgressData", player.league_progress_data.as_bytes());
+
+    if flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0 {
+        let resource = player
+            .resource
+            .as_ref()
+            .ok_or(ControlIniEncodeError::MissingPlayerInfoResource { index })?;
+        let resource_body = encode_network_resource_ini(resource, indent + 2)?;
+        body.section("ResCore", resource_body);
+    }
+    Ok(body)
+}
+
+fn encode_network_resource_ini(
+    resource: &NetworkResourceCore,
+    indent: usize,
+) -> Result<ControlIniBody, ControlIniEncodeError> {
+    if resource.loadable && resource.chunk_size == 0 {
+        return Err(ControlIniEncodeError::ZeroResourceChunkSize);
+    }
+    let mut body = ControlIniBody::new(indent);
+    match resource.resource_type {
+        NETWORK_RESOURCE_TYPE_NULL => {}
+        1 => body.raw("Type", b"Scenario"),
+        2 => body.raw("Type", b"Dynamic"),
+        3 => body.raw("Type", b"Player"),
+        4 => body.raw("Type", b"Definitions"),
+        5 => body.raw("Type", b"System"),
+        6 => body.raw("Type", b"Material"),
+        other => body.raw("Type", other.to_string().as_bytes()),
+    }
+    body.int("ID", resource.id, -1);
+    body.int("DerID", resource.derived_id, -1);
+    body.boolean("Loadable", resource.loadable, true);
+    if resource.loadable {
+        body.int("FileSize", resource.file_size, 0);
+        body.int("FileCRC", resource.file_crc, 0);
+        body.int(
+            "ChunkSize",
+            resource.chunk_size,
+            NETWORK_RESOURCE_DEFAULT_CHUNK_SIZE,
+        );
+    }
+    body.int("ContentsCRC", resource.contents_crc, 0);
+    if let Some(file_sha) = resource.file_sha {
+        let mut hex = Vec::with_capacity(40);
+        for byte in file_sha {
+            hex.extend_from_slice(format!("{byte:02x}").as_bytes());
+        }
+        body.raw("FileSHA", &hex);
+    }
+    body.string(
+        "Filename",
+        &classic_network_filename(resource.filename.as_bytes()),
+    );
+    body.string(
+        "Author",
+        &classic_network_filename(resource.author.as_bytes()),
+    );
+    Ok(body)
+}
+
+fn encode_ini_bitfield<T>(mut value: T, entries: &[(&str, T)]) -> Vec<u8>
+where
+    T: Copy
+        + PartialEq
+        + std::ops::BitAnd<Output = T>
+        + std::ops::BitAndAssign
+        + std::ops::Not<Output = T>
+        + ToString
+        + From<u8>,
+{
+    let zero = T::from(0);
+    let mut output = Vec::new();
+    for &(name, bit) in entries {
+        if bit & value == bit {
+            if !output.is_empty() {
+                output.push(b'|');
+            }
+            output.extend_from_slice(name.as_bytes());
+            value &= !bit;
+        }
+    }
+    if value != zero {
+        if !output.is_empty() {
+            output.push(b'|');
+        }
+        output.extend_from_slice(value.to_string().as_bytes());
+    }
+    output
+}
+
+fn join_ini_i32(values: &[i32]) -> Vec<u8> {
+    let mut output = Vec::new();
+    for (index, value) in values.iter().enumerate() {
+        if index != 0 {
+            output.push(b',');
+        }
+        output.extend_from_slice(value.to_string().as_bytes());
+    }
+    output
+}
+
+fn classic_network_filename(value: &[u8]) -> Vec<u8> {
+    #[cfg(windows)]
+    {
+        value.to_vec()
+    }
+    #[cfg(not(windows))]
+    {
+        value
+            .iter()
+            .map(|&byte| if byte == b'/' { b'\\' } else { byte })
+            .collect()
+    }
+}
+
+fn c4_id_numeric(value: &[u8; 4]) -> u32 {
+    if value == b"NONE" || value == b"0000" {
+        return 0;
+    }
+    if value.iter().all(u8::is_ascii_digit) {
+        return value
+            .iter()
+            .fold(0, |number, digit| number * 10 + u32::from(*digit - b'0'));
+    }
+    u32::from_ne_bytes(*value)
+}
+
+fn c4_id_text(value: &[u8; 4]) -> Vec<u8> {
+    let numeric = c4_id_numeric(value);
+    if numeric == 0 {
+        b"NONE".to_vec()
+    } else if numeric <= 9_999 {
+        format!("{numeric:04}").into_bytes()
+    } else {
+        value
+            .iter()
+            .copied()
+            .take_while(|&byte| byte != 0)
+            .collect()
+    }
+}
+
 /// Complete named `C4PlayerInfoList` stored in a replay's `PlayerInfos.txt`.
 ///
 /// `last_player_id` is the exact persisted `C4PlayerInfoList::iLastPlayerID`;
@@ -4479,6 +5222,399 @@ LastPlayerID=12
             }
             _ => panic!("expected unknown packet"),
         }
+    }
+
+    #[test]
+    fn classic_control_ini_encoder_matches_cpp_layout_and_escaping() {
+        let command = ControlPacket::PlayerCommand(PlayerCommandControlData {
+            player: 3,
+            command: 7,
+            x: 0,
+            y: -4,
+            target: 12,
+            target2: 0,
+            data: 0,
+            add_mode: 2,
+            by_client: 9,
+        });
+        assert_eq!(
+            encode_control_packet_ini(&command).unwrap(),
+            concat!(
+                "[IDPacket]\r\n",
+                "ID=162\r\n",
+                "\r\n",
+                "  [Player Command]\r\n",
+                "  Player=3\r\n",
+                "  Cmd=7\r\n",
+                "  Y=-4\r\n",
+                "  Target=12\r\n",
+                "  AddMode=2\r\n",
+                "  ByClient=9\r\n",
+            )
+            .as_bytes()
+        );
+
+        let script = ControlPacket::Script(ScriptControlData {
+            script: LegacyCString::from_bytes(vec![1, b'1', b'2', b'\n', b'"', b'\\', 0x80])
+                .unwrap(),
+            ..ScriptControlData::default()
+        });
+        let mut inline = b"[Rec]\r\nFrame=9\r\nType=1\r\n".to_vec();
+        append_control_packet_ini(&mut inline, &script, 0, ControlIniPacketMode::Inline).unwrap();
+        assert_eq!(
+            inline,
+            concat!(
+                "[Rec]\r\n",
+                "Frame=9\r\n",
+                "Type=1\r\n",
+                "ID=136\r\n",
+                "\r\n",
+                "  [Script]\r\n",
+                "  Script=\"\\1\\61\\62\\n\\\"\\\\\\200\"\r\n",
+            )
+            .as_bytes()
+        );
+
+        let mut list = b"[Rec]\r\nFrame=10\r\nType=0\r\n".to_vec();
+        append_control_packet_ini(
+            &mut list,
+            &ControlPacket::PlayerControl(PlayerControlData {
+                player: 1,
+                command: 2,
+                data: 0,
+                by_client: -1,
+            }),
+            2,
+            ControlIniPacketMode::IdPacketSection,
+        )
+        .unwrap();
+        assert_eq!(
+            list,
+            concat!(
+                "[Rec]\r\n",
+                "Frame=10\r\n",
+                "Type=0\r\n",
+                "\r\n",
+                "  [IDPacket]\r\n",
+                "  ID=161\r\n",
+                "\r\n",
+                "    [Player Control]\r\n",
+                "    Player=1\r\n",
+                "    Com=2\r\n",
+            )
+            .as_bytes()
+        );
+
+        assert_eq!(
+            encode_control_packet_ini(&ControlPacket::DebugRecord(DebugRecordControlData {
+                data: vec![0, b'7'],
+            },))
+            .unwrap(),
+            concat!(
+                "[IDPacket]\r\n",
+                "ID=192\r\n",
+                "Debug Rec=2:\"\\0\\67\"\r\n",
+            )
+            .as_bytes()
+        );
+
+        for packet in [
+            ControlPacket::ClientUpdate(ClientUpdateControlData {
+                update_type: u8::MAX,
+                client_id: -1,
+                data: 0,
+                by_client: -1,
+            }),
+            ControlPacket::Vote(VoteControlData {
+                vote_type: VOTE_TYPE_NONE,
+                approve: true,
+                data: 0,
+                by_client: -1,
+            }),
+        ] {
+            let encoded = encode_control_packet_ini(&packet).unwrap();
+            assert!(
+                encoded
+                    .windows(b"Type=255\r\n".len())
+                    .any(|window| window == b"Type=255\r\n"),
+                "binary byte 255 must not collapse back to the signed enum -1 default: {packet:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn classic_control_ini_encoder_matches_nested_cpp_fields() {
+        let packet = ControlPacket::ClientJoin(ClientJoinControlData {
+            core: ClientCoreControlData {
+                client_id: -1,
+                activated: false,
+                observer: false,
+                name: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                nick: LegacyCString::default(),
+                lobby_ready: false,
+            },
+            by_client: -1,
+        });
+        assert_eq!(
+            encode_control_packet_ini(&packet).unwrap(),
+            concat!(
+                "[IDPacket]\r\n",
+                "ID=128\r\n",
+                "\r\n",
+                "  [Client Join]\r\n",
+                "\r\n",
+                "    [ClientCore]\r\n",
+                "    Name=\"Alice\"\r\n",
+            )
+            .as_bytes()
+        );
+
+        let resource = NetworkResourceCore {
+            resource_type: 3,
+            id: 4,
+            derived_id: -1,
+            loadable: true,
+            file_size: 12,
+            file_crc: 0,
+            chunk_size: NETWORK_RESOURCE_DEFAULT_CHUNK_SIZE,
+            contents_crc: 9,
+            file_sha: Some([0xab; 20]),
+            filename: LegacyCString::from_bytes(b"Players/A.c4p".to_vec()).unwrap(),
+            author: LegacyCString::from_bytes(b"Host/A".to_vec()).unwrap(),
+        };
+        let mut player = ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(b"Bot".to_vec()).unwrap(),
+            forced_name: LegacyCString::from_bytes(b"Forced".to_vec()).unwrap(),
+            filename: LegacyCString::from_bytes(b"Bot.c4p".to_vec()).unwrap(),
+            flags: PLAYER_INFO_FLAG_JOINED
+                | PLAYER_INFO_FLAG_HAS_RESOURCE
+                | PLAYER_INFO_FLAG_IN_SCENARIO_FILE
+                | PLAYER_INFO_FLAG_JOIN_ISSUED,
+            id: 7,
+            player_type: PLAYER_INFO_TYPE_SCRIPT,
+            color: 0x123456,
+            original_color: 0x123456,
+            savegame_player: 0,
+            team: 2,
+            auth_id: LegacyCString::default(),
+            game_number: 8,
+            game_join_frame: 20,
+            game_part_frame: -1,
+            extra_data: *b"0007",
+            league_account: LegacyCString::default(),
+            league_score: 0,
+            league_rank: 0,
+            league_rank_symbol: 0,
+            league_projected_gain: -1,
+            clan_tag: LegacyCString::from_bytes(b"A\nB".to_vec()).unwrap(),
+            league_performance: 0,
+            league_progress_data_is_null: false,
+            league_progress_data: LegacyCString::default(),
+            resource: Some(resource),
+        };
+        // C++ serializes only PIF_SyncFlags, so the local JoinIssued bit is
+        // absent and the unnamed InScenarioFile bit is emitted numerically.
+        player.flags |= PLAYER_INFO_FLAG_INVISIBLE;
+        let encoded =
+            encode_control_packet_ini(&ControlPacket::PlayerInfo(PlayerInfoControlData {
+                client_id: 3,
+                flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS | CLIENT_PLAYER_INFO_FLAG_INITIAL | 0x80,
+                players: vec![player],
+                by_client: 0,
+            }))
+            .unwrap();
+        let text = std::str::from_utf8(&encoded).unwrap();
+        assert!(text.contains("  Flags=AddPlayers|Initial|128\r\n"));
+        assert!(text.contains("    Name=\"Bot\"\r\n"));
+        assert!(text.contains("    ForcedName=\"Forced\"\r\n"));
+        assert!(text.contains("    Flags=Joined|HasResource|Invisible|64\r\n"));
+        assert!(!text.contains("JoinIssued"));
+        assert!(text.contains("    ExtraData=0007\r\n"));
+        assert!(text.contains("    ClanTag=A\nB\r\n"));
+        assert!(text.contains("      [ResCore]\r\n"));
+        assert!(text.contains("      Type=Player\r\n"));
+        assert!(text.contains("      FileSHA=abababababababababababababababababababab\r\n"));
+        assert!(text.contains("      Filename=\"Players\\\\A.c4p\"\r\n"));
+    }
+
+    #[test]
+    fn classic_control_ini_encoder_covers_every_typed_packet() {
+        let text = |value: &[u8]| LegacyCString::from_bytes(value.to_vec()).unwrap();
+        let packets = vec![
+            ControlPacket::ClientJoin(ClientJoinControlData {
+                core: ClientCoreControlData::default(),
+                by_client: -1,
+            }),
+            ControlPacket::ClientUpdate(ClientUpdateControlData {
+                update_type: CLIENT_UPDATE_SET_OBSERVER,
+                client_id: 1,
+                data: 0,
+                by_client: 0,
+            }),
+            ControlPacket::ClientRemove(ClientRemoveControlData {
+                client_id: 1,
+                reason: text(b"gone"),
+                by_client: 0,
+            }),
+            ControlPacket::Set(SetControlData::default()),
+            ControlPacket::DebugRecord(DebugRecordControlData {
+                data: vec![0, 0xff],
+            }),
+            ControlPacket::Vote(VoteControlData {
+                vote_type: VOTE_TYPE_KICK,
+                approve: false,
+                data: 2,
+                by_client: 1,
+            }),
+            ControlPacket::VoteEnd(VoteControlData {
+                vote_type: VOTE_TYPE_PAUSE,
+                approve: true,
+                data: 0,
+                by_client: 0,
+            }),
+            ControlPacket::Script(ScriptControlData::default()),
+            ControlPacket::MessageBoardAnswer(MessageBoardAnswerControlData::default()),
+            ControlPacket::CustomCommand(CustomCommandControlData::default()),
+            ControlPacket::PlayerSelect(PlayerSelectControlData {
+                player: -1,
+                objects: Vec::new(),
+                by_client: -1,
+            }),
+            ControlPacket::PlayerControl(PlayerControlData {
+                player: -1,
+                command: 0,
+                data: 0,
+                by_client: -1,
+            }),
+            ControlPacket::PlayerCommand(PlayerCommandControlData {
+                player: -1,
+                command: 0,
+                x: 0,
+                y: 0,
+                target: 0,
+                target2: 0,
+                data: 0,
+                add_mode: 0,
+                by_client: -1,
+            }),
+            ControlPacket::Message(MessageControlData::default()),
+            ControlPacket::EmMoveObject(EmMoveObjectControlData::default()),
+            ControlPacket::EmDrawTool(EmDrawToolControlData::default()),
+            ControlPacket::EmDropDef(EmDropDefControlData::default()),
+            ControlPacket::InitScenarioPlayer(InitScenarioPlayerControlData::default()),
+            ControlPacket::ActivateGameGoalMenu(ActivateGameGoalMenuControlData::default()),
+            ControlPacket::ToggleHostility(ToggleHostilityControlData::default()),
+            ControlPacket::SurrenderPlayer(SurrenderPlayerControlData {
+                player: -1,
+                by_client: -1,
+            }),
+            ControlPacket::ActivateGameGoalRule(ActivateGameGoalRuleControlData::default()),
+            ControlPacket::SetPlayerTeam(SetPlayerTeamControlData::default()),
+            ControlPacket::EliminatePlayer(EliminatePlayerControlData::default()),
+            ControlPacket::SyncCheck(SyncCheckPacket {
+                frame: -1,
+                control_tick: 0,
+                random3: 0,
+                random_count: 0,
+                crew_positions_sum: 0,
+                pxs_count: 0,
+                mass_mover_index: 0,
+                object_count: 0,
+                object_enumeration_index: 0,
+                sector_shape_sum: 0,
+                by_client: -1,
+            }),
+            ControlPacket::Synchronize(SynchronizeControlData::default()),
+            ControlPacket::JoinPlayer(JoinPlayerControlData::default()),
+            ControlPacket::RemovePlayer(RemovePlayerControlData::default()),
+            ControlPacket::PlayerInfo(PlayerInfoControlData::default()),
+        ];
+
+        for packet in packets {
+            let encoded = encode_control_packet_ini(&packet).unwrap();
+            assert!(encoded.starts_with(b"[IDPacket]\r\nID="), "{packet:?}");
+            assert!(encoded.ends_with(b"\r\n"), "{packet:?}");
+        }
+    }
+
+    #[test]
+    fn classic_control_ini_encoder_round_trips_valid_cpp_grammar() {
+        let text = |value: &[u8]| LegacyCString::from_bytes(value.to_vec()).unwrap();
+        let packets = [
+            ControlPacket::ClientJoin(ClientJoinControlData {
+                core: ClientCoreControlData {
+                    client_id: 4,
+                    activated: true,
+                    observer: false,
+                    name: text(b"Alice"),
+                    nick: text(b"Ally"),
+                    lobby_ready: true,
+                },
+                by_client: 0,
+            }),
+            ControlPacket::EmMoveObject(EmMoveObjectControlData {
+                action: EMMO_SCRIPT,
+                tx: 1,
+                ty: 2,
+                target_object: 3,
+                objects: vec![4, 5],
+                strictness: ScriptStrictness::Strict2,
+                script: text(b"Do()"),
+                by_client: 0,
+            }),
+            ControlPacket::Message(MessageControlData {
+                message_type: MESSAGE_TYPE_PRIVATE,
+                player: 1,
+                to_player: 2,
+                message: text(b"hello"),
+                by_client: 4,
+            }),
+            ControlPacket::JoinPlayer(JoinPlayerControlData {
+                filename: text(b"Players/A.c4p"),
+                at_client: 4,
+                info_id: 9,
+                source: JoinPlayerSource::Embedded(vec![0, b'1', 0xff]),
+                by_client: 0,
+            }),
+        ];
+        let mut document = b"[Control]\r\n".to_vec();
+        for packet in &packets {
+            append_control_packet_ini(
+                &mut document,
+                packet,
+                0,
+                ControlIniPacketMode::IdPacketSection,
+            )
+            .unwrap();
+        }
+        let parsed = parse_control_ini(std::str::from_utf8(&document).unwrap()).unwrap();
+        assert_eq!(parsed, packets);
+    }
+
+    #[test]
+    fn classic_control_ini_encoder_reports_unrepresentable_typed_state() {
+        assert_eq!(
+            encode_control_packet_ini(&ControlPacket::Unknown {
+                id: ControlPacketId(3),
+                name: Some("Mystery".to_string()),
+                fields: HashMap::new(),
+            }),
+            Err(ControlIniEncodeError::UnsupportedPacket {
+                id: 3,
+                name: "Mystery".to_string(),
+            })
+        );
+
+        let mut resource = NetworkResourceCore::default();
+        resource.loadable = true;
+        resource.chunk_size = 0;
+        assert_eq!(
+            encode_control_packet_ini(&ControlPacket::JoinPlayer(JoinPlayerControlData {
+                source: JoinPlayerSource::Resource(resource),
+                ..JoinPlayerControlData::default()
+            })),
+            Err(ControlIniEncodeError::ZeroResourceChunkSize)
+        );
     }
 
     #[test]

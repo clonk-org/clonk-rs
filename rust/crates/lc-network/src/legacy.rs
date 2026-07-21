@@ -26,6 +26,7 @@ use crate::join_player_registry::{
 use crate::join_team_registry::{
     decode_join_team_list, encode_join_team_list, JoinTeamListSnapshot,
 };
+use crate::name_validation::{validate_name_allow_empty, validate_name_no_empty};
 use crate::{ClientId, ControlPacket, NetworkStatus, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
 
 // C4PacketType::PID_None (src/C4PacketBase.h). Binary C4PacketList values
@@ -690,8 +691,8 @@ fn decode_client_join(reader: &mut Reader<'_>) -> Result<EngineControlPacket, Le
         client_id: reader.read_raw_i32()?,
         activated: reader.read_u8()? != 0,
         observer: reader.read_u8()? != 0,
-        name: reader.read_c_string()?,
-        nick: reader.read_c_string()?,
+        name: validate_name_no_empty(reader.read_c_string()?),
+        nick: validate_name_no_empty(reader.read_c_string()?),
         lobby_ready: reader.read_u8()? != 0,
     };
     let by_client = reader.read_int32()?;
@@ -917,8 +918,8 @@ fn decode_player_info_contents(
 fn decode_player_info_entry(
     reader: &mut Reader<'_>,
 ) -> Result<ControlPlayerInfoEntry, LegacyControlError> {
-    let name = reader.read_c_string()?;
-    let forced_name = reader.read_c_string()?;
+    let name = validate_name_no_empty(reader.read_c_string()?);
+    let forced_name = validate_name_allow_empty(reader.read_c_string()?);
     let filename = reader.read_c_string()?;
     let mut flags = reader.read_raw_u16()?;
     let id = reader.read_raw_i32()?;
@@ -942,12 +943,12 @@ fn decode_player_info_entry(
         -1
     };
     let extra_data = reader.read_c4_id()?;
-    let league_account = reader.read_c_string()?;
+    let league_account = validate_name_allow_empty(reader.read_c_string()?);
     let league_score = reader.read_int32()?;
     let league_rank = reader.read_int32()?;
     let league_rank_symbol = reader.read_int32()?;
     let league_projected_gain = reader.read_int32()?;
-    let clan_tag = reader.read_c_string()?;
+    let clan_tag = validate_name_allow_empty(reader.read_c_string()?);
     let league_performance = reader.read_int32()?;
     let league_progress_data = reader.read_c_string()?;
     let resource = (flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0)
@@ -3229,6 +3230,120 @@ mod tests {
             encode_control_entry_payload(&control).expect("encode ClientJoin"),
             payload
         );
+    }
+
+    #[test]
+    fn client_join_decode_normalizes_cpp_validated_names_before_reencode() {
+        // C4ClientCore compiles Name and Nick through
+        // ValidatedStdStrBuf<VAL_NameNoEmpty>. An initially empty value first
+        // becomes "empty"; a nonempty value cleaned down to nothing uses the
+        // later "Unknown" fallback (src/C4Client.h:40-45;
+        // src/C4InputValidation.cpp:39-55,97-118).
+        let mut payload = vec![CID_CLIENT_JOIN];
+        payload.extend_from_slice(&3_i32.to_ne_bytes());
+        payload.extend_from_slice(&[0, 0, 0]);
+        payload.extend_from_slice(b" {<i>  </i>{ \0");
+        payload.extend_from_slice(&[0, 0]);
+
+        let decoded = decode_control_entry_payload(&payload).expect("decode ClientJoin");
+        let EngineControlPacket::ClientJoin(join) = &decoded else {
+            panic!("decoded the wrong control variant");
+        };
+        assert_eq!(join.core.name.as_bytes(), b"empty");
+        assert_eq!(join.core.nick.as_bytes(), b"Unknown");
+
+        let mut canonical = vec![CID_CLIENT_JOIN];
+        canonical.extend_from_slice(&3_i32.to_ne_bytes());
+        canonical.extend_from_slice(&[0, 0]);
+        canonical.extend_from_slice(b"empty\0Unknown\0");
+        canonical.extend_from_slice(&[0, 0]);
+        assert_eq!(
+            encode_control_entry_payload(&decoded).expect("reencode normalized ClientJoin"),
+            canonical
+        );
+    }
+
+    #[test]
+    fn player_info_decode_normalizes_all_cpp_validated_names_before_reencode() {
+        fn c_string(bytes: &[u8]) -> LegacyCString {
+            LegacyCString::from_bytes(bytes.to_vec()).expect("fixture is NUL-free")
+        }
+
+        // C4PlayerInfo validates these five fields after binary compilation.
+        // Use a non-UTF-8 name to prove C4MaxName truncation counts native
+        // bytes, while the other values cover brace removal, markup removal,
+        // whitespace trimming, and allow-empty behavior
+        // (src/C4PlayerInfo.h:85-104; src/C4InputValidation.cpp:97-118).
+        let dirty_player = ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(vec![0x80; 31]).unwrap(),
+            forced_name: c_string(b" {<c ff00ff>A{lice</c>}} "),
+            filename: c_string(b"Player.c4p"),
+            flags: 0,
+            id: 23,
+            player_type: 0,
+            color: 0x1122_3344,
+            original_color: 0x5566_7788,
+            savegame_player: 0,
+            team: 0,
+            auth_id: LegacyCString::default(),
+            game_number: -1,
+            game_join_frame: -1,
+            game_part_frame: -1,
+            extra_data: *b"NONE",
+            league_account: c_string(b" { \t "),
+            league_score: 0,
+            league_rank: 0,
+            league_rank_symbol: 0,
+            league_projected_gain: 0,
+            clan_tag: c_string(b"\t<i>Clan</i>\r"),
+            league_performance: 0,
+            league_progress_data_is_null: false,
+            league_progress_data: LegacyCString::default(),
+            resource: None,
+        };
+        let dirty_data = PlayerInfoControlData {
+            client_id: 7,
+            flags: 0,
+            players: vec![dirty_player],
+            by_client: 7,
+        };
+        let dirty = EngineControlPacket::PlayerInfo(dirty_data.clone());
+        let wire = encode_control_entry_payload(&dirty).expect("encode dirty PlayerInfo fixture");
+
+        let mut canonical_data = dirty_data;
+        canonical_data.players[0].name = LegacyCString::from_bytes(vec![0x80; 30]).unwrap();
+        canonical_data.players[0].forced_name = c_string(b"Alice");
+        canonical_data.players[0].league_account = LegacyCString::default();
+        canonical_data.players[0].clan_tag = c_string(b"Clan");
+        let canonical = EngineControlPacket::PlayerInfo(canonical_data.clone());
+        let decoded = decode_control_entry_payload(&wire).expect("decode PlayerInfo");
+
+        assert_eq!(decoded, canonical);
+        assert_eq!(
+            encode_control_entry_payload(&decoded).expect("reencode normalized PlayerInfo"),
+            encode_control_entry_payload(&canonical).expect("encode canonical PlayerInfo")
+        );
+        assert_ne!(
+            encode_control_entry_payload(&decoded).unwrap(),
+            wire,
+            "C++ rewriting persists the post-compile validated values"
+        );
+
+        // PID_PlayerInfoUpdReq carries the same C4ClientPlayerInfos body and
+        // therefore reaches the same C4PlayerInfo validation path.
+        let dirty_update = PlayerInfoUpdateRequest {
+            client_id: 7,
+            flags: 0,
+            players: match dirty {
+                EngineControlPacket::PlayerInfo(data) => data.players,
+                _ => unreachable!(),
+            },
+        };
+        let update_wire =
+            encode_player_info_update_payload(&dirty_update).expect("encode update fixture");
+        let decoded_update =
+            decode_player_info_update_payload(&update_wire).expect("decode PlayerInfo update");
+        assert_eq!(decoded_update.players, canonical_data.players);
     }
 
     #[test]

@@ -12539,7 +12539,11 @@ Message=Server says Andr\xe9\r\n\
         else {
             panic!("expected one immediate ClientJoin event");
         };
-        assert_eq!(actual, join);
+        let mut expected = join;
+        // C4ClientCore's binary reader always runs VAL_NameNoEmpty, including
+        // for an explicitly encoded empty Nick.
+        expected.core.nick = lc_engine::LegacyCString::from_bytes(b"empty".to_vec()).unwrap();
+        assert_eq!(actual, expected);
         assert!(event_rx.try_recv().is_err());
     }
 

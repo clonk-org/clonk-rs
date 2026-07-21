@@ -94,8 +94,10 @@ pub use control::{
     InsertStatus, MissingRange, ReadyBatch,
 };
 pub use control_record::{
-    decode_control_record, ControlRecordChunk, ControlRecordDecodeError, ControlRecordParser,
-    ControlRecordPlayback, ControlRecordWriter,
+    decode_control_record, decode_control_record_text, encode_control_record_binary,
+    encode_control_record_text, rewrite_control_record_binary, rewrite_control_record_text,
+    ControlRecordChunk, ControlRecordDecodeError, ControlRecordParser, ControlRecordPlayback,
+    ControlRecordRewriteError, ControlRecordWriter,
 };
 pub use forward_packet::{
     decode_forward_packet_payload, encode_forward_packet_payload, ForwardPacket,

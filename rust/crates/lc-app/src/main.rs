@@ -492,12 +492,23 @@ fn classic_port(value: &str) -> u16 {
         .clamp(0, i64::from(u16::MAX)) as u16
 }
 
+fn classic_path_extension(path: &Path) -> Option<&str> {
+    let path = path.to_str()?;
+    path.rsplit(std::path::MAIN_SEPARATOR)
+        .next()
+        .and_then(|basename| basename.rsplit_once('.').map(|(_, extension)| extension))
+}
+
 fn parse_classic_command_line(arguments: &[OsString]) -> ClassicCommandLine {
     let mut parsed = ClassicCommandLine::default();
 
     for argument in arguments {
         let path = Path::new(argument);
-        let extension = path.extension().and_then(|extension| extension.to_str());
+        let extension = if path.to_str().is_some() {
+            classic_path_extension(path)
+        } else {
+            path.extension().and_then(|extension| extension.to_str())
+        };
         if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("c4s")) {
             parsed.scenario = Some(path.to_path_buf());
             continue;
@@ -529,7 +540,6 @@ fn parse_classic_command_line(arguments: &[OsString]) -> ClassicCommandLine {
         }
         if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("c4r")) {
             parsed.record_stream = Some(path.to_path_buf());
-            continue;
         }
 
         let Some(argument) = argument.to_str() else {
@@ -618,6 +628,30 @@ fn parse_classic_command_line(arguments: &[OsString]) -> ClassicCommandLine {
     }
 
     parsed
+}
+
+fn write_classic_record_dump(
+    chunks: &[lc_network::ControlRecordChunk],
+    destination: &Path,
+) -> Result<()> {
+    // GetExtension scans back to the last platform directory separator and
+    // accepts a leading dot as the extension separator. `Path::extension`
+    // deliberately treats a basename such as `.txt` as extensionless.
+    let output = if classic_path_extension(destination)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
+    {
+        lc_network::encode_control_record_text(chunks)
+            .context("failed to create classic text record dump")?
+    } else {
+        lc_network::encode_control_record_binary(chunks)
+            .context("failed to create classic binary record dump")?
+    };
+    fs::write(destination, output).with_context(|| {
+        format!(
+            "failed to write classic record dump {}",
+            destination.display()
+        )
+    })
 }
 
 /// Split the parameter tail accepted by `C4Application::OnCommand("/open …")`.
@@ -15550,20 +15584,20 @@ fn count_direct_stream_player_crew_files(group: &Group) -> std::result::Result<u
     Ok(direct_crew)
 }
 
-fn replay_control_record_playback(
+fn replay_control_record_chunks(
     group: &Group,
-) -> std::result::Result<ControlRecordPlayback, String> {
+) -> std::result::Result<Vec<lc_network::ControlRecordChunk>, String> {
     // C4Playback::Open tries LoadEntryString first. A successfully loaded text
     // entry is authoritative even when parsing fails; only a load failure
     // (including native's zero-sized-entry failure) selects CtrlRec.c4b.
     if let Ok(text) = group.load_entry_string("CtrlRec.txt") {
-        return ControlRecordPlayback::from_text_bytes(&text)
+        return lc_network::decode_control_record_text(&text)
             .map_err(|error| format!("has an invalid CtrlRec.txt stream: {error}"));
     }
     let binary = group
         .read_file("CtrlRec.c4b")
         .map_err(|error| format!("has no readable CtrlRec.c4b: {error}"))?;
-    ControlRecordPlayback::from_bytes(&binary)
+    lc_network::decode_control_record(&binary)
         .map_err(|error| format!("has an invalid CtrlRec.c4b stream: {error}"))
 }
 
@@ -27223,9 +27257,6 @@ impl GameApp {
                 path = %record.display(),
                 "classic record-stream playback is not implemented in lc-app"
             );
-        }
-        if let Some(path) = classic.record_dump.as_deref() {
-            tracing::warn!(path, "classic /recdump output is not implemented in lc-app");
         }
         if let Some(address) = classic.stream_address.as_deref() {
             tracing::warn!(
@@ -84436,12 +84467,28 @@ impl GameApp {
                     })?
                     .map(|startup| startup.startup_player_count)
             };
-            let playback = replay_control_record_playback(&group).map_err(|error| {
+            let chunks = replay_control_record_chunks(&group).map_err(|error| {
                 ScenarioActivationError::Recoverable(format!(
                     "Replay {} {error}",
                     scenario.title
                 ))
             })?;
+            if let Some(destination) = self
+                .classic_command_line
+                .record_dump
+                .as_deref()
+                .filter(|destination| !destination.is_empty())
+                .map(Path::new)
+            {
+                write_classic_record_dump(&chunks, destination).map_err(|error| {
+                    ScenarioActivationError::Recoverable(format!(
+                        "Replay {} could not write /recdump {}: {error:#}",
+                        scenario.title,
+                        destination.display()
+                    ))
+                })?;
+            }
+            let playback = ControlRecordPlayback::from_chunks(chunks);
             let player_infos = if group.exists("PlayerInfos.txt") {
                 let bytes = group.read_file("PlayerInfos.txt").map_err(|error| {
                     ScenarioActivationError::Recoverable(format!(
@@ -94478,6 +94525,95 @@ mod tests {
     }
 
     #[test]
+    fn classic_recdump_writes_cpp_text_and_binary_outputs() {
+        let directory = tempdir().expect("record-dump tempdir");
+        let text_path = directory.path().join("dump.TXT");
+        let leading_dot_text_path = directory.path().join(".tXt");
+        let binary_path = directory.path().join("dump.c4b");
+        // One RCT_Ctrl with a noncanonical two-byte packed zero, followed by
+        // End and an ignored suffix. C4Playback fully loads the record,
+        // canonicalizes typed payloads, and stops at the first End.
+        let input = [
+            5,
+            lc_engine::RCT_CTRL,
+            0x86,
+            1,
+            1,
+            0x80,
+            0,
+            0xff,
+            42,
+            lc_engine::RCT_END,
+            9,
+            lc_engine::RCT_FRAME,
+        ];
+
+        let chunks = lc_network::decode_control_record(&input).expect("decode replay fixture");
+        write_classic_record_dump(&chunks, &text_path).expect("write text /recdump");
+        write_classic_record_dump(&chunks, &leading_dot_text_path)
+            .expect("write leading-dot text /recdump");
+        write_classic_record_dump(&chunks, &binary_path).expect("write binary /recdump");
+
+        let expected_text = concat!(
+            "[Rec]\r\n",
+            "Frame=5\r\n",
+            "Type=0\r\n",
+            "\r\n",
+            "  [IDPacket]\r\n",
+            "  ID=134\r\n",
+            "\r\n",
+            "    [Synchronize]\r\n",
+            "    SavePlrs=true\r\n",
+            "    SyncClear=true\r\n",
+            "    ByClient=0\r\n",
+            "\n\n",
+            "[Rec]\r\n",
+            "Frame=47\r\n",
+            "Type=16\r\n",
+            "\n\n",
+        );
+        assert_eq!(fs::read(&text_path).unwrap(), expected_text.as_bytes());
+        assert_eq!(
+            fs::read(&leading_dot_text_path).unwrap(),
+            expected_text.as_bytes()
+        );
+        assert_eq!(
+            fs::read(&binary_path).unwrap(),
+            [
+                5,
+                lc_engine::RCT_CTRL,
+                0x86,
+                1,
+                1,
+                0,
+                0xff,
+                42,
+                lc_engine::RCT_END,
+            ]
+        );
+
+        let missing_parent = directory.path().join("missing/dump.c4b");
+        let error = write_classic_record_dump(&chunks, &missing_parent)
+            .expect_err("an unwritable destination must fail replay loading");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to write classic record dump"),
+            "unexpected write diagnostic: {error:#}"
+        );
+    }
+
+    #[test]
+    fn classic_recdump_c4r_suffix_retains_both_native_interpretations() {
+        let classic = parse_classic_command_line(&[OsString::from("/recdump:dump.c4r")]);
+        assert_eq!(classic.record_dump.as_deref(), Some("dump.c4r"));
+        assert_eq!(
+            classic.record_stream,
+            Some(PathBuf::from("/recdump:dump.c4r"))
+        );
+    }
+
+    #[test]
     fn classic_command_line_maps_process_local_overrides_in_argument_order() {
         let classic = parse_classic_command_line(
             &[
@@ -94495,6 +94631,9 @@ mod tests {
                 "/udpport:3333",
                 "/pass:secret",
                 "/comment:launch comment",
+                "/recdump:discarded.bin",
+                "/RECDUMP:dump.TXT",
+                "/stream:record.example:11114",
                 "/faircrew",
                 "/trainedcrew",
                 "/config:portable.cfg",
@@ -94517,6 +94656,11 @@ mod tests {
         assert_eq!(classic.udp_port, Some(3333));
         assert_eq!(classic.password.as_deref(), Some("secret"));
         assert_eq!(classic.comment.as_deref(), Some("launch comment"));
+        assert_eq!(classic.record_dump.as_deref(), Some("dump.TXT"));
+        assert_eq!(
+            classic.stream_address.as_deref(),
+            Some("record.example:11114")
+        );
         assert_eq!(classic.fair_crew, Some(false));
         assert_eq!(classic.config_file, Some(PathBuf::from("portable.cfg")));
         assert!(classic.verbose);
@@ -152021,9 +152165,16 @@ VendorNestedField=discard me\n";
             .expect("write deliberately different binary record");
 
         let replay_group = Group::open(&replay_path).expect("open dual-format replay");
-        app.control_playback = Some(
-            replay_control_record_playback(&replay_group).expect("text record takes precedence"),
-        );
+        let replay_chunks =
+            replay_control_record_chunks(&replay_group).expect("text record takes precedence");
+        let dump_path = directory.path().join("preferred.txt");
+        write_classic_record_dump(&replay_chunks, &dump_path)
+            .expect("dump the authoritative text record");
+        let dump = fs::read_to_string(&dump_path).unwrap();
+        assert!(dump.contains(&format!("    Com={}\r\n", lc_engine::COM_RIGHT)));
+        assert!(dump.contains(&format!("  Com={}\r\n", lc_engine::COM_UP)));
+        assert!(!dump.contains(&format!("  Com={}\r\n", lc_engine::COM_LEFT)));
+        app.control_playback = Some(ControlRecordPlayback::from_chunks(replay_chunks));
         app.engine.set_replay_control(true);
         app.engine.set_control_host(false);
         app.update().expect("execute frame-zero text controls");
@@ -152049,7 +152200,9 @@ VendorNestedField=discard me\n";
         fs::write(binary_only_path.join("CtrlRec.c4b"), binary.finish(1))
             .expect("write fallback binary record");
         let binary_only = Group::open(&binary_only_path).unwrap();
-        let mut fallback = replay_control_record_playback(&binary_only).unwrap();
+        let mut fallback = ControlRecordPlayback::from_chunks(
+            replay_control_record_chunks(&binary_only).unwrap(),
+        );
         assert_eq!(fallback.take_controls(0), vec![binary_control.clone()]);
 
         let invalid_text_path = directory.path().join("InvalidTextWins.c4s");
@@ -152063,7 +152216,7 @@ VendorNestedField=discard me\n";
         binary.record_packet(0, &binary_control).unwrap();
         fs::write(invalid_text_path.join("CtrlRec.c4b"), binary.finish(1)).unwrap();
         let invalid_text = Group::open(&invalid_text_path).unwrap();
-        let error = replay_control_record_playback(&invalid_text)
+        let error = replay_control_record_chunks(&invalid_text)
             .expect_err("loaded malformed text must not fall back to binary");
         assert!(error.contains("invalid CtrlRec.txt"));
         assert!(error.contains("packet ID 0xff"));

@@ -6,8 +6,9 @@ use std::collections::VecDeque;
 use thiserror::Error;
 
 use crate::legacy::{
-    decode_control_entry_prefix, decode_control_list_prefix, encode_control_entry_payload,
-    encode_control_list_payload, LegacyControlError, LegacyEncodeError, Reader,
+    append_raw_i32, append_uint32, decode_control_entry_prefix, decode_control_list_prefix,
+    encode_control_entry_payload, encode_control_list_payload, LegacyControlError,
+    LegacyEncodeError, Reader,
 };
 
 /// One typed chunk from a C++ `CtrlRec.c4b` stream.
@@ -47,6 +48,10 @@ impl ControlRecordChunk {
             | Self::DebugRecord { frame, .. }
             | Self::End { frame } => *frame,
         }
+    }
+
+    fn signed_frame(&self) -> i32 {
+        self.frame() as i32
     }
 }
 
@@ -131,6 +136,16 @@ pub enum ControlRecordDecodeError {
     UnsupportedChunkType(u8),
     #[error("control record ends in a partial chunk")]
     Truncated,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ControlRecordRewriteError {
+    #[error("control record could not be decoded: {0}")]
+    Decode(#[from] ControlRecordDecodeError),
+    #[error("control record could not be encoded: {0}")]
+    Encode(#[from] LegacyEncodeError),
+    #[error("control record could not be written as classic text: {0}")]
+    Text(#[from] lc_engine::ControlIniEncodeError),
 }
 
 /// Incremental parser for a C++ `CtrlRec.c4b` stream.
@@ -336,7 +351,10 @@ fn parse_text_controls(
     input: &[u8],
 ) -> Result<Option<Vec<EngineControlPacket>>, ControlRecordDecodeError> {
     match parse_control_ini_bytes(input) {
-        Ok(controls) => Ok(Some(controls)),
+        Ok(mut controls) => {
+            validate_text_control_names(&mut controls, input);
+            Ok(Some(controls))
+        }
         Err(error)
             if matches!(
                 &error,
@@ -366,6 +384,58 @@ fn text_field<'a>(line: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
     let line = trim_ascii(line);
     let equals = line.iter().position(|byte| *byte == b'=')?;
     (trim_ascii(&line[..equals]) == name).then(|| trim_ascii(&line[equals + 1..]))
+}
+
+fn has_text_field(lines: &[&[u8]], name: &[u8]) -> bool {
+    lines.iter().any(|line| text_field(line, name).is_some())
+}
+
+fn validate_text_control_names(controls: &mut [EngineControlPacket], input: &[u8]) {
+    let lines = legacy_text_lines(input);
+    let packet_blocks = lines
+        .split(|line| text_section_name(line) == Some(b"IDPacket"))
+        .skip(1);
+
+    for (control, block) in controls.iter_mut().zip(packet_blocks) {
+        match control {
+            EngineControlPacket::ClientJoin(data) => {
+                if has_text_field(block, b"Name") {
+                    data.core.name =
+                        crate::validate_name_no_empty(std::mem::take(&mut data.core.name));
+                }
+                if has_text_field(block, b"Nick") {
+                    data.core.nick =
+                        crate::validate_name_no_empty(std::mem::take(&mut data.core.nick));
+                }
+            }
+            EngineControlPacket::PlayerInfo(data) => {
+                let player_blocks = block
+                    .split(|line| text_section_name(line) == Some(b"Player"))
+                    .skip(1);
+                for (player, player_block) in data.players.iter_mut().zip(player_blocks) {
+                    if has_text_field(player_block, b"Name") {
+                        player.name =
+                            crate::validate_name_no_empty(std::mem::take(&mut player.name));
+                    }
+                    if has_text_field(player_block, b"ForcedName") {
+                        player.forced_name = crate::validate_name_allow_empty(std::mem::take(
+                            &mut player.forced_name,
+                        ));
+                    }
+                    if has_text_field(player_block, b"LeagueAccount") {
+                        player.league_account = crate::validate_name_allow_empty(std::mem::take(
+                            &mut player.league_account,
+                        ));
+                    }
+                    if has_text_field(player_block, b"ClanTag") {
+                        player.clan_tag =
+                            crate::validate_name_allow_empty(std::mem::take(&mut player.clan_tag));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn parse_cpp_integer_prefix_with_len(value: &[u8]) -> Option<(i64, usize)> {
@@ -484,6 +554,19 @@ fn validate_text_packet(lines: &[&[u8]]) -> Result<(), ControlRecordDecodeError>
         .ok_or_else(|| ControlRecordDecodeError::InvalidTextControlEnvelope {
             detail: "packet ID is absent or unreadable".to_string(),
         })?;
+    // C4ControlDebugRec compiles its StdBuf directly through the named
+    // `Debug Rec` value instead of opening a packet-body section.
+    if id == 0xc0 {
+        if lines
+            .iter()
+            .any(|line| text_field(line, b"Debug Rec").is_some())
+        {
+            return Ok(());
+        }
+        return Err(ControlRecordDecodeError::InvalidTextControlEnvelope {
+            detail: "packet ID 0xc0 is missing Debug Rec=<StdBuf>".to_string(),
+        });
+    }
     let expected = control_packet_section(id).ok_or_else(|| {
         ControlRecordDecodeError::InvalidTextControlEnvelope {
             detail: format!("packet ID {id:#x} has no native control payload"),
@@ -640,9 +723,10 @@ fn decode_text_record_block(
     let (Some(frame), Some(chunk_type)) = (frame, chunk_type) else {
         return Ok(None);
     };
-    // Native stores a signed frame. Ordinary generated records are
-    // nonnegative; a hand-edited negative frame is already due at frame zero.
-    let frame = u32::try_from(frame).unwrap_or(0);
+    // The binary path holds the native int32 frame's bit pattern in this
+    // unsigned accumulator. Preserve that same representation for text so
+    // rewriting casts it back exactly and binary output retains its low byte.
+    let frame = frame as u32;
 
     let chunk = match chunk_type {
         RCT_CTRL => {
@@ -693,7 +777,7 @@ fn decode_text_record_block(
 /// list as repeated `[IDPacket]` children, while type 1 embeds one
 /// `C4IDPacket` directly. Other readable chunk types retain their native
 /// `C4PktDebugRec` type/data envelope; `RCT_File` has no usable INI form.
-fn decode_control_record_text(
+pub fn decode_control_record_text(
     bytes: &[u8],
 ) -> Result<Vec<ControlRecordChunk>, ControlRecordDecodeError> {
     let mut chunks = Vec::new();
@@ -719,6 +803,183 @@ fn decode_control_record_text(
     Ok(chunks)
 }
 
+/// Encode already-decoded control-record chunks using C++'s canonical binary
+/// rewrite rules. This entry point lets stream conversion remove `RCT_File`
+/// chunks before sharing the ordinary `/recdump` writer.
+pub fn encode_control_record_binary(
+    chunks: &[ControlRecordChunk],
+) -> Result<Vec<u8>, LegacyEncodeError> {
+    let mut output = Vec::new();
+    let mut previous_frame = 0u32;
+
+    for chunk in chunks {
+        let mut payload = Vec::new();
+        let (chunk_type, finished) = match chunk {
+            ControlRecordChunk::Controls { controls, .. } => {
+                payload = encode_control_list_payload(controls)?;
+                (RCT_CTRL, false)
+            }
+            ControlRecordChunk::ControlPacket { control, .. } => {
+                payload = encode_control_entry_payload(control)?;
+                (RCT_CTRL_PKT, false)
+            }
+            ControlRecordChunk::Frame { .. } => (RCT_FRAME, false),
+            ControlRecordChunk::DebugRecord {
+                chunk_type,
+                debug_type,
+                data,
+                ..
+            } => {
+                append_raw_i32(&mut payload, *debug_type);
+                let size = u32::try_from(data.len())
+                    .map_err(|_| LegacyEncodeError::DebugRecordTooLarge(data.len()))?;
+                append_uint32(&mut payload, size);
+                payload.extend_from_slice(data);
+                (*chunk_type, false)
+            }
+            ControlRecordChunk::End { .. } => (RCT_END, true),
+        };
+
+        let frame = chunk.frame();
+        // C4Playback::ReWriteBinary diagnoses a delta outside 0..=255 but
+        // still assigns it to the uint8 chunk header, retaining its low byte.
+        output.push(frame.wrapping_sub(previous_frame) as u8);
+        output.push(chunk_type);
+        output.extend_from_slice(&payload);
+        previous_frame = frame;
+
+        // ReWriteBinary stops at the first RCT_End even if its in-memory
+        // chunk list happens to contain later entries.
+        if finished {
+            break;
+        }
+    }
+
+    Ok(output)
+}
+
+/// Rewrite a complete C++ `CtrlRec.c4b` stream in canonical binary form.
+///
+/// This mirrors `C4Playback::ReWriteBinary`: chunk payloads are decompiled
+/// through their typed codecs, frame deltas are recomputed from absolute
+/// frames and truncated to the native uint8 header, and output stops after
+/// the first `RCT_End`. No missing end marker is synthesized.
+pub fn rewrite_control_record_binary(bytes: &[u8]) -> Result<Vec<u8>, ControlRecordRewriteError> {
+    let chunks = decode_control_record(bytes)?;
+    Ok(encode_control_record_binary(&chunks)?)
+}
+
+fn append_record_text_value(output: &mut Vec<u8>, name: &str, value: impl std::fmt::Display) {
+    output.extend_from_slice(name.as_bytes());
+    output.push(b'=');
+    output.extend_from_slice(value.to_string().as_bytes());
+    output.extend_from_slice(b"\r\n");
+}
+
+fn append_record_text_escaped(output: &mut Vec<u8>, value: &[u8]) {
+    output.push(b'"');
+    let mut previous_was_numeric_escape = false;
+    for &byte in value {
+        let printable = byte.is_ascii_graphic() || byte == b' ';
+        let needs_escape = !printable
+            || matches!(byte, b'\\' | b'"')
+            || (previous_was_numeric_escape && byte.is_ascii_digit());
+        if !needs_escape {
+            output.push(byte);
+            previous_was_numeric_escape = false;
+            continue;
+        }
+
+        previous_was_numeric_escape = false;
+        match byte {
+            b'\x07' => output.extend_from_slice(b"\\a"),
+            b'\x08' => output.extend_from_slice(b"\\b"),
+            b'\x0c' => output.extend_from_slice(b"\\f"),
+            b'\n' => output.extend_from_slice(b"\\n"),
+            b'\r' => output.extend_from_slice(b"\\r"),
+            b'\t' => output.extend_from_slice(b"\\t"),
+            b'\x0b' => output.extend_from_slice(b"\\v"),
+            b'"' => output.extend_from_slice(b"\\\""),
+            b'\\' => output.extend_from_slice(b"\\\\"),
+            other => {
+                output.push(b'\\');
+                output.extend_from_slice(format!("{other:o}").as_bytes());
+                previous_was_numeric_escape = true;
+            }
+        }
+    }
+    output.push(b'"');
+}
+
+fn append_record_text_buffer(output: &mut Vec<u8>, name: &str, value: &[u8]) {
+    output.extend_from_slice(name.as_bytes());
+    output.push(b'=');
+    output.extend_from_slice(value.len().to_string().as_bytes());
+    output.push(b':');
+    append_record_text_escaped(output, value);
+    output.extend_from_slice(b"\r\n");
+}
+
+/// Encode already-decoded chunks as C++ `CtrlRec.txt` data.
+pub fn encode_control_record_text(
+    chunks: &[ControlRecordChunk],
+) -> Result<Vec<u8>, lc_engine::ControlIniEncodeError> {
+    let mut output = Vec::new();
+    for chunk in chunks {
+        output.extend_from_slice(b"[Rec]\r\n");
+        append_record_text_value(&mut output, "Frame", chunk.frame() as i32);
+        match chunk {
+            ControlRecordChunk::Controls { controls, .. } => {
+                append_record_text_value(&mut output, "Type", RCT_CTRL);
+                for control in controls {
+                    lc_engine::append_control_packet_ini(
+                        &mut output,
+                        control,
+                        2,
+                        lc_engine::ControlIniPacketMode::IdPacketSection,
+                    )?;
+                }
+            }
+            ControlRecordChunk::ControlPacket { control, .. } => {
+                append_record_text_value(&mut output, "Type", RCT_CTRL_PKT);
+                lc_engine::append_control_packet_ini(
+                    &mut output,
+                    control,
+                    0,
+                    lc_engine::ControlIniPacketMode::Inline,
+                )?;
+            }
+            ControlRecordChunk::Frame { .. } => {
+                append_record_text_value(&mut output, "Type", RCT_FRAME);
+            }
+            ControlRecordChunk::DebugRecord {
+                chunk_type,
+                debug_type,
+                data,
+                ..
+            } => {
+                append_record_text_value(&mut output, "Type", chunk_type);
+                append_record_text_value(&mut output, "Type", debug_type);
+                append_record_text_buffer(&mut output, "Data", data);
+            }
+            ControlRecordChunk::End { .. } => {
+                append_record_text_value(&mut output, "Type", RCT_END);
+            }
+        }
+        // C4Playback::ReWriteText appends two literal LF bytes after each
+        // independently generated INI chunk, whose final field already ends
+        // in CRLF.
+        output.extend_from_slice(b"\n\n");
+    }
+    Ok(output)
+}
+
+/// Rewrite a complete C++ `CtrlRec.c4b` stream as canonical `CtrlRec.txt`.
+pub fn rewrite_control_record_text(bytes: &[u8]) -> Result<Vec<u8>, ControlRecordRewriteError> {
+    let chunks = decode_control_record(bytes)?;
+    Ok(encode_control_record_text(&chunks)?)
+}
+
 /// Frame-ordered playback view of a decoded control-record stream.
 ///
 /// [`take_controls`](Self::take_controls) mirrors
@@ -741,7 +1002,7 @@ impl ControlRecordPlayback {
         Ok(Self::from_chunks(decode_control_record_text(bytes)?))
     }
 
-    fn from_chunks(chunks: Vec<ControlRecordChunk>) -> Self {
+    pub fn from_chunks(chunks: Vec<ControlRecordChunk>) -> Self {
         Self {
             chunks: chunks.into(),
             finished: false,
@@ -757,7 +1018,7 @@ impl ControlRecordPlayback {
         while self
             .chunks
             .front()
-            .is_some_and(|chunk| chunk.frame() <= frame)
+            .is_some_and(|chunk| i64::from(chunk.signed_frame()) <= i64::from(frame))
         {
             match self.chunks.pop_front().expect("front chunk exists") {
                 ControlRecordChunk::Controls {
@@ -1079,6 +1340,261 @@ mod tests {
             decode_control_record(&[5, RCT_CTRL, 0x86]),
             Err(ControlRecordDecodeError::Truncated)
         );
+    }
+
+    #[test]
+    fn classic_recdump_binary_rewrite_matches_cpp_chunk_grammar() {
+        let mut input = vec![
+            5,
+            RCT_CTRL,
+            0x86,
+            1,
+            1,
+            0x80,
+            0,
+            0xff,
+            0,
+            RCT_CTRL_PKT,
+            0x86,
+            0,
+            0,
+            0x80,
+            0,
+            250,
+            0xa1,
+        ];
+        input.extend_from_slice(&(-1_234_i32).to_ne_bytes());
+        // Both signed zero and the one-byte debug size use valid but
+        // noncanonical two-byte packed representations in the source.
+        input.extend_from_slice(&[0x81, 0, 0xee, 1, RCT_FRAME, 2, RCT_END]);
+        input.extend_from_slice(&[9, RCT_FRAME]);
+
+        let mut expected = vec![
+            5,
+            RCT_CTRL,
+            0x86,
+            1,
+            1,
+            0,
+            0xff,
+            0,
+            RCT_CTRL_PKT,
+            0x86,
+            0,
+            0,
+            0,
+            250,
+            0xa1,
+        ];
+        expected.extend_from_slice(&(-1_234_i32).to_ne_bytes());
+        expected.extend_from_slice(&[1, 0xee, 1, RCT_FRAME, 2, RCT_END]);
+
+        assert_eq!(rewrite_control_record_binary(&input), Ok(expected));
+    }
+
+    #[test]
+    fn cpp_binary_rewrite_truncates_frame_deltas_and_stops_at_end() {
+        let chunks = vec![
+            ControlRecordChunk::Frame { frame: 300 },
+            ControlRecordChunk::DebugRecord {
+                frame: 20,
+                chunk_type: 0xff,
+                debug_type: 0x1234_5678,
+                data: vec![0xab; 128],
+            },
+            ControlRecordChunk::End { frame: 700 },
+            ControlRecordChunk::Frame { frame: 701 },
+        ];
+
+        let rewritten = encode_control_record_binary(&chunks).unwrap();
+        let mut expected = vec![44, RCT_FRAME, 232, 0xff];
+        expected.extend_from_slice(&0x1234_5678_i32.to_ne_bytes());
+        expected.extend_from_slice(&[0x80, 0x01]);
+        expected.extend_from_slice(&[0xab; 128]);
+        expected.extend_from_slice(&[168, RCT_END]);
+        assert_eq!(rewritten, expected);
+    }
+
+    #[test]
+    fn binary_rewrite_propagates_incomplete_record_errors() {
+        assert_eq!(
+            rewrite_control_record_binary(&[5, RCT_CTRL, 0x86]),
+            Err(ControlRecordRewriteError::Decode(
+                ControlRecordDecodeError::Truncated
+            ))
+        );
+    }
+
+    #[test]
+    fn classic_recdump_text_rewrite_matches_cpp_ini_grammar() {
+        let chunks = vec![
+            ControlRecordChunk::Controls {
+                frame: 5,
+                controls: vec![synchronize()],
+            },
+            ControlRecordChunk::ControlPacket {
+                frame: 5,
+                control: script(),
+            },
+            ControlRecordChunk::DebugRecord {
+                frame: 6,
+                chunk_type: 0x80,
+                debug_type: -1_234,
+                data: vec![0, b'7', b'"', b'\\', 0xff],
+            },
+            ControlRecordChunk::Frame { frame: 7 },
+            ControlRecordChunk::End { frame: 9 },
+        ];
+
+        let expected = concat!(
+            "[Rec]\r\n",
+            "Frame=5\r\n",
+            "Type=0\r\n",
+            "\r\n",
+            "  [IDPacket]\r\n",
+            "  ID=134\r\n",
+            "\r\n",
+            "    [Synchronize]\r\n",
+            "    SavePlrs=true\r\n",
+            "    SyncClear=true\r\n",
+            "    ByClient=0\r\n",
+            "\n\n",
+            "[Rec]\r\n",
+            "Frame=5\r\n",
+            "Type=1\r\n",
+            "ID=136\r\n",
+            "\r\n",
+            "  [Script]\r\n",
+            "  Script=\"A\\1B\"\r\n",
+            "  ByClient=2\r\n",
+            "\n\n",
+            "[Rec]\r\n",
+            "Frame=6\r\n",
+            "Type=128\r\n",
+            "Type=-1234\r\n",
+            "Data=5:\"\\0\\67\\\"\\\\\\377\"\r\n",
+            "\n\n",
+            "[Rec]\r\n",
+            "Frame=7\r\n",
+            "Type=2\r\n",
+            "\n\n",
+            "[Rec]\r\n",
+            "Frame=9\r\n",
+            "Type=16\r\n",
+            "\n\n",
+        );
+
+        assert_eq!(
+            encode_control_record_text(&chunks).unwrap(),
+            expected.as_bytes()
+        );
+    }
+
+    #[test]
+    fn cpp_text_record_preserves_signed_frames_and_debugrec_value_envelopes() {
+        let queued = EngineControlPacket::DebugRecord(DebugRecordControlData {
+            data: vec![0x00, 0xff],
+        });
+        let direct = EngineControlPacket::DebugRecord(DebugRecordControlData {
+            data: b"direct".to_vec(),
+        });
+        let chunks = vec![
+            ControlRecordChunk::Controls {
+                frame: u32::MAX,
+                controls: vec![queued.clone()],
+            },
+            ControlRecordChunk::ControlPacket {
+                frame: 0,
+                control: direct.clone(),
+            },
+            ControlRecordChunk::End { frame: 1 },
+        ];
+
+        let text = encode_control_record_text(&chunks).unwrap();
+        let rendered = std::str::from_utf8(&text).unwrap();
+        assert!(rendered.contains("Frame=-1\r\n"));
+        assert!(rendered.contains("Debug Rec=2:\"\\0\\377\"\r\n"));
+        assert!(rendered.contains("Debug Rec=6:\"direct\"\r\n"));
+        assert!(!rendered.contains("[Debug Rec]"));
+        assert_eq!(decode_control_record_text(&text).unwrap(), chunks);
+
+        let binary = encode_control_record_binary(&chunks).unwrap();
+        assert_eq!(binary[0], u8::MAX, "-1 rewrites through its low byte");
+
+        let mut playback = ControlRecordPlayback::from_text_bytes(&text).unwrap();
+        assert_eq!(playback.take_controls(0), vec![queued, direct]);
+    }
+
+    #[test]
+    fn classic_recdump_text_input_normalizes_cpp_validated_names() {
+        let input = concat!(
+            "[Rec]\n",
+            "Frame=1\n",
+            "Type=1\n",
+            "ID=128\n",
+            "  [Client Join]\n",
+            "    [ClientCore]\n",
+            "    Name=\"\"\n",
+            "    Nick=\" {<i> </i>{ \"\n",
+            "[Rec]\n",
+            "Frame=2\n",
+            "Type=1\n",
+            "ID=144\n",
+            "  [Player Info]\n",
+            "    [Player]\n",
+            "    Name=\"\"\n",
+            "    ForcedName=\" <i>Alice</i> \"\n",
+            "    LeagueAccount=\" { \"\n",
+            "    ClanTag=\"\\t<i>Clan</i>\\r\"\n",
+            "[Rec]\n",
+            "Frame=3\n",
+            "Type=1\n",
+            "ID=128\n",
+            "  [Client Join]\n",
+            "  ByClient=0\n",
+        );
+
+        let chunks = decode_control_record_text(input.as_bytes()).unwrap();
+        let ControlRecordChunk::ControlPacket {
+            control: EngineControlPacket::ClientJoin(join),
+            ..
+        } = &chunks[0]
+        else {
+            panic!("expected validated ClientJoin")
+        };
+        assert_eq!(join.core.name.as_bytes(), b"empty");
+        assert_eq!(join.core.nick.as_bytes(), b"Unknown");
+
+        let ControlRecordChunk::ControlPacket {
+            control: EngineControlPacket::PlayerInfo(info),
+            ..
+        } = &chunks[1]
+        else {
+            panic!("expected validated PlayerInfo")
+        };
+        let player = &info.players[0];
+        assert_eq!(player.name.as_bytes(), b"empty");
+        assert_eq!(player.forced_name.as_bytes(), b"Alice");
+        assert!(player.league_account.is_empty());
+        assert_eq!(player.clan_tag.as_bytes(), b"Clan");
+
+        let ControlRecordChunk::ControlPacket {
+            control: EngineControlPacket::ClientJoin(defaulted),
+            ..
+        } = &chunks[2]
+        else {
+            panic!("expected defaulted ClientJoin")
+        };
+        assert!(defaulted.core.name.is_empty());
+        assert!(defaulted.core.nick.is_empty());
+
+        let rewritten = encode_control_record_text(&chunks).unwrap();
+        let rewritten = std::str::from_utf8(&rewritten).unwrap();
+        assert!(rewritten.contains("    Name=\"empty\"\r\n"));
+        assert!(rewritten.contains("    Nick=\"Unknown\"\r\n"));
+        assert!(rewritten.contains("    ForcedName=\"Alice\"\r\n"));
+        assert!(!rewritten.contains("LeagueAccount="));
+        assert!(rewritten.contains("    ClanTag=Clan\r\n"));
     }
 
     #[test]

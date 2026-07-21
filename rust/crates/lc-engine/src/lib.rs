@@ -69,10 +69,12 @@ pub use command::{CommandStackSnapshot, MenuRequest, MenuRequestKind};
 #[doc(hidden)]
 pub use compat::BlastReplay;
 pub use control::{
-    interpret_player_control_command, ActivateGameGoalMenuControlData,
+    append_control_packet_ini, encode_control_packet_ini, interpret_player_control_command,
+    ActivateGameGoalMenuControlData,
     ActivateGameGoalRuleControlData, ClientCoreControlData, ClientJoinControlData,
     ClientRemoveControlData, ClientUpdateControlData, CommandKind, ControlButton, ControlCommand,
-    ControlEvent, ControlPacket, ControlPacketId, ControlPlayerInfoEntry, CustomCommandControlData,
+    ControlEvent, ControlIniEncodeError, ControlIniPacketMode, ControlPacket, ControlPacketId,
+    ControlPlayerInfoEntry, CustomCommandControlData,
     DebugRecordControlData, EliminatePlayerControlData, EmDrawToolControlData, EmDropDefControlData,
     EmMoveObjectControlData,
     InitScenarioPlayerControlData,

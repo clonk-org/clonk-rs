@@ -287,7 +287,12 @@ async fn player_info_update_request_reaches_host_with_transport_origin() {
             request: actual_request,
         })) => {
             assert_eq!(actual_origin, client_id);
-            assert_eq!(actual_request, request);
+            let mut expected = request;
+            // C4PlayerInfo's binary reader applies VAL_NameNoEmpty even when
+            // the sender encoded an empty default Name.
+            expected.players[0].name =
+                lc_engine::LegacyCString::from_bytes(b"empty".to_vec()).unwrap();
+            assert_eq!(actual_request, expected);
         }
         Ok(Some(event)) => panic!("unexpected host event: {event:?}"),
         Ok(None) => panic!("host event stream ended before PlayerInfo update"),
