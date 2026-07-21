@@ -58230,10 +58230,19 @@ impl Engine {
         }
         let index = self.objects.len() - 1;
         self.update_sector_for_index(index);
-        if !destroy_requested {
-            self.stage_materialized_spawn_solid_mask(index);
+        // C4GameObjects::Load moves Status=Inactive rows out of the main
+        // object list before its UpdateFaces pass, so those loaded objects
+        // have no C4SolidMask instance until StatusActivate calls
+        // UpdateFace(true). Runtime deactivation is deliberately different:
+        // it leaves an already-put mask intact.
+        let loaded_inactive = loaded
+            && self.objects[index].state.status == ObjectStatus::Inactive;
+        if !loaded_inactive {
+            if !destroy_requested {
+                self.stage_materialized_spawn_solid_mask(index);
+            }
+            self.update_solid_mask(index);
         }
-        self.update_solid_mask(index);
         for (previous, new) in container_changes {
             self.apply_container_change(id, previous, new, loaded)?;
         }

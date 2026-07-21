@@ -34476,6 +34476,124 @@ mod game_start_sync {
         );
     }
 
+    // C4GameObjects::Load removes inactive rows from the active list before
+    // UpdateFaces, so they do not construct or put a solid mask until
+    // StatusActivate runs UpdateFace(true). StatusDeactivate does not remove
+    // an existing mask.
+    #[test]
+    fn legacy_loaded_inactive_object_does_not_put_solid_mask_until_activated() {
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        let gate = defs.join("Gate.c4d");
+        std::fs::create_dir_all(&gate).expect("gate dir");
+        std::fs::write(
+            gate.join("DefCore.txt"),
+            "[DefCore]\nid=GATE\nName=Gate\nCategory=2\nWidth=1\nHeight=1\nOffset=0,0\nSolidMask=0,0,1,1,0,0\n",
+        )
+        .expect("defcore");
+        std::fs::write(
+            gate.join("Script.c"),
+            "#strict\npublic func ActivateMask() { return SetObjectStatus(1); }\n\
+             public func DeactivateMask() { return SetObjectStatus(2); }\n",
+        )
+        .expect("script");
+        write_test_definition_graphics(&gate);
+
+        let scenario_dir = dir.path().join("Sync.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Inactive mask\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Landscape]\nMapZoom=10\n",
+        )
+        .expect("scenario core");
+        image::GrayImage::from_pixel(4, 4, image::Luma([0]))
+            .save(scenario_dir.join("Landscape.bmp"))
+            .expect("landscape");
+        std::fs::write(
+            scenario_dir.join("Objects.txt"),
+            "[Object]\nid=GATE\nNumber=61\nStatus=2\nCategory=2\nX=10\nY=10\nSize=100000\nWidth=1\nHeight=1\nOffset=0,0\n\n\
+             [Object]\nid=GATE\nNumber=62\nStatus=1\nCategory=2\nX=20\nY=10\nSize=100000\nWidth=1\nHeight=1\nOffset=0,0\n",
+        )
+        .expect("objects");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "# dynamic slots only\n")
+            .expect("texmap");
+        std::fs::write(
+            materials.join("Vehicle.c4m"),
+            "[Material]\nName=Vehicle\nDensity=100\nTextureOverlay=Smooth\n",
+        )
+        .expect("vehicle material");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(materials.join("Smooth.png"))
+            .expect("texture");
+
+        let resolver = ProbeResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let mut engine = Engine::with_seed(61);
+        scenario.apply(&mut engine).expect("scenario applies");
+        let id = ObjectId::new(61);
+        let loaded_normal = ObjectId::new(62);
+
+        assert_eq!(engine.debug_solid_mask_is_put(id.as_u64()), Some(false));
+        assert_eq!(engine.debug_landscape_byte(10, 10), Some(0));
+        let index = engine.find_object_index(id).expect("inactive gate exists");
+        assert_eq!(
+            engine.objects[index].solid_mask_instance_sequence, None,
+            "the load path must not allocate an ordering slot"
+        );
+        assert_eq!(
+            engine.debug_solid_mask_is_put(loaded_normal.as_u64()),
+            Some(true),
+            "loaded normal objects still receive the initial UpdateFaces pass"
+        );
+        assert_eq!(
+            engine.debug_landscape_material_name(20, 10).as_deref(),
+            Some("Vehicle")
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "ActivateMask", Vec::new())
+                .expect("activation executes"),
+            lc_script::Value::Bool(true)
+        );
+        assert_eq!(engine.debug_solid_mask_is_put(id.as_u64()), Some(true));
+        assert_eq!(
+            engine.debug_landscape_material_name(10, 10).as_deref(),
+            Some("Vehicle")
+        );
+        let index = engine.find_object_index(id).expect("active gate exists");
+        let activated_sequence = engine.objects[index]
+            .solid_mask_instance_sequence
+            .expect("activation allocates the mask ordering slot");
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "DeactivateMask", Vec::new())
+                .expect("deactivation executes"),
+            lc_script::Value::Bool(true)
+        );
+        assert_eq!(
+            engine.debug_solid_mask_is_put(id.as_u64()),
+            Some(true),
+            "runtime deactivation retains the existing mask"
+        );
+        assert_eq!(
+            engine.debug_landscape_material_name(10, 10).as_deref(),
+            Some("Vehicle")
+        );
+        let index = engine.find_object_index(id).expect("inactive gate remains");
+        assert_eq!(
+            engine.objects[index].solid_mask_instance_sequence,
+            Some(activated_sequence),
+            "runtime deactivation preserves the existing mask ordering slot"
+        );
+    }
+
     // C4Object::CompileFunc reads SolidMask= with DEFAULT Def->SolidMask
     // (C4Object.cpp:2770): a saved 0,0,0,0,0,0 means the object's solid
     // mask is OFF (opened gates/doors save that way); the def's mask must
