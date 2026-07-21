@@ -73,6 +73,10 @@ pub struct CommandObjectSnapshot {
     pub direction: Direction,
     /// The resolved GetPhysical view (temporary→info→definition).
     pub physical: PhysicalInfo,
+    /// True only when reading `physical` would perform the first scripted
+    /// fair-crew cache fill. Command handlers suspend at their exact native
+    /// GetPhysical seam instead of observing this non-callback placeholder.
+    pub physical_deferred: bool,
     pub owner: i32,
     /// C4Object::Controller, used when commands arm work on a target.
     pub controller: i32,
@@ -600,6 +604,7 @@ mod tests {
             construction: 0,
             direction: Direction::Left,
             physical: PhysicalInfo::default(),
+            physical_deferred: false,
             owner: OWNER_NONE,
             controller: OWNER_NONE,
             base: OWNER_NONE,
@@ -773,6 +778,34 @@ mod tests {
             Some(CommandDirection::Right),
             "four pixels exceeds CLNK Shape.Wdt/5 = 1"
         );
+    }
+
+    #[test]
+    fn move_to_missing_coordinates_still_reads_free_move_physical() {
+        let mut actor = walking_jumper(Vector2::new(20, 20));
+        actor.physical_deferred = true;
+        let objects = HashMap::from([(actor.id, actor.clone())]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let landscape = crate::Landscape::flat(100, 60);
+        let ctx = jump_ctx(&actor, &objects, &players, &definitions, &landscape);
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::MoveTo))
+            .expect("MoveTo queues");
+
+        let result = stack.execute_front(&ctx).expect("MoveTo evaluates");
+        assert!(matches!(
+            result.events.as_slice(),
+            [CommandEvent::ResolveCommandPhysical { reads: 1, .. }]
+        ));
+        let view = stack
+            .command_views()
+            .into_iter()
+            .next()
+            .expect("MoveTo remains linked");
+        assert_eq!(view.tx, Some(0));
+        assert_eq!(view.ty, Some(0));
     }
 
     #[test]
@@ -1536,15 +1569,21 @@ mod tests {
         );
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
-        let update = result.update.expect("fly update");
-        assert_eq!(
-            update.command_direction, None,
+        assert!(
+            result.update.is_none(),
             "DFA_FLIGHT never steers ComDir (C4Command.cpp:414-417)"
         );
-        assert_eq!(
-            update.action.and_then(|action| action.name),
-            Some("Fly".into()),
+        assert!(
+            matches!(
+                result.events.as_slice(),
+                [CommandEvent::MoveToFlightControlTakeoff { .. }]
+            ),
             "FlightControl takes off (C4Command.cpp:1843)"
+        );
+        let resumed = state.resume_after_flight_control(&ctx);
+        assert!(
+            resumed.operations.is_empty(),
+            "DFA_FLIGHT has no walking JumpControl tail"
         );
 
         let mut disabled_flyer = flyer.clone();
@@ -1561,6 +1600,10 @@ mod tests {
         assert!(
             disabled_result.update.is_none(),
             "ObjectDisabled suppresses FlightControl without inventing flight steering"
+        );
+        assert!(
+            disabled_result.events.is_empty(),
+            "ObjectDisabled suppresses the callbackful Fly transition"
         );
     }
 
@@ -1961,6 +2004,122 @@ mod tests {
             }
             other => panic!("expected jump, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn move_to_flight_takeoff_defers_walk_jump_until_after_callbacks() {
+        let landscape = crate::Landscape::flat(300, 110);
+        let mut walker = pathfinder_jumper(Vector2::new(100, 100));
+        walker.physical.can_fly = 1;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(140))
+                .with_ty(Some(43)),
+        );
+
+        let takeoff = state.step(&ctx);
+        assert!(
+            takeoff.operations.is_empty(),
+            "JumpControl waits for Fly callbacks"
+        );
+        assert!(matches!(
+            takeoff.events.as_slice(),
+            [CommandEvent::MoveToFlightControlTakeoff {
+                command_instance_id: 0,
+                ..
+            }]
+        ));
+
+        let mut unchanged = state.clone();
+        let unchanged_result = unchanged.resume_after_flight_control(&ctx);
+        assert!(matches!(
+            unchanged_result.operations.as_slice(),
+            [CommandOperation::PushFront(request)] if request.id == CommandId::Jump
+        ));
+
+        // A Fly callback can ChangeDef and remove Pathfinder. JumpControl
+        // must see that fresh state rather than queueing the stale jump.
+        let mut callback_mutated = walker.clone();
+        callback_mutated.pathfinder = 0;
+        let mutated_ctx = jump_ctx(
+            &callback_mutated,
+            &objects,
+            &players,
+            &definitions,
+            &landscape,
+        );
+        let mutated_result = state.resume_after_flight_control(&mutated_ctx);
+        assert!(mutated_result.operations.is_empty());
+    }
+
+    #[test]
+    fn detached_deferred_move_to_retains_exact_flight_tail() {
+        let landscape = crate::Landscape::flat(300, 110);
+        let mut walker = pathfinder_jumper(Vector2::new(100, 100));
+        walker.physical_deferred = true;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(140))
+                    .with_ty(Some(43))
+                    .with_evaluated(true),
+            )
+            .expect("MoveTo queues");
+
+        let first = stack.execute_front(&ctx).expect("physical read stages");
+        let command_instance_id = match first.events.as_slice() {
+            [CommandEvent::ResolveCommandPhysical {
+                command_instance_id,
+                ..
+            }] => *command_instance_id,
+            other => panic!("unexpected first events: {other:?}"),
+        };
+        assert_ne!(command_instance_id, 0);
+
+        stack.clear();
+        let mut physical = PhysicalInfo::default();
+        physical.can_fly = 1;
+        let takeoff = stack
+            .execute_pending_physical(
+                &ctx,
+                crate::PhysicsSettings::default().gravity_as_c4fixed(),
+                command_instance_id,
+                physical,
+            )
+            .expect("detached physical MoveTo resumes");
+        assert!(takeoff.operations.is_empty());
+        assert!(matches!(
+            takeoff.events.as_slice(),
+            [CommandEvent::MoveToFlightControlTakeoff {
+                command_instance_id: event_id,
+                ..
+            }] if *event_id == command_instance_id
+        ));
+        assert_eq!(stack.detached_move_to_flights.len(), 1);
+
+        let mut callback_mutated = walker.clone();
+        callback_mutated.pathfinder = 0;
+        let mutated_ctx = jump_ctx(
+            &callback_mutated,
+            &objects,
+            &players,
+            &definitions,
+            &landscape,
+        );
+        let resumed = stack
+            .execute_pending_move_to_flight(&mutated_ctx, command_instance_id)
+            .expect("exact detached MoveTo flight tail resumes");
+        assert!(resumed.operations.is_empty());
+        assert!(stack.detached_move_to_flights.is_empty());
     }
 
     // Trigger 3 (C4Command.cpp:1896-1908): CNAT_RIGHT wall contact with
@@ -8294,30 +8453,23 @@ mod tests {
 
         let first = state.step(&ctx);
         assert_eq!(first.status, CommandStatus::Running);
-        assert_eq!(first.events.len(), 2);
+        assert_eq!(first.events.len(), 1);
 
         match &first.events[0] {
-            CommandEvent::SpawnObject {
+            CommandEvent::SpawnConstruction {
+                actor_id,
                 definition_id,
                 owner,
                 position,
-                container,
-                construction,
+                kit_id: event_kit,
+                command_instance_id,
             } => {
+                assert_eq!(*actor_id, builder_id);
                 assert_eq!(definition_id, &construction_definition);
                 assert_eq!(*owner, 42);
                 assert_eq!(*position, Vector2::new(10, 0));
-                assert_eq!(*container, None);
-                assert_eq!(*construction, Some(1));
-            }
-            other => panic!("unexpected event: {:?}", other),
-        }
-
-        match &first.events[1] {
-            CommandEvent::ApplyObjectUpdate { object_id, update } => {
-                assert_eq!(*object_id, kit_id);
-                assert_eq!(update.container, Some(None));
-                assert_eq!(update.status, Some(ObjectStatus::Deleted));
+                assert_eq!(*event_kit, kit_id);
+                assert_eq!(*command_instance_id, 0);
             }
             other => panic!("unexpected event: {:?}", other),
         }
@@ -8350,7 +8502,8 @@ mod tests {
             rng: None,
         };
 
-        let second = state.step(&ctx_after_spawn);
+        let mut creation_failed_state = state.clone();
+        let second = state.resume_after_spawn(&ctx_after_spawn, Some(construction_id));
         assert_eq!(second.status, CommandStatus::Completed);
         assert_eq!(second.operations.len(), 1);
         match &second.operations[0] {
@@ -8364,6 +8517,16 @@ mod tests {
             }
             other => panic!("unexpected operation: {:?}", other),
         }
+
+        let creation_failed = creation_failed_state.resume_after_spawn(&ctx_after_spawn, None);
+        assert_eq!(creation_failed.status, CommandStatus::Completed);
+        assert!(matches!(
+            creation_failed.operations.as_slice(),
+            [CommandOperation::PushFront(request)]
+                if request.id == CommandId::Build
+                    && request.target == Some(ObjectId::new(0))
+        ));
+        assert!(!creation_failed_state.spawn_requested);
     }
 
     #[test]
@@ -8719,12 +8882,10 @@ mod tests {
         let mut wider_state = ConstructState::from_request(&request);
         continue_construct_script(&mut wider_state);
         let spawned = wider_state.step(&wider_ctx);
-        assert!(
-            spawned
-                .events
-                .iter()
-                .any(|event| matches!(event, CommandEvent::SpawnObject { .. }))
-        );
+        assert!(spawned
+            .events
+            .iter()
+            .any(|event| matches!(event, CommandEvent::SpawnConstruction { .. })));
 
         let mut landscape = crate::Landscape::flat(200, 100);
         landscape.set_world_height(400);
@@ -12583,6 +12744,113 @@ mod tests {
     }
 
     #[test]
+    fn deferred_physical_waits_for_native_command_gates() {
+        let actor_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.physical_deferred = true;
+        actor.action_name = "Walk".into();
+        actor.action_procedure = ActionProcedure::Walk;
+        let target = snapshot_with_id(target_id.as_u64());
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+
+        let objects = HashMap::from([(actor_id, actor.clone())]);
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let mut missing_build = CommandStack::new();
+        missing_build
+            .push_front(CommandRequest::new(CommandId::Build).with_target(Some(target_id)))
+            .expect("Build queues");
+        let result = missing_build
+            .execute_front(&ctx)
+            .expect("missing-target Build executes");
+        assert_eq!(result.status, CommandStatus::Failed);
+        assert!(result
+            .events
+            .iter()
+            .all(|event| !matches!(event, CommandEvent::ResolveCommandPhysical { .. })));
+
+        let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+        let mut expired_build = CommandStack::new();
+        expired_build
+            .push_front(
+                CommandRequest::new(CommandId::Build)
+                    .with_target(Some(target_id))
+                    .with_update_interval(1),
+            )
+            .expect("expiring Build queues");
+        let result = expired_build
+            .execute_front(&ctx)
+            .expect("expiring Build executes");
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.events.is_empty());
+
+        let mut untargeted_throw = CommandStack::new();
+        untargeted_throw
+            .push_front(CommandRequest::new(CommandId::Throw))
+            .expect("Throw queues");
+        let result = untargeted_throw
+            .execute_front(&ctx)
+            .expect("untargeted Throw executes");
+        assert!(result
+            .events
+            .iter()
+            .all(|event| !matches!(event, CommandEvent::ResolveCommandPhysical { .. })));
+    }
+
+    #[test]
+    fn build_resumes_detached_with_second_physical_read() {
+        let actor_id = ObjectId::new(10);
+        let target_id = ObjectId::new(20);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.physical_deferred = true;
+        actor.physical.can_construct = 0;
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.construction = FULL_CON;
+        let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = move_to_ctx_at_frame(&actor, &objects, &players, &definitions, 0);
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::Build).with_target(Some(target_id)))
+            .expect("Build queues");
+        let suspended = stack.execute_front(&ctx).expect("Build suspends");
+        let (reads, command_instance_id) = match suspended.events.as_slice() {
+            [CommandEvent::ResolveCommandPhysical {
+                object_id,
+                reads,
+                command_instance_id,
+            }] => {
+                assert_eq!(*object_id, actor_id);
+                (*reads, *command_instance_id)
+            }
+            events => panic!("expected physical resolution, got {events:?}"),
+        };
+        assert_eq!(reads, 2);
+        assert_ne!(command_instance_id, 0);
+
+        stack.clear();
+        assert!(stack.is_empty());
+        let physical = PhysicalInfo {
+            can_construct: 1,
+            ..PhysicalInfo::default()
+        };
+        let resumed = stack
+            .execute_pending_physical(
+                &ctx,
+                crate::PhysicsSettings::default().gravity_as_c4fixed(),
+                command_instance_id,
+                physical,
+            )
+            .expect("detached Build resumes");
+        assert_eq!(resumed.status, CommandStatus::Completed);
+        assert_eq!(stack.take_successful_finishes(), [CommandId::Build]);
+    }
+
+    #[test]
     fn build_skips_energy_already_commanded_for_target() {
         let builder_id = ObjectId::new(10);
         let target_id = ObjectId::new(20);
@@ -12770,10 +13038,13 @@ mod tests {
 
         let stopped = stack.execute_front(&ctx).expect("dig build executed");
         assert_eq!(stopped.status, CommandStatus::Running);
-        assert!(matches!(
-            stopped.events.as_slice(),
-            [CommandEvent::ObjectComStopBuild { object_id }] if *object_id == builder_id
-        ));
+        let command_instance_id = match stopped.events.as_slice() {
+            [CommandEvent::ObjectComStopBuild {
+                object_id,
+                command_instance_id,
+            }] if *object_id == builder_id => *command_instance_id,
+            events => panic!("expected exact Build stop event, got {events:?}"),
+        };
         let mut callback_replaced = stack.clone();
         callback_replaced.restore_from_snapshot(&CommandStack::new().snapshot());
         assert!(callback_replaced.is_empty());
@@ -12797,7 +13068,7 @@ mod tests {
             rng: None,
         };
         let detached = callback_replaced
-            .execute_pending_build_stop(&walk_ctx)
+            .execute_pending_build_stop(&walk_ctx, command_instance_id)
             .expect("callback-replaced Build retained its native continuation");
         assert!(matches!(
             detached.events.as_slice(),
@@ -12808,7 +13079,7 @@ mod tests {
             }] if *object_id == builder_id && *event_target == target_id
         ));
         let resumed = stack
-            .execute_pending_build_stop(&walk_ctx)
+            .execute_pending_build_stop(&walk_ctx, command_instance_id)
             .expect("Build resumed after ObjectComStop");
         assert_eq!(resumed.status, CommandStatus::Running);
         assert!(matches!(
@@ -16742,6 +17013,7 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none(), "approach must preserve ComDir");
         assert!(!result.operations.is_empty());
         match &result.operations[0] {
             CommandOperation::PushFront(request) => assert_eq!(request.id, CommandId::MoveTo),
@@ -16879,6 +17151,7 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none(), "Push branch must preserve ComDir");
         assert_eq!(result.operations.len(), 1);
         match &result.operations[0] {
             CommandOperation::PushFront(request) => assert_eq!(request.id, CommandId::UnGrab),
@@ -16942,6 +17215,10 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
+        assert!(
+            result.update.is_none(),
+            "non-choppable completion must preserve ComDir"
+        );
     }
 
     #[test]
@@ -17316,6 +17593,24 @@ pub enum CommandEvent {
     SetPathFinderDebug {
         snapshot: PathfinderDebugSnapshot,
     },
+    /// Resolve the actor's first scripted fair-crew projection at the exact
+    /// native GetPhysical call, then resume this same C4Command::Execute.
+    /// Build and Construct evaluate GetPhysical twice in their capability
+    /// guards; `reads` preserves the second, post-hook backing selection.
+    ResolveCommandPhysical {
+        object_id: ObjectId,
+        reads: u8,
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
+    /// MoveTo's FlightControl calls ordinary SetActionByName("Fly"). Its
+    /// callbacks must finish before a walking command runs JumpControl
+    /// against the callback-mutated live object.
+    MoveToFlightControlTakeoff {
+        object_id: ObjectId,
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
     ApplyObjectUpdate {
         object_id: ObjectId,
         update: ObjectUpdate,
@@ -17487,6 +17782,20 @@ pub enum CommandEvent {
     /// same C4Command::Build invocation afterward (C4Command.cpp:872-899).
     ObjectComStopBuild {
         object_id: ObjectId,
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
+    /// Chop's active work-procedure branch runs callbackful ObjectComStop
+    /// and then returns from Execute without any post-stop command body.
+    ObjectComStopChop {
+        object_id: ObjectId,
+    },
+    /// Construct stops BUILD/CHOP/DIG through callbackful ObjectComStop and
+    /// continues the same Execute into push/site/script handling.
+    ObjectComStopConstruct {
+        object_id: ObjectId,
+        #[serde(skip)]
+        command_instance_id: u64,
     },
     /// Run `ObjectComBuild` against live action state. Ordinary reached-site
     /// builds stop first; the legacy internal-structure arm does not.
@@ -17507,6 +17816,14 @@ pub enum CommandEvent {
     /// it starts in DFA_DIG, then continues the same native command against
     /// callback-mutated state (C4Command.cpp:988-989).
     ObjectComStopDrop {
+        object_id: ObjectId,
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
+    /// Put stops DFA_DIG through ordinary callbackful ObjectComStop, then
+    /// continues the same Execute against post-callback action/containment
+    /// state before it reads pGrabbing or GetPhysical (C4Command.cpp:1438).
+    ObjectComStopPut {
         object_id: ObjectId,
         #[serde(skip)]
         command_instance_id: u64,
@@ -17558,6 +17875,18 @@ pub enum CommandEvent {
         site: Vector2,
         target2: Option<ObjectId>,
         definition_id: DefinitionId,
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
+    /// Construct's validated native creation tail: create the Con=1
+    /// object, consume the conkit, then resume this exact command to
+    /// Finish(true) and add Build in the same Execute.
+    SpawnConstruction {
+        actor_id: ObjectId,
+        definition_id: DefinitionId,
+        owner: i32,
+        position: Vector2,
+        kit_id: ObjectId,
         #[serde(skip)]
         command_instance_id: u64,
     },
@@ -17738,6 +18067,121 @@ impl CommandStepResult {
     pub fn with_failure_reason(mut self, reason: CommandFailureReason) -> Self {
         self.failure_reason = Some(reason);
         self
+    }
+}
+
+fn resolve_command_physical(
+    object_id: ObjectId,
+    reads: u8,
+    update: Option<ObjectUpdate>,
+) -> CommandStepResult {
+    CommandStepResult::running(update).with_events(vec![CommandEvent::ResolveCommandPhysical {
+        object_id,
+        reads,
+        command_instance_id: 0,
+    }])
+}
+
+fn stamp_command_event_instances(events: &mut [CommandEvent], instance_id: u64) {
+    for event in events {
+        let event_instance_id = match event {
+            CommandEvent::ResolveCommandPhysical {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::MoveToFlightControlTakeoff {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ObjectComPut {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ObjectComPutTake {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ObjectComDrop {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ThrowObject {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ObjectComUnGrabCommand {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::CommandExitObject {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::CommandExitIntoParent {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ObjectComStopExit {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ActivateEntrance {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ObjectComDig {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::GetObject {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ControlCommandAcquire {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ControlCommandConstruction {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::SpawnConstruction {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ControlTransfer {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ObjectComStopDrop {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ObjectComStopPut {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ObjectComStopConstruct {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ObjectComStopBuild {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ObjectComStopThrow {
+                command_instance_id,
+                ..
+            }
+            | CommandEvent::ObjectComSetDirThrow {
+                command_instance_id,
+                ..
+            } => command_instance_id,
+            _ => continue,
+        };
+        if *event_instance_id == 0 {
+            *event_instance_id = instance_id;
+        }
     }
 }
 
@@ -18270,9 +18714,12 @@ pub struct CommandStack {
     /// iExec guard, so retain that detached MoveTo until the same-Execute
     /// continuation consumes it.
     detached_move_to_stops: VecDeque<MoveToState>,
+    /// FlightControl's ordinary Fly action can run callbacks which unlink
+    /// the executing MoveTo before its walking-only JumpControl tail.
+    detached_move_to_flights: VecDeque<DetachedMoveToFlight>,
     /// Build has the same callback-detachment hazard while its Dig stop is
     /// in flight; retain that exact executing state through the continuation.
-    detached_build_stops: VecDeque<BuildState>,
+    detached_build_stops: VecDeque<DetachedBuildStop>,
     /// Exit's DFA_BUILD ObjectComStop must likewise retain the exact command
     /// (and its failure base chain) if a stop callback replaces the stack.
     detached_exit_preludes: VecDeque<DetachedExitPrelude>,
@@ -18288,6 +18735,16 @@ pub struct CommandStack {
     /// Put's callbackful ObjectComPut may unlink the executing command.
     /// Retain its failure/base context until the helper returns.
     detached_put_attempts: VecDeque<DetachedPutAttempt>,
+    /// Put's DFA_DIG ObjectComStop retains the full executing command and
+    /// original base chain while callbacks may replace the visible stack.
+    detached_put_stops: VecDeque<DetachedPutStop>,
+    /// Construct can cross both ObjectComStop and its script overload after
+    /// a physical hook has already detached the executing command.
+    detached_construct_commands: VecDeque<DetachedConstructCommand>,
+    /// GetPhysical's scripted fair-crew fill is a synchronous callback.
+    /// ClearCommands/SetCommand may unlink the executing native command,
+    /// whose iExec guard nevertheless keeps its post-callback body alive.
+    detached_physical_commands: VecDeque<DetachedPhysicalCommand>,
     /// Live Grab callbacks resolve inside engine/compat event handling, so
     /// their failure feedback cannot travel on the original CommandEvent.
     /// Keep it transient and let that synchronous caller drain it before
@@ -18341,6 +18798,9 @@ pub(crate) enum CommandEventInstanceKind {
     Prelude(CommandId),
     ExitActivation,
     Script(CommandId),
+    Physical,
+    MoveToFlightControl,
+    ConstructSpawn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18351,6 +18811,18 @@ struct DetachedGrabAttempt {
 
 #[derive(Debug, Clone)]
 struct DetachedThrowPrelude {
+    entry: ActiveCommand,
+    base_chain: Vec<DetachedCommandBase>,
+}
+
+#[derive(Debug, Clone)]
+struct DetachedMoveToFlight {
+    entry: ActiveCommand,
+    base_chain: Vec<DetachedCommandBase>,
+}
+
+#[derive(Debug, Clone)]
+struct DetachedBuildStop {
     entry: ActiveCommand,
     base_chain: Vec<DetachedCommandBase>,
 }
@@ -18373,8 +18845,26 @@ struct DetachedPutAttempt {
     base_chain: Vec<DetachedCommandBase>,
 }
 
+#[derive(Debug, Clone)]
+struct DetachedPutStop {
+    entry: ActiveCommand,
+    base_chain: Vec<DetachedCommandBase>,
+}
+
+#[derive(Debug, Clone)]
+struct DetachedConstructCommand {
+    entry: ActiveCommand,
+    base_chain: Vec<DetachedCommandBase>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct DetachedGetAttempt {
+    entry: ActiveCommand,
+    base_chain: Vec<DetachedCommandBase>,
+}
+
+#[derive(Debug, Clone)]
+struct DetachedPhysicalCommand {
     entry: ActiveCommand,
     base_chain: Vec<DetachedCommandBase>,
 }
@@ -18413,11 +18903,15 @@ impl CommandStack {
             detached_grab_attempts: Vec::new(),
             detached_get_attempts: VecDeque::new(),
             detached_move_to_stops: VecDeque::new(),
+            detached_move_to_flights: VecDeque::new(),
             detached_build_stops: VecDeque::new(),
             detached_exit_preludes: VecDeque::new(),
             detached_throw_preludes: VecDeque::new(),
             detached_drop_preludes: VecDeque::new(),
             detached_put_attempts: VecDeque::new(),
+            detached_put_stops: VecDeque::new(),
+            detached_construct_commands: VecDeque::new(),
+            detached_physical_commands: VecDeque::new(),
             pending_failure_feedback: VecDeque::new(),
             pending_successful_finishes: VecDeque::new(),
         }
@@ -18483,6 +18977,18 @@ impl CommandStack {
                 &entry.state,
                 CommandState::Drop(state) if !state.continuations.is_empty()
             ),
+            CommandEventInstanceKind::Prelude(CommandId::Put) => matches!(
+                &entry.state,
+                CommandState::Put(state) if state.stop_continuation.is_some()
+            ),
+            CommandEventInstanceKind::Prelude(CommandId::Construct) => matches!(
+                &entry.state,
+                CommandState::Construct(state) if state.stop_continuation
+            ),
+            CommandEventInstanceKind::Prelude(CommandId::Build) => matches!(
+                &entry.state,
+                CommandState::Build(state) if state.stop_continuation
+            ),
             CommandEventInstanceKind::ExitActivation => matches!(
                 &entry.state,
                 CommandState::Exit(state) if state.activation_pending != 0
@@ -18494,6 +19000,16 @@ impl CommandStack {
             CommandEventInstanceKind::Script(CommandId::Construct) => matches!(
                 &entry.state,
                 CommandState::Construct(state) if state.script_pending
+            ),
+            CommandEventInstanceKind::Physical => entry.state.has_physical_continuation(),
+            CommandEventInstanceKind::MoveToFlightControl => matches!(
+                &entry.state,
+                CommandState::MoveTo(state) if state.flight_continuation.is_some()
+            ),
+            CommandEventInstanceKind::ConstructSpawn => matches!(
+                &entry.state,
+                CommandState::Construct(state)
+                    if state.spawn_requested && state.construction_id.is_none()
             ),
             CommandEventInstanceKind::PutTake(_)
             | CommandEventInstanceKind::Prelude(_)
@@ -18534,6 +19050,36 @@ impl CommandStack {
                     )
                 })
                 .map(|detached| detached.entry.instance_id),
+            CommandEventInstanceKind::Prelude(CommandId::Put) => self
+                .detached_put_stops
+                .iter()
+                .find(|detached| {
+                    matches!(
+                        &detached.entry.state,
+                        CommandState::Put(state) if state.stop_continuation.is_some()
+                    )
+                })
+                .map(|detached| detached.entry.instance_id),
+            CommandEventInstanceKind::Prelude(CommandId::Construct) => self
+                .detached_construct_commands
+                .iter()
+                .find(|detached| {
+                    matches!(
+                        &detached.entry.state,
+                        CommandState::Construct(state) if state.stop_continuation
+                    )
+                })
+                .map(|detached| detached.entry.instance_id),
+            CommandEventInstanceKind::Prelude(CommandId::Build) => self
+                .detached_build_stops
+                .iter()
+                .find(|detached| {
+                    matches!(
+                        &detached.entry.state,
+                        CommandState::Build(state) if state.stop_continuation
+                    )
+                })
+                .map(|detached| detached.entry.instance_id),
             CommandEventInstanceKind::ExitActivation => self
                 .detached_exit_preludes
                 .iter()
@@ -18552,6 +19098,42 @@ impl CommandStack {
                     matches!(
                         &detached.entry.state,
                         CommandState::Get(state) if state.enter_pending
+                    )
+                })
+                .map(|detached| detached.entry.instance_id),
+            CommandEventInstanceKind::Physical => self
+                .detached_physical_commands
+                .iter()
+                .find(|detached| detached.entry.state.has_physical_continuation())
+                .map(|detached| detached.entry.instance_id),
+            CommandEventInstanceKind::MoveToFlightControl => self
+                .detached_move_to_flights
+                .iter()
+                .find(|detached| {
+                    matches!(
+                        &detached.entry.state,
+                        CommandState::MoveTo(state) if state.flight_continuation.is_some()
+                    )
+                })
+                .map(|detached| detached.entry.instance_id),
+            CommandEventInstanceKind::Script(CommandId::Construct) => self
+                .detached_construct_commands
+                .iter()
+                .find(|detached| {
+                    matches!(
+                        &detached.entry.state,
+                        CommandState::Construct(state) if state.script_pending
+                    )
+                })
+                .map(|detached| detached.entry.instance_id),
+            CommandEventInstanceKind::ConstructSpawn => self
+                .detached_construct_commands
+                .iter()
+                .find(|detached| {
+                    matches!(
+                        &detached.entry.state,
+                        CommandState::Construct(state)
+                            if state.spawn_requested && state.construction_id.is_none()
                     )
                 })
                 .map(|detached| detached.entry.instance_id),
@@ -18596,10 +19178,26 @@ impl CommandStack {
         }
     }
 
+    fn remember_detached_move_to_flight(&mut self, entry: &ActiveCommand) {
+        if matches!(
+            &entry.state,
+            CommandState::MoveTo(state) if state.flight_continuation.is_some()
+        ) {
+            self.detached_move_to_flights
+                .push_back(DetachedMoveToFlight {
+                    entry: entry.clone(),
+                    base_chain: self.entries.iter().map(DetachedCommandBase::from).collect(),
+                });
+        }
+    }
+
     fn remember_detached_build_stop(&mut self, entry: &ActiveCommand) {
         if let CommandState::Build(state) = &entry.state {
             if state.stop_continuation {
-                self.detached_build_stops.push_back(state.clone());
+                self.detached_build_stops.push_back(DetachedBuildStop {
+                    entry: entry.clone(),
+                    base_chain: self.entries.iter().map(DetachedCommandBase::from).collect(),
+                });
             }
         }
     }
@@ -18649,6 +19247,34 @@ impl CommandStack {
         }
     }
 
+    fn remember_detached_put_stop(&mut self, entry: &ActiveCommand) {
+        if matches!(
+            &entry.state,
+            CommandState::Put(state) if state.stop_continuation.is_some()
+        ) {
+            self.detached_put_stops.push_back(DetachedPutStop {
+                entry: entry.clone(),
+                base_chain: self.entries.iter().map(DetachedCommandBase::from).collect(),
+            });
+        }
+    }
+
+    fn remember_detached_construct(&mut self, entry: &ActiveCommand) {
+        if matches!(
+            &entry.state,
+            CommandState::Construct(state)
+                if state.stop_continuation
+                    || state.script_pending
+                    || (state.spawn_requested && state.construction_id.is_none())
+        ) {
+            self.detached_construct_commands
+                .push_back(DetachedConstructCommand {
+                    entry: entry.clone(),
+                    base_chain: self.entries.iter().map(DetachedCommandBase::from).collect(),
+                });
+        }
+    }
+
     fn remember_detached_get_attempt(&mut self, entry: &ActiveCommand) {
         if matches!(&entry.state, CommandState::Get(state) if state.enter_pending) {
             self.detached_get_attempts.push_back(DetachedGetAttempt {
@@ -18658,16 +19284,30 @@ impl CommandStack {
         }
     }
 
+    fn remember_detached_physical(&mut self, entry: &ActiveCommand) {
+        if entry.state.has_physical_continuation() {
+            self.detached_physical_commands
+                .push_back(DetachedPhysicalCommand {
+                    entry: entry.clone(),
+                    base_chain: self.entries.iter().map(DetachedCommandBase::from).collect(),
+                });
+        }
+    }
+
     fn pop_front(&mut self) -> Option<ActiveCommand> {
         let entry = self.entries.pop_front()?;
         self.remember_detached_grab(&entry);
         self.remember_detached_get_attempt(&entry);
         self.remember_detached_move_to_stop(&entry);
+        self.remember_detached_move_to_flight(&entry);
         self.remember_detached_build_stop(&entry);
         self.remember_detached_exit_prelude(&entry);
         self.remember_detached_throw_prelude(&entry);
         self.remember_detached_drop_prelude(&entry);
         self.remember_detached_put_attempt(&entry);
+        self.remember_detached_put_stop(&entry);
+        self.remember_detached_construct(&entry);
+        self.remember_detached_physical(&entry);
         Some(entry)
     }
 
@@ -18785,11 +19425,41 @@ impl CommandStack {
             })
             .collect::<Vec<_>>();
         self.detached_move_to_stops.extend(move_to_stops);
+        let move_to_flights = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                matches!(
+                    &entry.state,
+                    CommandState::MoveTo(state) if state.flight_continuation.is_some()
+                )
+                .then(|| DetachedMoveToFlight {
+                    entry: entry.clone(),
+                    base_chain: self
+                        .entries
+                        .iter()
+                        .skip(index + 1)
+                        .map(DetachedCommandBase::from)
+                        .collect(),
+                })
+            })
+            .collect::<Vec<_>>();
+        self.detached_move_to_flights.extend(move_to_flights);
         let build_stops = self
             .entries
             .iter()
-            .filter_map(|entry| match &entry.state {
-                CommandState::Build(state) if state.stop_continuation => Some(state.clone()),
+            .enumerate()
+            .filter_map(|(index, entry)| match &entry.state {
+                CommandState::Build(state) if state.stop_continuation => Some(DetachedBuildStop {
+                    entry: entry.clone(),
+                    base_chain: self
+                        .entries
+                        .iter()
+                        .skip(index + 1)
+                        .map(DetachedCommandBase::from)
+                        .collect(),
+                }),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -18894,6 +19564,71 @@ impl CommandStack {
             })
             .collect::<Vec<_>>();
         self.detached_put_attempts.extend(put_attempts);
+        let put_stops = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                matches!(
+                    &entry.state,
+                    CommandState::Put(state) if state.stop_continuation.is_some()
+                )
+                .then(|| DetachedPutStop {
+                    entry: entry.clone(),
+                    base_chain: self
+                        .entries
+                        .iter()
+                        .skip(index + 1)
+                        .map(DetachedCommandBase::from)
+                        .collect(),
+                })
+            })
+            .collect::<Vec<_>>();
+        self.detached_put_stops.extend(put_stops);
+        let construct_commands = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                matches!(
+                    &entry.state,
+                    CommandState::Construct(state)
+                        if state.stop_continuation
+                            || state.script_pending
+                            || (state.spawn_requested && state.construction_id.is_none())
+                )
+                .then(|| DetachedConstructCommand {
+                    entry: entry.clone(),
+                    base_chain: self
+                        .entries
+                        .iter()
+                        .skip(index + 1)
+                        .map(DetachedCommandBase::from)
+                        .collect(),
+                })
+            })
+            .collect::<Vec<_>>();
+        self.detached_construct_commands.extend(construct_commands);
+        let physical_commands = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                entry
+                    .state
+                    .has_physical_continuation()
+                    .then(|| DetachedPhysicalCommand {
+                        entry: entry.clone(),
+                        base_chain: self
+                            .entries
+                            .iter()
+                            .skip(index + 1)
+                            .map(DetachedCommandBase::from)
+                            .collect(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        self.detached_physical_commands.extend(physical_commands);
         self.entries.clear();
     }
 
@@ -18961,23 +19696,71 @@ impl CommandStack {
                 .collect::<Vec<_>>();
             self.detached_move_to_stops.extend(move_to_stops);
         }
-        let snapshot_retains_build = snapshot.commands.iter().any(|command| {
-            matches!(
-                &command.state,
-                CommandState::Build(state) if state.stop_continuation
-            )
-        });
-        if !snapshot_retains_build {
-            let build_stops = self
-                .entries
-                .iter()
-                .filter_map(|entry| match &entry.state {
-                    CommandState::Build(state) if state.stop_continuation => Some(state.clone()),
-                    _ => None,
+        let retained_move_to_flight_ids = snapshot
+            .commands
+            .iter()
+            .filter_map(|command| {
+                matches!(
+                    &command.state,
+                    CommandState::MoveTo(state) if state.flight_continuation.is_some()
+                )
+                .then_some(command.instance_id)
+            })
+            .collect::<HashSet<_>>();
+        let detached_move_to_flights = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                (matches!(
+                    &entry.state,
+                    CommandState::MoveTo(state) if state.flight_continuation.is_some()
+                ) && !retained_move_to_flight_ids.contains(&entry.instance_id))
+                .then(|| DetachedMoveToFlight {
+                    entry: entry.clone(),
+                    base_chain: self
+                        .entries
+                        .iter()
+                        .skip(index + 1)
+                        .map(DetachedCommandBase::from)
+                        .collect(),
                 })
-                .collect::<Vec<_>>();
-            self.detached_build_stops.extend(build_stops);
-        }
+            })
+            .collect::<Vec<_>>();
+        self.detached_move_to_flights
+            .extend(detached_move_to_flights);
+        let retained_build_ids = snapshot
+            .commands
+            .iter()
+            .filter_map(|command| {
+                matches!(
+                    &command.state,
+                    CommandState::Build(state) if state.stop_continuation
+                )
+                .then_some(command.instance_id)
+            })
+            .collect::<HashSet<_>>();
+        let build_stops = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                (matches!(
+                    &entry.state,
+                    CommandState::Build(state) if state.stop_continuation
+                ) && !retained_build_ids.contains(&entry.instance_id))
+                .then(|| DetachedBuildStop {
+                    entry: entry.clone(),
+                    base_chain: self
+                        .entries
+                        .iter()
+                        .skip(index + 1)
+                        .map(DetachedCommandBase::from)
+                        .collect(),
+                })
+            })
+            .collect::<Vec<_>>();
+        self.detached_build_stops.extend(build_stops);
         let retained_exit_ids = snapshot
             .commands
             .iter()
@@ -19164,6 +19947,107 @@ impl CommandStack {
             })
             .collect::<Vec<_>>();
         self.detached_put_attempts.extend(detached_put_attempts);
+        let retained_put_stop_ids = snapshot
+            .commands
+            .iter()
+            .filter_map(|command| {
+                matches!(
+                    &command.state,
+                    CommandState::Put(state) if state.stop_continuation.is_some()
+                )
+                .then_some(command.instance_id)
+            })
+            .collect::<HashSet<_>>();
+        let detached_put_stops = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                (matches!(
+                    &entry.state,
+                    CommandState::Put(state) if state.stop_continuation.is_some()
+                ) && !retained_put_stop_ids.contains(&entry.instance_id))
+                .then(|| DetachedPutStop {
+                    entry: entry.clone(),
+                    base_chain: self
+                        .entries
+                        .iter()
+                        .skip(index + 1)
+                        .map(DetachedCommandBase::from)
+                        .collect(),
+                })
+            })
+            .collect::<Vec<_>>();
+        self.detached_put_stops.extend(detached_put_stops);
+        let retained_construct_ids = snapshot
+            .commands
+            .iter()
+            .filter_map(|command| {
+                matches!(
+                    &command.state,
+                    CommandState::Construct(state)
+                        if state.stop_continuation
+                            || state.script_pending
+                            || (state.spawn_requested && state.construction_id.is_none())
+                )
+                .then_some(command.instance_id)
+            })
+            .collect::<HashSet<_>>();
+        let detached_construct_commands = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                (matches!(
+                    &entry.state,
+                    CommandState::Construct(state)
+                        if state.stop_continuation
+                            || state.script_pending
+                            || (state.spawn_requested && state.construction_id.is_none())
+                ) && !retained_construct_ids.contains(&entry.instance_id))
+                .then(|| DetachedConstructCommand {
+                    entry: entry.clone(),
+                    base_chain: self
+                        .entries
+                        .iter()
+                        .skip(index + 1)
+                        .map(DetachedCommandBase::from)
+                        .collect(),
+                })
+            })
+            .collect::<Vec<_>>();
+        self.detached_construct_commands
+            .extend(detached_construct_commands);
+        let retained_physical_ids = snapshot
+            .commands
+            .iter()
+            .filter_map(|command| {
+                command
+                    .state
+                    .has_physical_continuation()
+                    .then_some(command.instance_id)
+            })
+            .collect::<HashSet<_>>();
+        let detached_physical_commands = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                (entry.state.has_physical_continuation()
+                    && !retained_physical_ids.contains(&entry.instance_id))
+                .then(|| DetachedPhysicalCommand {
+                    entry: entry.clone(),
+                    base_chain: self
+                        .entries
+                        .iter()
+                        .skip(index + 1)
+                        .map(DetachedCommandBase::from)
+                        .collect(),
+                })
+            })
+            .collect::<Vec<_>>();
+        self.detached_physical_commands
+            .extend(detached_physical_commands);
         let highest_restored_id = snapshot
             .commands
             .iter()
@@ -19344,21 +20228,70 @@ impl CommandStack {
         Some(result)
     }
 
+    /// Continue the exact MoveTo after FlightControl's ordinary Fly action
+    /// and all of its callbacks. Only a WALK-origin continuation runs
+    /// JumpControl; DFA_FLIGHT returns immediately after the action.
+    pub(crate) fn execute_pending_move_to_flight(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        command_instance_id: u64,
+    ) -> Option<CommandStepResult> {
+        let index = self.entries.iter().position(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(
+                    &entry.state,
+                    CommandState::MoveTo(state) if state.flight_continuation.is_some()
+                )
+        });
+
+        let (resumed_instance_id, mut result) = if let Some(index) = index {
+            let entry = self.entries.get_mut(index)?;
+            let resumed_instance_id = entry.instance_id;
+            let CommandState::MoveTo(state) = &mut entry.state else {
+                return None;
+            };
+            (resumed_instance_id, state.resume_after_flight_control(ctx))
+        } else {
+            let detached_index = self.detached_move_to_flights.iter().position(|detached| {
+                (command_instance_id == 0 || detached.entry.instance_id == command_instance_id)
+                    && matches!(
+                        &detached.entry.state,
+                        CommandState::MoveTo(state) if state.flight_continuation.is_some()
+                    )
+            })?;
+            let mut detached = self.detached_move_to_flights.remove(detached_index)?;
+            let resumed_instance_id = detached.entry.instance_id;
+            let CommandState::MoveTo(state) = &mut detached.entry.state else {
+                return None;
+            };
+            (resumed_instance_id, state.resume_after_flight_control(ctx))
+        };
+
+        stamp_command_event_instances(&mut result.events, resumed_instance_id);
+        self.apply_result_operations(&mut result);
+        Some(result)
+    }
+
     /// Resume the Build whose Dig arm synchronously ran ObjectComStop.
     /// Callback-side ClearCommands may have detached the executing entry,
     /// but native C++ continues that same command object until Build returns.
     pub(crate) fn execute_pending_build_stop(
         &mut self,
         ctx: &CommandRuntimeContext<'_>,
+        command_instance_id: u64,
     ) -> Option<CommandStepResult> {
         let index = self.entries.iter().position(|entry| {
-            matches!(
-                &entry.state,
-                CommandState::Build(state) if state.stop_continuation
-            )
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(
+                    &entry.state,
+                    CommandState::Build(state) if state.stop_continuation
+                )
         });
+        let mut detached_failure = None;
+        let resumed_instance_id;
         let mut result = if let Some(index) = index {
             let entry = self.entries.get_mut(index)?;
+            resumed_instance_id = entry.instance_id;
             let CommandState::Build(state) = &mut entry.state else {
                 return None;
             };
@@ -19371,8 +20304,24 @@ impl CommandStack {
             }
             result
         } else {
-            let mut state = self.detached_build_stops.pop_front()?;
-            state.resume_after_stop(ctx)
+            let detached_index = self.detached_build_stops.iter().position(|detached| {
+                (command_instance_id == 0 || detached.entry.instance_id == command_instance_id)
+                    && matches!(
+                        &detached.entry.state,
+                        CommandState::Build(state) if state.stop_continuation
+                    )
+            })?;
+            let mut detached = self.detached_build_stops.remove(detached_index)?;
+            resumed_instance_id = detached.entry.instance_id;
+            let CommandState::Build(state) = &mut detached.entry.state else {
+                return None;
+            };
+            let result = state.resume_after_stop(ctx);
+            if result.status == CommandStatus::Failed {
+                detached.entry.finished = Some(CommandStatus::Failed);
+                detached_failure = Some(detached);
+            }
+            result
         };
 
         if result.status == CommandStatus::Completed {
@@ -19380,16 +20329,22 @@ impl CommandStack {
         }
 
         if result.status == CommandStatus::Failed {
-            if let Some(index) = index {
-                if let Some(mut feedback) = self.record_failure_at(index) {
-                    feedback.reason = result.failure_reason;
-                    result.events.push(CommandEvent::FailureFeedback {
-                        actor_id: ctx.object.id,
-                        feedback,
-                    });
-                }
+            let feedback = if let Some(index) = index {
+                self.record_failure_at(index)
+            } else {
+                detached_failure.as_ref().and_then(|detached| {
+                    self.record_detached_failure(&detached.entry, &detached.base_chain)
+                })
+            };
+            if let Some(mut feedback) = feedback {
+                feedback.reason = result.failure_reason;
+                result.events.push(CommandEvent::FailureFeedback {
+                    actor_id: ctx.object.id,
+                    feedback,
+                });
             }
         }
+        stamp_command_event_instances(&mut result.events, resumed_instance_id);
         self.apply_result_operations(&mut result);
         Some(result)
     }
@@ -19688,6 +20643,507 @@ impl CommandStack {
                 _ => {}
             }
         }
+        self.apply_result_operations(&mut result);
+        Some(result)
+    }
+
+    /// Resume Put after its DFA_DIG ObjectComStop. The callback may have
+    /// detached the executing command; native iExec still continues its
+    /// post-stop body against fresh pGrabbing, containment and physicals.
+    pub(crate) fn execute_pending_put_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        command_instance_id: u64,
+    ) -> Option<CommandStepResult> {
+        let index = self.entries.iter().position(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(
+                    &entry.state,
+                    CommandState::Put(state) if state.stop_continuation.is_some()
+                )
+        });
+
+        let mut detached = None;
+        let (resumed_instance_id, mut result) = if let Some(index) = index {
+            let entry = self.entries.get_mut(index)?;
+            let resumed_instance_id = entry.instance_id;
+            let CommandState::Put(state) = &mut entry.state else {
+                return None;
+            };
+            let result = state.resume_after_stop(ctx, gravity);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                entry.finished = Some(result.status);
+            }
+            (resumed_instance_id, result)
+        } else {
+            let detached_index = self.detached_put_stops.iter().position(|detached| {
+                (command_instance_id == 0 || detached.entry.instance_id == command_instance_id)
+                    && matches!(
+                        &detached.entry.state,
+                        CommandState::Put(state) if state.stop_continuation.is_some()
+                    )
+            })?;
+            let mut retained = self.detached_put_stops.remove(detached_index)?;
+            let resumed_instance_id = retained.entry.instance_id;
+            let CommandState::Put(state) = &mut retained.entry.state else {
+                return None;
+            };
+            let result = state.resume_after_stop(ctx, gravity);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                retained.entry.finished = Some(result.status);
+            }
+            detached = Some(retained);
+            (resumed_instance_id, result)
+        };
+
+        if result.status == CommandStatus::Completed {
+            self.record_native_success(CommandId::Put);
+        }
+        if result.status == CommandStatus::Failed {
+            let feedback = if let Some(index) = index {
+                self.record_failure_at(index)
+            } else {
+                detached.as_ref().and_then(|detached| {
+                    self.record_detached_failure(&detached.entry, &detached.base_chain)
+                })
+            };
+            if let Some(feedback) = feedback {
+                result.events.push(CommandEvent::FailureFeedback {
+                    actor_id: ctx.object.id,
+                    feedback,
+                });
+            }
+        }
+        stamp_command_event_instances(&mut result.events, resumed_instance_id);
+
+        if result.status == CommandStatus::Running {
+            if let Some(detached) = detached {
+                if detached.entry.state.has_physical_continuation() {
+                    self.detached_physical_commands
+                        .push_back(DetachedPhysicalCommand {
+                            entry: detached.entry,
+                            base_chain: detached.base_chain,
+                        });
+                } else if matches!(
+                    &detached.entry.state,
+                    CommandState::Put(state) if state.put_pending
+                ) {
+                    self.detached_put_attempts.push_back(DetachedPutAttempt {
+                        entry: detached.entry,
+                        base_chain: detached.base_chain,
+                    });
+                }
+            }
+        }
+
+        self.apply_result_operations(&mut result);
+        Some(result)
+    }
+
+    /// Resume Construct after callbackful ObjectComStop without repeating
+    /// its physical/definition/knowledge gates or command interval.
+    pub(crate) fn execute_pending_construct_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        command_instance_id: u64,
+    ) -> Option<CommandStepResult> {
+        let index = self.entries.iter().position(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(
+                    &entry.state,
+                    CommandState::Construct(state) if state.stop_continuation
+                )
+        });
+
+        let mut detached = None;
+        let (resumed_instance_id, mut result) = if let Some(index) = index {
+            let entry = self.entries.get_mut(index)?;
+            let resumed_instance_id = entry.instance_id;
+            let CommandState::Construct(state) = &mut entry.state else {
+                return None;
+            };
+            let result = state.resume_after_stop(ctx);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                entry.finished = Some(result.status);
+            }
+            (resumed_instance_id, result)
+        } else {
+            let detached_index = self
+                .detached_construct_commands
+                .iter()
+                .position(|detached| {
+                    (command_instance_id == 0 || detached.entry.instance_id == command_instance_id)
+                        && matches!(
+                            &detached.entry.state,
+                            CommandState::Construct(state) if state.stop_continuation
+                        )
+                })?;
+            let mut retained = self.detached_construct_commands.remove(detached_index)?;
+            let resumed_instance_id = retained.entry.instance_id;
+            let CommandState::Construct(state) = &mut retained.entry.state else {
+                return None;
+            };
+            let result = state.resume_after_stop(ctx);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                retained.entry.finished = Some(result.status);
+            }
+            detached = Some(retained);
+            (resumed_instance_id, result)
+        };
+
+        if result.status == CommandStatus::Completed {
+            self.record_native_success(CommandId::Construct);
+        }
+        if result.status == CommandStatus::Failed {
+            let feedback = if let Some(index) = index {
+                self.record_failure_at(index)
+            } else {
+                detached.as_ref().and_then(|detached| {
+                    self.record_detached_failure(&detached.entry, &detached.base_chain)
+                })
+            };
+            if let Some(feedback) = feedback {
+                result.events.push(CommandEvent::FailureFeedback {
+                    actor_id: ctx.object.id,
+                    feedback,
+                });
+            }
+        }
+        stamp_command_event_instances(&mut result.events, resumed_instance_id);
+
+        if result.status == CommandStatus::Running {
+            if let Some(detached) = detached {
+                if matches!(
+                    &detached.entry.state,
+                    CommandState::Construct(state)
+                        if state.script_pending
+                            || (state.spawn_requested && state.construction_id.is_none())
+                ) {
+                    self.detached_construct_commands.push_back(detached);
+                }
+            }
+        }
+        self.apply_result_operations(&mut result);
+        Some(result)
+    }
+
+    /// Continue the exact Construct immediately after its script overload
+    /// returns. Result zero falls through to conkit/range/check/spawn in the
+    /// same Execute; callback-detached commands retain their native base.
+    pub(crate) fn execute_pending_construct_script(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        command_instance_id: u64,
+        script_result: AcquireScriptResult,
+    ) -> Option<CommandStepResult> {
+        let index = self.entries.iter().position(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(
+                    &entry.state,
+                    CommandState::Construct(state) if state.script_pending
+                )
+        });
+
+        let mut detached = None;
+        let (resumed_instance_id, mut result) = if let Some(index) = index {
+            let entry = self.entries.get_mut(index)?;
+            let resumed_instance_id = entry.instance_id;
+            let CommandState::Construct(state) = &mut entry.state else {
+                return None;
+            };
+            let result = state.resume_after_script(ctx, script_result);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                entry.finished = Some(result.status);
+            }
+            (resumed_instance_id, result)
+        } else {
+            let detached_index = self
+                .detached_construct_commands
+                .iter()
+                .position(|detached| {
+                    (command_instance_id == 0 || detached.entry.instance_id == command_instance_id)
+                        && matches!(
+                            &detached.entry.state,
+                            CommandState::Construct(state) if state.script_pending
+                        )
+                })?;
+            let mut retained = self.detached_construct_commands.remove(detached_index)?;
+            let resumed_instance_id = retained.entry.instance_id;
+            let CommandState::Construct(state) = &mut retained.entry.state else {
+                return None;
+            };
+            let result = state.resume_after_script(ctx, script_result);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                retained.entry.finished = Some(result.status);
+            }
+            detached = Some(retained);
+            (resumed_instance_id, result)
+        };
+
+        if result.status == CommandStatus::Completed {
+            self.record_native_success(CommandId::Construct);
+        }
+        if result.status == CommandStatus::Failed {
+            let feedback = if let Some(index) = index {
+                self.record_failure_at(index)
+            } else {
+                detached.as_ref().and_then(|detached| {
+                    self.record_detached_failure(&detached.entry, &detached.base_chain)
+                })
+            };
+            if let Some(feedback) = feedback {
+                result.events.push(CommandEvent::FailureFeedback {
+                    actor_id: ctx.object.id,
+                    feedback,
+                });
+            }
+        }
+        stamp_command_event_instances(&mut result.events, resumed_instance_id);
+        if result.status == CommandStatus::Running {
+            if let Some(detached) = detached {
+                if matches!(
+                    &detached.entry.state,
+                    CommandState::Construct(state)
+                        if state.spawn_requested && state.construction_id.is_none()
+                ) {
+                    self.detached_construct_commands.push_back(detached);
+                }
+            }
+        }
+        self.apply_result_operations(&mut result);
+        Some(result)
+    }
+
+    /// Finish the exact Construct after its validated object was created and
+    /// the conkit consumed, then add Build before returning from Execute.
+    pub(crate) fn execute_pending_construct_spawn(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        command_instance_id: u64,
+        construction_id: Option<ObjectId>,
+    ) -> Option<CommandStepResult> {
+        let index = self.entries.iter().position(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(
+                    &entry.state,
+                    CommandState::Construct(state)
+                        if state.spawn_requested && state.construction_id.is_none()
+                )
+        });
+
+        let mut detached = None;
+        let (resumed_instance_id, mut result) = if let Some(index) = index {
+            let entry = self.entries.get_mut(index)?;
+            let resumed_instance_id = entry.instance_id;
+            let CommandState::Construct(state) = &mut entry.state else {
+                return None;
+            };
+            let result = state.resume_after_spawn(ctx, construction_id);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                entry.finished = Some(result.status);
+            }
+            (resumed_instance_id, result)
+        } else {
+            let detached_index = self
+                .detached_construct_commands
+                .iter()
+                .position(|detached| {
+                    (command_instance_id == 0 || detached.entry.instance_id == command_instance_id)
+                        && matches!(
+                            &detached.entry.state,
+                            CommandState::Construct(state)
+                                if state.spawn_requested && state.construction_id.is_none()
+                        )
+                })?;
+            let mut retained = self.detached_construct_commands.remove(detached_index)?;
+            let resumed_instance_id = retained.entry.instance_id;
+            let CommandState::Construct(state) = &mut retained.entry.state else {
+                return None;
+            };
+            let result = state.resume_after_spawn(ctx, construction_id);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                retained.entry.finished = Some(result.status);
+            }
+            detached = Some(retained);
+            (resumed_instance_id, result)
+        };
+
+        if result.status == CommandStatus::Completed {
+            self.record_native_success(CommandId::Construct);
+        }
+        if result.status == CommandStatus::Failed {
+            let feedback = if let Some(index) = index {
+                self.record_failure_at(index)
+            } else {
+                detached.as_ref().and_then(|detached| {
+                    self.record_detached_failure(&detached.entry, &detached.base_chain)
+                })
+            };
+            if let Some(feedback) = feedback {
+                result.events.push(CommandEvent::FailureFeedback {
+                    actor_id: ctx.object.id,
+                    feedback,
+                });
+            }
+        }
+        stamp_command_event_instances(&mut result.events, resumed_instance_id);
+        self.apply_result_operations(&mut result);
+        Some(result)
+    }
+
+    /// Resume the exact native command suspended at a first fair-crew
+    /// GetPhysical callback. The hook may have replaced the visible stack;
+    /// in that case the retained iExec body still completes against fresh
+    /// runtime snapshots without consuming another command interval.
+    pub(crate) fn execute_pending_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        command_instance_id: u64,
+        physical: PhysicalInfo,
+    ) -> Option<CommandStepResult> {
+        let index = self.entries.iter().position(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && entry.state.has_physical_continuation()
+        });
+
+        let mut detached = None;
+        let (resumed_instance_id, command, mut result) = if let Some(index) = index {
+            let entry = self.entries.get_mut(index)?;
+            let resumed_instance_id = entry.instance_id;
+            let command = entry.id();
+            let result = entry.state.resume_after_physical(ctx, gravity, physical);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                entry.finished = Some(result.status);
+            }
+            (resumed_instance_id, command, result)
+        } else {
+            let detached_index = self
+                .detached_physical_commands
+                .iter()
+                .position(|detached| {
+                    (command_instance_id == 0 || detached.entry.instance_id == command_instance_id)
+                        && detached.entry.state.has_physical_continuation()
+                })?;
+            let mut retained = self.detached_physical_commands.remove(detached_index)?;
+            let resumed_instance_id = retained.entry.instance_id;
+            let command = retained.entry.id();
+            let result = retained
+                .entry
+                .state
+                .resume_after_physical(ctx, gravity, physical);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                retained.entry.finished = Some(result.status);
+            }
+            detached = Some(retained);
+            (resumed_instance_id, command, result)
+        };
+
+        if result.status == CommandStatus::Completed {
+            if let Some(command) = command {
+                self.record_native_success(command);
+            }
+        }
+        if result.status == CommandStatus::Failed {
+            let feedback = if let Some(index) = index {
+                self.record_failure_at(index)
+            } else {
+                detached.as_ref().and_then(|detached| {
+                    self.record_detached_failure(&detached.entry, &detached.base_chain)
+                })
+            };
+            if let Some(mut feedback) = feedback {
+                feedback.reason = result.failure_reason;
+                result.events.push(CommandEvent::FailureFeedback {
+                    actor_id: ctx.object.id,
+                    feedback,
+                });
+            }
+        }
+        stamp_command_event_instances(&mut result.events, resumed_instance_id);
+
+        if result.status == CommandStatus::Running {
+            if let Some(detached) = detached {
+                if matches!(
+                    &detached.entry.state,
+                    CommandState::MoveTo(state) if state.flight_continuation.is_some()
+                ) {
+                    self.detached_move_to_flights
+                        .push_back(DetachedMoveToFlight {
+                            entry: detached.entry,
+                            base_chain: detached.base_chain,
+                        });
+                } else if matches!(
+                    &detached.entry.state,
+                    CommandState::Throw(state) if !state.continuations.is_empty()
+                ) {
+                    self.detached_throw_preludes
+                        .push_back(DetachedThrowPrelude {
+                            entry: detached.entry,
+                            base_chain: detached.base_chain,
+                        });
+                } else if matches!(
+                    &detached.entry.state,
+                    CommandState::Put(state) if state.put_pending
+                ) {
+                    self.detached_put_attempts.push_back(DetachedPutAttempt {
+                        entry: detached.entry,
+                        base_chain: detached.base_chain,
+                    });
+                } else if let CommandState::Build(state) = &detached.entry.state {
+                    if state.stop_continuation {
+                        self.detached_build_stops.push_back(DetachedBuildStop {
+                            entry: detached.entry,
+                            base_chain: detached.base_chain,
+                        });
+                    }
+                } else if matches!(
+                    &detached.entry.state,
+                    CommandState::Construct(state)
+                        if state.stop_continuation
+                            || state.script_pending
+                            || (state.spawn_requested && state.construction_id.is_none())
+                ) {
+                    self.detached_construct_commands
+                        .push_back(DetachedConstructCommand {
+                            entry: detached.entry,
+                            base_chain: detached.base_chain,
+                        });
+                }
+            }
+        }
+
         self.apply_result_operations(&mut result);
         Some(result)
     }
@@ -20547,24 +22003,42 @@ impl CommandStack {
         if result == AcquireScriptResult::Complete {
             self.record_native_success(CommandId::Construct);
         }
-        let Some(entry) = self.entries.iter_mut().find(|entry| {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| {
             (command_instance_id == 0 || entry.instance_id == command_instance_id)
                 && matches!(&entry.state, CommandState::Construct(state) if state.script_pending)
-        }) else {
-            return false;
-        };
-        let CommandState::Construct(state) = &mut entry.state else {
-            unreachable!("pending Construct predicate matched another command");
-        };
-        if result == AcquireScriptResult::Complete {
-            state.script_pending = false;
-            state.script_invoked = false;
-            state.script_result = None;
-            entry.finished = Some(CommandStatus::Completed);
-        } else {
-            state.script_result = Some(result);
+        }) {
+            let CommandState::Construct(state) = &mut entry.state else {
+                unreachable!("pending Construct predicate matched another command");
+            };
+            if result == AcquireScriptResult::Complete {
+                state.script_pending = false;
+                state.script_invoked = false;
+                state.script_result = None;
+                entry.finished = Some(CommandStatus::Completed);
+            } else {
+                state.script_result = Some(result);
+            }
+            return true;
         }
-        true
+        let detached_index = self
+            .detached_construct_commands
+            .iter()
+            .position(|detached| {
+                (command_instance_id == 0 || detached.entry.instance_id == command_instance_id)
+                    && matches!(
+                        &detached.entry.state,
+                        CommandState::Construct(state) if state.script_pending
+                    )
+            });
+        if let Some(detached_index) = detached_index {
+            let detached = &mut self.detached_construct_commands[detached_index];
+            let CommandState::Construct(state) = &mut detached.entry.state else {
+                unreachable!("detached Construct predicate matched another command");
+            };
+            state.script_result = Some(result);
+            return true;
+        }
+        false
     }
 
     pub fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<CommandStepResult> {
@@ -20692,6 +22166,30 @@ impl CommandStack {
                 return Some(base.retries == 0);
             }
             if let Some(index) = self
+                .detached_build_stops
+                .iter()
+                .position(|entry| entry.entry.instance_id == candidate.instance_id)
+            {
+                let base = &mut self.detached_build_stops[index].entry;
+                if base.finished.is_some() {
+                    continue;
+                }
+                base.failures = base.failures.saturating_add(1);
+                return Some(base.retries == 0);
+            }
+            if let Some(index) = self
+                .detached_move_to_flights
+                .iter()
+                .position(|entry| entry.entry.instance_id == candidate.instance_id)
+            {
+                let base = &mut self.detached_move_to_flights[index].entry;
+                if base.finished.is_some() {
+                    continue;
+                }
+                base.failures = base.failures.saturating_add(1);
+                return Some(base.retries == 0);
+            }
+            if let Some(index) = self
                 .detached_throw_preludes
                 .iter()
                 .position(|entry| entry.entry.instance_id == candidate.instance_id)
@@ -20728,11 +22226,47 @@ impl CommandStack {
                 return Some(base.retries == 0);
             }
             if let Some(index) = self
+                .detached_put_stops
+                .iter()
+                .position(|entry| entry.entry.instance_id == candidate.instance_id)
+            {
+                let base = &mut self.detached_put_stops[index].entry;
+                if base.finished.is_some() {
+                    continue;
+                }
+                base.failures = base.failures.saturating_add(1);
+                return Some(base.retries == 0);
+            }
+            if let Some(index) = self
+                .detached_construct_commands
+                .iter()
+                .position(|entry| entry.entry.instance_id == candidate.instance_id)
+            {
+                let base = &mut self.detached_construct_commands[index].entry;
+                if base.finished.is_some() {
+                    continue;
+                }
+                base.failures = base.failures.saturating_add(1);
+                return Some(base.retries == 0);
+            }
+            if let Some(index) = self
                 .detached_get_attempts
                 .iter()
                 .position(|entry| entry.entry.instance_id == candidate.instance_id)
             {
                 let base = &mut self.detached_get_attempts[index].entry;
+                if base.finished.is_some() {
+                    continue;
+                }
+                base.failures = base.failures.saturating_add(1);
+                return Some(base.retries == 0);
+            }
+            if let Some(index) = self
+                .detached_physical_commands
+                .iter()
+                .position(|entry| entry.entry.instance_id == candidate.instance_id)
+            {
+                let base = &mut self.detached_physical_commands[index].entry;
                 if base.finished.is_some() {
                     continue;
                 }
@@ -21023,6 +22557,28 @@ struct MoveToStopContinuation {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+enum MoveToPhysicalContinuation {
+    InitEvaluation {
+        x: i32,
+        y: i32,
+    },
+    Float {
+        fixed_dx: crate::C4Fixed,
+        fixed_dy: crate::C4Fixed,
+    },
+    FlightControl {
+        target: Vector2,
+        from_walk: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct MoveToFlightContinuation {
+    target: Vector2,
+    jump_after_takeoff: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct MoveToState {
     target: Option<ObjectId>,
     tx: Option<i32>,
@@ -21047,6 +22603,11 @@ struct MoveToState {
     /// ObjectComStop (Idle then Walk with callbacks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stop_continuation: Option<MoveToStopContinuation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    physical_continuation: Option<MoveToPhysicalContinuation>,
+    /// Same-Execute tail after FlightControl's callbackful Fly transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flight_continuation: Option<MoveToFlightContinuation>,
     /// Runtime handoff to the engine-owned `Game.PathFinder` settings.
     /// The event is consumed in the same Execute and is not save state.
     #[serde(skip)]
@@ -21072,6 +22633,8 @@ impl MoveToState {
             tolerance: 5,
             last_direction: CommandDirection::Stop,
             stop_continuation: None,
+            physical_continuation: None,
+            flight_continuation: None,
             pathfinder_settings_update: None,
             pathfinder_debug_update: None,
         }
@@ -21092,17 +22655,31 @@ impl MoveToState {
     /// the destination via AdjustMoveToTarget unless Data carries
     /// C4CMD_MoveTo_NoPosAdjust (:1640, C4Command.h:68). FreeMoveTo
     /// accepts any spot for floaters and CanFly physicals (:116-124).
-    fn init_evaluation(&mut self, ctx: &CommandRuntimeContext<'_>) {
+    fn init_evaluation(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<CommandStepResult> {
         if let Some(target) = self.target.take() {
             if let Some(position) = ctx.resolve_position(target) {
                 self.tx = Some(self.tx.unwrap_or(0) + position.x);
                 self.ty = Some(self.ty.unwrap_or(0) + position.y);
             }
         }
+        // C4Value null Tx reads as integer zero and Ty is a zero-initialized
+        // integer. Native always writes the numeric Tx back after evaluation,
+        // so omitted/partial coordinates still reach FreeMoveTo/GetPhysical.
+        let tx = self.tx.unwrap_or(0);
+        let ty = self.ty.unwrap_or(0);
+        self.tx = Some(tx);
+        self.ty = Some(ty);
         if self.data & COMMAND_FLAG_MOVE_TO_NO_POS_ADJUST == 0 {
-            if let (Some(landscape), Some(tx), Some(ty)) = (ctx.landscape, self.tx, self.ty) {
-                let free_move = ctx.object.action_procedure == ActionProcedure::Float
-                    || ctx.object.physical.can_fly != 0;
+            if let Some(landscape) = ctx.landscape {
+                let free_move = if ctx.object.action_procedure == ActionProcedure::Float {
+                    true
+                } else if ctx.object.physical_deferred {
+                    self.physical_continuation =
+                        Some(MoveToPhysicalContinuation::InitEvaluation { x: tx, y: ty });
+                    return Some(resolve_command_physical(ctx.object.id, 1, None));
+                } else {
+                    ctx.object.physical.can_fly != 0
+                };
                 let (mut x, mut y) = (tx, ty);
                 adjust_move_to_target(
                     landscape,
@@ -21115,6 +22692,7 @@ impl MoveToState {
                 self.ty = Some(y);
             }
         }
+        None
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -21130,8 +22708,9 @@ impl MoveToState {
         // moving (`if (InitEvaluation()) return;`, C4Command.cpp:1555).
         if !self.evaluated {
             self.evaluated = true;
-            self.init_evaluation(ctx);
-            return CommandStepResult::running(None);
+            return self
+                .init_evaluation(ctx)
+                .unwrap_or_else(|| CommandStepResult::running(None));
         }
 
         // C4Command::MoveTo leaves any container before pathfinding or
@@ -21439,33 +23018,19 @@ impl MoveToState {
             // target vector to Physical.Float, subtract current momentum,
             // then choose the closest of the eight control directions.
             ActionProcedure::Float => {
-                let mut fixed_dx = math::itofix(target.x) - ctx.object.fixed_position.x;
-                let mut fixed_dy = math::itofix(target.y) - ctx.object.fixed_position.y;
-                let scale =
-                    math::fixed100(ctx.object.physical.float) / fixed_dx.abs().max(fixed_dy.abs());
-                fixed_dx *= scale;
-                fixed_dy *= scale;
-                fixed_dx -= ctx.object.fixed_velocity.x;
-                fixed_dy -= ctx.object.fixed_velocity.y;
-                Some(if fixed_dx.abs() + fixed_dy.abs() < math::fixed100(20) {
-                    CommandDirection::Stop
-                } else if fixed_dy.abs() * 3 < fixed_dx {
-                    CommandDirection::Right
-                } else if fixed_dy.abs() * 3 < -fixed_dx {
-                    CommandDirection::Left
-                } else if fixed_dx.abs() * 3 < fixed_dy {
-                    CommandDirection::Down
-                } else if fixed_dx.abs() * 3 < -fixed_dy {
-                    CommandDirection::Up
-                } else if fixed_dx > crate::C4Fixed::ZERO && fixed_dy > crate::C4Fixed::ZERO {
-                    CommandDirection::DownRight
-                } else if fixed_dx < crate::C4Fixed::ZERO && fixed_dy > crate::C4Fixed::ZERO {
-                    CommandDirection::DownLeft
-                } else if fixed_dx > crate::C4Fixed::ZERO && fixed_dy < crate::C4Fixed::ZERO {
-                    CommandDirection::UpRight
-                } else {
-                    CommandDirection::UpLeft
-                })
+                let fixed_dx = math::itofix(target.x) - ctx.object.fixed_position.x;
+                let fixed_dy = math::itofix(target.y) - ctx.object.fixed_position.y;
+                if ctx.object.physical_deferred {
+                    self.physical_continuation =
+                        Some(MoveToPhysicalContinuation::Float { fixed_dx, fixed_dy });
+                    return resolve_command_physical(ctx.object.id, 1, None);
+                }
+                Some(Self::float_control_direction(
+                    ctx,
+                    ctx.object.physical,
+                    fixed_dx,
+                    fixed_dy,
+                ))
             }
             // C++ has no default procedure arm: NONE and every other
             // unmatched procedure leave ComDir untouched.
@@ -21505,22 +23070,44 @@ impl MoveToState {
         // taking off, :1816-1849); JumpControl returning true ends the
         // Execute for this tick. DFA_FLIGHT runs FlightControl alone
         // (:414-417).
-        let mut fly_update: Option<ActionUpdate> = None;
-        let mut jump_operations: Option<Vec<CommandOperation>> = None;
-        if ctx.object.action_procedure == ActionProcedure::Walk {
-            fly_update = self.flight_control(ctx, target);
-            jump_operations = self.jump_control(ctx, target);
-        } else if ctx.object.action_procedure == ActionProcedure::Flight {
-            fly_update = self.flight_control(ctx, target);
+        if matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Walk | ActionProcedure::Flight
+        ) && ctx.object.physical_deferred
+        {
+            self.physical_continuation = Some(MoveToPhysicalContinuation::FlightControl {
+                target,
+                from_walk: ctx.object.action_procedure == ActionProcedure::Walk,
+            });
+            let update =
+                steer.map(|direction| ObjectUpdate::new().with_command_direction(direction));
+            return resolve_command_physical(ctx.object.id, 1, update);
+        }
+        let from_walk = ctx.object.action_procedure == ActionProcedure::Walk;
+        if matches!(
+            ctx.object.action_procedure,
+            ActionProcedure::Walk | ActionProcedure::Flight
+        ) && self.flight_control_takes_off(ctx, target, ctx.object.physical)
+        {
+            self.flight_continuation = Some(MoveToFlightContinuation {
+                target,
+                jump_after_takeoff: from_walk,
+            });
+            let update =
+                steer.map(|direction| ObjectUpdate::new().with_command_direction(direction));
+            return CommandStepResult::running(update).with_events(vec![
+                CommandEvent::MoveToFlightControlTakeoff {
+                    object_id: ctx.object.id,
+                    command_instance_id: 0,
+                },
+            ]);
         }
 
-        if fly_update.is_some() || jump_operations.is_some() {
+        let jump_operations = from_walk.then(|| self.jump_control(ctx, target)).flatten();
+        if jump_operations.is_some() {
             let mut update = ObjectUpdate::new();
             if let Some(direction) = steer {
                 update = update.with_command_direction(direction);
-            }
-            if let Some(action) = fly_update {
-                update = update.with_action_update(action);
             }
             let mut result = CommandStepResult::running(Some(update));
             if let Some(operations) = jump_operations {
@@ -21536,6 +23123,104 @@ impl MoveToState {
                 CommandStepResult::running(Some(update))
             }
         }
+    }
+
+    fn float_control_direction(
+        ctx: &CommandRuntimeContext<'_>,
+        physical: PhysicalInfo,
+        mut fixed_dx: crate::C4Fixed,
+        mut fixed_dy: crate::C4Fixed,
+    ) -> CommandDirection {
+        let scale = math::fixed100(physical.float) / fixed_dx.abs().max(fixed_dy.abs());
+        fixed_dx *= scale;
+        fixed_dy *= scale;
+        fixed_dx -= ctx.object.fixed_velocity.x;
+        fixed_dy -= ctx.object.fixed_velocity.y;
+        if fixed_dx.abs() + fixed_dy.abs() < math::fixed100(20) {
+            CommandDirection::Stop
+        } else if fixed_dy.abs() * 3 < fixed_dx {
+            CommandDirection::Right
+        } else if fixed_dy.abs() * 3 < -fixed_dx {
+            CommandDirection::Left
+        } else if fixed_dx.abs() * 3 < fixed_dy {
+            CommandDirection::Down
+        } else if fixed_dx.abs() * 3 < -fixed_dy {
+            CommandDirection::Up
+        } else if fixed_dx > crate::C4Fixed::ZERO && fixed_dy > crate::C4Fixed::ZERO {
+            CommandDirection::DownRight
+        } else if fixed_dx < crate::C4Fixed::ZERO && fixed_dy > crate::C4Fixed::ZERO {
+            CommandDirection::DownLeft
+        } else if fixed_dx > crate::C4Fixed::ZERO && fixed_dy < crate::C4Fixed::ZERO {
+            CommandDirection::UpRight
+        } else {
+            CommandDirection::UpLeft
+        }
+    }
+
+    fn resume_after_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        physical: PhysicalInfo,
+    ) -> CommandStepResult {
+        let Some(continuation) = self.physical_continuation.take() else {
+            return CommandStepResult::running(None);
+        };
+        match continuation {
+            MoveToPhysicalContinuation::InitEvaluation { x, y } => {
+                let (mut x, mut y) = (x, y);
+                if let Some(landscape) = ctx.landscape {
+                    adjust_move_to_target(
+                        landscape,
+                        &mut x,
+                        &mut y,
+                        physical.can_fly != 0,
+                        ctx.object.shape.height,
+                    );
+                }
+                self.tx = Some(x);
+                self.ty = Some(y);
+                CommandStepResult::running(None)
+            }
+            MoveToPhysicalContinuation::Float { fixed_dx, fixed_dy } => {
+                let direction = Self::float_control_direction(ctx, physical, fixed_dx, fixed_dy);
+                self.last_direction = direction;
+                CommandStepResult::running(Some(
+                    ObjectUpdate::new().with_command_direction(direction),
+                ))
+            }
+            MoveToPhysicalContinuation::FlightControl { target, from_walk } => {
+                if self.flight_control_takes_off(ctx, target, physical) {
+                    self.flight_continuation = Some(MoveToFlightContinuation {
+                        target,
+                        jump_after_takeoff: from_walk,
+                    });
+                    return CommandStepResult::running(None).with_events(vec![
+                        CommandEvent::MoveToFlightControlTakeoff {
+                            object_id: ctx.object.id,
+                            command_instance_id: 0,
+                        },
+                    ]);
+                }
+                let jump_operations = from_walk.then(|| self.jump_control(ctx, target)).flatten();
+                CommandStepResult::running(None)
+                    .with_operations(jump_operations.unwrap_or_default())
+            }
+        }
+    }
+
+    fn resume_after_flight_control(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+    ) -> CommandStepResult {
+        let Some(continuation) = self.flight_continuation.take() else {
+            return CommandStepResult::running(None);
+        };
+        let operations = continuation
+            .jump_after_takeoff
+            .then(|| self.jump_control(ctx, continuation.target))
+            .flatten()
+            .unwrap_or_default();
+        CommandStepResult::running(None).with_operations(operations)
     }
 
     /// The DFA_SCALE let-go decision (C4Command.cpp:339-368): jump away
@@ -21566,41 +23251,46 @@ impl MoveToState {
     /// `C4Command::FlightControl` (C4Command.cpp:1816-1849): CanFly crew or
     /// Pathfinder definitions walking toward a distant target within ±60°
     /// of straight up take off unless the current ActMap entry is Disabled.
-    /// C++ always returns false, so jump control still runs.
-    fn flight_control(
+    /// This predicate reports whether native calls SetActionByName("Fly");
+    /// FlightControl itself always returns false, so WALK later resumes
+    /// JumpControl after that callbackful transition.
+    fn flight_control_takes_off(
         &self,
         ctx: &CommandRuntimeContext<'_>,
         target: Vector2,
-    ) -> Option<ActionUpdate> {
-        if ctx.object.physical.can_fly == 0 {
-            return None;
+        physical: PhysicalInfo,
+    ) -> bool {
+        if physical.can_fly == 0 {
+            return false;
         }
         if ctx.object.ocf & crate::ocf::CREW_MEMBER == 0 && ctx.object.pathfinder == 0 {
-            return None;
+            return false;
         }
         if ctx.object.action_disabled {
-            return None;
+            return false;
         }
-        let landscape = ctx.landscape?;
+        let Some(landscape) = ctx.landscape else {
+            return false;
+        };
         let (cx, cy) = (ctx.position.x, ctx.position.y);
         let mut angle = c4_angle(cx, cy, target.x, target.y);
         while angle > 180 {
             angle -= 360;
         }
         if !inside(angle, -FLIGHT_ANGLE_RANGE, FLIGHT_ANGLE_RANGE) {
-            return None;
+            return false;
         }
         if c4_distance(cx, cy, target.x, target.y) <= 30 {
-            return None;
+            return false;
         }
         let mut top_free = 0;
         while top_free < 50 && !landscape.is_solid_at(cx, cy + ctx.object.shape_top - top_free) {
             top_free += 1;
         }
         if top_free < 15 {
-            return None;
+            return false;
         }
-        Some(ActionUpdate::default().with_name("Fly"))
+        true
     }
 
     /// `C4Command::JumpControl` (C4Command.cpp:1851-1920): the three
@@ -22001,6 +23691,8 @@ struct BuildState {
     /// Same-Execute continuation staged while Dig runs live ObjectComStop.
     #[serde(default)]
     stop_continuation: bool,
+    #[serde(default)]
+    physical_pending: bool,
 }
 
 impl BuildState {
@@ -22016,6 +23708,7 @@ impl BuildState {
             approach_horizontal: 9,
             approach_vertical: 20,
             stop_continuation: false,
+            physical_pending: false,
         })
     }
 
@@ -22080,6 +23773,32 @@ impl BuildState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if ctx.resolve(self.target).is_none() {
+            return CommandStepResult::failed(None);
+        }
+        if ctx.object.physical_deferred {
+            self.physical_pending = true;
+            return resolve_command_physical(ctx.object.id, 2, None);
+        }
+        self.step_after_physical(ctx, ctx.object.physical)
+    }
+
+    fn resume_after_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        physical: PhysicalInfo,
+    ) -> CommandStepResult {
+        if !std::mem::take(&mut self.physical_pending) {
+            return CommandStepResult::running(None);
+        }
+        self.step_after_physical(ctx, physical)
+    }
+
+    fn step_after_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        physical: PhysicalInfo,
+    ) -> CommandStepResult {
         let builder = ctx.object;
         let Some(target_snapshot) = ctx.resolve(self.target) else {
             return CommandStepResult::failed(None);
@@ -22088,7 +23807,7 @@ impl BuildState {
         // C4Object::GetPhysical always resolves a physical set for an extant
         // object. Only exact zero loses construction ability; negative raw
         // values remain truthy in C++ (C4Command.cpp:831-836).
-        if builder.physical.can_construct == 0 {
+        if physical.can_construct == 0 {
             return CommandStepResult::failed(None)
                 .with_failure_reason(CommandFailureReason::CannotBuild);
         }
@@ -22135,6 +23854,7 @@ impl BuildState {
             return CommandStepResult::running(None).with_events(vec![
                 CommandEvent::ObjectComStopBuild {
                     object_id: builder.id,
+                    command_instance_id: 0,
                 },
             ]);
         }
@@ -22221,6 +23941,14 @@ struct ConstructState {
     script_invoked: bool,
     #[serde(default)]
     script_result: Option<AcquireScriptResult>,
+    #[serde(default)]
+    physical_pending: bool,
+    #[serde(default)]
+    stop_continuation: bool,
+    /// Native iMoveToRange local captured before stop/script callbacks in
+    /// the current Execute. A new ordinary Execute overwrites it.
+    #[serde(skip)]
+    execute_move_to_range: Option<i32>,
 }
 
 /// Side-effect-free core of `ConstructionCheck` (C4Landscape.cpp:2125-2169).
@@ -22291,6 +24019,9 @@ impl ConstructState {
             script_pending: false,
             script_invoked: false,
             script_result: None,
+            physical_pending: false,
+            stop_continuation: false,
+            execute_move_to_range: None,
         }
     }
 
@@ -22307,11 +24038,13 @@ impl ConstructState {
 
     fn at_site(&self, ctx: &CommandRuntimeContext<'_>, site: Vector2) -> bool {
         const APPROACH_VERTICAL: i32 = 20;
-        let approach_horizontal = if ctx.object.move_to_range > 0 {
-            ctx.object.move_to_range
-        } else {
-            5
-        };
+        let approach_horizontal = self.execute_move_to_range.unwrap_or_else(|| {
+            if ctx.object.move_to_range > 0 {
+                ctx.object.move_to_range
+            } else {
+                5
+            }
+        });
         let dx = site.x - ctx.position.x;
         let dy = site.y - ctx.position.y;
         dx.abs() <= approach_horizontal && dy.abs() <= APPROACH_VERTICAL
@@ -22417,9 +24150,32 @@ impl ConstructState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if ctx.object.physical_deferred {
+            self.physical_pending = true;
+            return resolve_command_physical(ctx.object.id, 2, None);
+        }
+        self.step_after_physical(ctx, ctx.object.physical)
+    }
+
+    fn resume_after_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        physical: PhysicalInfo,
+    ) -> CommandStepResult {
+        if !std::mem::take(&mut self.physical_pending) {
+            return CommandStepResult::running(None);
+        }
+        self.step_after_physical(ctx, physical)
+    }
+
+    fn step_after_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        physical: PhysicalInfo,
+    ) -> CommandStepResult {
         // C4Command::Construct applies the physical capability gate before
         // both the menu-opening Data=0 path and definition validation.
-        if ctx.object.physical.can_construct == 0 {
+        if physical.can_construct == 0 {
             return CommandStepResult::failed(None);
         }
 
@@ -22432,6 +24188,11 @@ impl ConstructState {
                 },
             )]);
         };
+        self.execute_move_to_range = Some(if ctx.object.move_to_range > 0 {
+            ctx.object.move_to_range
+        } else {
+            5
+        });
 
         if let Some(target_id) = self.target {
             if let Some(target) = ctx.resolve(target_id) {
@@ -22501,14 +24262,33 @@ impl ConstructState {
             ctx.object.action_procedure,
             ActionProcedure::Build | ActionProcedure::Chop | ActionProcedure::Dig
         ) {
-            let mut update = ObjectUpdate::new();
-            if ctx.object.command_direction != CommandDirection::Stop {
-                update.command_direction = Some(CommandDirection::Stop);
-            }
-            let idle_action = ActionUpdate::default().with_name("Idle").with_force(true);
-            update = update.with_action_update(idle_action);
-            return CommandStepResult::running(Some(update));
+            self.stop_continuation = true;
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::ObjectComStopConstruct {
+                    object_id: ctx.object.id,
+                    command_instance_id: 0,
+                },
+            ]);
         }
+
+        self.step_after_stop(ctx)
+    }
+
+    fn resume_after_stop(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        if !std::mem::take(&mut self.stop_continuation) {
+            return CommandStepResult::running(None);
+        }
+        self.step_after_stop(ctx)
+    }
+
+    fn step_after_stop(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let Some(definition_id) = self.definition_id.clone() else {
+            return CommandStepResult::failed(None);
+        };
+        let Some(definition) = ctx.definition(&definition_id) else {
+            return CommandStepResult::failed(None);
+        };
+        let owner = ctx.object.owner;
 
         if ctx.object.action_procedure == ActionProcedure::Push
             && ctx.object.action_target.is_some()
@@ -22528,6 +24308,19 @@ impl ConstructState {
             site = found;
             self.site = Some(site);
         }
+
+        self.step_after_site(ctx)
+    }
+
+    fn step_after_site(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let Some(definition_id) = self.definition_id.clone() else {
+            return CommandStepResult::failed(None);
+        };
+        let Some(definition) = ctx.definition(&definition_id) else {
+            return CommandStepResult::failed(None);
+        };
+        let site = self.site.unwrap_or(Vector2::ZERO);
+        let owner = ctx.object.owner;
 
         if !self.spawn_requested {
             if self.script_pending {
@@ -22601,28 +24394,17 @@ impl ConstructState {
                 return CommandStepResult::failed(None);
             }
 
-            let mut events = Vec::new();
-            events.push(CommandEvent::SpawnObject {
-                definition_id: definition_id.clone(),
-                owner,
-                position: site,
-                container: None,
-                construction: Some(1),
-            });
-
-            let mut kit_update = ObjectUpdate::new();
-            kit_update.container = Some(None);
-            kit_update.position = Some(ctx.position);
-            kit_update.velocity = Some(Vector2::ZERO);
-            kit_update.status = Some(ObjectStatus::Deleted);
-            kit_update.alive = Some(false);
-            events.push(CommandEvent::ApplyObjectUpdate {
-                object_id: kit_id,
-                update: kit_update,
-            });
-
             self.spawn_requested = true;
-            return CommandStepResult::running(None).with_events(events);
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::SpawnConstruction {
+                    actor_id: ctx.object.id,
+                    definition_id: definition_id.clone(),
+                    owner,
+                    position: site,
+                    kit_id,
+                    command_instance_id: 0,
+                },
+            ]);
         }
 
         if self.construction_id.is_none() {
@@ -22643,6 +24425,43 @@ impl ConstructState {
         ));
 
         CommandStepResult::completed(None).with_operations(operations)
+    }
+
+    fn resume_after_script(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        result: AcquireScriptResult,
+    ) -> CommandStepResult {
+        if !self.script_pending {
+            return CommandStepResult::running(None);
+        }
+        self.script_result = Some(result);
+        self.step_after_site(ctx)
+    }
+
+    fn resume_after_spawn(
+        &mut self,
+        _ctx: &CommandRuntimeContext<'_>,
+        construction_id: Option<ObjectId>,
+    ) -> CommandStepResult {
+        if !self.spawn_requested || self.construction_id.is_some() {
+            return CommandStepResult::running(None);
+        }
+        // Native continues even when CreateObjectConstruction returned null:
+        // the kit is consumed, Construct finishes successfully and it still
+        // attempts AddCommand(Build, nullptr). The typed Build request may be
+        // rejected later, but this exact Construct must not remain pending.
+        self.spawn_requested = false;
+        self.construction_id = construction_id;
+        CommandStepResult::completed(None).with_operations(vec![CommandOperation::PushFront(
+            CommandRequest::new(CommandId::Build)
+                // Required-target command states use object zero for a
+                // native null pointer. This queues the Build so it fails
+                // on its next Execute, suppressing Construct's finished
+                // callback in the same way as AddCommand(Build,nullptr).
+                .with_target(Some(construction_id.unwrap_or(ObjectId::new(0))))
+                .with_mode(CommandMode::SilentSub),
+        )])
     }
 }
 
@@ -22837,6 +24656,8 @@ impl TransferState {
 struct ChopState {
     target: ObjectId,
     update_interval: u32,
+    #[serde(default)]
+    physical_pending: bool,
 }
 
 impl ChopState {
@@ -22845,10 +24666,11 @@ impl ChopState {
         Ok(Self {
             target,
             update_interval: positive_helper_interval_or_one(request.update_interval),
+            physical_pending: false,
         })
     }
 
-    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
+    fn at_target_stop_update(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
         if ctx.object.command_direction != CommandDirection::Stop {
             Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
         } else {
@@ -22862,7 +24684,33 @@ impl ChopState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        if ctx.object.physical.can_chop == 0 {
+        if ctx.resolve(self.target).is_none() {
+            return CommandStepResult::failed(None);
+        }
+        if ctx.object.physical_deferred {
+            self.physical_pending = true;
+            return resolve_command_physical(ctx.object.id, 1, None);
+        }
+        self.step_after_physical(ctx, ctx.object.physical)
+    }
+
+    fn resume_after_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        physical: PhysicalInfo,
+    ) -> CommandStepResult {
+        if !std::mem::take(&mut self.physical_pending) {
+            return CommandStepResult::running(None);
+        }
+        self.step_after_physical(ctx, physical)
+    }
+
+    fn step_after_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        physical: PhysicalInfo,
+    ) -> CommandStepResult {
+        if physical.can_chop == 0 {
             return CommandStepResult::failed(None);
         }
 
@@ -22874,20 +24722,20 @@ impl ChopState {
         };
 
         if target_snapshot.ocf & ocf::CHOP == 0 {
-            return CommandStepResult::completed(self.update_to_stop(ctx));
+            return CommandStepResult::completed(None);
         }
 
         if ctx.object.action_procedure == ActionProcedure::Chop
             && ctx.object.action_target == Some(self.target)
         {
-            return CommandStepResult::running(self.update_to_stop(ctx));
+            return CommandStepResult::running(None);
         }
 
         if ctx.object.action_procedure == ActionProcedure::Push {
             let request = CommandRequest::new(CommandId::UnGrab)
                 .with_update_interval(50)
                 .with_mode(CommandMode::SilentSub);
-            let mut result = CommandStepResult::running(self.update_to_stop(ctx));
+            let mut result = CommandStepResult::running(None);
             result.operations.push(CommandOperation::PushFront(request));
             return result;
         }
@@ -22896,10 +24744,11 @@ impl ChopState {
             ctx.object.action_procedure,
             ActionProcedure::Chop | ActionProcedure::Build | ActionProcedure::Dig
         ) {
-            let mut update = self.update_to_stop(ctx).unwrap_or_default();
-            let idle_action = ActionUpdate::default().with_name("Idle").with_force(true);
-            update = update.with_action_update(idle_action);
-            return CommandStepResult::running(Some(update));
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::ObjectComStopChop {
+                    object_id: ctx.object.id,
+                },
+            ]);
         }
 
         let dx = target_snapshot.position.x - ctx.position.x;
@@ -22916,7 +24765,7 @@ impl ChopState {
             && dx.abs() <= MAX_HORIZONTAL_RANGE;
 
         if at_target {
-            let update = self.update_to_stop(ctx);
+            let update = self.at_target_stop_update(ctx);
             if ctx.object.action_procedure != ActionProcedure::Walk {
                 return CommandStepResult::running(update);
             }
@@ -22934,7 +24783,7 @@ impl ChopState {
             return CommandStepResult::running(Some(update));
         }
 
-        let mut result = CommandStepResult::running(self.update_to_stop(ctx));
+        let mut result = CommandStepResult::running(None);
 
         let approach_x = if ctx.position.x > target_snapshot.position.x {
             target_snapshot.position.x + 6
@@ -23544,6 +25393,8 @@ struct PushToState {
     /// executing behavior when the field is absent.
     #[serde(default)]
     evaluation_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    physical_continuation: Option<Vector2>,
 }
 
 impl PushToState {
@@ -23555,6 +25406,7 @@ impl PushToState {
             ty: request.ty,
             update_interval: positive_helper_interval_or_one(request.update_interval),
             evaluation_pending: !request.evaluated,
+            physical_continuation: None,
         })
     }
 
@@ -23567,17 +25419,23 @@ impl PushToState {
     /// C4CMD_PushTo InitEvaluation (C4Command.cpp:1645-1652): ground the
     /// destination once, using the actor's live FreeMoveTo/shape state, and
     /// consume this Execute before the PushTo handler runs.
-    fn init_evaluation(&mut self, ctx: &CommandRuntimeContext<'_>) -> bool {
+    fn init_evaluation(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<CommandStepResult> {
         if !self.evaluation_pending {
-            return false;
+            return None;
         }
         self.evaluation_pending = false;
 
         let destination = self.destination();
         let (mut x, mut y) = (destination.x, destination.y);
         if let Some(landscape) = ctx.landscape {
-            let free_move = ctx.object.action_procedure == ActionProcedure::Float
-                || ctx.object.physical.can_fly != 0;
+            let free_move = if ctx.object.action_procedure == ActionProcedure::Float {
+                true
+            } else if ctx.object.physical_deferred {
+                self.physical_continuation = Some(destination);
+                return Some(resolve_command_physical(ctx.object.id, 1, None));
+            } else {
+                ctx.object.physical.can_fly != 0
+            };
             adjust_move_to_target(
                 landscape,
                 &mut x,
@@ -23588,7 +25446,30 @@ impl PushToState {
         }
         self.tx = Some(x);
         self.ty = Some(y);
-        true
+        Some(CommandStepResult::running(None))
+    }
+
+    fn resume_after_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        physical: PhysicalInfo,
+    ) -> CommandStepResult {
+        let Some(destination) = self.physical_continuation.take() else {
+            return CommandStepResult::running(None);
+        };
+        let (mut x, mut y) = (destination.x, destination.y);
+        if let Some(landscape) = ctx.landscape {
+            adjust_move_to_target(
+                landscape,
+                &mut x,
+                &mut y,
+                physical.can_fly != 0,
+                ctx.object.shape_height,
+            );
+        }
+        self.tx = Some(x);
+        self.ty = Some(y);
+        CommandStepResult::running(None)
     }
 
     fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
@@ -23840,6 +25721,22 @@ struct PutState {
     /// A live ObjectComPut event is being resolved synchronously.
     #[serde(default)]
     put_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    physical_continuation: Option<PutPhysicalContinuation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_continuation: Option<PutStopContinuation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct PutPhysicalContinuation {
+    item_id: ObjectId,
+    target_position: Vector2,
+    p_grabbing: Option<ObjectId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct PutStopContinuation {
+    item_id: ObjectId,
 }
 
 impl PutState {
@@ -23853,24 +25750,9 @@ impl PutState {
             update_interval: positive_helper_interval_or_one(request.update_interval),
             put_ty: request.ty.unwrap_or(0),
             put_pending: false,
+            physical_continuation: None,
+            stop_continuation: None,
         })
-    }
-
-    fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
-        if ctx.object.action_procedure != ActionProcedure::Dig {
-            return None;
-        }
-        Some(
-            ObjectUpdate::new()
-                .with_command_direction(CommandDirection::Stop)
-                .with_action_update(
-                    ActionUpdate::default()
-                        .with_name("Idle")
-                        .with_force(true)
-                        .with_phase(0)
-                        .with_ticks(0),
-                ),
-        )
     }
 
     fn resolve_item<'a>(
@@ -23975,7 +25857,42 @@ impl PutState {
             return CommandStepResult::failed(None);
         }
 
-        let update = self.prepare_update(ctx);
+        if ctx.object.action_procedure == ActionProcedure::Dig {
+            self.stop_continuation = Some(PutStopContinuation { item_id });
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::ObjectComStopPut {
+                    object_id: ctx.object.id,
+                    command_instance_id: 0,
+                },
+            ]);
+        }
+
+        self.step_after_stop(ctx, gravity, item_id)
+    }
+
+    fn resume_after_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+    ) -> CommandStepResult {
+        let Some(continuation) = self.stop_continuation.take() else {
+            return CommandStepResult::running(None);
+        };
+        self.step_after_stop(ctx, gravity, continuation.item_id)
+    }
+
+    fn step_after_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        item_id: ObjectId,
+    ) -> CommandStepResult {
+        let Some(container_snapshot) = ctx.resolve(self.container) else {
+            return CommandStepResult::failed(None);
+        };
+        let Some(item_snapshot) = ctx.resolve(item_id) else {
+            return CommandStepResult::failed(None);
+        };
         let p_grabbing = (ctx.object.action_procedure == ActionProcedure::Push)
             .then_some(ctx.object.action_target)
             .flatten();
@@ -23984,13 +25901,13 @@ impl PutState {
             let request = CommandRequest::new(CommandId::UnGrab)
                 .with_update_interval(50)
                 .with_mode(CommandMode::SilentSub);
-            return CommandStepResult::running(update)
+            return CommandStepResult::running(None)
                 .with_operations(vec![CommandOperation::PushFront(request)]);
         }
 
         if ctx.object.container == Some(self.container) {
             self.put_pending = true;
-            return CommandStepResult::running(update).with_events(vec![
+            return CommandStepResult::running(None).with_events(vec![
                 CommandEvent::ObjectComPut {
                     actor_id: ctx.object.id,
                     target_id: self.container,
@@ -24005,7 +25922,7 @@ impl PutState {
             let request = CommandRequest::new(CommandId::Exit)
                 .with_update_interval(50)
                 .with_mode(CommandMode::SilentSub);
-            return CommandStepResult::running(update)
+            return CommandStepResult::running(None)
                 .with_operations(vec![CommandOperation::PushFront(request)]);
         }
 
@@ -24024,41 +25941,109 @@ impl PutState {
                     container_snapshot.position.x + collection.x + collection.width / 2,
                     container_snapshot.position.y + collection.y + collection.height / 2,
                 );
-                let throw_force = math::val_by_physical(400, ctx.object.physical.throw);
-                let target_distance = c4_distance(
-                    ctx.position.x,
-                    ctx.position.y,
-                    container_snapshot.position.x,
-                    container_snapshot.position.y,
-                );
-                let throwing_position_found = ctx.landscape.is_some_and(|landscape| {
-                    [1, -1].into_iter().any(|direction| {
-                        landscape
-                            .find_throwing_position(
-                                target_position,
-                                FixedVec2::new(throw_force * direction, -throw_force),
-                                ctx.object.shape_height,
-                                gravity,
-                            )
-                            .is_some_and(|position| {
-                                c4_distance(position.x, position.y, ctx.position.x, ctx.position.y)
-                                    < target_distance
-                            })
-                    })
-                });
-                if throwing_position_found {
-                    let request = CommandRequest::new(CommandId::Throw)
-                        .with_target(Some(item_id))
-                        .with_tx(Some(target_position.x))
-                        .with_ty(Some(target_position.y))
-                        .with_update_interval(5)
-                        .with_mode(CommandMode::SilentSub);
-                    return CommandStepResult::running(update)
-                        .with_operations(vec![CommandOperation::PushFront(request)]);
+                if ctx.object.physical_deferred {
+                    self.physical_continuation = Some(PutPhysicalContinuation {
+                        item_id,
+                        target_position,
+                        p_grabbing,
+                    });
+                    return resolve_command_physical(ctx.object.id, 1, None);
                 }
+                return self.step_after_throw_physical(
+                    ctx,
+                    gravity,
+                    ctx.object.physical,
+                    item_id,
+                    target_position,
+                    p_grabbing,
+                    None,
+                );
             }
         }
 
+        self.step_after_throw_attempt(ctx, item_id, p_grabbing, None)
+    }
+
+    fn resume_after_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        physical: PhysicalInfo,
+    ) -> CommandStepResult {
+        let Some(continuation) = self.physical_continuation.take() else {
+            return CommandStepResult::running(None);
+        };
+        self.step_after_throw_physical(
+            ctx,
+            gravity,
+            physical,
+            continuation.item_id,
+            continuation.target_position,
+            continuation.p_grabbing,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_after_throw_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        physical: PhysicalInfo,
+        item_id: ObjectId,
+        target_position: Vector2,
+        p_grabbing: Option<ObjectId>,
+        update: Option<ObjectUpdate>,
+    ) -> CommandStepResult {
+        let Some(container_snapshot) = ctx.resolve(self.container) else {
+            return CommandStepResult::failed(update);
+        };
+        let throw_force = math::val_by_physical(400, physical.throw);
+        let target_distance = c4_distance(
+            ctx.position.x,
+            ctx.position.y,
+            container_snapshot.position.x,
+            container_snapshot.position.y,
+        );
+        let throwing_position_found = ctx.landscape.is_some_and(|landscape| {
+            [1, -1].into_iter().any(|direction| {
+                landscape
+                    .find_throwing_position(
+                        target_position,
+                        FixedVec2::new(throw_force * direction, -throw_force),
+                        ctx.object.shape_height,
+                        gravity,
+                    )
+                    .is_some_and(|position| {
+                        c4_distance(position.x, position.y, ctx.position.x, ctx.position.y)
+                            < target_distance
+                    })
+            })
+        });
+        if throwing_position_found {
+            let request = CommandRequest::new(CommandId::Throw)
+                .with_target(Some(item_id))
+                .with_tx(Some(target_position.x))
+                .with_ty(Some(target_position.y))
+                .with_update_interval(5)
+                .with_mode(CommandMode::SilentSub);
+            return CommandStepResult::running(update)
+                .with_operations(vec![CommandOperation::PushFront(request)]);
+        }
+        self.step_after_throw_attempt(ctx, item_id, p_grabbing, update)
+    }
+
+    fn step_after_throw_attempt(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        item_id: ObjectId,
+        p_grabbing: Option<ObjectId>,
+        update: Option<ObjectUpdate>,
+    ) -> CommandStepResult {
+        let Some(container_snapshot) = ctx.resolve(self.container) else {
+            return CommandStepResult::failed(update);
+        };
+        let target_definition = ctx.definition(&container_snapshot.definition_id);
         if target_definition
             .is_some_and(|definition| definition.grab_put_get & crate::GRAB_PUT_GET_PUT != 0)
         {
@@ -24851,12 +26836,21 @@ struct ThrowState {
     put_take_pending: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     continuations: Vec<ThrowContinuation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    physical_continuation: Option<ThrowPhysicalContinuation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum ThrowContinuation {
     AfterObjectComStop,
     AfterSetDir,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct ThrowPhysicalContinuation {
+    target_position: Vector2,
+    preferred_direction: i32,
+    horizontal_range: i32,
 }
 
 impl ThrowState {
@@ -24868,6 +26862,7 @@ impl ThrowState {
             update_interval: positive_helper_interval_or_one(request.update_interval),
             put_take_pending: false,
             continuations: Vec::new(),
+            physical_continuation: None,
         })
     }
 
@@ -24922,6 +26917,12 @@ impl ThrowState {
         }
 
         let target_position = self.throw_position();
+        const THROW_HORIZONTAL_RANGE_DEFAULT: i32 = 5;
+        let horizontal_range = if ctx.object.move_to_range > 0 {
+            ctx.object.move_to_range
+        } else {
+            THROW_HORIZONTAL_RANGE_DEFAULT
+        };
         if ctx.object.action_procedure == ActionProcedure::Push && target_position.is_some() {
             let request = CommandRequest::new(CommandId::UnGrab)
                 .with_update_interval(50)
@@ -24937,56 +26938,22 @@ impl ThrowState {
             } else {
                 1
             };
-            let throw_force = math::val_by_physical(400, ctx.object.physical.throw);
-            let throwing_position = ctx.landscape.and_then(|landscape| {
-                [preferred_direction, -preferred_direction]
-                    .into_iter()
-                    .find_map(|direction| {
-                        landscape.find_throwing_position(
-                            target_position,
-                            FixedVec2::new(throw_force * direction, -throw_force),
-                            ctx.object.shape_height,
-                            gravity,
-                        )
-                    })
-            });
-            let Some(throwing_position) = throwing_position else {
-                return CommandStepResult::failed(None);
-            };
-
-            const THROW_HORIZONTAL_RANGE_DEFAULT: i32 = 5;
-            const THROW_VERTICAL_RANGE: i32 = 15;
-            let horizontal_range = if ctx.object.move_to_range > 0 {
-                ctx.object.move_to_range
-            } else {
-                THROW_HORIZONTAL_RANGE_DEFAULT
-            };
-            let dx = throwing_position.x - ctx.position.x;
-            let dy = throwing_position.y - ctx.position.y;
-            if dx.abs() > horizontal_range || dy.abs() > THROW_VERTICAL_RANGE {
-                let request = CommandRequest::new(CommandId::MoveTo)
-                    .with_tx(Some(throwing_position.x))
-                    .with_ty(Some(throwing_position.y))
-                    .with_update_interval(20)
-                    .with_mode(CommandMode::SilentSub);
-                let mut result = CommandStepResult::running(None);
-                result.operations.push(CommandOperation::PushFront(request));
-                return result;
+            if ctx.object.physical_deferred {
+                self.physical_continuation = Some(ThrowPhysicalContinuation {
+                    target_position,
+                    preferred_direction,
+                    horizontal_range,
+                });
+                return resolve_command_physical(ctx.object.id, 1, None);
             }
-
-            let direction = if target_position.x > ctx.position.x {
-                Direction::Right
-            } else {
-                Direction::Left
-            };
-            self.continuations.push(ThrowContinuation::AfterSetDir);
-            return CommandStepResult::running(None).with_events(vec![
-                CommandEvent::ObjectComSetDirThrow {
-                    object_id: ctx.object.id,
-                    direction,
-                    command_instance_id: 0,
-                },
-            ]);
+            return self.step_after_physical(
+                ctx,
+                gravity,
+                ctx.object.physical,
+                target_position,
+                preferred_direction,
+                horizontal_range,
+            );
         }
 
         // An untargeted Throw while contained is an inline put/take operation,
@@ -25026,6 +26993,79 @@ impl ThrowState {
         }
 
         self.step_object_com_throw(ctx, false)
+    }
+
+    fn resume_after_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        physical: PhysicalInfo,
+    ) -> CommandStepResult {
+        let Some(continuation) = self.physical_continuation.take() else {
+            return CommandStepResult::running(None);
+        };
+        self.step_after_physical(
+            ctx,
+            gravity,
+            physical,
+            continuation.target_position,
+            continuation.preferred_direction,
+            continuation.horizontal_range,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_after_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        physical: PhysicalInfo,
+        target_position: Vector2,
+        preferred_direction: i32,
+        horizontal_range: i32,
+    ) -> CommandStepResult {
+        let throw_force = math::val_by_physical(400, physical.throw);
+        let throwing_position = ctx.landscape.and_then(|landscape| {
+            [preferred_direction, -preferred_direction]
+                .into_iter()
+                .find_map(|direction| {
+                    landscape.find_throwing_position(
+                        target_position,
+                        FixedVec2::new(throw_force * direction, -throw_force),
+                        ctx.object.shape_height,
+                        gravity,
+                    )
+                })
+        });
+        let Some(throwing_position) = throwing_position else {
+            return CommandStepResult::failed(None);
+        };
+
+        const THROW_VERTICAL_RANGE: i32 = 15;
+        let dx = throwing_position.x - ctx.position.x;
+        let dy = throwing_position.y - ctx.position.y;
+        if dx.abs() > horizontal_range || dy.abs() > THROW_VERTICAL_RANGE {
+            let request = CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(throwing_position.x))
+                .with_ty(Some(throwing_position.y))
+                .with_update_interval(20)
+                .with_mode(CommandMode::SilentSub);
+            let mut result = CommandStepResult::running(None);
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
+        }
+
+        let direction = if target_position.x > ctx.position.x {
+            Direction::Right
+        } else {
+            Direction::Left
+        };
+        self.continuations.push(ThrowContinuation::AfterSetDir);
+        CommandStepResult::running(None).with_events(vec![CommandEvent::ObjectComSetDirThrow {
+            object_id: ctx.object.id,
+            direction,
+            command_instance_id: 0,
+        }])
     }
 
     fn resume_after_prelude(
@@ -26311,6 +28351,37 @@ impl CommandState {
         }
     }
 
+    fn has_physical_continuation(&self) -> bool {
+        match self {
+            CommandState::MoveTo(state) => state.physical_continuation.is_some(),
+            CommandState::Build(state) => state.physical_pending,
+            CommandState::Construct(state) => state.physical_pending,
+            CommandState::Chop(state) => state.physical_pending,
+            CommandState::Throw(state) => state.physical_continuation.is_some(),
+            CommandState::Put(state) => state.physical_continuation.is_some(),
+            CommandState::PushTo(state) => state.physical_continuation.is_some(),
+            _ => false,
+        }
+    }
+
+    fn resume_after_physical(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        gravity: crate::C4Fixed,
+        physical: PhysicalInfo,
+    ) -> CommandStepResult {
+        match self {
+            CommandState::MoveTo(state) => state.resume_after_physical(ctx, physical),
+            CommandState::Build(state) => state.resume_after_physical(ctx, physical),
+            CommandState::Construct(state) => state.resume_after_physical(ctx, physical),
+            CommandState::Chop(state) => state.resume_after_physical(ctx, physical),
+            CommandState::Throw(state) => state.resume_after_physical(ctx, gravity, physical),
+            CommandState::Put(state) => state.resume_after_physical(ctx, gravity, physical),
+            CommandState::PushTo(state) => state.resume_after_physical(ctx, physical),
+            _ => CommandStepResult::running(None),
+        }
+    }
+
     fn legacy_evaluated(&self, generic: bool) -> bool {
         match self {
             CommandState::MoveTo(state) => state.evaluated,
@@ -26547,8 +28618,16 @@ impl CommandState {
             CommandState::Activate(state) => clear(&mut state.target) | clear(&mut state.container),
             CommandState::PushTo(state) => clear(&mut state.target) | clear(&mut state.container),
             CommandState::Put(state) => {
-                clear_required_object_reference(&mut state.container, removed)
-                    | clear(&mut state.requested_item)
+                let mut changed = clear_required_object_reference(&mut state.container, removed)
+                    | clear(&mut state.requested_item);
+                if let Some(continuation) = &mut state.stop_continuation {
+                    changed |= clear_required_object_reference(&mut continuation.item_id, removed);
+                }
+                if let Some(continuation) = &mut state.physical_continuation {
+                    changed |= clear_required_object_reference(&mut continuation.item_id, removed);
+                    changed |= clear(&mut continuation.p_grabbing);
+                }
+                changed
             }
             CommandState::Drop(state) => {
                 clear(&mut state.requested_item) | clear(&mut state.delegated_container)
@@ -26885,8 +28964,9 @@ impl ActiveCommand {
         // C4Command::InitEvaluation runs after the interval decrement and
         // consumes the Execute without invoking the command handler.
         if let CommandState::PushTo(state) = &mut self.state {
-            if state.init_evaluation(ctx) {
-                return CommandStepResult::running(None);
+            if let Some(mut result) = state.init_evaluation(ctx) {
+                stamp_command_event_instances(&mut result.events, self.instance_id);
+                return result;
             }
         }
         if let CommandState::Wait(state) = &mut self.state {
@@ -26957,83 +29037,7 @@ impl ActiveCommand {
             CommandState::Malformed(_) => CommandStepResult::failed(None),
             CommandState::Unsupported => CommandStepResult::failed(None),
         };
-        for event in &mut result.events {
-            match event {
-                CommandEvent::ObjectComPut {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::ObjectComPutTake {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::ObjectComDrop {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::ThrowObject {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::ObjectComUnGrabCommand {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::CommandExitObject {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::CommandExitIntoParent {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::ObjectComStopExit {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::ActivateEntrance {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::ObjectComDig {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::GetObject {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::ControlCommandAcquire {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::ControlCommandConstruction {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::ControlTransfer {
-                    command_instance_id,
-                    ..
-                } if *command_instance_id == 0 => {
-                    *command_instance_id = self.instance_id;
-                }
-                CommandEvent::ObjectComStopDrop {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::ObjectComStopThrow {
-                    command_instance_id,
-                    ..
-                }
-                | CommandEvent::ObjectComSetDirThrow {
-                    command_instance_id,
-                    ..
-                } if *command_instance_id == 0 => {
-                    *command_instance_id = self.instance_id;
-                }
-                _ => {}
-            }
-        }
+        stamp_command_event_instances(&mut result.events, self.instance_id);
         result
     }
 }

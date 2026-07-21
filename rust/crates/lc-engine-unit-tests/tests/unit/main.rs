@@ -32949,6 +32949,7 @@ public func TrainTemporaryScale()
             ..PhysicalInfo::default()
         });
         let mut engine = Engine::new();
+        engine.set_fair_crew_strength(5_000);
         engine
             .register_definition(definition)
             .expect("crew definition registers");
@@ -33020,7 +33021,6 @@ public func TrainTemporaryScale()
         let crew = engine.player(0).expect("player exists").crew()[0];
         let crew_index = engine.find_object_index(crew).expect("crew exists");
 
-        engine.set_fair_crew_strength(5_000);
         let physical = engine.object_physical(crew_index);
         assert_eq!(physical.scale, 37_000);
         assert_eq!(physical.hangle, 46_000);
@@ -33048,6 +33048,258 @@ public func TrainTemporaryScale()
                 .call_object_function(crew_index, "ReadFair", Vec::new())
                 .expect("changed object script reads fair physicals"),
             Value::Array(vec![Value::Int(37_000), Value::Int(37_000)])
+        );
+    }
+
+    #[test]
+    fn fair_crew_projection_is_cached_per_definition_until_synchronize() {
+        let mut definition = Definition::from_script(
+            "FCCH",
+            "Fair crew cache probe",
+            r#"#strict
+static hook_calls, order_errors;
+static probe_armed, probe_target, probe_owner, probe_reentrant, probe_nested, probe_definition;
+
+protected func GetFairCrewPhysical(string name, int rank, &value)
+{
+    order_errors += 0;
+    var names = ["Energy", "Breath", "Walk", "Jump", "Scale", "Hangle", "Dig",
+                 "Swim", "Throw", "Push", "Fight", "Magic", "Float", "CanScale",
+                 "CanHangle", "CanDig", "CanConstruct", "CanChop", "CanFly",
+                 "CorrosionResist", "BreatheWater"];
+    if (name ne names[hook_calls % 21]) order_errors += 1;
+    hook_calls += 1;
+    if (name eq "Energy" && probe_armed)
+    {
+        probe_armed = false;
+        SetWealth(0, 1234);
+        probe_owner = GetOwner();
+        probe_reentrant = GetPhysical("Energy", 0, probe_target);
+        probe_nested = probe_target->ReadImplicit();
+        probe_definition = DefinitionCall(OTHR, "Probe");
+    }
+    value = Random(1000000);
+    return true;
+}
+
+public func ArmProbe() { probe_target = this(); probe_armed = true; return true; }
+public func HookState() { return [hook_calls, order_errors]; }
+public func ProbeState() { return [probe_owner, probe_reentrant, probe_nested, probe_definition]; }
+public func ReadEnergy() { return GetPhysical("Energy"); }
+public func ReadImplicit() { return [GetID(), GetPhysical("Energy")]; }
+public func FailMagicUnderload() { return DoMagicEnergy(-1, this(), false); }
+"#,
+        )
+        .expect("fair-crew cache probe compiles");
+        definition.set_crew_member(true);
+
+        let crew_info = |name: &str| player_file::CrewInfo {
+            id: "FCCH".to_string(),
+            name: name.to_string(),
+            death_message: String::new(),
+            core: Default::default(),
+            rank: 0,
+            rank_name: "Clonk".to_string(),
+            experience: 0,
+            rounds: 0,
+            physical: PhysicalInfo::default(),
+            death_count: 0,
+            total_playing_time: 0,
+            birthday: 0,
+            age: 0,
+            participation: 1,
+            in_action: false,
+            was_in_action: false,
+            in_action_time: 0,
+            has_died: false,
+            extra_data: Vec::new(),
+            portraits: Default::default(),
+        };
+
+        let mut engine = Engine::with_seed(0x148);
+        engine.set_use_fair_crew(true);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "OTHR",
+                    "Nested definition probe",
+                    "#strict\npublic func Probe() { return GetID(); }\n",
+                )
+                .expect("nested definition probe compiles"),
+            )
+            .expect("nested definition probe registers");
+        engine
+            .register_definition(definition)
+            .expect("fair-crew cache probe registers");
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("FCCH".to_string(), 2)];
+        engine.set_player_starts(vec![start]);
+        engine
+            .join_player(JoinPlayerConfig {
+                name: "Cache owner".to_string(),
+                player_info_id: 1,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: vec![crew_info("First"), crew_info("Second")],
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("cache owner joins");
+
+        let crew = engine
+            .player(0)
+            .expect("cache owner exists")
+            .crew()
+            .to_vec();
+        assert_eq!(crew.len(), 2);
+        let first_index = engine
+            .find_object_index(crew[0])
+            .expect("first crew exists");
+        let second_index = engine
+            .find_object_index(crew[1])
+            .expect("second crew exists");
+        let rng_after_join = engine.rng.clone();
+        assert_eq!(
+            engine
+                .call_object_function(first_index, "HookState", Vec::new())
+                .expect("hook state reads"),
+            Value::Array(vec![Value::Int(21), Value::Int(0)]),
+            "both crew share one definition cache fill in native field order"
+        );
+
+        let initial = engine.object_physical(first_index);
+        assert_eq!(engine.object_physical(second_index), initial);
+        assert_eq!(engine.object_physical(first_index), initial);
+        assert_eq!(
+            engine
+                .call_object_function(second_index, "ReadEnergy", Vec::new())
+                .expect("script reads the shared projection"),
+            Value::Int(initial.energy)
+        );
+        assert_eq!(
+            engine.rng, rng_after_join,
+            "repeated reads and a second same-definition crew consume no Random calls"
+        );
+
+        engine
+            .execute_synchronize_control(false, false)
+            .expect("game synchronization succeeds");
+        let rng_after_synchronize = engine.rng.clone();
+        assert_eq!(
+            engine
+                .call_object_function(first_index, "HookState", Vec::new())
+                .expect("post-sync hook state reads"),
+            Value::Array(vec![Value::Int(21), Value::Int(0)]),
+            "synchronization clears the cache without eagerly refilling it"
+        );
+        assert_eq!(engine.rng, rng_after_synchronize);
+        assert_eq!(
+            engine
+                .call_object_function(first_index, "FailMagicUnderload", Vec::new())
+                .expect("failed magic underload returns"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(first_index, "HookState", Vec::new())
+                .expect("failed underload leaves hook state readable"),
+            Value::Array(vec![Value::Int(21), Value::Int(0)]),
+            "a native early-return branch must not eagerly fill the cache"
+        );
+        assert_eq!(engine.rng, rng_after_synchronize);
+        engine
+            .tick_without_snapshot()
+            .expect("idle post-sync frame executes");
+        assert_eq!(
+            engine
+                .call_object_function(first_index, "HookState", Vec::new())
+                .expect("idle frame leaves hook state readable"),
+            Value::Array(vec![Value::Int(21), Value::Int(0)]),
+            "idle action and structural command snapshots do not refill unrelated physicals"
+        );
+        assert_eq!(engine.rng, rng_after_synchronize);
+
+        let mut expected_rng = rng_after_synchronize;
+        let expected = PhysicalInfo {
+            energy: expected_rng.random(1_000_000),
+            breath: expected_rng.random(1_000_000),
+            walk: expected_rng.random(1_000_000),
+            jump: expected_rng.random(1_000_000),
+            scale: expected_rng.random(1_000_000),
+            hangle: expected_rng.random(1_000_000),
+            dig: expected_rng.random(1_000_000),
+            swim: expected_rng.random(1_000_000),
+            throw: expected_rng.random(1_000_000),
+            push: expected_rng.random(1_000_000),
+            fight: expected_rng.random(1_000_000),
+            magic: expected_rng.random(1_000_000),
+            float: expected_rng.random(1_000_000),
+            can_scale: expected_rng.random(1_000_000),
+            can_hangle: expected_rng.random(1_000_000),
+            can_dig: expected_rng.random(1_000_000),
+            can_construct: expected_rng.random(1_000_000),
+            can_chop: expected_rng.random(1_000_000),
+            can_fly: expected_rng.random(1_000_000),
+            corrosion_resist: expected_rng.random(1_000_000),
+            breathe_water: expected_rng.random(1_000_000),
+        };
+        assert_eq!(
+            engine
+                .call_object_function(first_index, "ArmProbe", Vec::new())
+                .expect("post-sync compat-path probe arms"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine
+                .call_object_function(first_index, "ReadEnergy", Vec::new())
+                .expect("script triggers the first post-sync cache fill"),
+            Value::Int(expected.energy)
+        );
+        assert_eq!(
+            engine.rng, expected_rng,
+            "the lazy refill invokes exactly 21 ordered Random hooks"
+        );
+        assert_eq!(
+            engine.player(0).expect("cache owner remains live").wealth(),
+            1_234,
+            "a mutable host call inside the definition-only hook persists"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(first_index, "ProbeState", Vec::new())
+                .expect("definition-only hook probe state reads"),
+            Value::Array(vec![
+                Value::Int(OWNER_NONE),
+                Value::Int(55_000),
+                Value::Array(vec![Value::C4Id("FCCH".to_string()), Value::Int(55_000)]),
+                Value::C4Id("OTHR".to_string()),
+            ]),
+            "the definition hook has no implicit object, while nested object and other-definition frames restore their own GetID/GetPhysical context"
+        );
+        assert_eq!(engine.object_physical(first_index), expected);
+        let rng_after_refill = engine.rng.clone();
+        assert_eq!(engine.object_physical(second_index), expected);
+        assert_eq!(engine.object_physical(first_index), expected);
+        assert_eq!(
+            engine
+                .call_object_function(second_index, "ReadEnergy", Vec::new())
+                .expect("script reuses the refreshed projection"),
+            Value::Int(expected.energy)
+        );
+        assert_eq!(engine.rng, rng_after_refill);
+        assert_eq!(
+            engine
+                .call_object_function(first_index, "HookState", Vec::new())
+                .expect("refill hook state reads"),
+            Value::Array(vec![Value::Int(42), Value::Int(0)])
         );
     }
 
@@ -33086,6 +33338,7 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
 
         let mut engine = Engine::new();
         engine.set_use_fair_crew(true);
+        engine.set_fair_crew_strength(500);
         engine
             .register_definition(definition)
             .expect("ranked definition registers");
@@ -33135,11 +33388,12 @@ public func ReadFair() { return [GetPhysical("Magic"), GetPhysical("Energy"), Ge
         let crew = engine.player(0).expect("player exists").crew()[0];
         let crew_index = engine.find_object_index(crew).expect("crew exists");
 
-        engine.set_fair_crew_strength(500);
         let base_boundary = engine.object_physical(crew_index);
         assert_eq!(base_boundary.magic, 46_007);
         assert_eq!(base_boundary.energy, 55_000);
 
+        // Plain parameter mutation does not invalidate C4Def's projection;
+        // only C4DefList::Synchronize or the runtime FairCrew control does.
         engine.set_fair_crew_strength(1_000);
         let physical = engine.object_physical(crew_index);
         assert_eq!(physical.magic, 46_007);

@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use crate::action::{ScriptCallbackTarget, SharedActionLibrary};
 use crate::command::{
-    CallResultAction, CommandData, CommandDefinitionSnapshot, CommandEvent,
+    AcquireScriptResult, CallResultAction, CommandData, CommandDefinitionSnapshot, CommandEvent,
     CommandEventInstanceKind, CommandFailureFeedback, CommandFailureReason, CommandId, CommandMode,
     CommandObjectSnapshot, CommandOperation, CommandPlayerSnapshot, CommandRequest,
     CommandRuntimeContext, CommandStack, CommandStackSnapshot, CommandView, MAX_COMMAND_STACK,
@@ -80,12 +80,33 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
-struct FairCrewDefinitionContextGuard;
+struct FairCrewHostContextState {
+    script_object: Option<ObjectId>,
+    script_definition: Option<Option<DefinitionId>>,
+    definition: Option<DefinitionId>,
+}
+
+struct FairCrewDefinitionContextGuard {
+    previous: Option<(DefinitionId, PhysicalInfo)>,
+    host: Option<FairCrewHostContextState>,
+}
 
 impl Drop for FairCrewDefinitionContextGuard {
     fn drop(&mut self) {
+        if let Some(host) = self.host.take() {
+            HOST_CONTEXT.with(|cell| {
+                let mut borrow = cell.borrow_mut();
+                let context = borrow
+                    .as_mut()
+                    .expect("fair-crew host context must remain installed");
+                context.object = context.dormant_scopes.pop().unwrap_or(None);
+                context.script_object_context = host.script_object;
+                context.script_definition_context = host.script_definition;
+                context.definition_context = host.definition;
+            });
+        }
         FAIR_CREW_DEFINITION_CONTEXT.with(|cell| {
-            cell.borrow_mut().take();
+            *cell.borrow_mut() = self.previous.take();
         });
     }
 }
@@ -95,19 +116,44 @@ pub(crate) fn with_fair_crew_definition_context<T>(
     physical: PhysicalInfo,
     call: impl FnOnce() -> T,
 ) -> T {
-    FAIR_CREW_DEFINITION_CONTEXT.with(|cell| {
-        assert!(
-            cell.borrow().is_none(),
-            "nested fair-crew definition contexts are not supported"
-        );
-        *cell.borrow_mut() = Some((definition, physical));
+    let previous = FAIR_CREW_DEFINITION_CONTEXT
+        .with(|cell| cell.borrow_mut().replace((definition.clone(), physical)));
+    // C4PhysicalInfo::PromotionUpdate invokes the definition callback with
+    // cthr->Obj=null and cthr->Def set to the physical's definition. Move
+    // the suspended object scope, rather than cloning it, so explicit-object
+    // natives in the hook still reach and mutate that one live scope.
+    let host = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        let active = context.object.take();
+        context.dormant_scopes.push(active);
+        Some(FairCrewHostContextState {
+            script_object: context.script_object_context.take(),
+            script_definition: context
+                .script_definition_context
+                .replace(Some(definition.clone())),
+            definition: context.definition_context.replace(definition),
+        })
     });
-    let _guard = FairCrewDefinitionContextGuard;
+    let _guard = FairCrewDefinitionContextGuard { previous, host };
     call()
 }
 
 fn fair_crew_definition_context() -> Option<(DefinitionId, PhysicalInfo)> {
-    FAIR_CREW_DEFINITION_CONTEXT.with(|cell| cell.borrow().clone())
+    let active = FAIR_CREW_DEFINITION_CONTEXT.with(|cell| cell.borrow().clone())?;
+    // The definition callback itself has cthr->Obj=null and cthr->Def set to
+    // the fair-crew definition. Nested object, global, or other-definition
+    // frames must use their own ordinary GetID/GetPhysical context instead.
+    let direct_definition_frame = HOST_CONTEXT.with(|cell| {
+        cell.borrow().as_ref().is_none_or(|context| {
+            context.script_object_context.is_none()
+                && context
+                    .script_definition_context
+                    .as_ref()
+                    .is_some_and(|definition| definition.as_ref() == Some(&active.0))
+        })
+    });
+    direct_definition_frame.then_some(active)
 }
 
 const OWNER_ANY: i32 = -2;
@@ -2012,6 +2058,7 @@ pub struct HostWorldContext {
     /// synchronous and nested script callbacks.
     use_fair_crew: bool,
     fair_crew_strength: i32,
+    fair_crew_physical_cache: crate::FairCrewPhysicalCache,
     /// `Game.Control.isCtrlHost()`, independent from network-game state.
     control_host: bool,
     /// Ordered player-info updates produced inside copied script contexts.
@@ -2160,6 +2207,7 @@ impl Default for HostWorldContext {
             max_players: 0,
             use_fair_crew: false,
             fair_crew_strength: 1_000,
+            fair_crew_physical_cache: Rc::new(RefCell::new(HashMap::new())),
             control_host: true,
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             scenario_script_counter: 0,
@@ -2526,6 +2574,7 @@ impl HostWorldContext {
             max_players: 0,
             use_fair_crew: false,
             fair_crew_strength: 1_000,
+            fair_crew_physical_cache: Rc::new(RefCell::new(HashMap::new())),
             control_host: true,
             player_info_updates: Rc::new(RefCell::new(Vec::new())),
             scenario_script_counter: 0,
@@ -2844,6 +2893,14 @@ impl HostWorldContext {
     ) -> Self {
         self.use_fair_crew = use_fair_crew;
         self.fair_crew_strength = fair_crew_strength;
+        self
+    }
+
+    pub(crate) fn with_fair_crew_physical_cache(
+        mut self,
+        cache: crate::FairCrewPhysicalCache,
+    ) -> Self {
+        self.fair_crew_physical_cache = cache;
         self
     }
 
@@ -8352,42 +8409,47 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
     };
     let mut punch = parse_optional_i32(args.get(1), "Punch", "punch")?.unwrap_or(0);
 
-    // Read phase: attacker (cthr->Obj) dir + both Fight physicals.
-    let read = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut()?;
-        let scope = context.object_context()?;
-        let attacker = scope.id();
-        let attacker_fight = scope.resolved_physical(false).fight;
-        // cObj->Controller — the puncher's kill credit
-        // (C4ObjectCom.cpp:749,755,762).
-        let attacker_controller = scope.controller();
-        // tdir = +1, DIR_Left -> -1 (C4ObjectCom.cpp:745).
-        let tdir = match scope.direction() {
-            Direction::Left => -1,
-            _ => 1,
-        };
-        if !context.ensure_object_scope(target) {
-            return None;
-        }
-        let target_fight = context
-            .object_scope(target)
-            .map(|scope| scope.resolved_physical(false).fight)
-            .unwrap_or(0);
-        Some((
-            attacker,
-            attacker_fight,
-            attacker_controller,
-            tdir,
-            target_fight,
-        ))
+    // Resolve only the physicals the native zero-punch branch actually
+    // touches, in native order: target guard, attacker numerator, target
+    // denominator (C4ObjectCom.cpp:738-740).
+    let attacker = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_context().map(ObjectScopeContext::id))
     });
-    let Some((attacker, attacker_fight, attacker_controller, tdir, target_fight)) = read else {
-        return Ok(Value::Bool(false)); // !cthr->Obj / unknown target
+    let Some(attacker) = attacker else {
+        return Ok(Value::Bool(false));
     };
-
-    if punch == 0 && target_fight != 0 {
-        punch = (5 * attacker_fight / target_fight).clamp(0, 10);
+    let target_exists = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        borrow
+            .as_mut()
+            .is_some_and(|context| context.ensure_object_scope(target))
+    });
+    if !target_exists {
+        return Ok(Value::Bool(false)); // !cthr->Obj / unknown target
+    }
+    if punch == 0 {
+        let Some(target_guard) =
+            resolve_object_physical(target, false).map(|physical| physical.fight)
+        else {
+            return Ok(Value::Bool(false));
+        };
+        if target_guard != 0 {
+            let Some(attacker_fight) =
+                resolve_object_physical(attacker, false).map(|physical| physical.fight)
+            else {
+                return Ok(Value::Bool(false));
+            };
+            let Some(target_fight) =
+                resolve_object_physical(target, false).map(|physical| physical.fight)
+            else {
+                return Ok(Value::Bool(false));
+            };
+            if target_fight != 0 {
+                punch = (5 * attacker_fight / target_fight).clamp(0, 10);
+            }
+        }
     }
     if punch == 0 {
         return Ok(Value::Bool(true)); // nothing to do (C4ObjectCom.cpp:741)
@@ -8415,8 +8477,16 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     // DoEnergy(-punch, false, C4FxCall_EngGetPunched, cObj->Controller)
-    // + ComDir stop happen even for stopped blows (C4ObjectCom.cpp:749-752).
-    let written = HOST_CONTEXT.with(|cell| {
+    // reads the attacker controller after QueryCatchBlow. The target's
+    // physical Energy lookup may itself run the first fair-crew fill.
+    let attacker_controller = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_scope(attacker))
+            .map(ObjectScopeContext::controller)
+            .unwrap_or(OWNER_NONE)
+    });
+    let staged = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return false;
@@ -8428,17 +8498,46 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
             crate::C4FX_CALL_ENG_GET_PUNCHED,
             attacker_controller,
         );
-        context
-            .object_scope_mut(target)
+        context.object_scope(target).is_some()
+    });
+    if !staged {
+        return Ok(Value::Bool(false));
+    }
+    let Some(max_energy) = resolve_object_physical(target, false).map(|physical| physical.energy)
+    else {
+        return Ok(Value::Bool(false));
+    };
+    let written = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .and_then(|context| context.object_scope_mut(target))
             .map(|scope| {
-                scope.adjust_energy(-punch, false);
-                scope.set_command_direction(CommandDirection::Stop);
+                scope.adjust_energy(-punch, false, max_energy);
             })
             .is_some()
     });
     if !written {
         return Ok(Value::Bool(false));
     }
+    // Native reads the attacker's facing only after DoEnergy returned, then
+    // stops the target's command direction (C4ObjectCom.cpp:744-746).
+    let tdir_set = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return None;
+        };
+        let tdir = match context.object_scope(attacker)?.direction() {
+            Direction::Left => -1,
+            _ => 1,
+        };
+        context
+            .object_scope_mut(target)?
+            .set_command_direction(CommandDirection::Stop);
+        Some(tdir)
+    });
+    let Some(tdir) = tdir_set else {
+        return Ok(Value::Bool(false));
+    };
     if blow_stopped {
         return Ok(Value::Bool(false)); // no tumbles for caught blows
     }
@@ -8478,6 +8577,13 @@ fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
     // A successful fling writes the kill trace DIRECTLY — no
     // UpdatLastEnergyLossCause guard ("for kill tracing when pushing
     // enemies off a cliff", C4ObjectCom.cpp:755,762).
+    let attacker_controller = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_scope(attacker))
+            .map(ObjectScopeContext::controller)
+            .unwrap_or(OWNER_NONE)
+    });
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             if let Some(scope) = context.object_scope_mut(target) {
@@ -9471,6 +9577,7 @@ fn change_def_live(target: ObjectId, new_id: &str) -> Result<bool, RuntimeError>
         let Some(metadata) = context.definition_metadata(new_id).cloned() else {
             return false;
         };
+        let world = context.world.clone();
         let current_color = context
             .object_scope(target)
             .and_then(|object| object.pending_update.color)
@@ -9544,6 +9651,7 @@ fn change_def_live(target: ObjectId, new_id: &str) -> Result<bool, RuntimeError>
             object.pending_update.blit_mode = Some(metadata.blit_mode);
         }
         object.install_definition_preview(new_id, &metadata);
+        object.configure_fair_crew(&world);
         true
     });
     if !staged {
@@ -22160,6 +22268,7 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
             scope.info_physical = None;
             scope.record_physicals();
         }
+        context.refresh_scope_fair_crew(from);
 
         let target_alive = context
             .object_scope(to)
@@ -22191,6 +22300,7 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
             scope.info_definition_physical = donor_definition_physical;
             scope.record_physicals();
         }
+        context.refresh_scope_fair_crew(to);
         context.record_player_command(PlayerCommand::LinkCrewInfo {
             object_id: to,
             link: linked,
@@ -22638,6 +22748,7 @@ fn make_crew_member_live(target: ObjectId, player: i32) -> Result<bool, RuntimeE
             // (C4Player.cpp:1202-1204).
             object.set_controller(player);
         }
+        context.refresh_scope_fair_crew(target);
         if let Some((link, info, created_entry, _)) = assignment {
             context.record_player_command(PlayerCommand::LinkCrewInfo {
                 object_id: target,
@@ -23135,22 +23246,36 @@ fn do_breath(args: &[Value]) -> Result<Value, RuntimeError> {
     let change = value_to_i32(args.first().unwrap_or(&Value::Nil), "DoBreath", "change")?;
     let target_id =
         parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "DoBreath", "target")?;
-    HOST_CONTEXT.with(|cell| {
+    let target = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("DoBreath requires an active engine context"))?;
         let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
         else {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         };
         if !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         }
+        Ok(Some(target))
+    })?;
+    let Some(target) = target else {
+        return Ok(Value::Bool(false));
+    };
+    let Some(capacity) =
+        resolve_object_physical(target, false).map(|physical| physical.breath.max(0))
+    else {
+        return Ok(Value::Bool(false));
+    };
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("DoBreath requires an active engine context"))?;
         let Some(scope) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
-        let capacity = scope.resolved_physical(false).breath.max(0);
         let scaled = change.saturating_mul(LEGACY_MAX_PHYSICAL / 100);
         let breath = scope.breath().saturating_add(scaled).clamp(0, capacity);
         scope.set_breath(breath);
@@ -23495,6 +23620,17 @@ fn int_argument(args: &[Value], index: usize, fn_name: &str) -> Result<i32, Runt
     }
 }
 
+/// Resolve a live object's physicals without retaining a borrow of the host
+/// TLS across a possible first-fill definition callback.
+fn resolve_object_physical(target: ObjectId, permanent: bool) -> Option<PhysicalInfo> {
+    let resolution = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.prepare_object_physical(target, permanent))
+    });
+    resolution.map(PhysicalResolution::resolve)
+}
+
 /// `FnGetPhysical` (C4Script.cpp:638-688): `GetPhysical(name, mode, obj,
 /// id)`. The def form reads the definition's `[Physical]` section; object
 /// reads resolve against the explicitly targeted live object.
@@ -23511,58 +23647,43 @@ fn get_physical(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(name) = name else {
         return Ok(Value::Nil);
     };
-    if let Some((definition, physical)) = fair_crew_definition_context() {
-        // The native hook has no object context. An implicit object read is
-        // therefore nil; only its explicit definition form reads physicals.
-        // Resolve it here before the surrounding object GetPhysical borrow
-        // can recursively enter another fair-crew projection.
-        if target_id.is_some() || definition_id.as_deref() != Some(definition.as_str()) {
-            return Ok(Value::Nil);
-        }
-        return Ok(physical
-            .value_by_name(&name)
-            .map(Value::Int)
-            .unwrap_or(Value::Nil));
-    }
-
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
-        // No object given: a def id reads the definition physicals
-        // (C4Script.cpp:644-653).
-        if target_id.is_none() {
-            if let Some(definition_id) = definition_id {
-                return Ok(context
-                    .world
-                    .definition_metadata(&definition_id)
+    // No object given: a def id reads the definition physicals
+    // (C4Script.cpp:644-653). This path cannot enter fair-crew projection.
+    if target_id.is_none() {
+        if let Some(definition_id) = definition_id.as_deref() {
+            return Ok(HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.world.definition_metadata(definition_id))
                     .and_then(|metadata| metadata.physical.value_by_name(&name))
                     .map(Value::Int)
-                    .unwrap_or(Value::Nil));
-            }
+                    .unwrap_or(Value::Nil)
+            }));
         }
+    }
+
+    let resolution = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
         let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
-        let Some(target) = target else {
-            return Ok(Value::Nil);
-        };
+        let target = target?;
         if let Some(object) = context.object_scope(target) {
-            return Ok(object
-                .get_physical(&name, mode)
-                .map(Value::Int)
-                .unwrap_or(Value::Nil));
+            return object.prepare_get_physical(mode);
         }
         // An explicit pObj is not constrained to cthr->Obj: FnGetPhysical
         // dereferences that live object directly (C4Script.cpp:638-688).
         // Build the same read-only scope used for nested object calls so
         // crew info and temporary physicals retain their normal precedence.
-        Ok(context
+        context
             .get_world_object(target)
             .and_then(|object| context.nested_scope_for(&object))
-            .and_then(|(object, _)| object.get_physical(&name, mode))
-            .map(Value::Int)
-            .unwrap_or(Value::Nil))
-    })
+            .and_then(|(object, _)| object.prepare_get_physical(mode))
+    });
+    Ok(resolution
+        .map(PhysicalResolution::resolve)
+        .and_then(|physical| physical.value_by_name(&name))
+        .map(Value::Int)
+        .unwrap_or(Value::Nil))
 }
 
 /// `FnSetPhysical` (C4Script.cpp:557-601): `SetPhysical(name, value, mode,
@@ -23571,6 +23692,9 @@ fn set_physical(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(name) = physical_name_argument(args, 0, "SetPhysical")? else {
         return Ok(Value::Bool(false));
     };
+    if PhysicalInfo::default().value_mut_by_name(&name).is_none() {
+        return Ok(Value::Bool(false));
+    }
     let value = int_argument(args, 1, "SetPhysical")?;
     let mode = int_argument(args, 2, "SetPhysical")?;
     let target_id = args
@@ -23579,22 +23703,43 @@ fn set_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
+    let prepared = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetPhysical requires an active engine context"))?;
         let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         };
         if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         }
         let Some(object) = context.object_scope_mut(target) else {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         };
-        Ok(Value::Bool(object.set_physical(&name, value, mode)))
+        let base = matches!(mode, PHYS_TEMPORARY | PHYS_STACK_TEMPORARY)
+            .then(|| {
+                object
+                    .temporary_physical
+                    .is_none()
+                    .then(|| object.prepare_resolved_physical(false))
+            })
+            .flatten();
+        Ok(Some((target, base)))
+    })?;
+    let Some((target, base)) = prepared else {
+        return Ok(Value::Bool(false));
+    };
+    let base = base.map(PhysicalResolution::resolve);
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("SetPhysical requires an active engine context"))?;
+        Ok(Value::Bool(context.object_scope_mut(target).is_some_and(
+            |object| object.set_physical(&name, value, mode, base),
+        )))
     })
 }
 
@@ -23667,22 +23812,38 @@ fn reset_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         .flatten();
     let name = physical_name_argument(args, 1, "ResetPhysical")?;
 
-    HOST_CONTEXT.with(|cell| {
+    let prepared = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("ResetPhysical requires an active engine context"))?;
         let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         };
         if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         }
-        Ok(Value::Bool(context.object_scope_mut(target).is_some_and(
-            |object| object.reset_physical(name.as_deref()),
-        )))
-    })
+        Ok(context
+            .object_scope_mut(target)
+            .map(|object| (target, object.begin_reset_physical(name.as_deref()))))
+    })?;
+    let Some((target, step)) = prepared else {
+        return Ok(Value::Bool(false));
+    };
+    match step {
+        ResetPhysicalBegin::Complete(result) => return Ok(Value::Bool(result)),
+        ResetPhysicalBegin::ComparePermanent => {}
+    }
+    let Some(reference) = resolve_object_physical(target, true) else {
+        return Ok(Value::Bool(false));
+    };
+    Ok(Value::Bool(HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .and_then(|context| context.object_scope_mut(target))
+            .is_some_and(|object| object.finish_reset_physical(reference))
+    })))
 }
 
 fn do_energy(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -23852,13 +24013,17 @@ fn do_energy_with_cause_override(
         Some(modified) => modified,
         None => scaled,
     };
+    let Some(max_energy) = resolve_object_physical(target, false).map(|physical| physical.energy)
+    else {
+        return Ok(Value::Bool(false));
+    };
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return;
         };
         if let Some(scope) = context.object_scope_mut(target) {
-            scope.adjust_energy(scaled, true);
+            scope.adjust_energy(scaled, true, max_energy);
         }
     });
     Ok(Value::Bool(true))
@@ -23917,44 +24082,104 @@ fn do_magic_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    HOST_CONTEXT.with(|cell| {
+    let target = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("DoMagicEnergy requires an active engine context"))?;
         // `if (!pObj) pObj = cthr->Obj; if (!pObj) return false` (:519).
         let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         };
         if !context.ensure_object_scope(target) {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         }
+        Ok(Some(target))
+    })?;
+    let Some(target) = target else {
+        return Ok(Value::Bool(false));
+    };
+    // C++ arithmetic is plain i32 (wrapping on x86) — keep it exact.
+    let mut change = change.wrapping_mul(MAGIC_PHYSICAL_FACTOR);
+
+    // The positive overload expression is the first physical read. A failed
+    // negative underload returns before GetPhysical entirely
+    // (C4Script.cpp:523-540), which is observable for a lazy fair cache.
+    if change > 0 {
+        let current = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.object_scope(target))
+                .map(ObjectScopeContext::magic_energy)
+        });
+        let Some(current) = current else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(cap) = resolve_object_physical(target, false).map(|physical| physical.magic)
+        else {
+            return Ok(Value::Bool(false));
+        };
+        if current.wrapping_add(change) > cap {
+            if !allow_partial {
+                return Ok(Value::Bool(false));
+            }
+            // The partial branch calls GetPhysical a second time, then reads
+            // the live MagicEnergy again (C4Script.cpp:528).
+            let Some(cap) = resolve_object_physical(target, false).map(|physical| physical.magic)
+            else {
+                return Ok(Value::Bool(false));
+            };
+            let current = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.object_scope(target))
+                    .map(ObjectScopeContext::magic_energy)
+            });
+            let Some(current) = current else {
+                return Ok(Value::Bool(false));
+            };
+            change = cap.wrapping_sub(current);
+            if change == 0 {
+                return Ok(Value::Bool(false));
+            }
+        }
+    }
+
+    if change < 0 {
+        let current = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.object_scope(target))
+                .map(ObjectScopeContext::magic_energy)
+        });
+        let Some(current) = current else {
+            return Ok(Value::Bool(false));
+        };
+        if current.wrapping_add(change) < 0 {
+            if !allow_partial {
+                return Ok(Value::Bool(false));
+            }
+            change = current.wrapping_neg();
+            if change == 0 {
+                return Ok(Value::Bool(false));
+            }
+        }
+    }
+
+    // BoundBy performs the final GetPhysical even for a zero change. Re-read
+    // MagicEnergy afterward so side effects from that first fill are live.
+    let Some(cap) = resolve_object_physical(target, false).map(|physical| physical.magic) else {
+        return Ok(Value::Bool(false));
+    };
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("DoMagicEnergy requires an active engine context"))?;
         let Some(scope) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
-        // C++ arithmetic is plain i32 (wrapping on x86) — keep it exact.
-        let mut change = change.wrapping_mul(MAGIC_PHYSICAL_FACTOR);
-        let cap = scope.resolved_physical(false).magic;
-        let current = scope.magic_energy();
-        if change > 0 && current.wrapping_add(change) > cap {
-            if !allow_partial {
-                return Ok(Value::Bool(false));
-            }
-            change = cap - current;
-            if change == 0 {
-                return Ok(Value::Bool(false));
-            }
-        }
-        if change < 0 && current.wrapping_add(change) < 0 {
-            if !allow_partial {
-                return Ok(Value::Bool(false));
-            }
-            change = -current;
-            if change == 0 {
-                return Ok(Value::Bool(false));
-            }
-        }
-        let sum = current.wrapping_add(change);
+        let sum = scope.magic_energy().wrapping_add(change);
         scope.set_magic_energy(if sum < 0 {
             0
         } else if sum > cap {
@@ -25261,13 +25486,16 @@ fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<b
                 None => Some(scaled),
             };
         if let Some(scaled) = scaled {
+            let max_energy = resolve_object_physical(target, false)
+                .map(|physical| physical.energy)
+                .unwrap_or(0);
             HOST_CONTEXT.with(|cell| {
                 let mut borrow = cell.borrow_mut();
                 let Some(context) = borrow.as_mut() else {
                     return;
                 };
                 if let Some(scope) = context.object_scope_mut(target) {
-                    scope.adjust_energy(scaled, true);
+                    scope.adjust_energy(scaled, true, max_energy);
                 }
             });
         }
@@ -28331,12 +28559,7 @@ fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
     // C4ObjectCom.cpp:280-312): the snake's Activity jump takes effect
     // THIS frame, before its movement — a queued command would lag one
     // frame. Gates: only while the WALK procedure runs.
-    let gravity = PHYSICS_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|context| fixed100(context.gravity()) / 5)
-    });
-    let launch = HOST_CONTEXT.with(|cell| {
+    let jump_target = HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
             return None;
@@ -28351,8 +28574,27 @@ fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
         ) {
             return None;
         }
-        let walk = object.get_physical("Walk", PHYS_CURRENT).unwrap_or(0);
-        let jump_physical = object.get_physical("Jump", PHYS_CURRENT).unwrap_or(0);
+        Some(object.id())
+    });
+    let Some(object_id) = jump_target else {
+        return Ok(Value::Bool(false));
+    };
+    let Some(physical) = resolve_object_physical(object_id, false) else {
+        return Ok(Value::Bool(false));
+    };
+    // SimFlightHitsLiquid reads the current global gravity after
+    // GetPhysical; a fair-crew hook may have changed it synchronously.
+    let gravity = PHYSICS_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| fixed100(context.gravity()) / 5)
+    });
+    let launch = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let object = context.object_scope(object_id)?;
+        let walk = physical.walk;
+        let jump_physical = physical.jump;
         let con_scale = itofix_prec(object.construction(), crate::FULL_CON);
         let physical_walk = crate::math::val_by_physical(280, walk) * con_scale;
         let physical_jump = crate::math::val_by_physical(1000, jump_physical) * con_scale;
@@ -28368,9 +28610,9 @@ fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
         let launch = FixedVec2::new(txdir, -physical_jump);
         let dive = gravity
             .is_some_and(|gravity| script_jump_hits_liquid(context, object, launch, gravity));
-        Some((object.id(), txdir, -physical_jump, dive))
+        Some((txdir, -physical_jump, dive))
     });
-    let Some((object_id, txdir, tydir, dive)) = launch else {
+    let Some((txdir, tydir, dive)) = launch else {
         return Ok(Value::Bool(false));
     };
     if dive {
@@ -33231,7 +33473,7 @@ fn preview_object_com_ungrab(
 /// facing are frozen before SetAction callbacks; position/shape and the Exit
 /// callbacks are observed afterward (C4ObjectCom.cpp:120-137).
 fn preview_object_action_throw(actor: ObjectId, object: ObjectId) -> Result<bool, RuntimeError> {
-    let prepared = HOST_CONTEXT.with(|cell| {
+    let physical = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow.as_mut()?;
         if !context.ensure_object_scope(actor) || !context.ensure_object_scope(object) {
@@ -33241,17 +33483,24 @@ fn preview_object_action_throw(actor: ObjectId, object: ObjectId) -> Result<bool
         if !actor_state.is_present() {
             return None;
         }
+        context.prepare_object_physical(actor, false)
+    });
+    let Some(physical) = physical else {
+        return Ok(false);
+    };
+    let throw_force = crate::math::val_by_physical(400, physical.resolve().throw);
+    let prepared = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
         let actor_scope = context.object_scope(actor)?;
-        let throw_force =
-            crate::math::val_by_physical(400, actor_scope.resolved_physical(false).throw);
         let direction = if actor_scope.current_direction == Direction::Left {
             -1
         } else {
             1
         };
-        Some((throw_force, direction))
+        Some(direction)
     });
-    let Some((throw_force, direction)) = prepared else {
+    let Some(direction) = prepared else {
         return Ok(false);
     };
     if !native_set_action_by_name(actor, "Throw")? {
@@ -33290,15 +33539,22 @@ fn preview_object_action_throw(actor: ObjectId, object: ObjectId) -> Result<bool
 /// Item/actor state, callbacks, delay and cached OCF are staged here in C++
 /// order before the outer script call folds back into the engine.
 fn preview_object_com_drop(actor: ObjectId, object: ObjectId) -> Result<bool, RuntimeError> {
-    let prepared = HOST_CONTEXT.with(|cell| {
+    let physical = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow.as_mut()?;
         if !context.ensure_object_scope(actor) || !context.ensure_object_scope(object) {
             return None;
         }
+        context.prepare_object_physical(actor, false)
+    });
+    let Some(physical) = physical else {
+        return Ok(false);
+    };
+    let throw_force = crate::math::val_by_physical(400, physical.resolve().throw);
+    let prepared = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
         let actor_scope = context.object_scope(actor)?;
-        let throw_force =
-            crate::math::val_by_physical(400, actor_scope.resolved_physical(false).throw);
         let procedure = actor_scope.effective_action_procedure();
         let command_direction = actor_scope.command_direction();
         let actor_xdir = actor_scope.fixed_velocity().x;
@@ -33813,16 +34069,17 @@ fn preview_object_com_stop(actor: ObjectId) -> Result<(), RuntimeError> {
 /// physical gate, callbackful SetAction, localized GameMsgObject failure and
 /// Action.Data reset all complete before the caller's next script instruction.
 fn preview_object_com_dig(actor: ObjectId) -> Result<bool, RuntimeError> {
-    let can_dig = HOST_CONTEXT.with(|cell| {
+    let physical = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow.as_mut()?;
         if !context.ensure_object_scope(actor) {
             return None;
         }
-        context
-            .object_scope(actor)
-            .map(|scope| scope.resolved_physical(false).can_dig != 0)
+        context.prepare_object_physical(actor, false)
     });
+    let can_dig = physical
+        .map(PhysicalResolution::resolve)
+        .map(|physical| physical.can_dig != 0);
     let succeeded = can_dig == Some(true) && native_set_action_by_name(actor, "Dig")?;
     if succeeded {
         HOST_CONTEXT.with(|cell| {
@@ -33873,18 +34130,198 @@ fn preview_object_com_dig(actor: ObjectId) -> Result<bool, RuntimeError> {
     Ok(false)
 }
 
+type PreparedCommandRuntimeData = (
+    HashMap<ObjectId, CommandObjectSnapshot>,
+    HashMap<i32, CommandPlayerSnapshot>,
+    HashMap<DefinitionId, CommandDefinitionSnapshot>,
+    TransferZoneTable,
+);
+
+#[derive(Default)]
+struct CommandPreviewOutcome {
+    finished: Option<CommandView>,
+    buy_attempts: Vec<(ObjectId, ObjectId, DefinitionId, i32, i32, i32)>,
+    sell_attempts: Vec<(ObjectId, ObjectId, DefinitionId, Option<ObjectId>, i32)>,
+    grab_attempts: Vec<(ObjectId, ObjectId)>,
+    put_attempts: Vec<(ObjectId, ObjectId, ObjectId, bool, u64)>,
+    drop_attempts: Vec<(ObjectId, ObjectId, u64)>,
+    ungrab_attempts: Vec<(ObjectId, u64)>,
+    put_take_attempts: Vec<(ObjectId, ObjectId, Option<ObjectId>, CommandId, u64)>,
+    throw_attempts: Vec<(ObjectId, ObjectId, bool, u64)>,
+    throw_preludes: Vec<CommandEvent>,
+    entrance_attempts: Vec<(ObjectId, ObjectId, Option<CallResultAction>, u64)>,
+    control_transfers: Vec<(ObjectId, ObjectId, Value, i32, u64)>,
+    exit_attempts: Vec<CommandEvent>,
+    failure_feedback: Vec<(ObjectId, CommandFailureFeedback)>,
+    move_to_stops: Vec<ObjectId>,
+    build_stops: Vec<(ObjectId, u64)>,
+    build_actions: Vec<(ObjectId, ObjectId, bool)>,
+    dig_attempts: Vec<(ObjectId, bool, Option<CommandDirection>, u64)>,
+    physical_reads: Vec<(ObjectId, u8, u64)>,
+}
+
+impl CommandPreviewOutcome {
+    fn append(&mut self, mut other: Self) {
+        if other.finished.is_some() {
+            self.finished = other.finished.take();
+        }
+        self.buy_attempts.append(&mut other.buy_attempts);
+        self.sell_attempts.append(&mut other.sell_attempts);
+        self.grab_attempts.append(&mut other.grab_attempts);
+        self.put_attempts.append(&mut other.put_attempts);
+        self.drop_attempts.append(&mut other.drop_attempts);
+        self.ungrab_attempts.append(&mut other.ungrab_attempts);
+        self.put_take_attempts.append(&mut other.put_take_attempts);
+        self.throw_attempts.append(&mut other.throw_attempts);
+        self.throw_preludes.append(&mut other.throw_preludes);
+        self.entrance_attempts.append(&mut other.entrance_attempts);
+        self.control_transfers.append(&mut other.control_transfers);
+        self.exit_attempts.append(&mut other.exit_attempts);
+        self.failure_feedback.append(&mut other.failure_feedback);
+        self.move_to_stops.append(&mut other.move_to_stops);
+        self.build_stops.append(&mut other.build_stops);
+        self.build_actions.append(&mut other.build_actions);
+        self.dig_attempts.append(&mut other.dig_attempts);
+        self.physical_reads.append(&mut other.physical_reads);
+    }
+
+    fn had_live_attempt(&self) -> bool {
+        !self.buy_attempts.is_empty()
+            || !self.sell_attempts.is_empty()
+            || !self.grab_attempts.is_empty()
+            || !self.put_attempts.is_empty()
+            || !self.drop_attempts.is_empty()
+            || !self.ungrab_attempts.is_empty()
+            || !self.put_take_attempts.is_empty()
+            || !self.throw_attempts.is_empty()
+            || !self.throw_preludes.is_empty()
+            || !self.entrance_attempts.is_empty()
+            || !self.control_transfers.is_empty()
+            || !self.exit_attempts.is_empty()
+            || !self.failure_feedback.is_empty()
+            || !self.move_to_stops.is_empty()
+            || !self.build_stops.is_empty()
+            || !self.build_actions.is_empty()
+            || !self.dig_attempts.is_empty()
+    }
+}
+
+/// Structural command snapshots never read target physicals. Resolve at most
+/// the executing actor. A missing FairCrew projection is deliberately left
+/// unresolved and marked on that actor snapshot; the exact command branch
+/// which reaches native GetPhysical will suspend and request the live fill.
+fn prepare_command_runtime_data(
+    physical_actor: Option<ObjectId>,
+) -> Option<PreparedCommandRuntimeData> {
+    let resolution = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        Some(physical_actor.and_then(|id| {
+            context
+                .prepare_object_physical(id, false)
+                .map(|plan| (id, plan))
+        }))
+    })?;
+    let (physicals, deferred_actor) = match resolution {
+        Some((id, plan)) if plan.needs_fair_crew_fill() => (HashMap::new(), Some(id)),
+        Some((id, plan)) => (HashMap::from([(id, plan.resolve())]), None),
+        None => (HashMap::new(), None),
+    };
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| context.command_runtime_data(&physicals, deferred_actor))
+    })
+}
+
+/// Rebuild command snapshots after a physical hook using the exact value
+/// returned by its final GetPhysical call. The actor is no longer deferred:
+/// this continuation must retain that pointer value even if the hook changed
+/// other live state while the read was in flight.
+fn prepare_command_runtime_data_with_physical(
+    actor: ObjectId,
+    physical: PhysicalInfo,
+) -> Option<PreparedCommandRuntimeData> {
+    let physicals = HashMap::from([(actor, physical)]);
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|context| context.command_runtime_data(&physicals, None))
+    })
+}
+
+fn preview_command_event_instance_id(
+    actor: ObjectId,
+    kind: CommandEventInstanceKind,
+    supplied: u64,
+) -> u64 {
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_scope(actor))
+            .map(|scope| {
+                scope
+                    .live_commands
+                    .resolve_event_instance_id(kind, supplied)
+            })
+            .unwrap_or(supplied)
+    })
+}
+
+/// Execute callbackful GetPhysical reads without holding HOST_CONTEXT, then
+/// resume the retained native command against a fresh structural snapshot.
+/// The command identity is bound before the first hook because that hook may
+/// replace the visible stack which originally emitted the event.
+fn preview_resume_command_after_physical(
+    actor: ObjectId,
+    reads: u8,
+    supplied_instance_id: u64,
+    rng: Option<&RefCell<LcgRng>>,
+) -> Option<(Vec<CommandEvent>, Option<CommandView>)> {
+    let command_instance_id = preview_command_event_instance_id(
+        actor,
+        CommandEventInstanceKind::Physical,
+        supplied_instance_id,
+    );
+
+    let mut physical = None;
+    for _ in 0..reads {
+        let Some(resolved) = resolve_object_physical(actor, false) else {
+            break;
+        };
+        physical = Some(resolved);
+    }
+    let physical = physical?;
+    let command_data = prepare_command_runtime_data_with_physical(actor, physical)?;
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut().as_mut().and_then(|context| {
+            context.execute_pending_command_physical_preview(
+                actor,
+                command_instance_id,
+                physical,
+                rng,
+                &command_data,
+            )
+        })
+    })
+}
+
 /// Script-level ExecuteCommand twin of CommandEvent::ObjectComStopMoveTo.
 /// ObjectComStop callbacks and the retained command continuation must both
 /// complete before ExecuteCommand returns to its caller.
-fn preview_move_to_stop(actor: ObjectId) -> Result<(), RuntimeError> {
+fn preview_move_to_stop(actor: ObjectId) -> Result<Vec<CommandEvent>, RuntimeError> {
     preview_object_com_stop(actor)?;
 
+    let Some((objects, players, definitions, transfers)) =
+        prepare_command_runtime_data(Some(actor))
+    else {
+        return Ok(Vec::new());
+    };
     let events = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return Vec::new();
         };
-        let (objects, players, definitions, transfers) = context.command_runtime_data();
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
@@ -33921,29 +34358,61 @@ fn preview_move_to_stop(actor: ObjectId) -> Result<(), RuntimeError> {
         result.events
     });
 
-    for event in events {
-        match event {
-            CommandEvent::FailureFeedback { actor_id, feedback } => {
-                preview_command_failure_feedback(actor_id, feedback)?;
-            }
-            other => {
-                HOST_CONTEXT.with(|cell| {
-                    let mut borrow = cell.borrow_mut();
-                    let Some(context) = borrow.as_mut() else {
-                        return;
-                    };
-                    context.pending_command_events.push(other.clone());
-                    if let Some(scope) = context.object_scope_mut(actor) {
-                        scope.queued_commands.push(
-                            QueuedCommand::immediate(ObjectUpdate::default())
-                                .with_events(vec![other]),
-                        );
-                    }
-                });
-            }
+    Ok(events)
+}
+
+/// Continue the exact MoveTo after FlightControl's live Fly transition and
+/// callbacks. A WALK origin runs JumpControl against fresh post-callback
+/// state; DFA_FLIGHT only consumes the boundary, without another interval.
+fn preview_resume_move_to_after_flight(
+    actor: ObjectId,
+    command_instance_id: u64,
+) -> Vec<CommandEvent> {
+    let Some((objects, players, definitions, transfers)) = prepare_command_runtime_data(None)
+    else {
+        return Vec::new();
+    };
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Vec::new();
+        };
+        let Some(object_snapshot) = objects.get(&actor) else {
+            return Vec::new();
+        };
+        let landscape = context.world.landscape_shared();
+        let runtime = CommandRuntimeContext {
+            rng: None,
+            frame: context.world.frame,
+            position: object_snapshot.position,
+            landscape: landscape.as_deref(),
+            object: object_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: context.world.structures_need_energy,
+            base_buy_enabled: context.world.base_buy_enabled,
+            base_sell_enabled: context.world.base_sell_enabled,
+            transfer_zones: &transfers,
+        };
+        let Some(mut result) = context.object_scope_mut(actor).and_then(|scope| {
+            scope
+                .live_commands
+                .execute_pending_move_to_flight(&runtime, command_instance_id)
+        }) else {
+            return Vec::new();
+        };
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_stack_replaced = true;
         }
-    }
-    Ok(())
+        if let Some(update) = result.update.take() {
+            context.stage_object_command_update(actor, update);
+        }
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_count = scope.live_commands.len();
+        }
+        result.events
+    })
 }
 
 /// Host-preview twin of `ObjectComBuild` (C4ObjectCom.cpp:690-697).
@@ -33963,13 +34432,10 @@ fn preview_object_com_build(
             .as_ref()
             .and_then(|context| context.object_scope(actor))
             .is_some_and(|scope| {
-                scope
-                    .action_library
-                    .is_idle_entry(
-                        scope.effective_action_name(),
-                        scope.effective_action_index(),
-                    )
-                    || scope.effective_action_procedure() == ActionProcedure::Walk
+                scope.action_library.is_idle_entry(
+                    scope.effective_action_name(),
+                    scope.effective_action_index(),
+                ) || scope.effective_action_procedure() == ActionProcedure::Walk
             })
     });
     if can_build {
@@ -33994,10 +34460,9 @@ fn preview_resolve_put_attempt(
             .as_ref()
             .and_then(|context| context.object_scope(actor_id))
             .map_or(command_instance_id, |scope| {
-                scope.live_commands.resolve_event_instance_id(
-                    CommandEventInstanceKind::Put,
-                    command_instance_id,
-                )
+                scope
+                    .live_commands
+                    .resolve_event_instance_id(CommandEventInstanceKind::Put, command_instance_id)
             })
     });
     let succeeded = preview_object_com_put(actor_id, target_id, object_id)?;
@@ -34024,15 +34489,27 @@ fn preview_resolve_put_attempt(
 }
 
 /// Script-level same-Execute continuation for Build's Dig stop.
-fn preview_build_stop(actor: ObjectId) -> Result<(), RuntimeError> {
+fn preview_build_stop(
+    actor: ObjectId,
+    command_instance_id: u64,
+) -> Result<Vec<CommandEvent>, RuntimeError> {
+    let command_instance_id = preview_command_event_instance_id(
+        actor,
+        CommandEventInstanceKind::Prelude(CommandId::Build),
+        command_instance_id,
+    );
     preview_object_com_stop(actor)?;
 
+    let Some((objects, players, definitions, transfers)) =
+        prepare_command_runtime_data(Some(actor))
+    else {
+        return Ok(Vec::new());
+    };
     let events = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return Vec::new();
         };
-        let (objects, players, definitions, transfers) = context.command_runtime_data();
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
@@ -34054,7 +34531,10 @@ fn preview_build_stop(actor: ObjectId) -> Result<(), RuntimeError> {
         let Some(scope) = context.object_scope_mut(actor) else {
             return Vec::new();
         };
-        let Some(mut result) = scope.live_commands.execute_pending_build_stop(&runtime) else {
+        let Some(mut result) = scope
+            .live_commands
+            .execute_pending_build_stop(&runtime, command_instance_id)
+        else {
             return Vec::new();
         };
         scope.command_stack_replaced = true;
@@ -34065,34 +34545,7 @@ fn preview_build_stop(actor: ObjectId) -> Result<(), RuntimeError> {
         result.events
     });
 
-    for event in events {
-        match event {
-            CommandEvent::FailureFeedback { actor_id, feedback } => {
-                preview_command_failure_feedback(actor_id, feedback)?;
-            }
-            CommandEvent::ObjectComBuild {
-                object_id,
-                target_id,
-                stop_first,
-            } => preview_object_com_build(object_id, target_id, stop_first)?,
-            other => {
-                HOST_CONTEXT.with(|cell| {
-                    let mut borrow = cell.borrow_mut();
-                    let Some(context) = borrow.as_mut() else {
-                        return;
-                    };
-                    context.pending_command_events.push(other.clone());
-                    if let Some(scope) = context.object_scope_mut(actor) {
-                        scope.queued_commands.push(
-                            QueuedCommand::immediate(ObjectUpdate::default())
-                                .with_events(vec![other]),
-                        );
-                    }
-                });
-            }
-        }
-    }
-    Ok(())
+    Ok(events)
 }
 
 fn preview_resolve_put_take_attempt(
@@ -34173,12 +34626,16 @@ fn preview_resume_throw_after_prelude(
     actor: ObjectId,
     command_instance_id: u64,
 ) -> Vec<CommandEvent> {
+    let Some((objects, players, definitions, transfers)) =
+        prepare_command_runtime_data(Some(actor))
+    else {
+        return Vec::new();
+    };
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return Vec::new();
         };
-        let (objects, players, definitions, transfers) = context.command_runtime_data();
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
@@ -34225,16 +34682,288 @@ fn preview_resume_throw_after_prelude(
     })
 }
 
-fn preview_resume_drop_after_prelude(
-    actor: ObjectId,
-    command_instance_id: u64,
-) -> Vec<CommandEvent> {
+fn preview_resume_put_after_stop(actor: ObjectId, command_instance_id: u64) -> Vec<CommandEvent> {
+    let Some((objects, players, definitions, transfers)) =
+        prepare_command_runtime_data(Some(actor))
+    else {
+        return Vec::new();
+    };
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return Vec::new();
         };
-        let (objects, players, definitions, transfers) = context.command_runtime_data();
+        let Some(object_snapshot) = objects.get(&actor) else {
+            return Vec::new();
+        };
+        let landscape = context.world.landscape_shared();
+        let runtime = CommandRuntimeContext {
+            rng: None,
+            frame: context.world.frame,
+            position: object_snapshot.position,
+            landscape: landscape.as_deref(),
+            object: object_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: context.world.structures_need_energy,
+            base_buy_enabled: context.world.base_buy_enabled,
+            base_sell_enabled: context.world.base_sell_enabled,
+            transfer_zones: &transfers,
+        };
+        let gravity = PHYSICS_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|context| fixed100(context.gravity()) / 5)
+                .unwrap_or_else(|| PhysicsSettings::default().gravity_as_c4fixed())
+        });
+        let Some(mut result) = context.object_scope_mut(actor).and_then(|scope| {
+            scope
+                .live_commands
+                .execute_pending_put_stop(&runtime, gravity, command_instance_id)
+        }) else {
+            return Vec::new();
+        };
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_stack_replaced = true;
+        }
+        if let Some(update) = result.update.take() {
+            context.stage_object_command_update(actor, update);
+        }
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_count = scope.live_commands.len();
+        }
+        result.events
+    })
+}
+
+fn preview_resume_construct(
+    actor: ObjectId,
+    command_instance_id: u64,
+    script_result: Option<AcquireScriptResult>,
+) -> Vec<CommandEvent> {
+    let Some((objects, players, definitions, transfers)) = prepare_command_runtime_data(None)
+    else {
+        return Vec::new();
+    };
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Vec::new();
+        };
+        let Some(object_snapshot) = objects.get(&actor) else {
+            return Vec::new();
+        };
+        let landscape = context.world.landscape_shared();
+        let runtime = CommandRuntimeContext {
+            rng: None,
+            frame: context.world.frame,
+            position: object_snapshot.position,
+            landscape: landscape.as_deref(),
+            object: object_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: context.world.structures_need_energy,
+            base_buy_enabled: context.world.base_buy_enabled,
+            base_sell_enabled: context.world.base_sell_enabled,
+            transfer_zones: &transfers,
+        };
+        let Some(mut result) =
+            context
+                .object_scope_mut(actor)
+                .and_then(|scope| match script_result {
+                    Some(script_result) => scope.live_commands.execute_pending_construct_script(
+                        &runtime,
+                        command_instance_id,
+                        script_result,
+                    ),
+                    None => scope
+                        .live_commands
+                        .execute_pending_construct_stop(&runtime, command_instance_id),
+                })
+        else {
+            return Vec::new();
+        };
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_stack_replaced = true;
+        }
+        if let Some(update) = result.update.take() {
+            context.stage_object_command_update(actor, update);
+        }
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_count = scope.live_commands.len();
+        }
+        result.events
+    })
+}
+
+/// Resume Construct after the native Con=1 creation attempt and the retained
+/// conkit's AssignRemoval. Native performs Finish(true) and pushes Build
+/// before returning even when NewObject returned null.
+fn preview_resume_construct_spawn(
+    actor: ObjectId,
+    command_instance_id: u64,
+    construction_id: Option<ObjectId>,
+) -> Vec<CommandEvent> {
+    let Some((objects, players, definitions, transfers)) = prepare_command_runtime_data(None)
+    else {
+        return Vec::new();
+    };
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Vec::new();
+        };
+        let Some(object_snapshot) = objects.get(&actor) else {
+            return Vec::new();
+        };
+        let landscape = context.world.landscape_shared();
+        let runtime = CommandRuntimeContext {
+            rng: None,
+            frame: context.world.frame,
+            position: object_snapshot.position,
+            landscape: landscape.as_deref(),
+            object: object_snapshot,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: context.world.structures_need_energy,
+            base_buy_enabled: context.world.base_buy_enabled,
+            base_sell_enabled: context.world.base_sell_enabled,
+            transfer_zones: &transfers,
+        };
+        let Some(mut result) = context.object_scope_mut(actor).and_then(|scope| {
+            scope.live_commands.execute_pending_construct_spawn(
+                &runtime,
+                command_instance_id,
+                construction_id,
+            )
+        }) else {
+            return Vec::new();
+        };
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_stack_replaced = true;
+        }
+        if let Some(update) = result.update.take() {
+            context.stage_object_command_update(actor, update);
+        }
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope.command_count = scope.live_commands.len();
+        }
+        result.events
+    })
+}
+
+/// Live host twin of C4Game::CreateObjectConstruction from Construct. The
+/// command identity is bound before terrain, Construction, or kit callbacks
+/// can clear the visible stack; the exact detached command is then resumed.
+fn preview_spawn_construction(
+    actor: ObjectId,
+    definition_id: String,
+    owner: i32,
+    position: Vector2,
+    kit_id: ObjectId,
+    supplied_instance_id: u64,
+) -> Result<Vec<CommandEvent>, RuntimeError> {
+    let command_instance_id = preview_command_event_instance_id(
+        actor,
+        CommandEventInstanceKind::ConstructSpawn,
+        supplied_instance_id,
+    );
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        let Some(metadata) = context.definition_metadata(&definition_id).cloned() else {
+            return;
+        };
+        let (width, height) = metadata
+            .shape
+            .map(|shape| (shape.width, shape.height))
+            .unwrap_or_default();
+        context.prepare_construction_terrain(
+            position.x,
+            position.y,
+            width,
+            height,
+            metadata.basement,
+        );
+    });
+
+    let construction_id = create_native_object(NativeObjectCreation {
+        definition: definition_id,
+        creator: None,
+        owner,
+        controller: owner,
+        construction: 1,
+        position,
+        rotation: 0,
+        velocity: FixedVec2::ZERO,
+        rotation_velocity: C4Fixed::ZERO,
+    })?;
+
+    // Construct consumes the selected kit after NewObject returns, using
+    // the complete callbackful AssignRemoval(false) path.
+    let _ = assign_removal_live(kit_id, false)?;
+    Ok(preview_resume_construct_spawn(
+        actor,
+        command_instance_id,
+        construction_id,
+    ))
+}
+
+fn preview_control_command_construction(
+    caller: ObjectId,
+    target: Option<ObjectId>,
+    site: Vector2,
+    target2: Option<ObjectId>,
+    definition_id: &str,
+) -> AcquireScriptResult {
+    let args = [
+        target.map(object_reference_value).unwrap_or(Value::Nil),
+        Value::Int(site.x),
+        Value::Int(site.y),
+        target2.map(object_reference_value).unwrap_or(Value::Nil),
+        definition_id_to_c4id(definition_id)
+            .map(Value::Int)
+            .unwrap_or_else(|| Value::String(definition_id.to_string().into())),
+    ];
+    let value = match call_world_object_function(caller, "~ControlCommandConstruction", &args) {
+        Some(Ok(value)) => value,
+        Some(Err(error)) => {
+            tracing::warn!(
+                %error,
+                "ControlCommandConstruction error; continuing like the C++ fail-safe exec"
+            );
+            Value::Nil
+        }
+        None => Value::Nil,
+    };
+    let code = match value {
+        Value::Int(code) => Some(code),
+        Value::Bool(flag) => Some(if flag { 1 } else { 0 }),
+        _ => None,
+    };
+    code.and_then(AcquireScriptResult::from_code)
+        .unwrap_or(AcquireScriptResult::Continue)
+}
+
+fn preview_resume_drop_after_prelude(
+    actor: ObjectId,
+    command_instance_id: u64,
+) -> Vec<CommandEvent> {
+    let Some((objects, players, definitions, transfers)) = prepare_command_runtime_data(None)
+    else {
+        return Vec::new();
+    };
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Vec::new();
+        };
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
@@ -34273,16 +35002,16 @@ fn preview_resume_drop_after_prelude(
     })
 }
 
-fn preview_resume_exit_after_stop(
-    actor: ObjectId,
-    command_instance_id: u64,
-) -> Vec<CommandEvent> {
+fn preview_resume_exit_after_stop(actor: ObjectId, command_instance_id: u64) -> Vec<CommandEvent> {
+    let Some((objects, players, definitions, transfers)) = prepare_command_runtime_data(None)
+    else {
+        return Vec::new();
+    };
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return Vec::new();
         };
-        let (objects, players, definitions, transfers) = context.command_runtime_data();
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
@@ -34321,21 +35050,152 @@ fn preview_resume_exit_after_stop(
     })
 }
 
-fn preview_command_prelude(initial: CommandEvent) -> Result<(), RuntimeError> {
-    let actor = match &initial {
-        CommandEvent::ObjectComStopThrow { object_id, .. }
-        | CommandEvent::ObjectComSetDirThrow { object_id, .. }
-        | CommandEvent::ObjectComStopDrop { object_id, .. }
-        | CommandEvent::ObjectComStopExit { object_id, .. } => *object_id,
-        _ => return Ok(()),
-    };
-    let mut events = VecDeque::from([initial]);
+fn preview_defer_command_event(actor: ObjectId, event: CommandEvent) {
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        context.pending_command_events.push(event.clone());
+        if let Some(scope) = context.object_scope_mut(actor) {
+            scope
+                .queued_commands
+                .push(QueuedCommand::immediate(ObjectUpdate::default()).with_events(vec![event]));
+        }
+    });
+}
+
+/// Drain every callback continuation produced inside script ExecuteCommand.
+/// In particular, ResolveCommandPhysical is not an engine-queue event here:
+/// native is still inside the same C4Command::Execute invocation, so the
+/// FairCrew hook and retained body must finish before this VM call returns.
+fn preview_dispatch_command_continuation_events(
+    actor: ObjectId,
+    initial: impl IntoIterator<Item = CommandEvent>,
+) -> Result<(), RuntimeError> {
+    let mut events = initial.into_iter().collect::<VecDeque<_>>();
     while let Some(event) = events.pop_front() {
         let resumed = match event {
+            CommandEvent::ResolveCommandPhysical {
+                object_id,
+                reads,
+                command_instance_id,
+            } => {
+                let random = RANDOM_CONTEXT.with(|cell| cell.borrow().clone());
+                preview_resume_command_after_physical(
+                    object_id,
+                    reads,
+                    command_instance_id,
+                    random.as_ref().map(|rng| &rng.rng),
+                )
+                .map(|(events, _finished)| events)
+                .unwrap_or_default()
+            }
+            CommandEvent::MoveToFlightControlTakeoff {
+                object_id,
+                command_instance_id,
+            } => {
+                let command_instance_id = preview_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::MoveToFlightControl,
+                    command_instance_id,
+                );
+                // FlightControl ignores SetActionByName's return value and
+                // returns to the retained procedure-specific tail.
+                let _ = native_set_action_by_name(object_id, "Fly")?;
+                preview_resume_move_to_after_flight(object_id, command_instance_id)
+            }
+            CommandEvent::ObjectComStopMoveTo { object_id } => preview_move_to_stop(object_id)?,
+            CommandEvent::ObjectComStopBuild {
+                object_id,
+                command_instance_id,
+            } => preview_build_stop(object_id, command_instance_id)?,
+            CommandEvent::ObjectComStopChop { object_id } => {
+                preview_object_com_stop(object_id)?;
+                Vec::new()
+            }
+            CommandEvent::ObjectComStopConstruct {
+                object_id,
+                command_instance_id,
+            } => {
+                let command_instance_id = preview_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Prelude(CommandId::Construct),
+                    command_instance_id,
+                );
+                preview_object_com_stop(object_id)?;
+                preview_resume_construct(object_id, command_instance_id, None)
+            }
+            CommandEvent::ObjectComStopPut {
+                object_id,
+                command_instance_id,
+            } => {
+                let command_instance_id = preview_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Prelude(CommandId::Put),
+                    command_instance_id,
+                );
+                preview_object_com_stop(object_id)?;
+                preview_resume_put_after_stop(object_id, command_instance_id)
+            }
+            CommandEvent::ControlCommandConstruction {
+                caller,
+                target,
+                site,
+                target2,
+                definition_id,
+                command_instance_id,
+            } => {
+                let command_instance_id = preview_command_event_instance_id(
+                    caller,
+                    CommandEventInstanceKind::Script(CommandId::Construct),
+                    command_instance_id,
+                );
+                let script_result = preview_control_command_construction(
+                    caller,
+                    target,
+                    site,
+                    target2,
+                    &definition_id,
+                );
+                if preview_object_is_present(caller) {
+                    preview_resume_construct(caller, command_instance_id, Some(script_result))
+                } else {
+                    Vec::new()
+                }
+            }
+            CommandEvent::SpawnConstruction {
+                actor_id,
+                definition_id,
+                owner,
+                position,
+                kit_id,
+                command_instance_id,
+            } => preview_spawn_construction(
+                actor_id,
+                definition_id,
+                owner,
+                position,
+                kit_id,
+                command_instance_id,
+            )?,
+            CommandEvent::ObjectComBuild {
+                object_id,
+                target_id,
+                stop_first,
+            } => {
+                preview_object_com_build(object_id, target_id, stop_first)?;
+                Vec::new()
+            }
             CommandEvent::ObjectComStopThrow {
                 object_id,
                 command_instance_id,
             } => {
+                let command_instance_id = preview_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Prelude(CommandId::Throw),
+                    command_instance_id,
+                );
                 preview_object_com_stop(object_id)?;
                 preview_resume_throw_after_prelude(object_id, command_instance_id)
             }
@@ -34344,6 +35204,11 @@ fn preview_command_prelude(initial: CommandEvent) -> Result<(), RuntimeError> {
                 direction,
                 command_instance_id,
             } => {
+                let command_instance_id = preview_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Prelude(CommandId::Throw),
+                    command_instance_id,
+                );
                 native_set_dir(object_id, direction)?;
                 preview_resume_throw_after_prelude(object_id, command_instance_id)
             }
@@ -34351,6 +35216,11 @@ fn preview_command_prelude(initial: CommandEvent) -> Result<(), RuntimeError> {
                 object_id,
                 command_instance_id,
             } => {
+                let command_instance_id = preview_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Prelude(CommandId::Drop),
+                    command_instance_id,
+                );
                 preview_object_com_stop(object_id)?;
                 preview_resume_drop_after_prelude(object_id, command_instance_id)
             }
@@ -34358,6 +35228,11 @@ fn preview_command_prelude(initial: CommandEvent) -> Result<(), RuntimeError> {
                 object_id,
                 command_instance_id,
             } => {
+                let command_instance_id = preview_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Prelude(CommandId::Exit),
+                    command_instance_id,
+                );
                 preview_object_com_stop(object_id)?;
                 preview_resume_exit_after_stop(object_id, command_instance_id)
             }
@@ -34434,20 +35309,52 @@ fn preview_command_prelude(initial: CommandEvent) -> Result<(), RuntimeError> {
                 )?;
                 Vec::new()
             }
-            other => {
+            CommandEvent::SetPathFinderSettings {
+                level,
+                transfer_zones_enabled,
+            } => {
                 HOST_CONTEXT.with(|cell| {
-                    let mut borrow = cell.borrow_mut();
-                    let Some(context) = borrow.as_mut() else {
-                        return;
-                    };
-                    context.pending_command_events.push(other.clone());
-                    if let Some(scope) = context.object_scope_mut(actor) {
-                        scope.queued_commands.push(
-                            QueuedCommand::immediate(ObjectUpdate::default())
-                                .with_events(vec![other]),
-                        );
+                    if let Some(context) = cell.borrow_mut().as_mut() {
+                        context
+                            .world
+                            .set_pathfinder_settings(level, transfer_zones_enabled);
                     }
                 });
+                preview_defer_command_event(
+                    actor,
+                    CommandEvent::SetPathFinderSettings {
+                        level,
+                        transfer_zones_enabled,
+                    },
+                );
+                Vec::new()
+            }
+            CommandEvent::SetPathFinderDebug { snapshot } => {
+                HOST_CONTEXT.with(|cell| {
+                    if let Some(context) = cell.borrow_mut().as_mut() {
+                        *context.world.pathfinder_debug.borrow_mut() = snapshot;
+                    }
+                });
+                Vec::new()
+            }
+            CommandEvent::NativeCommandSuccess { object_id, command } => {
+                HOST_CONTEXT.with(|cell| {
+                    if let Some(context) = cell.borrow_mut().as_mut() {
+                        apply_preview_native_command_success(context, object_id, command);
+                    }
+                });
+                Vec::new()
+            }
+            CommandEvent::OpenMenu(request) => {
+                HOST_CONTEXT.with(|cell| {
+                    if let Some(context) = cell.borrow_mut().as_mut() {
+                        context.pending_menu_requests.push(request);
+                    }
+                });
+                Vec::new()
+            }
+            other => {
+                preview_defer_command_event(actor, other);
                 Vec::new()
             }
         };
@@ -34456,6 +35363,23 @@ fn preview_command_prelude(initial: CommandEvent) -> Result<(), RuntimeError> {
         }
     }
     Ok(())
+}
+
+fn preview_command_prelude(initial: CommandEvent) -> Result<(), RuntimeError> {
+    let actor = match &initial {
+        CommandEvent::ObjectComStopThrow { object_id, .. }
+        | CommandEvent::ObjectComSetDirThrow { object_id, .. }
+        | CommandEvent::ObjectComStopDrop { object_id, .. }
+        | CommandEvent::ObjectComStopPut { object_id, .. }
+        | CommandEvent::ObjectComStopChop { object_id }
+        | CommandEvent::ObjectComStopConstruct { object_id, .. }
+        | CommandEvent::ObjectComStopExit { object_id, .. } => *object_id,
+        CommandEvent::MoveToFlightControlTakeoff { object_id, .. } => *object_id,
+        CommandEvent::ControlCommandConstruction { caller, .. } => *caller,
+        CommandEvent::SpawnConstruction { actor_id, .. } => *actor_id,
+        _ => return Ok(()),
+    };
+    preview_dispatch_command_continuation_events(actor, [initial])
 }
 
 fn preview_object_com_grab(actor: ObjectId, target: ObjectId) -> Result<bool, RuntimeError> {
@@ -34547,10 +35471,7 @@ fn preview_grab_attempt(actor: ObjectId, target: ObjectId) -> Result<(), Runtime
         preview_object_com_stop(actor)?;
     }
 
-    let snapshots = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow.as_ref()?;
-        let objects = context.command_runtime_data().0;
+    let snapshots = prepare_command_runtime_data(None).and_then(|(objects, _, _, _)| {
         Some((objects.get(&actor)?.clone(), objects.get(&target).cloned()))
     });
     let Some((actor_snapshot, target_snapshot)) = snapshots else {
@@ -34691,12 +35612,14 @@ fn preview_grab_attempt(actor: ObjectId, target: ObjectId) -> Result<(), Runtime
 /// C++ exposes the gate, callback, and Exit result to the very next script
 /// instruction (C4Script.cpp:884-888; C4Object.cpp:1654-1670).
 fn preview_activate_entrance(target: ObjectId, caller: ObjectId) -> bool {
+    let Some((objects, _, _, _)) = prepare_command_runtime_data(None) else {
+        return false;
+    };
     let should_call = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
             return false;
         };
-        let objects = context.command_runtime_data().0;
         let (Some(target_snapshot), Some(caller_snapshot)) =
             (objects.get(&target), objects.get(&caller))
         else {
@@ -35313,12 +36236,51 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let random = RANDOM_CONTEXT.with(|cell| cell.borrow().clone());
-    let preview = HOST_CONTEXT.with(|cell| {
-        cell.borrow_mut().as_mut().and_then(|context| {
-            context.execute_command_preview(target, random.as_ref().map(|rng| &rng.rng))
+    let command_data = prepare_command_runtime_data(Some(target));
+    let preview = command_data.as_ref().and_then(|command_data| {
+        HOST_CONTEXT.with(|cell| {
+            cell.borrow_mut().as_mut().and_then(|context| {
+                context.execute_command_preview(
+                    target,
+                    random.as_ref().map(|rng| &rng.rng),
+                    command_data,
+                )
+            })
         })
     });
-    let Some((
+    let Some(mut preview) = preview else {
+        return Ok(Value::Bool(false));
+    };
+
+    // GetFairCrewPhysical is ordinary script and must run at the exact
+    // command branch which requested it, never while the initial structural
+    // snapshot is built. Resolve every native read with no HOST_CONTEXT
+    // borrow held, then resume that same command body synchronously before
+    // FnExecuteCommand returns to its caller.
+    while !preview.physical_reads.is_empty() {
+        let pending = std::mem::take(&mut preview.physical_reads);
+        for (actor_id, reads, supplied_instance_id) in pending {
+            let Some((events, finished)) = preview_resume_command_after_physical(
+                actor_id,
+                reads,
+                supplied_instance_id,
+                random.as_ref().map(|rng| &rng.rng),
+            ) else {
+                continue;
+            };
+            let resumed = HOST_CONTEXT.with(|cell| {
+                cell.borrow_mut().as_mut().and_then(|context| {
+                    context.collect_command_preview_events(actor_id, finished, events)
+                })
+            });
+            if let Some(resumed) = resumed {
+                preview.append(resumed);
+            }
+        }
+    }
+
+    let had_live_attempt = preview.had_live_attempt();
+    let CommandPreviewOutcome {
         mut finished,
         buy_attempts,
         sell_attempts,
@@ -35337,28 +36299,9 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
         build_stops,
         build_actions,
         dig_attempts,
-    )) = preview
-    else {
-        return Ok(Value::Bool(false));
-    };
-
-    let had_live_attempt = !buy_attempts.is_empty()
-        || !sell_attempts.is_empty()
-        || !grab_attempts.is_empty()
-        || !put_attempts.is_empty()
-        || !drop_attempts.is_empty()
-        || !ungrab_attempts.is_empty()
-        || !put_take_attempts.is_empty()
-        || !throw_attempts.is_empty()
-        || !throw_preludes.is_empty()
-        || !entrance_attempts.is_empty()
-        || !control_transfers.is_empty()
-        || !exit_attempts.is_empty()
-        || !failure_feedback.is_empty()
-        || !move_to_stops.is_empty()
-        || !build_stops.is_empty()
-        || !build_actions.is_empty()
-        || !dig_attempts.is_empty();
+        physical_reads,
+    } = preview;
+    debug_assert!(physical_reads.is_empty());
     for (actor_id, base_id, definition_id, buyer, payer, count) in buy_attempts {
         preview_evaluate_buy(actor_id, base_id, &definition_id, buyer, payer, count)?;
     }
@@ -35366,10 +36309,12 @@ fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
         preview_evaluate_sell(actor_id, base_id, &definition_id, preferred, count)?;
     }
     for actor_id in move_to_stops {
-        preview_move_to_stop(actor_id)?;
+        let events = preview_move_to_stop(actor_id)?;
+        preview_dispatch_command_continuation_events(actor_id, events)?;
     }
-    for actor_id in build_stops {
-        preview_build_stop(actor_id)?;
+    for (actor_id, command_instance_id) in build_stops {
+        let events = preview_build_stop(actor_id, command_instance_id)?;
+        preview_dispatch_command_continuation_events(actor_id, events)?;
     }
     for (actor_id, target_id, stop_first) in build_actions {
         preview_object_com_build(actor_id, target_id, stop_first)?;
@@ -36833,12 +37778,10 @@ fn get_id(args: &[Value]) -> Result<Value, RuntimeError> {
     if let Some(arg) = args.first() {
         target_id = parse_object_reference_argument(arg, "GetID", "target")?;
     }
-    if let Some((definition, _)) = fair_crew_definition_context() {
-        return Ok(if target_id.is_none() {
-            Value::C4Id(definition.as_str().to_string())
-        } else {
-            Value::Nil
-        });
+    if target_id.is_none() {
+        if let Some((definition, _)) = fair_crew_definition_context() {
+            return Ok(Value::C4Id(definition.as_str().to_string()));
+        }
     }
 
     HOST_CONTEXT.with(|cell| {
@@ -45940,8 +46883,8 @@ impl EffectHostContext {
                     .or_else(|| scope.info_physical.map(|_| 0));
                 scope.current_info_link = world.crew_info_link(scope.id());
                 scope.current_info_core = world.crew_infos.get(&scope.id()).cloned();
-                scope.configure_fair_crew(&world);
                 scope.definition_id = definition_id;
+                scope.configure_fair_crew(&world);
                 // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358).
                 scope.cached_ocf = Some(ocf);
                 scope.walk_rotation = walk_rotation;
@@ -47039,6 +47982,8 @@ impl EffectHostContext {
 
     fn command_runtime_data(
         &self,
+        physicals: &HashMap<ObjectId, PhysicalInfo>,
+        deferred_physical_actor: Option<ObjectId>,
     ) -> (
         HashMap<ObjectId, CommandObjectSnapshot>,
         HashMap<i32, CommandPlayerSnapshot>,
@@ -47212,8 +48157,9 @@ impl EffectHostContext {
                     direction: scope
                         .map(|scope| scope.current_direction)
                         .unwrap_or_else(|| Direction::from_script_value(object.direction)),
-                    physical: scope
-                        .map(|scope| scope.resolved_physical(false))
+                    physical: physicals
+                        .get(&id)
+                        .copied()
                         .or_else(|| {
                             object
                                 .full_state()
@@ -47222,6 +48168,7 @@ impl EffectHostContext {
                         .or_else(|| object.full_state().and_then(|state| state.info_physical))
                         .or_else(|| metadata.map(|metadata| metadata.physical))
                         .unwrap_or_default(),
+                    physical_deferred: deferred_physical_actor == Some(id),
                     owner,
                     controller: scope
                         .map(ObjectScopeContext::controller)
@@ -47345,27 +48292,9 @@ impl EffectHostContext {
         &mut self,
         target: ObjectId,
         rng: Option<&RefCell<LcgRng>>,
-    ) -> Option<(
-        Option<CommandView>,
-        Vec<(ObjectId, ObjectId, DefinitionId, i32, i32, i32)>,
-        Vec<(ObjectId, ObjectId, DefinitionId, Option<ObjectId>, i32)>,
-        Vec<(ObjectId, ObjectId)>,
-        Vec<(ObjectId, ObjectId, ObjectId, bool, u64)>,
-        Vec<(ObjectId, ObjectId, u64)>,
-        Vec<(ObjectId, u64)>,
-        Vec<(ObjectId, ObjectId, Option<ObjectId>, CommandId, u64)>,
-        Vec<(ObjectId, ObjectId, bool, u64)>,
-        Vec<CommandEvent>,
-        Vec<(ObjectId, ObjectId, Option<CallResultAction>, u64)>,
-        Vec<(ObjectId, ObjectId, Value, i32, u64)>,
-        Vec<CommandEvent>,
-        Vec<(ObjectId, CommandFailureFeedback)>,
-        Vec<ObjectId>,
-        Vec<ObjectId>,
-        Vec<(ObjectId, ObjectId, bool)>,
-        Vec<(ObjectId, bool, Option<CommandDirection>, u64)>,
-    )> {
-        let (objects, players, definitions, transfers) = self.command_runtime_data();
+        command_data: &PreparedCommandRuntimeData,
+    ) -> Option<CommandPreviewOutcome> {
+        let (objects, players, definitions, transfers) = command_data;
         let object_snapshot = objects.get(&target)?;
         let landscape = self.world.landscape_shared();
         let context = CommandRuntimeContext {
@@ -47374,13 +48303,13 @@ impl EffectHostContext {
             position: object_snapshot.position,
             landscape: landscape.as_deref(),
             object: object_snapshot,
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
+            objects,
+            players,
+            definitions,
             structures_need_energy: self.world.structures_need_energy,
             base_buy_enabled: self.world.base_buy_enabled,
             base_sell_enabled: self.world.base_sell_enabled,
-            transfer_zones: &transfers,
+            transfer_zones: transfers,
         };
         let gravity = PHYSICS_CONTEXT.with(|cell| {
             cell.borrow()
@@ -47389,7 +48318,7 @@ impl EffectHostContext {
                 .unwrap_or_else(|| PhysicsSettings::default().gravity_as_c4fixed())
         });
 
-        let (mut events, finished, update) = {
+        let (events, finished, update) = {
             let scope = self.object_scope_mut(target)?;
             let result = scope
                 .live_commands
@@ -47410,25 +48339,81 @@ impl EffectHostContext {
             self.stage_object_command_update(target, update);
         }
 
+        self.collect_command_preview_events(target, finished, events)
+    }
+
+    /// Resume a command which suspended exactly at GetPhysical. The caller
+    /// resolves the callbackful reads outside HOST_CONTEXT and supplies the
+    /// final captured value plus a freshly rebuilt snapshot table.
+    fn execute_pending_command_physical_preview(
+        &mut self,
+        target: ObjectId,
+        command_instance_id: u64,
+        physical: PhysicalInfo,
+        rng: Option<&RefCell<LcgRng>>,
+        command_data: &PreparedCommandRuntimeData,
+    ) -> Option<(Vec<CommandEvent>, Option<CommandView>)> {
+        let (objects, players, definitions, transfers) = command_data;
+        let object_snapshot = objects.get(&target)?;
+        let landscape = self.world.landscape_shared();
+        let context = CommandRuntimeContext {
+            rng,
+            frame: self.world.frame,
+            position: object_snapshot.position,
+            landscape: landscape.as_deref(),
+            object: object_snapshot,
+            objects,
+            players,
+            definitions,
+            structures_need_energy: self.world.structures_need_energy,
+            base_buy_enabled: self.world.base_buy_enabled,
+            base_sell_enabled: self.world.base_sell_enabled,
+            transfer_zones: transfers,
+        };
+        let gravity = PHYSICS_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|context| fixed100(context.gravity()) / 5)
+                .unwrap_or_else(|| PhysicsSettings::default().gravity_as_c4fixed())
+        });
+        let (events, finished, update) = {
+            let scope = self.object_scope_mut(target)?;
+            let result = scope.live_commands.execute_pending_physical(
+                &context,
+                gravity,
+                command_instance_id,
+                physical,
+            );
+            if result.is_some() {
+                scope.command_stack_replaced = true;
+            }
+            let mut events = Vec::new();
+            let mut update = None;
+            if let Some(mut result) = result {
+                update = result.update.take();
+                events = result.events;
+            }
+            scope.command_count = scope.live_commands.len();
+            (events, scope.live_commands.finished_front_view(), update)
+        };
+        if let Some(update) = update {
+            self.stage_object_command_update(target, update);
+        }
+        Some((events, finished))
+    }
+
+    fn collect_command_preview_events(
+        &mut self,
+        target: ObjectId,
+        finished: Option<CommandView>,
+        events: Vec<CommandEvent>,
+    ) -> Option<CommandPreviewOutcome> {
+        let mut outcome = CommandPreviewOutcome {
+            finished,
+            ..CommandPreviewOutcome::default()
+        };
         let mut deferred_events = Vec::new();
-        let mut buy_attempts = Vec::new();
-        let mut sell_attempts = Vec::new();
-        let mut grab_attempts = Vec::new();
-        let mut put_attempts = Vec::new();
-        let mut drop_attempts = Vec::new();
-        let mut ungrab_attempts = Vec::new();
-        let mut put_take_attempts = Vec::new();
-        let mut throw_attempts = Vec::new();
-        let mut throw_preludes = Vec::new();
-        let mut entrance_attempts = Vec::new();
-        let mut control_transfers = Vec::new();
-        let mut exit_attempts = Vec::new();
-        let mut failure_feedback = Vec::new();
-        let mut move_to_stops = Vec::new();
-        let mut build_stops = Vec::new();
-        let mut build_actions = Vec::new();
-        let mut dig_attempts = Vec::new();
-        for event in events.drain(..) {
+        for event in events {
             match event {
                 CommandEvent::EvaluateBuy {
                     actor_id,
@@ -47437,14 +48422,25 @@ impl EffectHostContext {
                     buyer,
                     payer,
                     count,
-                } => buy_attempts.push((actor_id, base_id, definition_id, buyer, payer, count)),
+                } => outcome.buy_attempts.push((
+                    actor_id,
+                    base_id,
+                    definition_id,
+                    buyer,
+                    payer,
+                    count,
+                )),
                 CommandEvent::EvaluateSell {
                     actor_id,
                     base_id,
                     definition_id,
                     preferred,
                     count,
-                } => sell_attempts.push((actor_id, base_id, definition_id, preferred, count)),
+                } => {
+                    outcome
+                        .sell_attempts
+                        .push((actor_id, base_id, definition_id, preferred, count))
+                }
                 CommandEvent::SetPathFinderSettings {
                     level,
                     transfer_zones_enabled,
@@ -47470,14 +48466,14 @@ impl EffectHostContext {
                 CommandEvent::AttemptGrab {
                     actor_id,
                     target_id,
-                } => grab_attempts.push((actor_id, target_id)),
+                } => outcome.grab_attempts.push((actor_id, target_id)),
                 CommandEvent::ObjectComPut {
                     actor_id,
                     target_id,
                     object_id,
                     ungrab_on_success,
                     command_instance_id,
-                } => put_attempts.push((
+                } => outcome.put_attempts.push((
                     actor_id,
                     target_id,
                     object_id,
@@ -47488,18 +48484,22 @@ impl EffectHostContext {
                     actor_id,
                     object_id,
                     command_instance_id,
-                } => drop_attempts.push((actor_id, object_id, command_instance_id)),
+                } => outcome
+                    .drop_attempts
+                    .push((actor_id, object_id, command_instance_id)),
                 CommandEvent::ObjectComUnGrabCommand {
                     actor_id,
                     command_instance_id,
-                } => ungrab_attempts.push((actor_id, command_instance_id)),
+                } => outcome
+                    .ungrab_attempts
+                    .push((actor_id, command_instance_id)),
                 CommandEvent::ObjectComPutTake {
                     actor_id,
                     target_id,
                     requested_item,
                     command,
                     command_instance_id,
-                } => put_take_attempts.push((
+                } => outcome.put_take_attempts.push((
                     actor_id,
                     target_id,
                     requested_item,
@@ -47511,7 +48511,7 @@ impl EffectHostContext {
                     object_id,
                     complete_command_on_success,
                     command_instance_id,
-                } => throw_attempts.push((
+                } => outcome.throw_attempts.push((
                     actor_id,
                     object_id,
                     complete_command_on_success,
@@ -47520,15 +48520,21 @@ impl EffectHostContext {
                 event @ (CommandEvent::ObjectComStopThrow { .. }
                 | CommandEvent::ObjectComSetDirThrow { .. }
                 | CommandEvent::ObjectComStopDrop { .. }
+                | CommandEvent::MoveToFlightControlTakeoff { .. }
+                | CommandEvent::ObjectComStopPut { .. }
+                | CommandEvent::ObjectComStopChop { .. }
+                | CommandEvent::ObjectComStopConstruct { .. }
+                | CommandEvent::ControlCommandConstruction { .. }
+                | CommandEvent::SpawnConstruction { .. }
                 | CommandEvent::ObjectComStopExit { .. }) => {
-                    throw_preludes.push(event);
+                    outcome.throw_preludes.push(event);
                 }
                 CommandEvent::ActivateEntrance {
                     object_id,
                     caller,
                     on_result,
                     command_instance_id,
-                } => entrance_attempts.push((
+                } => outcome.entrance_attempts.push((
                     object_id,
                     caller,
                     on_result,
@@ -47540,7 +48546,7 @@ impl EffectHostContext {
                     tx_value,
                     ty,
                     command_instance_id,
-                } => control_transfers.push((
+                } => outcome.control_transfers.push((
                     object_id,
                     caller,
                     tx_value,
@@ -47548,35 +48554,45 @@ impl EffectHostContext {
                     command_instance_id,
                 )),
                 event @ (CommandEvent::CommandExitObject { .. }
-                | CommandEvent::CommandExitIntoParent { .. }) => exit_attempts.push(event),
+                | CommandEvent::CommandExitIntoParent { .. }) => outcome.exit_attempts.push(event),
                 CommandEvent::NativeCommandSuccess { object_id, command } => {
                     apply_preview_native_command_success(self, object_id, command);
                 }
                 CommandEvent::FailureFeedback { actor_id, feedback } => {
-                    failure_feedback.push((actor_id, feedback));
+                    outcome.failure_feedback.push((actor_id, feedback));
                 }
                 CommandEvent::ObjectComStopMoveTo { object_id } => {
-                    move_to_stops.push(object_id);
+                    outcome.move_to_stops.push(object_id);
                 }
-                CommandEvent::ObjectComStopBuild { object_id } => {
-                    build_stops.push(object_id);
-                }
+                CommandEvent::ObjectComStopBuild {
+                    object_id,
+                    command_instance_id,
+                } => outcome.build_stops.push((object_id, command_instance_id)),
                 CommandEvent::ObjectComBuild {
                     object_id,
                     target_id,
                     stop_first,
-                } => build_actions.push((object_id, target_id, stop_first)),
+                } => outcome
+                    .build_actions
+                    .push((object_id, target_id, stop_first)),
                 CommandEvent::ObjectComDig {
                     actor_id,
                     dig_out_material,
                     direction,
                     command_instance_id,
-                } => dig_attempts.push((
+                } => outcome.dig_attempts.push((
                     actor_id,
                     dig_out_material,
                     direction,
                     command_instance_id,
                 )),
+                CommandEvent::ResolveCommandPhysical {
+                    object_id,
+                    reads,
+                    command_instance_id,
+                } => outcome
+                    .physical_reads
+                    .push((object_id, reads, command_instance_id)),
                 CommandEvent::OpenMenu(request) => self.pending_menu_requests.push(request),
                 other => deferred_events.push(other),
             }
@@ -47588,26 +48604,7 @@ impl EffectHostContext {
             );
             self.pending_command_events.extend(deferred_events);
         }
-        Some((
-            finished,
-            buy_attempts,
-            sell_attempts,
-            grab_attempts,
-            put_attempts,
-            drop_attempts,
-            ungrab_attempts,
-            put_take_attempts,
-            throw_attempts,
-            throw_preludes,
-            entrance_attempts,
-            control_transfers,
-            exit_attempts,
-            failure_feedback,
-            move_to_stops,
-            build_stops,
-            build_actions,
-            dig_attempts,
-        ))
+        Some(outcome)
     }
 
     fn clear_finished_command_fronts(&mut self, target: ObjectId) {
@@ -48173,6 +49170,7 @@ impl EffectHostContext {
             .or_else(|| scope.info_physical.map(|_| 0));
         scope.current_info_link = self.world.crew_info_link(object.id);
         scope.current_info_core = self.world.crew_infos.get(&object.id).cloned();
+        scope.definition_id = Some(object.definition_id().to_string());
         scope.configure_fair_crew(&self.world);
         scope.current_fixed_position = object.fixed_position;
         scope.current_fixed_velocity = object.fixed_velocity;
@@ -48195,7 +49193,6 @@ impl EffectHostContext {
                 .map(|vertex| vertex.x)
                 .unwrap_or(0),
         };
-        scope.definition_id = Some(object.definition_id().to_string());
         scope
             .live_commands
             .restore_from_snapshot(&object.command_stack);
@@ -48280,6 +49277,29 @@ impl EffectHostContext {
         self.nested_objects
             .get_mut(&target)
             .map(|state| &mut state.scope)
+    }
+
+    /// Clone an owned physical-resolution plan while the host context is
+    /// borrowed. The returned plan deliberately performs no script work and
+    /// may therefore be resolved after releasing the TLS `Ref`/`RefMut`.
+    fn prepare_object_physical(
+        &self,
+        target: ObjectId,
+        permanent: bool,
+    ) -> Option<PhysicalResolution> {
+        if let Some(scope) = self.object_scope(target) {
+            return Some(scope.prepare_resolved_physical(permanent));
+        }
+        let object = self.get_world_object(target)?;
+        self.nested_scope_for(&object)
+            .map(|(scope, _)| scope.prepare_resolved_physical(permanent))
+    }
+
+    fn refresh_scope_fair_crew(&mut self, target: ObjectId) {
+        let world = self.world.clone();
+        if let Some(scope) = self.object_scope_mut(target) {
+            scope.configure_fair_crew(&world);
+        }
     }
 
     /// A C4Object pointer is callable while its scope is in-flight even when
@@ -50054,6 +51074,70 @@ impl EffectScopeContext {
     }
 }
 
+#[derive(Clone)]
+enum PhysicalResolution {
+    Ready(PhysicalInfo),
+    FairCrew {
+        definition: PhysicalInfo,
+        strength: i32,
+        rank_base: i32,
+        definition_id: DefinitionId,
+        script: Option<Arc<ScriptEngine>>,
+        cache: crate::FairCrewPhysicalCache,
+    },
+}
+
+impl PhysicalResolution {
+    /// Resolve only after releasing the `HOST_CONTEXT` RefCell borrow. A
+    /// first fair-crew miss synchronously enters the definition script and
+    /// its host natives must be able to borrow that same context again.
+    fn resolve(self) -> PhysicalInfo {
+        match self {
+            Self::Ready(physical) => physical,
+            Self::FairCrew {
+                definition,
+                strength,
+                rank_base,
+                definition_id,
+                script,
+                cache,
+            } => match script {
+                Some(script) => crate::fair_crew_physical_with_script(
+                    definition,
+                    strength,
+                    rank_base,
+                    &definition_id,
+                    script.as_ref(),
+                    &cache,
+                ),
+                None => crate::fair_crew_physical_cached(
+                    definition,
+                    strength,
+                    rank_base,
+                    &definition_id,
+                    &cache,
+                ),
+            },
+        }
+    }
+
+    fn needs_fair_crew_fill(&self) -> bool {
+        match self {
+            Self::Ready(_) => false,
+            Self::FairCrew {
+                definition_id,
+                cache,
+                ..
+            } => !cache.borrow().contains_key(definition_id),
+        }
+    }
+}
+
+enum ResetPhysicalBegin {
+    Complete(bool),
+    ComparePermanent,
+}
+
 struct ObjectScopeContext {
     id: ObjectId,
     definition_id: Option<String>,
@@ -50159,6 +51243,7 @@ struct ObjectScopeContext {
     /// `Info->pDef`, which deliberately survives ChangeDef.
     use_fair_crew: bool,
     fair_crew_strength: i32,
+    fair_crew_physical_cache: crate::FairCrewPhysicalCache,
     info_definition_physical: Option<PhysicalInfo>,
     info_definition_id: Option<DefinitionId>,
     info_definition_rank_base: i32,
@@ -50292,6 +51377,7 @@ impl ObjectScopeContext {
             info_physical,
             use_fair_crew: false,
             fair_crew_strength: 1_000,
+            fair_crew_physical_cache: Rc::new(RefCell::new(HashMap::new())),
             info_definition_physical: None,
             info_definition_id: None,
             info_definition_rank_base: 1_000,
@@ -50421,15 +51507,20 @@ impl ObjectScopeContext {
     fn configure_fair_crew(&mut self, world: &HostWorldContext) {
         self.use_fair_crew = world.use_fair_crew;
         self.fair_crew_strength = world.fair_crew_strength;
-        self.info_definition_id = self
+        self.fair_crew_physical_cache = Rc::clone(&world.fair_crew_physical_cache);
+        let retained_definition_id = self
             .current_info_core
             .as_ref()
             .map(|info| info.definition_id.clone());
+        self.info_definition_id = retained_definition_id
+            .filter(|id| world.definition_metadata(id.as_str()).is_some())
+            .or_else(|| self.definition_id.as_deref().map(DefinitionId::from));
         self.info_definition_physical = self
             .info_definition_id
             .as_ref()
             .and_then(|id| world.definition_metadata(id.as_str()))
-            .map(|metadata| metadata.physical);
+            .map(|metadata| metadata.physical)
+            .or(Some(self.definition_physical));
         self.info_definition_rank_base = self
             .info_definition_id
             .as_ref()
@@ -50453,52 +51544,52 @@ impl ObjectScopeContext {
     /// `C4Object::GetPhysical` (C4Object.cpp:2118-2134): temporary set when
     /// active (unless `permanent`), then the actual Info branch using live
     /// fair-crew parameters, else the current definition.
-    fn resolved_physical(&self, permanent: bool) -> PhysicalInfo {
+    fn prepare_resolved_physical(&self, permanent: bool) -> PhysicalResolution {
         let temporary = (!permanent).then_some(self.temporary_physical).flatten();
         if let Some(temporary) = temporary {
-            return temporary;
+            return PhysicalResolution::Ready(temporary);
         }
         if self.current_info_core.is_some() {
             let info_definition = self
                 .info_definition_physical
                 .unwrap_or(self.definition_physical);
             if self.use_fair_crew {
-                if let (Some(id), Some(script)) = (
-                    self.info_definition_id.as_ref(),
-                    self.info_definition_script.as_ref(),
-                ) {
-                    return crate::fair_crew_physical_with_script(
-                        info_definition,
-                        self.fair_crew_strength,
-                        self.info_definition_rank_base,
-                        id,
-                        script.as_ref(),
-                    );
+                if let Some(id) = self.info_definition_id.as_ref() {
+                    return PhysicalResolution::FairCrew {
+                        definition: info_definition,
+                        strength: self.fair_crew_strength,
+                        rank_base: self.info_definition_rank_base,
+                        definition_id: id.clone(),
+                        script: self.info_definition_script.clone(),
+                        cache: Rc::clone(&self.fair_crew_physical_cache),
+                    };
                 }
-                return crate::fair_crew_physical(
+                return PhysicalResolution::Ready(crate::fair_crew_physical(
                     info_definition,
                     self.fair_crew_strength,
                     self.info_definition_rank_base,
-                );
+                ));
             }
-            return self.info_physical.unwrap_or(info_definition);
+            return PhysicalResolution::Ready(self.info_physical.unwrap_or(info_definition));
         }
         if self.has_physical_info() {
-            return self.info_physical.unwrap_or(self.definition_physical);
+            return PhysicalResolution::Ready(
+                self.info_physical.unwrap_or(self.definition_physical),
+            );
         }
-        self.definition_physical
+        PhysicalResolution::Ready(self.definition_physical)
     }
 
     /// `FnGetPhysical` mode dispatch (C4Script.cpp:638-688).
-    fn get_physical(&self, name: &str, mode: i32) -> Option<i32> {
+    fn prepare_get_physical(&self, mode: i32) -> Option<PhysicalResolution> {
         match mode {
-            PHYS_CURRENT => self.resolved_physical(false).value_by_name(name),
+            PHYS_CURRENT => Some(self.prepare_resolved_physical(false)),
             PHYS_PERMANENT => {
                 // Info objects only (C4Script.cpp:668).
                 if !self.has_physical_info() {
                     return None;
                 }
-                self.resolved_physical(true).value_by_name(name)
+                Some(self.prepare_resolved_physical(true))
             }
             PHYS_TEMPORARY => {
                 // Info objects only, and only in temporary mode
@@ -50506,15 +51597,20 @@ impl ObjectScopeContext {
                 if !self.has_physical_info() {
                     return None;
                 }
-                self.temporary_physical
-                    .and_then(|physical| physical.value_by_name(name))
+                self.temporary_physical.map(PhysicalResolution::Ready)
             }
             _ => None,
         }
     }
 
     /// `FnSetPhysical` mode dispatch (C4Script.cpp:557-601).
-    fn set_physical(&mut self, name: &str, value: i32, mode: i32) -> bool {
+    fn set_physical(
+        &mut self,
+        name: &str,
+        value: i32,
+        mode: i32,
+        resolved_base: Option<PhysicalInfo>,
+    ) -> bool {
         // Unknown names fail (C4Script.cpp:562).
         if PhysicalInfo::default().value_mut_by_name(name).is_none() {
             return false;
@@ -50549,8 +51645,19 @@ impl ObjectScopeContext {
             }
             PHYS_TEMPORARY | PHYS_STACK_TEMPORARY => {
                 // Auto-switch to temporary mode (C4Script.cpp:587-591).
-                let base = self.resolved_physical(false);
-                let temporary = self.temporary_physical.get_or_insert(base);
+                // `resolved_base` also records that the outer call observed
+                // PhysicalTemporary=false. C++ unconditionally copies that
+                // captured `GetPhysical()` result afterward, even when a
+                // nested fair-crew hook enabled temporary mode meanwhile.
+                if let Some(base) = resolved_base {
+                    self.temporary_physical = Some(base);
+                } else if self.temporary_physical.is_none() {
+                    return false;
+                }
+                let temporary = self
+                    .temporary_physical
+                    .as_mut()
+                    .expect("temporary physical was initialized above");
                 // PHYS_StackTemporary remembers the old value
                 // (C4Script.cpp:593-594; C4InfoCore.cpp:333-337).
                 if mode == PHYS_STACK_TEMPORARY {
@@ -50605,14 +51712,14 @@ impl ObjectScopeContext {
     }
 
     /// `FnResetPhysical` (C4Script.cpp:613-636).
-    fn reset_physical(&mut self, name: Option<&str>) -> bool {
+    fn begin_reset_physical(&mut self, name: Option<&str>) -> ResetPhysicalBegin {
         // Only in temporary mode (C4Script.cpp:619).
         if self.temporary_physical.is_none() {
-            return false;
+            return ResetPhysicalBegin::Complete(false);
         }
         if let Some(name) = name.filter(|name| !name.is_empty()) {
             if PhysicalInfo::default().value_mut_by_name(name).is_none() {
-                return false;
+                return ResetPhysicalBegin::Complete(false);
             }
             // Undo the last registered change for this physical
             // (C4InfoCore.cpp:339-351).
@@ -50621,26 +51728,35 @@ impl ObjectScopeContext {
                 .iter()
                 .rposition(|(changed, _)| changed.eq_ignore_ascii_case(name))
             else {
-                return false;
+                return ResetPhysicalBegin::Complete(false);
             };
             let (_, previous) = self.physical_changes.remove(position);
             self.temporary_physical
                 .as_mut()
                 .map(|physical| physical.set_by_name(name, previous));
-            // Keep temporary mode while other changes remain or the set
-            // still deviates from the reference (C4Script.cpp:628;
-            // C4InfoCore.cpp:319-331).
-            let reference = self.resolved_physical(true);
-            let deviates = self
-                .temporary_physical
-                .map(|physical| physical != reference)
-                .unwrap_or(false);
-            if !self.physical_changes.is_empty() || deviates {
-                self.record_physicals();
-                return true;
-            }
+            return ResetPhysicalBegin::ComparePermanent;
         }
         // Full reset (C4Script.cpp:631-635).
+        self.temporary_physical = None;
+        self.physical_changes.clear();
+        self.record_physicals();
+        ResetPhysicalBegin::Complete(true)
+    }
+
+    fn finish_reset_physical(&mut self, reference: PhysicalInfo) -> bool {
+        // Keep temporary mode while other changes remain or the set still
+        // deviates from the reference (C4Script.cpp:628;
+        // C4InfoCore.cpp:319-331). The callback may itself have changed the
+        // target while its permanent physical was being resolved, so inspect
+        // the live scope again here.
+        let deviates = self
+            .temporary_physical
+            .map(|physical| physical != reference)
+            .unwrap_or(false);
+        if !self.physical_changes.is_empty() || deviates {
+            self.record_physicals();
+            return true;
+        }
         self.temporary_physical = None;
         self.physical_changes.clear();
         self.record_physicals();
@@ -51747,13 +52863,12 @@ impl ObjectScopeContext {
     /// fExact (`iChange *= C4MaxPhysical/100`), clamped to
     /// 0..GetPhysical()->Energy, including a zero ceiling when the
     /// definition has no Physical Energy.
-    fn adjust_energy(&mut self, delta: i32, exact: bool) -> i32 {
+    fn adjust_energy(&mut self, delta: i32, exact: bool, max_energy: i32) -> i32 {
         let delta = if exact {
             delta
         } else {
             delta.saturating_mul(LEGACY_MAX_PHYSICAL / 100)
         };
-        let max_energy = self.resolved_physical(false).energy;
         let next = crate::bound_energy(self.energy().saturating_add(delta), max_energy);
         self.set_energy(next);
         next
@@ -81104,7 +82219,7 @@ protected func Construction()
             HOST_CONTEXT.with(|cell| {
                 let borrow = cell.borrow();
                 let context = borrow.as_ref().expect("host context installed");
-                let (objects, _, _, _) = context.command_runtime_data();
+                let (objects, _, _, _) = context.command_runtime_data(&HashMap::new(), None);
                 assert_eq!(objects[&ObjectId::new(12)].master_list_order, 0);
                 assert_eq!(objects[&ObjectId::new(11)].master_list_order, 1);
                 assert_eq!(objects[&ObjectId::new(13)].status, ObjectStatus::Inactive);

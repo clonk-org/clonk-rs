@@ -1203,11 +1203,13 @@ impl InternalObjectMenuSource for EngineInternalObjectMenuSource<'_> {
 
 /// Backing selected by the one `C4Object::GetPhysical()` call at
 /// ObjectComDigDouble entry. C++ retains this pointer across Activate:
-/// mutations of that storage remain visible, while switching temporary
-/// mode or changing definition does not retarget it.
+/// mutations of temporary/info/definition storage remain visible, while a
+/// fair-crew pointer keeps targeting its already-filled cached projection.
+/// Switching temporary mode or changing definition does not retarget it.
 #[derive(Clone)]
 enum DigDoublePhysicalBacking {
     Temporary,
+    FairCrew(PhysicalInfo),
     Info(PhysicalInfo),
     Definition(String),
 }
@@ -3316,42 +3318,52 @@ impl Engine {
     /// ballistic Throw are exact (C4MouseControl.cpp:833-879;
     /// C4Landscape.cpp:2055-2100).
     pub fn mouse_drag_carryable_cursor(
-        &self,
+        &mut self,
         owner: i32,
         position: Vector2,
     ) -> Option<MouseDragCarryableCursor> {
-        let landscape = self.landscape.as_ref()?;
-        if landscape.is_liquid_at(position.x, position.y) {
-            return Some(MouseDragCarryableCursor::Drop);
-        }
-        if landscape.is_solid_at(position.x, position.y) {
-            return None;
+        {
+            let landscape = self.landscape.as_ref()?;
+            if landscape.is_liquid_at(position.x, position.y) {
+                return Some(MouseDragCarryableCursor::Drop);
+            }
+            if landscape.is_solid_at(position.x, position.y) {
+                return None;
+            }
+
+            let mut ground_y = position.y;
+            let landscape_height = landscape.estimated_height();
+            while ground_y < landscape_height && !landscape.is_solid_at(position.x, ground_y) {
+                ground_y += 1;
+            }
+            if (ground_y - position.y).abs() <= 5 {
+                return Some(MouseDragCarryableCursor::Drop);
+            }
         }
 
-        let mut ground_y = position.y;
-        let landscape_height = landscape.estimated_height();
-        while ground_y < landscape_height && !landscape.is_solid_at(position.x, ground_y) {
-            ground_y += 1;
-        }
-        if (ground_y - position.y).abs() <= 5 {
-            return Some(MouseDragCarryableCursor::Drop);
-        }
-
-        let (throw_force, throw_height, cursor_x) = self
+        let throw_force = self
+            .crew_cursor(owner)
+            .and_then(|id| self.find_object_index(id))
+            .map(|index| math::val_by_physical(400, self.object_physical(index).throw))
+            .unwrap_or_else(|| math::val_by_physical(400, 50_000));
+        // GetPhysical may fill a fair-crew projection and execute definition
+        // script. Native re-reads pPlayer->Cursor separately for direction
+        // and throwing height after that call (C4MouseControl.cpp:866-870).
+        let (cursor_x, throw_height) = self
             .crew_cursor(owner)
             .and_then(|id| self.find_object_index(id))
             .map(|index| {
                 (
-                    math::val_by_physical(400, self.object_physical(index).throw),
+                    self.objects[index].state.position.x,
                     self.objects[index]
                         .current_shape_rect()
                         .map(|rect| rect.height)
                         .unwrap_or(20),
-                    self.objects[index].state.position.x,
                 )
             })
-            .unwrap_or((math::val_by_physical(400, 50_000), 20, position.x));
+            .unwrap_or((position.x, 20));
         let preferred_direction = if cursor_x > position.x { -1 } else { 1 };
+        let landscape = self.landscape.as_ref()?;
         [preferred_direction, -preferred_direction]
             .into_iter()
             .find_map(|direction| {
@@ -3366,7 +3378,11 @@ impl Engine {
             })
     }
 
-    pub fn mouse_drag_carryable_command(&self, owner: i32, position: Vector2) -> Option<CommandId> {
+    pub fn mouse_drag_carryable_command(
+        &mut self,
+        owner: i32,
+        position: Vector2,
+    ) -> Option<CommandId> {
         self.mouse_drag_carryable_cursor(owner, position)
             .map(|cursor| match cursor {
                 MouseDragCarryableCursor::Drop => CommandId::Drop,
@@ -5965,14 +5981,35 @@ impl Engine {
             })
     }
 
-    fn dig_double_physical_backing(&self, index: usize) -> DigDoublePhysicalBacking {
-        let object = &self.objects[index];
-        if object.state.temporary_physical.is_some() {
+    fn dig_double_physical_backing(&mut self, index: usize) -> DigDoublePhysicalBacking {
+        let object_id = self.objects[index].id;
+        if self.objects[index].state.temporary_physical.is_some() {
             DigDoublePhysicalBacking::Temporary
-        } else if object.state.info_physical.is_some() || object.state.crew_member {
-            DigDoublePhysicalBacking::Info(self.object_physical(index))
+        } else if self.crew_object_infos.contains_key(&object_id)
+            || self.objects[index].state.info_physical.is_some()
+            || self.objects[index].state.crew_member
+        {
+            let linked_info = self.crew_object_infos.contains_key(&object_id);
+            let physical = if linked_info {
+                self.object_physical(index)
+            } else {
+                self.objects[index]
+                    .state
+                    .info_physical
+                    .or_else(|| {
+                        self.definitions
+                            .get(&self.objects[index].definition_id)
+                            .map(|definition| *definition.physical())
+                    })
+                    .unwrap_or_default()
+            };
+            if linked_info && self.use_fair_crew() {
+                DigDoublePhysicalBacking::FairCrew(physical)
+            } else {
+                DigDoublePhysicalBacking::Info(physical)
+            }
         } else {
-            DigDoublePhysicalBacking::Definition(object.definition_id.clone())
+            DigDoublePhysicalBacking::Definition(self.objects[index].definition_id.clone())
         }
     }
 
@@ -5986,6 +6023,7 @@ impl Engine {
                 .state
                 .temporary_physical
                 .unwrap_or_default(),
+            DigDoublePhysicalBacking::FairCrew(physical) => *physical,
             DigDoublePhysicalBacking::Info(initial) => self.objects[index]
                 .state
                 .info_physical
@@ -6715,9 +6753,12 @@ impl Engine {
         if self.object_procedure(index) != ActionProcedure::Walk {
             return Ok(false);
         }
+        // Native GetPhysical may run the lazy fair-crew fill before any of
+        // GetCon, Action.ComDir, or Action.Dir are read (:286-294).
+        let physical = self.object_physical(index);
         let launch = crate::command::object_com_jump_launch(
             self.objects[index].state.construction,
-            self.object_physical(index),
+            physical,
             self.objects[index].state.command_direction,
             self.objects[index].state.direction,
         );

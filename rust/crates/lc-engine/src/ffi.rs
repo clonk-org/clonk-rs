@@ -473,6 +473,7 @@ impl RuntimeHandle {
                     self.engine.set_use_fair_crew(true);
                     self.engine.set_fair_crew_strength(control.data);
                 }
+                self.engine.clear_fair_crew_physicals();
             }
             // C4CVT_None and unknown raw enum values assert only in native
             // debug builds; release playback leaves state untouched.

@@ -8454,8 +8454,8 @@ pub(crate) fn crew_info_physical(definition: PhysicalInfo, info_rank: i32) -> Ph
     promotion_updated_physical(definition, info_rank, None)
 }
 
-/// `C4Def::GetFairCrewPhysicals` without its cache: deriving this on each
-/// read keeps the Rust projection tied to the live round parameters.
+/// Numeric half of `C4Def::GetFairCrewPhysicals`; cache ownership and script
+/// callbacks live at the definition-resolution seams below.
 pub(crate) fn fair_crew_physical(
     definition: PhysicalInfo,
     strength: i32,
@@ -8489,6 +8489,45 @@ const FAIR_CREW_PHYSICAL_NAMES: [&str; 21] = [
     "BreatheWater",
 ];
 
+pub(crate) type FairCrewPhysicalCache = Rc<RefCell<HashMap<DefinitionId, PhysicalInfo>>>;
+
+enum FairCrewProjectionStart {
+    Cached(PhysicalInfo),
+    New { physical: PhysicalInfo, rank: i32 },
+}
+
+fn begin_fair_crew_projection(
+    definition: PhysicalInfo,
+    strength: i32,
+    rank_base: i32,
+    definition_id: &DefinitionId,
+    cache: &FairCrewPhysicalCache,
+) -> FairCrewProjectionStart {
+    if let Some(physical) = cache.borrow().get(definition_id).copied() {
+        return FairCrewProjectionStart::Cached(physical);
+    }
+    let rank = fair_crew_rank(strength, rank_base);
+    let physical = promotion_updated_physical(definition, rank, Some(definition));
+    // Native publishes pFairCrewPhysical before PromotionUpdate invokes any
+    // hooks. Re-entrant GetPhysical calls therefore observe this in-progress
+    // projection instead of recursively filling another cache entry.
+    cache.borrow_mut().insert(definition_id.clone(), physical);
+    FairCrewProjectionStart::New { physical, rank }
+}
+
+pub(crate) fn fair_crew_physical_cached(
+    definition: PhysicalInfo,
+    strength: i32,
+    rank_base: i32,
+    definition_id: &DefinitionId,
+    cache: &FairCrewPhysicalCache,
+) -> PhysicalInfo {
+    match begin_fair_crew_projection(definition, strength, rank_base, definition_id, cache) {
+        FairCrewProjectionStart::Cached(physical)
+        | FairCrewProjectionStart::New { physical, .. } => physical,
+    }
+}
+
 /// C4PhysicalInfo::PromotionUpdate's definition callback. Every field is
 /// passed by reference after the numeric promotion; the callback's result is
 /// only the commit gate for the final reference value.
@@ -8498,6 +8537,7 @@ fn apply_fair_crew_physical_script(
     rank: i32,
     definition_id: &DefinitionId,
     script: &ScriptEngine,
+    cache: &FairCrewPhysicalCache,
 ) -> PhysicalInfo {
     if !script.has_function("GetFairCrewPhysical") {
         return physical;
@@ -8516,6 +8556,7 @@ fn apply_fair_crew_physical_script(
                             .and_then(Value::as_c4_int)
                             .unwrap_or_default();
                         physical.set_by_name(name, value);
+                        cache.borrow_mut().insert(definition_id.clone(), physical);
                     }
                     Ok(_) => {}
                     Err(error) => {
@@ -8541,10 +8582,19 @@ fn fair_crew_physical_with_script(
     rank_base: i32,
     definition_id: &DefinitionId,
     script: &ScriptEngine,
+    cache: &FairCrewPhysicalCache,
 ) -> PhysicalInfo {
-    let rank = fair_crew_rank(strength, rank_base);
-    let numeric = promotion_updated_physical(definition, rank, Some(definition));
-    apply_fair_crew_physical_script(definition, numeric, rank, definition_id, script)
+    match begin_fair_crew_projection(definition, strength, rank_base, definition_id, cache) {
+        FairCrewProjectionStart::Cached(physical) => physical,
+        FairCrewProjectionStart::New { physical, rank } => apply_fair_crew_physical_script(
+            definition,
+            physical,
+            rank,
+            definition_id,
+            script,
+            cache,
+        ),
+    }
 }
 
 fn log_runtime_call_frames(definition: &str, frames: &[lc_script::RuntimeCallFrame]) {
@@ -17685,10 +17735,25 @@ enum ObjectComPutTakeOutcome {
 enum ImmediateCommandResume {
     Front,
     MoveToAfterStop,
-    BuildAfterStop,
+    MoveToAfterFlight(u64),
+    BuildAfterStop(u64),
     ExitAfterStop(u64),
     ThrowPrelude(u64),
     DropPrelude(u64),
+    PutAfterStop(u64),
+    ConstructAfterStop(u64),
+    ConstructScript {
+        command_instance_id: u64,
+        result: AcquireScriptResult,
+    },
+    ConstructSpawn {
+        command_instance_id: u64,
+        construction_id: Option<ObjectId>,
+    },
+    Physical {
+        command_instance_id: u64,
+        physical: PhysicalInfo,
+    },
 }
 
 /// Network control timing copied from a C++ `C4PacketJoinData` before
@@ -17991,6 +18056,10 @@ pub struct Engine {
     /// each frame and immediate command continuation.
     command_definition_snapshot_cache:
         std::cell::RefCell<Option<Rc<HashMap<DefinitionId, CommandDefinitionSnapshot>>>>,
+    /// Native `C4Def::pFairCrewPhysical`: one lazily filled projection per
+    /// definition, shared by engine reads and every copied script host world.
+    /// Derived definition state is intentionally absent from EngineState.
+    fair_crew_physical_cache: FairCrewPhysicalCache,
     /// Definition/script lookup data shared by copied host worlds. These
     /// tables change only at definition-load or script-relink boundaries.
     host_definition_tables_cache:
@@ -20355,6 +20424,7 @@ impl Engine {
             object_index_cache: std::cell::RefCell::new((0, HashMap::new())),
             definition_metadata_cache: std::cell::RefCell::new(None),
             command_definition_snapshot_cache: std::cell::RefCell::new(None),
+            fair_crew_physical_cache: Rc::new(RefCell::new(HashMap::new())),
             host_definition_tables_cache: std::cell::RefCell::new(None),
             solid_mask_metadata_cache: std::cell::RefCell::new(None),
             materials: MaterialSet::default(),
@@ -24752,8 +24822,9 @@ impl Engine {
         self.startup_player_count
     }
 
-    /// Updates `Game.Parameters.UseFairCrew` for subsequent live physical
-    /// resolution. The default matches LegacyClonk's normal configuration.
+    /// Updates `Game.Parameters.UseFairCrew`. Native parameter assignment by
+    /// itself does not invalidate already-derived definition physicals; the
+    /// synchronized control and definition-list paths do that explicitly.
     pub fn set_use_fair_crew(&mut self, use_fair_crew: bool) {
         self.use_fair_crew = use_fair_crew;
     }
@@ -24762,14 +24833,22 @@ impl Engine {
         self.use_fair_crew
     }
 
-    /// Updates `Game.Parameters.FairCrewStrength` for subsequent live
-    /// physical resolution. The default is `Config.General.DefCrewStrength`.
+    /// Updates `Game.Parameters.FairCrewStrength` for the next cache fill.
+    /// The default is `Config.General.DefCrewStrength`.
     pub fn set_fair_crew_strength(&mut self, fair_crew_strength: i32) {
         self.fair_crew_strength = fair_crew_strength;
     }
 
     pub fn fair_crew_strength(&self) -> i32 {
         self.fair_crew_strength
+    }
+
+    /// `C4DefList::Synchronize` / runtime `C4CVT_FairCrew`: preserve the
+    /// shared cache allocation so already-copied host worlds enter the same
+    /// empty epoch.
+    #[doc(hidden)]
+    pub fn clear_fair_crew_physicals(&mut self) {
+        self.fair_crew_physical_cache.borrow_mut().clear();
     }
 
     pub fn set_fair_crew_forced(&mut self, fair_crew_forced: bool) {
@@ -26884,6 +26963,7 @@ impl Engine {
         .with_smoke_level(self.bubble_smoke_level())
         .with_max_players(self.max_players.unwrap_or_default())
         .with_fair_crew_parameters(self.use_fair_crew, self.fair_crew_strength)
+        .with_fair_crew_physical_cache(Rc::clone(&self.fair_crew_physical_cache))
         .with_control_host(self.control_host, Rc::clone(&self.player_info_updates))
         .with_player_order(self.player_order.iter().copied())
         .with_local_players(local_players)
@@ -30640,10 +30720,10 @@ impl Engine {
         self.finish_host_solid_mask_operations(outermost, result)
     }
 
-    /// `C4Game::CreateInfoObject`: reserve the enumeration number and attach
-    /// the exact roster node before `C4Object::Init` and every creation
-    /// callback. Callback writes therefore update this live projection rather
-    /// than being overwritten by a late clone after spawning.
+    /// `C4Game::CreateInfoObject`: attach the exact roster node before the
+    /// ordinary creation callbacks. Native assigns the object's enumeration
+    /// number only after `C4Object::Init`; a first fair-crew projection fill
+    /// inside Init must therefore precede number reservation as well.
     fn spawn_object_with_crew_info(
         &mut self,
         mut config: SpawnConfig,
@@ -30651,6 +30731,45 @@ impl Engine {
         link: CrewInfoLink,
         physical: PhysicalInfo,
     ) -> Result<ObjectId, EngineError> {
+        if self.use_fair_crew && !config.loaded {
+            let object_definition_id = config.definition_id.clone();
+            let info_definition_id = self
+                .definitions
+                .contains_key(&info.definition_id)
+                .then(|| info.definition_id.clone())
+                .unwrap_or_else(|| object_definition_id.clone());
+            let projection_source = self.definitions.get(&info_definition_id).map(|definition| {
+                (
+                    *definition.physical(),
+                    definition.rank_base().unwrap_or(1_000),
+                    definition.script_arc(),
+                )
+            });
+            match projection_source {
+                Some((definition_physical, rank_base, script)) => {
+                    self.fill_fair_crew_projection(
+                        info_definition_id,
+                        definition_physical,
+                        rank_base,
+                        script,
+                    );
+                }
+                None => {
+                    let definition_physical = self
+                        .definitions
+                        .get(&object_definition_id)
+                        .map(|definition| *definition.physical())
+                        .unwrap_or_default();
+                    fair_crew_physical_cached(
+                        definition_physical,
+                        self.fair_crew_strength,
+                        1_000,
+                        &info_definition_id,
+                        &self.fair_crew_physical_cache,
+                    );
+                }
+            }
+        }
         let id = self.next_object_id();
         config = config.with_id(id);
         let rank = info.rank;
@@ -31579,6 +31698,7 @@ impl Engine {
     /// bulk command snapshot. C++'s live ExecObjects iterator still runs
     /// ExecuteCommand for such newborn objects in the same frame.
     fn live_command_snapshot(&self, index: usize) -> CommandObjectSnapshot {
+        let physical = self.object_physical_without_fair_fill(index);
         let object = &self.objects[index];
         let master_list_order = self
             .exec_list
@@ -31666,7 +31786,8 @@ impl Engine {
             command_direction: object.state.command_direction,
             construction: object.state.construction,
             direction: object.state.direction,
-            physical: self.object_physical(index),
+            physical,
+            physical_deferred: false,
             owner: object.state.owner,
             controller: object.state.controller,
             base: object.state.base,
@@ -31690,27 +31811,49 @@ impl Engine {
     /// ordinary object tick.
     fn execute_object_command_now(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
         self.execute_object_command_now_inner(object_id, ImmediateCommandResume::Front)
+            .map(|_| ())
     }
 
     /// Resume the post-ObjectComStop half of the retained MoveTo without a
     /// second UpdateInterval decrement. This is still the same native
     /// C4Command::Execute invocation; only the live callback boundary made
     /// the engine rebuild its command snapshot.
-    fn resume_move_to_after_stop(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
+    fn resume_move_to_after_stop(&mut self, object_id: ObjectId) -> Result<bool, EngineError> {
         self.execute_object_command_now_inner(object_id, ImmediateCommandResume::MoveToAfterStop)
+    }
+
+    /// Resume MoveTo after FlightControl's ordinary SetActionByName("Fly")
+    /// and callbacks. A WALK origin continues into JumpControl; DFA_FLIGHT
+    /// only consumes the retained callback boundary.
+    fn resume_move_to_after_flight(
+        &mut self,
+        object_id: ObjectId,
+        command_instance_id: u64,
+    ) -> Result<bool, EngineError> {
+        self.execute_object_command_now_inner(
+            object_id,
+            ImmediateCommandResume::MoveToAfterFlight(command_instance_id),
+        )
     }
 
     /// Resume Build after its Dig arm's live ObjectComStop without consuming
     /// another command interval or frame.
-    fn resume_build_after_stop(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
-        self.execute_object_command_now_inner(object_id, ImmediateCommandResume::BuildAfterStop)
+    fn resume_build_after_stop(
+        &mut self,
+        object_id: ObjectId,
+        command_instance_id: u64,
+    ) -> Result<bool, EngineError> {
+        self.execute_object_command_now_inner(
+            object_id,
+            ImmediateCommandResume::BuildAfterStop(command_instance_id),
+        )
     }
 
     fn resume_exit_after_stop(
         &mut self,
         object_id: ObjectId,
         command_instance_id: u64,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         self.execute_object_command_now_inner(
             object_id,
             ImmediateCommandResume::ExitAfterStop(command_instance_id),
@@ -31721,7 +31864,7 @@ impl Engine {
         &mut self,
         object_id: ObjectId,
         command_instance_id: u64,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         self.execute_object_command_now_inner(
             object_id,
             ImmediateCommandResume::ThrowPrelude(command_instance_id),
@@ -31732,10 +31875,85 @@ impl Engine {
         &mut self,
         object_id: ObjectId,
         command_instance_id: u64,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         self.execute_object_command_now_inner(
             object_id,
             ImmediateCommandResume::DropPrelude(command_instance_id),
+        )
+    }
+
+    fn resume_put_after_stop(
+        &mut self,
+        object_id: ObjectId,
+        command_instance_id: u64,
+    ) -> Result<bool, EngineError> {
+        self.execute_object_command_now_inner(
+            object_id,
+            ImmediateCommandResume::PutAfterStop(command_instance_id),
+        )
+    }
+
+    fn resume_construct_after_stop(
+        &mut self,
+        object_id: ObjectId,
+        command_instance_id: u64,
+    ) -> Result<bool, EngineError> {
+        self.execute_object_command_now_inner(
+            object_id,
+            ImmediateCommandResume::ConstructAfterStop(command_instance_id),
+        )
+    }
+
+    fn resume_construct_after_script(
+        &mut self,
+        object_id: ObjectId,
+        command_instance_id: u64,
+        result: AcquireScriptResult,
+    ) -> Result<bool, EngineError> {
+        self.execute_object_command_now_inner(
+            object_id,
+            ImmediateCommandResume::ConstructScript {
+                command_instance_id,
+                result,
+            },
+        )
+    }
+
+    /// Finish Construct after CreateObjectConstruction and the conkit's
+    /// AssignRemoval have both completed. This is still the same native
+    /// Execute invocation: Finish(true) and AddCommand(Build) happen before
+    /// the event handler returns.
+    fn resume_construct_after_spawn(
+        &mut self,
+        object_id: ObjectId,
+        command_instance_id: u64,
+        construction_id: Option<ObjectId>,
+    ) -> Result<bool, EngineError> {
+        self.execute_object_command_now_inner(
+            object_id,
+            ImmediateCommandResume::ConstructSpawn {
+                command_instance_id,
+                construction_id,
+            },
+        )
+    }
+
+    /// Resume the exact command body after its first callbackful FairCrew
+    /// physical read. This remains the same native `C4Command::Execute`
+    /// invocation, so its update interval and InitEvaluation gates must not
+    /// run a second time.
+    fn resume_command_after_physical(
+        &mut self,
+        object_id: ObjectId,
+        command_instance_id: u64,
+        physical: PhysicalInfo,
+    ) -> Result<bool, EngineError> {
+        self.execute_object_command_now_inner(
+            object_id,
+            ImmediateCommandResume::Physical {
+                command_instance_id,
+                physical,
+            },
         )
     }
 
@@ -31743,13 +31961,33 @@ impl Engine {
         &mut self,
         object_id: ObjectId,
         resume: ImmediateCommandResume,
-    ) -> Result<(), EngineError> {
-        let command_snapshots = self
-            .objects
-            .iter()
-            .enumerate()
-            .map(|(index, object)| (object.id, self.live_command_snapshot(index)))
-            .collect::<HashMap<_, _>>();
+    ) -> Result<bool, EngineError> {
+        let Some(initial_index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        let physical_deferred = !matches!(resume, ImmediateCommandResume::Physical { .. })
+            && self.object_physical_will_fill_fair_cache(initial_index);
+
+        // Structural command snapshots never trigger FairCrew promotion.
+        // The exact handler branch that reaches GetPhysical emits a live
+        // continuation event; that event rebuilds this table after the hook.
+        let mut command_snapshots = HashMap::with_capacity(self.objects.len());
+        for index in 0..self.objects.len() {
+            let id = self.objects[index].id;
+            command_snapshots.insert(id, self.live_command_snapshot(index));
+        }
+        if let Some(snapshot) = command_snapshots.get_mut(&object_id) {
+            match resume {
+                ImmediateCommandResume::Physical { physical, .. } => {
+                    // Keep the exact pointer value returned by the final
+                    // native GetPhysical call even if its hook changed Def,
+                    // Info, or the global FairCrew controls afterward.
+                    snapshot.physical = physical;
+                    snapshot.physical_deferred = false;
+                }
+                _ => snapshot.physical_deferred = physical_deferred,
+            }
+        }
         let player_snapshots = self
             .players
             .iter()
@@ -31778,10 +32016,10 @@ impl Engine {
         let definition_snapshots = self.command_definition_snapshot_table();
         let transfer_zones = self.transfer_zones.clone();
         let Some(index) = self.find_object_index(object_id) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(object_snapshot) = command_snapshots.get(&object_id) else {
-            return Ok(());
+            return Ok(false);
         };
         let command_rng = std::cell::RefCell::new(std::mem::take(&mut self.rng));
         let command_context = CommandRuntimeContext {
@@ -31806,9 +32044,12 @@ impl Engine {
             ImmediateCommandResume::MoveToAfterStop => self.objects[index]
                 .commands
                 .execute_pending_move_to_stop(&command_context),
-            ImmediateCommandResume::BuildAfterStop => self.objects[index]
+            ImmediateCommandResume::MoveToAfterFlight(command_instance_id) => self.objects[index]
                 .commands
-                .execute_pending_build_stop(&command_context),
+                .execute_pending_move_to_flight(&command_context, command_instance_id),
+            ImmediateCommandResume::BuildAfterStop(command_instance_id) => self.objects[index]
+                .commands
+                .execute_pending_build_stop(&command_context, command_instance_id),
             ImmediateCommandResume::ExitAfterStop(command_instance_id) => self.objects[index]
                 .commands
                 .execute_pending_exit_stop(&command_context, command_instance_id),
@@ -31822,19 +32063,51 @@ impl Engine {
             ImmediateCommandResume::DropPrelude(command_instance_id) => self.objects[index]
                 .commands
                 .execute_pending_drop_prelude(&command_context, command_instance_id),
+            ImmediateCommandResume::PutAfterStop(command_instance_id) => self.objects[index]
+                .commands
+                .execute_pending_put_stop(&command_context, command_gravity, command_instance_id),
+            ImmediateCommandResume::ConstructAfterStop(command_instance_id) => self.objects[index]
+                .commands
+                .execute_pending_construct_stop(&command_context, command_instance_id),
+            ImmediateCommandResume::ConstructScript {
+                command_instance_id,
+                result,
+            } => self.objects[index]
+                .commands
+                .execute_pending_construct_script(&command_context, command_instance_id, result),
+            ImmediateCommandResume::ConstructSpawn {
+                command_instance_id,
+                construction_id,
+            } => self.objects[index]
+                .commands
+                .execute_pending_construct_spawn(
+                    &command_context,
+                    command_instance_id,
+                    construction_id,
+                ),
+            ImmediateCommandResume::Physical {
+                command_instance_id,
+                physical,
+            } => self.objects[index].commands.execute_pending_physical(
+                &command_context,
+                command_gravity,
+                command_instance_id,
+                physical,
+            ),
         };
         self.rng = command_rng.into_inner();
 
+        let mut resolved_command_physical = false;
         if let Some(result) = result {
             if let Some(update) = result.update {
                 self.apply_object_update(object_id, update)?;
             }
             for event in result.events {
-                self.apply_command_event(event)?;
+                resolved_command_physical |= self.apply_command_event(event)?;
             }
         }
         self.finish_object_command_execution(object_id)?;
-        Ok(())
+        Ok(resolved_command_physical)
     }
 
     /// Advance one simulation frame and return its full presentation snapshot.
@@ -31958,9 +32231,12 @@ impl Engine {
             .enumerate()
             .map(|(index, id)| (id, index))
             .collect::<HashMap<_, _>>();
+        let command_snapshot_object_count = self.objects.len();
         let mut command_snapshots: HashMap<ObjectId, CommandObjectSnapshot> =
-            HashMap::with_capacity(self.objects.len());
-        for (fallback_order, object) in self.objects.iter().enumerate() {
+            HashMap::with_capacity(command_snapshot_object_count);
+        for fallback_order in 0..command_snapshot_object_count {
+            let physical = self.object_physical_without_fair_fill(fallback_order);
+            let object = &self.objects[fallback_order];
             let (
                 procedure,
                 line_connect,
@@ -32051,7 +32327,8 @@ impl Engine {
                     command_direction: object.state.command_direction,
                     construction: object.state.construction,
                     direction: object.state.direction,
-                    physical: self.object_physical(fallback_order),
+                    physical,
+                    physical_deferred: false,
                     owner: object.state.owner,
                     controller: object.state.controller,
                     base: object.state.base,
@@ -32248,11 +32525,16 @@ impl Engine {
                     command_snapshots.extend(live_snapshots);
                 }
             }
+            let Some(idx) = self.find_object_index(current_id) else {
+                continue;
+            };
             // C++ command handlers read the live object and command lists.
             // Refresh the executing object after any earlier object in this
             // frame may have changed it; completed objects are likewise
             // written back below for later command scans.
-            command_snapshots.insert(current_id, self.live_command_snapshot(idx));
+            let mut actor_snapshot = self.live_command_snapshot(idx);
+            actor_snapshot.physical_deferred = self.object_physical_will_fill_fair_cache(idx);
+            command_snapshots.insert(current_id, actor_snapshot);
             let (mut definition_id, mut action_library) =
                 self.object_definition_context(idx)?;
             let previous_action_state = self.objects[idx].state.action.clone();
@@ -32366,8 +32648,24 @@ impl Engine {
                 self.reinsert_change_def_contents_link(object_id)?;
             }
 
+            // GetFairCrewPhysical is ordinary script. Its callback can
+            // mutate any object which a later ExecObjects command will read,
+            // so the frame-wide structural table from before that callback
+            // is no longer valid even though only the actor's captured
+            // physical value feeds the retained continuation.
+            let mut resolved_command_physical = false;
             for event in command_events {
-                self.apply_command_event(event)?;
+                resolved_command_physical |= self.apply_command_event(event)?;
+            }
+            if resolved_command_physical {
+                command_snapshots = (0..self.objects.len())
+                    .map(|index| {
+                        let snapshot = self.live_command_snapshot(index);
+                        (snapshot.id, snapshot)
+                    })
+                    .collect();
+                Self::refresh_command_master_list_order(&self.exec_list, &mut command_snapshots);
+                command_snapshot_exec_insert_generation = self.exec_list_insert_generation;
             }
 
             if !queue_events.is_empty() {
@@ -32524,7 +32822,9 @@ impl Engine {
             let exec_action_index = self.objects[idx].state.action.act_map_index;
             let (exec_action_definition_id, exec_action_library) =
                 self.object_definition_context(idx)?;
-            let exec_action_returned_early = self.apply_physics_at_index(idx)?;
+            let mut exec_action_physical = None;
+            let exec_action_returned_early =
+                self.apply_physics_at_index_inner(idx, Some(&mut exec_action_physical))?;
             if self.objects[idx].destroyed {
                 continue;
             }
@@ -32539,7 +32839,8 @@ impl Engine {
             // exit) skips it entirely; movement below still runs.
             let mut allow_deleted_phase_end_start = false;
             if !exec_action_returned_early {
-                let physical_for_advance = self.object_physical(idx);
+                let physical_for_advance = exec_action_physical
+                    .unwrap_or_else(|| self.object_physical_without_fair_fill(idx));
                 let mut advance_outcome = {
                     let object = &mut self.objects[idx];
                     // iPhaseAdvance (C4Object.cpp:4696): WALK fixtoi(|xdir|*10)
@@ -32577,22 +32878,12 @@ impl Engine {
                         }
                         _ => 1,
                     };
-                    let increment_live_time = object.state.action.name == exec_action_source
-                        && object.state.action.act_map_index == exec_action_index
-                        && !matches!(
-                            exec_action_library
-                                .procedure_for_entry(&exec_action_source, exec_action_index),
-                            ActionProcedure::Bridge
-                                | ActionProcedure::Build
-                                | ActionProcedure::Connect
-                                | ActionProcedure::Lift
-                        );
                     exec_action_library.advance_state_from_entry_by(
                         &mut object.state.action,
                         &exec_action_source,
                         exec_action_index,
                         phase_advance,
-                        increment_live_time,
+                        false,
                     )
                 };
 
@@ -33379,7 +33670,8 @@ impl Engine {
                     command_direction: self.objects[idx].state.command_direction,
                     construction: self.objects[idx].state.construction,
                     direction: self.objects[idx].state.direction,
-                    physical: self.object_physical(idx),
+                    physical: self.object_physical_without_fair_fill(idx),
+                    physical_deferred: false,
                     owner: self.objects[idx].state.owner,
                     controller: self.objects[idx].state.controller,
                     base: self.objects[idx].state.base,
@@ -36004,6 +36296,9 @@ impl Engine {
     }
 
     pub fn restore_state(&mut self, state: &EngineState) -> Result<(), EngineError> {
+        // C4Def::pFairCrewPhysical is derived runtime state. A restored game
+        // must lazily rebuild it from the restored parameters and RNG epoch.
+        self.clear_fair_crew_physicals();
         self.active_message_board_input = None;
         self.pending_game_goal_menu_requests.clear();
         self.network_target_fps_requests.borrow_mut().clear();
@@ -40575,7 +40870,15 @@ impl Engine {
     }
 
     #[doc(hidden)]
-    pub fn apply_physics_at_index(&mut self, mut idx: usize) -> Result<bool, EngineError> {
+    pub fn apply_physics_at_index(&mut self, idx: usize) -> Result<bool, EngineError> {
+        self.apply_physics_at_index_inner(idx, None)
+    }
+
+    fn apply_physics_at_index_inner(
+        &mut self,
+        mut idx: usize,
+        captured_physical: Option<&mut Option<PhysicalInfo>>,
+    ) -> Result<bool, EngineError> {
         if idx >= self.objects.len() {
             return Ok(false);
         }
@@ -40612,7 +40915,7 @@ impl Engine {
             object.state.t_attach = object.frame_t_attach;
         }
 
-        let (is_idle_action, incomplete_activity, energy_usage, source_procedure) = self
+        let (is_idle_action, incomplete_activity, energy_usage) = self
             .definitions
             .get(&self.objects[idx].definition_id)
             .map(|definition| {
@@ -40622,23 +40925,89 @@ impl Engine {
                     library.is_idle_state(action),
                     definition.incomplete_activity(),
                     library.energy_usage_for_entry(&action.name, action.act_map_index),
-                    library.procedure_for_entry(&action.name, action.act_map_index),
                 )
             })
-            .unwrap_or((true, false, 0, ActionProcedure::Undefined));
+            .unwrap_or((true, false, 0));
+
+        // Native idle actions return before C4Object::GetPhysical
+        // (C4Object.cpp:4718-4723). Besides preserving hook/RNG laziness,
+        // this keeps their gravity-only path out of the phase tail.
+        if is_idle_action {
+            if self.objects[idx].state.mobile {
+                self.apply_do_gravity_at_index(idx);
+            }
+            return Ok(true);
+        }
 
         // A real action on an object without OCF_FullCon is reset through
         // ordinary SetAction(ActIdle) unless its definition opts into
         // IncompleteActivity (C4Object.cpp:4725-4729). SetAction supplies the
         // synchronous Abort callback, OCF refresh and fixed-position resync;
         // ExecAction returns even when NoOtherAction rejects the transition.
-        if !is_idle_action
-            && self.objects[idx].state.ocf & crate::ocf::FULL_CON == 0
-            && !incomplete_activity
-        {
+        if self.objects[idx].state.ocf & crate::ocf::FULL_CON == 0 && !incomplete_activity {
             let definition_id = self.objects[idx].definition_id.clone();
             let _ = tolerate_script_error(self.action_with_calls(idx, &definition_id, "Idle"))?;
             return Ok(true);
+        }
+
+        // C++ retains pAction first, then resolves pPhysical exactly once
+        // before the action-energy gate and every script-capable procedure
+        // (C4Object.cpp:4731-4733). Keep the pAction-derived metadata and
+        // copied physical together across callbacks below.
+        let action_definition_id = self.objects[idx].definition_id.clone();
+        let (
+            procedure,
+            movement_profile,
+            mut gravity_component,
+            is_idle,
+            action_attach,
+            action_disabled,
+            in_liquid_action,
+        ) = {
+            let gravity = self.physics.gravity_as_c4fixed();
+            if let Some(definition) = self.definitions.get(&action_definition_id) {
+                let object = &self.objects[idx];
+                let library = definition.action_library();
+                let procedure = library.procedure_for_entry(
+                    &object.state.action.name,
+                    object.state.action.act_map_index,
+                );
+                (
+                    procedure,
+                    definition.movement_profile(),
+                    procedure.gravity_component_fixed(gravity),
+                    library.is_idle_state(&object.state.action),
+                    library.attach_for_entry(
+                        &object.state.action.name,
+                        object.state.action.act_map_index,
+                    ),
+                    library.disables_object_for_entry(
+                        &object.state.action.name,
+                        object.state.action.act_map_index,
+                    ),
+                    library
+                        .in_liquid_action_for_entry(
+                            &object.state.action.name,
+                            object.state.action.act_map_index,
+                        )
+                        .map(str::to_string),
+                )
+            } else {
+                let procedure = ActionProcedure::default();
+                (
+                    procedure,
+                    MovementProfile::default(),
+                    procedure.gravity_component_fixed(gravity),
+                    true,
+                    0,
+                    false,
+                    None,
+                )
+            }
+        };
+        let physical = self.object_physical(idx);
+        if let Some(slot) = captured_physical {
+            *slot = Some(physical);
         }
 
         // C4ActionDef::EnergyUsage is a signed, nonzero gate on every real
@@ -40647,7 +41016,7 @@ impl Engine {
         // InLiquidAction, steering and phase advance. Insufficient power is
         // the native idle return: mark NeedEnergy, apply raw gravity only to
         // Mobile objects, and skip all remaining action work.
-        if self.structures_need_energy && !is_idle_action && energy_usage != 0 {
+        if self.structures_need_energy && energy_usage != 0 {
             if energy_usage <= self.objects[idx].state.energy {
                 let object = &mut self.objects[idx];
                 object.state.energy = object.state.energy.wrapping_sub(energy_usage);
@@ -40664,35 +41033,17 @@ impl Engine {
                 return Ok(true);
             }
         }
-        // CONNECT is executed inside this helper rather than the deferred
-        // phase tail. Advance its source Action.Time here, after the energy
-        // gate but before InLiquidAction, exactly where C++ advances every
-        // real action (C4Object.cpp:4755-4756).
-        if matches!(source_procedure, ActionProcedure::Connect) {
-            self.objects[idx].state.action.time = self.objects[idx]
-                .state
-                .action
-                .time
-                .wrapping_add(1);
-        }
+        // Native increments the LIVE Action.Time exactly once after the
+        // energy gate and before InLiquidAction/procedure dispatch
+        // (C4Object.cpp:4755-4756). GetPhysical may have replaced the action,
+        // so this deliberately does not write through the retained pAction.
+        self.objects[idx].state.action.time = self.objects[idx].state.action.time.wrapping_add(1);
         // InLiquidAction check (C4Object.cpp:4749-4753): an InLiquid
         // object whose action declares one switches THROUGH
         // SetActionByName (Abort+Start calls, fix resync) and returns
         // early — steering and the phase advance skip; movement runs.
         if self.objects[idx].state.in_liquid {
-            let switch = self
-                .definitions
-                .get(&self.objects[idx].definition_id)
-                .and_then(|definition| {
-                    definition
-                        .action_library()
-                        .in_liquid_action_for_entry(
-                            &self.objects[idx].state.action.name,
-                            self.objects[idx].state.action.act_map_index,
-                        )
-                        .map(str::to_string)
-                });
-            if let Some(target) = switch {
+            if let Some(target) = in_liquid_action {
                 let definition_id = self.objects[idx].definition_id.clone();
                 self.action_with_calls(idx, &definition_id, &target)?;
                 return Ok(true);
@@ -40706,53 +41057,6 @@ impl Engine {
         let mut definition_id = self.objects[idx].definition_id.clone();
         let command_direction = self.objects[idx].state.command_direction;
         let action_target = self.objects[idx].state.action.target;
-
-        let (
-            procedure,
-            movement_profile,
-            mut gravity_component,
-            is_idle,
-            action_attach,
-            action_disabled,
-        ) = {
-            let gravity = self.physics.gravity_as_c4fixed();
-            if let Some(definition) = self.definitions.get(&definition_id) {
-                let object = &self.objects[idx];
-                let library = definition.action_library();
-                let procedure = library.procedure_for_entry(
-                    &object.state.action.name,
-                    object.state.action.act_map_index,
-                );
-                let gravity = procedure.gravity_component_fixed(gravity);
-                let is_idle = library.is_idle_state(&object.state.action);
-                let action_attach = library.attach_for_entry(
-                    &object.state.action.name,
-                    object.state.action.act_map_index,
-                );
-                (
-                    procedure,
-                    definition.movement_profile(),
-                    gravity,
-                    is_idle,
-                    action_attach,
-                    library.disables_object_for_entry(
-                        &object.state.action.name,
-                        object.state.action.act_map_index,
-                    ),
-                )
-            } else {
-                let procedure = ActionProcedure::default();
-                let gravity = procedure.gravity_component_fixed(gravity);
-                (
-                    procedure,
-                    MovementProfile::default(),
-                    gravity,
-                    true,
-                    0,
-                    false,
-                )
-            }
-        };
 
         // Latch this frame's Action.t_attach from the PRE-wrap action
         // (C4Object.cpp:4692 + per-procedure assignments): the phase-wrap
@@ -40825,15 +41129,6 @@ impl Engine {
         }
 
         if matches!(procedure, ActionProcedure::Bridge) {
-            // Action.Time++ precedes the procedure switch in C++
-            // (C4Object.cpp:4755-4756), and DoBridge observes the incremented
-            // value (:4585-4603). The generic phase tail must therefore not
-            // increment Bridge a second time.
-            self.objects[idx].state.action.time = self.objects[idx]
-                .state
-                .action
-                .time
-                .wrapping_add(1);
             if !self.apply_bridge_procedure(idx, command_direction, &definition_id)? {
                 // `if (!DoBridge(this)) return;` skips the phase tail
                 // (C4Object.cpp:4998-4999).
@@ -40842,12 +41137,6 @@ impl Engine {
         }
 
         if matches!(procedure, ActionProcedure::Build) {
-            // Action.Time++ precedes the procedure switch in C++
-            // (C4Object.cpp:4755-4756), including every early BUILD return.
-            // The external phase tail still advances Phase/PhaseDelay but
-            // must not increment Time a second time.
-            self.objects[idx].state.action.time =
-                self.objects[idx].state.action.time.wrapping_add(1);
             if !self.apply_build_procedure(idx)? {
                 return Ok(true);
             }
@@ -40862,7 +41151,7 @@ impl Engine {
         // A false helper result is a native `return` from ExecAction. Signal
         // the outer object loop to skip the captured action's phase tail.
         if matches!(procedure, ActionProcedure::Fight)
-            && !self.apply_fight_procedure(idx)?
+            && !self.apply_fight_procedure(idx, physical)?
         {
             return Ok(true);
         }
@@ -40880,6 +41169,7 @@ impl Engine {
                 command_direction,
                 movement_profile,
                 &definition_id,
+                physical,
             )?
             {
                 return Ok(true);
@@ -40894,6 +41184,7 @@ impl Engine {
                 command_direction,
                 movement_profile,
                 &definition_id,
+                physical,
             )?
             {
                 return Ok(true);
@@ -40906,14 +41197,6 @@ impl Engine {
         // ahead of the generic gravity block below so LiftTop observes the
         // pre-gravity lifter state.
         if matches!(procedure, ActionProcedure::Lift) {
-            // Action.Time++ precedes the procedure switch in C++
-            // (C4Object.cpp:4755-4756), so Contact/Stuck and LiftTop see the
-            // incremented value. The outer phase tail must not add it again.
-            self.objects[idx].state.action.time = self.objects[idx]
-                .state
-                .action
-                .time
-                .wrapping_add(1);
             let lifter_id = self.objects[idx].id;
             if !self.apply_lift_to_target(idx, command_direction, action_target)? {
                 // C++ uses ordinary SetAction(ActIdle), including its
@@ -40960,7 +41243,6 @@ impl Engine {
 
         let mut exec_set_direction = None;
         {
-            let physical = self.object_physical(idx);
             // At-limit physical training before the ComDir movement: Scale
             // Tick5 (C4Object.cpp:4810-4812), Hangle Tick5 (:4844-4846),
             // Swim Tick10 (:4924-4926).
@@ -43145,9 +43427,21 @@ impl Engine {
         &mut self,
         idx: usize,
         t_contact: u32,
-        definition_id: &DefinitionId,
+        _definition_id: &DefinitionId,
         solid_mask_indices: &[usize],
     ) -> Result<(), EngineError> {
+        let Some(object_id) = self.objects.get(idx).map(|object| object.id) else {
+            return Ok(());
+        };
+        // ContactAction resolves physicals before even its idle-action gate;
+        // Def, Action and OCF are read only after that callback returns
+        // (C4Object.cpp:4324-4330).
+        let physical = self.object_physical(idx);
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        let live_definition_id = self.objects[idx].definition_id.clone();
+        let definition_id = &live_definition_id;
         let Some(definition) = self.definitions.get(definition_id) else {
             return Ok(());
         };
@@ -43160,7 +43454,6 @@ impl Engine {
         let procedure = library.procedure_for_entry(&action_name, action.act_map_index);
         let action_disabled =
             library.disables_object_for_entry(&action_name, action.act_map_index);
-        let physical = self.object_physical(idx);
         let ocf = self.objects[idx].state.ocf;
         let com_dir = self.objects[idx].state.command_direction;
         let direction = self.objects[idx].state.direction;
@@ -44092,9 +44385,9 @@ impl Engine {
         target_idx: usize,
         command_direction: CommandDirection,
         _definition_id: &DefinitionId,
+        physical: PhysicalInfo,
     ) -> Result<bool, EngineError> {
         let puller_id = self.objects[idx].id;
-        let physical = self.object_physical(idx);
         let position = self.objects[idx].state.position;
         let target_position = self.objects[target_idx].state.position;
         let own_width = self.objects[idx]
@@ -44213,6 +44506,7 @@ impl Engine {
         command_direction: CommandDirection,
         movement_profile: MovementProfile,
         definition_id: &DefinitionId,
+        physical: PhysicalInfo,
     ) -> Result<bool, EngineError> {
         let puller_id = self.objects[idx].id;
         let Some(target_id) = self.objects[idx].state.action.target else {
@@ -44250,12 +44544,13 @@ impl Engine {
             return Ok(false);
         }
 
-        if self.object_physical(idx).walk != 0 {
+        if physical.walk != 0 {
             return self.apply_pull_procedure_physical(
                 idx,
                 target_idx,
                 command_direction,
                 definition_id,
+                physical,
             );
         }
 
@@ -44360,7 +44655,11 @@ impl Engine {
         Ok(true)
     }
 
-    fn apply_fight_procedure(&mut self, idx: usize) -> Result<bool, EngineError> {
+    fn apply_fight_procedure(
+        &mut self,
+        idx: usize,
+        physical: PhysicalInfo,
+    ) -> Result<bool, EngineError> {
         let fighter_id = self.objects[idx].id;
         let Some(target_id) = self.objects[idx].state.action.target else {
             let _ = self.object_action_stand_live(fighter_id)?;
@@ -44444,7 +44743,7 @@ impl Engine {
         if direction == Direction::Right {
             approach_x = target_position.x - target_half_width - 2;
         }
-        let limit = math::val_by_physical(95, self.object_physical(idx).walk);
+        let limit = math::val_by_physical(95, physical.walk);
         let physics = self.physics;
         let fighter = &mut self.objects[idx];
         let mut xdir = fighter.fixed_velocity.x;
@@ -44756,8 +45055,8 @@ impl Engine {
         target_idx: usize,
         command_direction: CommandDirection,
         definition_id: &DefinitionId,
+        physical: PhysicalInfo,
     ) -> Result<bool, EngineError> {
-        let physical = self.object_physical(idx);
         let limit = math::val_by_physical(280, physical.walk);
         // ComDir → target speed and straightening (C4Object.cpp:5049-5057).
         let (txdir, straighten) = match command_direction {
@@ -44876,6 +45175,7 @@ impl Engine {
         command_direction: CommandDirection,
         movement_profile: MovementProfile,
         definition_id: &DefinitionId,
+        physical: PhysicalInfo,
     ) -> Result<bool, EngineError> {
         let Some(target_id) = self.objects[idx].state.action.target else {
             self.stop_action_delay_command(idx, definition_id)?;
@@ -44904,12 +45204,13 @@ impl Engine {
             return Ok(false);
         }
 
-        if self.object_physical(idx).walk != 0 {
+        if physical.walk != 0 {
             return self.apply_push_procedure_physical(
                 idx,
                 target_idx,
                 command_direction,
                 definition_id,
+                physical,
             );
         }
 
@@ -46282,10 +46583,12 @@ impl Engine {
     /// `C4Object::BuyEnergy` (C4Object.cpp:814-823): buy one hundred
     /// percent-points for the base object, charging its assigned player.
     fn buy_object_energy(&mut self, idx: usize) -> Result<bool, EngineError> {
-        let (base_player, owner) = {
-            let object = &self.objects[idx];
-            (object.state.base, object.state.owner)
-        };
+        let base_player = self.objects[idx].state.base;
+        // Native captures pPlr and returns before GetPhysical when Base does
+        // not resolve (C4Object.cpp:816-817).
+        if !self.players.contains_key(&base_player) {
+            return Ok(false);
+        }
         if self.object_physical(idx).energy == 0 {
             return Ok(false);
         }
@@ -46300,6 +46603,9 @@ impl Engine {
             return Ok(false);
         }
         self.adjust_player_wealth(base_player, -self.base_regenerate_energy_price)?;
+        // GetFairCrewPhysical may have changed the object's owner. Native
+        // evaluates this argument only when it reaches DoEnergy (:821).
+        let owner = self.objects[idx].state.owner;
         self.change_object_energy(idx, 100, C4FX_CALL_ENG_BASE_REFRESH, owner)?;
         Ok(true)
     }
@@ -46330,14 +46636,22 @@ impl Engine {
         if frame % 3 == 0 && self.objects[idx].state.alive {
             let recipient_owner = self.objects[idx].state.owner;
             let recipient_energy = self.objects[idx].state.energy;
-            let recipient_max = self.object_physical(idx).energy;
-            if let Some(container_id) = self.objects[idx].state.container {
-                if let Some(container_idx) = self.find_object_index(container_id) {
-                    let base_player = self.objects[container_idx].state.base;
-                    if self.players.contains_key(&base_player)
-                        && !self.players_hostile(recipient_owner, base_player)
-                        && recipient_energy < recipient_max
-                        && self.base_regenerate_energy_enabled
+            let eligible_container = self.objects[idx].state.container.and_then(|container_id| {
+                let container_idx = self.find_object_index(container_id)?;
+                let base_player = self.objects[container_idx].state.base;
+                (self.players.contains_key(&base_player)
+                    && !self.players_hostile(recipient_owner, base_player))
+                .then_some(container_id)
+            });
+            // C++ reaches GetPhysical only after Contained, ValidPlr and
+            // Hostile have all passed (:843-846).
+            if eligible_container.is_some() {
+                let recipient_max = self.object_physical(idx).energy;
+                if recipient_energy < recipient_max && self.base_regenerate_energy_enabled {
+                    if let Some(container_idx) = self.objects[idx]
+                        .state
+                        .container
+                        .and_then(|container_id| self.find_object_index(container_id))
                     {
                         if self.objects[container_idx].state.energy <= 0 {
                             let _ = self.buy_object_energy(container_idx)?;
@@ -46355,28 +46669,38 @@ impl Engine {
                                 .min(self.objects[current_container_idx].state.energy)
                                 .min(recipient_max_after_buy - self.objects[idx].state.energy);
                             if transfer != 0 {
-                                let debit_caused_by =
-                                    self.objects[current_container_idx].state.owner;
-                                self.change_object_energy_exact(
-                                    current_container_idx,
-                                    -transfer,
-                                    C4FX_CALL_ENG_BASE_REFRESH,
-                                    debit_caused_by,
-                                )?;
-                                // `Contained->Owner` is evaluated again for
-                                // the second call after donor damage callbacks.
-                                let credit_caused_by = self.objects[idx]
+                                // The second GetPhysical may have changed
+                                // Contained. Native dereferences the live
+                                // pointer again for the donor DoEnergy call.
+                                if let Some(debit_container_idx) = self.objects[idx]
                                     .state
                                     .container
                                     .and_then(|current| self.find_object_index(current))
-                                    .map(|current_idx| self.objects[current_idx].state.owner)
-                                    .unwrap_or(OWNER_NONE);
-                                self.change_object_energy_exact(
-                                    idx,
-                                    transfer,
-                                    C4FX_CALL_ENG_BASE_REFRESH,
-                                    credit_caused_by,
-                                )?;
+                                {
+                                    let debit_caused_by =
+                                        self.objects[debit_container_idx].state.owner;
+                                    self.change_object_energy_exact(
+                                        debit_container_idx,
+                                        -transfer,
+                                        C4FX_CALL_ENG_BASE_REFRESH,
+                                        debit_caused_by,
+                                    )?;
+                                    // `Contained->Owner` is evaluated again
+                                    // for the second call after donor damage
+                                    // callbacks.
+                                    let credit_caused_by = self.objects[idx]
+                                        .state
+                                        .container
+                                        .and_then(|current| self.find_object_index(current))
+                                        .map(|current_idx| self.objects[current_idx].state.owner)
+                                        .unwrap_or(OWNER_NONE);
+                                    self.change_object_energy_exact(
+                                        idx,
+                                        transfer,
+                                        C4FX_CALL_ENG_BASE_REFRESH,
+                                        credit_caused_by,
+                                    )?;
+                                }
                             }
                         }
                     }
@@ -46389,35 +46713,56 @@ impl Engine {
         if frame % 3 == 0 && self.objects[idx].state.alive {
             let recipient_owner = self.objects[idx].state.owner;
             let recipient_magic = self.objects[idx].state.magic_energy;
-            let recipient_max = self.object_physical(idx).magic;
-            if let Some(container_id) = self.objects[idx].state.container {
-                if let Some(container_idx) = self.find_object_index(container_id) {
-                    let container_owner = self.objects[container_idx].state.owner;
-                    if !self.players_hostile(recipient_owner, container_owner)
-                        && recipient_magic < recipient_max
+            let eligible_container = self.objects[idx].state.container.and_then(|container_id| {
+                let container_idx = self.find_object_index(container_id)?;
+                let container_owner = self.objects[container_idx].state.owner;
+                (!self.players_hostile(recipient_owner, container_owner)).then_some(container_id)
+            });
+            // Native's Contained/Hostile gates precede GetPhysical()->Magic
+            // (C4Object.cpp:859-862).
+            if eligible_container.is_some() {
+                let recipient_max = self.object_physical(idx).magic;
+                if recipient_magic < recipient_max {
+                    if let Some(container_idx) = self.objects[idx]
+                        .state
+                        .container
+                        .and_then(|current| self.find_object_index(current))
                     {
                         const MAGIC_PHYSICAL_FACTOR: i32 = 1000;
+                        // Native performs a second GetPhysical in the transfer
+                        // expression and rereads both live energy words
+                        // (C4Object.cpp:864).
+                        let recipient_max_after_check = self.object_physical(idx).magic;
                         let transfer = (2 * MAGIC_PHYSICAL_FACTOR)
                             .min(self.objects[container_idx].state.magic_energy)
-                            .min(recipient_max - recipient_magic)
+                            .min(recipient_max_after_check - self.objects[idx].state.magic_energy)
                             / MAGIC_PHYSICAL_FACTOR;
                         if transfer != 0 {
-                            let debited = self.call_engine_global_function(
-                                "DoMagicEnergy",
-                                &[
-                                    Value::Int(-transfer),
-                                    compat::object_reference_value(container_id),
-                                ],
-                            )?;
-                            if compat::value_raw_truthy(&debited) {
-                                let recipient_id = self.objects[idx].id;
-                                let _ = self.call_engine_global_function(
+                            // The second GetPhysical may have changed
+                            // Contained. Native resolves the donor again for
+                            // the DoMagicEnergy debit.
+                            if let Some(debit_container_id) =
+                                self.objects[idx].state.container.and_then(|current| {
+                                    self.find_object_index(current).map(|_| current)
+                                })
+                            {
+                                let debited = self.call_engine_global_function(
                                     "DoMagicEnergy",
                                     &[
-                                        Value::Int(transfer),
-                                        compat::object_reference_value(recipient_id),
+                                        Value::Int(-transfer),
+                                        compat::object_reference_value(debit_container_id),
                                     ],
                                 )?;
+                                if compat::value_raw_truthy(&debited) {
+                                    let recipient_id = self.objects[idx].id;
+                                    let _ = self.call_engine_global_function(
+                                        "DoMagicEnergy",
+                                        &[
+                                            Value::Int(transfer),
+                                            compat::object_reference_value(recipient_id),
+                                        ],
+                                    )?;
+                                }
                             }
                         }
                     }
@@ -46433,7 +46778,6 @@ impl Engine {
             .map(|definition| definition.no_breath())
             .unwrap_or(false);
         if frame % 5 == 0 && self.objects[idx].state.alive && !no_breath {
-            let physical = self.object_physical(idx);
             let position = self.objects[idx].state.position;
             let shape_top = self.objects[idx]
                 .current_shape_rect()
@@ -46446,9 +46790,12 @@ impl Engine {
                     .and_then(|landscape| landscape.material_at(position.x, mouth_y))
                     == Some(vehicle)
             });
-            let breathe = if vehicle_at_mouth || self.objects[idx].state.container.is_some() {
+            let mut breathe = if vehicle_at_mouth {
                 true
-            } else if physical.breathe_water != 0 {
+            } else if self.object_physical(idx).breathe_water != 0 {
+                // GetFairCrewPhysical runs before this material read. Use the
+                // live position it may have changed, as native does (:891-893).
+                let position = self.objects[idx].state.position;
                 let water = self.materials.id_of("Water");
                 water.is_some()
                     && self
@@ -46457,6 +46804,12 @@ impl Engine {
                         .and_then(|landscape| landscape.material_at(position.x, position.y))
                         == water
             } else {
+                let position = self.objects[idx].state.position;
+                let shape_top = self.objects[idx]
+                    .current_shape_rect()
+                    .map(|rect| rect.y)
+                    .unwrap_or(0);
+                let mouth_y = position.y + shape_top / 2;
                 !self
                     .landscape
                     .as_ref()
@@ -46466,6 +46819,11 @@ impl Engine {
                     })
                     .unwrap_or(false)
             };
+            // Native checks containment after the complete vehicle /
+            // BreatheWater / semisolid chain (C4Object.cpp:899).
+            if self.objects[idx].state.container.is_some() {
+                breathe = true;
+            }
             if !breathe {
                 if self.objects[idx].state.breath > 0 {
                     let breath = &mut self.objects[idx].state.breath;
@@ -46493,8 +46851,9 @@ impl Engine {
                 }
                 self.train_physical(idx, "Breath", 2, C4_MAX_PHYSICAL);
             } else {
-                let take = physical.breath - self.objects[idx].state.breath;
-                if take > physical.breath / 2 {
+                let max_breath = self.object_physical(idx).breath;
+                let take = max_breath - self.objects[idx].state.breath;
+                if take > self.object_physical(idx).breath / 2 {
                     let _ = tolerate_script_error(self.call_object_function(
                         idx,
                         "DeepBreath",
@@ -46513,10 +46872,15 @@ impl Engine {
                 .map(|material| material.corrosive())
                 .unwrap_or(0);
             if corrosive != 0 && self.object_physical(idx).corrosion_resist == 0 {
+                let live_corrosive = self.objects[idx]
+                    .in_mat
+                    .and_then(|material| self.materials.get_by_id(material))
+                    .map(|material| material.corrosive())
+                    .unwrap_or(0);
                 let caused_by = self.objects[idx].last_energy_loss_cause;
                 self.change_object_energy(
                     idx,
-                    corrosive.wrapping_neg() / 15,
+                    live_corrosive.wrapping_neg() / 15,
                     C4FX_CALL_ENG_CORROSION,
                     caused_by,
                 )?;
@@ -46880,42 +47244,189 @@ impl Engine {
             .or_else(|| Some(self.definition_physical(idx)))
     }
 
-    fn fair_crew_info_physical(&self, idx: usize, raw: PhysicalInfo) -> PhysicalInfo {
+    fn fill_fair_crew_projection(
+        &mut self,
+        definition_id: DefinitionId,
+        definition_physical: PhysicalInfo,
+        rank_base: i32,
+        script: Arc<ScriptEngine>,
+    ) -> PhysicalInfo {
+        let (mut physical, rank) = match begin_fair_crew_projection(
+            definition_physical,
+            self.fair_crew_strength,
+            rank_base,
+            &definition_id,
+            &self.fair_crew_physical_cache,
+        ) {
+            FairCrewProjectionStart::Cached(physical) => return physical,
+            FairCrewProjectionStart::New { physical, rank } => (physical, rank),
+        };
+        if !script.has_function("GetFairCrewPhysical") {
+            return physical;
+        }
+
+        for name in FAIR_CREW_PHYSICAL_NAMES {
+            let current = physical.value_by_name(name).unwrap_or_default();
+            let args = [Value::from(name), Value::Int(rank), Value::Int(current)];
+            let world = self.host_world_context();
+            let global_effects = self.global_effects.clone();
+            let (value, final_args, batch, audio, rng, script_error) =
+                compat::with_fair_crew_definition_context(
+                    definition_id.clone(),
+                    definition_physical,
+                    || {
+                        ScenarioScript::execute_value_for_script(
+                            definition_id.as_str(),
+                            Some(definition_id.clone()),
+                            "GetFairCrewPhysical",
+                            &args,
+                            world,
+                            self.rng.clone(),
+                            self.frame,
+                            &global_effects,
+                            self.physics,
+                            self.environment,
+                            self.audio_registry.clone(),
+                            self.game_over_triggered,
+                            || script.call_with_ref_args("GetFairCrewPhysical", &args),
+                        )
+                    },
+                );
+            self.rng = rng;
+            self.audio_registry = audio;
+            // Native host operations happen before the callback returns and
+            // before its reference value commits. Fold the copied host world
+            // first so any re-entrant read sees the published partial cache.
+            if let Err(error) = self.apply_scenario_batch(batch) {
+                tracing::warn!(
+                    definition = %definition_id,
+                    field = name,
+                    %error,
+                    "fair-crew callback host batch failed to apply"
+                );
+            }
+            if script_error.is_none() && value.as_ref().is_some_and(compat::value_raw_truthy) {
+                let value = final_args
+                    .get(2)
+                    .and_then(Value::as_c4_int)
+                    .unwrap_or_default();
+                physical.set_by_name(name, value);
+                self.fair_crew_physical_cache
+                    .borrow_mut()
+                    .insert(definition_id.clone(), physical);
+            }
+        }
+        physical
+    }
+
+    fn fair_crew_info_physical(&mut self, idx: usize, raw: PhysicalInfo) -> PhysicalInfo {
         let object = &self.objects[idx];
-        let definition_id = self
+        let retained_id = self
             .crew_object_infos
             .get(&object.id)
-            .map(|info| &info.definition_id)
-            .unwrap_or(&object.definition_id);
-        let Some(definition) = self.definitions.get(definition_id) else {
-            return fair_crew_physical(raw, self.fair_crew_strength, 1_000);
+            .map(|info| info.definition_id.clone());
+        // C4Object::GetPhysical falls back from a null Info->pDef to the
+        // object's current Def. Rust represents that null pointer as a
+        // retained id whose definition is no longer loaded.
+        let definition_id = retained_id
+            .filter(|id| self.definitions.contains_key(id))
+            .unwrap_or_else(|| object.definition_id.clone());
+        let Some(definition) = self.definitions.get(&definition_id) else {
+            return fair_crew_physical_cached(
+                raw,
+                self.fair_crew_strength,
+                1_000,
+                &definition_id,
+                &self.fair_crew_physical_cache,
+            );
         };
-        fair_crew_physical_with_script(
-            raw,
-            self.fair_crew_strength,
-            definition.rank_base().unwrap_or(1_000),
-            definition_id,
-            definition.script.as_ref(),
-        )
+        let rank_base = definition.rank_base().unwrap_or(1_000);
+        let script = definition.script_arc();
+        self.fill_fair_crew_projection(definition_id, raw, rank_base, script)
     }
 
     /// `C4Object::GetPhysical` (C4Object.cpp:2118-2134): the temporary set
     /// when temporary mode is on; otherwise an object carrying crew info
     /// resolves either its persistent info physicals or the definition's
-    /// fair-crew projection from the live round parameters. Objects without
-    /// info use the definition's `[Physical]` section.
+    /// fair-crew projection cached by definition. Objects without info use
+    /// the definition's `[Physical]` section.
     #[doc(hidden)]
-    pub fn object_physical(&self, idx: usize) -> PhysicalInfo {
-        let object = &self.objects[idx];
+    pub fn object_physical(&mut self, idx: usize) -> PhysicalInfo {
+        if let Some(temporary) = self.objects[idx].state.temporary_physical {
+            return temporary;
+        }
         let definition = self.definition_physical(idx);
         let permanent = match self.info_definition_physical(idx) {
             Some(info_definition) if self.use_fair_crew => {
                 self.fair_crew_info_physical(idx, info_definition)
             }
-            Some(info_definition) => object.state.info_physical.unwrap_or(info_definition),
+            Some(info_definition) => self.objects[idx]
+                .state
+                .info_physical
+                .unwrap_or(info_definition),
             None => definition,
         };
-        object.state.temporary_physical.unwrap_or(permanent)
+        permanent
+    }
+
+    /// Command tables carry a physical field for every structural target,
+    /// although production handlers only inspect the executing actor's field.
+    /// Build those unused target fields without triggering a lazy definition
+    /// callback; the actor is resolved explicitly at its native read seam.
+    fn object_physical_without_fair_fill(&self, idx: usize) -> PhysicalInfo {
+        if let Some(temporary) = self.objects[idx].state.temporary_physical {
+            return temporary;
+        }
+        let definition = self.definition_physical(idx);
+        match self.info_definition_physical(idx) {
+            Some(info_definition) if self.use_fair_crew => {
+                let object = &self.objects[idx];
+                let definition_id = self
+                    .crew_object_infos
+                    .get(&object.id)
+                    .map(|info| info.definition_id.clone())
+                    .filter(|id| self.definitions.contains_key(id))
+                    .unwrap_or_else(|| object.definition_id.clone());
+                if let Some(physical) = self
+                    .fair_crew_physical_cache
+                    .borrow()
+                    .get(&definition_id)
+                    .copied()
+                {
+                    return physical;
+                }
+                let rank_base = self
+                    .definitions
+                    .get(&definition_id)
+                    .and_then(Definition::rank_base)
+                    .unwrap_or(1_000);
+                fair_crew_physical(info_definition, self.fair_crew_strength, rank_base)
+            }
+            Some(info_definition) => self.objects[idx]
+                .state
+                .info_physical
+                .unwrap_or(info_definition),
+            None => definition,
+        }
+    }
+
+    fn object_physical_will_fill_fair_cache(&self, idx: usize) -> bool {
+        if !self.use_fair_crew || self.objects[idx].state.temporary_physical.is_some() {
+            return false;
+        }
+        let object = &self.objects[idx];
+        let Some(info) = self.crew_object_infos.get(&object.id) else {
+            return false;
+        };
+        let definition_id = self
+            .definitions
+            .contains_key(&info.definition_id)
+            .then_some(&info.definition_id)
+            .unwrap_or(&object.definition_id);
+        !self
+            .fair_crew_physical_cache
+            .borrow()
+            .contains_key(definition_id)
     }
 
     /// `C4Object::TrainPhysical` (C4Object.cpp:2136-2146): trains the
@@ -47147,6 +47658,9 @@ impl Engine {
         cause: i32,
         caused_by: i32,
     ) -> Result<(), EngineError> {
+        // C++ captures this before damage effects and GetPhysical callbacks
+        // (C4Object.cpp:1375-1377).
+        let was_zero = self.objects[idx].state.energy == 0;
         // Mark the damage-causing player first (C4Object.cpp:1351-1353).
         if change < 0 || cause == C4FX_CALL_ENG_OBJ_HIT {
             self.update_last_energy_loss_cause(idx, caused_by);
@@ -47163,13 +47677,11 @@ impl Engine {
             change
         };
         let max_energy = self.object_physical(idx).energy;
-        let was_zero = {
+        {
             let object = &mut self.objects[idx];
-            let was_zero = object.state.energy == 0;
             object.state.energy =
                 bound_energy(object.state.energy.saturating_add(change), max_energy);
-            was_zero
-        };
+        }
         if self.objects[idx].state.alive && self.objects[idx].state.energy == 0 && !was_zero {
             let _ = tolerate_script_error(self.assign_death(idx, false))?;
         }
@@ -48353,6 +48865,9 @@ impl Engine {
         self.resort_all_unsorted();
         self.execute_object_order_commands();
         self.fix_random();
+        // Defs.Synchronize follows FixRandom in C4Game::Synchronize. Cache
+        // refill stays lazy because its 21 hooks can consume synchronized RNG.
+        self.clear_fair_crew_physicals();
         // C4Landscape::Synchronize resets the progressive material-scan
         // cursor before synchronized play resumes (C4Landscape.cpp:1662-1667).
         if let Some(landscape) = self.landscape.as_mut() {
@@ -53098,7 +53613,10 @@ impl Engine {
         } else {
             1
         };
-        if !self.action_with_calls(actor_index, &definition_id, "Throw")? {
+        // ObjectActionThrow resolves SetActionByName against the live Def
+        // after GetPhysical returns (C4ObjectCom.cpp:127-130).
+        let live_definition_id = self.objects[actor_index].definition_id.clone();
+        if !self.action_with_calls(actor_index, &live_definition_id, "Throw")? {
             return Ok(false);
         }
 
@@ -53266,7 +53784,11 @@ impl Engine {
         self.resolve_command_event_instance_id(caller, kind, command_instance_id)
     }
 
-    fn apply_command_event(&mut self, event: CommandEvent) -> Result<(), EngineError> {
+    /// Apply one command event and report whether it (including any retained
+    /// stop/prelude continuation it resumes) crossed a callbackful physical
+    /// read. ExecObjects uses this signal to invalidate its outer snapshots.
+    fn apply_command_event(&mut self, event: CommandEvent) -> Result<bool, EngineError> {
+        let mut resolved_command_physical = false;
         match event {
             CommandEvent::SetPathFinderSettings {
                 level,
@@ -53280,6 +53802,63 @@ impl Engine {
             }
             CommandEvent::ApplyObjectUpdate { object_id, update } => {
                 self.apply_object_update(object_id, update)?;
+            }
+            CommandEvent::ResolveCommandPhysical {
+                object_id,
+                reads,
+                command_instance_id,
+            } => {
+                resolved_command_physical = true;
+                // Bind the native command pointer before GetPhysical enters
+                // GetFairCrewPhysical: that callback may replace the visible
+                // stack, while the outer iExec body must still resume.
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Physical,
+                    command_instance_id,
+                );
+                let mut physical = None;
+                for _ in 0..reads {
+                    let Some(index) = self.find_object_index(object_id) else {
+                        break;
+                    };
+                    // C++ occasionally spells one logical gate as two
+                    // GetPhysical calls. Execute every read in order; only
+                    // the first missing FairCrew projection invokes script,
+                    // and the final returned pointer feeds the continuation.
+                    physical = Some(self.object_physical(index));
+                }
+                if let Some(physical) = physical {
+                    resolved_command_physical |= self.resume_command_after_physical(
+                        object_id,
+                        command_instance_id,
+                        physical,
+                    )?;
+                }
+            }
+            CommandEvent::MoveToFlightControlTakeoff {
+                object_id,
+                command_instance_id,
+            } => {
+                // Fly's callbacks can mutate any object a later ExecObjects
+                // command will scan. Rebuild the frame-wide snapshot table
+                // even when the retained JumpControl emits no physical read.
+                resolved_command_physical = true;
+                // Bind the retained MoveTo before Fly's Start/Abort calls:
+                // either callback may replace the visible command stack.
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::MoveToFlightControl,
+                    command_instance_id,
+                );
+                if let Some(index) = self.find_object_index(object_id) {
+                    let definition_id = self.objects[index].definition_id.clone();
+                    // FlightControl deliberately ignores SetActionByName's
+                    // result before returning to the procedure-specific tail.
+                    let _ = self.action_with_calls(index, &definition_id, "Fly")?;
+                }
+                resolved_command_physical |=
+                    self.resume_move_to_after_flight(object_id, command_instance_id)?;
             }
             CommandEvent::EnterObject {
                 object_id,
@@ -53343,7 +53922,7 @@ impl Engine {
                 let payer_wealth = self.players.get(&payer).map(|player| player.wealth());
                 if payer_wealth.is_none_or(|wealth| price > wealth) {
                     self.resolve_command_buy_attempt(actor_id, base_id, &definition_id, false)?;
-                    return Ok(());
+                    return Ok(resolved_command_physical);
                 }
 
                 let contained = self
@@ -53361,7 +53940,7 @@ impl Engine {
                                 .with_mode(CommandMode::SilentSub),
                         );
                     }
-                    return Ok(());
+                    return Ok(resolved_command_physical);
                 }
 
                 let purchase_count = self
@@ -53387,7 +53966,7 @@ impl Engine {
                         });
                     let Some((live_buyer, live_payer)) = live_parties else {
                         self.resolve_command_buy_attempt(actor_id, base_id, &definition_id, false)?;
-                        return Ok(());
+                        return Ok(resolved_command_physical);
                     };
                     if !self.base_buy_enabled
                         || !self.players.contains_key(&live_buyer)
@@ -53395,7 +53974,7 @@ impl Engine {
                         || self.players_hostile(live_buyer, live_payer)
                     {
                         self.resolve_command_buy_attempt(actor_id, base_id, &definition_id, false)?;
-                        return Ok(());
+                        return Ok(resolved_command_physical);
                     }
 
                     let bought = tolerate_script_error(self.call_command_buy_item(
@@ -53408,7 +53987,7 @@ impl Engine {
                     .unwrap_or(false);
                     if !bought {
                         self.resolve_command_buy_attempt(actor_id, base_id, &definition_id, false)?;
-                        return Ok(());
+                        return Ok(resolved_command_physical);
                     }
                     if let Some(actor_index) = self.find_object_index(actor_id) {
                         self.objects[actor_index]
@@ -53448,7 +54027,7 @@ impl Engine {
                             &definition_id,
                             false,
                         )?;
-                        return Ok(());
+                        return Ok(resolved_command_physical);
                     };
                     let sold = tolerate_script_error(
                         self.sell_object_to_home(actor_id, candidate, base_owner),
@@ -53461,7 +54040,7 @@ impl Engine {
                             &definition_id,
                             false,
                         )?;
-                        return Ok(());
+                        return Ok(resolved_command_physical);
                     }
                     preferred = None;
                     if let Some(actor_index) = self.find_object_index(actor_id) {
@@ -53726,15 +54305,54 @@ impl Engine {
                     command_instance_id,
                 );
                 let _ = self.object_com_stop_live(object_id)?;
-                self.resume_exit_after_stop(object_id, command_instance_id)?;
+                resolved_command_physical |=
+                    self.resume_exit_after_stop(object_id, command_instance_id)?;
             }
             CommandEvent::ObjectComStopMoveTo { object_id } => {
                 let _ = self.object_com_stop_live(object_id)?;
-                self.resume_move_to_after_stop(object_id)?;
+                resolved_command_physical |= self.resume_move_to_after_stop(object_id)?;
             }
-            CommandEvent::ObjectComStopBuild { object_id } => {
+            CommandEvent::ObjectComStopBuild {
+                object_id,
+                command_instance_id,
+            } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Prelude(CommandId::Build),
+                    command_instance_id,
+                );
                 let _ = self.object_com_stop_live(object_id)?;
-                self.resume_build_after_stop(object_id)?;
+                resolved_command_physical |=
+                    self.resume_build_after_stop(object_id, command_instance_id)?;
+            }
+            CommandEvent::ObjectComStopChop { object_id } => {
+                let _ = self.object_com_stop_live(object_id)?;
+            }
+            CommandEvent::ObjectComStopConstruct {
+                object_id,
+                command_instance_id,
+            } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Prelude(CommandId::Construct),
+                    command_instance_id,
+                );
+                let _ = self.object_com_stop_live(object_id)?;
+                resolved_command_physical |=
+                    self.resume_construct_after_stop(object_id, command_instance_id)?;
+            }
+            CommandEvent::ObjectComStopPut {
+                object_id,
+                command_instance_id,
+            } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Prelude(CommandId::Put),
+                    command_instance_id,
+                );
+                let _ = self.object_com_stop_live(object_id)?;
+                resolved_command_physical |=
+                    self.resume_put_after_stop(object_id, command_instance_id)?;
             }
             CommandEvent::ObjectComBuild {
                 object_id,
@@ -53756,7 +54374,8 @@ impl Engine {
                     command_instance_id,
                 );
                 let _ = self.object_com_stop_live(object_id)?;
-                self.resume_throw_after_prelude(object_id, command_instance_id)?;
+                resolved_command_physical |=
+                    self.resume_throw_after_prelude(object_id, command_instance_id)?;
             }
             CommandEvent::ObjectComStopDrop {
                 object_id,
@@ -53768,7 +54387,8 @@ impl Engine {
                     command_instance_id,
                 );
                 let _ = self.object_com_stop_live(object_id)?;
-                self.resume_drop_after_prelude(object_id, command_instance_id)?;
+                resolved_command_physical |=
+                    self.resume_drop_after_prelude(object_id, command_instance_id)?;
             }
             CommandEvent::ObjectComSetDirThrow {
                 object_id,
@@ -53784,7 +54404,8 @@ impl Engine {
                     let definition_id = self.objects[index].definition_id.clone();
                     self.set_command_action_direction(index, &definition_id, direction)?;
                 }
-                self.resume_throw_after_prelude(object_id, command_instance_id)?;
+                resolved_command_physical |=
+                    self.resume_throw_after_prelude(object_id, command_instance_id)?;
             }
             CommandEvent::AttemptGrab {
                 actor_id,
@@ -53854,7 +54475,62 @@ impl Engine {
                     target2,
                     &definition_id,
                 )?;
-                self.set_construct_script_result(caller, command_instance_id, result)?;
+                let caller_present = self
+                    .find_object_index(caller)
+                    .is_some_and(|index| self.objects[index].state.status != ObjectStatus::Deleted);
+                if caller_present {
+                    resolved_command_physical |=
+                        self.resume_construct_after_script(caller, command_instance_id, result)?;
+                }
+            }
+            CommandEvent::SpawnConstruction {
+                actor_id,
+                definition_id,
+                owner,
+                position,
+                kit_id,
+                command_instance_id,
+            } => {
+                // Runtime events are already stamped. A restored zero token
+                // must be rebound before Construction or conkit Destruction
+                // callbacks can replace the visible command stack.
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    actor_id,
+                    CommandEventInstanceKind::ConstructSpawn,
+                    command_instance_id,
+                );
+                let (width, height, basement) = self
+                    .definitions
+                    .get(&definition_id)
+                    .map(|definition| {
+                        let (width, height) = definition
+                            .shape_rect()
+                            .map(|shape| (shape.width, shape.height))
+                            .unwrap_or_default();
+                        (width, height, definition.basement())
+                    })
+                    .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+
+                // C4Game::CreateObjectConstruction(..., 1, true) prepares
+                // terrain first, then runs the complete NewObject lifecycle
+                // synchronously with a null creator.
+                self.prepare_construction_terrain(position.x, position.y, width, height, basement);
+                let construction_id = self.spawn_object_with_initial_lifecycle(
+                    SpawnConfig::new(definition_id)
+                        .with_position(position)
+                        .with_owner(owner)
+                        .with_construction(1),
+                    None,
+                )?;
+
+                // Native consumes the retained kit even if creation failed
+                // or a creation callback removed the new object.
+                let _ = self.assign_object_removal(kit_id)?;
+                resolved_command_physical |= self.resume_construct_after_spawn(
+                    actor_id,
+                    command_instance_id,
+                    construction_id,
+                )?;
             }
             CommandEvent::SpawnObject {
                 definition_id,
@@ -53951,7 +54627,7 @@ impl Engine {
                         handled,
                         command_instance_id,
                     )?;
-                    return Ok(());
+                    return Ok(resolved_command_physical);
                 }
                 let mut args = Vec::new();
                 args.push(object_reference_value(caller));
@@ -54022,7 +54698,7 @@ impl Engine {
             }
             CommandEvent::OpenMenu(request) => {
                 let Some(crew_index) = self.find_object_index(request.crew_id) else {
-                    return Ok(());
+                    return Ok(resolved_command_physical);
                 };
                 match request.kind {
                     MenuRequestKind::Activate => {
@@ -54106,7 +54782,7 @@ impl Engine {
                 }
             }
         }
-        Ok(())
+        Ok(resolved_command_physical)
     }
 
     fn dispatch_control_command_finished(
@@ -54552,25 +55228,6 @@ impl Engine {
                 let _ = object
                     .commands
                     .resolve_acquire_script_result(command_instance_id, result);
-            }
-        }
-        Ok(())
-    }
-
-    fn set_construct_script_result(
-        &mut self,
-        object_id: ObjectId,
-        command_instance_id: u64,
-        result: AcquireScriptResult,
-    ) -> Result<(), EngineError> {
-        let Some(index) = self.find_object_index(object_id) else {
-            return Ok(());
-        };
-        if let Some(object) = self.objects.get_mut(index) {
-            if object.state.status != ObjectStatus::Deleted {
-                let _ = object
-                    .commands
-                    .resolve_construct_script_result(command_instance_id, result);
             }
         }
         Ok(())
@@ -57919,24 +58576,43 @@ impl Engine {
             .map(|definition| *definition.physical())
             .unwrap_or_default();
         let initial_permanent_physical = match initial_info_physical {
-            Some(_) if self.use_fair_crew => {
-                let info_definition_id = self
+            // Loaded objects compile their saved Energy/Breath and never run
+            // C4Object::Init. In particular, restore must not eagerly refill
+            // the definition fair-crew cache that was just invalidated.
+            Some(_) if self.use_fair_crew && !loaded => {
+                let retained_definition_id = self
                     .crew_object_infos
                     .get(&id)
-                    .map(|info| &info.definition_id)
-                    .unwrap_or(&definition_id);
-                self.definitions.get(info_definition_id).map_or_else(
-                    || fair_crew_physical(definition_physical, self.fair_crew_strength, 1_000),
-                    |definition| {
-                        fair_crew_physical_with_script(
+                    .map(|info| info.definition_id.clone());
+                // C4Object::GetPhysical uses Info->pDef when available and
+                // falls back to the object's current Def when that retained
+                // pointer cannot be resolved after a definition transition.
+                let info_definition_id = retained_definition_id
+                    .filter(|id| self.definitions.contains_key(id))
+                    .unwrap_or_else(|| definition_id.clone());
+                let projection_source =
+                    self.definitions.get(&info_definition_id).map(|definition| {
+                        (
                             *definition.physical(),
-                            self.fair_crew_strength,
                             definition.rank_base().unwrap_or(1_000),
-                            info_definition_id,
-                            definition.script.as_ref(),
+                            definition.script_arc(),
                         )
-                    },
-                )
+                    });
+                match projection_source {
+                    Some((physical, rank_base, script)) => self.fill_fair_crew_projection(
+                        info_definition_id,
+                        physical,
+                        rank_base,
+                        script,
+                    ),
+                    None => fair_crew_physical_cached(
+                        definition_physical,
+                        self.fair_crew_strength,
+                        1_000,
+                        &info_definition_id,
+                        &self.fair_crew_physical_cache,
+                    ),
+                }
             }
             Some(physical) => physical,
             None => definition_physical,

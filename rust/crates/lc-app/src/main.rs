@@ -49156,7 +49156,7 @@ impl GameApp {
     }
 
     fn current_ingame_region_drag_cursor(
-        &self,
+        &mut self,
         pointer: ViewportPointer,
     ) -> Option<IngameRegionDragCursor> {
         if self.ingame_pointer_fog_blocked(pointer) {
@@ -49164,10 +49164,11 @@ impl GameApp {
             // drags that originated in a viewport inventory region.
             return None;
         }
-        let object = self.ingame_dragged_objects.iter().find_map(|object| {
+        let carryable = self.ingame_dragged_objects.iter().find_map(|object| {
             self.engine
                 .object_snapshot(*object)
                 .filter(|object| object.status != lc_engine::ObjectStatus::Deleted)
+                .map(|object| object.ocf & lc_engine::ocf::CARRYABLE != 0)
         })?;
         let put_target = self
             .keyboard_modifiers
@@ -49181,7 +49182,7 @@ impl GameApp {
                 )
             })
             .flatten();
-        if object.ocf & lc_engine::ocf::CARRYABLE != 0 {
+        if carryable {
             if let Some(target) = put_target {
                 return Some(IngameRegionDragCursor::Put(target));
             }
@@ -49940,7 +49941,7 @@ impl GameApp {
     }
 
     fn ingame_moving_drag_caption(
-        &self,
+        &mut self,
         pointer: ViewportPointer,
     ) -> Option<(IngameMouseCursorKind, Option<String>)> {
         let (source, selected) = self.active_ingame_moving_drag()?;
@@ -70325,9 +70326,9 @@ impl GameApp {
                     host_snapshot_changed = true;
                 }
             }
-            // C4CVT_FairCrew. Rust resolves fair-crew physicals live rather
-            // than caching them per definition, so changing these parameters
-            // inherently performs C4Def::ClearFairCrewPhysicals.
+            // C4CVT_FairCrew. Native clears every definition's cached
+            // projection for every accepted control, even if the parameters
+            // are unchanged.
             5 => {
                 let prepared_forced = self
                     .loading_state
@@ -70356,6 +70357,9 @@ impl GameApp {
                 };
                 self.engine.set_use_fair_crew(use_fair_crew);
                 self.engine.set_fair_crew_strength(fair_crew_strength);
+                if self.mode == AppMode::Running {
+                    self.engine.clear_fair_crew_physicals();
+                }
                 if let Some(prepared) = self
                     .loading_state
                     .as_mut()
@@ -78458,7 +78462,7 @@ impl GameApp {
         }
         let mut players = if viewport_overlays_visible {
             collect_player_overlays(
-                &self.engine,
+                &mut self.engine,
                 &self.snapshot,
                 self.focus_id,
                 &self.bindings,
@@ -86299,7 +86303,7 @@ fn scoreboard_preferred_rect(rect: Rect) -> lc_frontend::classic_gui::IntRect {
 }
 
 fn collect_player_overlays(
-    engine: &Engine,
+    engine: &mut Engine,
     snapshot: &SimulationSnapshot,
     focus_id: Option<ObjectId>,
     bindings: &KeyboardBindings,
@@ -86343,14 +86347,12 @@ fn collect_player_overlays(
                 // Energy runs on the C4MaxPhysical scale against the
                 // crew's physical Energy (C4Object::DrawEnergy,
                 // src/C4Object.cpp:2692-2695).
-                let max_energy = object
-                    .info_physical
-                    .as_ref()
-                    .map(|physical| physical.energy)
-                    .filter(|energy| *energy > 0)
-                    .unwrap_or(100);
-                let energy_fraction =
-                    (object.energy.max(0) as f32 / max_energy as f32).clamp(0.0, 1.0);
+                let max_energy = physical.map(|physical| physical.energy).unwrap_or(0);
+                let energy_fraction = if max_energy > 0 {
+                    (object.energy.max(0) as f32 / max_energy as f32).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 let magic_capacity = physical
                     .map(|physical| physical.magic)
                     .unwrap_or(object.magic_capacity);
@@ -92345,7 +92347,7 @@ mod tests {
     }
 
     fn mouse_test_empty_point(
-        app: &GameApp,
+        app: &mut GameApp,
         owner: i32,
         start: GuiPoint,
         carry_command: Option<CommandId>,
@@ -92708,7 +92710,7 @@ mod tests {
             "Named target",
             Some("Helpful details."),
         );
-        let (empty, _) = mouse_test_empty_point(&app, owner, point, None);
+        let (empty, _) = mouse_test_empty_point(&mut app, owner, point, None);
         let help = viewport_button_point(&app, owner, lc_frontend::hud::ViewportButton::Help);
         let menu =
             viewport_button_point(&app, owner, lc_frontend::hud::ViewportButton::PlayerMenu);
@@ -92967,7 +92969,7 @@ mod tests {
         let owner = app.local_owner;
         let (_target, point) =
             install_mouse_help_target(&mut app, "HLP3", "Right target", None);
-        let (empty, _) = mouse_test_empty_point(&app, owner, point, None);
+        let (empty, _) = mouse_test_empty_point(&mut app, owner, point, None);
         let cursor = app.engine.crew_cursor(owner);
         let mut commands = install_mouse_network_capture(&mut app);
 
@@ -93857,7 +93859,7 @@ mod tests {
         render_mouse_test_app(&mut app);
         let target_point = mouse_test_object_point(&app, owner, target);
         let (drop_point, drop_world) =
-            mouse_test_empty_point(&app, owner, target_point, Some(CommandId::Drop));
+            mouse_test_empty_point(&mut app, owner, target_point, Some(CommandId::Drop));
         let mut commands = install_mouse_network_capture(&mut app);
 
         physical_left_drag(&mut app, target_point, drop_point);
@@ -93925,7 +93927,7 @@ mod tests {
             .expect("spawn chat-drag carryable");
         render_mouse_test_app(&mut app);
         let start = mouse_test_object_point(&app, owner, target);
-        let (end, _) = mouse_test_empty_point(&app, owner, start, None);
+        let (end, _) = mouse_test_empty_point(&mut app, owner, start, None);
 
         app.handle_cursor_moved(PhysicalPosition::new(f64::from(start.x), f64::from(start.y)))
             .expect("move to carryable");
@@ -94044,7 +94046,7 @@ mod tests {
             Some(container)
         );
         let (open_point, open_world) =
-            mouse_test_empty_point(&app, owner, vehicle_point, None);
+            mouse_test_empty_point(&mut app, owner, vehicle_point, None);
         let mut commands = install_mouse_network_capture(&mut app);
 
         physical_left_drag(&mut app, vehicle_point, open_point);
@@ -94208,7 +94210,7 @@ mod tests {
 
         let member_point = mouse_test_object_point(&app, owner, first);
         let (drop_point, drop_world) =
-            mouse_test_empty_point(&app, owner, member_point, Some(CommandId::Drop));
+            mouse_test_empty_point(&mut app, owner, member_point, Some(CommandId::Drop));
         app.handle_cursor_moved(PhysicalPosition::new(
             f64::from(member_point.x),
             f64::from(member_point.y),
@@ -94396,7 +94398,7 @@ mod tests {
             "Entrance overrides the otherwise Carryable cursor"
         );
         let (release_point, _) =
-            mouse_test_empty_point(&app, owner, entrance_point, None);
+            mouse_test_empty_point(&mut app, owner, entrance_point, None);
         physical_left_drag(&mut app, entrance_point, release_point);
         let (direct, player_commands, selections) = commands.take_submitted_mouse_controls();
         assert!(direct.is_empty());
@@ -94684,7 +94686,7 @@ mod tests {
         assert_eq!(caption.text, expected);
         assert!(caption.text.contains('|'));
 
-        let (miss, _) = mouse_test_empty_point(&app, owner, target_point, None);
+        let (miss, _) = mouse_test_empty_point(&mut app, owner, target_point, None);
         move_to(&mut app, miss);
         assert!(
             app.ingame_mouse_caption.caption.is_none(),
@@ -94721,7 +94723,7 @@ mod tests {
             IngameMouseCursorKind::Region
         );
 
-        let (miss, _) = mouse_test_empty_point(&app, owner, region_point, None);
+        let (miss, _) = mouse_test_empty_point(&mut app, owner, region_point, None);
         app.handle_cursor_moved(PhysicalPosition::new(
             f64::from(miss.x),
             f64::from(miss.y),
@@ -98733,9 +98735,9 @@ mod tests {
         );
     }
 
-    fn app_cursor_inventory_contains(app: &GameApp, clonk: ObjectId, definition: &str) -> bool {
+    fn app_cursor_inventory_contains(app: &mut GameApp, clonk: ObjectId, definition: &str) -> bool {
         let mut overlays = collect_player_overlays(
-            &app.engine,
+            &mut app.engine,
             &app.snapshot,
             Some(clonk),
             &app.bindings,
@@ -104961,7 +104963,7 @@ func Award()
         assert_eq!(cursor_portrait_owner_color(&color_defaults, 99), u32::MAX);
 
         let mut players = collect_player_overlays(
-            &app.engine,
+            &mut app.engine,
             &app.snapshot,
             Some(viewed_object),
             &app.bindings,
@@ -106701,7 +106703,13 @@ func Award()
                 on_fire: false,
                 fire_phase: 0,
                 fire_caused_by: -1,
-                info_physical: None,
+                // This fixture has no matching live Engine object. Supply the
+                // physical backing explicitly: native DrawEnergy always uses
+                // GetPhysical()->Energy and never invents a 100-point range.
+                info_physical: Some(lc_engine::PhysicalInfo {
+                    energy: 100,
+                    ..lc_engine::PhysicalInfo::default()
+                }),
                 temporary_physical: None,
                 physical_changes: Vec::new(),
                 breath: 0,
@@ -106820,7 +106828,7 @@ func Award()
             )
             .expect("register Balloon definition");
         let overlay = collect_player_overlays(
-            &engine,
+            &mut engine,
             &snapshot,
             Some(focus),
             &bindings,
@@ -106858,7 +106866,7 @@ func Award()
 
         snapshot.players[0].control_set = 2;
         let keyboard3 = collect_player_overlays(
-            &engine,
+            &mut engine,
             &snapshot,
             Some(focus),
             &bindings,
@@ -106871,7 +106879,7 @@ func Award()
         );
         snapshot.players[0].control_set = 4;
         let unassigned_gamepad = collect_player_overlays(
-            &engine,
+            &mut engine,
             &snapshot,
             Some(focus),
             &bindings,
@@ -106885,7 +106893,7 @@ func Award()
 
         snapshot.hud.local_players.clear();
         let remote_overlay = collect_player_overlays(
-            &engine,
+            &mut engine,
             &snapshot,
             Some(focus),
             &bindings,
@@ -106933,7 +106941,7 @@ func Award()
         let raw_name = lc_script::c4_string_from_bytes(&[0xe9]);
         snapshot.players[0].name = raw_name;
         let overlay = collect_player_overlays(
-            &engine,
+            &mut engine,
             &snapshot,
             Some(focus),
             &bindings,
@@ -106949,7 +106957,7 @@ func Award()
         snapshot.hud.players[0].crew = vec![focus];
         snapshot.players[0].view_cursor = Some(teammate);
         let overlay = collect_player_overlays(
-            &engine,
+            &mut engine,
             &snapshot,
             Some(teammate),
             &bindings,
@@ -106983,7 +106991,7 @@ func Award()
 
         assert!(!app.engine.scenario_value_gain_enabled());
         let overlays = collect_player_overlays(
-            &app.engine,
+            &mut app.engine,
             &app.snapshot,
             None,
             &app.bindings,
@@ -107009,7 +107017,7 @@ func Award()
         player.view_wealth = 0;
         player.view_value = -1;
         let overlays = collect_player_overlays(
-            &app.engine,
+            &mut app.engine,
             &app.snapshot,
             None,
             &app.bindings,
@@ -107107,13 +107115,16 @@ func Award()
         assert_eq!(current_breath, 50_000, "CLNK keeps its birth breath");
         assert_eq!(capacity, 250_000, "Tutorial09 installs AquaClonk capacity");
 
-        let overlays = collect_player_overlays(
-            &app.engine,
-            &app.snapshot,
-            Some(clonk),
-            &app.bindings,
-            &app.gamepad_bindings,
-        );
+        let overlays = {
+            let game_app = &mut app.app;
+            collect_player_overlays(
+                &mut game_app.engine,
+                &game_app.snapshot,
+                Some(clonk),
+                &game_app.bindings,
+                &game_app.gamepad_bindings,
+            )
+        };
         let crew = overlays
             .iter()
             .find(|player| player.owner == app.local_owner)
@@ -107327,7 +107338,7 @@ func Award()
 
         let bindings = KeyboardBindings::load(None);
         let mut overlays = collect_player_overlays(
-            &engine,
+            &mut engine,
             &snapshot,
             Some(crew_id),
             &bindings,
@@ -149290,7 +149301,7 @@ ScenInfoArea=70,5,25,90
         app.snapshot = app.engine.snapshot();
 
         let mut players = collect_player_overlays(
-            &app.engine,
+            &mut app.engine,
             &app.snapshot,
             Some(object),
             &app.bindings,
@@ -149367,7 +149378,7 @@ ScenInfoArea=70,5,25,90
         app.snapshot = app.engine.snapshot();
 
         let mut players = collect_player_overlays(
-            &app.engine,
+            &mut app.engine,
             &app.snapshot,
             Some(crew),
             &app.bindings,
@@ -163880,10 +163891,27 @@ protected func InputCallback(string answer, int player)
     }
 
     #[test]
-    fn fair_crew_set_changes_the_next_live_physical_lookup() {
+    fn fair_crew_set_clears_cached_projection_even_when_parameters_are_unchanged() {
         let mut app = new_state_only_lightweight_running_sandbox_app();
-        let mut definition =
-            Definition::from_script("FCRW", "Fair crew", "#strict\n").expect("definition compiles");
+        app.engine.set_use_fair_crew(true);
+        app.engine.set_fair_crew_strength(1_000);
+        let mut definition = Definition::from_script(
+            "FCRW",
+            "Fair crew",
+            r#"#strict
+static fill_count;
+protected func GetFairCrewPhysical(string name, int rank, &value)
+{
+    if (name eq "Energy")
+    {
+        fill_count += 1;
+        value += fill_count;
+    }
+    return true;
+}
+"#,
+        )
+        .expect("definition compiles");
         definition.set_crew_member(true);
         definition.set_physical(lc_engine::PhysicalInfo {
             energy: 50_000,
@@ -163953,23 +163981,24 @@ protected func InputCallback(string answer, int player)
             .expect("fair-crew object exists");
         let crew_index = app.engine.find_object_index(crew).expect("crew remains live");
         let before = app.engine.object_physical(crew_index);
+        assert_eq!(before.energy, 55_001);
+        assert_eq!(before.scale, 33_500);
 
         app.apply_ready_controls(
             14,
             vec![NetworkControl::Set(lc_network::LegacyControlSet {
                 value_type: 5,
-                data: 0,
+                data: 1_000,
                 by_client: 0,
             })],
         )
         .expect("FairCrew executes");
 
         let after = app.engine.object_physical(crew_index);
-        assert_ne!(after, before, "the lookup cannot retain a stale fair-crew projection");
-        assert_eq!(after.energy, 50_000);
-        assert_eq!(after.scale, 30_000);
+        assert_eq!(after.energy, 55_002);
+        assert_eq!(after.scale, 33_500);
         assert!(app.engine.use_fair_crew());
-        assert_eq!(app.engine.fair_crew_strength(), 0);
+        assert_eq!(app.engine.fair_crew_strength(), 1_000);
     }
 
     #[test]
@@ -168072,7 +168101,7 @@ protected func InputCallback(string answer, int player)
             Some(clonk)
         );
         assert!(
-            app_cursor_inventory_contains(&app, clonk, "FLAG"),
+            app_cursor_inventory_contains(&mut app, clonk, "FLAG"),
             "the collected FLAG must reach the rendered cursor inventory"
         );
         app.snapshot.hud.messages.clear();
@@ -168349,7 +168378,7 @@ protected func InputCallback(string answer, int player)
             },
         );
         assert!(
-            app_cursor_inventory_contains(&app, clonk, "GOLD"),
+            app_cursor_inventory_contains(&mut app, clonk, "GOLD"),
             "the collected GOLD must reach the rendered cursor inventory"
         );
         // Typed C4GameMessage rejection has its own regression; isolate this
@@ -168959,7 +168988,7 @@ protected func InputCallback(string answer, int player)
         }
         assert!(app_clonk_carries(&app, clonk, "LOAM"));
         assert!(
-            app_cursor_inventory_contains(&app, clonk, "LOAM"),
+            app_cursor_inventory_contains(&mut app, clonk, "LOAM"),
             "the collected LOAM must reach the cursor inventory presentation"
         );
 
