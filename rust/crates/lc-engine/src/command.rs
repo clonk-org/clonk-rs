@@ -2164,6 +2164,45 @@ mod tests {
     }
 
     #[test]
+    fn follow_self_remains_running_and_preserves_cpp_command_lifetime() {
+        let follower_id = ObjectId::new(2);
+        let mut follower = snapshot_with_id(follower_id.as_u64());
+        follower.crew_member = true;
+        follower.owner = 42;
+        follower.selected = true;
+        follower.action_procedure = ActionProcedure::Walk;
+        follower.command_direction = CommandDirection::DownRight;
+
+        let objects = HashMap::from([(follower_id, follower)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let follower = objects.get(&follower_id).expect("follower present");
+        let ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 0);
+
+        let mut stack = CommandStack::new();
+        stack
+            .push_back(
+                CommandRequest::new(CommandId::Follow).with_target(Some(follower_id)),
+            )
+            .expect("self-Follow queues");
+        stack
+            .push_back(CommandRequest::new(CommandId::Wait))
+            .expect("trailing command queues");
+
+        for _ in 0..2 {
+            let result = stack.step(&ctx).expect("self-Follow executes");
+            assert_eq!(result.status, CommandStatus::Running);
+            assert!(result.update.is_none());
+            assert!(result.operations.is_empty());
+            assert_eq!(stack.command_names(), ["Follow", "Wait"]);
+            let views = stack.command_views();
+            assert_eq!(views[0].target, Some(follower_id));
+            assert!(!views[0].finished);
+            assert!(stack.take_successful_finishes().is_empty());
+        }
+    }
+
+    #[test]
     fn follow_enters_the_targets_container() {
         let follower_id = ObjectId::new(3);
         let target_id = ObjectId::new(4);
@@ -22641,10 +22680,6 @@ impl FollowState {
 
         if !target.is_status_active() {
             return CommandStepResult::failed(None);
-        }
-
-        if follower.id == target.id {
-            return CommandStepResult::completed(None);
         }
 
         if follower.container != target.container {
