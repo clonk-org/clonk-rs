@@ -10429,6 +10429,30 @@ fn denumerate_effect(effect: &mut EffectState, object_numbers: &HashSet<u64>) {
     }
 }
 
+/// Complete the load-only half of `C4Effect::DenumeratePointers`.
+///
+/// Native loading resolves the command object first and then
+/// `AssignCallbackFunctions`/`GetCallbackScript` refreshes the serialized
+/// command ID from that object's current definition. This is deliberately
+/// separate from ordinary pointer clearing: removal denumeration must not
+/// pretend that callbacks were rebound as part of a fresh load.
+fn denumerate_loaded_effect(
+    effect: &mut EffectState,
+    object_numbers: &HashSet<u64>,
+    object_definition_ids: &HashMap<u64, DefinitionId>,
+) {
+    denumerate_effect(effect, object_numbers);
+    let Some(command_target) = effect
+        .command_target
+        .and_then(|target| u64::try_from(target).ok())
+    else {
+        return;
+    };
+    if let Some(definition_id) = object_definition_ids.get(&command_target) {
+        effect.command_id = Some(definition_id.clone());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FogOfWarPlayerFrame {
     /// Ordered runtime `C4Player::FoWViewObjs` projection.
@@ -20381,8 +20405,18 @@ impl Engine {
     pub(crate) fn apply_initial_network_post_object_state(
         &mut self,
         script_globals: &ScriptGlobalState,
-        global_effects: Vec<EffectState>,
+        mut global_effects: Vec<EffectState>,
     ) {
+        let object_definition_ids = self
+            .objects
+            .iter()
+            .filter(|object| object.state.status != ObjectStatus::Deleted)
+            .map(|object| (object.id.as_u64(), object.definition_id.clone()))
+            .collect::<HashMap<_, _>>();
+        let object_numbers = object_definition_ids.keys().copied().collect::<HashSet<_>>();
+        for effect in &mut global_effects {
+            denumerate_loaded_effect(effect, &object_numbers, &object_definition_ids);
+        }
         self.restore_script_globals(script_globals);
         self.global_effects = global_effects;
     }
@@ -35914,6 +35948,12 @@ impl Engine {
             .filter(|object| object.state.status != ObjectStatus::Deleted)
             .map(|object| object.id.as_u64())
             .collect();
+        let object_definition_ids = self
+            .objects
+            .iter()
+            .filter(|object| object.state.status != ObjectStatus::Deleted)
+            .map(|object| (object.id.as_u64(), object.definition_id.clone()))
+            .collect::<HashMap<_, _>>();
         container_assignments.retain(|(object, container)| {
             object_numbers.contains(&object.as_u64())
                 && object_numbers.contains(&container.as_u64())
@@ -35935,11 +35975,11 @@ impl Engine {
                 .commands
                 .denumerate_object_references(&object_numbers);
             for effect in &mut object.state.effects {
-                denumerate_effect(effect, &object_numbers);
+                denumerate_loaded_effect(effect, &object_numbers, &object_definition_ids);
             }
         }
         for effect in &mut self.global_effects {
-            denumerate_effect(effect, &object_numbers);
+            denumerate_loaded_effect(effect, &object_numbers, &object_definition_ids);
         }
         // Backward compatibility for states written before ObjectSnapshot
         // carried C4Object::Select: project the legacy per-player list onto
@@ -47933,6 +47973,11 @@ impl Engine {
             .iter()
             .map(|object| object.id.as_u64())
             .collect::<HashSet<_>>();
+        let object_definition_ids = self
+            .objects
+            .iter()
+            .map(|object| (object.id.as_u64(), object.definition_id.clone()))
+            .collect::<HashMap<_, _>>();
         for object in &mut self.objects {
             denumerate_legacy_enumerated_object_reference(
                 &mut object.state.action.target,
@@ -47954,7 +47999,7 @@ impl Engine {
                 *value = denumerate_script_value(value, &object_numbers);
             }
             for effect in &mut object.state.effects {
-                denumerate_effect(effect, &object_numbers);
+                denumerate_loaded_effect(effect, &object_numbers, &object_definition_ids);
             }
             for overlay in &mut object.state.graphics_overlays {
                 denumerate_legacy_enumerated_object_reference(

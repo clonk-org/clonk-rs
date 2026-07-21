@@ -1,8 +1,11 @@
 use std::fs;
 
 use image::{Rgba, RgbaImage};
+use lc_engine::effect::EffectVarValue;
 use lc_engine::scenario::LegacyDefinitionResolver;
-use lc_engine::{Engine, Landscape, ObjectId, Scenario, ScenarioError, SpawnConfig, Vector2};
+use lc_engine::{
+    Engine, Landscape, ObjectId, ObjectStatus, Scenario, ScenarioError, SpawnConfig, Vector2,
+};
 use lc_resources::Group;
 
 fn tempdir() -> std::io::Result<tempfile::TempDir> {
@@ -131,6 +134,291 @@ fn legacy_scenario_loads_map_objects_and_definitions() -> Result<(), Box<dyn std
     assert_eq!(spawned.definition_id, "TEST");
     assert_eq!(spawned.position, Vector2::new(50, 60));
 
+    Ok(())
+}
+
+fn write_effect_restore_fixture(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let definition = path.join("Carrier.ocd");
+    fs::create_dir_all(&definition)?;
+    fs::write(
+        definition.join("DefCore.txt"),
+        "[DefCore]\nid=CARR\nName=Carrier\nCategory=16\nWidth=8\nHeight=8\n",
+    )?;
+    fs::write(
+        definition.join("Script.c"),
+        "#strict\n\
+         local start_calls, timer_calls, timer_time;\n\
+         func FxRestoredStart(pTarget, iNumber, fTemporary)\n\
+         {\n\
+             start_calls = 1;\n\
+             return(1);\n\
+         }\n\
+         func FxRestoredTimer(pTarget, iNumber, iTime)\n\
+         {\n\
+             timer_calls = 1;\n\
+             timer_time = iTime;\n\
+             return(1);\n\
+         }\n",
+    )?;
+    write_definition_graphics(&definition)?;
+    fs::write(
+        path.join("Scenario.txt"),
+        "[Head]\nTitle=Effect restore\nSaveGame=1\nNoInitialize=1\n\n\
+         [Definitions]\nDefinition1=Carrier.ocd\n",
+    )?;
+    let raw_id = lc_script::c4_id_raw("CARR") as i32;
+    fs::write(
+        path.join("Objects.txt"),
+        format!(
+            "[Object]\n\
+             id=CARR\nNumber=1\nStatus=1\nCategory=16\nX=20\nY=20\n\
+             Effects=Later(3,200,40,0,0,NONE),\
+             Restored(7,10,5,3,2,WRNG)[10;A0,A1000000002,i-7,b2,o2,O1000000002,I{raw_id},S0,a[4;i1,O2,S0,A0],m[2;i7=S0;O2=I{raw_id}]]\n\n\
+             [Object]\n\
+             id=CARR\nNumber=2\nStatus=1\nCategory=16\nX=30\nY=20\n"
+        ),
+    )?;
+    fs::write(path.join("Strings.txt"), b"saved text\r\n")?;
+    Ok(())
+}
+
+#[test]
+fn legacy_objects_restore_effect_chain_and_variables() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempdir()?;
+    write_effect_restore_fixture(temp.path())?;
+    let scenario = Scenario::load_from_path_with(temp.path(), &LocalDefinitionResolver)?;
+    let mut engine = Engine::with_seed(0);
+    scenario.apply(&mut engine)?;
+
+    let effects = engine
+        .object_snapshot(ObjectId::new(1))
+        .expect("effect carrier loads")
+        .effects;
+    assert_eq!(
+        effects
+            .iter()
+            .map(|effect| effect.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Later", "Restored"],
+        "compiled linked-list order is not priority-sorted"
+    );
+    assert_eq!(
+        (
+            effects[0].number,
+            effects[0].priority,
+            effects[0].timer,
+            effects[0].interval,
+            effects[0].command_target,
+            effects[0].command_id.as_deref(),
+        ),
+        (3, 200, 40, 0, None, None)
+    );
+    assert_eq!(
+        (
+            effects[1].number,
+            effects[1].priority,
+            effects[1].timer,
+            effects[1].interval,
+            effects[1].command_target,
+            effects[1].command_id.as_deref(),
+        ),
+        (7, 10, 5, 3, Some(2), Some("CARR")),
+        "a resolved command object refreshes the stale saved definition ID"
+    );
+    assert!(effects.iter().all(|effect| effect.start_dispatched));
+
+    let expected_map = lc_script::ValueMap::from([
+        (
+            lc_script::Value::Int(7),
+            lc_script::Value::String("saved text".into()),
+        ),
+        (
+            lc_script::Value::Object(2),
+            lc_script::Value::C4Id("CARR".to_string()),
+        ),
+    ]);
+    assert_eq!(
+        effects[1].vars,
+        vec![
+            EffectVarValue::Nil,
+            EffectVarValue::Object(2),
+            EffectVarValue::Int(-7),
+            EffectVarValue::RawBool(2),
+            EffectVarValue::Object(2),
+            EffectVarValue::Object(2),
+            EffectVarValue::C4Id("CARR".to_string()),
+            EffectVarValue::String("saved text".into()),
+            EffectVarValue::Array(vec![
+                EffectVarValue::Int(1),
+                EffectVarValue::Object(2),
+                EffectVarValue::String("saved text".into()),
+                EffectVarValue::Nil,
+            ]),
+            EffectVarValue::Proplist(expected_map),
+        ]
+    );
+
+    let target = engine
+        .object_snapshot(ObjectId::new(2))
+        .expect("command target loads after the carrier");
+    assert_eq!(
+        target
+            .local_vars
+            .get("start_calls")
+            .cloned()
+            .unwrap_or(lc_script::Value::Nil),
+        lc_script::Value::Nil,
+        "compiled restoration binds callbacks without executing Start"
+    );
+
+    let mut saved = engine.capture_state();
+    let saved_carrier = saved
+        .objects
+        .iter_mut()
+        .find(|object| object.snapshot.id == ObjectId::new(1))
+        .expect("carrier persists");
+    saved_carrier.snapshot.effects[1].command_id = Some("WRNG".to_string());
+    engine.restore_state(&saved)?;
+    assert_eq!(
+        engine
+            .object_snapshot(ObjectId::new(1))
+            .expect("restored carrier exists")
+            .effects[1]
+            .command_id
+            .as_deref(),
+        Some("CARR"),
+        "state restoration runs the same callback-assignment pass"
+    );
+
+    engine.tick_without_snapshot()?;
+
+    let effects = engine
+        .object_snapshot(ObjectId::new(1))
+        .expect("effect carrier survives")
+        .effects;
+    assert_eq!(
+        effects
+            .iter()
+            .map(|effect| (effect.name.as_str(), effect.timer))
+            .collect::<Vec<_>>(),
+        [("Later", 41), ("Restored", 6)],
+        "timers resume from the saved time in linked-list order"
+    );
+    let target = engine
+        .object_snapshot(ObjectId::new(2))
+        .expect("command target survives");
+    assert_eq!(
+        target
+            .local_vars
+            .get("start_calls")
+            .cloned()
+            .unwrap_or(lc_script::Value::Nil),
+        lc_script::Value::Nil
+    );
+    assert_eq!(
+        target.local_vars.get("timer_calls"),
+        Some(&lc_script::Value::Int(1))
+    );
+    assert_eq!(
+        target.local_vars.get("timer_time"),
+        Some(&lc_script::Value::Int(6))
+    );
+    Ok(())
+}
+
+#[test]
+fn initial_network_global_effect_refreshes_resolved_target_id(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempdir()?;
+    write_effect_restore_fixture(temp.path())?;
+    let scenario = Scenario::load_from_path_with(temp.path(), &LocalDefinitionResolver)?;
+    let game_data = lc_engine::parse_initial_network_game_data(
+        b"[Effects]\r\nGlobalEffects=Probe(9,100,4,0,2,WRNG)[1;O1]\r\n",
+    );
+    let mut engine = Engine::with_seed(0);
+    scenario.apply_before_network_final_init_with_game_data(
+        &mut engine,
+        &game_data,
+        None,
+        None,
+    )?;
+
+    let effects = engine.capture_state().global_effects;
+    assert_eq!(effects.len(), 1);
+    assert_eq!(effects[0].command_target, Some(2));
+    assert_eq!(effects[0].command_id.as_deref(), Some("CARR"));
+    assert_eq!(effects[0].vars, vec![EffectVarValue::Object(1)]);
+    assert!(effects[0].start_dispatched);
+    Ok(())
+}
+
+#[test]
+fn scenario_section_effects_resolve_retained_object_references(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempdir()?;
+    let definition = temp.path().join("Carrier.ocd");
+    fs::create_dir_all(&definition)?;
+    fs::write(
+        definition.join("DefCore.txt"),
+        "[DefCore]\nid=CARR\nName=Carrier\nCategory=16\nWidth=8\nHeight=8\n",
+    )?;
+    fs::write(definition.join("Script.c"), "#strict\n")?;
+    write_definition_graphics(&definition)?;
+    fs::write(
+        temp.path().join("Scenario.txt"),
+        "[Head]\nTitle=Section effects\nNoInitialize=1\n\n\
+         [Definitions]\nDefinition1=Carrier.ocd\n",
+    )?;
+    fs::write(
+        temp.path().join("Script.c"),
+        "#strict\nfunc Switch() { return LoadScenarioSection(\"Next\", 0); }\n",
+    )?;
+    fs::write(
+        temp.path().join("Objects.txt"),
+        "[Object]\nid=CARR\nNumber=42\nStatus=2\nX=10\nY=10\n",
+    )?;
+    let section = temp.path().join("SectNext.c4g");
+    fs::create_dir_all(&section)?;
+    fs::write(
+        section.join("Objects.txt"),
+        "[Object]\n\
+         id=CARR\nNumber=500\nStatus=1\nX=20\nY=10\n\
+         Effects=Probe(6,100,9,0,42,WRNG)[3;O42,a[1;O42],m[1;i1=O42]]\n",
+    )?;
+
+    let scenario = Scenario::load_from_path_with(temp.path(), &LocalDefinitionResolver)?;
+    let mut engine = Engine::with_seed(0);
+    scenario.apply(&mut engine)?;
+    assert_eq!(
+        engine
+            .object_snapshot(ObjectId::new(42))
+            .expect("retained object loads")
+            .status,
+        ObjectStatus::Inactive
+    );
+
+    engine.call_scenario_script_function("Switch", Vec::new())?;
+
+    assert_eq!(engine.debug_current_scenario_section(), "Next");
+    let mut effects = engine
+        .object_snapshot(ObjectId::new(500))
+        .expect("section effect carrier loads")
+        .effects;
+    let effect = effects.remove(0);
+    assert_eq!(effect.command_target, Some(42));
+    assert_eq!(effect.command_id.as_deref(), Some("CARR"));
+    assert_eq!(
+        effect.vars,
+        vec![
+            EffectVarValue::Object(42),
+            EffectVarValue::Array(vec![EffectVarValue::Object(42)]),
+            EffectVarValue::Proplist(lc_script::ValueMap::from([(
+                lc_script::Value::Int(1),
+                lc_script::Value::Object(42),
+            )])),
+        ],
+        "retained inactive objects participate in recursive denumeration"
+    );
     Ok(())
 }
 
