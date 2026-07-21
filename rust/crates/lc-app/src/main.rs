@@ -9087,6 +9087,27 @@ struct ControlledMusicLoads {
     requests: VecDeque<ControlledMusicLoadRequest>,
 }
 
+enum MusicStartKind {
+    Default {
+        catalog: MusicCatalog,
+        playlist: Option<String>,
+        looped: bool,
+    },
+    Asset {
+        asset: MusicAsset,
+        looped: bool,
+    },
+    Data {
+        data: Vec<u8>,
+        looped: bool,
+    },
+}
+
+struct QueuedMusicStart {
+    order: u64,
+    kind: MusicStartKind,
+}
+
 struct AudioContext {
     system: AudioSystem,
     options: AudioOptions,
@@ -9098,6 +9119,8 @@ struct AudioContext {
     music_control: Arc<std::sync::Mutex<MusicControlState>>,
     pending_music: Arc<std::sync::Mutex<Option<MusicHandle>>>,
     music_load_pending: Arc<AtomicU64>,
+    queued_music_starts: VecDeque<QueuedMusicStart>,
+    next_music_start_order: u64,
     #[cfg(test)]
     controlled_music_loads: Option<ControlledMusicLoads>,
     #[cfg(test)]
@@ -9155,6 +9178,8 @@ impl AudioContext {
             music_control,
             pending_music: Arc::new(std::sync::Mutex::new(None)),
             music_load_pending: Arc::new(AtomicU64::new(0)),
+            queued_music_starts: VecDeque::new(),
+            next_music_start_order: 1,
             #[cfg(test)]
             controlled_music_loads: None,
             #[cfg(test)]
@@ -9179,6 +9204,10 @@ impl AudioContext {
             0,
             "controlled music loading must be installed before a request starts"
         );
+        assert!(
+            self.queued_music_starts.is_empty(),
+            "controlled music loading must be installed before a request queues"
+        );
         self.controlled_music_loads = Some(ControlledMusicLoads {
             fixture,
             requests: VecDeque::new(),
@@ -9187,6 +9216,19 @@ impl AudioContext {
 
     #[cfg(test)]
     fn complete_next_controlled_music_load(&mut self) -> Result<bool, AudioError> {
+        self.finish_next_controlled_music_load(true)
+    }
+
+    #[cfg(test)]
+    fn fail_next_controlled_music_load(&mut self) -> Result<bool, AudioError> {
+        self.finish_next_controlled_music_load(false)
+    }
+
+    #[cfg(test)]
+    fn finish_next_controlled_music_load(
+        &mut self,
+        start_successfully: bool,
+    ) -> Result<bool, AudioError> {
         let (request, fixture) = {
             let controlled = self
                 .controlled_music_loads
@@ -9198,44 +9240,55 @@ impl AudioContext {
                 .expect("controlled music load queue is empty");
             (request, controlled.fixture.clone())
         };
-        let _pending_guard = PendingMusicLoadGuard(
-            Arc::clone(&self.music_load_pending),
-            request.generation,
-        );
-        let mut control = lock_unpoisoned(&self.music_control);
-        let Some(volume) = control.start_volume(request.generation) else {
-            return Ok(false);
-        };
-        // The request retains its production loop flag for assertions. Keep
-        // the silent fixture looping until the test explicitly advances the
-        // lifecycle so host wall-clock progress cannot end it first.
-        self.system.play_music(&fixture, true)?;
-        self.system.music_set_volume(volume);
-        if let Some(identity) = request.identity {
-            control.most_recently_played = Some(identity);
-        }
-        *lock_unpoisoned(&self.pending_music) = Some(fixture);
-        Ok(true)
+        let _pending_guard =
+            PendingMusicLoadGuard(Arc::clone(&self.music_load_pending), request.generation);
+        let result = (|| -> Result<bool, AudioError> {
+            let mut control = lock_unpoisoned(&self.music_control);
+            let Some(volume) = control.start_volume(request.generation) else {
+                return Ok(false);
+            };
+            if !start_successfully {
+                Ok(false)
+            } else {
+                // The request retains its production loop flag for assertions. Keep
+                // the silent fixture looping until the test explicitly advances the
+                // lifecycle so host wall-clock progress cannot end it first.
+                self.system.play_music(&fixture, true)?;
+                self.system.music_set_volume(volume);
+                if let Some(identity) = request.identity {
+                    control.most_recently_played = Some(identity);
+                }
+                *lock_unpoisoned(&self.pending_music) = Some(fixture);
+                Ok(true)
+            }
+        })();
+        drop(_pending_guard);
+        self.pump_queued_music_starts();
+        result
     }
 
     fn play_music(&mut self, data: &[u8], looped: bool) -> Result<(), AudioError> {
-        self.play_music_asset(data, looped, None)
+        self.push_music_start(MusicStartKind::Data {
+            data: data.to_vec(),
+            looped,
+        });
+        self.pump_queued_music_starts();
+        Ok(())
     }
 
-    fn play_music_asset(
+    fn start_music_asset_now(
         &mut self,
-        data: &[u8],
+        data: Vec<u8>,
         looped: bool,
         identity: Option<Arc<MusicAssetIdentity>>,
-    ) -> Result<(), AudioError> {
-        self.stop_music();
+    ) {
+        self.stop_current_music();
         // Initialize the pull decoder off-thread. This retains the compressed
         // bytes and parses bounded source state (including a MIDI event
         // schedule) without rendering the complete track to PCM, matching
         // C++'s SDL_mixer ownership model.
         let generation = lock_unpoisoned(&self.music_control).generation;
         let worker = self.system.worker_handle();
-        let data = data.to_vec();
         let control = Arc::clone(&self.music_control);
         let slot = Arc::clone(&self.pending_music);
         self.music_load_pending
@@ -9247,7 +9300,7 @@ impl AudioContext {
                 looped,
                 identity,
             });
-            return Ok(());
+            return;
         }
         let load_pending = Arc::clone(&self.music_load_pending);
         std::thread::spawn(move || {
@@ -9276,10 +9329,103 @@ impl AudioContext {
             }
             *lock_unpoisoned(&slot) = Some(music);
         });
+    }
+
+    fn push_music_start(&mut self, kind: MusicStartKind) -> u64 {
+        let order = self.next_music_start_order;
+        self.next_music_start_order = self.next_music_start_order.wrapping_add(1);
+        if self.next_music_start_order == 0 {
+            self.next_music_start_order = 1;
+        }
+        self.queued_music_starts
+            .push_back(QueuedMusicStart { order, kind });
+        order
+    }
+
+    fn enqueue_catalog_music_start(&mut self, kind: MusicStartKind) -> anyhow::Result<()> {
+        let order = self.push_music_start(kind);
+        let mut own_error = None;
+        for (failed_order, error) in self.try_pump_queued_music_starts() {
+            if failed_order == order {
+                own_error = Some(error);
+            } else {
+                tracing::warn!(%error, "deferred music start failed");
+            }
+        }
+        own_error.map_or(Ok(()), Err)
+    }
+
+    fn pump_queued_music_starts(&mut self) {
+        for (_, error) in self.try_pump_queued_music_starts() {
+            tracing::warn!(%error, "deferred music start failed");
+        }
+    }
+
+    fn try_pump_queued_music_starts(&mut self) -> Vec<(u64, anyhow::Error)> {
+        let mut failures = Vec::new();
+        while self.music_load_pending.load(AtomicOrdering::Acquire) == 0 {
+            let Some(start) = self.queued_music_starts.pop_front() else {
+                break;
+            };
+            if let Err(error) = self.start_queued_music_now(start.kind) {
+                failures.push((start.order, error));
+                continue;
+            }
+        }
+        failures
+    }
+
+    fn start_queued_music_now(&mut self, kind: MusicStartKind) -> anyhow::Result<()> {
+        let (data, looped, identity) = match kind {
+            MusicStartKind::Default {
+                catalog,
+                playlist,
+                looped,
+            } => {
+                let recent = lock_unpoisoned(&self.music_control)
+                    .most_recently_played
+                    .clone();
+                let selected = {
+                    let _guard = CLASSIC_SAFE_RANDOM_LOCK
+                        .lock()
+                        .map_err(|_| anyhow!("classic SafeRandom lock was poisoned"))?;
+                    catalog
+                        .select_enabled_with(playlist.as_deref(), recent.as_ref(), |range| {
+                            debug_assert!(range > 0);
+                            // SAFETY: C rand takes no arguments and C guarantees a
+                            // non-negative result. The process-global lock above
+                            // serializes this shared unsynced stream with the loader.
+                            (unsafe { rand() } as usize) % range
+                        })
+                        .cloned()
+                }
+                .ok_or_else(|| anyhow!("queued default music has no enabled asset"))?;
+                let identity = Arc::clone(&selected.identity);
+                let data = selected
+                    .load_audio()
+                    .context("failed to read default music asset")?;
+                (data, looped, Some(identity))
+            }
+            MusicStartKind::Asset { asset, looped } => {
+                let identity = Arc::clone(&asset.identity);
+                let name = asset.file_name.clone();
+                let data = asset
+                    .load_audio()
+                    .with_context(|| format!("failed to read named music asset `{name}`"))?;
+                (data, looped, Some(identity))
+            }
+            MusicStartKind::Data { data, looped } => (data, looped, None),
+        };
+        self.start_music_asset_now(data, looped, identity);
         Ok(())
     }
 
     fn stop_music(&mut self) {
+        self.queued_music_starts.clear();
+        self.stop_current_music();
+    }
+
+    fn stop_current_music(&mut self) {
         self.music_load_pending.store(0, AtomicOrdering::Release);
         let mut control = lock_unpoisoned(&self.music_control);
         control.advance_generation();
@@ -9295,6 +9441,7 @@ impl AudioContext {
         // pending decode represents the song that C++ would already have
         // started synchronously, though, so invalidate that generation before
         // it can begin stale frontend playback during scenario loading.
+        self.queued_music_starts.clear();
         let pending = self.music_load_pending.load(AtomicOrdering::Acquire) != 0;
         let mut playing = self.system.music_is_playing();
         if !pending && !playing {
@@ -9347,6 +9494,7 @@ impl AudioContext {
         viewports: &[ActiveViewportProjection],
         runtime_music_enabled: &mut bool,
     ) {
+        self.pump_queued_music_starts();
         let events = &snapshot.audio;
         if !events.is_empty() {
             self.handle_events(
@@ -9467,33 +9615,17 @@ impl AudioContext {
     }
 
     fn play_default_music(&mut self, looped: bool) -> anyhow::Result<bool> {
-        let recent = lock_unpoisoned(&self.music_control)
-            .most_recently_played
-            .clone();
-        let selected = {
-            let _guard = CLASSIC_SAFE_RANDOM_LOCK
-                .lock()
-                .map_err(|_| anyhow!("classic SafeRandom lock was poisoned"))?;
-            self.music_resolver
-                .select_default_with(recent.as_ref(), |range| {
-                    debug_assert!(range > 0);
-                    // SAFETY: C rand takes no arguments and C guarantees a
-                    // non-negative result. The process-global lock above
-                    // serializes this shared unsynced stream with the loader.
-                    (unsafe { rand() } as usize) % range
-                })
-        };
-        let Some(selected) = selected else {
+        let catalog = self.music_resolver.active_catalog().clone();
+        let playlist = self.music_resolver.playlist.clone();
+        if catalog.first_enabled(playlist.as_deref()).is_none() {
             return Ok(false);
-        };
-        let (identity, data) = (
-            Arc::clone(&selected.identity),
-            selected
-                .load_audio()
-                .context("failed to read default music asset")?,
-        );
-        self.play_music_asset(&data, looped, Some(identity))
-            .context("failed to play default music")?;
+        }
+        self.enqueue_catalog_music_start(MusicStartKind::Default {
+            catalog,
+            playlist,
+            looped,
+        })
+        .context("failed to play default music")?;
         Ok(true)
     }
 
@@ -9513,14 +9645,11 @@ impl AudioContext {
         let Some(selected) = self.music_resolver.resolve(name) else {
             return Ok(false);
         };
-        let (identity, data) = (
-            Arc::clone(&selected.identity),
-            selected
-                .load_audio()
-                .with_context(|| format!("failed to read named music asset `{name}`"))?,
-        );
-        self.play_music_asset(&data, looped, Some(identity))
-            .with_context(|| format!("failed to play named music asset `{name}`"))?;
+        self.enqueue_catalog_music_start(MusicStartKind::Asset {
+            asset: selected.clone(),
+            looped,
+        })
+        .with_context(|| format!("failed to play named music asset `{name}`"))?;
         Ok(true)
     }
 
@@ -9559,7 +9688,9 @@ impl AudioContext {
     }
 
     fn music_is_playing(&self) -> bool {
-        self.music_load_pending.load(AtomicOrdering::Acquire) != 0 || self.system.music_is_playing()
+        self.music_load_pending.load(AtomicOrdering::Acquire) != 0
+            || !self.queued_music_starts.is_empty()
+            || self.system.music_is_playing()
     }
 
     fn play_gui_sound(&mut self, name: &str, game_running: bool, snapshot: &SimulationSnapshot) {
@@ -72752,6 +72883,7 @@ impl GameApp {
         let game_running = matches!(self.mode, AppMode::Running);
         let viewports = self.graphics.active_viewport_projections();
         if let Some(audio) = self.audio.as_mut() {
+            audio.pump_queued_music_starts();
             audio.update_channels(&self.snapshot, &viewports, game_running);
         }
     }
@@ -90246,6 +90378,7 @@ fn music_playlist_matches(playlist: &str, filename: &str) -> bool {
         .any(|pattern| lc_core::std_file::wildcard_match(pattern, filename))
 }
 
+#[derive(Clone)]
 struct MusicCatalog {
     assets: Vec<MusicAsset>,
 }
@@ -90359,6 +90492,7 @@ impl MusicCatalog {
     }
 }
 
+#[derive(Clone)]
 struct MusicAsset {
     source: Arc<Group>,
     relative_path: PathBuf,
@@ -123618,6 +123752,11 @@ public func Grant(password) { return GainMissionAccess(password); }
         let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
         audio.music_resolver =
             MusicResolver::with_global_group(group).expect("build music resolver");
+        let fixture = audio
+            .system
+            .load_music(&silent_pcm_wav(20))
+            .expect("predecode controlled music fixture");
+        audio.control_music_loads_with(fixture);
         let snapshot = make_snapshot(Vec::new(), Vec::new());
         let event = AudioCommand::SetMusicPlaylist {
             playlist: Some("Frontend.*".to_string()),
@@ -123658,6 +123797,9 @@ public func Grant(password) { return GainMissionAccess(password); }
             initial_generation,
             "an enabled restart replaces the current music generation"
         );
+        assert!(audio
+            .complete_next_controlled_music_load()
+            .expect("complete enabled playlist restart"));
 
         let before_play_restart_stop = lock_unpoisoned(&audio.music_control).generation;
         runtime_music_enabled = false;
@@ -124141,6 +124283,278 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let after = lock_unpoisoned(&audio.music_control).generation;
         assert_eq!(after, before, "a miss must leave current playback intact");
+    }
+
+    #[test]
+    fn back_to_back_music_commands_exclude_the_prior_selected_track() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create global music group");
+        fs::write(global.join("A.ogg"), b"A").expect("write A fixture");
+        fs::write(global.join("B.ogg"), b"B").expect("write B fixture");
+
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        audio.music_resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("open global music group"),
+        )
+        .expect("build music resolver");
+        let a_identity = Arc::clone(
+            &audio
+                .music_resolver
+                .resolve("A")
+                .expect("resolve A")
+                .identity,
+        );
+        let b_identity = Arc::clone(
+            &audio
+                .music_resolver
+                .resolve("B")
+                .expect("resolve B")
+                .identity,
+        );
+        lock_unpoisoned(&audio.music_control).most_recently_played = Some(Arc::clone(&a_identity));
+        let fixture = audio
+            .system
+            .load_music(&silent_pcm_wav(20))
+            .expect("predecode controlled music fixture");
+        audio.control_music_loads_with(fixture);
+
+        let mut runtime_music_enabled = false;
+        audio.handle_events(
+            &[
+                AudioCommand::PlayMusic {
+                    name: String::new(),
+                    looped: false,
+                },
+                AudioCommand::PlayMusic {
+                    name: String::new(),
+                    looped: false,
+                },
+            ],
+            &make_snapshot(Vec::new(), Vec::new()),
+            &[],
+            &mut runtime_music_enabled,
+        );
+
+        let controlled = audio
+            .controlled_music_loads
+            .as_ref()
+            .expect("controlled music loading");
+        assert_eq!(controlled.requests.len(), 1);
+        assert_eq!(audio.queued_music_starts.len(), 1);
+        assert!(controlled
+            .requests
+            .front()
+            .and_then(|request| request.identity.as_ref())
+            .is_some_and(|identity| Arc::ptr_eq(identity, &b_identity)));
+
+        assert!(audio
+            .complete_next_controlled_music_load()
+            .expect("complete first music start"));
+        let first_started = lock_unpoisoned(&audio.music_control)
+            .most_recently_played
+            .clone()
+            .expect("first request updates the recent marker");
+        assert!(Arc::ptr_eq(&first_started, &b_identity));
+        let controlled = audio
+            .controlled_music_loads
+            .as_ref()
+            .expect("controlled music loading");
+        assert_eq!(controlled.requests.len(), 1);
+        assert!(controlled
+            .requests
+            .front()
+            .and_then(|request| request.identity.as_ref())
+            .is_some_and(|identity| Arc::ptr_eq(identity, &a_identity)));
+        assert!(audio.queued_music_starts.is_empty());
+
+        assert!(audio
+            .complete_next_controlled_music_load()
+            .expect("complete second music start"));
+        let second_started = lock_unpoisoned(&audio.music_control)
+            .most_recently_played
+            .clone()
+            .expect("second request updates the recent marker");
+        assert!(Arc::ptr_eq(&second_started, &a_identity));
+    }
+
+    #[test]
+    fn queued_default_selection_observes_a_failed_prior_start() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create global music group");
+        fs::write(global.join("A.ogg"), b"A").expect("write A fixture");
+        fs::write(global.join("B.ogg"), b"B").expect("write B fixture");
+
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        audio.music_resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("open global music group"),
+        )
+        .expect("build music resolver");
+        let a_identity = Arc::clone(
+            &audio
+                .music_resolver
+                .resolve("A")
+                .expect("resolve A")
+                .identity,
+        );
+        let b_identity = Arc::clone(
+            &audio
+                .music_resolver
+                .resolve("B")
+                .expect("resolve B")
+                .identity,
+        );
+        lock_unpoisoned(&audio.music_control).most_recently_played = Some(Arc::clone(&a_identity));
+        let fixture = audio
+            .system
+            .load_music(&silent_pcm_wav(20))
+            .expect("predecode controlled music fixture");
+        audio.control_music_loads_with(fixture);
+
+        audio
+            .play_default_music(false)
+            .expect("queue first default");
+        audio
+            .play_default_music(false)
+            .expect("queue second default");
+        assert!(!audio
+            .fail_next_controlled_music_load()
+            .expect("fail first music start"));
+
+        let recent = lock_unpoisoned(&audio.music_control)
+            .most_recently_played
+            .clone()
+            .expect("failed start preserves prior marker");
+        assert!(Arc::ptr_eq(&recent, &a_identity));
+        let controlled = audio
+            .controlled_music_loads
+            .as_ref()
+            .expect("controlled music loading");
+        assert_eq!(controlled.requests.len(), 1);
+        assert!(controlled
+            .requests
+            .front()
+            .and_then(|request| request.identity.as_ref())
+            .is_some_and(|identity| Arc::ptr_eq(identity, &b_identity)));
+    }
+
+    #[test]
+    fn queued_playlist_restart_uses_its_command_time_filter() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create global music group");
+        for name in ["A.ogg", "B.ogg", "C.ogg"] {
+            fs::write(global.join(name), name.as_bytes()).expect("write music fixture");
+        }
+
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        audio.music_resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("open global music group"),
+        )
+        .expect("build music resolver");
+        let b_identity = Arc::clone(
+            &audio
+                .music_resolver
+                .resolve("B")
+                .expect("resolve B")
+                .identity,
+        );
+        let fixture = audio
+            .system
+            .load_music(&silent_pcm_wav(20))
+            .expect("predecode controlled music fixture");
+        audio.control_music_loads_with(fixture);
+
+        let mut runtime_music_enabled = true;
+        audio.handle_events(
+            &[
+                AudioCommand::PlayMusic {
+                    name: "A".to_string(),
+                    looped: false,
+                },
+                AudioCommand::SetMusicPlaylist {
+                    playlist: Some("B.*".to_string()),
+                    restart: true,
+                },
+                AudioCommand::SetMusicPlaylist {
+                    playlist: Some("C.*".to_string()),
+                    restart: false,
+                },
+            ],
+            &make_snapshot(Vec::new(), Vec::new()),
+            &[],
+            &mut runtime_music_enabled,
+        );
+        assert_eq!(audio.queued_music_starts.len(), 1);
+        assert_eq!(audio.music_resolver.playlist.as_deref(), Some("C.*"));
+
+        assert!(audio
+            .complete_next_controlled_music_load()
+            .expect("complete named predecessor"));
+        let controlled = audio
+            .controlled_music_loads
+            .as_ref()
+            .expect("controlled music loading");
+        assert_eq!(controlled.requests.len(), 1);
+        assert!(controlled
+            .requests
+            .front()
+            .and_then(|request| request.identity.as_ref())
+            .is_some_and(|identity| Arc::ptr_eq(identity, &b_identity)));
+    }
+
+    #[test]
+    fn stop_music_cancels_deferred_starts_and_rejects_the_stale_worker() {
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Music.c4g");
+        fs::create_dir_all(&global).expect("create global music group");
+        fs::write(global.join("A.ogg"), b"A").expect("write A fixture");
+        fs::write(global.join("B.ogg"), b"B").expect("write B fixture");
+
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        audio.music_resolver = MusicResolver::with_global_group(
+            Group::open(&global).expect("open global music group"),
+        )
+        .expect("build music resolver");
+        let prior = Arc::clone(
+            &audio
+                .music_resolver
+                .resolve("A")
+                .expect("resolve A")
+                .identity,
+        );
+        lock_unpoisoned(&audio.music_control).most_recently_played = Some(Arc::clone(&prior));
+        let fixture = audio
+            .system
+            .load_music(&silent_pcm_wav(20))
+            .expect("predecode controlled music fixture");
+        audio.control_music_loads_with(fixture);
+
+        audio
+            .play_default_music(false)
+            .expect("queue first default");
+        audio
+            .play_default_music(false)
+            .expect("queue second default");
+        audio.stop_music();
+        assert!(audio.queued_music_starts.is_empty());
+        assert_eq!(audio.music_load_pending.load(AtomicOrdering::Acquire), 0);
+        assert!(!audio
+            .complete_next_controlled_music_load()
+            .expect("complete stale worker"));
+        assert!(audio
+            .controlled_music_loads
+            .as_ref()
+            .expect("controlled music loading")
+            .requests
+            .is_empty());
+        let recent = lock_unpoisoned(&audio.music_control)
+            .most_recently_played
+            .clone()
+            .expect("stale worker preserves prior marker");
+        assert!(Arc::ptr_eq(&recent, &prior));
+        assert!(!audio.system.music_is_playing());
     }
 
     #[test]
