@@ -841,8 +841,7 @@ impl PlayerFile {
             rounds_lost: int("Player", "RoundsLost", 0),
             total_playing_time: int("Player", "TotalPlayingTime", 0),
             extra_data: entry("Player", "ExtraData")
-                .map(|value| parse_persisted_value_map(&value, value_resolution))
-                .transpose()?
+                .and_then(|value| parse_persisted_value_map(&value, value_resolution).ok())
                 .unwrap_or_default(),
             pref_color,
             pref_color_dw,
@@ -1099,7 +1098,8 @@ fn parse_persisted_value_map(
     let (count, payload) = encoded
         .split_once(';')
         .map_or((encoded, None), |(count, payload)| (count, Some(payload)));
-    let count = parse_leading_i32(count).unwrap_or(0);
+    let mut count_parser = PersistedC4ValueParser::new(count, resolution);
+    let count = count_parser.integer().unwrap_or(0);
     if count == 0 {
         return Ok(Vec::new());
     }
@@ -1122,10 +1122,19 @@ fn parse_persisted_value_map(
         if index != 0 {
             parser.expect(b',')?;
         }
-        let name = parser.take_until(b'=')?.trim().to_string();
+        let name = parser.take_until(b'=')?.trim_matches([' ', '\t']);
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(parser.error(format!(
+                "invalid C4ValueMapData identifier `{name}`"
+            )));
+        }
         parser.expect(b'=')?;
         let value = parser.value()?;
-        entries.push((name, value));
+        entries.push((name.to_string(), value));
     }
     Ok(entries)
 }
@@ -1222,6 +1231,29 @@ impl<'a> PersistedC4ValueParser<'a> {
     fn integer(&mut self) -> Result<i32, ScenarioError> {
         self.skip_whitespace();
         let start = self.position;
+        if self.input.get(self.position..self.position.saturating_add(2)).is_some_and(
+            |prefix| matches!(prefix, [b'0', b'x' | b'X']),
+        ) {
+            self.position += 2;
+            let digit_start = self.position;
+            while self
+                .input
+                .get(self.position)
+                .is_some_and(u8::is_ascii_hexdigit)
+            {
+                self.position += 1;
+            }
+            if self.position == digit_start {
+                return Err(self.error("expected hexadecimal integer"));
+            }
+            let value = std::str::from_utf8(&self.input[digit_start..self.position])
+                .ok()
+                .and_then(|value| u64::from_str_radix(value, 16).ok())
+                .map(|value| value as i32)
+                .ok_or_else(|| self.error("invalid hexadecimal integer"))?;
+            self.skip_whitespace();
+            return Ok(value);
+        }
         if matches!(self.input.get(self.position), Some(b'+' | b'-')) {
             self.position += 1;
         }
@@ -1292,11 +1324,17 @@ impl<'a> PersistedC4ValueParser<'a> {
         &mut self,
     ) -> Result<(lc_script::Value, PersistedDirectObjectStatus), ScenarioError> {
         self.skip_whitespace();
-        let kind = *self
-            .input
-            .get(self.position)
-            .ok_or_else(|| self.error("missing value type"))?;
-        self.position += 1;
+        // StdCompilerINIRead::Character accepts only alphabetic bytes. A
+        // legacy untagged integer therefore falls through C4Value's caught
+        // NotFoundException as `A` without consuming its first digit.
+        let kind = self.input.get(self.position).copied().map_or(b'A', |kind| {
+            if kind.is_ascii_alphabetic() {
+                self.position += 1;
+                kind
+            } else {
+                b'A'
+            }
+        });
         match kind {
             b'A' => {
                 let value = self.integer()?;
@@ -1469,7 +1507,13 @@ impl<'a> PersistedC4ValueParser<'a> {
                     PersistedDirectObjectStatus::NONE,
                 ))
             }
-            _ => Err(self.error(format!("unknown value type `{}`", char::from(kind)))),
+            // GetC4VFromID maps unknown alphabetic tags to C4V_Any.
+            _ => self.integer().map(|value| {
+                (
+                    persistent_any_fallback(value),
+                    PersistedDirectObjectStatus::NONE,
+                )
+            }),
         }
     }
 }

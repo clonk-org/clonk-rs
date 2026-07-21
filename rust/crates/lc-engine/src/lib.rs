@@ -22264,9 +22264,9 @@ impl Engine {
         if let Some(base) = first_base {
             config = config.with_container(base);
         }
-        let id = self.spawn_object(config)?;
-        Rc::make_mut(&mut self.crew_object_infos).insert(
-            id,
+        let info_physical = info.physical;
+        let id = self.spawn_object_with_crew_info(
+            config,
             CrewObjectInfo {
                 definition_id: definition_id.clone(),
                 name: info.name.clone(),
@@ -22285,30 +22285,18 @@ impl Engine {
                 extra_data: info.extra_data.clone(),
                 portraits: info.portraits.clone(),
             },
-        );
-        Rc::make_mut(&mut self.crew_info_links).insert(
-            id,
             CrewInfoLink {
                 player_id: number,
                 roster_index: info_index,
             },
-        );
+            info_physical,
+        )?;
 
-        // C4Object::Init receives the crew pInfo. Its persistent physicals
-        // promote by the info rank; GetPhysical selects those when fair crew
-        // is off and derives the definition's fair-crew projection from the
-        // live round strength when it is on (C4Object.cpp:2118-2133;
-        // C4Def.cpp:860-874).
-        let info_physical = info.physical;
+        // C4Player adds the default FoW range only after NewObject has
+        // finished Construction/Completion/Initialize (C4Player.cpp:
+        // 511-520,551-568).
         if let Some(index) = self.find_object_index(id) {
-            self.objects[index].state.info_physical = Some(info_physical);
             self.objects[index].state.plr_view_range = 500;
-            // Init: `if (Alive) Energy = GetPhysical()->Energy`
-            // (C4Object.cpp:192) — the spawn used the def physical before
-            // the info attached.
-            if self.objects[index].state.alive {
-                self.objects[index].state.energy = self.object_physical(index).energy;
-            }
         }
         self.actualize_object_fow_view_range(id);
 
@@ -29853,9 +29841,18 @@ impl Engine {
     }
 
     pub fn spawn_object(&mut self, config: SpawnConfig) -> Result<ObjectId, EngineError> {
+        self.spawn_object_inner(config, None)
+    }
+
+    fn spawn_object_inner(
+        &mut self,
+        config: SpawnConfig,
+        initial_info_physical: Option<PhysicalInfo>,
+    ) -> Result<ObjectId, EngineError> {
         let was_deferred = self.defer_solid_mask_updates;
         let result = (|| {
-            let (id, additional, nested_outcomes) = self.spawn_single(config)?;
+            let (id, additional, nested_outcomes) =
+                self.spawn_single_inner(config, initial_info_physical)?;
             self.process_spawn_queue_with_outcomes(additional, nested_outcomes)?;
             self.refresh_elimination_state();
             self.check_game_over()?;
@@ -29863,6 +29860,36 @@ impl Engine {
         })();
         let outermost = !was_deferred && self.defer_solid_mask_updates;
         self.finish_host_solid_mask_operations(outermost, result)
+    }
+
+    /// `C4Game::CreateInfoObject`: reserve the enumeration number and attach
+    /// the exact roster node before `C4Object::Init` and every creation
+    /// callback. Callback writes therefore update this live projection rather
+    /// than being overwritten by a late clone after spawning.
+    fn spawn_object_with_crew_info(
+        &mut self,
+        mut config: SpawnConfig,
+        info: CrewObjectInfo,
+        link: CrewInfoLink,
+        physical: PhysicalInfo,
+    ) -> Result<ObjectId, EngineError> {
+        let id = self.next_object_id();
+        config = config.with_id(id);
+        let rank = info.rank;
+        Rc::make_mut(&mut self.crew_object_infos).insert(id, info);
+        Rc::make_mut(&mut self.crew_info_links).insert(id, link);
+        Rc::make_mut(&mut self.crew_ranks).insert(id.as_u64(), rank);
+
+        let result = self.spawn_object_inner(config, Some(physical));
+        if result.is_err() && self.find_object_index(id).is_none() {
+            // A failed materialization cannot retain an Info pointer. If a
+            // callback moved the info first, its destination is a different
+            // key and remains untouched.
+            Rc::make_mut(&mut self.crew_object_infos).remove(&id);
+            Rc::make_mut(&mut self.crew_info_links).remove(&id);
+            Rc::make_mut(&mut self.crew_ranks).remove(&id.as_u64());
+        }
+        result
     }
 
     /// `C4Game::NewObject` for engine-owned creation sites which do not run
@@ -56457,12 +56484,13 @@ impl Engine {
         &mut self,
         config: SpawnConfig,
     ) -> Result<(ObjectId, Vec<SpawnConfig>, Vec<compat::NestedObjectOutcome>), EngineError> {
-        self.spawn_single_inner(config)
+        self.spawn_single_inner(config, None)
     }
 
     fn spawn_single_inner(
         &mut self,
         config: SpawnConfig,
+        initial_info_physical: Option<PhysicalInfo>,
     ) -> Result<(ObjectId, Vec<SpawnConfig>, Vec<compat::NestedObjectOutcome>), EngineError> {
         let SpawnConfig {
             id: explicit_id,
@@ -56660,6 +56688,29 @@ impl Engine {
             .get(&definition_id)
             .map(|definition| *definition.physical())
             .unwrap_or_default();
+        let initial_permanent_physical = match initial_info_physical {
+            Some(_) if self.use_fair_crew => {
+                let info_definition_id = self
+                    .crew_object_infos
+                    .get(&id)
+                    .map(|info| &info.definition_id)
+                    .unwrap_or(&definition_id);
+                self.definitions.get(info_definition_id).map_or_else(
+                    || fair_crew_physical(definition_physical, self.fair_crew_strength, 1_000),
+                    |definition| {
+                        fair_crew_physical_with_script(
+                            *definition.physical(),
+                            self.fair_crew_strength,
+                            definition.rank_base().unwrap_or(1_000),
+                            info_definition_id,
+                            definition.script.as_ref(),
+                        )
+                    },
+                )
+            }
+            Some(physical) => physical,
+            None => definition_physical,
+        };
 
         // Init: an explicit controller wins, else the owner
         // (C4Object.cpp:162). Loaded objects skip Init and keep the
@@ -56825,14 +56876,13 @@ impl Engine {
                 t_attach: 0,
                 no_collect_delay: no_collect_delay.unwrap_or(0),
                 base: base.unwrap_or(OWNER_NONE),
-                // C4Object::Init: `if (Alive) Energy = GetPhysical()->Energy`
-                // (C4Object.cpp:192, raw C4MaxPhysical scale); at creation
-                // no info/temporary physical exists yet, so the def's
-                // physical applies. Loaded objects compile Energy= verbatim.
+                // C4Object::Init assigns Info before resolving Energy and
+                // Breath. Ready crew therefore use their persistent physical
+                // set, or its fair-crew projection, before Construction.
                 energy: energy.unwrap_or(if native_compiled_object_defaults {
                     0
                 } else if initial_alive {
-                    definition_physical.energy
+                    initial_permanent_physical.energy
                 } else {
                     0
                 }),
@@ -56895,13 +56945,13 @@ impl Engine {
                 on_fire: on_fire.unwrap_or(false),
                 fire_phase: fire_phase.unwrap_or(0),
                 fire_caused_by: fire_caused_by.unwrap_or(OWNER_NONE),
-                info_physical: None,
+                info_physical: initial_info_physical,
                 temporary_physical,
                 physical_changes,
                 breath: breath.unwrap_or(if native_compiled_object_defaults {
                     0
                 } else {
-                    definition_physical.breath
+                    initial_permanent_physical.breath
                 }),
                 entrance_status: entrance_status.unwrap_or(false),
                 menu: None,

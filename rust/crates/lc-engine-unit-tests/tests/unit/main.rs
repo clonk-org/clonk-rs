@@ -36097,6 +36097,262 @@ global func PreInitializePlayer(int player)
     }
 
     #[test]
+    fn player_file_loads_player_and_crew_extra_data_into_join_state() -> Result<(), EngineError> {
+        // C4Player::Load compiles both ordered maps before C4Player::Init;
+        // the player map is visible in PreInitializePlayer and the exact
+        // C4ObjectInfo is already attached when ready-crew Construction runs
+        // (C4Player.cpp:267-347,481-570; C4Object.cpp:158-195).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profile_path = temp.path().join("ExtraData.c4p");
+        std::fs::create_dir_all(&profile_path).expect("profile directory");
+
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(simple_definition("MARK"))?;
+        let marker = engine.spawn_object(SpawnConfig::new("MARK"))?;
+        let marker_number = marker.as_u64();
+
+        std::fs::write(
+            profile_path.join("Player.txt"),
+            format!(
+                "[Player]\nName=Loaded\nExtraData=0x9;Nil=A0,Int=i-7,Raw=b7,Flag=b1,Badge=I1145851719,Target=O{marker_number},Hex=i0x10,Legacy=7,Unknown=x7\n\n[Preferences]\nColorDw=255\n"
+            ),
+        )
+        .expect("write player core");
+        let crew_path = profile_path.join("Loaded.c4i");
+        std::fs::create_dir_all(&crew_path).expect("crew directory");
+        std::fs::write(
+            crew_path.join("ObjectInfo.txt"),
+            format!(
+                "[ObjectInfo]\nid=CRWD\nName=Loaded Crew\nParticipation=1\nExtraData=6;CrewInt=i41,CrewNil=A0,CrewRaw=b7,CrewFlag=b1,CrewBadge=I1145851719,CrewObject=O{marker_number}\n\n[Physical]\nEnergy=43000\nBreath=31000\n"
+            ),
+        )
+        .expect("write crew core");
+        let malformed_path = profile_path.join("Malformed.c4i");
+        std::fs::create_dir_all(&malformed_path).expect("malformed crew directory");
+        std::fs::write(
+            malformed_path.join("ObjectInfo.txt"),
+            "[ObjectInfo]\nid=BRKN\nName=Malformed\nExtraData=2;Good=i1,Bad Name=i2\n",
+        )
+        .expect("write malformed crew core");
+
+        let resolution = player_file::PersistedC4ValueResolution {
+            strings: lc_script::new_string_registrations(),
+            object_numbers: HashSet::from([marker_number]),
+        };
+        let group = lc_resources::Group::open(&profile_path).expect("open player group");
+        let loaded = player_file::PlayerFile::load_with_portraits_and_value_resolution(
+            &group,
+            true,
+            &resolution,
+        )
+        .expect("load player file");
+
+        let expected_player = vec![
+            ("Nil".to_string(), Value::Nil),
+            ("Int".to_string(), Value::Int(-7)),
+            ("Raw".to_string(), Value::RawBool(7)),
+            ("Flag".to_string(), Value::Bool(true)),
+            ("Badge".to_string(), Value::C4Id("GOLD".to_string())),
+            ("Target".to_string(), Value::Object(marker_number)),
+            ("Hex".to_string(), Value::Int(16)),
+            ("Legacy".to_string(), Value::Int(7)),
+            ("Unknown".to_string(), Value::Int(7)),
+        ];
+        assert_eq!(loaded.info_core.extra_data, expected_player);
+        let loaded_crew = loaded
+            .crew
+            .iter()
+            .find(|info| info.id == "CRWD")
+            .expect("loaded crew info");
+        let expected_crew_energy = loaded_crew.physical.energy;
+        assert_ne!(
+            expected_crew_energy,
+            PhysicalInfo::default().energy,
+            "fixture must distinguish attached info physicals from the definition fallback"
+        );
+        let expected_crew = vec![
+            ("CrewInt".to_string(), Value::Int(41)),
+            ("CrewNil".to_string(), Value::Nil),
+            ("CrewRaw".to_string(), Value::RawBool(7)),
+            ("CrewFlag".to_string(), Value::Bool(true)),
+            ("CrewBadge".to_string(), Value::C4Id("GOLD".to_string())),
+            ("CrewObject".to_string(), Value::Object(marker_number)),
+        ];
+        assert_eq!(loaded_crew.extra_data, expected_crew);
+        assert!(
+            loaded
+                .crew
+                .iter()
+                .find(|info| info.id == "BRKN")
+                .expect("malformed crew still loads")
+                .extra_data
+                .is_empty(),
+            "a malformed default-adapted map resets as a whole"
+        );
+        let malformed_player_path = temp.path().join("MalformedPlayer.c4p");
+        std::fs::create_dir_all(&malformed_player_path)
+            .expect("malformed player directory");
+        std::fs::write(
+            malformed_player_path.join("Player.txt"),
+            "[Player]\nName=Malformed Player\nExtraData=2;Good=i1,Bad Name=i2\n",
+        )
+        .expect("write malformed player core");
+        assert!(
+            player_file::PlayerFile::load_from_path(&malformed_player_path)
+                .expect("malformed default-adapted player map still loads")
+                .info_core
+                .extra_data
+                .is_empty()
+        );
+
+        let mut crew_definition = Definition::from_script(
+            "CRWD",
+            "ExtraData crew",
+            r#"#strict 2
+protected func Construction()
+{
+    SetPlrExtraData(GetOwner(), "ConstructionSeen", GetCrewExtraData(0, "CrewInt"));
+    SetPlrExtraData(GetOwner(), "ConstructionEnergy", GetEnergy());
+    SetCrewExtraData(0, "CrewInt", 99);
+    return 1;
+}
+protected func Initialize()
+{
+    SetPlrExtraData(GetOwner(), "InitializeSeen", GetCrewExtraData(0, "CrewInt"));
+    return 1;
+}
+protected func Recruitment(int player)
+{
+    SetPlrExtraData(player, "RecruitmentSeen", GetCrewExtraData(0, "CrewInt"));
+    return 1;
+}
+"#,
+        )?;
+        crew_definition.set_c4_callback_convention(true);
+        crew_definition.set_category(CATEGORY_LIVING);
+        crew_definition.set_crew_member(true);
+        engine.register_definition(crew_definition)?;
+        engine.set_use_fair_crew(false);
+        let mut start = PlayerStart::default();
+        start.ready_crew = vec![("CRWD".to_string(), 1)];
+        start.enforce_position = true;
+        engine.set_player_starts(vec![start]);
+        engine.install_scenario_script_with_convention(
+            "ExtraData join callbacks",
+            r#"#strict 2
+static pre_nil, pre_int, pre_raw, pre_flag, pre_badge, pre_target;
+static initialize_player_seen;
+global func PreInitializePlayer(int player)
+{
+    pre_nil = GetPlrExtraData(player, "Nil");
+    pre_int = GetPlrExtraData(player, "Int");
+    pre_raw = GetPlrExtraData(player, "Raw");
+    pre_flag = GetPlrExtraData(player, "Flag");
+    pre_badge = GetPlrExtraData(player, "Badge");
+    pre_target = GetPlrExtraData(player, "Target");
+    return 1;
+}
+global func InitializePlayer(int player)
+{
+    initialize_player_seen = GetCrewExtraData(GetCrew(player), "CrewInt");
+    return 1;
+}
+"#,
+            true,
+        )?;
+
+        let core = loaded.exact_info_core();
+        let joined = engine
+            .join_player_with_profile_core(
+                JoinPlayerConfig {
+                    name: loaded.name.clone(),
+                    player_info_id: 1,
+                    score: loaded.score,
+                    rounds: loaded.rounds,
+                    rounds_won: loaded.rounds_won,
+                    rounds_lost: loaded.rounds_lost,
+                    total_playing_time: loaded.total_playing_time,
+                    team: None,
+                    color_dw: loaded.normalized_preferred_color(),
+                    pref_color: loaded.pref_color,
+                    pref_position: loaded.pref_position,
+                    crew: loaded.crew.clone(),
+                    control_style: loaded.pref_control_style,
+                    auto_context_menu: loaded.pref_auto_context_menu,
+                    startup_player_count: 1,
+                },
+                PlayerAtClient::HOST,
+                "Local",
+                None,
+                PlayerRuntimeControl::NONE,
+                core,
+            )?
+            .number();
+
+        let snapshot = engine.snapshot();
+        let globals = &snapshot.script_globals.named;
+        assert_eq!(globals.get("pre_nil"), Some(&Value::Nil));
+        assert_eq!(globals.get("pre_int"), Some(&Value::Int(-7)));
+        assert_eq!(globals.get("pre_raw"), Some(&Value::RawBool(7)));
+        assert_eq!(globals.get("pre_flag"), Some(&Value::Bool(true)));
+        assert_eq!(
+            globals.get("pre_badge"),
+            Some(&Value::C4Id("GOLD".to_string()))
+        );
+        assert_eq!(globals.get("pre_target"), Some(&Value::Object(marker_number)));
+        assert_eq!(globals.get("initialize_player_seen"), Some(&Value::Int(99)));
+
+        let crew = engine.player(joined).expect("joined player remains").crew()[0];
+        let state = engine.capture_state();
+        let player_extra_data = &state
+            .players
+            .iter()
+            .find(|player| player.id == joined)
+            .expect("joined player state remains")
+            .extra_data;
+        for (slot, expected) in [
+            ("ConstructionSeen", Value::Int(41)),
+            (
+                "ConstructionEnergy",
+                Value::Int(expected_crew_energy / 1_000),
+            ),
+            ("InitializeSeen", Value::Int(99)),
+            ("RecruitmentSeen", Value::Int(99)),
+        ] {
+            assert_eq!(
+                player_extra_data
+                    .iter()
+                    .find(|(name, _)| name == slot)
+                    .map(|(_, value)| value),
+                Some(&expected),
+                "callback slot {slot}"
+            );
+        }
+        assert_eq!(
+            engine.object_snapshot(crew).expect("ready crew remains").energy,
+            expected_crew_energy
+        );
+        let mut expected_mutated_crew = expected_crew;
+        expected_mutated_crew[0].1 = Value::Int(99);
+        assert_eq!(
+            engine
+                .crew_object_info(crew)
+                .expect("ready crew retains info")
+                .extra_data,
+            expected_mutated_crew
+        );
+        assert_eq!(
+            state.crew_info_rosters[&joined]
+                .iter()
+                .find(|info| info.id == "CRWD")
+                .expect("roster entry remains")
+                .extra_data,
+            expected_mutated_crew
+        );
+        Ok(())
+    }
+
+    #[test]
     fn player_lifecycle_restore_reapplies_autostop_to_inactive_crew() -> Result<(), EngineError> {
         // ApplyForcedControl clears buffered input whenever ControlStyle
         // changes and, when switching to AutoStop, clears ComDir on every
