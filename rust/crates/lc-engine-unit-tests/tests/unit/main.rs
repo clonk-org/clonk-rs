@@ -62609,6 +62609,128 @@ func ProbeGraphicsBounds() {
     }
 
     #[test]
+    fn contact_callback_mutations_affect_later_movement_probes() {
+        // The later vertical arm must use ContactRight's new
+        // C4Shape::ContactDensity rather than the movement-entry value.
+        {
+            let mut landscape = vehicle_grid_landscape(20, 20);
+            landscape.grid_write_byte(7, 5, 1);
+            landscape.grid_write_byte(5, 7, 1);
+
+            let mut definition = Definition::from_script(
+                "L217",
+                "Live movement density",
+                r#"#strict 2
+                    global func ContactRight()
+                    {
+                        SetContactDensity(101);
+                        SetYDir(20);
+                        return 0;
+                    }
+                "#,
+            )
+            .expect("density fixture compiles");
+            definition.set_shape_vertices(vec![
+                ObjectVertex::new(1, 0).with_cnat(CNAT_RIGHT),
+                ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM),
+            ]);
+            definition.set_contact_density(50);
+            definition.set_contact_function_calls(true);
+
+            let mut engine = Engine::with_seed(217);
+            engine.set_landscape(landscape);
+            engine.set_physics(PhysicsSettings::new(0, 20, -20));
+            engine
+                .register_definition(definition)
+                .expect("density definition registers");
+            let object_id = engine
+                .spawn_object(
+                    SpawnConfig::new("L217")
+                        .with_loaded(true)
+                        .with_category(CATEGORY_OBJECT)
+                        .with_position(Vector2::new(5, 5))
+                        .with_fixed_position(FixedVec2::from_ints(5, 5))
+                        .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
+                        .with_mobile(true),
+                )
+                .expect("density mover spawns");
+
+            engine
+                .tick_without_snapshot()
+                .expect("density movement succeeds");
+            let object = engine.object_snapshot(object_id).expect("mover remains");
+            assert_eq!(object.position, Vector2::new(5, 7));
+            assert_eq!(object.contact_density, 101);
+        }
+
+        // Rotation follows translation in the same DoMovement. ChangeDef's
+        // tighter Rotateable limit is therefore authoritative immediately.
+        {
+            let mut landscape = vehicle_grid_landscape(20, 20);
+            landscape.grid_write_byte(7, 5, 1);
+
+            let mut old = Definition::from_script(
+                "LOLD",
+                "Old rotation limit",
+                r#"#strict 2
+                    global func ContactRight()
+                    {
+                        SetXDir(0);
+                        ChangeDef(LNEW);
+                        SetRDir(100);
+                        return 0;
+                    }
+                "#,
+            )
+            .expect("old rotation fixture compiles");
+            old.set_shape_vertices(vec![ObjectVertex::new(1, 0).with_cnat(CNAT_RIGHT)]);
+            old.set_contact_density(50);
+            old.set_contact_function_calls(true);
+            old.set_rotateable(100);
+
+            let mut new = Definition::from_script("LNEW", "New rotation limit", "")
+                .expect("new rotation fixture compiles");
+            new.set_rotateable(20);
+
+            let mut engine = Engine::with_seed(217);
+            engine.set_landscape(landscape);
+            engine.set_physics(PhysicsSettings::new(0, 20, -20));
+            engine
+                .register_definition(old)
+                .expect("old rotation definition registers");
+            engine
+                .register_definition(new)
+                .expect("new rotation definition registers");
+            let object_id = engine
+                .spawn_object(
+                    SpawnConfig::new("LOLD")
+                        .with_loaded(true)
+                        .with_category(CATEGORY_OBJECT)
+                        .with_position(Vector2::new(5, 5))
+                        .with_fixed_position(FixedVec2::from_ints(5, 5))
+                        .with_fixed_velocity(FixedVec2::new(itofix(1), C4Fixed::ZERO))
+                        .with_mobile(true),
+                )
+                .expect("rotation mover spawns");
+
+            engine
+                .tick_without_snapshot()
+                .expect("rotation movement succeeds");
+            let object = engine.object_snapshot(object_id).expect("mover remains");
+            assert_eq!(object.definition_id, "LNEW");
+            assert_eq!(object.position, Vector2::new(6, 5));
+            let index = engine.find_object_index(object_id).expect("mover index");
+            assert_eq!(
+                object.rotation,
+                20,
+                "rdir={:?} ocf={}",
+                engine.objects[index].rotation_velocity,
+                object.ocf
+            );
+        }
+    }
+
+    #[test]
     fn l125_liquid_entry_splash_amount_uses_live_shape_area_like_cpp() {
         let library = MaterialLibrary::parse(
             r#"
