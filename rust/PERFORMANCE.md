@@ -549,6 +549,43 @@ The 25ms planning target leaves 3ms of headroom beneath the 28ms in-game
 cadence. Do not split it into arbitrary simulation/render limits before phase
 measurements show where time is spent.
 
+### Deep Sea retained-GPU presentation benchmark
+
+Build once, then run the real Deep Sea scenario through the windowed GPU path:
+
+```sh
+cd rust
+cargo build --release --offline --locked -p lc-app --bin lc-app
+scripts/run-deep-sea-gpu-benchmark.sh 20
+```
+
+The wrapper creates and removes a self-contained `/private/tmp` fixture. It
+excludes only Hazard's three duplicate process-global GUI sheets and removes
+the copied scenario's `Origin` redirect; all Deep Sea world and gameplay
+resources remain the real checked-in content.
+
+The app warms up for two seconds, measures for 20 seconds, prints one
+`LC_APP_PRESENTATION_BENCHMARK` machine line, and exits. The assertion exits
+with status 2 unless at least one refreshed frame was presented, average GPU
+graphics-pass time is at most the native 28ms game tick, and
+`automatic_graphics_skips=0`. Record the machine line together with the commit,
+content revision, display size, hardware, OS, and power state; do not compare
+runs with different fingerprints.
+
+Reference run for the L023 retained-GPU landing candidate on 2026-07-21:
+
+- content revision `67a54d0e662bda3aa0202134efc065d7bc420872`;
+- Apple M4 Max, Metal, arm64, 128 GiB memory;
+- macOS 26.5.2 (25F84), AC power at 100%;
+- 800x600 windowed output, 100% scale, immediate/no-vsync presentation;
+- 20.002 seconds measured after warmup, 1,077 successful presentation
+  submissions and refreshed frames, and 714 simulation frames.
+
+The machine result was 53.845 presentation-submission FPS, 35.697 simulation
+FPS, 5.794ms average and 9.202ms maximum graphics-pass time, with zero
+automatic graphics skips. This is a passing native-tick-budget reference, not
+a claim that the current path sustains 60 FPS.
+
 ## Reproducing render measurements
 
 Render one explicit replay snapshot:

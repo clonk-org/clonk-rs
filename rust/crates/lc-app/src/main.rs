@@ -19,6 +19,7 @@ mod draw_commands;
 mod game_message;
 mod game_over;
 mod gamepad;
+mod gpu_renderer;
 mod host_game_resource_sources;
 mod ingame_menu;
 mod input;
@@ -250,7 +251,11 @@ const INGAME_FRAME_INTERVAL: Duration = Duration::from_millis(28);
 const DEFAULT_MAX_REFRESH_DELAY_MS: u64 = 16;
 const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp backlog to avoid runaway catch-up
 const PRESENTATION_BENCHMARK_ENV: &str = "LC_APP_PRESENTATION_BENCHMARK_SECONDS";
+const PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK_ENV: &str =
+    "LC_APP_PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK";
 const PRESENTATION_BENCHMARK_WARMUP: Duration = Duration::from_secs(2);
+const SAVE_THUMBNAIL_WIDTH: u32 = 200;
+const SAVE_THUMBNAIL_HEIGHT: u32 = 150;
 static LOBBY_PRELOAD_SERIAL: AtomicU64 = AtomicU64::new(0);
 const NETWORK_CONTROL_OVERFLOW_LIMIT: u32 = 3;
 const NETWORK_RENDER_SKIP_BEHIND: u32 = 25;
@@ -7961,6 +7966,11 @@ fn main() -> Result<()> {
         .enable_vsync(false)
         .build()
         .context("failed to create pixel framebuffer")?;
+    let mut retained_gpu_renderer = gpu_renderer::RetainedGpuRenderer::new(
+        pixels.device(),
+        pixels.queue(),
+        pixels.surface_texture_format(),
+    );
 
     // The app lays out and renders at the GUI resolution; the presenter
     // scales the finished frame to the window like the C++ engine scales
@@ -8018,6 +8028,7 @@ fn main() -> Result<()> {
     let mut next_graphics_deadline = previous_instant + frame_schedule.refresh_interval;
     let mut automatic_frame_skip = AutomaticFrameSkip::default();
     let mut presentation_benchmark = presentation_benchmark_from_env();
+    let presentation_benchmark_asserts_native_tick = presentation_benchmark_asserts_native_tick();
 
     event_loop.run(move |event, _, control_flow| {
         match event {
@@ -8222,10 +8233,74 @@ fn main() -> Result<()> {
                     ) =>
             {
                 tracing::trace!("automatic frame skip consumed one graphics pass");
+                if let Some(benchmark) = presentation_benchmark.as_mut() {
+                    benchmark.record_automatic_graphics_skip();
+                }
             }
             Event::RedrawRequested(id) if id == window.id() => {
                 let graphics_started = Instant::now();
                 app.graphics.set_presentation_scale(presenter.scale());
+                if app.mode == AppMode::Running && !app.console_mode {
+                    app.retained_gpu_presentation_active = true;
+                    if pixels.context().texture_extent.width != 1
+                        || pixels.context().texture_extent.height != 1
+                    {
+                        if let Err(error) = pixels.resize_buffer(1, 1) {
+                            tracing::error!(%error, "failed to enter retained GPU presentation");
+                            control_flow.set_exit();
+                            return;
+                        }
+                    }
+                    match render_retained_gpu_running_frame(
+                        &mut app,
+                        &pixels,
+                        &presenter,
+                        &mut retained_gpu_renderer,
+                    ) {
+                        Ok(()) => {
+                            let graphics_duration = graphics_started.elapsed();
+                            automatic_frame_skip.finish_graphics_pass(
+                                app.auto_frame_skip,
+                                graphics_duration,
+                                frame_schedule.simulation_interval,
+                            );
+                            if let Some(benchmark) = presentation_benchmark.as_mut() {
+                                let completed_at = Instant::now();
+                                benchmark.record_successful_presentation(
+                                    completed_at,
+                                    graphics_duration,
+                                    true,
+                                );
+                                if let Some(report) =
+                                    benchmark.poll(true, completed_at, app.engine.frame())
+                                {
+                                    finish_presentation_benchmark(
+                                        control_flow,
+                                        report,
+                                        presentation_benchmark_asserts_native_tick,
+                                    );
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(?error, "retained GPU render failed");
+                            control_flow.set_exit();
+                        }
+                    }
+                    window.set_cursor_visible(app.platform_cursor_visible());
+                    return;
+                }
+                app.retained_gpu_presentation_active = false;
+                let (physical_width, physical_height) = presenter.physical_size();
+                if pixels.context().texture_extent.width != physical_width
+                    || pixels.context().texture_extent.height != physical_height
+                {
+                    if let Err(error) = pixels.resize_buffer(physical_width, physical_height) {
+                        tracing::error!(%error, "failed to restore CPU presentation buffer");
+                        control_flow.set_exit();
+                        return;
+                    }
+                }
                 let ordered_native_text =
                     !app.console_mode && app.can_present_ordered_native_text(presenter.scale());
                 let defer_native_main_text =
@@ -8329,8 +8404,11 @@ fn main() -> Result<()> {
                                 completed_at,
                                 app.engine.frame(),
                             ) {
-                                println!("{}", report.machine_line());
-                                control_flow.set_exit();
+                                finish_presentation_benchmark(
+                                    control_flow,
+                                    report,
+                                    presentation_benchmark_asserts_native_tick,
+                                );
                             }
                         }
                     }
@@ -8378,6 +8456,107 @@ fn main() -> Result<()> {
             }
         }
     });
+}
+
+fn render_retained_gpu_running_frame(
+    app: &mut GameApp,
+    pixels: &Pixels,
+    presenter: &lc_scaling::FramePresenter,
+    renderer: &mut gpu_renderer::RetainedGpuRenderer,
+) -> Result<()> {
+    let scene = app.render_running_gpu_scene()?;
+    let geometry = presenter.presentation_geometry();
+    let (physical_width, physical_height) = geometry.physical_size();
+    let presentation = lc_graphics::GpuPresentation {
+        physical_extent: [physical_width, physical_height],
+        scale: geometry.scale(),
+        crop_top: geometry.crop_top(),
+    };
+    let request_readback =
+        !app.pending_screenshots.is_empty() || !app.pending_gpu_thumbnail_paths.is_empty();
+    let mut readback = None;
+    pixels
+        .render_with(|encoder, surface_view, context| {
+            readback = renderer.render(
+                &context.device,
+                &context.queue,
+                encoder,
+                surface_view,
+                &scene,
+                &presentation,
+                request_readback,
+            )?;
+            Ok(())
+        })
+        .context("failed to submit retained GPU frame")?;
+
+    if let Some(ticket) = readback {
+        let mut frame = match ticket.read(pixels.device()) {
+            Ok(frame) => frame,
+            Err(error) => {
+                while let Some(path) = app.pending_gpu_thumbnail_paths.pop_front() {
+                    tracing::warn!(
+                        path = %path.display(),
+                        ?error,
+                        "failed to read retained GPU save thumbnail"
+                    );
+                }
+                while !app.pending_screenshots.is_empty() {
+                    let result = app.save_next_screenshot(
+                        None,
+                        physical_width,
+                        physical_height,
+                        presenter.scale(),
+                    );
+                    app.report_screenshot_result(result);
+                }
+                return Ok(());
+            }
+        };
+        if !app.pending_gpu_thumbnail_paths.is_empty() {
+            match encode_presented_save_thumbnail(frame.extent[0], frame.extent[1], &frame.rgba) {
+                Ok(encoded) => {
+                    while let Some(path) = app.pending_gpu_thumbnail_paths.pop_front() {
+                        let result = (|| -> Result<()> {
+                            let mut file = File::create(&path).with_context(|| {
+                                format!("failed to create thumbnail at {}", path.display())
+                            })?;
+                            file.write_all(&encoded)
+                                .context("failed to write retained GPU save thumbnail")?;
+                            file.flush()
+                                .context("failed to flush retained GPU save thumbnail")
+                        })();
+                        if let Err(error) = result {
+                            tracing::warn!(
+                                path = %path.display(),
+                                ?error,
+                                "failed to persist retained GPU save thumbnail"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    while let Some(path) = app.pending_gpu_thumbnail_paths.pop_front() {
+                        tracing::warn!(
+                            path = %path.display(),
+                            ?error,
+                            "failed to encode retained GPU save thumbnail"
+                        );
+                    }
+                }
+            }
+        }
+        while !app.pending_screenshots.is_empty() {
+            let result = app.save_next_screenshot(
+                Some(frame.rgba.as_mut_slice()),
+                frame.extent[0],
+                frame.extent[1],
+                presenter.scale(),
+            );
+            app.report_screenshot_result(result);
+        }
+    }
+    Ok(())
 }
 
 fn deliver_desktop_notifications<F>(app: &mut GameApp, mut show: F)
@@ -13683,6 +13862,8 @@ struct GameApp {
     scoreboard_tab_raw_pressed: bool,
     keyboard_modifiers: ModifiersState,
     pending_screenshots: VecDeque<ScreenshotRequest>,
+    retained_gpu_presentation_active: bool,
+    pending_gpu_thumbnail_paths: VecDeque<PathBuf>,
     pending_options_display_requests: VecDeque<OptionsDisplayRequest>,
     /// Current `Config.General.GamepadEnabled` value used by each new
     /// `C4Player::InitControl` analogue.
@@ -16137,6 +16318,7 @@ struct PresentationBenchmarkMeasurement {
     simulation_frame: u64,
     submissions: u64,
     refreshed_frames: u64,
+    automatic_graphics_skips: u64,
     graphics_total: Duration,
     graphics_max: Duration,
 }
@@ -16147,6 +16329,7 @@ struct PresentationBenchmarkReport {
     submissions: u64,
     refreshed_frames: u64,
     simulation_frames: u64,
+    automatic_graphics_skips: u64,
     graphics_average: Duration,
     graphics_max: Duration,
 }
@@ -16157,10 +16340,11 @@ impl PresentationBenchmarkReport {
         let submission_fps = self.submissions as f64 / elapsed_seconds;
         let simulation_fps = self.simulation_frames as f64 / elapsed_seconds;
         format!(
-            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds={elapsed_seconds:.6} successful_present_submissions={} presentation_submission_fps={submission_fps:.6} refreshed_frames={} simulation_frames={} simulation_fps={simulation_fps:.6} average_graphics_pass_ms={:.6} max_graphics_pass_ms={:.6}",
+            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds={elapsed_seconds:.6} successful_present_submissions={} presentation_submission_fps={submission_fps:.6} refreshed_frames={} simulation_frames={} simulation_fps={simulation_fps:.6} automatic_graphics_skips={} average_graphics_pass_ms={:.6} max_graphics_pass_ms={:.6}",
             self.submissions,
             self.refreshed_frames,
             self.simulation_frames,
+            self.automatic_graphics_skips,
             self.graphics_average.as_secs_f64() * 1_000.0,
             self.graphics_max.as_secs_f64() * 1_000.0,
         )
@@ -16228,6 +16412,7 @@ impl PresentationBenchmark {
             submissions,
             refreshed_frames: self.measurement.refreshed_frames,
             simulation_frames: simulation_frame.saturating_sub(self.measurement.simulation_frame),
+            automatic_graphics_skips: self.measurement.automatic_graphics_skips,
             graphics_average,
             graphics_max: self.measurement.graphics_max,
         })
@@ -16257,6 +16442,14 @@ impl PresentationBenchmark {
             .saturating_add(graphics_duration);
         self.measurement.graphics_max = self.measurement.graphics_max.max(graphics_duration);
     }
+
+    fn record_automatic_graphics_skip(&mut self) {
+        if self.finished || self.measurement.started.is_none() {
+            return;
+        }
+        self.measurement.automatic_graphics_skips =
+            self.measurement.automatic_graphics_skips.saturating_add(1);
+    }
 }
 
 fn parse_presentation_benchmark_window(raw: &str) -> Option<Duration> {
@@ -16272,6 +16465,48 @@ fn presentation_benchmark_from_env() -> Option<PresentationBenchmark> {
         .as_deref()
         .and_then(parse_presentation_benchmark_window)
         .map(PresentationBenchmark::new)
+}
+
+fn presentation_benchmark_asserts_native_tick() -> bool {
+    std::env::var(PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK_ENV).is_ok_and(|value| value == "1")
+}
+
+fn validate_native_tick_presentation_budget(
+    report: PresentationBenchmarkReport,
+) -> std::result::Result<(), String> {
+    if report.submissions == 0 || report.refreshed_frames == 0 {
+        return Err("benchmark produced no refreshed presentation".to_string());
+    }
+    if report.automatic_graphics_skips != 0 {
+        return Err(format!(
+            "automatic graphics skips must be zero (observed {})",
+            report.automatic_graphics_skips
+        ));
+    }
+    if report.graphics_average > INGAME_FRAME_INTERVAL {
+        return Err(format!(
+            "average graphics pass {:.6}ms exceeds the native 28ms game tick",
+            report.graphics_average.as_secs_f64() * 1_000.0
+        ));
+    }
+    Ok(())
+}
+
+fn finish_presentation_benchmark(
+    control_flow: &mut ControlFlow,
+    report: PresentationBenchmarkReport,
+    assert_native_tick: bool,
+) {
+    println!("{}", report.machine_line());
+    if assert_native_tick {
+        if let Err(error) = validate_native_tick_presentation_budget(report) {
+            eprintln!("LC_APP_PRESENTATION_BENCHMARK result=fail error={error}");
+            control_flow.set_exit_with_code(2);
+            return;
+        }
+        println!("LC_APP_PRESENTATION_BENCHMARK result=pass native_tick_budget_ms=28");
+    }
+    control_flow.set_exit();
 }
 
 fn advance_graphics_deadline(deadline: Instant, now: Instant, interval: Duration) -> Instant {
@@ -21781,8 +22016,50 @@ fn sanitize_record_name(raw: &str) -> String {
 }
 
 fn encode_surface_to_png(surface: &Surface) -> Result<Vec<u8>> {
-    let width = surface.width();
-    let height = surface.height();
+    encode_rgba_png(surface.width(), surface.height(), surface.pixels())
+}
+
+fn encode_presented_save_thumbnail(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+    anyhow::ensure!(width != 0 && height != 0, "save thumbnail source is empty");
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .context("save thumbnail source dimensions overflow")?;
+    anyhow::ensure!(
+        rgba.len() == expected,
+        "save thumbnail source has {} bytes, expected {expected}",
+        rgba.len()
+    );
+    let image = ImageData::new(width, height, rgba.to_vec());
+    let mut thumbnail = Surface::new(
+        SAVE_THUMBNAIL_WIDTH,
+        SAVE_THUMBNAIL_HEIGHT,
+        PixelFormat::Rgba8888,
+    );
+    lc_frontend::draw_image_bilinear(
+        &mut thumbnail,
+        &GuiRect::new(
+            0.0,
+            0.0,
+            SAVE_THUMBNAIL_WIDTH as f32,
+            SAVE_THUMBNAIL_HEIGHT as f32,
+        ),
+        &image,
+        None,
+    );
+    encode_surface_to_png(&thumbnail)
+}
+
+fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .context("RGBA PNG dimensions overflow")?;
+    anyhow::ensure!(
+        rgba.len() == expected,
+        "RGBA PNG frame has {} bytes, expected {expected}",
+        rgba.len()
+    );
     let mut buffer = Vec::new();
     {
         let mut encoder = Encoder::new(&mut buffer, width, height);
@@ -21792,7 +22069,7 @@ fn encode_surface_to_png(surface: &Surface) -> Result<Vec<u8>> {
             .write_header()
             .context("failed to initialise PNG encoder")?;
         writer
-            .write_image_data(surface.pixels())
+            .write_image_data(rgba)
             .context("failed to encode PNG surface")?;
         writer.finish().context("failed to finish PNG encoding")?;
     }
@@ -25690,6 +25967,8 @@ impl GameApp {
             scoreboard_tab_raw_pressed: false,
             keyboard_modifiers: ModifiersState::empty(),
             pending_screenshots: VecDeque::new(),
+            retained_gpu_presentation_active: false,
+            pending_gpu_thumbnail_paths: VecDeque::new(),
             pending_options_display_requests: VecDeque::new(),
             gamepads_enabled,
             gamepad_input_enabled: gamepads_enabled,
@@ -41139,10 +41418,14 @@ impl GameApp {
     }
 
     fn write_save_thumbnail(&mut self, path: &Path) -> Result<()> {
+        let target = path.with_extension("png");
+        if self.retained_gpu_presentation_active {
+            self.pending_gpu_thumbnail_paths.push_back(target);
+            return Ok(());
+        }
         let surface = self.graphics.surface();
         let encoded =
             encode_surface_to_png(surface).context("failed to encode save thumbnail image")?;
-        let target = path.with_extension("png");
         let mut file = File::create(&target)
             .with_context(|| format!("failed to create thumbnail at {}", target.display()))?;
         file.write_all(&encoded)
@@ -78326,6 +78609,21 @@ impl GameApp {
         Some(format_resource_string(template, &[&name]))
     }
 
+    fn render_running_gpu_scene(&mut self) -> Result<lc_graphics::GpuScene> {
+        let gamma = self
+            .graphics
+            .active_gamma_ramp(&self.snapshot.environment.gamma);
+        self.graphics.begin_gpu_scene_capture();
+        let mut ignored_cpu_pixel = [0_u8; 4];
+        if let Err(error) = self.render_running(&mut ignored_cpu_pixel, false) {
+            let _ = self.graphics.finish_gpu_scene_capture(&gamma);
+            return Err(error);
+        }
+        self.graphics
+            .finish_gpu_scene_capture(&gamma)
+            .ok_or_else(|| anyhow!("GPU scene capture ended before presentation"))
+    }
+
     fn render_running(&mut self, frame: &mut [u8], defer_native_game_messages: bool) -> Result<()> {
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         self.graphics.set_renderer_config(
@@ -100854,6 +101152,7 @@ func Award()
 
         assert_eq!(benchmark.poll(false, base, 10), None);
         benchmark.record_successful_presentation(base, Duration::from_millis(100), true);
+        benchmark.record_automatic_graphics_skip();
         assert_eq!(benchmark.poll(true, base, 10), None);
         assert_eq!(
             benchmark.poll(
@@ -100867,6 +101166,7 @@ func Award()
             benchmark.poll(true, base + PRESENTATION_BENCHMARK_WARMUP, 70),
             None
         );
+        benchmark.record_automatic_graphics_skip();
         benchmark.record_successful_presentation(
             base + PRESENTATION_BENCHMARK_WARMUP + Duration::from_millis(10),
             Duration::from_millis(10),
@@ -100897,13 +101197,46 @@ func Award()
         assert_eq!(report.submissions, 2);
         assert_eq!(report.refreshed_frames, 1);
         assert_eq!(report.simulation_frames, 105);
+        assert_eq!(report.automatic_graphics_skips, 1);
         assert_eq!(report.graphics_average, Duration::from_millis(15));
         assert_eq!(report.graphics_max, Duration::from_millis(20));
         assert_eq!(
             report.machine_line(),
-            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000"
+            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000"
         );
         assert_eq!(benchmark.poll(true, base + Duration::from_secs(10), 999), None);
+    }
+
+    #[test]
+    fn deep_sea_gpu_presentation_meets_native_tick_budget() {
+        let passing = PresentationBenchmarkReport {
+            elapsed: Duration::from_secs(20),
+            submissions: 1_200,
+            refreshed_frames: 1_200,
+            simulation_frames: 714,
+            automatic_graphics_skips: 0,
+            graphics_average: INGAME_FRAME_INTERVAL,
+            graphics_max: Duration::from_millis(32),
+        };
+        assert_eq!(validate_native_tick_presentation_budget(passing), Ok(()));
+
+        let mut too_slow = passing;
+        too_slow.graphics_average = Duration::from_micros(28_001);
+        assert!(validate_native_tick_presentation_budget(too_slow)
+            .unwrap_err()
+            .contains("exceeds the native 28ms game tick"));
+
+        let mut skipped = passing;
+        skipped.automatic_graphics_skips = 1;
+        assert!(validate_native_tick_presentation_budget(skipped)
+            .unwrap_err()
+            .contains("must be zero"));
+
+        let mut not_refreshed = passing;
+        not_refreshed.refreshed_frames = 0;
+        assert!(validate_native_tick_presentation_budget(not_refreshed)
+            .unwrap_err()
+            .contains("no refreshed presentation"));
     }
 
     #[test]
@@ -131906,6 +132239,43 @@ ScenInfoArea=70,5,25,90
 
         result.expect("install-root screenshot fallback");
         assert_eq!(path, install.path().join("Screenshot001.png"));
+    }
+
+    #[test]
+    fn retained_gpu_save_thumbnail_waits_for_the_presented_frame() {
+        let directory = tempdir().expect("save thumbnail directory");
+        let save_path = directory.path().join("round.c4s");
+        let thumbnail_path = save_path.with_extension("png");
+        let mut app = new_running_sandbox_app();
+        app.retained_gpu_presentation_active = true;
+
+        app.write_save_thumbnail(&save_path)
+            .expect("queue retained GPU thumbnail");
+
+        assert_eq!(
+            app.pending_gpu_thumbnail_paths.iter().collect::<Vec<_>>(),
+            vec![&thumbnail_path]
+        );
+        assert!(
+            !thumbnail_path.exists(),
+            "the stale CPU surface must not be written before GPU readback"
+        );
+    }
+
+    #[test]
+    fn retained_gpu_save_thumbnail_matches_cpp_title_extent() {
+        let encoded = encode_presented_save_thumbnail(2, 1, &[255, 0, 0, 255, 0, 0, 255, 255])
+            .expect("encode retained GPU thumbnail");
+        let decoder = Decoder::new(io::Cursor::new(encoded));
+        let mut reader = decoder.read_info().expect("read thumbnail header");
+        let mut buffer = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buffer).expect("decode thumbnail");
+
+        assert_eq!(
+            (info.width, info.height),
+            (SAVE_THUMBNAIL_WIDTH, SAVE_THUMBNAIL_HEIGHT)
+        );
+        assert_eq!(info.color_type, ColorType::Rgba);
     }
 
     #[test]

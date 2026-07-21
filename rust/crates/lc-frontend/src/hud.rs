@@ -921,6 +921,46 @@ pub(crate) fn draw_player_fixed_items_with_gamma(
     show_crew: bool,
     gamma: Option<&GammaRamp>,
 ) {
+    let crew_icon = show_crew
+        .then(|| {
+            hud.crew
+                .as_ref()
+                .map(|icon| colorize_by_owner(icon, owner_color))
+        })
+        .flatten();
+    draw_player_fixed_items_with_colored_crew_gamma(
+        surface,
+        font,
+        hud,
+        viewport,
+        wealth,
+        score,
+        select_count,
+        crew_count,
+        crew_icon.as_ref(),
+        show_wealth,
+        show_score,
+        show_crew,
+        gamma,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_player_fixed_items_with_colored_crew_gamma(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    hud: &HudGraphics,
+    viewport: SurfaceRect,
+    wealth: i32,
+    score: i32,
+    select_count: i32,
+    crew_count: i32,
+    crew_icon: Option<&ImageData>,
+    show_wealth: bool,
+    show_score: bool,
+    show_crew: bool,
+    gamma: Option<&GammaRamp>,
+) {
     let (wdt, hgt) = (SYMBOL_SIZE, SYMBOL_SIZE / 2);
     let right = viewport.x + viewport.width as i32;
     let top = viewport.y + SYMBOL_BORDER;
@@ -965,14 +1005,10 @@ pub(crate) fn draw_player_fixed_items_with_gamma(
             wdt as u32,
             hgt as u32,
         );
-        let crew_icon = hud
-            .crew
-            .as_ref()
-            .map(|icon| colorize_by_owner(icon, owner_color));
         draw_value(
             surface,
             font,
-            crew_icon.as_ref(),
+            crew_icon,
             &format!("{select_count}/{crew_count}"),
             cgo,
             gamma,
@@ -1487,6 +1523,35 @@ fn draw_scaled_region(
 ) {
     if src.width == 0 || src.height == 0 || dest.width == 0 || dest.height == 0 {
         return;
+    }
+    if surface.is_gpu_scene_capture_active()
+        && src.x >= 0
+        && src.y >= 0
+        && i64::from(src.x) + i64::from(src.width) <= i64::from(image.width())
+        && i64::from(src.y) + i64::from(src.height) <= i64::from(image.height())
+    {
+        if let (Ok(source_width), Ok(source_height)) =
+            (i32::try_from(src.width), i32::try_from(src.height))
+        {
+            crate::draw_image_region(
+                surface,
+                &lc_gui::Rect::new(
+                    dest.x as f32,
+                    dest.y as f32,
+                    dest.width as f32,
+                    dest.height as f32,
+                ),
+                image,
+                None,
+                &crate::SourceRect::new(src.x, src.y, source_width, source_height),
+                false,
+                None,
+                crate::SpriteBlitState::normal(),
+                gamma,
+                None,
+            );
+            return;
+        }
     }
     let pixels = image.pixels();
     let (img_w, img_h) = (image.width() as i32, image.height() as i32);
@@ -2609,7 +2674,7 @@ pub(crate) fn message_board_physical_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lc_graphics::{FontMetrics, PixelFormat, TextFont};
+    use lc_graphics::{FontMetrics, GpuBlend, GpuCommand, GpuSampler, PixelFormat, TextFont};
 
     struct MarkerFont;
 
@@ -2689,6 +2754,46 @@ mod tests {
         let mut surface = Surface::new(width, height, PixelFormat::Rgba8888);
         surface.fill(Color::opaque(0, 0, 0));
         surface
+    }
+
+    #[test]
+    fn gpu_capture_lowers_scaled_command_region_to_nearest_gamma_quad() {
+        let image = solid_image(4, 2, [64, 128, 192, 128]);
+        let gamma = GammaRamp::standard();
+        let mut surface = surface(8, 4);
+        surface.begin_gpu_scene_capture();
+
+        draw_scaled_region(
+            &mut surface,
+            &image,
+            SurfaceRect::new(1, 0, 2, 2),
+            SurfaceRect::new(2, 1, 4, 2),
+            Some(&gamma),
+        );
+
+        let scene = surface
+            .take_gpu_scene_capture()
+            .expect("GPU capture remains active")
+            .into_scene([8, 4], Color::transparent(), &gamma);
+        assert_eq!(scene.textures.len(), 1);
+        assert_eq!(scene.commands.len(), 1);
+        let GpuCommand::Quad {
+            vertices,
+            sampler,
+            blend,
+            gamma,
+            ..
+        } = &scene.commands[0]
+        else {
+            panic!("scaled command region did not lower to a textured quad");
+        };
+        assert_eq!(*sampler, GpuSampler::Nearest);
+        assert_eq!(*blend, GpuBlend::Normal);
+        assert!(*gamma);
+        assert_eq!(vertices[0].position, [2.0, 1.0, 1.0]);
+        assert_eq!(vertices[3].position, [6.0, 3.0, 1.0]);
+        assert_eq!(vertices[0].uv, [0.25, 0.0]);
+        assert_eq!(vertices[3].uv, [0.75, 1.0]);
     }
 
     fn paint_rect(

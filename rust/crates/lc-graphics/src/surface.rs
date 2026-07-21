@@ -1,6 +1,12 @@
 use crate::clonk_font::CapturedClonkText;
 use crate::color::Color;
+use crate::gpu_scene::{
+    GpuBlend, GpuCommand, GpuPrimitiveTopology, GpuSampler, GpuSceneRecorder, GpuSolidVertex,
+    GpuTextureId, GpuTextureResource, GpuVertex,
+};
 use crate::snapshot::{checksum_update, SurfaceSnapshot, FNV_OFFSET};
+use std::cell::Cell;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +111,114 @@ impl Rect {
     }
 }
 
+fn union_rect(left: Rect, right: Rect) -> Rect {
+    let x = left.x.min(right.x);
+    let y = left.y.min(right.y);
+    let right_edge = (i64::from(left.x) + i64::from(left.width))
+        .max(i64::from(right.x) + i64::from(right.width));
+    let bottom_edge = (i64::from(left.y) + i64::from(left.height))
+        .max(i64::from(right.y) + i64::from(right.height));
+    Rect::new(
+        x,
+        y,
+        u32::try_from(right_edge.saturating_sub(i64::from(x))).unwrap_or(u32::MAX),
+        u32::try_from(bottom_edge.saturating_sub(i64::from(y))).unwrap_or(u32::MAX),
+    )
+}
+
+fn rgba(color: Color) -> [f32; 4] {
+    [
+        f32::from(color.r) / 255.0,
+        f32::from(color.g) / 255.0,
+        f32::from(color.b) / 255.0,
+        f32::from(color.a) / 255.0,
+    ]
+}
+
+/// Preserve the packed-C4 convention used by blit modulation. RGB is a
+/// normalized multiplier while the fourth component is *transparency*, not
+/// the opacity convention used by texture and solid colours.
+fn c4_modulation(color: Color) -> [f32; 4] {
+    // Surface's long-standing unmodulated convenience path uses opacity-white
+    // as its sentinel even though real packed C4 modulation stores inverse
+    // alpha. Convert that one sentinel to native zero transparency.
+    if color == Color::opaque(255, 255, 255) {
+        [1.0, 1.0, 1.0, 0.0]
+    } else {
+        rgba(color)
+    }
+}
+
+fn gpu_blend(mode: BlitMode) -> GpuBlend {
+    match mode {
+        BlitMode::Normal | BlitMode::Mod2 => GpuBlend::Normal,
+        BlitMode::Additive | BlitMode::Mod2Additive => GpuBlend::Additive,
+    }
+}
+
+fn rect_uv(rect: Rect, width: u32, height: u32) -> [f32; 4] {
+    [
+        rect.x as f32 / width as f32,
+        rect.y as f32 / height as f32,
+        (rect.x as f32 + rect.width as f32) / width as f32,
+        (rect.y as f32 + rect.height as f32) / height as f32,
+    ]
+}
+
+fn quad_vertices(position: [f32; 4], uv: [f32; 4], modulation: [f32; 4]) -> [GpuVertex; 4] {
+    positioned_quad_vertices(
+        [
+            [position[0], position[1], 1.0],
+            [position[2], position[1], 1.0],
+            [position[0], position[3], 1.0],
+            [position[2], position[3], 1.0],
+        ],
+        uv,
+        modulation,
+    )
+}
+
+fn positioned_quad_vertices(
+    position: [[f32; 3]; 4],
+    uv: [f32; 4],
+    modulation: [f32; 4],
+) -> [GpuVertex; 4] {
+    [
+        GpuVertex::new(position[0], [uv[0], uv[1]], modulation),
+        GpuVertex::new(position[1], [uv[2], uv[1]], modulation),
+        GpuVertex::new(position[2], [uv[0], uv[3]], modulation),
+        GpuVertex::new(position[3], [uv[2], uv[3]], modulation),
+    ]
+}
+
+fn homogeneous_position(transform: &crate::transform::Transform, x: f32, y: f32) -> [f32; 3] {
+    let matrix = &transform.mat;
+    [
+        matrix[0] * x + matrix[1] * y + matrix[2],
+        matrix[3] * x + matrix[4] * y + matrix[5],
+        matrix[6] * x + matrix[7] * y + matrix[8],
+    ]
+}
+
+fn solid_rect_vertices(rect: Rect, color: Color) -> Vec<GpuSolidVertex> {
+    let left = rect.x as f32;
+    let top = rect.y as f32;
+    let right = left + rect.width as f32;
+    let bottom = top + rect.height as f32;
+    let vertex = |x, y| GpuSolidVertex {
+        position: [x, y, 1.0],
+        color: rgba(color),
+    };
+    vec![
+        vertex(left, top),
+        vertex(right, top),
+        vertex(left, bottom),
+        vertex(left, bottom),
+        vertex(right, top),
+        vertex(right, bottom),
+    ]
+}
+
 #[derive(Debug, Error)]
 pub enum SurfaceError {
     #[error("pixel buffer has invalid length: expected {expected} bytes, got {actual}")]
@@ -130,6 +244,44 @@ pub trait SurfaceDrawTarget {
     fn clear_clip(&mut self);
     fn get_pixel(&self, x: u32, y: u32) -> Option<Color>;
     fn set_pixel(&mut self, x: u32, y: u32, color: Color) -> Result<(), SurfaceError>;
+
+    /// Blend one straight-alpha fragment whose channels are expressed in the
+    /// native shader's 0..=255 float domain. Owned GPU-recording surfaces can
+    /// retain this operation without first reading a stale CPU destination;
+    /// borrowed CPU targets use the exact reference composition below.
+    fn blend_fragment(
+        &mut self,
+        x: u32,
+        y: u32,
+        source: [f32; 4],
+        gamma: Option<&crate::GammaRamp>,
+    ) -> Result<(), SurfaceError> {
+        let Some(destination) = self.get_pixel(x, y) else {
+            return Ok(());
+        };
+        let alpha = (source[3] / 255.0).clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            return Ok(());
+        }
+        let channel = |channel, value: f32, destination: u8| {
+            let value = gamma.map_or(value, |ramp| ramp.sample_channel_float(channel, value));
+            (value * alpha + f32::from(destination) * (1.0 - alpha))
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        self.set_pixel(
+            x,
+            y,
+            Color::new(
+                channel(crate::gamma::GammaChannel::Red, source[0], destination.r),
+                channel(crate::gamma::GammaChannel::Green, source[1], destination.g),
+                channel(crate::gamma::GammaChannel::Blue, source[2], destination.b),
+                (source[3].clamp(0.0, 255.0) * alpha + f32::from(destination.a) * (1.0 - alpha))
+                    .round()
+                    .clamp(0.0, 255.0) as u8,
+            ),
+        )
+    }
 
     /// Semantic text capture is an owned-surface facility. Borrowed native
     /// presentation targets always rasterize immediately.
@@ -242,13 +394,13 @@ impl SurfaceDrawTarget for RgbaSurfaceViewMut<'_> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Surface {
     width: u32,
     height: u32,
     format: PixelFormat,
     stride: usize,
-    data: Vec<u8>,
+    data: Arc<[u8]>,
     /// Active clipping rectangle (C++ `SetPrimaryClipper`); `None` = full surface.
     /// All draws are restricted to `clip ∩ bounds`.
     clip: Option<Rect>,
@@ -256,12 +408,41 @@ pub struct Surface {
     /// unchanged; role-tagged ClonkFont draws append here and suppress their
     /// logical glyph pixels until the command list is taken.
     clonk_text_capture: Option<Vec<CapturedClonkText>>,
+    gpu_texture_id: GpuTextureId,
+    gpu_revision: u64,
+    gpu_published_revision: Cell<u64>,
+    gpu_dirty: Cell<Option<Rect>>,
+    gpu_scene: Option<GpuSceneRecorder>,
+}
+
+impl Clone for Surface {
+    fn clone(&self) -> Self {
+        Self {
+            width: self.width,
+            height: self.height,
+            format: self.format,
+            stride: self.stride,
+            data: Arc::clone(&self.data),
+            clip: self.clip,
+            clonk_text_capture: self.clonk_text_capture.clone(),
+            // Clones initially describe the same immutable retained resource.
+            // `mark_gpu_dirty` forks the identity immediately before COW
+            // mutation, so clone-heavy caches retain one GPU allocation.
+            gpu_texture_id: self.gpu_texture_id,
+            gpu_revision: self.gpu_revision,
+            gpu_published_revision: Cell::new(self.gpu_published_revision.get()),
+            gpu_dirty: Cell::new(self.gpu_dirty.get()),
+            // A command stream belongs to one render target invocation, not
+            // to the pixel resource cloned from it.
+            gpu_scene: None,
+        }
+    }
 }
 
 impl Surface {
     pub fn new(width: u32, height: u32, format: PixelFormat) -> Self {
         let stride = width as usize * format.bytes_per_pixel();
-        let data = vec![0; stride * height as usize];
+        let data = Arc::from(vec![0; stride * height as usize].into_boxed_slice());
         Self {
             width,
             height,
@@ -270,6 +451,11 @@ impl Surface {
             data,
             clip: None,
             clonk_text_capture: None,
+            gpu_texture_id: GpuTextureId::fresh(),
+            gpu_revision: 0,
+            gpu_published_revision: Cell::new(0),
+            gpu_dirty: Cell::new(None),
+            gpu_scene: None,
         }
     }
 
@@ -292,10 +478,95 @@ impl Surface {
             height,
             format,
             stride,
-            data,
+            data: Arc::from(data.into_boxed_slice()),
             clip: None,
             clonk_text_capture: None,
+            gpu_texture_id: GpuTextureId::fresh(),
+            gpu_revision: 0,
+            gpu_published_revision: Cell::new(0),
+            gpu_dirty: Cell::new(None),
+            gpu_scene: None,
         })
+    }
+
+    /// Start a painter-order capture. Pixel storage remains available for CPU
+    /// scratch work, but capture-aware primitives append commands and avoid
+    /// rasterizing their covered pixels.
+    pub fn begin_gpu_scene_capture(&mut self) {
+        self.gpu_scene = Some(GpuSceneRecorder::default());
+    }
+
+    pub fn is_gpu_scene_capture_active(&self) -> bool {
+        self.gpu_scene.is_some()
+    }
+
+    pub fn take_gpu_scene_capture(&mut self) -> Option<GpuSceneRecorder> {
+        self.gpu_scene.take()
+    }
+
+    pub fn gpu_scene_capture(&self) -> Option<&GpuSceneRecorder> {
+        self.gpu_scene.as_ref()
+    }
+
+    pub fn add_gpu_texture(&mut self, resource: GpuTextureResource) -> bool {
+        let Some(scene) = self.gpu_scene.as_mut() else {
+            return false;
+        };
+        scene.add_texture(resource);
+        true
+    }
+
+    pub fn push_gpu_command(&mut self, command: GpuCommand) -> bool {
+        let Some(scene) = self.gpu_scene.as_mut() else {
+            return false;
+        };
+        scene.push(command);
+        true
+    }
+
+    fn push_gpu_solid_vertex(
+        &mut self,
+        vertex: GpuSolidVertex,
+        topology: GpuPrimitiveTopology,
+        clip: Option<Rect>,
+        blend: GpuBlend,
+        gamma: bool,
+    ) -> bool {
+        let Some(scene) = self.gpu_scene.as_mut() else {
+            return false;
+        };
+        scene.push_solid_vertex(vertex, topology, clip, blend, gamma);
+        true
+    }
+
+    pub fn append_gpu_scene_from(&mut self, child: &Surface, offset: Point) -> bool {
+        let (Some(destination), Some(source)) = (self.gpu_scene.as_mut(), child.gpu_scene.as_ref())
+        else {
+            return false;
+        };
+        destination.append_translated(
+            source.clone(),
+            offset.x,
+            offset.y,
+            Rect::new(0, 0, child.width, child.height),
+            self.clip,
+        );
+        true
+    }
+
+    pub fn gpu_texture_resource(&self) -> GpuTextureResource {
+        let dirty = self.gpu_dirty.take().into_iter().collect::<Vec<_>>();
+        let base_revision =
+            (!dirty.is_empty()).then(|| self.gpu_published_revision.replace(self.gpu_revision));
+        GpuTextureResource {
+            id: self.gpu_texture_id,
+            extent: [self.width, self.height],
+            revision: self.gpu_revision,
+            base_revision,
+            format: crate::gpu_scene::GpuTextureFormat::Rgba8,
+            pixels: Arc::clone(&self.data),
+            dirty,
+        }
     }
 
     /// Begin a fresh semantic ClonkFont capture, discarding any untaken
@@ -477,7 +748,9 @@ impl Surface {
     }
 
     pub fn pixels_mut(&mut self) -> &mut [u8] {
-        &mut self.data
+        let bounds = self.bounds();
+        self.mark_gpu_dirty(bounds);
+        Arc::make_mut(&mut self.data)
     }
 
     pub fn snapshot(&self) -> SurfaceSnapshot {
@@ -509,8 +782,19 @@ impl Surface {
     }
 
     pub fn fill(&mut self, color: Color) {
+        let bounds = self.bounds();
+        if self.push_gpu_command(GpuCommand::Solid {
+            vertices: solid_rect_vertices(bounds, color),
+            topology: GpuPrimitiveTopology::TriangleList,
+            clip: None,
+            blend: GpuBlend::Replace,
+            gamma: false,
+        }) {
+            return;
+        }
+        self.mark_gpu_dirty(bounds);
         let bpp = self.format.bytes_per_pixel();
-        for chunk in self.data.chunks_exact_mut(bpp) {
+        for chunk in Arc::make_mut(&mut self.data).chunks_exact_mut(bpp) {
             Self::write_color(self.format, chunk, color);
         }
     }
@@ -524,15 +808,28 @@ impl Surface {
             Some(r) => r,
             None => return,
         };
+        let clip = self.clip;
+        if self.push_gpu_command(GpuCommand::Solid {
+            vertices: solid_rect_vertices(region, color),
+            topology: GpuPrimitiveTopology::TriangleList,
+            clip,
+            blend: GpuBlend::Normal,
+            gamma: false,
+        }) {
+            return;
+        }
+        self.mark_gpu_dirty(region);
         let bpp = self.format.bytes_per_pixel();
+        let data = Arc::make_mut(&mut self.data);
         for row in 0..region.height {
             let y = (region.y + row as i32) as u32;
-            let row_off = self.pixel_offset(region.x as u32, y);
+            let row_off =
+                y as usize * self.stride + region.x as usize * self.format.bytes_per_pixel();
             for col in 0..region.width {
                 let off = row_off + col as usize * bpp;
-                let dst = Self::read_color(self.format, &self.data[off..off + bpp]);
+                let dst = Self::read_color(self.format, &data[off..off + bpp]);
                 let blended = color.blend_over(dst);
-                Self::write_color(self.format, &mut self.data[off..off + bpp], blended);
+                Self::write_color(self.format, &mut data[off..off + bpp], blended);
             }
         }
     }
@@ -549,9 +846,23 @@ impl Surface {
         if !self.pixel_in_clip(x, y) {
             return Ok(());
         }
+        let clip = self.clip;
+        if self.push_gpu_solid_vertex(
+            GpuSolidVertex {
+                position: [x as f32 + 0.5, y as f32 + 0.5, 1.0],
+                color: rgba(color),
+            },
+            GpuPrimitiveTopology::PointList,
+            clip,
+            GpuBlend::Replace,
+            false,
+        ) {
+            return Ok(());
+        }
+        self.mark_gpu_dirty(Rect::new(x as i32, y as i32, 1, 1));
         let bpp = self.format.bytes_per_pixel();
         let offset = self.pixel_offset(x, y);
-        let slice = &mut self.data[offset..offset + bpp];
+        let slice = &mut Arc::make_mut(&mut self.data)[offset..offset + bpp];
         Self::write_color(self.format, slice, color);
         Ok(())
     }
@@ -568,9 +879,23 @@ impl Surface {
         if !self.pixel_in_clip(x, y) {
             return Ok(());
         }
+        let clip = self.clip;
+        if self.push_gpu_solid_vertex(
+            GpuSolidVertex {
+                position: [x as f32 + 0.5, y as f32 + 0.5, 1.0],
+                color: rgba(color),
+            },
+            GpuPrimitiveTopology::PointList,
+            clip,
+            GpuBlend::Normal,
+            false,
+        ) {
+            return Ok(());
+        }
+        self.mark_gpu_dirty(Rect::new(x as i32, y as i32, 1, 1));
         let bpp = self.format.bytes_per_pixel();
         let offset = self.pixel_offset(x, y);
-        let slice = &mut self.data[offset..offset + bpp];
+        let slice = &mut Arc::make_mut(&mut self.data)[offset..offset + bpp];
         let existing = Self::read_color(self.format, slice);
         let blended = color.blend_over(existing);
         Self::write_color(self.format, slice, blended);
@@ -708,12 +1033,38 @@ impl Surface {
             return Ok(());
         }
 
-        let bpp = self.format.bytes_per_pixel();
+        if self.is_gpu_scene_capture_active() {
+            self.add_gpu_texture(src.gpu_texture_resource());
+            let left = dest.x as f32;
+            let top = dest.y as f32;
+            let right = left + src_rect.width as f32;
+            let bottom = top + src_rect.height as f32;
+            let uv = rect_uv(src_rect, src.width, src.height);
+            let clip = self.clip;
+            self.push_gpu_command(GpuCommand::Quad {
+                texture: src.gpu_texture_id,
+                owner_mask: None,
+                vertices: quad_vertices([left, top, right, bottom], uv, c4_modulation(modulation)),
+                clip,
+                blend: gpu_blend(mode),
+                base_mod2: matches!(mode, BlitMode::Mod2 | BlitMode::Mod2Additive),
+                owner_mod2: false,
+                sampler: GpuSampler::Nearest,
+                gamma: false,
+            });
+            return Ok(());
+        }
+
+        self.mark_gpu_dirty(Rect::new(dest.x, dest.y, src_rect.width, src_rect.height));
+        let format = self.format;
+        let bpp = format.bytes_per_pixel();
+        let stride = self.stride;
+        let data = Arc::make_mut(&mut self.data);
         for row in 0..src_rect.height {
             let src_y = (src_rect.y + row as i32) as u32;
             let dest_y = (dest.y + row as i32) as u32;
             let src_row_offset = src.pixel_offset(src_rect.x as u32, src_y);
-            let dest_row_offset = self.pixel_offset(dest.x as u32, dest_y);
+            let dest_row_offset = dest_y as usize * stride + dest.x as usize * bpp;
 
             for col in 0..src_rect.width {
                 let src_offset = src_row_offset + col as usize * bpp;
@@ -723,13 +1074,13 @@ impl Surface {
                 let raw = Self::read_color(src.format, slice);
                 let source = mode.prepare_source(raw, modulation);
                 let destination = {
-                    let slice = &self.data[dest_offset..dest_offset + bpp];
-                    Self::read_color(self.format, slice)
+                    let slice = &data[dest_offset..dest_offset + bpp];
+                    Self::read_color(format, slice)
                 };
                 let blended = Self::composite(source, destination, mode);
                 {
-                    let slice = &mut self.data[dest_offset..dest_offset + bpp];
-                    Self::write_color(self.format, slice, blended);
+                    let slice = &mut data[dest_offset..dest_offset + bpp];
+                    Self::write_color(format, slice, blended);
                 }
             }
         }
@@ -800,6 +1151,56 @@ impl Surface {
             Some(t) => t,
             None => return Ok(()),
         };
+        if self.is_gpu_scene_capture_active() {
+            let (modulation, mode, blend) = match composite {
+                Some((modulation, mode)) => (modulation, mode, gpu_blend(mode)),
+                None => (
+                    Color::opaque(255, 255, 255),
+                    BlitMode::Normal,
+                    GpuBlend::Replace,
+                ),
+            };
+            let left = dest_origin.x as f32;
+            let top = dest_origin.y as f32;
+            let right = left + src_rect.width as f32;
+            let bottom = top + src_rect.height as f32;
+            let positions = [
+                homogeneous_position(transform, left, top),
+                homogeneous_position(transform, right, top),
+                homogeneous_position(transform, left, bottom),
+                homogeneous_position(transform, right, bottom),
+            ];
+            let positions_are_finite = positions.iter().all(|position| {
+                position.iter().all(|component| component.is_finite()) && position[2] != 0.0
+            });
+            let crosses_horizon = positions_are_finite
+                && positions
+                    .iter()
+                    .any(|position| position[2].is_sign_positive())
+                && positions
+                    .iter()
+                    .any(|position| position[2].is_sign_negative());
+            if positions_are_finite && !crosses_horizon {
+                self.add_gpu_texture(src.gpu_texture_resource());
+                let clip = self.clip;
+                self.push_gpu_command(GpuCommand::Quad {
+                    texture: src.gpu_texture_id,
+                    owner_mask: None,
+                    vertices: positioned_quad_vertices(
+                        positions,
+                        rect_uv(src_rect, src.width, src.height),
+                        c4_modulation(modulation),
+                    ),
+                    clip,
+                    blend,
+                    base_mod2: matches!(mode, BlitMode::Mod2 | BlitMode::Mod2Additive),
+                    owner_mod2: false,
+                    sampler: GpuSampler::Nearest,
+                    gamma: false,
+                });
+            }
+            return Ok(());
+        }
         // Forward-transform the four corners of the dest-placed rect to find the
         // destination bounding box to rasterise.
         let (ox, oy) = (dest_origin.x as f32, dest_origin.y as f32);
@@ -857,7 +1258,11 @@ impl Surface {
             (right - left) as u32,
             (bottom - top) as u32,
         );
-        let bpp = self.format.bytes_per_pixel();
+        self.mark_gpu_dirty(clipped);
+        let format = self.format;
+        let bpp = format.bytes_per_pixel();
+        let stride = self.stride;
+        let data = Arc::make_mut(&mut self.data);
         for row in 0..clipped.height {
             let dest_y = clipped.y + row as i32;
             for col in 0..clipped.width {
@@ -878,20 +1283,15 @@ impl Surface {
                 let src_y = src_rect.y as u32 + ly as u32;
                 let off = src.pixel_offset(src_x, src_y);
                 let raw = Self::read_color(src.format, &src.data[off..off + bpp]);
-                let dest_off = self.pixel_offset(dest_x as u32, dest_y as u32);
+                let dest_off = dest_y as usize * stride + dest_x as usize * bpp;
                 let output = if let Some((modulation, mode)) = composite {
                     let source = mode.prepare_source(raw, modulation);
-                    let destination =
-                        Self::read_color(self.format, &self.data[dest_off..dest_off + bpp]);
+                    let destination = Self::read_color(format, &data[dest_off..dest_off + bpp]);
                     Self::composite(source, destination, mode)
                 } else {
                     raw
                 };
-                Self::write_color(
-                    self.format,
-                    &mut self.data[dest_off..dest_off + bpp],
-                    output,
-                );
+                Self::write_color(format, &mut data[dest_off..dest_off + bpp], output);
             }
         }
         Ok(())
@@ -943,7 +1343,36 @@ impl Surface {
             Some(r) => r,
             None => return Ok(()),
         };
-        let bpp = self.format.bytes_per_pixel();
+        if self.is_gpu_scene_capture_active() {
+            self.add_gpu_texture(src.gpu_texture_resource());
+            let clip = self.clip;
+            self.push_gpu_command(GpuCommand::Quad {
+                texture: src.gpu_texture_id,
+                owner_mask: None,
+                vertices: quad_vertices(
+                    [
+                        dest_rect.x as f32,
+                        dest_rect.y as f32,
+                        dest_rect.x as f32 + dest_rect.width as f32,
+                        dest_rect.y as f32 + dest_rect.height as f32,
+                    ],
+                    rect_uv(src_rect, src.width, src.height),
+                    c4_modulation(modulation),
+                ),
+                clip,
+                blend: gpu_blend(mode),
+                base_mod2: matches!(mode, BlitMode::Mod2 | BlitMode::Mod2Additive),
+                owner_mod2: false,
+                sampler: GpuSampler::Nearest,
+                gamma: false,
+            });
+            return Ok(());
+        }
+        self.mark_gpu_dirty(clipped);
+        let format = self.format;
+        let bpp = format.bytes_per_pixel();
+        let stride = self.stride;
+        let data = Arc::make_mut(&mut self.data);
         for row in 0..clipped.height {
             let dest_y = (clipped.y + row as i32) as u32;
             let local_y = (clipped.y - dest_rect.y) as u32 + row;
@@ -955,15 +1384,10 @@ impl Surface {
                 let off = src.pixel_offset(src_x, src_y);
                 let raw = Self::read_color(src.format, &src.data[off..off + bpp]);
                 let source = mode.prepare_source(raw, modulation);
-                let dest_off = self.pixel_offset(dest_x, dest_y);
-                let destination =
-                    Self::read_color(self.format, &self.data[dest_off..dest_off + bpp]);
+                let dest_off = dest_y as usize * stride + dest_x as usize * bpp;
+                let destination = Self::read_color(format, &data[dest_off..dest_off + bpp]);
                 let blended = Self::composite(source, destination, mode);
-                Self::write_color(
-                    self.format,
-                    &mut self.data[dest_off..dest_off + bpp],
-                    blended,
-                );
+                Self::write_color(format, &mut data[dest_off..dest_off + bpp], blended);
             }
         }
         Ok(())
@@ -971,6 +1395,23 @@ impl Surface {
 
     fn pixel_offset(&self, x: u32, y: u32) -> usize {
         y as usize * self.stride + x as usize * self.format.bytes_per_pixel()
+    }
+
+    fn mark_gpu_dirty(&mut self, rect: Rect) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        if Arc::strong_count(&self.data) > 1 {
+            self.gpu_texture_id = GpuTextureId::fresh();
+            self.gpu_revision = 0;
+            self.gpu_published_revision.set(0);
+            self.gpu_dirty.set(None);
+        }
+        self.gpu_revision = self.gpu_revision.wrapping_add(1);
+        self.gpu_dirty.set(Some(match self.gpu_dirty.get() {
+            Some(previous) => union_rect(previous, rect),
+            None => rect,
+        }));
     }
 
     fn read_color(format: PixelFormat, bytes: &[u8]) -> Color {
@@ -1020,6 +1461,60 @@ impl SurfaceDrawTarget for Surface {
         Surface::set_pixel(self, x, y, color)
     }
 
+    fn blend_fragment(
+        &mut self,
+        x: u32,
+        y: u32,
+        source: [f32; 4],
+        gamma: Option<&crate::GammaRamp>,
+    ) -> Result<(), SurfaceError> {
+        if x >= self.width || y >= self.height {
+            return Err(SurfaceError::OutOfBounds {
+                x,
+                y,
+                width: self.width,
+                height: self.height,
+            });
+        }
+        if !self.pixel_in_clip(x, y) || source[3] <= 0.0 {
+            return Ok(());
+        }
+        let clip = self.clip;
+        if self.push_gpu_solid_vertex(
+            GpuSolidVertex {
+                position: [x as f32 + 0.5, y as f32 + 0.5, 1.0],
+                color: source.map(|component| (component / 255.0).clamp(0.0, 1.0)),
+            },
+            GpuPrimitiveTopology::PointList,
+            clip,
+            GpuBlend::Normal,
+            gamma.is_some(),
+        ) {
+            return Ok(());
+        }
+
+        let destination = self.get_pixel(x, y).unwrap_or_default();
+        let alpha = (source[3] / 255.0).clamp(0.0, 1.0);
+        let channel = |channel, value: f32, destination: u8| {
+            let value = gamma.map_or(value, |ramp| ramp.sample_channel_float(channel, value));
+            (value * alpha + f32::from(destination) * (1.0 - alpha))
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        self.set_pixel(
+            x,
+            y,
+            Color::new(
+                channel(crate::gamma::GammaChannel::Red, source[0], destination.r),
+                channel(crate::gamma::GammaChannel::Green, source[1], destination.g),
+                channel(crate::gamma::GammaChannel::Blue, source[2], destination.b),
+                (source[3].clamp(0.0, 255.0) * alpha + f32::from(destination.a) * (1.0 - alpha))
+                    .round()
+                    .clamp(0.0, 255.0) as u8,
+            ),
+        )
+    }
+
     fn capture_clonk_text(&mut self, command: CapturedClonkText) -> bool {
         Surface::capture_clonk_text(self, command)
     }
@@ -1045,6 +1540,140 @@ mod tests {
             gamma: None,
             images: Vec::new(),
         }
+    }
+
+    fn finish_gpu_scene(surface: &mut Surface) -> crate::GpuScene {
+        let extent = [surface.width(), surface.height()];
+        surface
+            .take_gpu_scene_capture()
+            .expect("capture is active")
+            .into_scene(
+                extent,
+                Color::transparent(),
+                &crate::GammaRamp::from_control_points([0, 0x80_80_80, 0xff_ff_ff]),
+            )
+    }
+
+    #[test]
+    fn gpu_capture_converts_surface_white_sentinel_to_zero_transparency() {
+        let mut source = Surface::new(1, 1, PixelFormat::Rgba8888);
+        source.fill(Color::opaque(40, 80, 120));
+        let mut destination = Surface::new(1, 1, PixelFormat::Rgba8888);
+        destination.begin_gpu_scene_capture();
+        destination.blit(&source, Point::new(0, 0)).unwrap();
+
+        let scene = finish_gpu_scene(&mut destination);
+        let GpuCommand::Quad { vertices, .. } = &scene.commands[0] else {
+            panic!("blit did not lower to a quad");
+        };
+        assert!(vertices
+            .iter()
+            .all(|vertex| vertex.modulation == [1.0, 1.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn gpu_capture_retains_unblended_gamma_text_fragment() {
+        let mut destination = Surface::new(2, 2, PixelFormat::Rgba8888);
+        destination.begin_gpu_scene_capture();
+        let gamma = crate::GammaRamp::from_control_points([0, 0x80_80_80, 0xff_ff_ff]);
+        SurfaceDrawTarget::blend_fragment(
+            &mut destination,
+            1,
+            0,
+            [40.0, 80.0, 120.0, 128.0],
+            Some(&gamma),
+        )
+        .unwrap();
+
+        let scene = finish_gpu_scene(&mut destination);
+        let GpuCommand::Solid {
+            vertices,
+            topology,
+            blend,
+            gamma,
+            ..
+        } = &scene.commands[0]
+        else {
+            panic!("text fragment did not lower to a solid point");
+        };
+        assert_eq!(*topology, GpuPrimitiveTopology::PointList);
+        assert_eq!(*blend, GpuBlend::Normal);
+        assert!(*gamma);
+        assert_eq!(vertices.len(), 1);
+        assert_eq!(vertices[0].position, [1.5, 0.5, 1.0]);
+        assert_eq!(
+            vertices[0].color,
+            [40.0 / 255.0, 80.0 / 255.0, 120.0 / 255.0, 128.0 / 255.0]
+        );
+    }
+
+    #[test]
+    fn gpu_surface_resources_publish_exact_revision_deltas_and_fork_cow_clones() {
+        let mut original = Surface::new(4, 4, PixelFormat::Rgba8888);
+        let initial = original.gpu_texture_resource();
+        assert_eq!(initial.revision, 0);
+        assert_eq!(initial.base_revision, None);
+        assert!(initial.dirty.is_empty());
+
+        original.set_pixel(2, 1, Color::opaque(1, 2, 3)).unwrap();
+        let changed = original.gpu_texture_resource();
+        assert_eq!(changed.revision, 1);
+        assert_eq!(changed.base_revision, Some(0));
+        assert_eq!(changed.dirty, vec![Rect::new(2, 1, 1, 1)]);
+        let repeated = original.gpu_texture_resource();
+        assert_eq!(repeated.revision, 1);
+        assert!(repeated.dirty.is_empty());
+
+        let mut clone = original.clone();
+        assert_eq!(
+            clone.gpu_texture_resource().id,
+            original.gpu_texture_resource().id,
+            "immutable COW clones share one retained texture",
+        );
+        clone.set_pixel(0, 0, Color::opaque(4, 5, 6)).unwrap();
+        assert_ne!(
+            clone.gpu_texture_resource().id,
+            original.gpu_texture_resource().id,
+            "the first divergent write forks retained identity",
+        );
+    }
+
+    #[test]
+    fn gpu_capture_rejects_projective_quads_crossing_the_horizon() {
+        let source = Surface::new(2, 1, PixelFormat::Rgba8888);
+        let mut destination = Surface::new(4, 4, PixelFormat::Rgba8888);
+        destination.begin_gpu_scene_capture();
+        let transform = crate::Transform::set(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, -0.5);
+        destination
+            .blit_transformed(
+                &source,
+                source.bounds(),
+                Point::new(0, 0),
+                &transform,
+                Color::opaque(255, 255, 255),
+                BlitMode::Normal,
+            )
+            .unwrap();
+        assert!(destination
+            .gpu_scene_capture()
+            .is_some_and(GpuSceneRecorder::is_empty));
+    }
+
+    #[test]
+    fn flattened_child_gpu_scene_obeys_parent_clip() {
+        let mut child = Surface::new(8, 8, PixelFormat::Rgba8888);
+        child.begin_gpu_scene_capture();
+        child.fill(Color::opaque(10, 20, 30));
+
+        let mut parent = Surface::new(20, 20, PixelFormat::Rgba8888);
+        parent.set_clip(Rect::new(5, 6, 4, 3));
+        parent.begin_gpu_scene_capture();
+        assert!(parent.append_gpu_scene_from(&child, Point::new(3, 4)));
+        let scene = finish_gpu_scene(&mut parent);
+        let GpuCommand::Solid { clip, .. } = &scene.commands[0] else {
+            panic!("child fill did not remain a solid command");
+        };
+        assert_eq!(*clip, Some(Rect::new(5, 6, 4, 3)));
     }
 
     #[test]

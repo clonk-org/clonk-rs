@@ -489,11 +489,18 @@ pub enum DrawCommand {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ImageData {
     width: u32,
     height: u32,
     pixels: Arc<[u8]>,
+    gpu_texture_id: lc_graphics::GpuTextureId,
+}
+
+impl PartialEq for ImageData {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width && self.height == other.height && self.pixels == other.pixels
+    }
 }
 
 impl ImageData {
@@ -502,6 +509,7 @@ impl ImageData {
             width,
             height,
             pixels: Arc::from(pixels.into_boxed_slice()),
+            gpu_texture_id: lc_graphics::GpuTextureId::fresh(),
         }
     }
 
@@ -510,6 +518,7 @@ impl ImageData {
             width,
             height,
             pixels,
+            gpu_texture_id: lc_graphics::GpuTextureId::fresh(),
         }
     }
 
@@ -523,6 +532,23 @@ impl ImageData {
 
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
+    }
+
+    pub fn pixels_arc(&self) -> Arc<[u8]> {
+        Arc::clone(&self.pixels)
+    }
+
+    pub fn gpu_texture_id(&self) -> lc_graphics::GpuTextureId {
+        self.gpu_texture_id
+    }
+
+    pub fn gpu_texture_resource(&self) -> lc_graphics::GpuTextureResource {
+        lc_graphics::GpuTextureResource::immutable_rgba(
+            self.gpu_texture_id,
+            self.width,
+            self.height,
+            Arc::clone(&self.pixels),
+        )
     }
 }
 

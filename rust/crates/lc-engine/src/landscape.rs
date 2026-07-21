@@ -656,6 +656,14 @@ impl PixelGrid {
             .unwrap_or(0)
     }
 
+    /// `Pix2Dens[byte & 0x7f]` for presentation consumers that already hold
+    /// a Surface8 byte. Keeping this lookup separate from [`Self::density_at`]
+    /// lets retained render caches classify a changed plane without repeating
+    /// coordinate validation for every output they derive from the same byte.
+    pub fn density_of_byte(&self, byte: u8) -> i32 {
+        self.density_of(byte)
+    }
+
     pub fn density_at(&self, x: i32, y: i32) -> Option<i32> {
         self.byte_at(x, y).map(|byte| self.density_of(byte))
     }

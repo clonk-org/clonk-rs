@@ -79,6 +79,22 @@ const fn framebuffer_channel(value: u16) -> u8 {
 }
 
 impl GammaRamp {
+    /// Copy the exact lookup table for a retained graphics backend.
+    pub fn channels(&self) -> [[u16; 256]; 3] {
+        self.channels
+    }
+
+    /// Stable content revision used by the retained gamma texture cache.
+    pub fn gpu_revision(&self) -> u64 {
+        let mut hash = crate::snapshot::FNV_OFFSET;
+        for channel in &self.channels {
+            for value in channel {
+                hash = crate::snapshot::checksum_update(hash, &value.to_le_bytes());
+            }
+        }
+        u64::from(hash)
+    }
+
     /// The default ramp (control points 0x000000, 0x808080, 0xffffff).
     ///
     /// Note the C++ feeds channels through `GetBValue`/`GetRValue` swapped

@@ -1175,35 +1175,21 @@ fn blend_font_sample<T: SurfaceDrawTarget + ?Sized>(
     if out_a <= 0.0 {
         return;
     }
-    let Some(dst) = surface.get_pixel(x, y) else {
-        return;
-    };
-    let alpha = out_a / 255.0;
-    let source = |channel: crate::gamma::GammaChannel, value: f32, modulation: u8| {
-        let value = value * f32::from(modulation) / 255.0;
-        gamma.map_or(value, |ramp| ramp.sample_channel_float(channel, value))
-    };
-    let blend = |source: f32, destination: u8| {
-        (source * alpha + f32::from(destination) * (1.0 - alpha))
-            .round()
-            .clamp(0.0, 255.0) as u8
-    };
-    let blended = Color::new(
-        blend(
-            source(crate::gamma::GammaChannel::Red, sample[0], mod_rgb[0]),
-            dst.r,
-        ),
-        blend(
-            source(crate::gamma::GammaChannel::Green, sample[1], mod_rgb[1]),
-            dst.g,
-        ),
-        blend(
-            source(crate::gamma::GammaChannel::Blue, sample[2], mod_rgb[2]),
-            dst.b,
-        ),
-        blend(out_a, dst.a),
+    // Preserve the native inverted-alpha subtraction above while keeping the
+    // unblended float fragment available to retained GPU targets. The default
+    // SurfaceDrawTarget implementation performs the same gamma lookup and
+    // source-alpha composition for CPU targets.
+    let _ = surface.blend_fragment(
+        x,
+        y,
+        [
+            sample[0] * f32::from(mod_rgb[0]) / 255.0,
+            sample[1] * f32::from(mod_rgb[1]) / 255.0,
+            sample[2] * f32::from(mod_rgb[2]) / 255.0,
+            out_a,
+        ],
+        gamma,
     );
-    let _ = surface.set_pixel(x, y, blended);
 }
 
 fn font_sample_alpha(sample_alpha: f32, color_alpha: u8) -> f32 {
@@ -1433,34 +1419,20 @@ fn blit_cell<T: SurfaceDrawTarget + ?Sized>(
             let (Some(dx), Some(dy)) = (offset_coord(x, col), offset_coord(y, row)) else {
                 continue;
             };
-            let Some(dst) = surface.get_pixel(dx, dy) else {
-                continue; // clipped
-            };
-            let af = out_a / 255.0;
-            // Modulate in float; the shader samples an independent normalized
-            // R16 gamma texture for each RGB channel before blending
-            // (StdGL.cpp:1068-1087,1246-1263).
-            let modulate = |channel: crate::gamma::GammaChannel, c: u8, m: u8| -> f32 {
-                let v = c as f32 * m as f32 / 255.0;
-                gamma.map_or(v, |g| g.sample_channel_float(channel, v))
-            };
-            let blend = |src: f32, dst: u8| (src * af + dst as f32 * (1.0 - af)).round() as u8;
-            let blended = Color::new(
-                blend(
-                    modulate(crate::gamma::GammaChannel::Red, px.r, mod_rgb[0]),
-                    dst.r,
-                ),
-                blend(
-                    modulate(crate::gamma::GammaChannel::Green, px.g, mod_rgb[1]),
-                    dst.g,
-                ),
-                blend(
-                    modulate(crate::gamma::GammaChannel::Blue, px.b, mod_rgb[2]),
-                    dst.b,
-                ),
-                blend(out_a, dst.a),
+            // Keep the unblended float source available to a retained GPU
+            // target; CPU targets apply the same gamma and alpha composition
+            // through SurfaceDrawTarget's reference implementation.
+            let _ = surface.blend_fragment(
+                dx,
+                dy,
+                [
+                    f32::from(px.r) * f32::from(mod_rgb[0]) / 255.0,
+                    f32::from(px.g) * f32::from(mod_rgb[1]) / 255.0,
+                    f32::from(px.b) * f32::from(mod_rgb[2]) / 255.0,
+                    out_a,
+                ],
+                gamma,
             );
-            let _ = surface.set_pixel(dx, dy, blended);
         }
     }
 }
