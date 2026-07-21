@@ -117,8 +117,15 @@ pub(crate) fn create_basic_map(
         player_count,
         rng,
     );
-    let map_wdt = map_wdt.max(1);
-    let map_hgt = map_hgt.max(1);
+    // CSurface8's constructor starts at 0x0 and Create returns before
+    // assigning either dimension when either requested size is zero
+    // (StdSurface8.cpp:33-47,90-95). Keep the existing negative-size
+    // hardening, but preserve that native failed-surface state exactly.
+    let (map_wdt, map_hgt) = if map_wdt == 0 || map_hgt == 0 {
+        (0, 0)
+    } else {
+        (map_wdt.max(1), map_hgt.max(1))
+    };
     let mut map = MapBuf {
         wdt: map_wdt,
         hgt: map_hgt,
@@ -342,6 +349,70 @@ mod tests {
         let base = rng.count; // FixRandom leaves Randomize3's 500 draws
         create_basic_map(&flat_params(), &mut classifier, 1, &mut rng);
         assert_eq!(rng.count - base, 9 + 40);
+    }
+
+    #[test]
+    fn basic_map_zero_dimension_preserves_native_empty_surface_and_rng_ledger() {
+        let advance_native_empty_ledger = |params: &BasicMapParams, rng: &mut LcgRng| {
+            LegacyC4SVal::new(
+                params.map_width.std,
+                params.map_width.rnd,
+                params.map_width.min,
+                10000,
+            )
+            .evaluate(rng);
+            LegacyC4SVal::new(
+                params.map_height.std,
+                params.map_height.rnd,
+                params.map_height.min,
+                10000,
+            )
+            .evaluate(rng);
+            params.amplitude.evaluate(rng);
+            params.phase.evaluate(rng);
+            params.period.evaluate(rng);
+            params.random.evaluate(rng);
+            rng.random(2001);
+            rng.random(201);
+            params.liquid_level.evaluate(rng);
+        };
+
+        for (requested_width, requested_height) in [(0, 7), (7, 0), (0, 0)] {
+            let mut params = flat_params();
+            params.map_width = LegacyC4SVal::new(requested_width, 0, 0, 250);
+            params.map_height = LegacyC4SVal::new(requested_height, 0, 0, 250);
+            params.map_player_extend = true;
+            params.amplitude = LegacyC4SVal::new(20, 3, 0, 100);
+            params.phase = LegacyC4SVal::new(40, 4, 0, 100);
+            params.period = LegacyC4SVal::new(10, 2, 0, 100);
+            params.random = LegacyC4SVal::new(30, 5, 0, 100);
+            params.liquid_level = LegacyC4SVal::new(25, 6, 0, 100);
+            params.layers = vec![("Gold".into(), 20)];
+
+            let mut expected_rng = LcgRng::seed_from_u64(73);
+            let base_count = expected_rng.count;
+            advance_native_empty_ledger(&params, &mut expected_rng);
+
+            let mut classifier = test_classifier();
+            let mut rng = LcgRng::seed_from_u64(73);
+            let map = create_basic_map(&params, &mut classifier, 3, &mut rng);
+            assert_eq!(
+                (map.width, map.height),
+                (0, 0),
+                "requested {requested_width}x{requested_height}"
+            );
+            assert!(map.indices.is_empty());
+            assert_eq!(rng.count - base_count, 9, "no forced-column draws");
+            assert_eq!(rng, expected_rng, "exact C4SVal/noise draw order");
+
+            let landscape = crate::scenario::classified_landscape(&map, &classifier, 10, 0)
+                .expect("the empty source map still builds the minimum world");
+            let grid = landscape
+                .pixel_grid()
+                .expect("dynamic maps retain a Surface8 plane");
+            assert_eq!((grid.width(), grid.height()), (100, 100));
+            assert!(grid.bytes().iter().all(|byte| *byte == 0));
+        }
     }
 
     #[test]
