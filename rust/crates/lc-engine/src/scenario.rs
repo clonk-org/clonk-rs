@@ -14,7 +14,8 @@ use lc_resources::definition::{
 use lc_resources::{
     ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap, ColorByOwnerMask,
     ComponentGroups, DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
-    LanguagePacks, RankNameTable, ResourceDefinition as ResourceDefinitionData,
+    LanguagePacks, ParticleDefinition as ResourceParticleDefinition, RankNameTable,
+    ResourceDefinition as ResourceDefinitionData,
     decode_legacy_script_text,
     localize_script_source_with_components,
 };
@@ -348,6 +349,10 @@ fn scenario_map_callback_functions(
             DefinitionLoadStep::SystemScripts(sources) => {
                 linker.install_additional_global_scripts(sources);
             }
+            // Particle definitions have no script host. Their render and
+            // simulation metadata is registered only when the scenario is
+            // applied to the live engine.
+            DefinitionLoadStep::Particle(_) => {}
             // Destroyed overload hosts retain declarations only; their
             // functions no longer participate in append/include linking.
             DefinitionLoadStep::Declarations { .. } => {}
@@ -370,12 +375,14 @@ enum DefinitionLoadStep {
     Definition(String),
     Declarations { name: String, source: String },
     SystemScripts(Vec<(String, String)>),
+    Particle(ResourceParticleDefinition),
 }
 
 #[derive(Debug)]
 enum CollectedDefinition {
     Definition(ScenarioDefinition),
     SystemScripts(Vec<(String, String)>),
+    Particle(ResourceParticleDefinition),
 }
 
 // C4Game::InitDefs checks every loaded definition against the running engine
@@ -2826,6 +2833,9 @@ impl Scenario {
                     definition_load_steps.push(DefinitionLoadStep::SystemScripts(sources));
                 }
                 CollectedDefinition::SystemScripts(_) => {}
+                CollectedDefinition::Particle(definition) => {
+                    definition_load_steps.push(DefinitionLoadStep::Particle(definition));
+                }
             }
         }
 
@@ -2842,7 +2852,9 @@ impl Scenario {
             .collect();
         definition_load_steps.retain(|step| match step {
             DefinitionLoadStep::Definition(id) => retained_definition_ids.contains(id.as_str()),
-            DefinitionLoadStep::Declarations { .. } | DefinitionLoadStep::SystemScripts(_) => true,
+            DefinitionLoadStep::Declarations { .. }
+            | DefinitionLoadStep::SystemScripts(_)
+            | DefinitionLoadStep::Particle(_) => true,
         });
         report_progress(40, "Definition metadata and sources collected");
 
@@ -3648,6 +3660,16 @@ impl Scenario {
                 }
                 DefinitionLoadStep::SystemScripts(sources) => {
                     engine.install_additional_global_scripts(sources);
+                    continue;
+                }
+                DefinitionLoadStep::Particle(resource) => {
+                    if let Err(error) = engine.register_particle_resource(resource) {
+                        tracing::warn!(
+                            particle = %resource.core.name,
+                            %error,
+                            "particle definition failed to register; skipping"
+                        );
+                    }
                     continue;
                 }
             };
@@ -15676,7 +15698,16 @@ fn collect_definitions_from_group<S: AsRef<str>>(
     let mut primary_definition = false;
     // C4Def::Load diverts Particle.txt groups into C4ParticleDef before it
     // even attempts DefCore; they never become object definitions.
-    if !group.exists("Particle.txt") && group.exists("DefCore.txt") {
+    if group.exists("Particle.txt") {
+        match ResourceParticleDefinition::load(group) {
+            Ok(definition) => output.push(CollectedDefinition::Particle(definition)),
+            Err(error) => tracing::warn!(
+                group = %group.root().display(),
+                %error,
+                "particle definition failed to load; skipping"
+            ),
+        }
+    } else if group.exists("DefCore.txt") {
         // C4Def::Load checks SkipDefs immediately after DefCore, before
         // scripts, ActMap, graphics, sounds, or localized auxiliary data.
         // Probe the ID first so malformed data in a skipped definition is
@@ -21890,8 +21921,11 @@ global func Step(state, frame, random)
 
         let particle = write_core(&defs, "Particle", "[DefCore]\nid=PART\n");
         write_test_definition_graphics(&particle);
-        std::fs::write(particle.join("Particle.txt"), b"[Particle]\n")
-            .expect("write particle marker");
+        std::fs::write(
+            particle.join("Particle.txt"),
+            b"[Particle]\nName=ScenarioParticle\nInitFn=StdInit\nExecFn=StdExec\nDrawFn=Std\nFace=0,0,1,1,0,0\n",
+        )
+        .expect("write particle definition");
         let particle_child = write_core(&particle, "Child", "[DefCore]\nid=CHLD\n");
         write_test_definition_graphics(&particle_child);
 
@@ -21961,6 +21995,17 @@ global func Step(state, frame, random)
                     .as_deref()
                     .is_some_and(|error| error.contains("Graphics.png/Graphics.bmp"))
         }));
+
+        let mut engine = Engine::with_seed(0);
+        scenario
+            .apply(&mut engine)
+            .expect("valid particle resources apply after object definitions");
+        let particle = engine
+            .particle_system()
+            .get_def("ScenarioParticle")
+            .expect("scenario definition traversal registers Particle.txt groups");
+        assert_eq!(particle.length, 1);
+        assert!(particle.graphics.is_some());
     }
 
     fn write_definition_localization_fixture(
@@ -25771,7 +25816,7 @@ public func ActualizePhase(pClonk)
             .into_iter()
             .filter_map(|item| match item {
                 CollectedDefinition::Definition(definition) => Some(definition.id),
-                CollectedDefinition::SystemScripts(_) => None,
+                CollectedDefinition::SystemScripts(_) | CollectedDefinition::Particle(_) => None,
             })
             .collect::<Vec<_>>();
         ids.sort();
@@ -25841,7 +25886,8 @@ public func ActualizePhase(pClonk)
                 .iter()
                 .filter_map(|item| match item {
                     CollectedDefinition::Definition(definition) => Some(definition.id.as_str()),
-                    CollectedDefinition::SystemScripts(_) => None,
+                    CollectedDefinition::SystemScripts(_)
+                    | CollectedDefinition::Particle(_) => None,
                 })
                 .collect::<Vec<_>>(),
             ["UDEF", "ODEF"]

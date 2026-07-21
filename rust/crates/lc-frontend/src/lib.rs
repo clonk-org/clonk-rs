@@ -51,14 +51,14 @@ use lc_engine::landscape::PixelGrid;
 use lc_engine::{
     math::{fixtoi, itofix, C4Fixed},
     object_visible_for_player,
-    particles::SafeRng,
+    particles::{ParticleDefCore, ParticleDrawProc, SafeRng},
     DefinitionActionGraphics, DefinitionId, DefinitionLineMetadata, DefinitionRect,
     DefinitionTargetRect, Direction, DrawTransform, PHYSICAL_ACTION_GRAPHICS_MARKER,
     EnvironmentFrame, EnvironmentSettings, FloatVector2, GammaControlState, GraphicsOverlayMode,
-    Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus, ParticleSnapshot,
-    PlayerState, RgbColor, SimulationSnapshot, SkyFrame, SkySettings, PLAYER_VIEW_MODE_TARGET,
-    SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent, FULL_CON, OWNER_NONE,
-    physical_action_graphics_key,
+    Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus, ParticleLayer,
+    ParticleSnapshot, PlayerState, RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
+    PLAYER_VIEW_MODE_TARGET, SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent,
+    FULL_CON, OWNER_NONE, physical_action_graphics_key,
 };
 #[cfg(test)]
 use lc_engine::{
@@ -702,6 +702,49 @@ pub struct DefinitionSprite {
     /// DefCore `TopFace`: source facet and object-relative target rectangle.
     pub top_face: Option<DefinitionTargetRect>,
 }
+
+/// Source facet selected from one particle definition's `Graphics.png`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParticleFacet {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl ParticleFacet {
+    pub const fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn phase(self, x: i32, y: i32) -> SourceRect {
+        SourceRect::new(
+            self.x.saturating_add(self.width.saturating_mul(x)),
+            self.y.saturating_add(self.height.saturating_mul(y)),
+            self.width,
+            self.height,
+        )
+    }
+}
+
+/// Immutable render half of a loaded native particle definition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParticleRenderDefinition {
+    pub image: ImageData,
+    pub facet: ParticleFacet,
+    pub length: i32,
+    /// Native `C4ParticleDef::Aspect`: facet width divided by facet height.
+    pub aspect: f32,
+    pub core: ParticleDefCore,
+    pub draw_proc: ParticleDrawProc,
+}
+
+pub type ParticleSprite = ParticleRenderDefinition;
 
 /// Definition geometry read by `C4Object`'s developer overlays. Keeping this
 /// beside, rather than inside, bitmap sprites preserves the distinction
@@ -2362,6 +2405,34 @@ impl SourceRect {
     }
 }
 
+/// `C4Math::Angle(0, 0, x, y)`: zero points up, clockwise positive.
+fn c4_particle_angle(x: i32, y: i32) -> i32 {
+    let absolute_x = x.wrapping_abs() as f32;
+    let absolute_y = y.wrapping_abs() as f32;
+    let angle = (180.0_f64
+        * f64::from(absolute_y.atan2(absolute_x))
+        * f64::from(std::f32::consts::FRAC_1_PI)) as i32;
+    if x > 0 {
+        if y < 0 {
+            90 - angle
+        } else {
+            90 + angle
+        }
+    } else if y < 0 {
+        270 + angle
+    } else {
+        270 - angle
+    }
+}
+
+fn lower_bounded_surface_clip(surface: &Surface, left: i32, top: i32) -> SurfaceRect {
+    let width = (i64::from(surface.width()) - i64::from(left))
+        .clamp(0, i64::from(u32::MAX)) as u32;
+    let height = (i64::from(surface.height()) - i64::from(top))
+        .clamp(0, i64::from(u32::MAX)) as u32;
+    SurfaceRect::new(left, top, width, height)
+}
+
 /// Floating-point source geometry used only by C4Object face blits. C++
 /// forwards `GetGraphics()->pDef->Scale` into `Blit` without quantizing the
 /// resulting source rectangle (C4Object.cpp:438-467,2639-2670).
@@ -3813,6 +3884,7 @@ pub struct GraphicsSystem {
     world_width: i32,
     world_height: i32,
     object_sprites: Arc<HashMap<String, DefinitionSprite>>,
+    particle_sprites: Arc<HashMap<String, ParticleRenderDefinition>>,
     rotateable_definitions: HashSet<DefinitionId>,
     cursor_atlas: Arc<CursorAtlas>,
     hud_graphics: Arc<HudGraphics>,
@@ -3916,6 +3988,7 @@ impl GraphicsSystem {
             world_width: surface_width as i32,
             world_height: fallback_ground_height.max(surface_height as i32).max(0),
             object_sprites,
+            particle_sprites: Arc::new(HashMap::new()),
             rotateable_definitions: HashSet::new(),
             cursor_atlas,
             hud_graphics,
@@ -3942,6 +4015,14 @@ impl GraphicsSystem {
 
     pub fn set_object_sprites(&mut self, sprites: Arc<HashMap<String, DefinitionSprite>>) {
         self.object_sprites = sprites;
+    }
+
+    /// Install the final exact-case, post-overload particle render catalog.
+    pub fn set_particle_sprites(
+        &mut self,
+        sprites: Arc<HashMap<String, ParticleRenderDefinition>>,
+    ) {
+        self.particle_sprites = sprites;
     }
 
     pub fn set_presentation_scale(&mut self, scale: f32) {
@@ -5847,6 +5928,7 @@ impl GraphicsSystem {
             &snapshot.objects,
             &snapshot.render_order,
             &snapshot.definition_lines,
+            &snapshot.particles,
             &snapshot.players,
             input.owner,
             lighting,
@@ -5883,6 +5965,7 @@ impl GraphicsSystem {
             &snapshot.objects,
             &snapshot.render_order,
             &snapshot.definition_lines,
+            &snapshot.particles,
             &snapshot.players,
             input.owner,
             lighting,
@@ -5890,11 +5973,18 @@ impl GraphicsSystem {
             ObjectRenderPass::Normal,
             gamma,
         );
+        self.draw_definition_particles(
+            &snapshot.particles,
+            &ParticleLayer::Global,
+            None,
+            gamma,
+        );
         self.draw_objects_at_frame(
             snapshot.frame,
             &snapshot.objects,
             &snapshot.render_order,
             &snapshot.definition_lines,
+            &snapshot.particles,
             &snapshot.players,
             input.owner,
             lighting,
@@ -5950,6 +6040,7 @@ impl GraphicsSystem {
                 &snapshot.objects,
                 &snapshot.render_order,
                 &snapshot.definition_lines,
+                &snapshot.particles,
                 &snapshot.players,
                 input.owner,
                 lighting,
@@ -5968,6 +6059,7 @@ impl GraphicsSystem {
                 &snapshot.objects,
                 &snapshot.render_order,
                 &snapshot.definition_lines,
+                &snapshot.particles,
                 &snapshot.players,
                 input.owner,
                 lighting,
@@ -6705,6 +6797,255 @@ impl GraphicsSystem {
         let g = ((value >> 8) & 0xff) as u8;
         let b = (value & 0xff) as u8;
         Color::opaque(r, g, b)
+    }
+
+    /// Draw one native particle list. Snapshot order is creation order,
+    /// whereas C++ prepends new particles, so reverse iteration is native
+    /// newest-first traversal.
+    fn draw_definition_particles(
+        &mut self,
+        particles: &[ParticleSnapshot],
+        layer: &ParticleLayer,
+        target: Option<&ObjectSnapshot>,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        for particle in particles.iter().rev() {
+            if &particle.layer != layer {
+                continue;
+            }
+            let Some(definition) = self
+                .particle_sprites
+                .get(&particle.definition_id)
+                .cloned()
+            else {
+                continue;
+            };
+            match definition.draw_proc {
+                ParticleDrawProc::Smoke => {
+                    self.draw_smoke_particle(particle, &definition, gamma)
+                }
+                ParticleDrawProc::Std => {
+                    self.draw_std_particle(particle, &definition, target, gamma)
+                }
+            }
+        }
+    }
+
+    fn particle_parallax_target(&self, core: &ParticleDefCore) -> (i32, i32) {
+        let target_x = self.viewport_x as i32;
+        let target_y = self.viewport_y as i32;
+        (
+            target_x.wrapping_mul(core.parallaxity[0]) / 100,
+            target_y.wrapping_mul(core.parallaxity[1]) / 100,
+        )
+    }
+
+    fn particle_visible(&self, x: f32, y: f32, radius: f32, tx: i32, ty: i32) -> bool {
+        if !(x.is_finite() && y.is_finite() && radius.is_finite()) {
+            return false;
+        }
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let width = (self.surface_width as f32 / zoom).ceil();
+        let height = (self.surface_height as f32 / zoom).ceil();
+        x >= tx as f32 - radius
+            && x <= tx as f32 + width + radius
+            && y >= ty as f32 - radius
+            && y <= ty as f32 + height + radius
+    }
+
+    fn draw_smoke_particle(
+        &mut self,
+        particle: &ParticleSnapshot,
+        definition: &ParticleRenderDefinition,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        let (tx, ty) = self.particle_parallax_target(&definition.core);
+        if !self.particle_visible(
+            particle.position.x,
+            particle.position.y,
+            particle.parameter_a,
+            tx,
+            ty,
+        ) {
+            return;
+        }
+        let cx = particle.position.x as i32 - tx;
+        let cy = particle.position.y as i32 - ty;
+        let kind = particle.velocity.y as i32;
+        let source = definition.facet.phase(kind / 4, kind % 4);
+        let left = (cx as f32 - particle.parameter_a) as i32;
+        let top = (cy as f32 - particle.parameter_a) as i32;
+        let size = (particle.parameter_a * 2.0) as i32;
+        if size <= 0 {
+            return;
+        }
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let destination = GuiRect::new(
+            left as f32 * zoom,
+            top as f32 * zoom,
+            size as f32 * zoom,
+            size as f32 * zoom,
+        );
+        let fog = self.fog_draw_context();
+        draw_image_region(
+            &mut self.surface,
+            &destination,
+            &definition.image,
+            None,
+            &source,
+            false,
+            None,
+            SpriteBlitState {
+                mode: 0,
+                modulation: Some(particle.parameter_b as u32),
+                fog_modulation: None,
+            },
+            gamma,
+            fog.as_ref(),
+        );
+    }
+
+    fn draw_std_particle(
+        &mut self,
+        particle: &ParticleSnapshot,
+        definition: &ParticleRenderDefinition,
+        target: Option<&ObjectSnapshot>,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        let (tx, ty) = self.particle_parallax_target(&definition.core);
+        let mut x = particle.position.x;
+        let mut y = particle.position.y;
+        let mut xdir = particle.velocity.x;
+        let mut ydir = particle.velocity.y;
+        if definition.core.attach != 0 {
+            if let Some(target) = target {
+                x += target.position.x as f32;
+                y += target.position.y as f32;
+                if let Some(velocity) = target.fixed_velocity {
+                    xdir += velocity.x.to_float();
+                    ydir += velocity.y.to_float();
+                } else {
+                    xdir += target.velocity.x as f32;
+                    ydir += target.velocity.y as f32;
+                }
+            }
+        }
+        if !self.particle_visible(x, y, particle.parameter_a, tx, ty) {
+            return;
+        }
+
+        let mut phase = particle.life;
+        if definition.core.delay != 0 {
+            if phase >= 0 {
+                phase /= definition.core.delay;
+                if definition.core.reverse != 0 {
+                    let length = definition.length - 1;
+                    let cycle = length.saturating_mul(2);
+                    if cycle == 0 {
+                        return;
+                    }
+                    phase %= cycle;
+                    if phase > length {
+                        phase = length.saturating_mul(2).saturating_add(1) - phase;
+                    }
+                } else {
+                    if definition.length == 0 {
+                        return;
+                    }
+                    phase %= definition.length;
+                }
+            } else {
+                if definition.core.fade_out_delay == 0 {
+                    return;
+                }
+                phase = (phase + 1) / -definition.core.fade_out_delay + definition.length;
+            }
+        }
+
+        let rotation = match definition.core.r_by_v {
+            1 | 2 => c4_particle_angle((xdir * 10.0) as i32, (ydir * 10.0) as i32),
+            3 => ((particle.position.x * 23.0 + particle.position.y * 12.0) as i32) % 360,
+            _ => 0,
+        };
+        let half_width = particle.parameter_a as i32;
+        let half_height = (definition.aspect * half_width as f32) as i32;
+        if half_width <= 0 || half_height <= 0 {
+            return;
+        }
+        let cgox = -tx;
+        let cgoy = -ty;
+        let cx = (x + cgox as f32) as i32;
+        let cy = (y + cgoy as f32) as i32;
+        let width = half_width.saturating_mul(2);
+        let height = half_height.saturating_mul(2);
+        let source = definition.facet.phase(phase, 0);
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let blit = SpriteBlitState {
+            mode: if definition.core.additive != 0 {
+                C4GFXBLIT_ADDITIVE
+            } else {
+                0
+            },
+            modulation: Some(particle.parameter_b as u32),
+            fog_modulation: None,
+        };
+        let fog = self.fog_draw_context();
+
+        let clip_left = (cgox as f32 * zoom).round() as i32;
+        let clip_top = ((cgoy + definition.core.y_off) as f32 * zoom).round() as i32;
+        let lower_clip = lower_bounded_surface_clip(&self.surface, clip_left, clip_top);
+        let previous_clip = self.surface.clip();
+        let clip = previous_clip
+            .and_then(|clip| clip.intersection(lower_clip))
+            .unwrap_or_else(|| {
+                if previous_clip.is_some() {
+                    SurfaceRect::new(0, 0, 0, 0)
+                } else {
+                    lower_clip
+                }
+            });
+        self.surface.set_clip(clip);
+
+        if rotation != 0 {
+            draw_image_region_rotated(
+                &mut self.surface,
+                cx as f32 * zoom,
+                cy as f32 * zoom,
+                width as f32 * zoom,
+                height as f32 * zoom,
+                &definition.image,
+                None,
+                &source,
+                false,
+                None,
+                rotation as f32,
+                blit,
+                gamma,
+                fog.as_ref(),
+            );
+        } else {
+            draw_image_region(
+                &mut self.surface,
+                &GuiRect::new(
+                    (cx - half_width) as f32 * zoom,
+                    (cy - half_height) as f32 * zoom,
+                    width as f32 * zoom,
+                    height as f32 * zoom,
+                ),
+                &definition.image,
+                None,
+                &source,
+                false,
+                None,
+                blit,
+                gamma,
+                fog.as_ref(),
+            );
+        }
+        match previous_clip {
+            Some(clip) => self.surface.set_clip(clip),
+            None => self.surface.clear_clip(),
+        }
     }
 
     fn draw_pxs(
@@ -7590,6 +7931,53 @@ impl GraphicsSystem {
         )
     }
 
+    /// Native output-boundary gate, which runs after the back list but before
+    /// command debug, ShowSolidMask, containment and IgnoreFoW suppression.
+    fn object_output_bounds_culled(&self, object: &ObjectSnapshot) -> bool {
+        let (base_definition_id, base_graphics_name) =
+            if let Some(base) = object.base_graphics.as_ref() {
+                (base.definition.clone(), base.graphics_name.clone())
+            } else {
+                (object.definition_id.clone(), None)
+            };
+        let mut sprite = self
+            .object_sprites
+            .get(&sprite_map_key(
+                &base_definition_id,
+                base_graphics_name.as_deref(),
+            ))
+            .cloned();
+        if sprite.is_none() && base_graphics_name.is_some() {
+            sprite = self
+                .object_sprites
+                .get(&sprite_map_key(&base_definition_id, None))
+                .cloned();
+        }
+        if sprite.is_none() && base_definition_id != object.definition_id {
+            sprite = self
+                .object_sprites
+                .get(&sprite_map_key(&object.definition_id, None))
+                .cloned();
+        }
+        let geometry_sprite = self
+            .object_sprites
+            .get(&sprite_map_key(&object.definition_id, None))
+            .cloned()
+            .or(sprite);
+        if let Some(geometry_sprite) = geometry_sprite.as_ref() {
+            let shape = self.live_object_shape(geometry_sprite, object);
+            return !self.object_reaches_post_face_draw(object, geometry_sprite, shape);
+        }
+
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let screen_x = (object.position.x as f32 - self.viewport_x) * zoom;
+        let screen_y = (object.position.y as f32 - self.viewport_y) * zoom;
+        screen_x < -10.0
+            || screen_y < -10.0
+            || screen_x > self.surface_width as f32 + 10.0
+            || screen_y > self.surface_height as f32 + 10.0
+    }
+
     #[cfg(test)]
     fn draw_objects(
         &mut self,
@@ -7608,6 +7996,7 @@ impl GraphicsSystem {
             objects,
             render_order,
             definition_lines,
+            &[],
             players,
             for_player,
             lighting,
@@ -7623,6 +8012,7 @@ impl GraphicsSystem {
         objects: &[ObjectSnapshot],
         render_order: &[ObjectId],
         definition_lines: &HashMap<DefinitionId, DefinitionLineMetadata>,
+        particles: &[ParticleSnapshot],
         players: &[PlayerState],
         for_player: i32,
         lighting: f32,
@@ -7691,19 +8081,35 @@ impl GraphicsSystem {
                 .get(&object.definition_id)
                 .map(|metadata| metadata.line)
                 .unwrap_or(0);
+            if line == 0 && object.container.is_none() {
+                self.draw_definition_particles(
+                    particles,
+                    &ParticleLayer::ObjectBack(object.id),
+                    Some(object),
+                    gamma,
+                );
+            }
+            if line == 0 && self.object_output_bounds_culled(object) {
+                if object.container.is_none() {
+                    self.draw_definition_particles(
+                        particles,
+                        &ParticleLayer::ObjectFront(object.id),
+                        Some(object),
+                        gamma,
+                    );
+                }
+                continue;
+            }
             if line == 0 && self.debug_draw_flags.show_command {
                 self.paint_command_debug(object, objects, gamma);
-            }
-            // Native ShowCommand runs before this containment return, so
-            // carried objects retain their command overlay while their
-            // ordinary face/debug-tail work remains suppressed.
-            if line == 0 && object.container.is_some() {
-                continue;
             }
             if line == 0
                 && self.debug_draw_flags.show_solid_mask
                 && self.object_has_debug_solid_mask(object)
             {
+                continue;
+            }
+            if line == 0 && object.container.is_some() {
                 continue;
             }
             // `C4D_IgnoreFoW` disables the modulation map only around the
@@ -7715,9 +8121,10 @@ impl GraphicsSystem {
             if suppress_fog {
                 self.fog_suppression_depth += 1;
             }
-            let reaches_post_face_draw = self.paint_object(
+            let reaches_post_face_draw = self.paint_object_with_particles(
                 object,
                 objects,
+                particles,
                 players,
                 for_player,
                 lighting,
@@ -8606,6 +9013,32 @@ impl GraphicsSystem {
         players: &[PlayerState],
         for_player: i32,
         lighting: f32,
+        owner_colors: &HashMap<i32, Color>,
+        line: i32,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        self.paint_object_with_particles(
+            object,
+            objects,
+            &[],
+            players,
+            for_player,
+            lighting,
+            owner_colors,
+            line,
+            gamma,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_object_with_particles(
+        &mut self,
+        object: &ObjectSnapshot,
+        objects: &[ObjectSnapshot],
+        particles: &[ParticleSnapshot],
+        players: &[PlayerState],
+        for_player: i32,
+        lighting: f32,
         _owner_colors: &HashMap<i32, Color>,
         line: i32,
         gamma: Option<&lc_graphics::GammaRamp>,
@@ -8663,6 +9096,12 @@ impl GraphicsSystem {
             let target_position = self.object_target_position(object);
             let shape = self.live_object_shape(geometry_sprite, object);
             if !self.object_reaches_post_face_draw(object, geometry_sprite, shape) {
+                self.draw_definition_particles(
+                    particles,
+                    &ParticleLayer::ObjectFront(object.id),
+                    Some(object),
+                    gamma,
+                );
                 return false;
             }
             // C4Object draws the fire facet before PrepareDrawing and before
@@ -8689,9 +9128,10 @@ impl GraphicsSystem {
                 SpriteBlitState::for_object(object),
                 gamma,
             );
-            self.draw_object_overlays(
+            self.draw_object_overlays_with_particles(
                 object,
                 objects,
+                particles,
                 players,
                 for_player,
                 owner_color,
@@ -8702,6 +9142,12 @@ impl GraphicsSystem {
                 base_transform,
                 gamma,
             );
+            self.draw_definition_particles(
+                particles,
+                &ParticleLayer::ObjectFront(object.id),
+                Some(object),
+                gamma,
+            );
             return true;
         }
 
@@ -8710,6 +9156,12 @@ impl GraphicsSystem {
             || screen_x > content_width + 10.0
             || screen_y > content_height + 10.0
         {
+            self.draw_definition_particles(
+                particles,
+                &ParticleLayer::ObjectFront(object.id),
+                Some(object),
+                gamma,
+            );
             return false;
         }
 
@@ -8745,6 +9197,12 @@ impl GraphicsSystem {
                     fill_polygon(&mut self.surface, &points, color)
                 }
             {
+                self.draw_definition_particles(
+                    particles,
+                    &ParticleLayer::ObjectFront(object.id),
+                    Some(object),
+                    gamma,
+                );
                 return true;
             }
         }
@@ -8762,9 +9220,10 @@ impl GraphicsSystem {
         } else {
             fill_rect(&mut self.surface, &rect, color);
         }
-        self.draw_object_overlays(
+        self.draw_object_overlays_with_particles(
             object,
             objects,
+            particles,
             players,
             for_player,
             owner_color,
@@ -8773,6 +9232,12 @@ impl GraphicsSystem {
             zoom,
             rotation_degrees,
             base_transform,
+            gamma,
+        );
+        self.draw_definition_particles(
+            particles,
+            &ParticleLayer::ObjectFront(object.id),
+            Some(object),
             gamma,
         );
         true
@@ -9560,10 +10025,43 @@ impl GraphicsSystem {
         base_transform: Option<DrawTransform>,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
+        self.draw_object_overlays_with_particles(
+            object,
+            objects,
+            &[],
+            players,
+            for_player,
+            owner_color,
+            screen_x,
+            screen_y,
+            zoom,
+            rotation_degrees,
+            base_transform,
+            gamma,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_object_overlays_with_particles(
+        &mut self,
+        object: &ObjectSnapshot,
+        objects: &[ObjectSnapshot],
+        particles: &[ParticleSnapshot],
+        players: &[PlayerState],
+        for_player: i32,
+        owner_color: Option<u32>,
+        screen_x: f32,
+        screen_y: f32,
+        zoom: f32,
+        rotation_degrees: f32,
+        base_transform: Option<DrawTransform>,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
         let mut object_ancestry = HashSet::from([object.id]);
         self.draw_object_overlays_inner(
             object,
             objects,
+            particles,
             players,
             for_player,
             owner_color,
@@ -9582,6 +10080,7 @@ impl GraphicsSystem {
         &mut self,
         object: &ObjectSnapshot,
         objects: &[ObjectSnapshot],
+        particles: &[ParticleSnapshot],
         players: &[PlayerState],
         for_player: i32,
         owner_color: Option<u32>,
@@ -9635,6 +10134,7 @@ impl GraphicsSystem {
                     object,
                     overlay,
                     objects,
+                    particles,
                     players,
                     for_player,
                     zoom,
@@ -9652,6 +10152,7 @@ impl GraphicsSystem {
         host: &ObjectSnapshot,
         overlay: &ObjectGraphicsOverlay,
         objects: &[ObjectSnapshot],
+        particles: &[ParticleSnapshot],
         players: &[PlayerState],
         for_player: i32,
         zoom: f32,
@@ -9735,6 +10236,25 @@ impl GraphicsSystem {
                 // branch, including ODM_Overlay.
                 self.paint_typed_line(target, geometry_sprite.line, gamma);
             } else {
+                if target.container.is_none() {
+                    self.draw_definition_particles(
+                        particles,
+                        &ParticleLayer::ObjectBack(target.id),
+                        Some(target),
+                        gamma,
+                    );
+                }
+                // C4Object::Draw(ODM_Overlay) reaches ShowSolidMask after
+                // the back list and returns before fire, face, recursive
+                // overlays, front particles, and the separate TopFace call.
+                if self.debug_draw_flags.show_solid_mask
+                    && self.object_has_debug_solid_mask(target)
+                {
+                    self.viewport_x = saved_viewport_x;
+                    self.viewport_y = saved_viewport_y;
+                    object_ancestry.remove(&target.id);
+                    return;
+                }
                 // MODE_Object calls C4Object::Draw with ODM_Overlay. The fire
                 // pass still precedes the face, but inherits the overlay's
                 // already-established blit state (C4DefGraphics.cpp:769-780).
@@ -9769,6 +10289,7 @@ impl GraphicsSystem {
                 self.draw_object_overlays_inner(
                     target,
                     objects,
+                    particles,
                     players,
                     for_player,
                     owner_color,
@@ -9779,6 +10300,12 @@ impl GraphicsSystem {
                     target.draw_transform,
                     gamma,
                     object_ancestry,
+                );
+                self.draw_definition_particles(
+                    particles,
+                    &ParticleLayer::ObjectFront(target.id),
+                    Some(target),
+                    gamma,
                 );
                 if suppress_fog {
                     self.fog_suppression_depth -= 1;
@@ -21724,10 +22251,495 @@ mod tests {
     }
 
     #[test]
+    fn stock_particle_groups_render_std_smoke_and_layer_order() {
+        fn solid_definition(
+            name: &str,
+            color: Color,
+            core: ParticleDefCore,
+        ) -> ParticleRenderDefinition {
+            ParticleRenderDefinition {
+                image: ImageData::new(1, 1, vec![color.r, color.g, color.b, color.a]),
+                facet: ParticleFacet::new(0, 0, 1, 1),
+                length: 1,
+                aspect: 1.0,
+                core: ParticleDefCore {
+                    name: name.to_string(),
+                    ..core
+                },
+                draw_proc: ParticleDrawProc::Std,
+            }
+        }
+
+        fn particle(
+            definition_id: &str,
+            x: f32,
+            y: f32,
+            life: i32,
+            parameter_a: f32,
+            layer: ParticleLayer,
+        ) -> ParticleSnapshot {
+            ParticleSnapshot {
+                definition_id: definition_id.to_string(),
+                position: FloatVector2::new(x, y),
+                velocity: FloatVector2::new(0.0, 0.0),
+                life,
+                parameter_a,
+                parameter_b: 0x00ff_ffff,
+                layer,
+                pxs_fixed: None,
+                pxs_slot: None,
+            }
+        }
+
+        fn shipped_particle_image(path: &str) -> ImageData {
+            let path = crate::test_support::repo_root().join(path);
+            let rgba = image::open(&path)
+                .unwrap_or_else(|error| panic!("decode {}: {error}", path.display()))
+                .into_rgba8();
+            let (width, height) = rgba.dimensions();
+            ImageData::new(width, height, rgba.into_raw())
+        }
+
+        let owner_id = ObjectId::new(1);
+        let mut owner = make_snapshot().objects.remove(0);
+        owner.id = owner_id;
+        owner.definition_id = "ParticleOwner".to_string();
+        owner.position = Vector2::new(8, 8);
+        owner.crew_member = false;
+
+        let mut foreground = owner.clone();
+        foreground.id = ObjectId::new(2);
+        foreground.definition_id = "ParticleForeground".to_string();
+        foreground.position = Vector2::new(22, 8);
+        foreground.category |= CATEGORY_FOREGROUND_FLAG;
+        let objects = vec![owner, foreground];
+
+        let shape = Some(DefinitionRect::new(-3, -3, 6, 6));
+        let mut object_sprites = HashMap::new();
+        object_sprites.extend((*solid_sprite(
+            "ParticleOwner",
+            6,
+            6,
+            Color::opaque(0, 0, 220),
+            shape,
+            false,
+        ))
+        .clone());
+        object_sprites.extend((*solid_sprite(
+            "ParticleForeground",
+            6,
+            6,
+            Color::opaque(220, 220, 0),
+            shape,
+            false,
+        ))
+        .clone());
+
+        let mut definitions = HashMap::from([
+            (
+                "BackRed".to_string(),
+                solid_definition(
+                    "BackRed",
+                    Color::opaque(220, 0, 0),
+                    ParticleDefCore {
+                        attach: 1,
+                        ..ParticleDefCore::default()
+                    },
+                ),
+            ),
+            (
+                "FrontGreen".to_string(),
+                solid_definition(
+                    "FrontGreen",
+                    Color::opaque(0, 220, 0),
+                    ParticleDefCore {
+                        attach: 1,
+                        ..ParticleDefCore::default()
+                    },
+                ),
+            ),
+            (
+                "GlobalWhite".to_string(),
+                solid_definition(
+                    "GlobalWhite",
+                    Color::opaque(255, 255, 255),
+                    ParticleDefCore::default(),
+                ),
+            ),
+            (
+                "GlobalMagenta".to_string(),
+                solid_definition(
+                    "GlobalMagenta",
+                    Color::opaque(220, 0, 220),
+                    ParticleDefCore::default(),
+                ),
+            ),
+            (
+                "OldOrange".to_string(),
+                solid_definition(
+                    "OldOrange",
+                    Color::opaque(220, 80, 0),
+                    ParticleDefCore::default(),
+                ),
+            ),
+            (
+                "NewCyan".to_string(),
+                solid_definition(
+                    "NewCyan",
+                    Color::opaque(0, 200, 220),
+                    ParticleDefCore::default(),
+                ),
+            ),
+            (
+                "YOffBlue".to_string(),
+                solid_definition(
+                    "YOffBlue",
+                    Color::opaque(0, 80, 220),
+                    ParticleDefCore {
+                        y_off: 18,
+                        ..ParticleDefCore::default()
+                    },
+                ),
+            ),
+            (
+                "AdditiveRed".to_string(),
+                solid_definition(
+                    "AdditiveRed",
+                    Color::opaque(100, 0, 0),
+                    ParticleDefCore {
+                        additive: 1,
+                        ..ParticleDefCore::default()
+                    },
+                ),
+            ),
+        ]);
+        definitions.insert(
+            "Phase".to_string(),
+            ParticleRenderDefinition {
+                image: ImageData::new(2, 1, vec![220, 0, 0, 255, 0, 220, 0, 255]),
+                facet: ParticleFacet::new(0, 0, 1, 1),
+                length: 2,
+                aspect: 1.0,
+                core: ParticleDefCore {
+                    name: "Phase".to_string(),
+                    delay: 1,
+                    ..ParticleDefCore::default()
+                },
+                draw_proc: ParticleDrawProc::Std,
+            },
+        );
+        definitions.insert(
+            "Smoke".to_string(),
+            ParticleRenderDefinition {
+                image: shipped_particle_image(
+                    "content/Objects.c4d/Effects.c4d/Smoke.c4d/Graphics.png",
+                ),
+                facet: ParticleFacet::new(0, 0, 64, 64),
+                length: 4,
+                aspect: 1.0,
+                core: ParticleDefCore {
+                    name: "Smoke".to_string(),
+                    ..ParticleDefCore::default()
+                },
+                draw_proc: ParticleDrawProc::Smoke,
+            },
+        );
+        definitions.insert(
+            "Fire".to_string(),
+            ParticleRenderDefinition {
+                image: shipped_particle_image(
+                    "content/Objects.c4d/Effects.c4d/Particles.c4d/Fire.c4d/Graphics.png",
+                ),
+                facet: ParticleFacet::new(0, 0, 26, 26),
+                length: 1,
+                aspect: 1.0,
+                core: ParticleDefCore {
+                    name: "Fire".to_string(),
+                    attach: 1,
+                    ..ParticleDefCore::default()
+                },
+                draw_proc: ParticleDrawProc::Std,
+            },
+        );
+
+        let particles = vec![
+            particle(
+                "BackRed",
+                0.0,
+                0.0,
+                0,
+                2.0,
+                ParticleLayer::ObjectBack(owner_id),
+            ),
+            particle(
+                "FrontGreen",
+                2.0,
+                0.0,
+                0,
+                1.0,
+                ParticleLayer::ObjectFront(owner_id),
+            ),
+            particle("GlobalWhite", 7.0, 8.0, 0, 1.0, ParticleLayer::Global),
+            particle(
+                "GlobalMagenta",
+                22.0,
+                8.0,
+                0,
+                1.0,
+                ParticleLayer::Global,
+            ),
+            particle("Phase", 14.0, 8.0, 1, 1.0, ParticleLayer::Global),
+            particle("Smoke", 36.0, 8.0, 0, 4.0, ParticleLayer::Global),
+            particle("Fire", 48.0, 8.0, 0, 5.0, ParticleLayer::Global),
+            particle("fire", 59.0, 8.0, 0, 2.0, ParticleLayer::Global),
+            particle("OldOrange", 15.0, 18.0, 0, 1.0, ParticleLayer::Global),
+            particle("NewCyan", 15.0, 18.0, 0, 1.0, ParticleLayer::Global),
+            particle("YOffBlue", 28.0, 18.0, 0, 2.0, ParticleLayer::Global),
+            particle("AdditiveRed", 31.0, 18.0, 0, 1.0, ParticleLayer::Global),
+        ];
+
+        let mut graphics = GraphicsSystem::new(
+            64,
+            24,
+            24,
+            "particle draw procedures",
+            test_font(),
+            Arc::new(object_sprites),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_particle_sprites(Arc::new(definitions));
+        graphics.set_renderer_config(true, true, false);
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        graphics
+            .surface_mut()
+            .set_pixel(31, 18, Color::opaque(50, 20, 30))
+            .expect("seed additive destination");
+
+        graphics.draw_objects_at_frame(
+            0,
+            &objects,
+            &[],
+            &HashMap::new(),
+            &particles,
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(7, 8),
+            Some(Color::opaque(0, 0, 220))
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(9, 8),
+            Some(Color::opaque(0, 220, 0))
+        );
+
+        graphics.draw_definition_particles(&particles, &ParticleLayer::Global, None, None);
+        assert_eq!(
+            graphics.surface().get_pixel(7, 8),
+            Some(Color::opaque(255, 255, 255))
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(22, 8),
+            Some(Color::opaque(220, 0, 220))
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(14, 8),
+            Some(Color::opaque(0, 220, 0))
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(15, 18),
+            Some(Color::opaque(220, 80, 0)),
+            "definition particles draw newest-first"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(28, 17),
+            Some(Color::opaque(0, 0, 0))
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(28, 18),
+            Some(Color::opaque(0, 80, 220))
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(31, 18),
+            Some(Color::opaque(150, 20, 30))
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(59, 8),
+            Some(Color::opaque(0, 0, 0)),
+            "lookup remains exact-case"
+        );
+        assert!((32..40).any(|x| (4..12).any(|y| {
+            graphics.surface().get_pixel(x, y) != Some(Color::opaque(0, 0, 0))
+        })));
+        assert!((43..53).any(|x| (3..13).any(|y| {
+            graphics.surface().get_pixel(x, y) != Some(Color::opaque(0, 0, 0))
+        })));
+
+        graphics.draw_objects_at_frame(
+            0,
+            &objects,
+            &[],
+            &HashMap::new(),
+            &particles,
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::ForegroundNonParallax,
+            None,
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(22, 8),
+            Some(Color::opaque(220, 220, 0))
+        );
+    }
+
+    #[test]
+    fn std_particles_apply_aspect_parallax_velocity_rotation_and_packed_modulation() {
+        fn definition(
+            name: &str,
+            color: Color,
+            aspect: f32,
+            core: ParticleDefCore,
+        ) -> ParticleRenderDefinition {
+            ParticleRenderDefinition {
+                image: ImageData::new(1, 1, vec![color.r, color.g, color.b, color.a]),
+                facet: ParticleFacet::new(0, 0, 1, 1),
+                length: 1,
+                aspect,
+                core: ParticleDefCore {
+                    name: name.to_string(),
+                    ..core
+                },
+                draw_proc: ParticleDrawProc::Std,
+            }
+        }
+        fn particle(name: &str, x: f32, y: f32, a: f32) -> ParticleSnapshot {
+            ParticleSnapshot {
+                definition_id: name.to_string(),
+                position: FloatVector2::new(x, y),
+                velocity: FloatVector2::new(0.0, 0.0),
+                life: 0,
+                parameter_a: a,
+                parameter_b: 0x00ff_ffff,
+                layer: ParticleLayer::Global,
+                pxs_fixed: None,
+                pxs_slot: None,
+            }
+        }
+
+        let definitions = HashMap::from([
+            (
+                "Packed".to_string(),
+                definition(
+                    "Packed",
+                    Color::opaque(255, 255, 255),
+                    1.0,
+                    ParticleDefCore::default(),
+                ),
+            ),
+            (
+                "Tall".to_string(),
+                definition(
+                    "Tall",
+                    Color::opaque(0, 180, 0),
+                    2.0,
+                    ParticleDefCore::default(),
+                ),
+            ),
+            (
+                "Rotated".to_string(),
+                definition(
+                    "Rotated",
+                    Color::opaque(200, 0, 0),
+                    2.0,
+                    ParticleDefCore {
+                        r_by_v: 1,
+                        ..ParticleDefCore::default()
+                    },
+                ),
+            ),
+            (
+                "Parallax".to_string(),
+                definition(
+                    "Parallax",
+                    Color::opaque(220, 220, 0),
+                    1.0,
+                    ParticleDefCore {
+                        parallaxity: [50, 50],
+                        ..ParticleDefCore::default()
+                    },
+                ),
+            ),
+        ]);
+        let mut packed = particle("Packed", 14.0, 10.0, 1.0);
+        packed.parameter_b = 0x0011_2233;
+        let tall = particle("Tall", 22.0, 14.0, 2.0);
+        let mut rotated = particle("Rotated", 30.0, 14.0, 2.0);
+        rotated.velocity = FloatVector2::new(1.0, 0.0);
+        let parallax = particle("Parallax", 35.0, 7.0, 1.0);
+
+        let mut graphics = GraphicsSystem::new(
+            36,
+            16,
+            16,
+            "Std particle branches",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.viewport_x = 10.0;
+        graphics.viewport_y = 6.0;
+        graphics.set_particle_sprites(Arc::new(definitions));
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        graphics.draw_definition_particles(
+            &[packed, tall, rotated, parallax],
+            &ParticleLayer::Global,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(4, 4),
+            Some(Color::opaque(17, 34, 51))
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(12, 4),
+            Some(Color::opaque(0, 180, 0))
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(9, 8),
+            Some(Color::opaque(0, 0, 0))
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(17, 8),
+            Some(Color::opaque(200, 0, 0)),
+            "RByV rotates the tall destination onto the horizontal axis"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(20, 5),
+            Some(Color::opaque(0, 0, 0))
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(30, 4),
+            Some(Color::opaque(220, 220, 0))
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(25, 1),
+            Some(Color::opaque(0, 0, 0))
+        );
+    }
+
+    #[test]
     fn l049_disabling_extended_fire_particles_keeps_simple_fire_facet() {
-        // Rust does not yet implement C++'s extended Fire/Fire2 particle pass.
-        // FireParticles=false therefore disables no existing extended layer;
-        // the native simple Fire.png object facet remains the required fallback.
+        // FireParticles gates automatic emission only; the simple object
+        // Fire.png facet and script-created registry particles remain visible.
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(6, 6);
         object.crew_member = false;

@@ -24751,8 +24751,10 @@ impl Engine {
 
     /// Register a particle definition, mirroring `C4ParticleDef::Load`
     /// (C4Particles.cpp:118-192). `gfx_length` is the number of animation
-    /// phases in the graphics, `aspect` the phase height:width ratio — both
-    /// derived from Graphics.png at load time in C++.
+    /// phases in the graphics, `aspect` the native facet width/height ratio —
+    /// both derived from Graphics.png at load time in C++. This legacy/manual
+    /// seam registers no frontend graphics payload but still validates all
+    /// named init, exec, collision, and draw procedures.
     pub fn register_particle_definition(
         &mut self,
         core: particles::ParticleDefCore,
@@ -24760,6 +24762,22 @@ impl Engine {
         aspect: f32,
     ) -> Result<(), particles::ParticleDefError> {
         self.particle_system.register_def(core, gfx_length, aspect)
+    }
+
+    /// Register one fully decoded particle resource, retaining its RGBA image
+    /// and normalized source-facet metadata for the frontend render catalog.
+    pub fn register_particle_resource(
+        &mut self,
+        resource: &lc_resources::ParticleDefinition,
+    ) -> Result<(), particles::ParticleDefError> {
+        self.particle_system.register_resource(resource)
+    }
+
+    /// Loaded particle definitions in native linked-list order. The returned
+    /// catalog is immutable; resource-backed entries expose graphics while
+    /// manually registered simulation-only entries have `graphics == None`.
+    pub fn particle_render_catalog(&self) -> &[particles::ParticleDef] {
+        self.particle_system.definitions()
     }
 
     pub fn particle_system(&self) -> &particles::ParticleSystem {

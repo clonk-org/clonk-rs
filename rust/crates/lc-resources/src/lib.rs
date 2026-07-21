@@ -9,6 +9,7 @@ pub mod group_writer;
 pub mod language;
 pub mod material;
 pub mod network_scenario;
+pub mod particle;
 pub mod rtf;
 pub mod scenario;
 mod script_strings;
@@ -32,6 +33,9 @@ pub use group_writer::{
 pub use language::{ComponentGroups, LanguageInfo, LanguagePacks, LoadedComponent};
 pub use material::{MaterialDefinition, MaterialError, MaterialLibrary};
 pub use network_scenario::{combine_network_scenario, NetworkScenarioError};
+pub use particle::{
+    ParticleDefinition, ParticleDefinitionCore, ParticleDefinitionError, ParticleFacet,
+};
 pub use scenario::{
     discover, discover_many, discover_many_with_languages,
     discover_many_with_languages_and_packs,

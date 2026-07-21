@@ -11,7 +11,9 @@
 
 use crate::math::{fixtof, C4Fixed};
 use crate::ParticleLayer;
+use lc_resources::GraphicsImage;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Engine state read by the particle exec procs: GravAccel,
 /// `Game.FrameCounter`, landscape bounds, `GBackSolid`, and `GBackWind`.
@@ -100,6 +102,37 @@ impl Default for ParticleDefCore {
     }
 }
 
+impl From<&lc_resources::ParticleDefinitionCore> for ParticleDefCore {
+    fn from(core: &lc_resources::ParticleDefinitionCore) -> Self {
+        Self {
+            name: core.name.clone(),
+            max_count: core.max_count,
+            min_lifetime: core.min_lifetime,
+            max_lifetime: core.max_lifetime,
+            y_off: core.y_off,
+            delay: core.delay,
+            repeats: core.repeats,
+            reverse: core.reverse,
+            fade_out_len: core.fade_out_len,
+            fade_out_delay: core.fade_out_delay,
+            r_by_v: core.r_by_v,
+            placement: core.placement,
+            gravity_acc: core.gravity_acc,
+            wind_drift: core.wind_drift,
+            vertex_count: core.vertex_count,
+            vertex_y: core.vertex_y,
+            additive: core.additive,
+            attach: core.attach,
+            alpha_fade: core.alpha_fade,
+            parallaxity: core.parallaxity,
+            init_fn: core.init_fn.clone(),
+            exec_fn: core.exec_fn.clone(),
+            draw_fn: core.draw_fn.clone(),
+            collision_fn: core.collision_fn.clone(),
+        }
+    }
+}
+
 /// `LightenClrBy` (StdColors.h:216-223): per-RGB-byte saturating add, alpha
 /// byte unchanged.
 fn lighten_clr_by(clr: u32, by: u8) -> u32 {
@@ -157,6 +190,71 @@ pub enum ParticleProc {
     Die,
 }
 
+/// Drawing procedures from `C4ParticleDrawProcMap`
+/// (C4Particles.cpp:803-808). Keeping this separate from [`ParticleProc`]
+/// prevents an init/exec procedure name from being accepted as a draw proc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParticleDrawProc {
+    Smoke,
+    Std,
+}
+
+impl ParticleDrawProc {
+    /// `C4ParticleSystem::GetDrawProc` (C4Particles.cpp:455-463).
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Smoke" => Some(Self::Smoke),
+            "Std" => Some(Self::Std),
+            _ => None,
+        }
+    }
+}
+
+/// Source facet retained from a particle group's `Face=` setting. Target
+/// offsets are preserved even though the two built-in C++ draw procs do not
+/// consult them; exposing the normalized value keeps the render catalog a
+/// faithful description of the loaded resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParticleGraphicsFacet {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub target_x: i32,
+    pub target_y: i32,
+}
+
+/// Geometry of the phase grid derived by `C4Facet::GetPhaseNum`
+/// (C4Facet.cpp:391-398). Std draws horizontal phases from row zero; Smoke
+/// addresses its native 4x4 grid explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParticleSourcePhaseGeometry {
+    pub width: i32,
+    pub height: i32,
+    pub columns: i32,
+    pub rows: i32,
+}
+
+/// Runtime-only graphics payload exposed to the frontend. Particle
+/// definitions are rebuilt from definition resources on startup, so the
+/// decoded RGBA payload is intentionally omitted from save-state serde.
+#[derive(Debug, Clone)]
+pub struct ParticleGraphics {
+    pub image: GraphicsImage,
+    pub facet: ParticleGraphicsFacet,
+    pub phases: ParticleSourcePhaseGeometry,
+}
+
+impl PartialEq for ParticleGraphics {
+    fn eq(&self, other: &Self) -> bool {
+        self.facet == other.facet
+            && self.phases == other.phases
+            && self.image.width() == other.image.width()
+            && self.image.height() == other.image.height()
+            && self.image.pixels() == other.image.pixels()
+    }
+}
+
 impl ParticleProc {
     /// `C4ParticleSystem::GetProc` (C4Particles.cpp:445-453): nullptr when the
     /// name is not in the map.
@@ -183,22 +281,37 @@ pub struct ParticleDef {
     /// Number of animation phases in the graphics (C4Particles.cpp:141), after
     /// the FadeOutLen adjustment (C4Particles.cpp:148-152).
     pub length: i32,
-    /// height:width of one phase (C4Particles.cpp:156).
+    /// Native's literal facet width/height ratio (C4Particles.cpp:156).
     pub aspect: f32,
     pub init_proc: ParticleProc,
     pub exec_proc: ParticleProc,
     pub collision_proc: Option<ParticleProc>,
+    pub draw_proc: ParticleDrawProc,
+    /// Decoded image and phase-grid metadata for resource-backed defs.
+    /// Manually registered simulation-only defs retain `None`.
+    #[serde(default, skip)]
+    pub graphics: Option<ParticleGraphics>,
     /// Number of live particles of this kind (C4Particles.h:104).
     pub count: i32,
 }
 
 /// Load failure reasons (C4Particles.cpp:142-177 logs + returns false).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ParticleDefError {
+    #[error("particle graphics have no horizontal phases")]
     InvalidLength,
+    #[error("particle facet dimensions must be positive, got {width}x{height}")]
+    InvalidFacetDimensions { width: i32, height: i32 },
+    #[error("particle image dimensions exceed the supported i32 range")]
+    ImageDimensionsOutOfRange,
+    #[error("unknown particle init procedure `{0}`")]
     UnknownInitProc(String),
+    #[error("unknown particle exec procedure `{0}`")]
     UnknownExecProc(String),
+    #[error("unknown particle collision procedure `{0}`")]
     UnknownCollisionProc(String),
+    #[error("unknown particle draw procedure `{0}`")]
+    UnknownDrawProc(String),
 }
 
 /// One live particle, mirroring `C4Particle` (C4Particles.h:118-134). The C++
@@ -217,7 +330,8 @@ pub struct Particle {
     pub layer: ParticleLayer,
 }
 
-/// Mirror of `C4ParticleSystem` (C4Particles.h:172-219) minus drawing.
+/// Mirror of `C4ParticleSystem` (C4Particles.h:172-219). Simulation remains
+/// here; decoded draw metadata is exposed read-only for the frontend.
 #[derive(Debug, Clone)]
 pub struct ParticleSystem {
     /// Insertion-ordered def list (C++ keeps a linked list, pDef0..pDefL).
@@ -255,6 +369,13 @@ impl ParticleSystem {
         self.defs.len()
     }
 
+    /// Definitions in native linked-list order (`pDef0` through `pDefL`).
+    /// Successful overloads remove the first exact-case match and append the
+    /// replacement at the tail.
+    pub fn definitions(&self) -> &[ParticleDef] {
+        &self.defs
+    }
+
     /// `C4ParticleDef::Load` (C4Particles.cpp:118-192): derive length/aspect,
     /// resolve procs, then replace any older def of the same name
     /// ("particle overloading", C4Particles.cpp:178-187).
@@ -263,6 +384,16 @@ impl ParticleSystem {
         core: ParticleDefCore,
         gfx_length: i32,
         aspect: f32,
+    ) -> Result<(), ParticleDefError> {
+        self.register_def_with_graphics(core, gfx_length, aspect, None)
+    }
+
+    fn register_def_with_graphics(
+        &mut self,
+        core: ParticleDefCore,
+        gfx_length: i32,
+        aspect: f32,
+        graphics: Option<ParticleGraphics>,
     ) -> Result<(), ParticleDefError> {
         if gfx_length <= 0 {
             return Err(ParticleDefError::InvalidLength);
@@ -291,8 +422,16 @@ impl ParticleSystem {
                 })
             })
             .transpose()?;
+        let draw_proc = ParticleDrawProc::from_name(&core.draw_fn)
+            .ok_or_else(|| ParticleDefError::UnknownDrawProc(core.draw_fn.clone()))?;
+
+        // Resolve every procedure before mutating the list. In C++ the old
+        // same-name definition is deleted only after the new definition has
+        // loaded its graphics and resolved all function pointers.
         let name = core.name.clone();
-        self.defs.retain(|def| def.core.name != name);
+        if let Some(index) = self.defs.iter().position(|def| def.core.name == name) {
+            self.defs.remove(index);
+        }
         self.defs.push(ParticleDef {
             core,
             length,
@@ -300,9 +439,59 @@ impl ParticleSystem {
             init_proc,
             exec_proc,
             collision_proc,
+            draw_proc,
+            graphics,
             count: 0,
         });
         Ok(())
+    }
+
+    /// Register a decoded `Particle.txt` resource. Graphics-derived values
+    /// follow `C4ParticleDef::Load`: horizontal image/facet division yields
+    /// the raw phase count and Aspect is literally facet width/height. C++
+    /// accepts many out-of-bounds facets; Rust preserves that weak contract
+    /// while rejecting non-positive divisors so arithmetic remains safe.
+    pub fn register_resource(
+        &mut self,
+        resource: &lc_resources::ParticleDefinition,
+    ) -> Result<(), ParticleDefError> {
+        let facet = ParticleGraphicsFacet {
+            x: resource.facet.x,
+            y: resource.facet.y,
+            width: resource.facet.width,
+            height: resource.facet.height,
+            target_x: resource.facet.target_x,
+            target_y: resource.facet.target_y,
+        };
+        if facet.width <= 0 || facet.height <= 0 {
+            return Err(ParticleDefError::InvalidFacetDimensions {
+                width: facet.width,
+                height: facet.height,
+            });
+        }
+        let image_width = i32::try_from(resource.image.width())
+            .map_err(|_| ParticleDefError::ImageDimensionsOutOfRange)?;
+        let image_height = i32::try_from(resource.image.height())
+            .map_err(|_| ParticleDefError::ImageDimensionsOutOfRange)?;
+        let columns = image_width / facet.width;
+        let rows = image_height / facet.height;
+        let aspect = facet.width as f32 / facet.height as f32;
+        let graphics = ParticleGraphics {
+            image: resource.image.clone(),
+            facet,
+            phases: ParticleSourcePhaseGeometry {
+                width: facet.width,
+                height: facet.height,
+                columns,
+                rows,
+            },
+        };
+        self.register_def_with_graphics(
+            ParticleDefCore::from(&resource.core),
+            columns,
+            aspect,
+            Some(graphics),
+        )
     }
 
     pub fn particles(&self) -> &[Particle] {
@@ -813,6 +1002,109 @@ mod tests {
         bad.exec_fn = "NoSuchProc".to_string();
         assert!(system.register_def(bad, 4, 1.0).is_err());
         assert!(system.get_def("Bad").is_none());
+
+        // Draw proc resolution happens after the generic proc lookups but
+        // before overload deletion. A bad newer same-name def must leave the
+        // previously loaded winner intact.
+        let mut bad_draw = std_core("Smoke");
+        bad_draw.gravity_acc = 99;
+        bad_draw.draw_fn = "NoSuchDrawProc".to_string();
+        assert_eq!(
+            system.register_def(bad_draw, 4, 1.0),
+            Err(ParticleDefError::UnknownDrawProc(
+                "NoSuchDrawProc".to_string()
+            ))
+        );
+        assert_eq!(system.get_def("Smoke").unwrap().core.gravity_acc, 77);
+        assert_eq!(
+            system.get_def("Smoke").unwrap().draw_proc,
+            ParticleDrawProc::Std
+        );
+    }
+
+    #[test]
+    fn def_registry_exposes_native_order_and_appends_successful_overloads() {
+        let mut system = ParticleSystem::default();
+        system.register_def(std_core("First"), 1, 1.0).unwrap();
+        system.register_def(std_core("Second"), 1, 1.0).unwrap();
+
+        let mut first_overload = std_core("First");
+        first_overload.gravity_acc = 42;
+        system.register_def(first_overload, 1, 1.0).unwrap();
+
+        assert_eq!(
+            system
+                .definitions()
+                .iter()
+                .map(|def| def.core.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Second", "First"]
+        );
+        assert_eq!(system.get_def("First").unwrap().core.gravity_acc, 42);
+
+        // Native overload matching is exact-case.
+        system.register_def(std_core("first"), 1, 1.0).unwrap();
+        assert_eq!(
+            system
+                .definitions()
+                .iter()
+                .map(|def| def.core.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Second", "First", "first"]
+        );
+    }
+
+    #[test]
+    fn resource_registration_retains_image_facet_and_raw_phase_geometry() {
+        let resource = lc_resources::ParticleDefinition {
+            core: lc_resources::ParticleDefinitionCore {
+                name: "Sheet".to_string(),
+                init_fn: "StdInit".to_string(),
+                exec_fn: "StdExec".to_string(),
+                draw_fn: "Std".to_string(),
+                fade_out_len: 1,
+                ..lc_resources::ParticleDefinitionCore::default()
+            },
+            image: GraphicsImage::new(96, 64, vec![0xff; 96 * 64 * 4]),
+            facet: lc_resources::ParticleFacet {
+                x: 4,
+                y: 8,
+                width: 32,
+                height: 16,
+                target_x: -16,
+                target_y: -8,
+            },
+        };
+        let mut system = ParticleSystem::default();
+        system.register_resource(&resource).unwrap();
+
+        let def = system.get_def("Sheet").unwrap();
+        assert_eq!(def.length, 2, "FadeOutLen adjusts the live phase length");
+        assert_eq!(def.aspect.to_bits(), 2.0f32.to_bits());
+        assert_eq!(def.draw_proc, ParticleDrawProc::Std);
+        let graphics = def.graphics.as_ref().expect("resource graphics retained");
+        assert_eq!(graphics.image.width(), 96);
+        assert_eq!(graphics.image.height(), 64);
+        assert_eq!(
+            graphics.facet,
+            ParticleGraphicsFacet {
+                x: 4,
+                y: 8,
+                width: 32,
+                height: 16,
+                target_x: -16,
+                target_y: -8,
+            }
+        );
+        assert_eq!(
+            graphics.phases,
+            ParticleSourcePhaseGeometry {
+                width: 32,
+                height: 16,
+                columns: 3,
+                rows: 4,
+            }
+        );
     }
 
     #[test]
@@ -1409,6 +1701,17 @@ mod tests {
         assert_eq!(ParticleProc::from_name("Die"), Some(ParticleProc::Die));
         assert_eq!(ParticleProc::from_name("NoSuchProc"), None);
         assert_eq!(ParticleProc::from_name(""), None);
+
+        assert_eq!(
+            ParticleDrawProc::from_name("Smoke"),
+            Some(ParticleDrawProc::Smoke)
+        );
+        assert_eq!(
+            ParticleDrawProc::from_name("Std"),
+            Some(ParticleDrawProc::Std)
+        );
+        assert_eq!(ParticleDrawProc::from_name("std"), None);
+        assert_eq!(ParticleDrawProc::from_name(""), None);
     }
 
     #[test]

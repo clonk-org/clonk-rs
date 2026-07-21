@@ -1584,14 +1584,14 @@ fn truncate_c4_string_bytes(value: &str, max_bytes: usize) -> String {
     lc_script::c4_string_from_bytes(&bytes[..bytes.len().min(max_bytes)])
 }
 
-struct IniNameNode<'a> {
-    name: &'a str,
-    raw_value: &'a str,
-    parent: usize,
+pub(crate) struct IniNameNode<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) raw_value: &'a str,
+    pub(crate) parent: usize,
     indent: usize,
 }
 
-fn create_ini_name_tree(text: &str) -> Vec<IniNameNode<'_>> {
+pub(crate) fn create_ini_name_tree(text: &str) -> Vec<IniNameNode<'_>> {
     let text = text.split_once('\0').map_or(text, |(head, _)| head);
     let mut nodes = vec![IniNameNode {
         name: "",
@@ -3570,6 +3570,13 @@ fn fill_u32_array(value: &str, target: &mut [u32]) {
 }
 
 pub(crate) fn parse_int_array(value: &str) -> impl Iterator<Item = i32> {
+    parse_int_array_with_default(value, 0)
+}
+
+pub(crate) fn parse_int_array_with_default(
+    value: &str,
+    default: i32,
+) -> impl Iterator<Item = i32> {
     let bytes = lc_script::c4_string_bytes(value);
     let mut values = Vec::new();
     let mut cursor = 0;
@@ -3593,7 +3600,7 @@ pub(crate) fn parse_int_array(value: &str) -> impl Iterator<Item = i32> {
             // StdArrayDefaultAdapt installs this slot's default without
             // advancing the compiler cursor. The next comma check therefore
             // stops the remaining slots when garbage caused the failure.
-            values.push(0);
+            values.push(default);
         }
     }
     values.into_iter()
@@ -3631,7 +3638,7 @@ fn parse_target_rect(value: &str) -> Option<TargetRect> {
     })
 }
 
-fn parse_i32(value: &str) -> Option<i32> {
+pub(crate) fn parse_i32(value: &str) -> Option<i32> {
     parse_action_i32(value)
 }
 

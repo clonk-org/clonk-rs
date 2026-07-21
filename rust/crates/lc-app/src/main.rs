@@ -161,8 +161,8 @@ use lc_frontend::{
     DefinitionSprite, GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics,
     ImageData, InputDispatcher, InventoryOverlay, InventoryPictureOverlay, KeyCode, MainMenuAction,
     MainMenuItem, MaterialRenderInfo, MaterialTextureSurface, MessageBoardMode,
-    MessageBoardOverlay, MouseCursorPhase, PlayerOverlay, ScenarioEntry, ScenarioKind,
-    SkyRenderState, StartupMainMenu, StartupMenu,
+    MessageBoardOverlay, MouseCursorPhase, ParticleFacet, ParticleRenderDefinition, PlayerOverlay,
+    ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu,
     StartupMenuAction, StartupTooltip, ViewportEdgeScroll, ViewportInput, ViewportPointer,
 };
 use lc_graphics::clonk_font::{
@@ -182,7 +182,8 @@ use lc_resources::{
     load_endeavour_font, scenario as resource_scenario, DefCore as ResourceDefCore,
     DefinitionError as ResourceDefinitionError, FontCatalog, FontRole, GraphicsError,
     GraphicsImage, GraphicsResource, Group, GroupError, LanguagePacks, MutableGroup,
-    MutableGroupChildMut, ResolvedFontSpec, ResourceDefinition as ResourceDefinitionData,
+    MutableGroupChildMut, ParticleDefinition as ResourceParticleDefinition, ResolvedFontSpec,
+    ResourceDefinition as ResourceDefinitionData,
 };
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
 use menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event};
@@ -328,6 +329,36 @@ fn sprite_map_key(definition_id: &str, graphics_name: Option<&str>) -> String {
         }
         _ => definition_id.to_string(),
     }
+}
+
+fn particle_sprite_map(engine: &Engine) -> HashMap<String, ParticleRenderDefinition> {
+    engine
+        .particle_render_catalog()
+        .iter()
+        .filter_map(|definition| {
+            let graphics = definition.graphics.as_ref()?;
+            Some((
+                definition.core.name.clone(),
+                ParticleRenderDefinition {
+                    image: ImageData::from_arc(
+                        graphics.image.width(),
+                        graphics.image.height(),
+                        graphics.image.clone_pixels(),
+                    ),
+                    facet: ParticleFacet::new(
+                        graphics.facet.x,
+                        graphics.facet.y,
+                        graphics.facet.width,
+                        graphics.facet.height,
+                    ),
+                    length: definition.length,
+                    aspect: definition.aspect,
+                    core: definition.core.clone(),
+                    draw_proc: definition.draw_proc,
+                },
+            ))
+        })
+        .collect()
 }
 
 #[derive(Debug, Parser)]
@@ -29362,6 +29393,7 @@ impl GameApp {
 
     fn rebuild_definition_sprites(&mut self) {
         let mut sprites = self.assets.base_sprite_map().clone();
+        let particle_sprites = particle_sprite_map(&self.engine);
         let mut rotateable_definitions = HashSet::new();
         let mut debug_geometry = HashMap::new();
         for definition_id in self.engine.definition_ids() {
@@ -29480,6 +29512,8 @@ impl GameApp {
         self.graphics
             .set_rotateable_definitions(rotateable_definitions);
         self.graphics.set_definition_debug_geometry(debug_geometry);
+        self.graphics
+            .set_particle_sprites(Arc::new(particle_sprites));
         if sprites != self.object_sprites {
             self.object_sprites = sprites;
             self.update_sprite_cache();
@@ -88391,6 +88425,23 @@ fn load_definitions_from_group(
     spawn_candidate: &mut Option<String>,
 ) -> Result<Option<NonNull<AudioContext>>, EngineError> {
     if group.exists("Particle.txt") {
+        match ResourceParticleDefinition::load(group) {
+            Ok(resource) => {
+                if let Err(error) = engine.register_particle_resource(&resource) {
+                    tracing::warn!(
+                        particle = %resource.core.name,
+                        group = %group.root().display(),
+                        %error,
+                        "install particle definition failed to register; skipping"
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(
+                group = %group.root().display(),
+                %error,
+                "install particle definition failed to load; skipping"
+            ),
+        }
         if let Some(mut ptr) = audio {
             unsafe {
                 ptr.as_mut().register_definition_sounds("NONE", group);
@@ -88512,10 +88563,13 @@ fn load_definitions_from_group(
     };
 
     for entry in entries {
-        if !entry.is_directory {
+        // C4DefList::Load walks only immediate C4CFN_DefFiles (`*.c4d`)
+        // entries in native group order. Ordinary directories such as a
+        // System.c4g must not become an accidental particle-definition root.
+        if !classic_wildcard_match(b"*.c4d", &entry.name_bytes) {
             continue;
         }
-        match group.open_child(&entry.relative_path) {
+        match group.open_child_entry_exact(&entry) {
             Ok(child) => {
                 audio = load_definitions_from_group(engine, &child, audio, seen, spawn_candidate)?;
             }
@@ -193672,7 +193726,36 @@ func ControlDig() { dig_count = 1; return(1); }
         )
         .unwrap();
         write_test_definition_graphics(&particle);
-        fs::write(particle.join("Particle.txt"), "[Particle]\n").unwrap();
+        fs::write(
+            particle.join("Particle.txt"),
+            "[Particle]\n\
+             Name=InstallParticle\n\
+             InitFn=StdInit\n\
+             ExecFn=StdExec\n\
+             DrawFn=Std\n\
+             Face=0,0,1,1,0,0\n",
+        )
+        .unwrap();
+        let particle_override = particle.join("Override.c4d");
+        fs::create_dir_all(&particle_override).unwrap();
+        fs::write(
+            particle_override.join("Particle.txt"),
+            "[Particle]\nName=InstallParticle\nInitFn=StdInit\nExecFn=StdExec\nDrawFn=Std\nFace=0,0,1,1,0,0\n",
+        )
+        .unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([9, 8, 7, 255]))
+            .save(particle_override.join("Graphics.png"))
+            .unwrap();
+        let invalid_override = particle_override.join("Invalid.c4d");
+        fs::create_dir_all(&invalid_override).unwrap();
+        fs::write(
+            invalid_override.join("Particle.txt"),
+            "[Particle]\nName=InstallParticle\nInitFn=StdInit\nExecFn=StdExec\nDrawFn=MissingDrawProc\nFace=0,0,1,1,0,0\n",
+        )
+        .unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([99, 98, 97, 255]))
+            .save(invalid_override.join("Graphics.png"))
+            .unwrap();
 
         let bad_overlay = planet_dir.join("objects.c4d").join("overlay.c4d");
         fs::create_dir_all(&bad_overlay).unwrap();
@@ -193710,6 +193793,22 @@ func ControlDig() { dig_count = 1; return(1); }
         for rejected in ["MISS", "OLDG", "OVLY", "PART"] {
             assert!(!engine.definition_ids().any(|id| id == rejected));
         }
+        let particle = engine
+            .particle_system()
+            .get_def("InstallParticle")
+            .expect("Particle.txt group registers through production traversal");
+        assert_eq!(particle.length, 1);
+        assert_eq!(
+            particle.graphics.as_ref().unwrap().image.pixels(),
+            [9, 8, 7, 255],
+            "later valid overload wins and a later invalid overload preserves it"
+        );
+        let particle_sprites = particle_sprite_map(&engine);
+        assert_eq!(
+            particle_sprites["InstallParticle"].image.pixels(),
+            [9, 8, 7, 255],
+            "frontend registry receives the final post-overload image"
+        );
 
         let objects_group = Group::open(planet_dir.join("objects.c4d")).unwrap();
         assert!(
