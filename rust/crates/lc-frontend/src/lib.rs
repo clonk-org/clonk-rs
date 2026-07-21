@@ -3335,6 +3335,14 @@ struct ActiveViewport {
     is_no_owner_viewport: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AudibilityFacet {
+    target_x: i32,
+    target_y: i32,
+    width: i32,
+    height: i32,
+}
+
 /// Immutable projection data for one exact active viewport record.
 ///
 /// Owners are not unique: split-screen can create multiple viewports for one
@@ -3357,6 +3365,23 @@ pub struct ActiveViewportProjection {
     pub content_origin_y: f32,
     pub zoom: f32,
 }
+
+/// One ordered draw-time `C4Object::SetAudibilityAt` call. The application
+/// reduces these after the completed graphics pass, when every active
+/// viewport/listener is available, and retains that result across skipped
+/// graphics passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderedAudibilityCall {
+    /// A non-parallax line endpoint, mixed through all active viewports.
+    World { point: Vector2 },
+    /// A parallax object/line point and the center of its exact draw facet.
+    Parallax {
+        point: Vector2,
+        rendered_center: Vector2,
+    },
+}
+
+pub type RenderedObjectAudibilityCalls = HashMap<ObjectId, Vec<RenderedAudibilityCall>>;
 
 impl ActiveViewportProjection {
     /// C4Facet logical output bounds (`TargetX/Y`, `Wdt/Hgt`).
@@ -4300,6 +4325,10 @@ pub struct GraphicsSystem {
     owner_colored_crew_icons: HashMap<(GpuTextureId, Color), ImageData>,
     game_palette: Arc<GamePalette>,
     active_viewports: Vec<ActiveViewport>,
+    rendered_object_audibility_calls: RenderedObjectAudibilityCalls,
+    content_audibility_facet: Option<AudibilityFacet>,
+    full_audibility_facet: Option<AudibilityFacet>,
+    current_audibility_facet: Option<AudibilityFacet>,
     camera_states: HashMap<CameraKey, CameraState>,
     /// FreeView input may arrive after a graphics rebuild but before the
     /// first physical viewport is projected. Retain that primary-camera
@@ -4411,6 +4440,10 @@ impl GraphicsSystem {
             owner_colored_crew_icons: HashMap::new(),
             game_palette: Arc::new(GamePalette::default()),
             active_viewports: Vec::new(),
+            rendered_object_audibility_calls: HashMap::new(),
+            content_audibility_facet: None,
+            full_audibility_facet: None,
+            current_audibility_facet: None,
             camera_states: HashMap::new(),
             pending_primary_observer_scroll: Vector2::ZERO,
             active_gamma_control_points: None,
@@ -4844,6 +4877,13 @@ impl GraphicsSystem {
                 zoom: viewport.zoom,
             })
             .collect()
+    }
+
+    /// Ordered special-object audibility calls produced by the most recent
+    /// completed world render. A skipped render deliberately leaves this map
+    /// untouched, matching the lifetime of C4Object::Audible/AudiblePan.
+    pub fn rendered_object_audibility_calls(&self) -> &RenderedObjectAudibilityCalls {
+        &self.rendered_object_audibility_calls
     }
 
     /// Delete smoothing state owned by one destroyed physical C4Viewport.
@@ -6149,6 +6189,7 @@ impl GraphicsSystem {
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         self.active_viewports.clear();
+        self.rendered_object_audibility_calls.clear();
         self.pending_viewport_foregrounds.clear();
         let background = self.hud_graphics.background.clone();
         self.tiled_underlay_cache
@@ -6230,6 +6271,9 @@ impl GraphicsSystem {
         let saved_viewport_zoom = self.viewport_zoom;
         let saved_world_width = self.world_width;
         let saved_world_height = self.world_height;
+        let saved_content_audibility_facet = self.content_audibility_facet;
+        let saved_full_audibility_facet = self.full_audibility_facet;
+        let saved_current_audibility_facet = self.current_audibility_facet;
 
         self.surface_width = rect.width;
         self.surface_height = rect.height;
@@ -6320,6 +6364,20 @@ impl GraphicsSystem {
         let border_bottom = (view_height - world_height + view_y)
             .max(0)
             .min(view_height - border_top);
+
+        self.content_audibility_facet = Some(AudibilityFacet {
+            target_x: view_x + border_left,
+            target_y: view_y + border_top,
+            width: view_width - border_left - border_right,
+            height: view_height - border_top - border_bottom,
+        });
+        self.full_audibility_facet = Some(AudibilityFacet {
+            target_x: view_x,
+            target_y: view_y,
+            width: view_width,
+            height: view_height,
+        });
+        self.current_audibility_facet = None;
 
         let offset_x = scaled_camera_border(border_left, zoom, rect.width) as i32;
         let offset_y = scaled_camera_border(border_top, zoom, rect.height) as i32;
@@ -6594,6 +6652,9 @@ impl GraphicsSystem {
         self.viewport_zoom = saved_viewport_zoom;
         self.world_width = saved_world_width;
         self.world_height = saved_world_height;
+        self.content_audibility_facet = saved_content_audibility_facet;
+        self.full_audibility_facet = saved_full_audibility_facet;
+        self.current_audibility_facet = saved_current_audibility_facet;
 
         present_viewport_content(
             &mut self.surface,
@@ -8779,6 +8840,97 @@ impl GraphicsSystem {
         )
     }
 
+    fn audibility_facet_for_pass(&self, pass: ObjectRenderPass) -> Option<AudibilityFacet> {
+        match pass {
+            ObjectRenderPass::ForegroundParallax => self.full_audibility_facet,
+            ObjectRenderPass::Background
+            | ObjectRenderPass::Normal
+            | ObjectRenderPass::ForegroundNonParallax => self.content_audibility_facet,
+        }
+    }
+
+    /// Integer `C4Object::TargetPos` for the exact facet that produced an
+    /// audibility call. This remains separate from the float output transform:
+    /// native sound uses logical facet coordinates and integer division.
+    fn object_audibility_target_position(
+        object: &ObjectSnapshot,
+        facet: AudibilityFacet,
+    ) -> Vector2 {
+        if object.category & CATEGORY_PARALLAX_FLAG == 0 {
+            return Vector2::new(facet.target_x, facet.target_y);
+        }
+        let local = |name| {
+            object
+                .local_vars
+                .get(name)
+                .and_then(|value| value.as_c4_int())
+                .unwrap_or(0)
+        };
+        let apply = |target: i32, parallax: i32, position: i32, extent: i32| {
+            if parallax == 0 && position < 0 {
+                -extent
+            } else {
+                target.wrapping_mul(parallax) / 100
+            }
+        };
+        Vector2::new(
+            apply(
+                facet.target_x,
+                local("__local_0"),
+                object.position.x,
+                facet.width,
+            ),
+            apply(
+                facet.target_y,
+                local("__local_1"),
+                object.position.y,
+                facet.height,
+            ),
+        )
+    }
+
+    fn record_audibility_at(&mut self, object: &ObjectSnapshot, point: Vector2) {
+        let Some(facet) = self.current_audibility_facet else {
+            return;
+        };
+        let call = if object.category & CATEGORY_PARALLAX_FLAG != 0 {
+            let target = Self::object_audibility_target_position(object, facet);
+            RenderedAudibilityCall::Parallax {
+                point,
+                rendered_center: Vector2::new(
+                    target.x.wrapping_add(facet.width / 2),
+                    target.y.wrapping_add(facet.height / 2),
+                ),
+            }
+        } else {
+            RenderedAudibilityCall::World { point }
+        };
+        self.rendered_object_audibility_calls
+            .entry(object.id)
+            .or_default()
+            .push(call);
+    }
+
+    fn record_line_audibility_calls(&mut self, object: &ObjectSnapshot) {
+        let Some(first) = object.vertices.first() else {
+            return;
+        };
+        let last = object
+            .vertices
+            .last()
+            .expect("a first line vertex implies a last line vertex");
+        self.record_audibility_at(object, Vector2::new(first.x, first.y));
+        self.record_audibility_at(object, Vector2::new(last.x, last.y));
+    }
+
+    fn record_direct_audibility_calls(&mut self, object: &ObjectSnapshot, line: i32) {
+        if line != 0 {
+            self.record_line_audibility_calls(object);
+        } else if object.category & CATEGORY_PARALLAX_FLAG != 0 {
+            self.record_audibility_at(object, object.position);
+        }
+    }
+
     /// Native output-boundary gate, which runs after the back list but before
     /// command debug, ShowSolidMask, containment and IgnoreFoW suppression.
     fn object_output_bounds_culled(&self, object: &ObjectSnapshot) -> bool {
@@ -8868,6 +9020,9 @@ impl GraphicsSystem {
         pass: ObjectRenderPass,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
+        let saved_current_audibility_facet = self.current_audibility_facet;
+        self.current_audibility_facet = self.audibility_facet_for_pass(pass);
+
         // Engine snapshots keep object payloads in canonical ID order, while
         // C4ObjectList draws Last -> Prev in its mutable master-list order
         // (src/C4ObjectList.cpp:387-396). Empty is the legacy snapshot
@@ -8929,6 +9084,10 @@ impl GraphicsSystem {
                 .get(&object.definition_id)
                 .map(|metadata| metadata.line)
                 .unwrap_or(0);
+            // C4Object::Draw dispatches DrawLine before particles, output
+            // bounds and containment. Non-line parallax objects likewise call
+            // SetAudibilityAt before their output-boundary gate.
+            self.record_direct_audibility_calls(object, line);
             if line == 0 && object.container.is_none() {
                 self.draw_definition_particles(
                     particles,
@@ -9013,6 +9172,8 @@ impl GraphicsSystem {
                 self.paint_object_top_face(object, SpriteBlitState::for_object(object), gamma);
             }
         }
+
+        self.current_audibility_facet = saved_current_audibility_facet;
     }
 
     fn object_has_debug_solid_mask(&self, object: &ObjectSnapshot) -> bool {
@@ -11040,6 +11201,7 @@ impl GraphicsSystem {
 
         let saved_viewport_x = self.viewport_x;
         let saved_viewport_y = self.viewport_y;
+        let saved_current_audibility_facet = self.current_audibility_facet;
         let offset_x = overlay.transform.map_or(0, |transform| transform.offset_x as i32);
         let offset_y = overlay.transform.map_or(0, |transform| transform.offset_y as i32);
         // C++ mutates cgo.TargetX/Y rather than the object's position. Keeping
@@ -11051,6 +11213,23 @@ impl GraphicsSystem {
             - offset_x as f32;
         self.viewport_y = host_target_y - host.position.y as f32 + target.position.y as f32
             - offset_y as f32;
+        self.current_audibility_facet = saved_current_audibility_facet.map(|facet| {
+            let host_target = Self::object_audibility_target_position(host, facet);
+            AudibilityFacet {
+                target_x: host_target
+                    .x
+                    .wrapping_sub(host.position.x)
+                    .wrapping_add(target.position.x)
+                    .wrapping_sub(offset_x),
+                target_y: host_target
+                    .y
+                    .wrapping_sub(host.position.y)
+                    .wrapping_add(target.position.y)
+                    .wrapping_sub(offset_y),
+                width: facet.width,
+                height: facet.height,
+            }
+        });
 
         let (base_definition_id, base_graphics_name) =
             if let Some(base) = target.base_graphics.as_ref() {
@@ -11097,6 +11276,7 @@ impl GraphicsSystem {
             if geometry_sprite.line != 0 {
                 // C4Object::Draw dispatches lines before every draw-mode
                 // branch, including ODM_Overlay.
+                self.record_line_audibility_calls(target);
                 self.paint_typed_line(target, geometry_sprite.line, gamma);
             } else {
                 if target.container.is_none() {
@@ -11115,6 +11295,7 @@ impl GraphicsSystem {
                 {
                     self.viewport_x = saved_viewport_x;
                     self.viewport_y = saved_viewport_y;
+                    self.current_audibility_facet = saved_current_audibility_facet;
                     object_ancestry.remove(&target.id);
                     return;
                 }
@@ -11179,6 +11360,7 @@ impl GraphicsSystem {
 
         self.viewport_x = saved_viewport_x;
         self.viewport_y = saved_viewport_y;
+        self.current_audibility_facet = saved_current_audibility_facet;
         object_ancestry.remove(&target.id);
     }
 
@@ -19634,6 +19816,139 @@ mod tests {
     }
 
     #[test]
+    fn audibility_call_cache_preserves_line_order_and_exact_pass_facets() {
+        let template = make_snapshot().objects.remove(0);
+
+        let mut line = template.clone();
+        line.id = ObjectId::new(1);
+        line.definition_id = "AudibleLine".to_string();
+        line.container = Some(ObjectId::new(99));
+        line.vertices = vec![lc_engine::ObjectVertex::new(7, 9)];
+
+        let mut ordinary = template.clone();
+        ordinary.id = ObjectId::new(2);
+        ordinary.definition_id = "LazyOrdinary".to_string();
+        ordinary.position = Vector2::new(12, 14);
+
+        let mut parallax = template.clone();
+        parallax.id = ObjectId::new(3);
+        parallax.definition_id = "ContentParallax".to_string();
+        parallax.position = Vector2::new(300, 70);
+        parallax.category = CATEGORY_PARALLAX_FLAG;
+        parallax
+            .local_vars
+            .insert("__local_0".to_string(), lc_script::Value::Int(50));
+        parallax
+            .local_vars
+            .insert("__local_1".to_string(), lc_script::Value::Int(25));
+
+        let mut foreground_parallax = template;
+        foreground_parallax.id = ObjectId::new(4);
+        foreground_parallax.definition_id = "FullParallax".to_string();
+        foreground_parallax.position = Vector2::new(400, 90);
+        foreground_parallax.category = CATEGORY_FOREGROUND_FLAG | CATEGORY_PARALLAX_FLAG;
+        foreground_parallax
+            .local_vars
+            .insert("__local_0".to_string(), lc_script::Value::Int(100));
+        foreground_parallax
+            .local_vars
+            .insert("__local_1".to_string(), lc_script::Value::Int(50));
+
+        let lines = HashMap::from([(
+            DefinitionId::from("AudibleLine"),
+            DefinitionLineMetadata {
+                line: 1,
+                line_intersect: 0,
+            },
+        )]);
+        let mut graphics = GraphicsSystem::new(
+            32,
+            16,
+            16,
+            "Audibility calls",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.content_audibility_facet = Some(AudibilityFacet {
+            target_x: 20,
+            target_y: 30,
+            width: 80,
+            height: 40,
+        });
+        graphics.full_audibility_facet = Some(AudibilityFacet {
+            target_x: -10,
+            target_y: -20,
+            width: 120,
+            height: 60,
+        });
+
+        graphics.draw_objects(
+            &[line.clone(), ordinary.clone(), parallax.clone()],
+            &[],
+            &lines,
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+        graphics.draw_objects(
+            &[foreground_parallax.clone()],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::ForegroundParallax,
+            None,
+        );
+
+        assert_eq!(
+            graphics.rendered_object_audibility_calls().get(&line.id),
+            Some(&vec![
+                RenderedAudibilityCall::World {
+                    point: Vector2::new(7, 9),
+                },
+                RenderedAudibilityCall::World {
+                    point: Vector2::new(7, 9),
+                },
+            ]),
+            "DrawLine calls both first and last even for one live vertex, before containment",
+        );
+        assert!(
+            !graphics
+                .rendered_object_audibility_calls()
+                .contains_key(&ordinary.id),
+            "ordinary non-line objects retain native lazy origin mixing",
+        );
+        assert_eq!(
+            graphics
+                .rendered_object_audibility_calls()
+                .get(&parallax.id),
+            Some(&vec![RenderedAudibilityCall::Parallax {
+                point: parallax.position,
+                rendered_center: Vector2::new(50, 27),
+            }]),
+            "normal-pass parallax uses the border-clipped content facet",
+        );
+        assert_eq!(
+            graphics
+                .rendered_object_audibility_calls()
+                .get(&foreground_parallax.id),
+            Some(&vec![RenderedAudibilityCall::Parallax {
+                point: foreground_parallax.position,
+                rendered_center: Vector2::new(50, 20),
+            }]),
+            "foreground parallax uses the restored full viewport facet",
+        );
+        assert_eq!(graphics.current_audibility_facet, None);
+    }
+
+    #[test]
     fn typed_line_variants_use_cpp_palette_and_saved_numbered_locals() {
         // C4Object::DrawLine's exact type/color table lives at
         // src/C4Object.cpp:2684-2712; Colored/Vertex cast Local[0]/Local[1]
@@ -21340,6 +21655,126 @@ mod tests {
             Some(Color::opaque(50, 10, 10)),
             "zero parallax plus negative host coordinates anchors from right/bottom"
         );
+    }
+
+    #[test]
+    fn nested_object_overlay_line_calls_use_rewritten_audibility_facets() {
+        let mut template = make_snapshot().objects.remove(0);
+        template.crew_member = false;
+
+        let mut host = template.clone();
+        host.id = ObjectId::new(1);
+        host.definition_id = "AudibleOverlayHost".to_string();
+        host.position = Vector2::new(50, 60);
+        host.category = CATEGORY_PARALLAX_FLAG;
+        host.local_vars
+            .insert("__local_0".to_string(), lc_script::Value::Int(50));
+        host.local_vars
+            .insert("__local_1".to_string(), lc_script::Value::Int(25));
+        host.graphics_overlays = vec![
+            ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Object)
+                .with_overlay_object(Some(ObjectId::new(2)))
+                .with_transform(Some(DrawTransform::from_components(1.0, 1.0, 3.9, -2.9))),
+        ];
+
+        let mut middle = template.clone();
+        middle.id = ObjectId::new(2);
+        middle.definition_id = "AudibleOverlayMiddle".to_string();
+        middle.position = Vector2::new(100, 120);
+        middle.category = CATEGORY_PARALLAX_FLAG;
+        middle.visibility = lc_engine::VIS_OVERLAY_ONLY;
+        middle
+            .local_vars
+            .insert("__local_0".to_string(), lc_script::Value::Int(75));
+        middle
+            .local_vars
+            .insert("__local_1".to_string(), lc_script::Value::Int(50));
+        middle.graphics_overlays = vec![
+            ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Object)
+                .with_overlay_object(Some(ObjectId::new(3)))
+                .with_transform(Some(DrawTransform::from_components(1.0, 1.0, -4.9, 5.9))),
+        ];
+
+        let mut line = template;
+        line.id = ObjectId::new(3);
+        line.definition_id = "AudibleOverlayLine".to_string();
+        line.position = Vector2::new(150, 160);
+        line.category = CATEGORY_PARALLAX_FLAG;
+        line.visibility = lc_engine::VIS_OVERLAY_ONLY;
+        line.vertices = vec![lc_engine::ObjectVertex::new(200, 90)];
+        line.local_vars
+            .insert("__local_0".to_string(), lc_script::Value::Int(25));
+        line.local_vars
+            .insert("__local_1".to_string(), lc_script::Value::Int(100));
+        line.graphics_overlays.clear();
+
+        let sprite = |line| DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(1, 1, vec![0, 0, 0, 0]),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            fire_top: 0,
+            rotateable: 0,
+            line,
+            stretch_growth: false,
+            top_face: None,
+        };
+        let mut graphics = GraphicsSystem::new(
+            160,
+            100,
+            100,
+            "Nested overlay audibility",
+            test_font(),
+            Arc::new(HashMap::from([
+                (sprite_map_key("AudibleOverlayHost", None), sprite(0)),
+                (sprite_map_key("AudibleOverlayMiddle", None), sprite(0)),
+                (sprite_map_key("AudibleOverlayLine", None), sprite(1)),
+            ])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.viewport_x = 20.0;
+        graphics.viewport_y = 30.0;
+        graphics.content_audibility_facet = Some(AudibilityFacet {
+            target_x: 20,
+            target_y: 30,
+            width: 80,
+            height: 40,
+        });
+        graphics.draw_objects(
+            &[host.clone(), middle.clone(), line.clone()],
+            &[],
+            &HashMap::new(),
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(
+            graphics.rendered_object_audibility_calls().get(&line.id),
+            Some(&vec![
+                RenderedAudibilityCall::Parallax {
+                    point: Vector2::new(200, 90),
+                    rendered_center: Vector2::new(64, 89),
+                },
+                RenderedAudibilityCall::Parallax {
+                    point: Vector2::new(200, 90),
+                    rendered_center: Vector2::new(64, 89),
+                },
+            ]),
+            "each nesting level rewrites TargetX/Y before the line target applies parallax",
+        );
+        assert!(
+            !graphics
+                .rendered_object_audibility_calls()
+                .contains_key(&middle.id),
+            "ODM_Overlay does not run the ordinary non-line parallax call",
+        );
+        assert_eq!(graphics.current_audibility_facet, None);
     }
 
     #[test]

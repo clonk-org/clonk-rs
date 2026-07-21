@@ -163,8 +163,9 @@ use lc_frontend::{
     ImageData, InputDispatcher, InventoryOverlay, InventoryPictureOverlay, KeyCode, MainMenuAction,
     MainMenuItem, MaterialRenderInfo, MaterialTextureSurface, MessageBoardMode,
     MessageBoardOverlay, MouseCursorPhase, ParticleFacet, ParticleRenderDefinition, PlayerOverlay,
-    ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu,
-    StartupMenuAction, StartupTooltip, ViewportEdgeScroll, ViewportInput, ViewportPointer,
+    RenderedAudibilityCall, RenderedObjectAudibilityCalls, ScenarioEntry, ScenarioKind,
+    SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction, StartupTooltip,
+    ViewportEdgeScroll, ViewportInput, ViewportPointer,
 };
 use lc_graphics::clonk_font::{
     font_image_lookup_tag, inline_image_token, FontImageProvider, FontImageRef,
@@ -8258,6 +8259,7 @@ fn main() -> Result<()> {
                         &mut retained_gpu_renderer,
                     ) {
                         Ok(()) => {
+                            app.finish_rendered_object_audibility_pass();
                             let graphics_duration = graphics_started.elapsed();
                             automatic_frame_skip.finish_graphics_pass(
                                 app.auto_frame_skip,
@@ -8386,6 +8388,11 @@ fn main() -> Result<()> {
                 }
                 match pixels.render() {
                     Ok(()) => {
+                        // Console presentation returns before render_running
+                        // and leaves the prior world call list untouched.
+                        if refreshed && app.mode == AppMode::Running && !app.console_mode {
+                            app.finish_rendered_object_audibility_pass();
+                        }
                         let graphics_duration = graphics_started.elapsed();
                         automatic_frame_skip.finish_graphics_pass(
                             app.mode == AppMode::Running && app.auto_frame_skip,
@@ -9108,6 +9115,13 @@ struct QueuedMusicStart {
     kind: MusicStartKind,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CachedObjectAudibilityMix {
+    object_position: Vector2,
+    audibility: u8,
+    pan: i32,
+}
+
 struct AudioContext {
     system: AudioSystem,
     options: AudioOptions,
@@ -9133,6 +9147,10 @@ struct AudioContext {
     next_sound_sample_order: usize,
     active_channels: HashMap<SoundInstanceKey, ChannelInfo>,
     next_sound_instance_order: u64,
+    /// Reduced special-object `SetAudibilityAt` calls from the last completed
+    /// graphics pass. A skipped or failed pass deliberately leaves this map
+    /// untouched.
+    rendered_object_audibility: HashMap<ObjectId, CachedObjectAudibilityMix>,
     resolver: SoundResolver,
     music_resolver: MusicResolver,
     missing_sounds: HashSet<String>,
@@ -9189,6 +9207,7 @@ impl AudioContext {
             next_sound_sample_order: 0,
             active_channels: HashMap::new(),
             next_sound_instance_order: 1,
+            rendered_object_audibility: HashMap::new(),
             resolver,
             music_resolver,
             missing_sounds: HashSet::new(),
@@ -9506,6 +9525,21 @@ impl AudioContext {
         }
     }
 
+    fn cache_rendered_object_audibility(
+        &mut self,
+        calls: &RenderedObjectAudibilityCalls,
+        snapshot: &SimulationSnapshot,
+        viewports: &[ActiveViewportProjection],
+    ) {
+        let rendered_object_audibility = reduce_rendered_object_audibility(
+            calls,
+            snapshot,
+            viewports,
+            &self.rendered_object_audibility,
+        );
+        self.rendered_object_audibility = rendered_object_audibility;
+    }
+
     fn reset_sfx(&mut self) {
         self.remove_sound_instances_matching(|_| true);
     }
@@ -9517,6 +9551,7 @@ impl AudioContext {
         self.missing_sounds.clear();
         self.next_sound_sample_order = 0;
         self.next_sound_instance_order = 1;
+        self.rendered_object_audibility.clear();
         self.resolver.reset_dynamic_catalog();
         self.refresh_sound_catalog();
     }
@@ -10039,7 +10074,12 @@ impl AudioContext {
             started_at: Instant::now(),
             detached_mix: initial_mix,
         };
-        let (mut mix_volume, pan) = compute_mix_values(&mut info, snapshot, viewports);
+        let (mut mix_volume, pan) = compute_mix_values_with_rendered_audibility(
+            &mut info,
+            snapshot,
+            viewports,
+            Some(&self.rendered_object_audibility),
+        );
         mix_volume *= self.options.sound_volume;
         if sound_enabled && mix_volume > 0.0 {
             let channel = self.system.play_sound(&info.handle, looped)?;
@@ -10132,6 +10172,7 @@ impl AudioContext {
         let Some(key) = self.active_channel_key(name, target) else {
             return false;
         };
+        let rendered_object_audibility = &self.rendered_object_audibility;
         if let Some(info) = self.active_channels.get_mut(&key) {
             info.volume = volume;
             if info.target.is_none() {
@@ -10143,13 +10184,112 @@ impl AudioContext {
             let Some(channel) = info.channel else {
                 return true;
             };
-            let (mut mix_volume, pan) = compute_mix_values(info, snapshot, viewports);
+            let (mut mix_volume, pan) = compute_mix_values_with_rendered_audibility(
+                info,
+                snapshot,
+                viewports,
+                Some(rendered_object_audibility),
+            );
             mix_volume *= self.options.sound_volume;
             self.system
                 .channel_set_volume_and_pan(channel, mix_volume, pan);
             return true;
         }
         false
+    }
+
+    /// Apply a completed draw's object mix without running a second
+    /// finished/half-duration sweep. Native order matters here: an inaudible
+    /// attached instance can release a scarce channel before a later newly
+    /// audible one restores it in the same post-graphics pass.
+    fn refresh_attached_channel_mix_after_render(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        viewports: &[ActiveViewportProjection],
+    ) {
+        if !self.sound_effects_enabled(true) {
+            return;
+        }
+        let rendered_object_audibility = &self.rendered_object_audibility;
+        let mut ordered_channels = self
+            .active_channels
+            .iter()
+            .filter_map(|(key, info)| {
+                info.target.and_then(|target| snapshot.object(target))?;
+                Some((
+                    (info.sample_order, info.instance_order),
+                    key.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        ordered_channels.sort_unstable_by_key(|(order, _)| *order);
+
+        // The ordinary pre-render sound tick already swept everything that
+        // was finished then. Remove only attached channels that completed
+        // during the render, before any restoration can reuse their slot.
+        let finished_during_render = ordered_channels
+            .iter()
+            .filter_map(|(_, key)| {
+                let info = self.active_channels.get(key)?;
+                info.channel
+                    .is_some_and(|channel| !self.system.channel_is_playing(channel))
+                    .then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in finished_during_render {
+            if let Some(info) = self.active_channels.remove(&key) {
+                if let Some(channel) = info.channel {
+                    self.system.halt_channel(channel);
+                }
+            }
+        }
+
+        let mut failed_restores = Vec::new();
+        for (_, key) in ordered_channels {
+            let Some(info) = self.active_channels.get_mut(&key) else {
+                continue;
+            };
+            let (mut mix_volume, pan) = compute_mix_values_with_rendered_audibility(
+                info,
+                snapshot,
+                viewports,
+                Some(rendered_object_audibility),
+            );
+            mix_volume *= self.options.sound_volume;
+            if mix_volume <= 0.0 {
+                if let Some(channel) = info.channel.take() {
+                    self.system.halt_channel(channel);
+                }
+                continue;
+            }
+            let channel = match info.channel {
+                Some(channel) => channel,
+                None => match self.system.play_sound(&info.handle, info.looped) {
+                    Ok(channel) => {
+                        info.channel = Some(channel);
+                        channel
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            sound = %info.sample_key,
+                            "failed to restore attached sound after render"
+                        );
+                        failed_restores.push(key.clone());
+                        continue;
+                    }
+                },
+            };
+            self.system
+                .channel_set_volume_and_pan(channel, mix_volume, pan);
+        }
+        for key in failed_restores {
+            if let Some(info) = self.active_channels.remove(&key) {
+                if let Some(channel) = info.channel {
+                    self.system.halt_channel(channel);
+                }
+            }
+        }
     }
 
     fn update_channels(
@@ -10161,6 +10301,7 @@ impl AudioContext {
         let now = Instant::now();
         let mut finished = Vec::new();
         let mut updates: Vec<(ChannelId, f32, f32)> = Vec::new();
+        let rendered_object_audibility = &self.rendered_object_audibility;
         if !self.sound_effects_enabled(game_running) {
             for (key, info) in self.active_channels.iter_mut() {
                 if info
@@ -10237,7 +10378,12 @@ impl AudioContext {
                 }
                 _ => {}
             }
-            let (mut mix_volume, pan) = compute_mix_values(info, snapshot, viewports);
+            let (mut mix_volume, pan) = compute_mix_values_with_rendered_audibility(
+                info,
+                snapshot,
+                viewports,
+                Some(rendered_object_audibility),
+            );
             mix_volume *= self.options.sound_volume;
             if mix_volume <= 0.0 {
                 if let Some(channel) = info.channel.take() {
@@ -72910,6 +73056,15 @@ impl GameApp {
         }
     }
 
+    fn finish_rendered_object_audibility_pass(&mut self) {
+        let viewports = self.graphics.active_viewport_projections();
+        let calls = self.graphics.rendered_object_audibility_calls();
+        if let Some(audio) = self.audio.as_mut() {
+            audio.cache_rendered_object_audibility(calls, &self.snapshot, &viewports);
+            audio.refresh_attached_channel_mix_after_render(&self.snapshot, &viewports);
+        }
+    }
+
     fn dismiss_game_over_dialog(&mut self) {
         if self.game_over_dialog.take().is_some() {
             self.hide_runtime_default_dialog(RuntimeDefaultDialog::GameOver);
@@ -78007,9 +78162,10 @@ impl GameApp {
             AppMode::Loading => self
                 .render_loading(frame, defer_native_loader_text)
                 .map(|()| true),
-            AppMode::Running => self
-                .render_running(frame, defer_native_game_messages)
-                .map(|()| true),
+            AppMode::Running => {
+                self.render_running(frame, defer_native_game_messages)?;
+                Ok(true)
+            }
         }
     }
 
@@ -78911,9 +79067,11 @@ impl GameApp {
             let _ = self.graphics.finish_gpu_scene_capture(&gamma);
             return Err(error);
         }
-        self.graphics
+        let scene = self
+            .graphics
             .finish_gpu_scene_capture(&gamma)
-            .ok_or_else(|| anyhow!("GPU scene capture ended before presentation"))
+            .ok_or_else(|| anyhow!("GPU scene capture ended before presentation"))?;
+        Ok(scene)
     }
 
     fn render_running(&mut self, frame: &mut [u8], defer_native_game_messages: bool) -> Result<()> {
@@ -91114,6 +91272,15 @@ fn compute_mix_values(
     snapshot: &SimulationSnapshot,
     viewports: &[ActiveViewportProjection],
 ) -> (f32, f32) {
+    compute_mix_values_with_rendered_audibility(info, snapshot, viewports, None)
+}
+
+fn compute_mix_values_with_rendered_audibility(
+    info: &mut ChannelInfo,
+    snapshot: &SimulationSnapshot,
+    viewports: &[ActiveViewportProjection],
+    rendered_object_audibility: Option<&HashMap<ObjectId, CachedObjectAudibilityMix>>,
+) -> (f32, f32) {
     let base_volume = (info.volume as f32 / 100.0).max(0.0);
     let Some(target_id) = info.target else {
         return info.detached_mix.unwrap_or((base_volume, 0.0));
@@ -91121,8 +91288,11 @@ fn compute_mix_values(
     let Some(target) = snapshot.object(target_id) else {
         return info.detached_mix.unwrap_or((base_volume, 0.0));
     };
-    let (audibility, pan) = compute_positional_mix_values(target.position, snapshot, viewports);
-    info.detached_mix = Some((f32::from(audibility) / 100.0, pan));
+    let origin_mix = compute_positional_mix_values(target.position, snapshot, viewports);
+    info.detached_mix = Some((f32::from(origin_mix.0) / 100.0, origin_mix.1));
+    let (audibility, pan) = rendered_object_audibility
+        .and_then(|cache| cached_attached_object_mix_values(target, cache))
+        .unwrap_or(origin_mix);
 
     (
         base_volume * adjusted_audibility(audibility, info.custom_falloff),
@@ -91160,6 +91330,104 @@ fn compute_mix_values_for(
     )
 }
 
+#[cfg(test)]
+fn compute_mix_values_for_with_rendered_audibility(
+    volume: u8,
+    target_id: Option<ObjectId>,
+    custom_falloff: Option<i32>,
+    snapshot: &SimulationSnapshot,
+    viewports: &[ActiveViewportProjection],
+    rendered_object_audibility: &HashMap<ObjectId, CachedObjectAudibilityMix>,
+) -> (f32, f32) {
+    let base_volume = (f32::from(volume) / 100.0).clamp(0.0, 1.0);
+    let Some(target_id) = target_id else {
+        return (base_volume, 0.0);
+    };
+    let Some(target) = snapshot.object(target_id) else {
+        return (base_volume, 0.0);
+    };
+    let origin_mix = compute_positional_mix_values(target.position, snapshot, viewports);
+    let (audibility, pan) = cached_attached_object_mix_values(
+        target,
+        rendered_object_audibility,
+    )
+    .unwrap_or(origin_mix);
+    (
+        base_volume * adjusted_audibility(audibility, custom_falloff),
+        pan,
+    )
+}
+
+fn cached_attached_object_mix_values(
+    target: &ObjectSnapshot,
+    rendered_object_audibility: &HashMap<ObjectId, CachedObjectAudibilityMix>,
+) -> Option<(u8, f32)> {
+    let cached = rendered_object_audibility.get(&target.id)?;
+    (cached.object_position == target.position)
+        .then_some((cached.audibility, cached.pan as f32 / 100.0))
+}
+
+fn reduce_rendered_object_audibility(
+    calls: &RenderedObjectAudibilityCalls,
+    snapshot: &SimulationSnapshot,
+    viewports: &[ActiveViewportProjection],
+    previous: &HashMap<ObjectId, CachedObjectAudibilityMix>,
+) -> HashMap<ObjectId, CachedObjectAudibilityMix> {
+    // Inactive MODE_Object targets are not members of Game.Objects, so the
+    // frame-start ResetAudibility loop never clears them. Preserve their
+    // cache (and seed parallax pan from it) until movement invalidates it.
+    let mut reduced = previous
+        .iter()
+        .filter_map(|(&object_id, &cached)| {
+            snapshot
+                .object(object_id)
+                .is_some_and(|target| {
+                    target.status == lc_engine::ObjectStatus::Inactive
+                        && target.position == cached.object_position
+                })
+                .then_some((object_id, cached))
+        })
+        .collect::<HashMap<_, _>>();
+    reduced.reserve(calls.len());
+    for (&object_id, calls) in calls {
+        let Some(target) = snapshot.object(object_id) else {
+            continue;
+        };
+        let initial_pan = (target.status == lc_engine::ObjectStatus::Inactive)
+            .then(|| reduced.get(&object_id).map(|cached| cached.pan))
+            .flatten()
+            .unwrap_or(0);
+        let mut mix: Option<(u8, i32)> = None;
+        for call in calls {
+            let pan = mix.map_or(initial_pan, |(_, pan)| pan);
+            mix = Some(match *call {
+                RenderedAudibilityCall::World { point } => {
+                    compute_raw_positional_mix_values(point, snapshot, viewports)
+                }
+                RenderedAudibilityCall::Parallax {
+                    point,
+                    rendered_center,
+                } => (
+                    positional_audibility(point, rendered_center),
+                    pan.wrapping_add(point.x.wrapping_sub(rendered_center.x) / 5)
+                        .clamp(-100, 100),
+                ),
+            });
+        }
+        if let Some((audibility, pan)) = mix {
+            reduced.insert(
+                object_id,
+                CachedObjectAudibilityMix {
+                    object_position: target.position,
+                    audibility,
+                    pan,
+                },
+            );
+        }
+    }
+    reduced
+}
+
 fn adjusted_audibility(audibility: u8, custom_falloff: Option<i32>) -> f32 {
     const AUDIBILITY_RADIUS: i32 = 700;
 
@@ -91177,6 +91445,15 @@ fn compute_positional_mix_values(
     snapshot: &SimulationSnapshot,
     viewports: &[ActiveViewportProjection],
 ) -> (u8, f32) {
+    let (volume, pan) = compute_raw_positional_mix_values(source, snapshot, viewports);
+    (volume, pan as f32 / 100.0)
+}
+
+fn compute_raw_positional_mix_values(
+    source: Vector2,
+    snapshot: &SimulationSnapshot,
+    viewports: &[ActiveViewportProjection],
+) -> (u8, i32) {
     let mut volume = 0u8;
     let mut pan = 0i32;
 
@@ -91206,7 +91483,7 @@ fn compute_positional_mix_values(
         pan = pan.wrapping_add((source.x.wrapping_sub(center.x)) / 5);
     }
 
-    (volume, pan.clamp(-100, 100) as f32 / 100.0)
+    (volume, pan.clamp(-100, 100))
 }
 
 fn positional_audibility(source: Vector2, listener: Vector2) -> u8 {
@@ -105505,6 +105782,405 @@ func Award()
             (0, 0.0),
             "no active C4Viewport means no audibility or pan contribution",
         );
+    }
+
+    #[test]
+    fn line_object_sound_uses_rendered_endpoints() {
+        let mut line = make_object(1, "LINE", Vector2::new(2_000, 100));
+        line.vertices = vec![
+            lc_engine::ObjectVertex::new(0, 100),
+            lc_engine::ObjectVertex::new(350, 100),
+        ];
+        let mut snapshot = make_snapshot(vec![line.clone()], Vec::new());
+        snapshot.definition_lines.insert(
+            line.definition_id.clone(),
+            lc_engine::DefinitionLineMetadata {
+                line: 1,
+                ..Default::default()
+            },
+        );
+        let viewports = [audio_viewport(0, OWNER_NONE, Vector2::new(0, 100))];
+        let mut calls = HashMap::from([(
+            line.id,
+            vec![
+                RenderedAudibilityCall::World {
+                    point: Vector2::new(0, 100),
+                },
+                RenderedAudibilityCall::World {
+                    point: Vector2::new(350, 100),
+                },
+            ],
+        )]);
+        let mut audio = empty_test_audio_context();
+        audio.cache_rendered_object_audibility(&calls, &snapshot, &viewports);
+
+        assert_eq!(
+            compute_mix_values_for_with_rendered_audibility(
+                100,
+                Some(line.id),
+                None,
+                &snapshot,
+                &viewports,
+                &audio.rendered_object_audibility,
+            ),
+            (0.5, 0.7),
+            "the last absolute live vertex replaces the first SetAudibilityAt result",
+        );
+
+        calls.get_mut(&line.id).expect("line calls").reverse();
+        audio.cache_rendered_object_audibility(&calls, &snapshot, &viewports);
+        assert_eq!(
+            compute_mix_values_for_with_rendered_audibility(
+                100,
+                Some(line.id),
+                None,
+                &snapshot,
+                &viewports,
+                &audio.rendered_object_audibility,
+            ),
+            (1.0, 0.0),
+            "reversing the endpoints proves native call order rather than max-volume mixing",
+        );
+
+        snapshot.definition_lines.clear();
+        assert_eq!(
+            compute_mix_values_for_with_rendered_audibility(
+                100,
+                Some(line.id),
+                None,
+                &snapshot,
+                &viewports,
+                &audio.rendered_object_audibility,
+            ),
+            (1.0, 0.0),
+            "changing classification alone does not invalidate native's retained fields",
+        );
+        audio.cache_rendered_object_audibility(&HashMap::new(), &snapshot, &viewports);
+        assert_eq!(
+            compute_mix_values_for_with_rendered_audibility(
+                100,
+                Some(line.id),
+                None,
+                &snapshot,
+                &viewports,
+                &audio.rendered_object_audibility,
+            ),
+            (0.0, 1.0),
+            "the next completed normal-object render resets the retained cache",
+        );
+    }
+
+    #[test]
+    fn parallax_sound_uses_rendered_target_position() {
+        let mut target = make_object(1, "PARA", Vector2::new(350, 100));
+        target.category |= C4D_PARALLAX;
+        let snapshot = make_snapshot(vec![target.clone()], Vec::new());
+        let viewports = [
+            audio_viewport(0, OWNER_NONE, Vector2::new(400, 100)),
+            audio_viewport(1, OWNER_NONE, Vector2::new(0, 100)),
+        ];
+        let calls = HashMap::from([(
+            target.id,
+            vec![
+                RenderedAudibilityCall::Parallax {
+                    point: target.position,
+                    rendered_center: Vector2::new(250, 100),
+                },
+                RenderedAudibilityCall::Parallax {
+                    point: target.position,
+                    rendered_center: Vector2::new(50, 100),
+                },
+            ],
+        )]);
+        let mut audio = empty_test_audio_context();
+        audio.cache_rendered_object_audibility(&calls, &snapshot, &viewports);
+
+        assert_eq!(
+            compute_mix_values_for_with_rendered_audibility(
+                100,
+                Some(target.id),
+                None,
+                &snapshot,
+                &viewports,
+                &audio.rendered_object_audibility,
+            ),
+            (0.58, 0.8),
+            "the last rendered viewport wins volume while both rendered pans accumulate",
+        );
+        assert_eq!(
+            audio.rendered_object_audibility[&target.id],
+            CachedObjectAudibilityMix {
+                object_position: target.position,
+                audibility: 58,
+                pan: 80,
+            },
+        );
+        assert_eq!(
+            compute_positional_mix_values(target.position, &snapshot, &viewports),
+            (93, 0.6),
+            "the ordinary world-origin mix remains observably different",
+        );
+    }
+
+    #[test]
+    fn rendered_object_audibility_cache_retains_until_render_and_falls_back_after_motion() {
+        let line = make_object(1, "LINE", Vector2::new(2_000, 100));
+        let mut snapshot = make_snapshot(vec![line.clone()], Vec::new());
+        snapshot.definition_lines.insert(
+            line.definition_id.clone(),
+            lc_engine::DefinitionLineMetadata {
+                line: 1,
+                ..Default::default()
+            },
+        );
+        let viewports = [audio_viewport(0, OWNER_NONE, Vector2::new(0, 100))];
+        let calls = HashMap::from([(
+            line.id,
+            vec![RenderedAudibilityCall::World {
+                point: Vector2::new(350, 100),
+            }],
+        )]);
+        let mut audio = empty_test_audio_context();
+        audio.cache_rendered_object_audibility(&calls, &snapshot, &viewports);
+        let retained = audio.rendered_object_audibility.clone();
+
+        audio.update_channels(&snapshot, &viewports, true);
+        assert_eq!(
+            audio.rendered_object_audibility, retained,
+            "a sound tick without a completed render retains the prior draw cache",
+        );
+
+        snapshot.objects[0].position.x += 1;
+        assert_eq!(
+            compute_mix_values_for_with_rendered_audibility(
+                100,
+                Some(line.id),
+                None,
+                &snapshot,
+                &viewports,
+                &audio.rendered_object_audibility,
+            ),
+            compute_mix_values_for(100, Some(line.id), None, &snapshot, &viewports),
+            "movement without a new render rejects the stale cache and uses the origin",
+        );
+
+        audio.cache_rendered_object_audibility(&HashMap::new(), &snapshot, &viewports);
+        assert!(
+            audio.rendered_object_audibility.is_empty(),
+            "the next completed render replaces rather than extends the cache",
+        );
+        audio.cache_rendered_object_audibility(&calls, &snapshot, &viewports);
+        audio.reset_sound_system_generation();
+        assert!(audio.rendered_object_audibility.is_empty());
+    }
+
+    #[test]
+    fn rendered_audibility_reduction_clamps_each_parallax_pan_call() {
+        let mut target = make_object(1, "PARA", Vector2::ZERO);
+        target.category |= C4D_PARALLAX;
+        let snapshot = make_snapshot(vec![target.clone()], Vec::new());
+        let calls = HashMap::from([(
+            target.id,
+            vec![
+                RenderedAudibilityCall::Parallax {
+                    point: Vector2::new(1_000, 0),
+                    rendered_center: Vector2::ZERO,
+                },
+                RenderedAudibilityCall::Parallax {
+                    point: Vector2::new(-10, 0),
+                    rendered_center: Vector2::ZERO,
+                },
+            ],
+        )]);
+
+        assert_eq!(
+            reduce_rendered_object_audibility(&calls, &snapshot, &[], &HashMap::new())[&target.id]
+                .pan,
+            98,
+            "each integer contribution is clamped before the next one is added",
+        );
+    }
+
+    #[test]
+    fn inactive_parallax_cache_retains_pan_while_normal_objects_reset_it() {
+        let mut target = make_object(1, "PARA", Vector2::ZERO);
+        target.category |= C4D_PARALLAX;
+        target.status = ObjectStatus::Inactive;
+        let snapshot = make_snapshot(vec![target.clone()], Vec::new());
+        let previous = HashMap::from([(
+            target.id,
+            CachedObjectAudibilityMix {
+                object_position: target.position,
+                audibility: 37,
+                pan: 80,
+            },
+        )]);
+        let no_calls = HashMap::new();
+        assert_eq!(
+            reduce_rendered_object_audibility(&no_calls, &snapshot, &[], &previous),
+            previous,
+            "inactive MODE_Object targets are outside the frame reset loop",
+        );
+
+        let calls = HashMap::from([(
+            target.id,
+            vec![RenderedAudibilityCall::Parallax {
+                point: Vector2::new(100, 0),
+                rendered_center: Vector2::ZERO,
+            }],
+        )]);
+        assert_eq!(
+            reduce_rendered_object_audibility(&calls, &snapshot, &[], &previous)[&target.id].pan,
+            100,
+            "the next inactive parallax contribution starts from retained pan",
+        );
+
+        let mut normal_snapshot = snapshot;
+        normal_snapshot.objects[0].status = ObjectStatus::Normal;
+        assert_eq!(
+            reduce_rendered_object_audibility(&calls, &normal_snapshot, &[], &previous)
+                [&target.id]
+                .pan,
+            20,
+            "normal objects begin every completed frame with reset pan",
+        );
+    }
+
+    #[test]
+    fn post_render_attached_mix_releases_then_restores_channel_capacity() {
+        let dir = tempdir().expect("post-render sound fixture");
+        let scenario = dir.path().join("Audio.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        for name in ["First.wav", "Second.wav"] {
+            fs::write(scenario.join(name), silent_pcm_wav(10_000))
+                .expect("write sound fixture");
+        }
+        let mut audio = AudioContext::try_new(AudioOptions {
+            max_channels: 1,
+            ..AudioOptions::default()
+        })
+        .expect("audio context");
+        audio.configure_scenario(Some(&scenario));
+
+        let first = make_object(1, "SND1", Vector2::ZERO);
+        let second = make_object(2, "SND2", Vector2::new(2_000, 0));
+        let mut snapshot = make_snapshot(vec![first.clone(), second.clone()], Vec::new());
+        snapshot.definition_lines.insert(
+            second.definition_id.clone(),
+            lc_engine::DefinitionLineMetadata {
+                line: 1,
+                ..Default::default()
+            },
+        );
+        let viewports = [audio_viewport(0, OWNER_NONE, Vector2::ZERO)];
+        audio
+            .start_sound(
+                "First",
+                Some(first.id),
+                100,
+                false,
+                false,
+                None,
+                &snapshot,
+                &viewports,
+            )
+            .expect("first ordinary sound starts");
+        audio
+            .start_sound(
+                "Second",
+                Some(second.id),
+                100,
+                false,
+                false,
+                None,
+                &snapshot,
+                &viewports,
+            )
+            .expect("inaudible second line sound remains logical");
+        let first_key = SoundInstanceKey::new("First", Some(first.id));
+        let second_key = SoundInstanceKey::new("Second", Some(second.id));
+        assert!(audio.active_channels[&first_key].channel.is_some());
+        assert!(audio.active_channels[&second_key].channel.is_none());
+        audio
+            .active_channels
+            .get_mut(&first_key)
+            .expect("first instance")
+            .sample_order = 0;
+        audio
+            .active_channels
+            .get_mut(&second_key)
+            .expect("second instance")
+            .sample_order = 1;
+
+        let rendered_viewports = [audio_viewport(0, OWNER_NONE, Vector2::new(1_000, 0))];
+        let calls = HashMap::from([(
+            second.id,
+            vec![RenderedAudibilityCall::World {
+                point: Vector2::new(1_000, 0),
+            }],
+        )]);
+        audio.cache_rendered_object_audibility(&calls, &snapshot, &rendered_viewports);
+        audio.refresh_attached_channel_mix_after_render(&snapshot, &rendered_viewports);
+
+        assert!(audio.active_channels[&first_key].channel.is_none());
+        assert!(audio.active_channels[&second_key].channel.is_some());
+        assert_eq!(
+            audio.active_channels[&first_key].detached_mix,
+            Some((0.0, -1.0)),
+            "the ordinary earlier sound releases its channel under the new viewport",
+        );
+        assert_eq!(
+            audio.active_channels[&second_key].detached_mix,
+            Some((0.0, 1.0)),
+            "a detached one-shot would retain the second object's origin, not its line endpoint",
+        );
+
+        let second_channel = audio.active_channels[&second_key]
+            .channel
+            .expect("second sound owns the released channel");
+        audio.system.halt_channel(second_channel);
+        audio.refresh_attached_channel_mix_after_render(&snapshot, &rendered_viewports);
+        assert!(
+            !audio.active_channels.contains_key(&second_key),
+            "a special channel that finished during rendering is removed",
+        );
+
+        audio
+            .start_sound(
+                "Second",
+                None,
+                100,
+                false,
+                false,
+                None,
+                &snapshot,
+                &viewports,
+            )
+            .expect("global blocker occupies the only channel");
+        let blocker_key = SoundInstanceKey::new("Second", None);
+        snapshot.definition_lines.insert(
+            first.definition_id.clone(),
+            lc_engine::DefinitionLineMetadata {
+                line: 1,
+                ..Default::default()
+            },
+        );
+        audio.cache_rendered_object_audibility(
+            &HashMap::from([(
+                first.id,
+                vec![RenderedAudibilityCall::World {
+                    point: Vector2::new(1_000, 0),
+                }],
+            )]),
+            &snapshot,
+            &rendered_viewports,
+        );
+        audio.refresh_attached_channel_mix_after_render(&snapshot, &rendered_viewports);
+        assert!(
+            !audio.active_channels.contains_key(&first_key),
+            "a special instance whose newly audible channel cannot be restored is removed",
+        );
+        assert!(audio.active_channels.contains_key(&blocker_key));
     }
 
     #[test]
