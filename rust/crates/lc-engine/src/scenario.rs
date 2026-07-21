@@ -515,6 +515,12 @@ pub struct Scenario {
     /// them to `DefinitionFilenames` and registers them again at definition
     /// priority (C4Game.cpp:210-213,2432-2442,3961-3994).
     definition_root_groups: Vec<Group>,
+    /// Exact `C4SoundSystem::LoadEffects` group stream produced by
+    /// `C4DefList::Load`, in native load order. Unlike the surviving
+    /// definition list, this retains pure sound `.c4d` groups, rejected
+    /// DefCore groups and duplicate visits so later samples can overload
+    /// earlier samples exactly as they do in C++.
+    sound_effect_groups: Vec<Group>,
     /// The scenario's own System.c4g sources. C++ loads these after defs
     /// specifically to give them overload priority (C4Game.cpp:2606-2617).
     scenario_system_scripts: Vec<(String, String)>,
@@ -2690,6 +2696,7 @@ impl Scenario {
         let mut load_items = Vec::new();
         let mut definition_resource_paths = Vec::new();
         let mut definition_root_groups = Vec::new();
+        let mut sound_effect_groups = Vec::new();
 
         // C4Game::InitDefs loads explicit definition resources first, then
         // folder-local resources from outermost to innermost, and finally the
@@ -2736,6 +2743,7 @@ impl Scenario {
                     &language_packs,
                     group,
                     scenario_origin.as_deref(),
+                    &mut sound_effect_groups,
                     &mut load_items,
                 )?;
             }
@@ -2751,6 +2759,7 @@ impl Scenario {
                     &language_packs,
                     group,
                     scenario_origin.as_deref(),
+                    &mut sound_effect_groups,
                     &mut load_items,
                 )?;
             }
@@ -2767,6 +2776,7 @@ impl Scenario {
                     &language_packs,
                     group,
                     scenario_origin.as_deref(),
+                    &mut sound_effect_groups,
                     &mut load_items,
                 )?;
             }
@@ -2784,6 +2794,7 @@ impl Scenario {
                     &language_packs,
                     group,
                     scenario_origin.as_deref(),
+                    &mut sound_effect_groups,
                     &mut load_items,
                 )?;
             }
@@ -2799,6 +2810,7 @@ impl Scenario {
             &language_packs,
             group,
             scenario_origin.as_deref(),
+            &mut sound_effect_groups,
             &mut load_items,
         )?;
 
@@ -3055,6 +3067,7 @@ impl Scenario {
             definition_load_steps,
             definition_resource_paths,
             definition_root_groups,
+            sound_effect_groups,
             scenario_system_scripts,
             player_starts: PlayerStart::slots_from_legacy(&manifest.core.players),
             teams,
@@ -3129,6 +3142,14 @@ impl Scenario {
     /// including folder-local definition roots appended by C++.
     pub fn definition_root_groups(&self) -> &[Group] {
         &self.definition_root_groups
+    }
+
+    /// Exact ordered groups for which native `C4Def::Load` invokes
+    /// `C4SoundSystem::LoadEffects`. Entries are direct-load events, not
+    /// definition roots: callers must inspect only each group's direct audio
+    /// files and must preserve duplicates and order.
+    pub fn sound_effect_groups(&self) -> &[Group] {
+        &self.sound_effect_groups
     }
 
     /// Immutable legacy pre-game metadata. JSON-only engine fixtures return
@@ -4463,6 +4484,7 @@ impl Scenario {
             definition_load_steps,
             definition_resource_paths: Vec::new(),
             definition_root_groups: Vec::new(),
+            sound_effect_groups: Vec::new(),
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             teams: Vec::new(),
@@ -15693,12 +15715,17 @@ fn collect_definitions_from_group<S: AsRef<str>>(
     language_packs: &LanguagePacks,
     scenario: &Group,
     scenario_origin: Option<&str>,
+    sound_effect_groups: &mut Vec<Group>,
     output: &mut Vec<CollectedDefinition>,
 ) -> Result<(), ScenarioError> {
     let mut primary_definition = false;
     // C4Def::Load diverts Particle.txt groups into C4ParticleDef before it
     // even attempts DefCore; they never become object definitions.
     if group.exists("Particle.txt") {
+        // C4Def::Load marks particle groups as non-definitions, loads the
+        // particle metadata, and then still runs the invalid-definition
+        // LoadEffects path regardless of whether that metadata succeeded.
+        sound_effect_groups.push(group.clone());
         match ResourceParticleDefinition::load(group) {
             Ok(definition) => output.push(CollectedDefinition::Particle(definition)),
             Err(error) => tracing::warn!(
@@ -15714,9 +15741,15 @@ fn collect_definitions_from_group<S: AsRef<str>>(
         // never observed.
         let core = match ResourceDefCore::load(group) {
             Ok(core) => Some(core),
-            Err(ResourceDefinitionError::DefCoreMissing) => None,
+            Err(ResourceDefinitionError::DefCoreMissing) => {
+                sound_effect_groups.push(group.clone());
+                None
+            }
             Err(error) if is_rejected_definition_error(&error) => {
                 warn_rejected_definition(group, &error);
+                // A failed C4DefCore::Load deliberately turns the group into
+                // a pure sound container before C4DefList visits children.
+                sound_effect_groups.push(group.clone());
                 None
             }
             Err(error) => return Err(error.into()),
@@ -15728,6 +15761,12 @@ fn collect_definitions_from_group<S: AsRef<str>>(
                     group = %group.root().display(),
                     "skipping definition with invalid C4ID"
                 );
+                // NeededGfxMode is checked even after an invalid ID made the
+                // definition unsuccessful. OLDGFX therefore suppresses the
+                // otherwise intentional pure-sound fallback.
+                if core.needed_gfx_mode != 2 {
+                    sound_effect_groups.push(group.clone());
+                }
             } else if skip_ids.contains(&core.id.to_ascii_uppercase()) {
                 // C4Def::Load checks SkipDefs before the graphics-mode gate.
             } else if core.needed_gfx_mode == 2 {
@@ -15751,6 +15790,11 @@ fn collect_definitions_from_group<S: AsRef<str>>(
                             );
                         } else {
                             primary_definition = true;
+                            // Valid definitions reach LoadEffects only after
+                            // bitmap, portrait and ActMap/resource loading has
+                            // succeeded. Retain the event before descending
+                            // into child definitions.
+                            sound_effect_groups.push(group.clone());
                             let mut definition =
                                 scenario_definition_from_resource(resource, Some(group.clone()));
                             definition.script = localize_script_source_with_components(
@@ -15768,6 +15812,9 @@ fn collect_definitions_from_group<S: AsRef<str>>(
                 }
             }
         }
+    } else {
+        // Missing DefCore is the canonical pure `.c4d` sound-folder case.
+        sound_effect_groups.push(group.clone());
     }
 
     // C4DefList::Load recursively visits only *.c4d children.
@@ -15790,6 +15837,7 @@ fn collect_definitions_from_group<S: AsRef<str>>(
             language_packs,
             scenario,
             scenario_origin,
+            sound_effect_groups,
             output,
         )?;
     }
@@ -21156,6 +21204,7 @@ global func Step(state, frame, random)
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
             definition_resource_paths: Vec::new(),
             definition_root_groups: Vec::new(),
+            sound_effect_groups: Vec::new(),
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             teams: Vec::new(),
@@ -21291,6 +21340,7 @@ global func Step(state, frame, random)
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
             definition_resource_paths: Vec::new(),
             definition_root_groups: Vec::new(),
+            sound_effect_groups: Vec::new(),
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             teams: Vec::new(),
@@ -25800,6 +25850,7 @@ public func ActualizePhase(pClonk)
 
         let group = Group::open(&root).expect("definition root opens");
         let language_packs = LanguagePacks::default();
+        let mut sound_effect_groups = Vec::new();
         let mut collected = Vec::new();
         collect_definitions_from_group(
             &group,
@@ -25809,6 +25860,7 @@ public func ActualizePhase(pClonk)
             &language_packs,
             &group,
             None,
+            &mut sound_effect_groups,
             &mut collected,
         )
         .expect("invalid IDs skip without aborting the definition tree");
@@ -25821,6 +25873,118 @@ public func ActualizePhase(pClonk)
             .collect::<Vec<_>>();
         ids.sort();
         assert_eq!(ids, ["1337", "3HUD", "CHLD", "CLON"]);
+    }
+
+    #[test]
+    fn definition_sound_groups_follow_native_load_effects_gates_and_preorder() {
+        fn write_definition(path: &Path, id: &str, needed_gfx_mode: Option<i32>) {
+            std::fs::create_dir_all(path).expect("definition directory");
+            let mut core = format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n");
+            if let Some(mode) = needed_gfx_mode {
+                core.push_str(&format!("NeededGfxMode={mode}\n"));
+            }
+            std::fs::write(path.join("DefCore.txt"), core).expect("write DefCore");
+            std::fs::write(path.join("Script.c"), "// definition\n")
+                .expect("write definition script");
+            write_test_definition_graphics(path);
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("Defs.c4d");
+        std::fs::create_dir_all(&root).expect("definition root");
+
+        let pure = root.join("Pure.c4d");
+        std::fs::create_dir_all(&pure).expect("pure sound group");
+        std::fs::write(pure.join("Pure.wav"), b"pure").expect("pure sound");
+
+        let good = root.join("Good.c4d");
+        write_definition(&good, "GOOD", None);
+        let nested = good.join("Nested.c4d");
+        std::fs::create_dir_all(&nested).expect("nested pure sound group");
+        std::fs::write(nested.join("Nested.wav"), b"nested").expect("nested sound");
+
+        let particle = root.join("Particle.c4d");
+        std::fs::create_dir_all(&particle).expect("particle group");
+        std::fs::write(particle.join("Particle.txt"), b"invalid particle data")
+            .expect("particle core");
+
+        let invalid = root.join("Invalid.c4d");
+        write_definition(&invalid, "0000", None);
+        let invalid_oldgfx = root.join("InvalidOldGfx.c4d");
+        write_definition(&invalid_oldgfx, "0000", Some(2));
+        let rejected_core = root.join("RejectedCore.c4d");
+        std::fs::create_dir_all(&rejected_core).expect("rejected core group");
+        std::fs::write(
+            rejected_core.join("DefCore.txt"),
+            "[DefCore]\nName=Missing ID\nCategory=0\n",
+        )
+        .expect("rejected DefCore");
+
+        let skipped = root.join("Skipped.c4d");
+        write_definition(&skipped, "SKIP", None);
+        let broken_graphics = root.join("BrokenGraphics.c4d");
+        std::fs::create_dir_all(&broken_graphics).expect("broken definition group");
+        std::fs::write(
+            broken_graphics.join("DefCore.txt"),
+            "[DefCore]\nid=BRKN\nName=Broken\nCategory=0\n",
+        )
+        .expect("broken definition core");
+        let broken_act_map = root.join("BrokenActMap.c4d");
+        write_definition(&broken_act_map, "BACT", None);
+        std::fs::write(broken_act_map.join("ActMap.txt"), "not an action map")
+            .expect("broken ActMap");
+
+        let ordinary = root.join("Ordinary");
+        std::fs::create_dir_all(&ordinary).expect("ordinary directory");
+        std::fs::write(ordinary.join("Hidden.wav"), b"hidden").expect("hidden sound");
+
+        let group = Group::open(&root).expect("definition root opens");
+        let mut sound_effect_groups = Vec::new();
+        let mut collected = Vec::new();
+        collect_definitions_from_group(
+            &group,
+            false,
+            &HashSet::from(["SKIP".to_string()]),
+            &["US"],
+            &LanguagePacks::default(),
+            &group,
+            None,
+            &mut sound_effect_groups,
+            &mut collected,
+        )
+        .expect("collect definition sound events");
+
+        let roots = sound_effect_groups
+            .iter()
+            .map(|group| group.root().to_path_buf())
+            .collect::<Vec<_>>();
+        assert_eq!(roots.first(), Some(&root), "the root loads before children");
+        for expected in [&pure, &good, &nested, &particle, &invalid, &rejected_core] {
+            assert!(
+                roots.contains(expected),
+                "missing sound event for {}",
+                expected.display()
+            );
+        }
+        let good_index = roots.iter().position(|path| path == &good).unwrap();
+        let nested_index = roots.iter().position(|path| path == &nested).unwrap();
+        assert!(
+            good_index < nested_index,
+            "parents load sounds before children"
+        );
+        for excluded in [
+            &invalid_oldgfx,
+            &skipped,
+            &broken_graphics,
+            &broken_act_map,
+            &ordinary,
+        ] {
+            assert!(
+                !roots.contains(excluded),
+                "unexpected sound event for {}",
+                excluded.display()
+            );
+        }
     }
 
     #[test]
@@ -25869,6 +26033,7 @@ public func ActualizePhase(pClonk)
             "both legacy names must collide under lossy UTF-8 projection"
         );
 
+        let mut sound_effect_groups = Vec::new();
         let mut collected = Vec::new();
         collect_definitions_from_group(
             &group,
@@ -25878,6 +26043,7 @@ public func ActualizePhase(pClonk)
             &LanguagePacks::default(),
             &group,
             None,
+            &mut sound_effect_groups,
             &mut collected,
         )
         .expect("collect exact colliding child definitions");

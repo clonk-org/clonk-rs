@@ -9384,32 +9384,24 @@ impl AudioContext {
     }
 
     fn configure_scenario(&mut self, path: Option<&Path>) {
-        self.configure_scenario_with_music_roots(path, None);
+        self.configure_scenario_with_resources(path, None, None);
     }
 
-    fn configure_scenario_with_definition_roots(
-        &mut self,
-        path: Option<&Path>,
-        definition_roots: &[Group],
-    ) {
-        self.configure_scenario_with_music_roots(path, Some(definition_roots));
-    }
-
-    fn configure_scenario_with_music_roots(
+    fn configure_scenario_with_resources(
         &mut self,
         path: Option<&Path>,
         definition_roots: Option<&[Group]>,
+        sound_effect_groups: Option<&[Group]>,
     ) {
-        let (sound_catalog_changed, reloaded_samples) = match definition_roots {
-            Some(definition_roots) => {
+        let (sound_catalog_changed, reloaded_samples) = match sound_effect_groups {
+            Some(sound_effect_groups) => {
                 let changed = self
                     .resolver
-                    .configure_scenario_with_definition_roots(path, definition_roots);
+                    .configure_scenario_with_sound_effect_groups(path, sound_effect_groups);
                 let reloaded = self
                     .resolver
-                    .definition_sample_loads
+                    .scenario_sample_loads
                     .iter()
-                    .chain(&self.resolver.scenario_sample_loads)
                     .cloned()
                     .collect::<HashSet<_>>();
                 (changed, reloaded)
@@ -10183,13 +10175,11 @@ fn configure_scenario_sound_samples(
         return Vec::new();
     };
     audio.set_music_playlist(None);
-    audio.configure_scenario_with_definition_roots(
+    audio.configure_scenario_with_resources(
         Some(path),
-        scenario.definition_root_groups(),
+        Some(scenario.definition_root_groups()),
+        Some(scenario.sound_effect_groups()),
     );
-    scenario.visit_definition_groups(|id, group| {
-        audio.register_definition_sounds(id, group);
-    });
     audio.available_sound_samples()
 }
 
@@ -10325,54 +10315,48 @@ impl SoundResolver {
         if self.scenario_root.as_deref() == new_root.as_deref() {
             return false;
         }
-        self.clear_registered_definition_libraries();
-        self.configure_scenario_catalog(new_root);
-        self.definition_sample_loads.clear();
-        self.scenario_sample_loads = path
-            .and_then(|root| Group::open(root).ok())
-            .map(|group| definition_tree_sound_sample_loads(&group))
+        let sound_effect_groups = path
+            .map(collect_path_sound_effect_groups)
             .unwrap_or_default();
-        self.sample_ranks_prebuilt = path.is_some();
-        self.rebuild_sample_ranks();
+        self.install_scenario_sound_effect_groups(new_root, &sound_effect_groups);
         true
     }
 
-    fn configure_scenario_with_definition_roots(
+    fn configure_scenario_with_sound_effect_groups(
         &mut self,
         path: Option<&Path>,
-        definition_roots: &[Group],
+        sound_effect_groups: &[Group],
     ) -> bool {
-        let new_root = path.map(Path::to_path_buf);
-        let changed = self.scenario_root.as_deref() != new_root.as_deref();
-        self.clear_registered_definition_libraries();
-        if changed {
-            self.configure_scenario_catalog(new_root);
-        }
-        self.definition_sample_loads.clear();
-        self.scenario_sample_loads.clear();
-        for root in definition_roots {
-            self.scenario_sample_loads
-                .extend(definition_tree_sound_sample_loads(root));
-        }
-        if let Some(group) = path.and_then(|root| Group::open(root).ok()) {
-            self.scenario_sample_loads
-                .extend(definition_tree_sound_sample_loads(&group));
-        }
-        self.sample_ranks_prebuilt = path.is_some() || !definition_roots.is_empty();
-        self.rebuild_sample_ranks();
-        changed
+        self.install_scenario_sound_effect_groups(path.map(Path::to_path_buf), sound_effect_groups);
+        // A resource-aware call is a real activation/reload. C++ reconstructs
+        // the sample bank even when the scenario path is unchanged.
+        true
     }
 
-    fn configure_scenario_catalog(&mut self, new_root: Option<PathBuf>) {
-        self.scenario = match new_root.as_ref() {
-            Some(root) => {
-                let mut libraries = collect_sound_libraries_for_path(root);
-                libraries.extend(collect_local_definition_folder_root_sounds(root));
-                libraries
-            }
-            None => Vec::new(),
-        };
+    fn install_scenario_sound_effect_groups(
+        &mut self,
+        new_root: Option<PathBuf>,
+        sound_effect_groups: &[Group],
+    ) {
+        self.clear_registered_definition_libraries();
+        self.scenario = sound_effect_groups
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(index, group)| {
+                let label = format!("load::{index}::{}", group.root().display());
+                collect_direct_sound_library(group, label)
+            })
+            .collect();
         self.scenario_root = new_root;
+        self.definition_sample_loads.clear();
+        self.scenario_sample_loads = sound_effect_groups
+            .iter()
+            .flat_map(direct_sound_sample_loads)
+            .collect();
+        self.sample_ranks_prebuilt =
+            self.scenario_root.is_some() || !sound_effect_groups.is_empty();
+        self.rebuild_sample_ranks();
     }
 
     fn clear_registered_definition_libraries(&mut self) {
@@ -10496,10 +10480,9 @@ impl SoundResolver {
             return;
         }
         let label = format!("definition::{}", definition_id);
-        let libs = collect_sound_libraries_from_group(group, label);
-        if !libs.is_empty() {
-            self.definition_library_count += libs.len();
-            self.global.splice(0..0, libs);
+        if let Some(library) = collect_direct_sound_library(group, label) {
+            self.definition_library_count += 1;
+            self.global.insert(0, library);
             if !self.sample_ranks_prebuilt {
                 self.definition_sample_loads
                     .extend(direct_sound_sample_loads(group));
@@ -10509,12 +10492,7 @@ impl SoundResolver {
     }
 
     fn reset_dynamic_catalog(&mut self) {
-        self.clear_registered_definition_libraries();
-        self.configure_scenario_catalog(None);
-        self.definition_sample_loads.clear();
-        self.scenario_sample_loads.clear();
-        self.sample_ranks_prebuilt = false;
-        self.rebuild_sample_ranks();
+        self.install_scenario_sound_effect_groups(None, &[]);
     }
 }
 
@@ -10705,39 +10683,29 @@ fn sound_name_has_extension(name: &str) -> bool {
 }
 
 fn discover_global_sound_libraries() -> (Vec<SoundLibrary>, Vec<String>) {
-    let mut libraries = Vec::new();
-    let mut sample_loads = Vec::new();
     match AppPaths::discover() {
         Ok(paths) => {
-            let mut seen = HashSet::new();
-            let mut roots = vec![
-                paths.install_root().to_path_buf(),
-                paths.planet_dir().to_path_buf(),
-                paths.user_data_dir().to_path_buf(),
-            ];
-            if let Some(content) = paths.content_dir() {
-                roots.push(content.to_path_buf());
-            }
-            roots.sort();
-            roots.dedup();
-            for root in roots {
-                for candidate in find_sound_group_candidates(&root) {
-                    let key = candidate.to_string_lossy().to_ascii_lowercase();
-                    if !seen.insert(key) {
-                        continue;
-                    }
-                    if let Ok(group) = Group::open(&candidate) {
-                        sample_loads.extend(direct_sound_sample_loads(&group));
-                    }
-                    let mut libs = collect_sound_libraries_for_path(&candidate);
-                    libraries.append(&mut libs);
-                }
-            }
+            discover_global_sound_libraries_at(paths.content_dir().unwrap_or(paths.install_root()))
         }
         Err(err) => {
             tracing::warn!(error = %err, "sound asset discovery skipped");
+            (Vec::new(), Vec::new())
         }
     }
+}
+
+fn discover_global_sound_libraries_at(exe_data_root: &Path) -> (Vec<SoundLibrary>, Vec<String>) {
+    // C4SoundSystem's constructor performs exactly one Config.AtExePath
+    // lookup. Sound-like siblings, user data, and alternate extensions never
+    // enter the native sample bank.
+    let sound_path = exe_data_root.join("Sound.c4g");
+    let Ok(group) = Group::open(&sound_path) else {
+        return (Vec::new(), Vec::new());
+    };
+    let sample_loads = direct_sound_sample_loads(&group);
+    let libraries = collect_direct_sound_library(&group, "Sound.c4g".to_string())
+        .into_iter()
+        .collect();
     (libraries, sample_loads)
 }
 
@@ -10748,12 +10716,13 @@ fn direct_sound_sample_loads(group: &Group) -> Vec<String> {
     let mut names = Vec::new();
     // C4SoundSystem::LoadEffects performs three complete group scans in this
     // order, preserving each scan's group-entry order.
-    for wanted_rank in 0..3 {
+    for pattern in [
+        b"*.wav".as_slice(),
+        b"*.ogg".as_slice(),
+        b"*.mp3".as_slice(),
+    ] {
         names.extend(entries.iter().filter_map(|entry| {
-            if entry.is_directory
-                || extension_rank(entry.relative_path.extension().and_then(|ext| ext.to_str()))
-                    != wanted_rank
-            {
+            if entry.is_directory || !classic_wildcard_match(pattern, &entry.name_bytes) {
                 return None;
             }
             entry
@@ -10765,23 +10734,7 @@ fn direct_sound_sample_loads(group: &Group) -> Vec<String> {
     names
 }
 
-fn definition_tree_sound_sample_loads(group: &Group) -> Vec<String> {
-    let mut names = direct_sound_sample_loads(group);
-    let Ok(entries) = group.entries() else {
-        return names;
-    };
-    for entry in entries {
-        if !has_extension(&entry.relative_path, "c4d") {
-            continue;
-        }
-        let Ok(child) = group.open_child(&entry.relative_path) else {
-            continue;
-        };
-        names.extend(definition_tree_sound_sample_loads(&child));
-    }
-    names
-}
-
+#[cfg(test)]
 fn collect_sound_libraries_for_path(path: &Path) -> Vec<SoundLibrary> {
     let group = match Group::open(path) {
         Ok(group) => group,
@@ -10795,135 +10748,81 @@ fn collect_sound_libraries_for_path(path: &Path) -> Vec<SoundLibrary> {
         .and_then(|name| name.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
-    collect_sound_libraries_from_group(&group, label)
-}
-
-fn collect_local_definition_folder_root_sounds(scenario_path: &Path) -> Vec<SoundLibrary> {
-    let mut libraries = Vec::new();
-    let mut parent = scenario_path.parent();
-    while let Some(folder_path) = parent {
-        if has_extension(folder_path, "c4f") {
-            match collect_local_definition_folder_root_sound(folder_path) {
-                Ok(Some(library)) => libraries.push(library),
-                Ok(None) => {}
-                Err(error) => tracing::warn!(
-                    path = %folder_path.display(),
-                    %error,
-                    "failed to inspect local definition folder sounds"
-                ),
-            }
-        }
-        parent = folder_path.parent();
-    }
-    libraries
-}
-
-fn collect_local_definition_folder_root_sound(
-    folder_path: &Path,
-) -> Result<Option<SoundLibrary>, lc_resources::GroupError> {
-    let group = Group::open(folder_path)?;
-    let entries = group.entries()?;
-    if !entries
-        .iter()
-        .any(|entry| has_extension(&entry.relative_path, "c4d"))
-    {
-        return Ok(None);
-    }
-
-    let source = Arc::new(group);
-    let label = format!("folder::{}", folder_path.display());
-    let mut library = SoundLibrary::new(label, source);
-    for entry in entries
+    collect_direct_sound_library(&group, label)
         .into_iter()
-        .filter(|entry| !entry.is_directory && is_audio_path(&entry.relative_path))
-    {
-        library.add_entry(entry.relative_path);
-    }
-    Ok((!library.is_empty()).then_some(library))
+        .collect()
 }
 
-fn collect_sound_libraries_from_group(group: &Group, label: String) -> Vec<SoundLibrary> {
-    let mut libs = Vec::new();
-    if let Err(err) = collect_sound_libraries_recursive(group, label.as_str(), &mut libs) {
-        tracing::warn!(
-            path = %group.root().display(),
-            error = %err,
-            "failed to inspect sound entries"
-        );
-    }
-    libs
-}
-
-fn collect_sound_libraries_recursive(
-    group: &Group,
-    label: &str,
-    libs: &mut Vec<SoundLibrary>,
-) -> Result<(), lc_resources::GroupError> {
+fn collect_direct_sound_library(group: &Group, label: String) -> Option<SoundLibrary> {
     let source = Arc::new(group.clone());
-    let mut library = SoundLibrary::new(label.to_string(), source);
-    for entry in group.entries()? {
-        if entry.is_directory {
-            let child = group.open_child(&entry.relative_path)?;
-            let child_label = if label.is_empty() {
-                entry.relative_path.to_string_lossy().into_owned()
-            } else {
-                format!("{}/{}", label, entry.relative_path.display())
-            };
-            collect_sound_libraries_recursive(&child, &child_label, libs)?;
-        } else if is_audio_path(&entry.relative_path) {
-            library.add_entry(entry.relative_path.clone());
+    let mut library = SoundLibrary::new(label, source);
+    let entries = match group.entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                path = %group.root().display(),
+                %error,
+                "failed to inspect direct sound entries"
+            );
+            return None;
         }
-    }
-    if !library.is_empty() {
-        libs.push(library);
-    }
-    Ok(())
-}
-
-fn find_sound_group_candidates(root: &Path) -> Vec<PathBuf> {
-    let mut result = Vec::new();
-    for name in [
-        "Sound.c4g",
-        "sound.c4g",
-        "Sound.ocg",
-        "sound.ocg",
-        "Sound.c4d",
-        "sound.c4d",
+    };
+    for pattern in [
+        b"*.wav".as_slice(),
+        b"*.ogg".as_slice(),
+        b"*.mp3".as_slice(),
     ] {
-        let candidate = root.join(name);
-        if candidate.exists() {
-            result.push(candidate);
-        }
-    }
-
-    if let Ok(entries) = fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name_lower = entry.file_name().to_string_lossy().to_ascii_lowercase();
-            if is_probable_sound_container(&path, &name_lower) {
-                result.push(path);
+        for entry in &entries {
+            if !entry.is_directory && classic_wildcard_match(pattern, &entry.name_bytes) {
+                library.add_entry(entry.relative_path.clone());
             }
         }
     }
-
-    result
+    (!library.is_empty()).then_some(library)
 }
 
-fn is_probable_sound_container(path: &Path, name_lower: &str) -> bool {
-    if !name_lower.starts_with("sound") {
-        return false;
-    }
-    if path.is_dir() {
-        return true;
-    }
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some(ext) => {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "c4g" | "ocg" | "c4d" | "c4s"
-            )
+fn collect_path_sound_effect_groups(scenario_path: &Path) -> Vec<Group> {
+    let mut folder_paths = scenario_path
+        .ancestors()
+        .skip(1)
+        .filter(|path| has_extension(path, "c4f"))
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    folder_paths.reverse();
+
+    let mut groups = Vec::new();
+    for folder_path in folder_paths {
+        let Ok(folder) = Group::open(&folder_path) else {
+            continue;
+        };
+        let has_definition_child = folder.entries().is_ok_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| classic_wildcard_match(b"*.c4d", &entry.name_bytes))
+        });
+        if has_definition_child {
+            collect_definition_tree_sound_groups(&folder, &mut groups);
         }
-        None => false,
+    }
+
+    if let Ok(scenario) = Group::open(scenario_path) {
+        collect_definition_tree_sound_groups(&scenario, &mut groups);
+    }
+    groups
+}
+
+fn collect_definition_tree_sound_groups(group: &Group, groups: &mut Vec<Group>) {
+    groups.push(group.clone());
+    let Ok(entries) = group.entries() else {
+        return;
+    };
+    for entry in entries {
+        if !classic_wildcard_match(b"*.c4d", &entry.name_bytes) {
+            continue;
+        }
+        if let Ok(child) = group.open_child_entry_exact(&entry) {
+            collect_definition_tree_sound_groups(&child, groups);
+        }
     }
 }
 
@@ -88931,6 +88830,12 @@ fn load_definitions_from_group(
                 }
             }
         }
+    } else if let Some(mut ptr) = audio {
+        // C4Def::Load still calls LoadEffects for a group without DefCore so
+        // pure *.c4d sound folders participate in the sample bank.
+        unsafe {
+            ptr.as_mut().register_definition_sounds("NONE", group);
+        }
     }
 
     let entries = match group.entries() {
@@ -90780,18 +90685,6 @@ fn is_music_path(path: &Path) -> bool {
             // C4MusicSystem.cpp:31-32. WAV belongs to the sound-effect resolver.
             MUSIC_FILE_EXTENSIONS.contains(&extension.as_str())
         })
-}
-
-fn is_audio_path(path: &Path) -> bool {
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("ogg") | Some("mp3") | Some("wav") => true,
-        _ => false,
-    }
 }
 
 fn sandbox_music_bytes() -> &'static [u8] {
@@ -103605,6 +103498,182 @@ func Award()
     }
 
     #[test]
+    fn external_pure_c4d_sound_folder_without_defcore_is_playable() {
+        struct FixtureResolver {
+            definitions: Group,
+        }
+
+        impl LegacyDefinitionResolver for FixtureResolver {
+            fn resolve_definition_groups(
+                &self,
+                _scenario: &Group,
+                identifier: &str,
+            ) -> Result<Vec<Group>, ScenarioError> {
+                if identifier.eq_ignore_ascii_case("Objects.c4d") {
+                    Ok(vec![self.definitions.clone()])
+                } else {
+                    Err(ScenarioError::LegacyDefinitionNotFound {
+                        path: identifier.to_string(),
+                    })
+                }
+            }
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let definitions = dir.path().join("Objects.c4d");
+        let valid = definitions.join("Valid.c4d");
+        let pure_sounds = definitions.join("Potions.c4d");
+        let scenario_path = dir.path().join("SoundTest.c4s");
+        for path in [&valid, &pure_sounds, &scenario_path] {
+            fs::create_dir_all(path).expect("create sound fixture group");
+        }
+        fs::write(
+            valid.join("DefCore.txt"),
+            "[DefCore]\nid=TEST\nName=Test\nCategory=1\n",
+        )
+        .expect("write valid definition core");
+        write_test_definition_graphics(&valid);
+        fs::write(pure_sounds.join("Drink.wav"), silent_pcm_wav(20))
+            .expect("write pure-container sound");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Sound Test\n\n[Definitions]\nDefinition1=Objects.c4d\n",
+        )
+        .expect("write scenario core");
+
+        let fixture_resolver = FixtureResolver {
+            definitions: Group::open(&definitions).expect("open definition root"),
+        };
+        let scenario = Scenario::load_from_path_with(&scenario_path, &fixture_resolver)
+            .expect("load scenario with pure sound child");
+        assert!(
+            scenario
+                .sound_effect_groups()
+                .iter()
+                .any(|group| group.root() == pure_sounds),
+            "the live C4DefList event stream retains the DefCore-less child"
+        );
+
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        audio.resolver = SoundResolver::empty();
+        let advertised =
+            configure_scenario_sound_samples(Some(&mut audio), &scenario, &scenario_path);
+        assert!(advertised.iter().any(|name| name == "drink.wav"));
+        assert!(
+            audio
+                .ensure_sound_with_key("Drink")
+                .expect("decode pure-container sample")
+                .is_some(),
+            "the advertised pure-container sample must also be playable"
+        );
+    }
+
+    #[test]
+    fn install_walker_registers_defcoreless_c4d_sound_groups() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("Objects.c4d");
+        let pure_sounds = root.join("Potions.c4d");
+        fs::create_dir_all(&pure_sounds).expect("create pure install sound group");
+        fs::write(pure_sounds.join("Drink.wav"), silent_pcm_wav(20))
+            .expect("write pure install sound");
+
+        let group = Group::open(&root).expect("open install definition root");
+        let mut engine = Engine::new();
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        audio.resolver = SoundResolver::empty();
+        load_definitions_from_group(
+            &mut engine,
+            &group,
+            Some(NonNull::from(&mut audio)),
+            &mut HashSet::new(),
+            &mut None,
+        )
+        .expect("walk install definition tree");
+
+        assert_eq!(audio.available_sound_samples(), ["drink.wav"]);
+        assert!(
+            audio
+                .ensure_sound_with_key("Drink")
+                .expect("decode install pure-container sample")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn nested_non_definition_audio_is_not_admitted() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("Objects.c4d");
+        let pure = root.join("Pure.c4d");
+        let child = pure.join("Child.c4d");
+        let ordinary = root.join("Ordinary");
+        let sound_sibling = root.join("SoundExtra.c4g");
+        let nested_ordinary = pure.join("Assets");
+        for path in [&child, &ordinary, &sound_sibling, &nested_ordinary] {
+            fs::create_dir_all(path).expect("create nested sound fixture");
+        }
+        fs::write(root.join("Root.wav"), b"root").expect("write root sound");
+        fs::write(pure.join("Direct.ogg"), b"direct").expect("write direct c4d sound");
+        fs::write(child.join("Child.mp3"), b"child").expect("write child c4d sound");
+        fs::write(ordinary.join("Leak.wav"), b"ordinary leak").expect("write ordinary leak");
+        fs::write(sound_sibling.join("Leak.ogg"), b"sound sibling leak")
+            .expect("write sound-container leak");
+        fs::write(nested_ordinary.join("Deep.mp3"), b"nested leak")
+            .expect("write nested ordinary leak");
+
+        let root = Group::open(&root).expect("open definition root");
+        let mut sound_effect_groups = Vec::new();
+        collect_definition_tree_sound_groups(&root, &mut sound_effect_groups);
+        let mut resolver = SoundResolver::empty();
+        resolver.configure_scenario_with_sound_effect_groups(None, &sound_effect_groups);
+
+        assert_eq!(
+            resolver.sample_names(),
+            ["child.mp3", "direct.ogg", "root.wav"]
+        );
+        for rejected in ["Leak", "Leak.ogg", "Deep.mp3"] {
+            assert!(
+                resolver.resolve_entry(rejected).is_none(),
+                "non-definition descendant `{rejected}` entered the sound bank"
+            );
+        }
+    }
+
+    #[test]
+    fn global_sound_discovery_uses_only_native_sound_c4g() {
+        let dir = tempdir().expect("tempdir");
+        let native = dir.path().join("Sound.c4g");
+        let nested = native.join("Nested");
+        let probable = dir.path().join("SoundExtra.c4g");
+        let alternate = dir.path().join("Sound.ocg");
+        for path in [&nested, &probable, &alternate] {
+            fs::create_dir_all(path).expect("create global sound fixture");
+        }
+        fs::write(native.join("Native.wav"), b"native").expect("write native sound");
+        fs::write(nested.join("Nested.wav"), b"nested").expect("write nested decoy");
+        fs::write(probable.join("Probable.wav"), b"probable").expect("write probable decoy");
+        fs::write(alternate.join("Alternate.wav"), b"alternate").expect("write alternate decoy");
+
+        let (global, base_sample_loads) = discover_global_sound_libraries_at(dir.path());
+        let mut resolver = SoundResolver::empty();
+        resolver.global = global;
+        resolver.base_sample_loads = base_sample_loads;
+        resolver.rebuild_sample_ranks();
+
+        assert_eq!(resolver.sample_names(), ["native.wav"]);
+        assert_eq!(
+            resolver
+                .resolve_entry("Native")
+                .expect("native global sample")
+                .load_audio()
+                .expect("read native global sample"),
+            b"native"
+        );
+        for rejected in ["Nested", "Probable", "Alternate"] {
+            assert!(resolver.resolve_entry(rejected).is_none());
+        }
+    }
+
+    #[test]
     fn sound_sample_rank_tracks_cpp_last_load_order_separately_from_precedence() {
         let dir = tempdir().expect("tempdir");
         let global = dir.path().join("Sound.c4g");
@@ -103635,11 +103704,12 @@ func Award()
         };
         resolver.rebuild_sample_ranks();
         let definition_group = Group::open(&definition).expect("open definition group");
-        assert!(resolver.configure_scenario_with_definition_roots(
+        let scenario_group = Group::open(&scenario).expect("open scenario group");
+        let sound_effect_groups = [definition_group, scenario_group];
+        assert!(resolver.configure_scenario_with_sound_effect_groups(
             Some(&scenario),
-            std::slice::from_ref(&definition_group),
+            &sound_effect_groups,
         ));
-        resolver.register_definition_group("OBJS", &definition_group);
 
         for definition_sample in ["a.wav", "c.wav"] {
             for scenario_sample in ["b.wav", "d.wav"] {
@@ -103726,9 +103796,13 @@ func Award()
             sample_ranks_prebuilt: false,
         };
         resolver.rebuild_sample_ranks();
-        assert!(resolver.configure_scenario_with_definition_roots(
+        let first_scenario_group = Group::open(&first_scenario).expect("open first scenario");
+        let mut first_sound_effect_groups = Vec::new();
+        collect_definition_tree_sound_groups(&definitions, &mut first_sound_effect_groups);
+        collect_definition_tree_sound_groups(&first_scenario_group, &mut first_sound_effect_groups);
+        assert!(resolver.configure_scenario_with_sound_effect_groups(
             Some(&first_scenario),
-            std::slice::from_ref(&definitions),
+            &first_sound_effect_groups,
         ));
 
         let ordered = [
@@ -103742,9 +103816,10 @@ func Award()
             .windows(2)
             .all(|pair| resolver.sample_order(pair[0]) < resolver.sample_order(pair[1])));
 
-        assert!(resolver.configure_scenario_with_definition_roots(
+        let second_scenario_group = Group::open(&second_scenario).expect("open second scenario");
+        assert!(resolver.configure_scenario_with_sound_effect_groups(
             Some(&second_scenario),
-            &[],
+            std::slice::from_ref(&second_scenario_group),
         ));
         assert_eq!(resolver.sample_order("next.wav"), 0);
         for stale in ordered {
@@ -104226,16 +104301,16 @@ func Award()
         );
         assert_eq!(
             resolver.sample_names(),
-            vec!["drop.wav"],
+            vec!["drop.wav", "voice.wav"],
             "the engine-facing inventory follows the same admitted libraries"
         );
-
-        let definition_group = Group::open(&definitions).expect("definition group");
-        resolver.register_definition_group("TEST", &definition_group);
         assert_eq!(
-            resolver.sample_names(),
-            vec!["drop.wav", "voice.wav"],
-            "definition samples join the catalog before initialization"
+            resolver
+                .resolve_entry("Voice")
+                .expect("local definition-tree sound")
+                .load_audio()
+                .expect("read local definition sound"),
+            b"definition voice"
         );
     }
 
@@ -104475,7 +104550,12 @@ func Award()
             ..AudioOptions::default()
         })
         .expect("audio context");
-        audio.configure_scenario_with_definition_roots(Some(&scenario), &[]);
+        let scenario_group = Group::open(&scenario).expect("open scenario sound group");
+        audio.configure_scenario_with_resources(
+            Some(&scenario),
+            Some(&[]),
+            Some(std::slice::from_ref(&scenario_group)),
+        );
         let snapshot = make_snapshot(Vec::new(), Vec::new());
         let key = SoundInstanceKey::new("Click", None);
         audio.play_gui_sound("Click", false, &snapshot);
