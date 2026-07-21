@@ -21588,7 +21588,7 @@ fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     let custom_falloff = if let Some(arg) = args.get(index) {
-        Some(value_to_i32(arg, "Sound", "custom_falloff")?).filter(|value| *value > 0)
+        Some(value_to_i32(arg, "Sound", "custom_falloff")?).filter(|value| *value != 0)
     } else {
         None
     };
@@ -21637,8 +21637,6 @@ fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
         }
         let volume = volume.clamp(0, 100) as u8;
         let looped = loop_flag > 0;
-        let custom_falloff = custom_falloff.filter(|value| *value > 0);
-
         // Live sound instances and resolved filenames are client-local. Emit
         // every ordered request so the frontend can perform FindInst exactly.
         context
@@ -59089,6 +59087,53 @@ func Announce()
             outcome.audio.events.as_slice(),
             [AudioCommand::PlaySound { multiple: true, .. }]
         ));
+    }
+
+    #[test]
+    fn sound_preserves_negative_custom_falloff() {
+        // FnSound forwards every nonzero signed falloff distance unchanged;
+        // zero alone selects C4SoundSystem's ordinary audibility radius
+        // (C4Script.cpp:2297-2323; C4SoundSystem.cpp:194-200).
+        let (result, outcome) = with_object_host_context(|| {
+            let call = |name: &str, custom_falloff: i32| {
+                sound(&[
+                    Value::String(name.into()),
+                    Value::Bool(false),
+                    Value::Nil,
+                    Value::Int(100),
+                    Value::Int(0),
+                    Value::Int(0),
+                    Value::Bool(false),
+                    Value::Int(custom_falloff),
+                ])
+            };
+            assert_eq!(call("NegativeFalloff", -700)?, Value::Bool(true));
+            assert_eq!(call("DefaultFalloff", 0)?, Value::Bool(true));
+            Ok::<Value, RuntimeError>(Value::Nil)
+        });
+
+        result.expect("Sound custom-falloff probes run");
+        assert_eq!(
+            outcome.audio.events,
+            vec![
+                AudioCommand::PlaySound {
+                    name: "NegativeFalloff".into(),
+                    target: Some(ObjectId::new(1)),
+                    volume: 100,
+                    looped: false,
+                    multiple: false,
+                    custom_falloff: Some(-700),
+                },
+                AudioCommand::PlaySound {
+                    name: "DefaultFalloff".into(),
+                    target: Some(ObjectId::new(1)),
+                    volume: 100,
+                    looped: false,
+                    multiple: false,
+                    custom_falloff: None,
+                },
+            ]
+        );
     }
 
     #[test]

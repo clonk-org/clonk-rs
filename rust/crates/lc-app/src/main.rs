@@ -104877,6 +104877,55 @@ func Award()
     }
 
     #[test]
+    fn negative_custom_falloff_matches_cpp_transform() {
+        // C4SoundSystem applies the signed integer transform for every
+        // nonzero value. A negative denominator therefore clamps every raw
+        // audibility to full volume, while pan remains positional.
+        for audibility in [0, 50, 100] {
+            assert_eq!(adjusted_audibility(audibility, Some(-700)), 1.0);
+        }
+        assert_eq!(adjusted_audibility(0, Some(0)), 0.0);
+
+        let (_dir, mut audio, _) = test_audio_context_with_sound(1_000);
+        let listener = make_object(1, "Listener", Vector2::new(1000, 1000));
+        let source = make_object(2, "Source", Vector2::new(1700, 1000));
+        let snapshot = make_snapshot(
+            vec![listener.clone(), source.clone()],
+            vec![HudPlayerSnapshot {
+                owner: 1,
+                crew: vec![listener.id],
+                focus: Some(listener.id),
+                eliminated: false,
+                wealth: 0,
+                score: 0,
+            }],
+        );
+        let viewports = [audio_viewport(0, OWNER_NONE, listener.position)];
+
+        audio
+            .start_sound(
+                "Loop",
+                Some(source.id),
+                100,
+                true,
+                false,
+                Some(-700),
+                &snapshot,
+                &viewports,
+            )
+            .expect("negative-falloff sound starts");
+        let key = SoundInstanceKey::new("Loop", Some(source.id));
+        let info = audio
+            .active_channels
+            .get_mut(&key)
+            .expect("channel info retains the sound");
+        assert_eq!(info.custom_falloff, Some(-700));
+        let (volume, pan) = compute_mix_values(info, &snapshot, &viewports);
+        assert_eq!(volume, 1.0);
+        assert_eq!(pan, 1.0);
+    }
+
+    #[test]
     fn compute_mix_values_for_global_sound_preserves_base_mix() {
         let listener = make_object(1, "Listener", Vector2::new(0, 0));
         let snapshot = make_snapshot(
