@@ -192,20 +192,22 @@ worktrees had independently compiled the 162k-line `lc-app` harness while a
 workspace gate was running; one observed contended gate took 50.92s to compile
 and 73.736s to execute, with host load around 25--30 on 16 logical cores. That
 sample is evidence of contention, not a profile baseline. The shared worker
-protocol now serializes the authoritative rebase, workspace gate, and fast-
-forward with the merge lock, and omits the redundant whole-crate working-phase
-suite before that final gate. Scoped diagnostics do not acquire a second lock,
-but do not start while a landing gate owns the machine.
+protocol uses `queue/merge.lock` as its only build slot. Every Cargo, rustc,
+and nextest invocation acquires it with 5 ms polling and releases it promptly,
+while source inspection and editing remain lock-free. The authoritative
+rebase, workspace gate, and fast-forward hold the same lock as one operation,
+and the redundant whole-crate working-phase suite remains omitted.
 
 A live follow-up exposed the remaining release/acquire race: scoped work could
 start just after one landing released the lock while the next landing acquired
 it, causing both to run together. One nearly cached 8,120-test gate then took
 129.299s to execute, versus 61.360s for a nearby 8,112-test gate; the samples
 differ by eight tests and are directional contention evidence, not a test-code
-A/B. After acquiring the existing merge lock, a landing worker now polls at
-5ms until pre-existing Cargo, rustc, and nextest processes drain. The held lock
-prevents new compliant diagnostics from starting, without introducing another
-lock or adding a redundant test pass.
+A/B. After acquiring the existing merge lock, a landing worker also polls at
+5 ms until pre-existing Cargo, rustc, and nextest processes drain. This is a
+transition guard for commands launched by workers following an older protocol;
+the held lock prevents new compliant diagnostics from starting without a
+second lock or a redundant test pass.
 
 With the host build slot isolated, a same-source, one-line incremental app
 change compared warmed test-profile artifacts (`n = 1` each):
@@ -395,6 +397,37 @@ the favorable sample saved only 1.76s, below the 3s acceptance threshold, and
 the candidate rlib was only 0.63% smaller. Since level 2 lacked evidence of a
 material compile win and could slow simulation-heavy tests, the override was
 not adopted and no runtime tradeoff was taken.
+
+### Tutorial07 scheduling and host-state follow-up
+
+Five seed-zero Tutorial07 integration assertions repeated the same immutable
+scenario preparation, but an exact same-host A/B rejected batching them. The
+five parallel processes passed in 2.299s with 7.112s of aggregate testcase
+work; two batches passed in 2.448s with 4.086s aggregate. Their wrapper builds
+were equivalent at 6.25s and 6.18s. The 42.5% aggregate-work reduction did not
+offset the lost process parallelism, so the measured 6.5% elapsed regression
+keeps all five original process and test-ID boundaries.
+
+Those five Tutorial07 tests and four real-resource frontend tests previously
+started near the end of the cached suite. They now share the priority-60
+scenario tier. This changes only start order and retains every independent
+process and exact test ID.
+
+A further Goldrush/Drachenfels consolidation was rejected by an exact
+same-host, same-cache A/B. The parent configuration's eight processes passed
+in 9.201s after a 6.05s wrapper build; five merged processes took 11.491s after
+an equivalent 6.06s build. Drachenfels' own slowest process also rose from
+6.873s to 7.110s. The measured 24.9% family regression outweighed the removed
+scenario preparations, so those process boundaries remain unchanged.
+
+The preceding rebased workspace gate's 127s compile, 176.742s nextest phase,
+and 310.20s command wall time are not a code-performance baseline. It ran with
+AC Low Power Mode active during a display-off dark wake and sustained elevated
+thermal pressure. No competing worktree produced Rust artifacts in the gate
+window, its inventory grew by only 0.14%, and its profiles, feature graph,
+linker, and artifact sizes did not regress. Authoritative gates now run under
+`caffeinate` and retain nextest JUnit timings through the `profiling` profile;
+power-mode state must still be recorded before comparing samples.
 
 The first local reference baseline was recorded on 2026-07-12 from
 `dd32e5d3` with content `67a54d0`, Rust 1.87.0, macOS/Darwin arm64, and an
