@@ -792,6 +792,7 @@ impl NativeClonkFont {
                     surface,
                     cell,
                     raw_height,
+                    self.raster.texture_size(),
                     pen_x,
                     pen_y,
                     f64::from(raw_width) * quad_scale_x,
@@ -950,6 +951,7 @@ fn blit_scaled_native_glyph<T: SurfaceDrawTarget + ?Sized>(
     surface: &mut T,
     cell: &GlyphCell,
     source_height: i32,
+    physical_texture_size: i32,
     x: f64,
     y: f64,
     width: f64,
@@ -977,6 +979,7 @@ fn blit_scaled_native_glyph<T: SurfaceDrawTarget + ?Sized>(
         shear,
         modulation,
         color_alpha,
+        Some(physical_texture_size),
     );
 }
 
@@ -1005,6 +1008,7 @@ fn blit_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
         shear,
         modulation,
         color_alpha,
+        None,
     );
 }
 
@@ -1020,16 +1024,31 @@ fn draw_scaled_native_image<T: SurfaceDrawTarget + ?Sized>(
     shear: f64,
     modulation: [u8; 3],
     color_alpha: u8,
+    physical_texture_size: Option<i32>,
 ) {
-    crate::draw_image_bilinear_sheared_target(
-        surface,
-        &GuiRect::new(x as f32, y as f32, width as f32, height as f32),
-        &image,
-        gamma,
-        shear as f32,
-        modulation,
-        color_alpha,
-    );
+    let rect = GuiRect::new(x as f32, y as f32, width as f32, height as f32);
+    if let Some(physical_texture_size) = physical_texture_size {
+        crate::draw_image_bilinear_sheared_target_on_texture(
+            surface,
+            &rect,
+            &image,
+            gamma,
+            shear as f32,
+            modulation,
+            color_alpha,
+            physical_texture_size,
+        );
+    } else {
+        crate::draw_image_bilinear_sheared_target(
+            surface,
+            &rect,
+            &image,
+            gamma,
+            shear as f32,
+            modulation,
+            color_alpha,
+        );
+    }
 }
 
 /// The five GUI fonts rasterized at the application's physical output scale.
@@ -1309,6 +1328,23 @@ fn loaded_glyph_cell(
     })
 }
 
+fn vector_font_texture_size(raster_height: u32) -> u32 {
+    if raster_height > 40 {
+        512
+    } else {
+        128
+    }
+}
+
+fn surface_texture_size(width: u32, height: u32) -> u32 {
+    width
+        .min(height)
+        .max(2)
+        .checked_next_power_of_two()
+        .unwrap_or(4096)
+        .min(4096)
+}
+
 /// Rasterizes one ClonkFont at `px_height` from `face`.
 fn build_font(
     face: &freetype::Face,
@@ -1338,6 +1374,7 @@ fn build_font(
     let ascent_px = i64::from(px_height) * i64::from(ascender) / i64::from(units_per_em);
 
     let mut font = ClonkFont::new(line_height);
+    font.set_texture_size(vector_font_texture_size(px_height));
     font.cell_height = cell_height as i32;
     font.h_space = if shadow { -1 } else { 0 };
     for ch in classic_font_characters(face) {
@@ -1526,6 +1563,7 @@ fn build_native_font(
     let ascent_px = i64::from(raster_height) * i64::from(ascender) / i64::from(units_per_em);
 
     let mut font = ClonkFont::new(line_height);
+    font.set_texture_size(vector_font_texture_size(raster_height));
     // iHSpace remains -1 GUI unit in C++. The existing physical-run blitter
     // accepts integer pen positions, so retain exact integer-scale behavior
     // and use the nearest physical spacing at fractional scales. Logical
@@ -1671,6 +1709,7 @@ pub fn build_prerendered_font(
         gfx_line_height += 1;
     }
     let mut font = ClonkFont::new(gfx_line_height as i32 - indent);
+    font.set_texture_size(surface_texture_size(width, height));
     font.cell_height = gfx_line_height as i32;
     font.h_space = -indent;
 

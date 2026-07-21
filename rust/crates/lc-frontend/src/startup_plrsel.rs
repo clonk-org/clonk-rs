@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use freetype::face::LoadFlag;
 use freetype::Library;
 use lc_graphics::clonk_font::{line_height_for, ClonkFont, ClonkFontRole, GlyphCell, TextAlign};
-use lc_graphics::{Color, GammaRamp, Surface};
+use lc_graphics::{BlitSampling, Color, GammaRamp, Rect as SurfaceRect, Surface};
 use lc_gui::Rect as GuiRect;
 use lc_resources::{PhysicalInfo, C4_MAX_PHYSICAL};
 
@@ -503,6 +503,30 @@ fn draw_box_dw(
     clr: u32,
     gamma: Option<&GammaRamp>,
 ) {
+    if crate::active_advanced_renderer_config()
+        .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
+    {
+        if x2 < x1 || y2 < y1 {
+            return;
+        }
+        crate::draw_color_rect(
+            surface,
+            SurfaceRect::new(
+                x1,
+                y1,
+                x2.saturating_sub(x1).saturating_add(1) as u32,
+                y2.saturating_sub(y1).saturating_add(1) as u32,
+            ),
+            Color::new(
+                (clr >> 16) as u8,
+                (clr >> 8) as u8,
+                clr as u8,
+                255 - (clr >> 24) as u8,
+            ),
+            gamma,
+        );
+        return;
+    }
     let a_inv = ((clr >> 24) & 0xff) as f32 / 255.0;
     let opacity = 1.0 - a_inv;
     let enc =
@@ -625,6 +649,22 @@ fn draw_image_strip_modulated(
     mod_clr: u32,
     gamma: Option<&GammaRamp>,
 ) {
+    if crate::draw_image_source_modulated_with_active_renderer_config(
+        surface,
+        &GuiRect::new(
+            dest_x as f32,
+            dest_y as f32,
+            image.width() as f32,
+            image.height() as f32,
+        ),
+        image,
+        (0.0, 0.0, image.width() as f32, image.height() as f32),
+        BlitSampling::Nearest,
+        mod_clr,
+        gamma,
+    ) {
+        return;
+    }
     let mod_rgb = [(mod_clr >> 16) as u8, (mod_clr >> 8) as u8, mod_clr as u8];
     let mod_a = (mod_clr >> 24) as u8;
     let px = image.pixels();
@@ -731,6 +771,17 @@ fn draw_image_bilinear_modulated(
     mod_clr: u32,
     gamma: Option<&GammaRamp>,
 ) {
+    if crate::draw_image_source_modulated_with_active_renderer_config(
+        surface,
+        rect,
+        image,
+        (0.0, 0.0, image.width() as f32, image.height() as f32),
+        BlitSampling::Linear,
+        mod_clr,
+        gamma,
+    ) {
+        return;
+    }
     if rect.size.width <= 0.0
         || rect.size.height <= 0.0
         || image.width() == 0

@@ -171,8 +171,8 @@ use lc_graphics::clonk_font::{
     font_image_lookup_tag, inline_image_token, FontImageProvider, FontImageRef,
 };
 use lc_graphics::{
-    BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, RgbaSurfaceViewMut,
-    Surface, TextFont, Transform, TrueTypeFont,
+    BitmapFont, BlitMode, Color, GpuGammaMode, PixelFormat, Point as SurfacePoint, Rect,
+    RgbaSurfaceViewMut, Surface, TextFont, Transform, TrueTypeFont,
 };
 use lc_gui::{ButtonTextures, Rect as GuiRect};
 use lc_network::{
@@ -4497,29 +4497,19 @@ fn validate_classic_loader_graphics_config(paths: &AppPaths) -> Result<()> {
     Ok(())
 }
 
-fn load_classic_loader_gamma(paths: Option<&AppPaths>) -> Option<lc_graphics::GammaRamp> {
-    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
-    let disabled = config
-        .as_ref()
-        .and_then(|config| config.get_in(Some("Graphics"), "DisableGamma"))
-        .and_then(parse_classic_loader_bool)
-        .unwrap_or(false);
-    if disabled {
+fn load_classic_loader_gamma_from_native(config: &[u8]) -> Option<lc_graphics::GammaRamp> {
+    if load_advanced_renderer_config(config).disable_gamma {
         return None;
     }
-    let parse_color = |key: &str, default: u32| {
-        config
-            .as_ref()
-            .and_then(|config| config.get_in(Some("Graphics"), key))
-            .and_then(parse_classic_loader_i32)
-            .map(|value| value as u32)
-            .unwrap_or(default)
-    };
     Some(lc_graphics::GammaRamp::from_control_points([
-        parse_color("Gamma1", 0x000000),
-        parse_color("Gamma2", 0x808080),
-        parse_color("Gamma3", 0xffffff),
+        startup_config_integer(config, "Graphics", "Gamma1", 0x000000) as u32,
+        startup_config_integer(config, "Graphics", "Gamma2", 0x808080) as u32,
+        startup_config_integer(config, "Graphics", "Gamma3", 0xffffff) as u32,
     ]))
+}
+
+fn load_classic_loader_gamma(paths: Option<&AppPaths>) -> Option<lc_graphics::GammaRamp> {
+    load_classic_loader_gamma_from_native(&load_native_config_bytes(paths))
 }
 
 fn startup_loader_registrations(paths: &AppPaths) -> Result<Vec<LoaderGroupRegistration>> {
@@ -7553,6 +7543,109 @@ fn startup_config_integer(config: &[u8], section: &str, key: &str, default: i32)
         .unwrap_or(default)
 }
 
+fn narrow_startup_strtoul_value(value: u128, negative: bool) -> u32 {
+    // C++'s DWord INI overload parses through native `unsigned long` before
+    // narrowing to uint32_t. Keep Unix-64's wider parse range and Windows /
+    // 32-bit saturation boundary, including unsigned negation.
+    #[cfg(all(not(windows), target_pointer_width = "64"))]
+    {
+        if value > u128::from(u64::MAX) {
+            return u64::MAX as u32;
+        }
+        let value = value as u64;
+        (if negative {
+            value.wrapping_neg()
+        } else {
+            value
+        }) as u32
+    }
+    #[cfg(any(windows, target_pointer_width = "32"))]
+    {
+        if value > u128::from(u32::MAX) {
+            return u32::MAX;
+        }
+        let value = value as u32;
+        if negative {
+            value.wrapping_neg()
+        } else {
+            value
+        }
+    }
+}
+
+fn parse_startup_config_unsigned(value: &[u8]) -> Option<u32> {
+    let start = value
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+        .unwrap_or(value.len());
+    let value = &value[start..];
+    // C4's parser selects the radix before strtoul consumes an optional sign.
+    // Consequently `-0x10` is decimal zero (the leading `0` is consumed).
+    let radix = if value.first() == Some(&b'0')
+        && value
+            .get(1)
+            .is_some_and(|byte| byte.eq_ignore_ascii_case(&b'x'))
+    {
+        16_u128
+    } else {
+        10_u128
+    };
+    let (negative, unsigned) = match value.first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    let digits = if radix == 16 {
+        unsigned.get(2..).unwrap_or_default()
+    } else {
+        unsigned
+    };
+    let mut parsed = 0_u128;
+    let mut consumed = radix == 16;
+    for byte in digits.iter().copied() {
+        let digit = match byte {
+            b'0'..=b'9' => u128::from(byte - b'0'),
+            b'a'..=b'f' if radix == 16 => u128::from(byte - b'a') + 10,
+            b'A'..=b'F' if radix == 16 => u128::from(byte - b'A') + 10,
+            _ => break,
+        };
+        if digit >= radix {
+            break;
+        }
+        parsed = parsed.saturating_mul(radix).saturating_add(digit);
+        consumed = true;
+    }
+    consumed.then(|| narrow_startup_strtoul_value(parsed, negative))
+}
+
+fn startup_config_unsigned(config: &[u8], section: &str, key: &str, default: u32) -> u32 {
+    lc_app::configured_native_scalar(config, section, key)
+        .and_then(parse_startup_config_unsigned)
+        .unwrap_or(default)
+}
+
+fn load_advanced_renderer_config(config: &[u8]) -> lc_frontend::AdvancedRendererConfig {
+    let defaults = lc_frontend::AdvancedRendererConfig::DEFAULT;
+    let boolean = |key: &str, default: bool| {
+        lc_app::configured_native_boolean(config, "Graphics", key).unwrap_or(default)
+    };
+    lc_frontend::AdvancedRendererConfig {
+        no_alpha_add: boolean("NoAlphaAdd", defaults.no_alpha_add),
+        no_box_fades: boolean("NoBoxFades", defaults.no_box_fades),
+        tex_indent: startup_config_integer(config, "Graphics", "TexIndent", defaults.tex_indent),
+        blit_offset: startup_config_integer(config, "Graphics", "BlitOffset", defaults.blit_offset),
+        allowed_blit_modes: startup_config_unsigned(
+            config,
+            "Graphics",
+            "AllowedBlitModes",
+            defaults.allowed_blit_modes,
+        ),
+        shader: boolean("Shader", defaults.shader),
+        use_shader_gamma: boolean("UseShaderGamma", defaults.use_shader_gamma),
+        disable_gamma: boolean("DisableGamma", defaults.disable_gamma),
+    }
+}
+
 fn configured_max_refresh_delay_ms(config: &[u8]) -> u64 {
     u64::try_from(startup_config_integer(
         config,
@@ -8311,19 +8404,39 @@ fn main() -> Result<()> {
                     !ordered_native_text && app.can_defer_native_loader_text(presenter.scale());
                 let defer_native_game_messages =
                     !ordered_native_text && app.can_defer_native_game_messages(presenter.scale());
-                let native_game_message_gamma = defer_native_game_messages.then(|| {
-                    app.graphics
-                        .active_gamma_ramp(&app.snapshot.environment.gamma)
-                });
+                let presentation_monitor_gamma = if ordered_native_text {
+                    None
+                } else {
+                    match app.mode {
+                        AppMode::Menu | AppMode::Loading => app.startup_monitor_gamma(),
+                        AppMode::Running => app.graphics.monitor_gamma_enabled().then(|| {
+                            app.graphics
+                                .active_gamma_ramp(&app.snapshot.environment.gamma)
+                        }),
+                    }
+                };
+                let native_game_message_gamma = if defer_native_game_messages {
+                    let active = app
+                        .graphics
+                        .active_gamma_ramp(&app.snapshot.environment.gamma);
+                    Some(if app.graphics.fragment_gamma_enabled() {
+                        active
+                    } else {
+                        lc_graphics::GammaRamp::identity()
+                    })
+                } else {
+                    None
+                };
                 let refreshed = match presenter.present(pixels.frame_mut(), |frame| {
                     if ordered_native_text {
                         app.render_ordered_native_base(frame)
                     } else {
-                        app.render_for_presentation(
+                        app.render_for_presentation_with_monitor_defer(
                             frame,
                             defer_native_main_text,
                             defer_native_loader_text,
                             defer_native_game_messages,
+                            true,
                         )
                     }
                 }) {
@@ -8374,6 +8487,11 @@ fn main() -> Result<()> {
                         tracing::error!(error = ?err, "native game-message render failed");
                         control_flow.set_exit();
                         return;
+                    }
+                }
+                if refreshed {
+                    if let Some(gamma) = presentation_monitor_gamma.as_ref() {
+                        gamma.apply_to_rgba_bytes(pixels.frame_mut());
                     }
                 }
                 while !app.pending_screenshots.is_empty() {
@@ -8463,6 +8581,16 @@ fn main() -> Result<()> {
             }
         }
     });
+}
+
+fn retained_gpu_gamma_mode(config: lc_frontend::AdvancedRendererConfig) -> GpuGammaMode {
+    if config.disable_gamma {
+        GpuGammaMode::Disabled
+    } else if config.shader && config.use_shader_gamma {
+        GpuGammaMode::Fragment
+    } else {
+        GpuGammaMode::Monitor
+    }
 }
 
 fn render_retained_gpu_running_frame(
@@ -18368,6 +18496,7 @@ impl NetworkLobbyState {
         scenario_game_options: &GameOptionButtons,
         include_tooltips: bool,
         active: bool,
+        gamma: &lc_graphics::GammaRamp,
     ) -> Result<()> {
         let resources = assets.game_lobby_resources()?;
         let option_resources = assets.game_option_resources()?;
@@ -18380,7 +18509,7 @@ impl NetworkLobbyState {
                 &options,
                 &option_resources,
                 active,
-                Some(startup_gamma()),
+                Some(gamma),
             )
         } else {
             controller.render_without_tooltips(
@@ -18389,7 +18518,7 @@ impl NetworkLobbyState {
                 &options,
                 &option_resources,
                 active,
-                Some(startup_gamma()),
+                Some(gamma),
             )
         };
         self.resource_scroll = controller.resource_scroll();
@@ -18402,6 +18531,7 @@ impl NetworkLobbyState {
         surface: &mut Surface,
         assets: &FrontendAssets,
         scenario_game_options: &GameOptionButtons,
+        gamma: &lc_graphics::GammaRamp,
     ) -> Result<()> {
         let resources = assets.game_lobby_resources()?;
         let option_resources = assets.game_option_resources()?;
@@ -18413,7 +18543,7 @@ impl NetworkLobbyState {
             &options,
             &option_resources,
             true,
-            Some(startup_gamma()),
+            Some(gamma),
         )
     }
 
@@ -26033,6 +26163,8 @@ impl GameApp {
         // other UTF-8 convenience writer can rewrite the config projection.
         // Both values are process-local in C++ and fixed before startup UI.
         let native_config = load_native_config_bytes(paths);
+        let advanced_renderer_config = load_advanced_renderer_config(&native_config);
+        let loader_gamma = load_classic_loader_gamma_from_native(&native_config);
         let gamepads_enabled = configured_gamepads_enabled(&native_config);
         let allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
         let process_group_maker = configured_process_group_maker(&native_config);
@@ -26237,7 +26369,18 @@ impl GameApp {
         let mut main_menu = StartupMainMenu::new(assets.font_arc(), button_textures.clone());
         main_menu.set_highlight_texture(assets.button_highlight.clone());
         main_menu.set_clonk_fonts(assets.clonk_fonts.clone());
-        main_menu.set_gamma_ramp(Some(Arc::new(lc_graphics::GammaRamp::standard())));
+        main_menu.set_gamma_ramp(
+            (!advanced_renderer_config.disable_gamma
+                && advanced_renderer_config.shader
+                && advanced_renderer_config.use_shader_gamma)
+                .then(|| {
+                    Arc::new(
+                        loader_gamma
+                            .clone()
+                            .unwrap_or_else(lc_graphics::GammaRamp::standard),
+                    )
+                }),
+        );
         main_menu.resize(width as f32, height as f32);
         let participants_label = load_participants_label(paths);
         let main_menu_state = MainMenuState::new(main_menu, participants_label);
@@ -26259,6 +26402,7 @@ impl GameApp {
             assets.cursor_atlas(),
             assets.hud_graphics(),
         );
+        graphics.set_advanced_renderer_config(advanced_renderer_config);
         graphics.set_clonk_fonts(assets.clonk_fonts.clone());
         graphics.set_game_palette(assets.game_palette());
         graphics.set_liquid_animation(assets.liquid_animation());
@@ -26463,7 +26607,7 @@ impl GameApp {
                 DisplayOptions::load(paths).point_filtering,
             )),
             loader_render_error: None,
-            loader_gamma: load_classic_loader_gamma(paths),
+            loader_gamma,
             app_paths: paths.cloned(),
             classic_command_line: ClassicCommandLine::default(),
             console_mode: false,
@@ -28385,11 +28529,19 @@ impl GameApp {
         let Some(plan) = self.pending_native_presentation.take() else {
             return Ok(());
         };
+        let _renderer_config = lc_frontend::activate_advanced_renderer_config(
+            self.graphics.advanced_renderer_config(),
+        );
+        let NativePresentationPlan {
+            batches,
+            monitor_gamma,
+        } = plan;
         let default_fonts = self
             .native_startup_fonts
             .as_deref()
             .context("scale-native font bundle disappeared before presentation")?;
-        for batch in plan.batches {
+        let startup_gamma = self.startup_fragment_gamma();
+        for batch in batches {
             if let Some(layer) = batch.logical_layer {
                 let target = composer.begin_layer();
                 anyhow::ensure!(
@@ -28409,7 +28561,6 @@ impl GameApp {
                 let loader = self.loader_screen.as_ref().ok_or_else(|| {
                     self.loader_boundary("selected classic loader disappeared before presentation")
                 })?;
-                let gamma = self.loader_gamma.as_ref();
                 composer
                     .draw_native(|physical, geometry| -> Result<()> {
                         let (width, height) = geometry.physical_size();
@@ -28420,7 +28571,7 @@ impl GameApp {
                             default_fonts,
                             logical_width,
                             logical_height,
-                            gamma,
+                            Some(&startup_gamma),
                         )?;
                         Ok(())
                     })
@@ -28436,6 +28587,9 @@ impl GameApp {
                 fonts.draw_captured_text_to(&mut surface, &batch.text, geometry.logical_size());
                 Ok(())
             })?;
+        }
+        if let Some(gamma) = monitor_gamma {
+            composer.draw_native(|physical, _| gamma.apply_to_rgba_bytes(physical));
         }
         Ok(())
     }
@@ -29706,6 +29860,7 @@ impl GameApp {
         graphics.inherit_pending_observer_scroll(&self.graphics);
         graphics.inherit_debug_draw_state(&self.graphics);
         graphics.inherit_runtime_sprite_filtering(&self.graphics);
+        graphics.inherit_advanced_renderer_config(&self.graphics);
         graphics.set_clonk_fonts(self.assets.clonk_fonts.clone());
         graphics.set_game_palette(game_palette);
         graphics.set_liquid_animation(liquid_animation);
@@ -50345,7 +50500,12 @@ impl GameApp {
         {
             return None;
         }
-        let inventory = collect_crew_inventory(&self.engine, &self.snapshot, cursor);
+        let inventory = collect_crew_inventory(
+            &self.engine,
+            &self.snapshot,
+            cursor,
+            self.graphics.advanced_renderer_config(),
+        );
         let section = lc_frontend::hud::inventory_region_index(viewport, point, inventory.len())?;
         let region = lc_frontend::hud::inventory_region_rect(viewport, section, inventory.len())?;
         inventory
@@ -64567,9 +64727,25 @@ impl GameApp {
         }
         let point_filtering = DisplayOptions::load(paths).point_filtering;
         self.graphics.set_point_filtering(point_filtering);
+        let advanced_renderer_config = load_advanced_renderer_config(&native_config);
+        self.graphics
+            .set_advanced_renderer_config(advanced_renderer_config);
+        self.loader_gamma = load_classic_loader_gamma_from_native(&native_config);
+        let main_menu_gamma = self.graphics.fragment_gamma_enabled().then(|| {
+            Arc::new(
+                self.loader_gamma
+                    .clone()
+                    .unwrap_or_else(lc_graphics::GammaRamp::standard),
+            )
+        });
+        self.main_menu_state.menu.set_gamma_ramp(main_menu_gamma);
         if let Some(config) = self.loader_render_config {
             self.configure_native_startup_fonts(config.application_scale(), point_filtering);
         }
+        self.menu_frame_cache = None;
+        self.menu_backdrop_cache = StartupBackdropCache::default();
+        self.startup_dialog_fade = None;
+        self.mark_menu_dirty();
     }
 
     fn process_options_advanced_actions(
@@ -68790,6 +68966,7 @@ impl GameApp {
 
     fn render_inactive_startup_dialog_layer(&mut self, frame: &mut [u8]) -> Result<()> {
         let scenario_loading_label = self.scenario_selector_loading_label();
+        let gamma = self.startup_fragment_gamma();
         render_startup_frame(
             &mut self.graphics,
             self.assets.as_ref(),
@@ -68818,6 +68995,7 @@ impl GameApp {
             self.startup_view_flags,
             &mut self.menu_backdrop_cache,
             false,
+            &gamma,
             frame,
         )
     }
@@ -68828,9 +69006,11 @@ impl GameApp {
             (surface.width(), surface.height())
         };
         let mut underlay = vec![0_u8; width as usize * height as usize * 4];
+        let gamma = self.startup_fragment_gamma();
         render_startup_underlay(
             &mut self.graphics,
             self.assets.as_ref(),
+            &gamma,
             &mut underlay,
         );
         let mut outgoing = vec![0_u8; underlay.len()];
@@ -68896,9 +69076,11 @@ impl GameApp {
             (surface.width(), surface.height())
         };
         let mut underlay = vec![0_u8; width as usize * height as usize * 4];
+        let gamma = self.startup_fragment_gamma();
         render_startup_underlay(
             &mut self.graphics,
             self.assets.as_ref(),
+            &gamma,
             &mut underlay,
         );
         self.startup_dialog_fade = Some(StartupDialogFade {
@@ -76450,7 +76632,11 @@ impl GameApp {
         Ok(true)
     }
 
-    fn render_loading_league_signup_dialog(&self, surface: &mut Surface) -> Result<()> {
+    fn render_loading_league_signup_dialog(
+        &self,
+        surface: &mut Surface,
+        gamma: &lc_graphics::GammaRamp,
+    ) -> Result<()> {
         let Some(dialog) = self.league_signup_dialog.as_ref() else {
             return Ok(());
         };
@@ -76464,12 +76650,16 @@ impl GameApp {
                 surface,
                 resources,
                 self.message_dialogs.is_empty() && self.context_menu.is_none(),
-                self.loader_gamma.as_ref(),
+                Some(gamma),
             )
             .map_err(|error| self.loader_boundary(error.to_string()))
     }
 
-    fn render_loading_league_signup_tooltip(&self, surface: &mut Surface) -> Result<bool> {
+    fn render_loading_league_signup_tooltip(
+        &self,
+        surface: &mut Surface,
+        gamma: &lc_graphics::GammaRamp,
+    ) -> Result<bool> {
         let Some((pointer, text)) =
             self.league_signup_tooltip(surface.width() as i32, surface.height() as i32)
         else {
@@ -76480,13 +76670,7 @@ impl GameApp {
             .global_tooltip_font
             .as_deref()
             .context("classic shadowless tooltip font is unavailable")?;
-        lc_frontend::context_menu::draw_classic_tooltip(
-            surface,
-            font,
-            pointer,
-            &text,
-            self.loader_gamma.as_ref(),
-        );
+        lc_frontend::context_menu::draw_classic_tooltip(surface, font, pointer, &text, Some(gamma));
         Ok(true)
     }
 
@@ -77256,12 +77440,13 @@ impl GameApp {
             .global_tooltip_font
             .as_deref()
             .context("classic shadowless tooltip font is unavailable")?;
+        let gamma = self.startup_fragment_gamma();
         lc_frontend::context_menu::draw_classic_tooltip(
             self.graphics.surface_mut(),
             tooltip_font,
             pointer,
             &text,
-            Some(startup_gamma()),
+            Some(&gamma),
         );
         Ok(true)
     }
@@ -77285,11 +77470,13 @@ impl GameApp {
                         .is_none_or(|wait| !wait.visible) =>
             {
                 let assets = Arc::clone(&self.assets);
+                let gamma = self.startup_fragment_gamma();
                 if let Some(lobby) = self.network_lobby.as_mut() {
                     lobby.render_classic_tooltips(
                         self.graphics.surface_mut(),
                         assets.as_ref(),
                         &self.scenario_game_options,
+                        &gamma,
                     )?;
                     rendered = true;
                 }
@@ -77301,6 +77488,7 @@ impl GameApp {
 
     fn render_classic_host_lobby(&mut self) -> Result<()> {
         self.close_stale_classic_lobby_team_combo();
+        let gamma = self.startup_fragment_gamma();
         let config = self.loader_render_config.ok_or_else(|| {
             classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
                 detail: "loader render configuration is unavailable".to_string(),
@@ -77341,20 +77529,20 @@ impl GameApp {
             && self.message_dialogs.is_empty()
             && self.runtime_client_list.is_none()
             && !self.external_irc_dialog_visible;
-        let gamma = self.loader_gamma.as_ref();
         let surface = self.graphics.surface_mut();
-        loader.render_background(surface, config, gamma);
+        loader.render_background(surface, config, Some(&gamma));
         lobby.controller.render_without_tooltips(
             surface,
             &lobby_resources,
             &self.scenario_game_options,
             &option_resources,
             active,
-            gamma,
+            Some(&gamma),
         )
     }
 
     fn render_classic_host_lobby_tooltips(&mut self) -> Result<()> {
+        let gamma = self.startup_fragment_gamma();
         let assets = Arc::clone(&self.assets);
         let lobby_resources = assets.game_lobby_resources().map_err(|error| {
             classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
@@ -77384,7 +77572,7 @@ impl GameApp {
             &self.scenario_game_options,
             &option_resources,
             active,
-            self.loader_gamma.as_ref(),
+            Some(&gamma),
         )
     }
 
@@ -77635,9 +77823,33 @@ impl GameApp {
         Ok(())
     }
 
-    /// Renders into `frame`; returns whether the frame content is new (a
-    /// replayed menu cache hit returns `false`, letting the caller skip
-    /// any output post-processing).
+    fn startup_active_gamma(&self) -> lc_graphics::GammaRamp {
+        if self.graphics.advanced_renderer_config().disable_gamma {
+            startup_identity_gamma().clone()
+        } else {
+            self.loader_gamma
+                .clone()
+                .unwrap_or_else(|| startup_gamma().clone())
+        }
+    }
+
+    fn startup_fragment_gamma(&self) -> lc_graphics::GammaRamp {
+        if self.graphics.fragment_gamma_enabled() {
+            self.startup_active_gamma()
+        } else {
+            startup_identity_gamma().clone()
+        }
+    }
+
+    fn startup_monitor_gamma(&self) -> Option<lc_graphics::GammaRamp> {
+        self.graphics
+            .monitor_gamma_enabled()
+            .then(|| self.startup_active_gamma())
+    }
+
+    /// Renders into `frame`; returns whether the physical presentation must
+    /// refresh. A raw menu-cache hit still returns `true` when a deferred
+    /// monitor-gamma pass remains to be applied.
     fn render(&mut self, frame: &mut [u8]) -> Result<bool> {
         self.render_for_presentation(frame, false, false, false)
     }
@@ -77673,6 +77885,26 @@ impl GameApp {
         defer_native_loader_text: bool,
         defer_native_game_messages: bool,
     ) -> Result<bool> {
+        self.render_for_presentation_with_monitor_defer(
+            frame,
+            defer_native_main_text,
+            defer_native_loader_text,
+            defer_native_game_messages,
+            false,
+        )
+    }
+
+    fn render_for_presentation_with_monitor_defer(
+        &mut self,
+        frame: &mut [u8],
+        defer_native_main_text: bool,
+        defer_native_loader_text: bool,
+        defer_native_game_messages: bool,
+        defer_monitor_gamma: bool,
+    ) -> Result<bool> {
+        let _renderer_config_guard = lc_frontend::activate_advanced_renderer_config(
+            self.graphics.advanced_renderer_config(),
+        );
         if self.console_mode {
             self.sync_developer_console_view();
             let font = self.assets.font_arc();
@@ -77689,7 +77921,16 @@ impl GameApp {
         }
         match self.mode {
             AppMode::Menu => {
+                let menu_gamma_value = self.startup_fragment_gamma();
+                let menu_gamma = &menu_gamma_value;
+                let monitor_gamma = self.startup_monitor_gamma();
                 let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+                if ordered_native {
+                    self.pending_native_presentation
+                        .as_mut()
+                        .expect("ordered presentation plan is active")
+                        .monitor_gamma = monitor_gamma.clone();
+                }
                 self.advance_startup_player_portrait_thumbnail();
                 self.preflight_startup_presentation()?;
                 self.preflight_visible_gui_overlay_resources()?;
@@ -77748,7 +77989,7 @@ impl GameApp {
                         self.commit_pending_native_base(frame);
                         self.begin_native_text_capture(true);
                     }
-                    let gamma = self.loader_gamma.clone();
+                    let gamma = Some(menu_gamma_value.clone());
                     if self.definition_selector.is_some() {
                         self.render_definition_selector(gamma.as_ref())?;
                         if ordered_native {
@@ -77779,7 +78020,7 @@ impl GameApp {
                         .is_some_and(|dialog| dialog.is_info_only())
                     {
                         self.render_runtime_client_list_layer(
-                            gamma.as_ref().unwrap_or(startup_gamma()),
+                            gamma.as_ref().unwrap_or(menu_gamma),
                             ordered_native,
                         )?;
                     }
@@ -77807,9 +78048,9 @@ impl GameApp {
                     {
                         self.next_pending_native_overlay();
                     }
-                    if self.render_runtime_client_list_tooltip(
-                        gamma.as_ref().unwrap_or(startup_gamma()),
-                    )? && ordered_native
+                    if self
+                        .render_runtime_client_list_tooltip(gamma.as_ref().unwrap_or(menu_gamma))?
+                        && ordered_native
                     {
                         self.next_pending_native_overlay();
                     }
@@ -77838,6 +78079,11 @@ impl GameApp {
                                 surface.height(),
                                 frame,
                             );
+                        }
+                        if !defer_monitor_gamma {
+                            if let Some(gamma) = monitor_gamma.as_ref() {
+                                gamma.apply_to_rgba_bytes(frame);
+                            }
                         }
                     }
                     return Ok(true);
@@ -77901,7 +78147,15 @@ impl GameApp {
                             && cache.frame.len() == frame.len()
                         {
                             frame.copy_from_slice(&cache.frame);
-                            return Ok(false);
+                            if !defer_monitor_gamma {
+                                if let Some(gamma) = monitor_gamma.as_ref() {
+                                    gamma.apply_to_rgba_bytes(frame);
+                                }
+                            }
+                            // A physical post-pass still counts as refreshed:
+                            // the event loop must run it after the cached raw
+                            // logical frame has been copied into the presenter.
+                            return Ok(defer_monitor_gamma && monitor_gamma.is_some());
                         }
                     }
                 }
@@ -77959,6 +78213,7 @@ impl GameApp {
                     self.startup_view_flags,
                     &mut self.menu_backdrop_cache,
                     defer_native_main_text && !fade_was_active,
+                    menu_gamma,
                     frame,
                 )?;
                 if fade_was_active {
@@ -77977,6 +78232,7 @@ impl GameApp {
                         );
                         frame.copy_from_slice(&fade.underlay);
                         let mut plan = NativePresentationPlan::default();
+                        plan.monitor_gamma = monitor_gamma.clone();
                         if outgoing_opacity != 0 {
                             if let Some(outgoing) = fade.outgoing_native_frame.as_deref() {
                                 plan.batches.push(NativePresentationBatch {
@@ -78045,7 +78301,7 @@ impl GameApp {
                         &properties_assets,
                         fonts,
                         &pending.controller,
-                        Some(startup_gamma()),
+                        Some(menu_gamma),
                     );
                 }
                 if ordered_native {
@@ -78053,25 +78309,25 @@ impl GameApp {
                     self.begin_native_text_capture(true);
                 }
                 if definition_selector_open {
-                    self.render_definition_selector(Some(startup_gamma()))?;
+                    self.render_definition_selector(Some(menu_gamma))?;
                     if ordered_native {
                         self.next_pending_native_overlay();
                     }
                 }
                 if game_option_input_open {
-                    self.render_game_option_input_dialog(Some(startup_gamma()))?;
+                    self.render_game_option_input_dialog(Some(menu_gamma))?;
                     if ordered_native {
                         self.next_pending_native_overlay();
                     }
                 }
                 if league_signup_open {
-                    self.render_league_signup_dialog(Some(startup_gamma()))?;
+                    self.render_league_signup_dialog(Some(menu_gamma))?;
                     if ordered_native {
                         self.next_pending_native_overlay();
                     }
                 }
                 if self.external_irc_dialog_visible {
-                    self.render_external_irc_dialog(Some(startup_gamma()))?;
+                    self.render_external_irc_dialog(Some(menu_gamma))?;
                     if ordered_native {
                         self.next_pending_native_overlay();
                     }
@@ -78081,51 +78337,46 @@ impl GameApp {
                     .as_ref()
                     .is_some_and(|dialog| dialog.is_info_only())
                 {
-                    self.render_runtime_client_list_layer(startup_gamma(), ordered_native)?;
+                    self.render_runtime_client_list_layer(menu_gamma, ordered_native)?;
                 }
                 if !self.message_dialogs.is_empty() {
-                    self.render_message_dialogs(Some(startup_gamma()))?;
+                    self.render_message_dialogs(Some(menu_gamma))?;
                 }
                 if ordered_native && !game_option_input_open && self.context_menu.is_some() {
                     self.next_pending_native_overlay();
-                    self.render_ordered_context_menu(Some(startup_gamma()))?;
+                    self.render_ordered_context_menu(Some(menu_gamma))?;
                 } else if fade_was_active && !game_option_input_open {
                     if let Some(context_menu) = self.context_menu.as_ref() {
                         context_menu
-                            .render_panels(self.graphics.surface_mut(), Some(startup_gamma()))?;
+                            .render_panels(self.graphics.surface_mut(), Some(menu_gamma))?;
                     }
                 }
-                let gui_cursor_drawn = self.draw_classic_gui_cursor(Some(startup_gamma()));
+                let gui_cursor_drawn = self.draw_classic_gui_cursor(Some(menu_gamma));
                 if ordered_native && gui_cursor_drawn {
                     self.next_pending_native_overlay();
                 }
-                if self
-                    .render_game_option_input_dialog_tooltip(Some(startup_gamma()))?
-                    && ordered_native
+                if self.render_game_option_input_dialog_tooltip(Some(menu_gamma))? && ordered_native
                 {
                     self.next_pending_native_overlay();
                 }
-                if self.render_runtime_client_list_tooltip(startup_gamma())? && ordered_native {
+                if self.render_runtime_client_list_tooltip(menu_gamma)? && ordered_native {
                     self.next_pending_native_overlay();
                 }
                 let startup_tooltips_drawn = self.render_startup_tooltips()?;
                 if ordered_native && startup_tooltips_drawn {
                     self.next_pending_native_overlay();
                 }
-                if self.render_league_signup_tooltip(Some(startup_gamma()))? && ordered_native {
+                if self.render_league_signup_tooltip(Some(menu_gamma))? && ordered_native {
                     self.next_pending_native_overlay();
                 }
-                if self.render_external_irc_dialog_tooltip(Some(startup_gamma()))? && ordered_native
-                {
+                if self.render_external_irc_dialog_tooltip(Some(menu_gamma))? && ordered_native {
                     self.next_pending_native_overlay();
                 }
-                if self.render_classic_dialog_title_tooltip(Some(startup_gamma()))?
-                    && ordered_native
-                {
+                if self.render_classic_dialog_title_tooltip(Some(menu_gamma))? && ordered_native {
                     self.next_pending_native_overlay();
                 }
-                self.render_message_dialog_tooltip(Some(startup_gamma()))?;
-                if self.render_context_menu_tooltip(Some(startup_gamma())) && ordered_native {
+                self.render_message_dialog_tooltip(Some(menu_gamma))?;
+                if self.render_context_menu_tooltip(Some(menu_gamma)) && ordered_native {
                     self.next_pending_native_overlay();
                 }
                 if !ordered_native
@@ -78157,15 +78408,23 @@ impl GameApp {
                         frame: frame.to_vec(),
                     });
                 }
+                if !ordered_native && !defer_monitor_gamma {
+                    if let Some(gamma) = monitor_gamma.as_ref() {
+                        gamma.apply_to_rgba_bytes(frame);
+                    }
+                }
                 Ok(true)
             }
             AppMode::Loading => self
-                .render_loading(frame, defer_native_loader_text)
+                .render_loading(frame, defer_native_loader_text, defer_monitor_gamma)
                 .map(|()| true),
-            AppMode::Running => {
-                self.render_running(frame, defer_native_game_messages)?;
-                Ok(true)
-            }
+            AppMode::Running => self
+                .render_running_for_presentation(
+                    frame,
+                    defer_native_game_messages,
+                    defer_monitor_gamma,
+                )
+                .map(|()| true),
         }
     }
 
@@ -78175,6 +78434,10 @@ impl GameApp {
         frame_width: u32,
         frame_height: u32,
     ) -> Result<()> {
+        let _renderer_config = lc_frontend::activate_advanced_renderer_config(
+            self.graphics.advanced_renderer_config(),
+        );
+        let gamma = self.startup_fragment_gamma();
         self.preflight_startup_presentation()?;
         self.preflight_visible_gui_overlay_resources()?;
         if self.startup_view != StartupView::MainMenu {
@@ -78213,12 +78476,8 @@ impl GameApp {
         let clipped_top = i32::try_from(viewport_height - frame_height)
             .context("native main-menu viewport offset exceeds C++ integers")?;
         let physical_offset = (0, -clipped_top);
-        self.main_menu_state.render_native_text(
-            &mut surface,
-            fonts,
-            physical_offset,
-            Some(startup_gamma()),
-        );
+        self.main_menu_state
+            .render_native_text(&mut surface, fonts, physical_offset, Some(&gamma));
 
         let (width, height) = (logical.width() as i32, logical.height() as i32);
         if let Some(logo) = self.assets.logo() {
@@ -78232,7 +78491,7 @@ impl GameApp {
                 lc_graphics::clonk_font::TextAlign::Right,
                 true,
                 physical_offset,
-                Some(startup_gamma()),
+                Some(&gamma),
             );
         }
         frame[..expected_len].copy_from_slice(surface.pixels());
@@ -78590,7 +78849,12 @@ impl GameApp {
         ))
     }
 
-    fn render_loading(&mut self, frame: &mut [u8], defer_native_text: bool) -> Result<()> {
+    fn render_loading(
+        &mut self,
+        frame: &mut [u8],
+        defer_native_text: bool,
+        defer_monitor_gamma: bool,
+    ) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
         if let Some(detail) = self.loader_error.as_deref() {
             return Err(self.loader_boundary(detail));
@@ -78601,7 +78865,16 @@ impl GameApp {
         let config = self
             .loader_render_config
             .ok_or_else(|| self.loader_boundary("loader render configuration is unavailable"))?;
+        let gamma_value = self.startup_fragment_gamma();
+        let gamma = &gamma_value;
+        let monitor_gamma = self.startup_monitor_gamma();
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+        if ordered_native {
+            self.pending_native_presentation
+                .as_mut()
+                .expect("ordered presentation plan is active")
+                .monitor_gamma = monitor_gamma.clone();
+        }
         if config.uses_scaling_correction()
             && !defer_native_text
             && !ordered_native
@@ -78636,11 +78909,7 @@ impl GameApp {
                 .loader_screen
                 .as_ref()
                 .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?
-                .render_chrome(
-                    self.graphics.surface_mut(),
-                    config,
-                    self.loader_gamma.as_ref(),
-                );
+                .render_chrome(self.graphics.surface_mut(), config, Some(gamma));
             render.map_err(|error| self.loader_boundary(error.to_string()))?;
 
             // C4GraphicsSystem draws the startup message-board loader before
@@ -78662,37 +78931,31 @@ impl GameApp {
                         .as_ref()
                         .expect("visibility was checked above")
                         .controller
-                        .render(
-                            self.graphics.surface_mut(),
-                            &resources,
-                            true,
-                            self.loader_gamma.as_ref(),
-                        )
+                        .render(self.graphics.surface_mut(), &resources, true, Some(gamma))
                         .map_err(|error| self.loader_boundary(error.to_string()))?;
                 }
                 self.next_pending_native_overlay();
             }
-            let gamma = self.loader_gamma.clone();
-            self.render_league_signup_dialog(gamma.as_ref())
+            self.render_league_signup_dialog(Some(gamma))
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
             if self.league_signup_dialog.is_some() {
                 self.next_pending_native_overlay();
             }
-            self.render_message_dialogs(gamma.as_ref())
+            self.render_message_dialogs(Some(gamma))
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
             if !self.message_dialogs.is_empty() {
                 self.next_pending_native_overlay();
             }
-            if self.draw_classic_gui_cursor(gamma.as_ref()) {
+            if self.draw_classic_gui_cursor(Some(gamma)) {
                 self.next_pending_native_overlay();
             }
             if self
-                .render_league_signup_tooltip(gamma.as_ref())
+                .render_league_signup_tooltip(Some(gamma))
                 .map_err(|error| self.loader_boundary(error.to_string()))?
             {
                 self.next_pending_native_overlay();
             }
-            self.render_message_dialog_tooltip(gamma.as_ref())
+            self.render_message_dialog_tooltip(Some(gamma))
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
             return Ok(());
         }
@@ -78704,9 +78967,9 @@ impl GameApp {
         let mut surface = Surface::from_bytes(width, height, PixelFormat::Rgba8888, frame.to_vec())
             .map_err(|error| self.loader_boundary(error.to_string()))?;
         let render = if defer_native_text {
-            loader.render_chrome(&mut surface, config, self.loader_gamma.as_ref())
+            loader.render_chrome(&mut surface, config, Some(gamma))
         } else {
-            loader.render_with_config(&mut surface, config, self.loader_gamma.as_ref())
+            loader.render_with_config(&mut surface, config, Some(gamma))
         };
         render.map_err(|error| self.loader_boundary(error.to_string()))?;
         if self
@@ -78722,19 +78985,28 @@ impl GameApp {
                 .as_ref()
                 .expect("visibility was checked above")
                 .controller
-                .render(&mut surface, &resources, true, self.loader_gamma.as_ref())
+                .render(&mut surface, &resources, true, Some(gamma))
                 .map_err(|error| self.loader_boundary(error.to_string()))?;
         }
-        self.render_loading_league_signup_dialog(&mut surface)?;
-        self.render_loading_message_dialogs(&mut surface)?;
-        self.draw_classic_gui_cursor_to_surface(&mut surface, self.loader_gamma.as_ref());
-        self.render_loading_league_signup_tooltip(&mut surface)?;
-        self.render_loading_message_dialog_tooltip(&mut surface)?;
+        self.render_loading_league_signup_dialog(&mut surface, gamma)?;
+        self.render_loading_message_dialogs(&mut surface, gamma)?;
+        self.draw_classic_gui_cursor_to_surface(&mut surface, Some(gamma));
+        self.render_loading_league_signup_tooltip(&mut surface, gamma)?;
+        self.render_loading_message_dialog_tooltip(&mut surface, gamma)?;
         frame.copy_from_slice(surface.pixels());
+        if !defer_monitor_gamma {
+            if let Some(gamma) = monitor_gamma.as_ref() {
+                gamma.apply_to_rgba_bytes(frame);
+            }
+        }
         Ok(())
     }
 
-    fn render_loading_message_dialogs(&mut self, surface: &mut Surface) -> Result<()> {
+    fn render_loading_message_dialogs(
+        &mut self,
+        surface: &mut Surface,
+        gamma: &lc_graphics::GammaRamp,
+    ) -> Result<()> {
         if self.message_dialogs.is_empty() {
             return Ok(());
         }
@@ -78756,7 +79028,7 @@ impl GameApp {
                 resources,
                 keyboard_active,
                 mouse_active,
-                self.loader_gamma.as_ref(),
+                Some(gamma),
                 now,
             );
             if let Err(error) = result {
@@ -78767,7 +79039,11 @@ impl GameApp {
         Ok(())
     }
 
-    fn render_loading_message_dialog_tooltip(&mut self, surface: &mut Surface) -> Result<()> {
+    fn render_loading_message_dialog_tooltip(
+        &mut self,
+        surface: &mut Surface,
+        gamma: &lc_graphics::GammaRamp,
+    ) -> Result<()> {
         if self.message_dialogs.is_empty() {
             return Ok(());
         }
@@ -78795,7 +79071,7 @@ impl GameApp {
             surface,
             resources,
             Some(tooltip_pointer),
-            self.loader_gamma.as_ref(),
+            Some(gamma),
         );
         result.map_err(|error| self.loader_boundary(error.to_string()))
     }
@@ -78806,7 +79082,11 @@ impl GameApp {
         frame_width: u32,
         frame_height: u32,
     ) -> Result<()> {
+        let _renderer_config = lc_frontend::activate_advanced_renderer_config(
+            self.graphics.advanced_renderer_config(),
+        );
         self.reject_classic_global_gui_bootstrap()?;
+        let gamma = self.startup_fragment_gamma();
         let loader = self
             .loader_screen
             .as_ref()
@@ -78849,7 +79129,7 @@ impl GameApp {
                 fonts,
                 logical.width(),
                 logical.height(),
-                self.loader_gamma.as_ref(),
+                Some(&gamma),
             )
             .map_err(|error| self.loader_boundary(error.to_string()))?;
         frame.copy_from_slice(surface.pixels());
@@ -78862,6 +79142,9 @@ impl GameApp {
         geometry: lc_scaling::PresentationGeometry,
         gamma: &lc_graphics::GammaRamp,
     ) -> Result<()> {
+        let _renderer_config = lc_frontend::activate_advanced_renderer_config(
+            self.graphics.advanced_renderer_config(),
+        );
         if self.mode != AppMode::Running || self.snapshot.hud.messages.is_empty() {
             return Ok(());
         }
@@ -79061,20 +79344,34 @@ impl GameApp {
         let gamma = self
             .graphics
             .active_gamma_ramp(&self.snapshot.environment.gamma);
+        let renderer_config = self.graphics.advanced_renderer_config();
+        let gamma_mode = retained_gpu_gamma_mode(renderer_config);
         self.graphics.begin_gpu_scene_capture();
         let mut ignored_cpu_pixel = [0_u8; 4];
-        if let Err(error) = self.render_running(&mut ignored_cpu_pixel, false) {
+        if let Err(error) =
+            self.render_running_for_presentation(&mut ignored_cpu_pixel, false, true)
+        {
             let _ = self.graphics.finish_gpu_scene_capture(&gamma);
             return Err(error);
         }
-        let scene = self
+        let mut scene = self
             .graphics
             .finish_gpu_scene_capture(&gamma)
             .ok_or_else(|| anyhow!("GPU scene capture ended before presentation"))?;
+        scene.gamma_mode = gamma_mode;
         Ok(scene)
     }
 
     fn render_running(&mut self, frame: &mut [u8], defer_native_game_messages: bool) -> Result<()> {
+        self.render_running_for_presentation(frame, defer_native_game_messages, false)
+    }
+
+    fn render_running_for_presentation(
+        &mut self,
+        frame: &mut [u8],
+        defer_native_game_messages: bool,
+        defer_monitor_gamma: bool,
+    ) -> Result<()> {
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         self.graphics.set_renderer_config(
             self.display_flags.show_player_hud_always,
@@ -79214,9 +79511,24 @@ impl GameApp {
         // runtime SetGamma controls for the next pass. C++ draws every GUI
         // overlay below with this same pre-latch ramp
         // (C4GraphicsSystem.cpp:160-199).
-        let frame_gamma = self
+        let active_gamma = self
             .graphics
             .active_gamma_ramp(&self.snapshot.environment.gamma);
+        let monitor_gamma = self
+            .graphics
+            .monitor_gamma_enabled()
+            .then(|| active_gamma.clone());
+        let frame_gamma = if self.graphics.fragment_gamma_enabled() {
+            active_gamma
+        } else {
+            lc_graphics::GammaRamp::identity()
+        };
+        if ordered_native {
+            self.pending_native_presentation
+                .as_mut()
+                .expect("ordered presentation plan is active")
+                .monitor_gamma = monitor_gamma.clone();
+        }
         let mut value_footer_players = Vec::new();
         for &menu_owner in &script_menu_owners {
             let player = self
@@ -79249,7 +79561,12 @@ impl GameApp {
         } else {
             Vec::new()
         };
-        populate_crew_inventories(&self.engine, &self.snapshot, &mut players);
+        populate_crew_inventories(
+            &self.engine,
+            &self.snapshot,
+            &mut players,
+            self.graphics.advanced_renderer_config(),
+        );
         self.populate_crew_infos(&mut players);
         self.populate_crew_portraits(&mut players);
         // Command rows for the local player's real cursor
@@ -79353,14 +79670,14 @@ impl GameApp {
                 &mut self.pending_native_presentation,
             );
             self.graphics
-                .render_frame_hud_chrome_without_atlas(pending_chrome);
+                .render_frame_hud_chrome_without_atlas_deferred_monitor_gamma(pending_chrome);
             Self::next_native_overlay_parts(
                 &mut self.graphics,
                 &mut self.pending_native_presentation,
             );
         } else {
             self.graphics
-                .render_frame_without_atlas(&self.snapshot, &viewports);
+                .render_frame_without_atlas_deferred_monitor_gamma(&self.snapshot, &viewports);
         }
         // C4Viewport::AdjustPosition consumes ViewOffs for an ownerless
         // physical viewport after each successful draw, even when film mode
@@ -79510,11 +79827,13 @@ impl GameApp {
                     error
                 })?;
                 let hud_graphics = self.current_hud_graphics();
+                let allowed_blit_modes =
+                    self.graphics.advanced_renderer_config().allowed_blit_modes;
                 let item_icons = menu
                     .items
                     .iter()
                     .map(|item| {
-                        object_menu_item_picture_with_text_spec_resources(
+                        object_menu_item_picture_with_renderer_modes(
                             &self.engine,
                             &self.snapshot,
                             item,
@@ -79522,6 +79841,7 @@ impl GameApp {
                             &hud_graphics,
                             menu.style,
                             text_spec_resources,
+                            allowed_blit_modes,
                         )
                     })
                     .collect::<Vec<_>>();
@@ -80394,6 +80714,11 @@ impl GameApp {
         }
 
         if !ordered_native {
+            if !defer_monitor_gamma {
+                if let Some(gamma) = monitor_gamma.as_ref() {
+                    self.graphics.apply_monitor_gamma(gamma);
+                }
+            }
             let surface = self.graphics.surface();
             let pixels = surface.pixels();
             if pixels.len() == frame.len() {
@@ -82059,6 +82384,8 @@ impl GameApp {
             self.assets.hud_graphics(),
         );
         graphics.inherit_liquid_animation_cycle(&self.graphics);
+        graphics.inherit_runtime_sprite_filtering(&self.graphics);
+        graphics.inherit_advanced_renderer_config(&self.graphics);
         self.graphics = graphics;
         self.graphics
             .set_clonk_fonts(self.assets.clonk_fonts.clone());
@@ -85042,6 +85369,8 @@ impl GameApp {
             hud_graphics,
         );
         graphics.inherit_liquid_animation_cycle(&self.graphics);
+        graphics.inherit_runtime_sprite_filtering(&self.graphics);
+        graphics.inherit_advanced_renderer_config(&self.graphics);
         self.graphics = graphics;
         self.graphics
             .set_clonk_fonts(self.assets.clonk_fonts.clone());
@@ -85190,6 +85519,9 @@ impl GameApp {
 #[derive(Clone, Default)]
 struct NativePresentationPlan {
     batches: Vec<NativePresentationBatch>,
+    /// CStdGL's non-shader path installs one monitor ramp after every raster
+    /// and scale-native text layer has reached the physical framebuffer.
+    monitor_gamma: Option<lc_graphics::GammaRamp>,
 }
 
 #[derive(Clone)]
@@ -85397,7 +85729,7 @@ fn draw_scensel_map_dynamic(
     button_down: &ImageData,
     fonts: &lc_frontend::ClonkFontSet,
     book_fonts: &lc_frontend::startup_scensel::BookFontSet,
-    gamma: &'static lc_graphics::GammaRamp,
+    gamma: &lc_graphics::GammaRamp,
     draw_focus: bool,
     title: &str,
 ) -> Result<()> {
@@ -85599,7 +85931,7 @@ fn draw_scensel_dynamic(
     fonts: &lc_frontend::ClonkFontSet,
     book_fonts: &lc_frontend::startup_scensel::BookFontSet,
     loading_label: Option<&str>,
-    gamma: &'static lc_graphics::GammaRamp,
+    gamma: &lc_graphics::GammaRamp,
     draw_focus: bool,
 ) -> Result<()> {
     use lc_frontend::startup_scensel as scensel;
@@ -85925,9 +86257,15 @@ fn startup_gamma() -> &'static lc_graphics::GammaRamp {
     STARTUP_GAMMA.get_or_init(lc_graphics::GammaRamp::standard)
 }
 
+fn startup_identity_gamma() -> &'static lc_graphics::GammaRamp {
+    static IDENTITY_GAMMA: std::sync::OnceLock<lc_graphics::GammaRamp> = std::sync::OnceLock::new();
+    IDENTITY_GAMMA.get_or_init(lc_graphics::GammaRamp::identity)
+}
+
 fn render_startup_underlay(
     graphics: &mut GraphicsSystem,
     assets: &FrontendAssets,
+    gamma: &lc_graphics::GammaRamp,
     frame: &mut [u8],
 ) {
     let surface = graphics.surface_mut();
@@ -85936,16 +86274,10 @@ fn render_startup_underlay(
             GuiPoint::new(0.0, 0.0),
             lc_gui::Size::new(surface.width() as f32, surface.height() as f32),
         );
-        lc_frontend::draw_image_bilinear(
-            surface,
-            &rect,
-            &background,
-            Some(startup_gamma()),
-        );
+        lc_frontend::draw_image_bilinear(surface, &rect, &background, Some(gamma));
     } else {
         surface.fill(Color::opaque(0, 0, 0));
     }
-    startup_gamma().apply_to_surface(surface);
     if surface.pixels().len() == frame.len() {
         frame.copy_from_slice(surface.pixels());
     } else {
@@ -85984,6 +86316,7 @@ fn render_startup_frame(
     flags: StartupViewFlags,
     backdrop: &mut StartupBackdropCache,
     defer_native_main_text: bool,
+    gamma: &lc_graphics::GammaRamp,
     frame: &mut [u8],
 ) -> Result<()> {
     if view == StartupView::MainMenu {
@@ -86015,7 +86348,7 @@ fn render_startup_frame(
                         &dlg_assets,
                         fonts,
                         dialog,
-                        Some(startup_gamma()),
+                        Some(gamma),
                         !context_menu_open
                             && !definition_selector_open
                             && !game_option_input_open
@@ -86053,7 +86386,7 @@ fn render_startup_frame(
                                 surface.height() as f32 + 2.0,
                             ),
                             &dlg_assets.background,
-                            Some(startup_gamma()),
+                            Some(gamma),
                         );
                         draw_scensel_map_dynamic(
                             surface,
@@ -86062,7 +86395,7 @@ fn render_startup_frame(
                             button_down,
                             fonts,
                             book_fonts,
-                            startup_gamma(),
+                            gamma,
                             draw_focus,
                             title,
                         )?;
@@ -86076,7 +86409,7 @@ fn render_startup_frame(
                                 surface,
                                 &dlg_assets,
                                 fonts,
-                                Some(startup_gamma()),
+                                Some(gamma),
                             );
                         });
                         // CStdFont glyphs are semantic commands during
@@ -86087,7 +86420,7 @@ fn render_startup_frame(
                             surface,
                             fonts,
                             title,
-                            Some(startup_gamma()),
+                            Some(gamma),
                         );
                         draw_scensel_dynamic(
                             surface,
@@ -86098,7 +86431,7 @@ fn render_startup_frame(
                             fonts,
                             book_fonts,
                             scenario_loading_label,
-                            startup_gamma(),
+                            gamma,
                             draw_focus,
                         )?;
                     }
@@ -86112,7 +86445,7 @@ fn render_startup_frame(
                             && !definition_selector_open
                             && !game_option_input_open
                             && !message_dialog_open,
-                        Some(startup_gamma()),
+                        Some(gamma),
                     )?;
                     true
                 }
@@ -86128,7 +86461,7 @@ fn render_startup_frame(
                         surface,
                         &dlg_assets,
                         fonts,
-                        Some(startup_gamma()),
+                        Some(gamma),
                         dialog,
                         0,
                         !context_menu_open
@@ -86154,6 +86487,7 @@ fn render_startup_frame(
                             && !definition_selector_open
                             && !game_option_input_open
                             && !message_dialog_open,
+                        gamma,
                     )?;
                     true
                 }
@@ -86172,7 +86506,7 @@ fn render_startup_frame(
                         fonts,
                         book,
                         dialog,
-                        Some(startup_gamma()),
+                        Some(gamma),
                         options_draw_focus,
                     );
                     if let Some(controller) = options_advanced {
@@ -86185,7 +86519,7 @@ fn render_startup_frame(
                             fonts,
                             controller,
                             !message_dialog_open,
-                            Some(startup_gamma()),
+                            Some(gamma),
                         )?;
                     }
                     true
@@ -86212,7 +86546,7 @@ fn render_startup_frame(
                             && !definition_selector_open
                             && !game_option_input_open
                             && !message_dialog_open,
-                        Some(startup_gamma()),
+                        Some(gamma),
                     );
                     true
                 }
@@ -86222,9 +86556,8 @@ fn render_startup_frame(
         };
         if parity_rendered {
             if let Some(context_menu) = context_menu {
-                context_menu.render_panels(surface, Some(startup_gamma()))?;
+                context_menu.render_panels(surface, Some(gamma))?;
             }
-            startup_gamma().apply_to_surface(surface);
             let surface = graphics.surface();
             let pixels = surface.pixels();
             if pixels.len() == frame.len() {
@@ -86259,12 +86592,7 @@ fn render_startup_frame(
                     GuiPoint::new(0.0, 0.0),
                     lc_gui::Size::new(surface.width() as f32, surface.height() as f32),
                 );
-                lc_frontend::draw_image_bilinear(
-                    surface,
-                    &rect,
-                    &background,
-                    Some(startup_gamma()),
-                );
+                lc_frontend::draw_image_bilinear(surface, &rect, &background, Some(gamma));
             } else {
                 surface.fill(Color::opaque(16, 28, 52));
             }
@@ -86293,12 +86621,7 @@ fn render_startup_frame(
                         logo_w as f32,
                         logo_h as f32,
                     );
-                    lc_frontend::draw_image_bilinear(
-                        surface,
-                        &logo_rect,
-                        &logo,
-                        Some(startup_gamma()),
-                    );
+                    lc_frontend::draw_image_bilinear(surface, &logo_rect, &logo, Some(gamma));
 
                     // "Version %s" with C4VERSION = "4.9.11.0 [362] " (trailing
                     // space from empty C4VERSIONEXTRA/C4BUILDOPT, C4Version.h:55),
@@ -86317,7 +86640,7 @@ fn render_startup_frame(
                                 [255, 255, 255, 255],
                                 lc_graphics::clonk_font::TextAlign::Right,
                                 true,
-                                Some(startup_gamma()),
+                                Some(gamma),
                             );
                         } else {
                             let font = assets.font_arc();
@@ -86339,16 +86662,9 @@ fn render_startup_frame(
             StartupView::Options | StartupView::About => {}
         }
         if let Some(context_menu) = context_menu {
-            context_menu.render_panels(surface, Some(startup_gamma()))?;
+            context_menu.render_panels(surface, Some(gamma))?;
         }
 
-        // The C++ blit shader applies the gamma ramp to every fragment
-        // (StdGL.cpp:1082-1086, UseShaderGamma default on). The filtered
-        // (bilinear) draws already encode through the ramp; this final pass
-        // covers the unfiltered ones (planks, text), where the default ramp
-        // is identity apart from the black floor — so re-applying it to
-        // already-encoded pixels is a no-op.
-        startup_gamma().apply_to_surface(surface);
     }
     let surface = graphics.surface();
     let pixels = surface.pixels();
@@ -87337,12 +87653,13 @@ fn populate_crew_inventories(
     engine: &Engine,
     snapshot: &SimulationSnapshot,
     players: &mut [PlayerOverlay],
+    renderer_config: lc_frontend::AdvancedRendererConfig,
 ) {
     for player in players {
         let cursor = player.cursor;
         for crew in &mut player.crew {
             crew.inventory = (cursor == Some(crew.object_id))
-                .then(|| collect_crew_inventory(engine, snapshot, crew.object_id))
+                .then(|| collect_crew_inventory(engine, snapshot, crew.object_id, renderer_config))
                 .unwrap_or_default();
         }
     }
@@ -87352,6 +87669,7 @@ fn collect_crew_inventory(
     engine: &Engine,
     snapshot: &SimulationSnapshot,
     crew_id: ObjectId,
+    renderer_config: lc_frontend::AdvancedRendererConfig,
 ) -> Vec<InventoryOverlay> {
     let Some(crew) = snapshot.object(crew_id) else {
         return Vec::new();
@@ -87394,7 +87712,7 @@ fn collect_crew_inventory(
                     })
                     .count();
             let child = eligible[current];
-            let prepared = inventory_object_picture_layers(engine, child);
+            let prepared = inventory_object_picture_layers(engine, child, renderer_config);
             let (picture, picture_overlays) = prepared
                 .map(|prepared| (Some(prepared.base), prepared.overlays))
                 .unwrap_or_default();
@@ -87402,7 +87720,7 @@ fn collect_crew_inventory(
                 object_id: child.id,
                 definition_id: child.definition_id.clone(),
                 picture,
-                additive: child.blit_mode & 1 != 0,
+                additive: child.blit_mode & renderer_config.allowed_blit_modes & 1 != 0,
                 picture_overlays,
                 count,
             });
@@ -87414,26 +87732,37 @@ fn collect_crew_inventory(
 }
 
 fn inventory_object_picture(engine: &Engine, object: &ObjectSnapshot) -> Option<ImageData> {
+    inventory_object_picture_with_allowed_modes(engine, object, 15)
+}
+
+fn inventory_object_picture_with_allowed_modes(
+    engine: &Engine,
+    object: &ObjectSnapshot,
+    allowed_blit_modes: u32,
+) -> Option<ImageData> {
     let image = engine.object_picture_image(object)?;
-    compose_inventory_picture(
+    compose_inventory_picture_with_allowed_modes(
         image,
         engine.object_picture_overlay_images(object),
         object.color,
         object.color_modulation,
         object.blit_mode,
+        allowed_blit_modes,
     )
 }
 
 fn inventory_object_picture_layers(
     engine: &Engine,
     object: &ObjectSnapshot,
+    renderer_config: lc_frontend::AdvancedRendererConfig,
 ) -> Option<PreparedInventoryPicture> {
-    prepare_inventory_picture(
+    prepare_inventory_picture_with_renderer_config(
         engine.object_picture_image(object)?,
         engine.object_picture_overlay_images(object),
         object.color,
         object.color_modulation,
         object.blit_mode,
+        renderer_config,
     )
 }
 
@@ -87441,6 +87770,15 @@ fn cached_menu_object_picture(
     engine: &Engine,
     object: &lc_engine::ObjectMenuPictureSnapshot,
     force_owned: bool,
+) -> Option<ImageData> {
+    cached_menu_object_picture_with_allowed_modes(engine, object, force_owned, 15)
+}
+
+fn cached_menu_object_picture_with_allowed_modes(
+    engine: &Engine,
+    object: &lc_engine::ObjectMenuPictureSnapshot,
+    force_owned: bool,
+    allowed_blit_modes: u32,
 ) -> Option<ImageData> {
     let image = engine.object_menu_picture_image(object)?;
     if !force_owned
@@ -87456,10 +87794,11 @@ fn cached_menu_object_picture(
             inventory_picture_pixels(&image, object.color),
         ));
     }
-    compose_owned_menu_picture(
+    compose_owned_menu_picture_with_allowed_modes(
         image,
         engine.object_menu_picture_overlay_images(object),
         object,
+        allowed_blit_modes,
     )
 }
 
@@ -87628,15 +87967,28 @@ fn compose_owned_menu_picture(
     )>,
     object: &lc_engine::ObjectMenuPictureSnapshot,
 ) -> Option<ImageData> {
+    compose_owned_menu_picture_with_allowed_modes(image, overlays, object, 15)
+}
+
+fn compose_owned_menu_picture_with_allowed_modes(
+    image: lc_engine::DefinitionPictureImage,
+    overlays: Vec<(
+        lc_engine::ObjectGraphicsOverlay,
+        lc_engine::DefinitionPictureImage,
+    )>,
+    object: &lc_engine::ObjectMenuPictureSnapshot,
+    allowed_blit_modes: u32,
+) -> Option<ImageData> {
     let side = u32::try_from(object.symbol_size.max(1)).ok()?;
     let destination = Rect::new(0, 0, side, side);
-    let object_mode = inventory_blit_mode(object.blit_mode);
+    let effective_object_blit_mode = object.blit_mode & allowed_blit_modes;
+    let object_mode = inventory_blit_mode(effective_object_blit_mode);
     let object_modulation = inventory_modulation(object.color_modulation, object.blit_mode);
     let base_pixels = prepare_owned_menu_definition_pixels(
         &image,
         object.color,
         object_modulation,
-        object.blit_mode,
+        effective_object_blit_mode,
     )?;
     let base = Surface::from_bytes(
         image.width(),
@@ -87660,10 +88012,11 @@ fn compose_owned_menu_picture(
         } else {
             overlay.blit_mode
         };
+        let allowed_blit_mode = effective_blit_mode & allowed_blit_modes;
         let mode = if inherits_parent {
             object_mode
         } else {
-            inventory_blit_mode(overlay.blit_mode)
+            inventory_blit_mode(allowed_blit_mode)
         };
         let modulation = if inherits_parent {
             object_modulation
@@ -87676,7 +88029,7 @@ fn compose_owned_menu_picture(
             &image,
             object.color,
             modulation,
-            effective_blit_mode,
+            allowed_blit_mode,
         )?;
         let overlay_surface = Surface::from_bytes(
             image.width(),
@@ -87747,15 +88100,63 @@ fn prepare_inventory_picture(
     color_modulation: u32,
     blit_mode: u32,
 ) -> Option<PreparedInventoryPicture> {
+    prepare_inventory_picture_with_allowed_modes(
+        image,
+        overlays,
+        object_color,
+        color_modulation,
+        blit_mode,
+        15,
+    )
+}
+
+fn prepare_inventory_picture_with_allowed_modes(
+    image: lc_engine::DefinitionPictureImage,
+    overlays: Vec<(
+        lc_engine::ObjectGraphicsOverlay,
+        lc_engine::DefinitionPictureImage,
+    )>,
+    object_color: u32,
+    color_modulation: u32,
+    blit_mode: u32,
+    allowed_blit_modes: u32,
+) -> Option<PreparedInventoryPicture> {
+    prepare_inventory_picture_with_renderer_config(
+        image,
+        overlays,
+        object_color,
+        color_modulation,
+        blit_mode,
+        lc_frontend::AdvancedRendererConfig {
+            allowed_blit_modes,
+            ..lc_frontend::AdvancedRendererConfig::DEFAULT
+        },
+    )
+}
+
+fn prepare_inventory_picture_with_renderer_config(
+    image: lc_engine::DefinitionPictureImage,
+    overlays: Vec<(
+        lc_engine::ObjectGraphicsOverlay,
+        lc_engine::DefinitionPictureImage,
+    )>,
+    object_color: u32,
+    color_modulation: u32,
+    blit_mode: u32,
+    renderer_config: lc_frontend::AdvancedRendererConfig,
+) -> Option<PreparedInventoryPicture> {
     let width = image.width();
     let height = image.height();
-    let object_mode = inventory_blit_mode(blit_mode);
+    let allowed_blit_modes = renderer_config.allowed_blit_modes;
+    let effective_object_blit_mode = blit_mode & allowed_blit_modes;
+    let object_mode = inventory_blit_mode(effective_object_blit_mode);
     let object_modulation = inventory_modulation(color_modulation, blit_mode);
     let (base_pixels, owner_pixels) = prepare_inventory_definition_layers(
         &image,
         object_color,
         object_modulation,
-        blit_mode,
+        effective_object_blit_mode,
+        renderer_config,
     )?;
     let base = ImageData::new(width, height, base_pixels);
     let mut prepared_overlays = Vec::with_capacity(
@@ -87774,10 +88175,11 @@ fn prepare_inventory_picture(
         } else {
             overlay.blit_mode
         };
+        let allowed_blit_mode = effective_blit_mode & allowed_blit_modes;
         let mode = if inherits_parent {
             object_mode
         } else {
-            inventory_blit_mode(overlay.blit_mode)
+            inventory_blit_mode(allowed_blit_mode)
         };
         let modulation = if inherits_parent {
             object_modulation
@@ -87790,7 +88192,8 @@ fn prepare_inventory_picture(
             &image,
             object_color,
             modulation,
-            effective_blit_mode,
+            allowed_blit_mode,
+            renderer_config,
         )?;
         let source_rect = Rect::new(0, 0, image.width(), image.height());
         let destination_rect = Rect::new(0, 0, width, height);
@@ -87859,12 +88262,34 @@ fn compose_inventory_picture(
     color_modulation: u32,
     blit_mode: u32,
 ) -> Option<ImageData> {
-    let prepared = prepare_inventory_picture(
+    compose_inventory_picture_with_allowed_modes(
         image,
         overlays,
         object_color,
         color_modulation,
         blit_mode,
+        15,
+    )
+}
+
+fn compose_inventory_picture_with_allowed_modes(
+    image: lc_engine::DefinitionPictureImage,
+    overlays: Vec<(
+        lc_engine::ObjectGraphicsOverlay,
+        lc_engine::DefinitionPictureImage,
+    )>,
+    object_color: u32,
+    color_modulation: u32,
+    blit_mode: u32,
+    allowed_blit_modes: u32,
+) -> Option<ImageData> {
+    let prepared = prepare_inventory_picture_with_allowed_modes(
+        image,
+        overlays,
+        object_color,
+        color_modulation,
+        blit_mode,
+        allowed_blit_modes,
     )?;
     if prepared.overlays.is_empty() {
         return Some(prepared.base);
@@ -87960,19 +88385,52 @@ fn object_menu_item_picture_with_text_spec_resources(
     menu_style: i32,
     text_spec_resources: ScriptTextSpecResources<'_>,
 ) -> Option<ImageData> {
+    object_menu_item_picture_with_renderer_modes(
+        engine,
+        snapshot,
+        item,
+        definition_color,
+        hud,
+        menu_style,
+        text_spec_resources,
+        15,
+    )
+}
+
+fn object_menu_item_picture_with_renderer_modes(
+    engine: &Engine,
+    snapshot: &SimulationSnapshot,
+    item: &lc_engine::ObjectMenuItem,
+    definition_color: u32,
+    hud: &HudGraphics,
+    menu_style: i32,
+    text_spec_resources: ScriptTextSpecResources<'_>,
+    allowed_blit_modes: u32,
+) -> Option<ImageData> {
     match &item.image {
         lc_engine::ObjectMenuImage::None => None,
         lc_engine::ObjectMenuImage::Object { object } => item
             .picture_snapshot
             .as_ref()
-            .and_then(|picture| cached_menu_object_picture(engine, picture, false))
+            .and_then(|picture| {
+                cached_menu_object_picture_with_allowed_modes(
+                    engine,
+                    picture,
+                    false,
+                    allowed_blit_modes,
+                )
+            })
             .or_else(|| {
                 // Backward compatibility for snapshots written before
                 // add-time picture descriptors were retained.
                 if item.presentation_definition_id.is_none() {
-                    snapshot
-                        .object(*object)
-                        .and_then(|object| inventory_object_picture(engine, object))
+                    snapshot.object(*object).and_then(|object| {
+                        inventory_object_picture_with_allowed_modes(
+                            engine,
+                            object,
+                            allowed_blit_modes,
+                        )
+                    })
                 } else {
                     None
                 }
@@ -87981,15 +88439,25 @@ fn object_menu_item_picture_with_text_spec_resources(
             .picture_snapshot
             .as_ref()
             .and_then(|picture| {
-                cached_menu_object_picture(engine, picture, true).and_then(|object_picture| {
+                cached_menu_object_picture_with_allowed_modes(
+                    engine,
+                    picture,
+                    true,
+                    allowed_blit_modes,
+                )
+                .and_then(|object_picture| {
                     menu_object_rank_picture(engine, hud, picture, object_picture, menu_style)
                 })
             })
             .or_else(|| {
                 if item.presentation_definition_id.is_none() {
-                    snapshot
-                        .object(*object)
-                        .and_then(|object| inventory_object_picture(engine, object))
+                    snapshot.object(*object).and_then(|object| {
+                        inventory_object_picture_with_allowed_modes(
+                            engine,
+                            object,
+                            allowed_blit_modes,
+                        )
+                    })
                 } else {
                     None
                 }
@@ -88008,9 +88476,9 @@ fn object_menu_item_picture_with_text_spec_resources(
         | lc_engine::ObjectMenuImage::Indexed { .. }
         | lc_engine::ObjectMenuImage::Color { .. }
         | lc_engine::ObjectMenuImage::IndexedColor { .. } => match item.picture_object {
-            Some(object_id) => snapshot
-                .object(object_id)
-                .and_then(|object| inventory_object_picture(engine, object)),
+            Some(object_id) => snapshot.object(object_id).and_then(|object| {
+                inventory_object_picture_with_allowed_modes(engine, object, allowed_blit_modes)
+            }),
             None => {
                 let definition_id = item
                     .presentation_definition_id
@@ -88133,16 +88601,42 @@ fn inventory_owner_blit_mode(raw: u32) -> BlitMode {
     }
 }
 
+fn prepared_inventory_alpha(
+    source: u8,
+    modulation: Color,
+    mode: BlitMode,
+    renderer_config: lc_frontend::AdvancedRendererConfig,
+) -> u8 {
+    let live_mod2 = matches!(mode, BlitMode::Mod2 | BlitMode::Mod2Additive)
+        && modulation != Color::transparent();
+    if live_mod2 {
+        if renderer_config.shader {
+            source
+        } else {
+            source.saturating_sub(modulation.a)
+        }
+    } else if !renderer_config.shader && renderer_config.no_alpha_add {
+        // Exact packed C4 white keeps GL_REPLACE. Every actually modulated
+        // NoAlphaAdd draw instead uses GL_MODULATE but ORs dwModMask's
+        // 0xff000000 into the primary C4-transparency alpha first; multiplying
+        // the texture transparency by 255 likewise preserves source opacity.
+        source
+    } else {
+        source.saturating_sub(modulation.a)
+    }
+}
+
 fn prepare_inventory_owner_pixels(
     pixels: &mut [u8],
     modulation: Color,
     mode: BlitMode,
+    renderer_config: lc_frontend::AdvancedRendererConfig,
 ) {
     let mod2 = matches!(mode, BlitMode::Mod2 | BlitMode::Mod2Additive)
         && modulation != Color::transparent();
     for pixel in pixels.chunks_exact_mut(4) {
         let source = Color::new(pixel[0], pixel[1], pixel[2], pixel[3]);
-        let prepared = if mod2 {
+        let mut prepared = if mod2 {
             let channel = |source: u8, modulation: u8| -> u8 {
                 (2 * i32::from(source) + 2 * i32::from(modulation) - 255)
                     .clamp(0, 255) as u8
@@ -88161,9 +88655,10 @@ fn prepare_inventory_owner_pixels(
                 channel(source.r, modulation.r),
                 channel(source.g, modulation.g),
                 channel(source.b, modulation.b),
-                source.a.saturating_sub(modulation.a),
+                source.a,
             )
         };
+        prepared.a = prepared_inventory_alpha(source.a, modulation, mode, renderer_config);
         pixel.copy_from_slice(&[prepared.r, prepared.g, prepared.b, prepared.a]);
     }
 }
@@ -88173,6 +88668,7 @@ fn prepare_inventory_definition_layers(
     object_color: u32,
     global_modulation: Option<Color>,
     raw_blit_mode: u32,
+    renderer_config: lc_frontend::AdvancedRendererConfig,
 ) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
     let mut base = image.pixels().to_vec();
     let Some(owner_pixels) = image
@@ -88185,12 +88681,14 @@ fn prepare_inventory_definition_layers(
                 &mut flattened,
                 modulation,
                 inventory_blit_mode(raw_blit_mode),
+                renderer_config,
             );
         } else if raw_blit_mode & 2 != 0 {
             prepare_inventory_pixels(
                 &mut flattened,
                 Color::new(255, 255, 255, 0),
                 inventory_blit_mode(raw_blit_mode),
+                renderer_config,
             );
         }
         return Some((flattened, None));
@@ -88201,12 +88699,14 @@ fn prepare_inventory_definition_layers(
             &mut base,
             modulation,
             inventory_blit_mode(raw_blit_mode),
+            renderer_config,
         );
     } else if raw_blit_mode & 2 != 0 {
         prepare_inventory_pixels(
             &mut base,
             Color::new(255, 255, 255, 0),
             inventory_blit_mode(raw_blit_mode),
+            renderer_config,
         );
     }
     let mut owner_pixels = owner_pixels.to_vec();
@@ -88220,6 +88720,7 @@ fn prepare_inventory_definition_layers(
         &mut owner_pixels,
         owner_modulation,
         inventory_owner_blit_mode(raw_blit_mode),
+        renderer_config,
     );
     Some((base, Some(owner_pixels)))
 }
@@ -88309,20 +88810,24 @@ fn inventory_blit_mode(raw: u32) -> BlitMode {
     }
 }
 
-fn prepare_inventory_pixels(pixels: &mut [u8], modulation: Color, mode: BlitMode) {
+fn prepare_inventory_pixels(
+    pixels: &mut [u8],
+    modulation: Color,
+    mode: BlitMode,
+    renderer_config: lc_frontend::AdvancedRendererConfig,
+) {
     if modulation == Color::opaque(255, 255, 255)
         && matches!(mode, BlitMode::Normal | BlitMode::Additive)
     {
         for pixel in pixels.chunks_exact_mut(4) {
-            pixel[3] = 0;
+            pixel[3] = prepared_inventory_alpha(pixel[3], modulation, mode, renderer_config);
         }
         return;
     }
     for pixel in pixels.chunks_exact_mut(4) {
-        let prepared = mode.prepare_source(
-            Color::new(pixel[0], pixel[1], pixel[2], pixel[3]),
-            modulation,
-        );
+        let source = Color::new(pixel[0], pixel[1], pixel[2], pixel[3]);
+        let mut prepared = mode.prepare_source(source, modulation);
+        prepared.a = prepared_inventory_alpha(source.a, modulation, mode, renderer_config);
         pixel.copy_from_slice(&[prepared.r, prepared.g, prepared.b, prepared.a]);
     }
 }
@@ -97347,7 +97852,13 @@ mod tests {
             .set_view_cursor(Some(hidden_cursor));
         app.snapshot = app.engine.snapshot();
         assert!(
-            !collect_crew_inventory(&app.engine, &app.snapshot, hidden_cursor).is_empty(),
+            !collect_crew_inventory(
+                &app.engine,
+                &app.snapshot,
+                hidden_cursor,
+                lc_frontend::AdvancedRendererConfig::DEFAULT,
+            )
+            .is_empty(),
             "the hidden cursor would expose an inventory region without its mask"
         );
         assert_eq!(
@@ -99695,7 +100206,12 @@ mod tests {
             &app.bindings,
             &app.gamepad_bindings,
         );
-        populate_crew_inventories(&app.engine, &app.snapshot, &mut overlays);
+        populate_crew_inventories(
+            &app.engine,
+            &app.snapshot,
+            &mut overlays,
+            lc_frontend::AdvancedRendererConfig::DEFAULT,
+        );
         overlays
             .iter()
             .flat_map(|player| &player.crew)
@@ -99854,6 +100370,13 @@ mod tests {
                 ("LC_LANGUAGE", Some(Path::new("US"))),
             ]);
             let paths = AppPaths::discover().expect("discover repository install");
+            paths.ensure_user_dirs().expect("prepared user dirs");
+            // The production launcher adapts an empty config before lc-app.
+            fs::write(
+                paths.config_file(),
+                b"[General]\nVersion=362\n[Graphics]\nShader=true\nDisableGamma=false\n",
+            )
+            .expect("materialize post-migration renderer config");
             let audio_options = AudioOptions {
                 sound_enabled: false,
                 music_enabled: false,
@@ -103362,6 +103885,66 @@ func Award()
                 Some(i32::MIN)
             );
         }
+    }
+
+    #[test]
+    fn l032_unsigned_renderer_mask_follows_native_ulong_narrowing() {
+        assert_eq!(
+            parse_startup_config_unsigned(b"0xfffffffftail"),
+            Some(u32::MAX)
+        );
+        assert_eq!(parse_startup_config_unsigned(b"-1"), Some(u32::MAX));
+        assert_eq!(parse_startup_config_unsigned(b"-0x10"), Some(0));
+        assert_eq!(parse_startup_config_unsigned(b"0x"), Some(0));
+
+        #[cfg(all(not(windows), target_pointer_width = "64"))]
+        {
+            assert_eq!(
+                parse_startup_config_unsigned(b"9223372036854775808"),
+                Some(0),
+                "Unix-64 strtoul retains the value before uint32 narrowing"
+            );
+            assert_eq!(
+                parse_startup_config_unsigned(b"18446744073709551616"),
+                Some(u32::MAX),
+                "strtoul overflow saturates to native ULONG_MAX"
+            );
+        }
+        #[cfg(any(windows, target_pointer_width = "32"))]
+        assert_eq!(
+            parse_startup_config_unsigned(b"4294967296"),
+            Some(u32::MAX),
+            "32-bit strtoul overflow saturates before narrowing"
+        );
+    }
+
+    #[test]
+    fn advanced_renderer_config_loads_native_device_snapshot() {
+        assert_eq!(
+            load_advanced_renderer_config(b""),
+            lc_frontend::AdvancedRendererConfig::DEFAULT
+        );
+        let loaded = load_advanced_renderer_config(
+            b"[Graphics]\nNoAlphaAdd=true\nNoBoxFades=1\nTexIndent=-250junk\nBlitOffset=0x32tail\nAllowedBlitModes=0x5\nShader=true\nUseShaderGamma=false\nDisableGamma=true\n",
+        );
+        assert_eq!(
+            loaded,
+            lc_frontend::AdvancedRendererConfig {
+                no_alpha_add: true,
+                no_box_fades: true,
+                tex_indent: -250,
+                blit_offset: 50,
+                allowed_blit_modes: 5,
+                shader: true,
+                use_shader_gamma: false,
+                disable_gamma: true,
+            }
+        );
+        assert_eq!(
+            load_advanced_renderer_config(b"[Graphics]\nAllowedBlitModes=4294967295\n")
+                .allowed_blit_modes,
+            u32::MAX
+        );
     }
 
     #[test]
@@ -109674,7 +110257,12 @@ func Award()
             &bindings,
             &GamepadBindings::default(),
         );
-        populate_crew_inventories(&engine, &snapshot, &mut overlays);
+        populate_crew_inventories(
+            &engine,
+            &snapshot,
+            &mut overlays,
+            lc_frontend::AdvancedRendererConfig::DEFAULT,
+        );
 
         let inventory = &overlays[0].crew[0].inventory;
         assert_eq!(inventory.len(), 3, "noncontiguous ID chunks stay separate");
@@ -109831,7 +110419,12 @@ func Award()
             }],
         );
 
-        let inventory = collect_crew_inventory(&engine, &snapshot, crew_id);
+        let inventory = collect_crew_inventory(
+            &engine,
+            &snapshot,
+            crew_id,
+            lc_frontend::AdvancedRendererConfig::DEFAULT,
+        );
         assert_eq!(inventory.len(), 2, "different PictureRects do not stack");
         assert_eq!(inventory[0].object_id, idle_id);
         assert_eq!(inventory[1].object_id, active_id);
@@ -110177,6 +110770,39 @@ func Award()
             "Picture2Facet uses packed software MOD2 in its temporary surface",
         );
 
+        let masked_inventory = compose_inventory_picture_with_allowed_modes(
+            image.clone(),
+            Vec::new(),
+            0,
+            modulation,
+            2,
+            0,
+        )
+        .expect("masked inventory picture");
+        assert_eq!(
+            masked_inventory.pixels(),
+            &[31, 63, 95, 128],
+            "AllowedBlitModes masks MOD2 while retaining active ColorMod",
+        );
+        let masked_menu = compose_owned_menu_picture_with_allowed_modes(
+            image.clone(),
+            Vec::new(),
+            &lc_engine::ObjectMenuPictureSnapshot {
+                definition_id: "M2PX".to_string(),
+                symbol_size: 1,
+                base_graphics: None,
+                graphics_overlays: Vec::new(),
+                blit_mode: 2,
+                color: 0,
+                color_modulation: modulation,
+                picture_rect: lc_engine::DefinitionRect::default(),
+                rank: None,
+            },
+            0,
+        )
+        .expect("masked owned-menu picture");
+        assert_eq!(masked_menu.pixels(), &[31, 63, 95, 128]);
+
         let prepared_owner = prepare_inventory_picture(
             owner_image.clone(),
             Vec::new(),
@@ -110192,9 +110818,14 @@ func Award()
             &[63, 0, 0, 128],
             "owner tint and global modulation are prepared on the owner pass",
         );
-        let (default_mod2_base, default_mod2_owner) =
-            prepare_inventory_definition_layers(&owner_image, 0x00ff_0000, None, 2)
-                .expect("default-modulation MOD2 layers");
+        let (default_mod2_base, default_mod2_owner) = prepare_inventory_definition_layers(
+            &owner_image,
+            0x00ff_0000,
+            None,
+            2,
+            lc_frontend::AdvancedRendererConfig::DEFAULT,
+        )
+        .expect("default-modulation MOD2 layers");
         assert_eq!(default_mod2_base, [255, 255, 255, 255]);
         assert_eq!(
             default_mod2_owner.expect("owner pass"),
@@ -110442,6 +111073,47 @@ func Award()
             "owned-menu overlays use packed software MOD2 without the GL zero reset",
         );
         assert_eq!(inventory_blit_mode(3), BlitMode::Mod2Additive);
+    }
+
+    #[test]
+    fn direct_hud_inventory_alpha_uses_the_full_renderer_snapshot() {
+        let modulation = Color::new(255, 255, 255, 64);
+        let prepared_alpha = |mode, shader, no_alpha_add| {
+            let config = lc_frontend::AdvancedRendererConfig {
+                shader,
+                no_alpha_add,
+                ..lc_frontend::AdvancedRendererConfig::DEFAULT
+            };
+            let mut pixels = vec![80, 100, 120, 192];
+            prepare_inventory_pixels(&mut pixels, modulation, mode, config);
+            let mut owner = vec![80, 100, 120, 192];
+            prepare_inventory_owner_pixels(&mut owner, modulation, mode, config);
+            assert_eq!(owner[3], pixels[3], "owner and base live passes agree");
+            pixels[3]
+        };
+
+        assert_eq!(prepared_alpha(BlitMode::Normal, false, false), 128);
+        assert_eq!(prepared_alpha(BlitMode::Normal, false, true), 192);
+        assert_eq!(prepared_alpha(BlitMode::Normal, true, false), 128);
+        assert_eq!(prepared_alpha(BlitMode::Normal, true, true), 128);
+        assert_eq!(prepared_alpha(BlitMode::Mod2, false, false), 128);
+        assert_eq!(prepared_alpha(BlitMode::Mod2, false, true), 128);
+        assert_eq!(prepared_alpha(BlitMode::Mod2, true, false), 192);
+        assert_eq!(prepared_alpha(BlitMode::Mod2, true, true), 192);
+        assert_eq!(
+            prepared_inventory_alpha(
+                192,
+                Color::new(255, 255, 255, 0),
+                BlitMode::Normal,
+                lc_frontend::AdvancedRendererConfig {
+                    shader: false,
+                    no_alpha_add: true,
+                    ..lc_frontend::AdvancedRendererConfig::DEFAULT
+                },
+            ),
+            192,
+            "exact packed C4 white keeps GL_REPLACE alpha",
+        );
     }
 
     #[test]
@@ -117020,8 +117692,9 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
         let blank = surface.pixels().to_vec();
+        let gamma = client.startup_fragment_gamma();
         client
-            .render_loading_message_dialogs(&mut surface)
+            .render_loading_message_dialogs(&mut surface, &gamma)
             .expect("render client wait over the loading surface");
         assert_ne!(surface.pixels(), blank.as_slice());
     }
@@ -126648,7 +127321,19 @@ public func Grant(password) { return GainMissionAccess(password); }
     fn new_real_menu_app(width: u32, height: u32) -> GameApp {
         let mut app = new_state_only_menu_app(width, height);
         install_classic_test_assets(&mut app);
+        apply_test_post_migration_renderer_config(&mut app);
         app
+    }
+
+    fn apply_test_post_migration_renderer_config(app: &mut GameApp) {
+        // These pathless fixtures bypass lc-game::prepare_config. Model the
+        // post-AdaptToCurrentVersion device state used by a normal launch.
+        let renderer_config = app.graphics.advanced_renderer_config();
+        app.graphics
+            .set_advanced_renderer_config(lc_frontend::AdvancedRendererConfig {
+                shader: true,
+                ..renderer_config
+            });
     }
 
     fn new_state_only_menu_app(width: u32, height: u32) -> GameApp {
@@ -131199,6 +131884,86 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn retained_gpu_gamma_mode_matches_native_device_switch_matrix() {
+        for shader in [false, true] {
+            for use_shader_gamma in [false, true] {
+                for disable_gamma in [false, true] {
+                    let config = lc_frontend::AdvancedRendererConfig {
+                        shader,
+                        use_shader_gamma,
+                        disable_gamma,
+                        ..lc_frontend::AdvancedRendererConfig::DEFAULT
+                    };
+                    let expected = if disable_gamma {
+                        GpuGammaMode::Disabled
+                    } else if shader && use_shader_gamma {
+                        GpuGammaMode::Fragment
+                    } else {
+                        GpuGammaMode::Monitor
+                    };
+                    assert_eq!(retained_gpu_gamma_mode(config), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_menu_requests_the_deferred_monitor_gamma_post_pass() {
+        let mut app = new_real_classic_menu_app(320, 240);
+        let configured_gamma =
+            lc_graphics::GammaRamp::from_control_points([0x101010, 0x707070, 0xe0e0e0]);
+        app.loader_gamma = Some(configured_gamma.clone());
+        app.graphics
+            .set_advanced_renderer_config(lc_frontend::AdvancedRendererConfig {
+                shader: false,
+                use_shader_gamma: true,
+                disable_gamma: false,
+                ..lc_frontend::AdvancedRendererConfig::DEFAULT
+            });
+        app.main_menu_state.menu.set_gamma_ramp(None);
+        app.menu_frame_cache = None;
+
+        let mut cold = vec![0_u8; 320 * 240 * 4];
+        assert!(app
+            .render_for_presentation_with_monitor_defer(&mut cold, false, false, false, true,)
+            .expect("render raw cached menu base"));
+        let cached = app
+            .menu_frame_cache
+            .as_ref()
+            .expect("cold render caches the raw logical frame")
+            .frame
+            .clone();
+        assert_eq!(cold, cached);
+
+        let mut deferred_hit = vec![0x55; cold.len()];
+        assert!(app
+            .render_for_presentation_with_monitor_defer(
+                &mut deferred_hit,
+                false,
+                false,
+                false,
+                true,
+            )
+            .expect("replay raw cache for a physical post-pass"));
+        assert_eq!(deferred_hit, cached);
+
+        let mut direct_hit = vec![0x77; cold.len()];
+        assert!(
+            !app.render_for_presentation_with_monitor_defer(
+                &mut direct_hit,
+                false,
+                false,
+                false,
+                false,
+            )
+            .expect("direct replay applies its own monitor gamma")
+        );
+        let mut expected = cached;
+        configured_gamma.apply_to_rgba_bytes(&mut expected);
+        assert_eq!(direct_hit, expected);
+    }
+
+    #[test]
     fn production_gamepad_batch_invalidates_cache_once_when_switching_options_sheet() {
         let mut app = new_real_classic_menu_app(640, 480);
         let mut frame = vec![0_u8; 640 * 480 * 4];
@@ -131380,6 +132145,88 @@ public func Grant(password) { return GainMissionAccess(password); }
             .loader_render_config
             .expect("loader config follows live advanced save")
             .point_filtering());
+    }
+
+    #[test]
+    fn startup_gamma_reload_uses_native_boolean_grammar_and_invalidates_caches() {
+        let _lock = env_lock().lock();
+        let fixture = tempdir().expect("startup gamma configuration");
+        let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
+        fs::write(
+            paths.config_file(),
+            b"[Graphics]\nDisableGamma=true\nGamma2=6579300\n",
+        )
+        .expect("disable startup gamma");
+
+        let mut app = new_state_only_running_sandbox_app();
+        app.app_paths = Some(paths.clone());
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        app.menu_frame_cache = Some(MenuFrameCache {
+            view: StartupView::MainMenu,
+            version: app.menu_render_version,
+            width,
+            height,
+            native_text_deferred: false,
+            frame: vec![0; width as usize * height as usize * 4],
+        });
+        app.menu_backdrop_cache = StartupBackdropCache {
+            key: Some(StartupBackdropKey {
+                view: StartupView::MainMenu,
+                width,
+                height,
+                fair_crew: false,
+                record: false,
+                network_host_selector: false,
+            }),
+            pixels: vec![1],
+        };
+        app.startup_dialog_fade = Some(StartupDialogFade {
+            outgoing: None,
+            incoming: StartupDialog::MainMenu,
+            step: 0,
+            width,
+            height,
+            underlay: vec![0; width as usize * height as usize * 4],
+            outgoing_frame: None,
+            outgoing_native_frame: None,
+            outgoing_native_text: Vec::new(),
+            outgoing_native_fonts: None,
+        });
+        let version = app.menu_render_version;
+
+        app.synchronize_advanced_options_runtime();
+        assert!(app.graphics.advanced_renderer_config().disable_gamma);
+        assert_eq!(app.loader_gamma, None);
+        assert_eq!(
+            app.startup_active_gamma(),
+            lc_graphics::GammaRamp::identity()
+        );
+        assert!(app.menu_frame_cache.is_none());
+        assert!(app.menu_backdrop_cache.key.is_none());
+        assert!(app.menu_backdrop_cache.pixels.is_empty());
+        assert!(app.startup_dialog_fade.is_none());
+        assert_eq!(app.menu_render_version, version.wrapping_add(1));
+
+        fs::write(
+            paths.config_file(),
+            b"[Graphics]\nDisableGamma= true\nGamma2=6579300\n",
+        )
+        .expect("write malformed native gamma switch");
+        app.synchronize_advanced_options_runtime();
+        assert!(!app.graphics.advanced_renderer_config().disable_gamma);
+        assert_eq!(
+            app.loader_gamma,
+            Some(lc_graphics::GammaRamp::from_control_points([
+                0x000000, 0x646464, 0xffffff,
+            ]))
+        );
+        assert_eq!(
+            app.startup_active_gamma(),
+            lc_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xffffff,])
+        );
     }
 
     #[test]
@@ -135508,12 +136355,32 @@ ScenInfoArea=70,5,25,90
     }
 
     #[test]
-    fn loader_gamma_numbers_require_full_decimal_i32() {
+    fn classic_loader_scale_numbers_require_full_decimal_i32() {
         assert_eq!(parse_classic_loader_i32(" 2147483647 "), Some(i32::MAX));
         assert_eq!(parse_classic_loader_i32("-1"), Some(-1));
         assert_eq!(parse_classic_loader_i32("0x808080"), None);
         assert_eq!(parse_classic_loader_i32("2147483648"), None);
         assert_eq!(parse_classic_loader_i32("123tail"), None);
+    }
+
+    #[test]
+    fn startup_gamma_uses_the_native_snapshot_and_scalar_grammar() {
+        let config =
+            b"[Graphics]\nGamma1=0x010203tail\nGamma2=6579300junk\nGamma3=-1\nDisableGamma=false\n";
+        assert_eq!(
+            load_classic_loader_gamma_from_native(config),
+            Some(lc_graphics::GammaRamp::from_control_points([
+                0x010203,
+                0x646464,
+                u32::MAX,
+            ]))
+        );
+        assert_eq!(
+            load_classic_loader_gamma_from_native(
+                b"[Graphics]\nGamma2=0x707070\nDisableGamma=true\n"
+            ),
+            None
+        );
     }
 
     struct FakeSystemFontProvider {
@@ -137230,6 +138097,12 @@ ScenInfoArea=70,5,25,90
             .expect("disabled gamma config");
         assert_eq!(load_classic_loader_gamma(Some(&paths)), None);
         app.loader_gamma = None;
+        let current_renderer_config = app.graphics.advanced_renderer_config();
+        app.graphics
+            .set_advanced_renderer_config(lc_frontend::AdvancedRendererConfig {
+                disable_gamma: true,
+                ..current_renderer_config
+            });
         let mut disabled = vec![0_u8; 320 * 200 * 4];
         app.render(&mut disabled).expect("gamma-disabled loader");
         assert!(disabled
@@ -146365,10 +147238,12 @@ ScenInfoArea=70,5,25,90
 
     fn new_classic_running_sandbox_app() -> GameApp {
         let paths = cached_app_paths().expect("discover sandbox crew definition");
-        new_running_sandbox_app_with_definitions_and_assets(
+        let mut app = new_running_sandbox_app_with_definitions_and_assets(
             SandboxDefinitionLoad::InstallCrew(paths.as_ref()),
             SandboxFixtureAssets::Classic,
-        )
+        );
+        apply_test_post_migration_renderer_config(&mut app);
+        app
     }
 
     #[inline(never)]

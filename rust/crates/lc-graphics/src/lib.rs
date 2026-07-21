@@ -16,9 +16,9 @@ pub use clip_projection::ClipperProjection;
 pub use gamma::GammaRamp;
 pub use font::{BitmapFont, FontMetrics, TextFont, TrueTypeFont, TrueTypeFontError};
 pub use gpu_scene::{
-    GpuBlend, GpuCommand, GpuGammaLut, GpuOwnerMask, GpuPresentation, GpuPrimitiveTopology,
-    GpuSampler, GpuScene, GpuSceneRecorder, GpuSolidVertex, GpuTextureFormat, GpuTextureId,
-    GpuTextureResource, GpuVertex,
+    GpuBlend, GpuCommand, GpuGammaLut, GpuGammaMode, GpuOwnerMask, GpuPresentation,
+    GpuPrimitiveTopology, GpuSampler, GpuScene, GpuSceneRecorder, GpuSolidVertex, GpuTextureFormat,
+    GpuTextureId, GpuTextureResource, GpuVertex,
 };
 pub use sampling::{stdgl_blit_sampling, BlitSampling};
 pub use snapshot::{SnapshotHasher, SurfaceSnapshot};

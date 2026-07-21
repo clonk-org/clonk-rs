@@ -1028,6 +1028,7 @@ fn draw_scoreboard_text(
                         surface,
                         glyph,
                         font.cell_height,
+                        font.texture_size(),
                         pen_x,
                         line_y,
                         color,
@@ -1122,6 +1123,7 @@ fn draw_sheared_glyph(
     surface: &mut Surface,
     glyph: &GlyphCell,
     height: i32,
+    physical_texture_size: i32,
     x: f32,
     y: i32,
     modulation: [u8; 4],
@@ -1129,6 +1131,28 @@ fn draw_sheared_glyph(
     gamma: Option<&GammaRamp>,
 ) {
     let width = glyph.width as f32;
+    if crate::active_advanced_renderer_config().is_some_and(|config| {
+        config.tex_indent != 0 || config.blit_offset != 0 || (!config.shader && config.no_alpha_add)
+    }) {
+        let cell_width = usize::try_from(glyph.width.max(0)).unwrap_or(0);
+        let cell_height = usize::try_from(height.max(0)).unwrap_or(0);
+        let mut rgba = Vec::with_capacity(cell_width.saturating_mul(cell_height).saturating_mul(4));
+        for index in 0..cell_width.saturating_mul(cell_height) {
+            let pixel = glyph.pixels.get(index).copied().unwrap_or_default();
+            rgba.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+        }
+        crate::draw_image_bilinear_sheared_target_on_texture(
+            surface,
+            &lc_gui::Rect::new(x, y as f32, width, height as f32),
+            &ImageData::new(cell_width as u32, cell_height as u32, rgba),
+            gamma,
+            shear,
+            [modulation[0], modulation[1], modulation[2]],
+            modulation[3],
+            physical_texture_size,
+        );
+        return;
+    }
     let Some((x0, y0, x1, y1)) = sheared_raster_bounds(surface, x, y, width, height, shear) else {
         return;
     };
@@ -1201,6 +1225,20 @@ fn draw_sheared_font_image(
     shear: f32,
     gamma: Option<&GammaRamp>,
 ) {
+    if crate::active_advanced_renderer_config().is_some_and(|config| {
+        config.tex_indent != 0 || config.blit_offset != 0 || (!config.shader && config.no_alpha_add)
+    }) {
+        crate::draw_image_bilinear_sheared_target(
+            surface,
+            &lc_gui::Rect::new(x, y as f32, width, height as f32),
+            image,
+            gamma,
+            shear,
+            [modulation[0], modulation[1], modulation[2]],
+            modulation[3],
+        );
+        return;
+    }
     let Some((x0, y0, x1, y1)) = sheared_raster_bounds(surface, x, y, width, height, shear) else {
         return;
     };

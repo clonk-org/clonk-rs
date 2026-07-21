@@ -1030,6 +1030,27 @@ fn draw_box_dw(
     if surface.width() == 0 || surface.height() == 0 || x2 < x1 || y2 < y1 {
         return;
     }
+    if crate::active_advanced_renderer_config()
+        .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
+    {
+        crate::draw_color_rect(
+            surface,
+            Rect::new(
+                x1,
+                y1,
+                x2.saturating_sub(x1).saturating_add(1) as u32,
+                y2.saturating_sub(y1).saturating_add(1) as u32,
+            ),
+            Color::new(
+                (color >> 16) as u8,
+                (color >> 8) as u8,
+                color as u8,
+                255 - (color >> 24) as u8,
+            ),
+            gamma,
+        );
+        return;
+    }
     let inverse_alpha = ((color >> 24) & 0xff) as f32 / 255.0;
     let opacity = 1.0 - inverse_alpha;
     if opacity <= 0.0 {
@@ -1225,6 +1246,26 @@ fn draw_surface_facet(
     gamma: Option<&GammaRamp>,
     sampling: LoaderSampling,
 ) {
+    if crate::draw_image_source_with_active_renderer_config(
+        surface,
+        &lc_gui::Rect::new(
+            target.x as f32,
+            target.y as f32,
+            target.width as f32,
+            target.height as f32,
+        ),
+        image,
+        (
+            source_rect.x,
+            source_rect.y,
+            source_rect.width,
+            source_rect.height,
+        ),
+        sampling,
+        gamma,
+    ) {
+        return;
+    }
     if source_rect.width <= 0.0
         || source_rect.height <= 0.0
         || target.width <= 0

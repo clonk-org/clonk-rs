@@ -33,6 +33,10 @@ impl GammaChannel {
 #[derive(Clone, Debug, PartialEq)]
 pub struct GammaRamp {
     channels: [[u16; 256]; 3],
+    /// Mathematical identity is also the sentinel for bypassing the shader's
+    /// nearest-sampled 1D lookup. A literal identity texture would quantize
+    /// filtered fractional RGB before blending, unlike the native fixed path.
+    passthrough: bool,
 }
 
 /// Builds the uncorrected curve for one channel from three control values.
@@ -79,6 +83,14 @@ const fn framebuffer_channel(value: u16) -> u8 {
 }
 
 impl GammaRamp {
+    /// Whether this ramp is the continuous identity sentinel used when
+    /// native gamma correction is disabled or belongs to a later monitor
+    /// postpass. Retained command recorders use this to avoid quantizing
+    /// fractional fragment colours through a literal identity lookup.
+    pub const fn is_passthrough(&self) -> bool {
+        self.passthrough
+    }
+
     /// Copy the exact lookup table for a retained graphics backend.
     pub fn channels(&self) -> [[u16; 256]; 3] {
         self.channels
@@ -93,6 +105,18 @@ impl GammaRamp {
             }
         }
         u64::from(hash)
+    }
+
+    /// A byte-for-byte linear ramp used when native gamma correction is
+    /// disabled. Passing this through an in-process renderer is visibly
+    /// equivalent to C++ skipping both its shader lookup and monitor ramp,
+    /// without mutating process-global display state.
+    pub fn identity() -> Self {
+        let channel = std::array::from_fn(|index| (index as u16) * 257);
+        Self {
+            channels: [channel; 3],
+            passthrough: true,
+        }
     }
 
     /// The default ramp (control points 0x000000, 0x808080, 0xffffff).
@@ -118,6 +142,7 @@ impl GammaRamp {
                 ramp_channel((c1 >> 8) as u8, (c2 >> 8) as u8, (c3 >> 8) as u8),
                 ramp_channel(c1 as u8, c2 as u8, c3 as u8),
             ],
+            passthrough: false,
         }
     }
 
@@ -135,6 +160,9 @@ impl GammaRamp {
     /// Applies one channel's ramp to a filtered (fractional) colour value with
     /// the shader's `GL_NEAREST` texture-coordinate semantics.
     pub fn encode_channel_float(&self, channel: GammaChannel, x: f32) -> u8 {
+        if self.passthrough {
+            return x.round().clamp(0.0, 255.0) as u8;
+        }
         let index = Self::sample_index(x);
         framebuffer_channel(self.channels[channel.index()][index])
     }
@@ -147,6 +175,9 @@ impl GammaRamp {
     /// this value in float and round only when storing the final pixel.
     #[inline]
     pub fn sample_channel_float(&self, channel: GammaChannel, x: f32) -> f32 {
+        if self.passthrough {
+            return x.clamp(0.0, 255.0);
+        }
         let index = Self::sample_index(x);
         // `u16 / 65535 * 255` is exactly `u16 / 257`.
         f32::from(self.channels[channel.index()][index]) / 257.0
@@ -167,14 +198,19 @@ impl GammaRamp {
         self.encode_channel_float(GammaChannel::Red, x)
     }
 
-    /// Applies the ramp to every pixel of `surface`, like the blit shader
-    /// does per fragment.
-    pub fn apply_to_surface(&self, surface: &mut Surface) {
-        for px in surface.pixels_mut().chunks_exact_mut(4) {
+    /// Applies the ramp to every complete RGBA pixel, preserving alpha.
+    pub fn apply_to_rgba_bytes(&self, pixels: &mut [u8]) {
+        for px in pixels.chunks_exact_mut(4) {
             px[0] = self.encode_channel(GammaChannel::Red, px[0]);
             px[1] = self.encode_channel(GammaChannel::Green, px[1]);
             px[2] = self.encode_channel(GammaChannel::Blue, px[2]);
         }
+    }
+
+    /// Applies the ramp to every pixel of `surface`, like a monitor ramp
+    /// becoming visible after the complete framebuffer has been composed.
+    pub fn apply_to_surface(&self, surface: &mut Surface) {
+        self.apply_to_rgba_bytes(surface.pixels_mut());
     }
 }
 
@@ -218,6 +254,19 @@ mod tests {
                 assert_eq!(ramp.encode_channel(channel, input), framebuffer);
             }
         }
+    }
+
+    #[test]
+    fn identity_bypasses_fractional_shader_lookup_quantization() {
+        let ramp = GammaRamp::identity();
+        assert!(ramp.is_passthrough());
+        assert!(!GammaRamp::standard().is_passthrough());
+        assert_eq!(ramp.sample_channel_float(GammaChannel::Red, 127.25), 127.25);
+        assert_eq!(
+            ramp.sample_channel_float(GammaChannel::Green, 200.75),
+            200.75
+        );
+        assert_eq!(ramp.encode_channel_float(GammaChannel::Blue, 127.49), 127);
     }
 
     #[test]

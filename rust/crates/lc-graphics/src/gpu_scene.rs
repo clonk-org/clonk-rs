@@ -105,6 +105,30 @@ impl GpuGammaLut {
     }
 }
 
+/// Where the active native gamma ramp is applied for one retained frame.
+///
+/// CStdGL uses fragment lookup only when both shader switches are enabled.
+/// The fixed-function path leaves all draws untouched and exposes the ramp
+/// after the complete framebuffer has been composed. `Disabled` bypasses
+/// both operations continuously.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuGammaMode {
+    #[default]
+    Fragment,
+    Monitor,
+    Disabled,
+}
+
+impl GpuGammaMode {
+    pub const fn fragment_lookup(self) -> bool {
+        matches!(self, Self::Fragment)
+    }
+
+    pub const fn monitor_postpass(self) -> bool {
+        matches!(self, Self::Monitor)
+    }
+}
+
 /// Mapping from logical C4 coordinates into the physical drawable.
 ///
 /// Native anchors an oversized scaled viewport at the lower-left.  In the
@@ -283,6 +307,10 @@ pub struct GpuScene {
     pub logical_extent: [u32; 2],
     pub clear: Color,
     pub gamma: GpuGammaLut,
+    /// Device-snapshot gamma placement for this exact frame. Recorder-only
+    /// callers retain the historical fragment behavior by default; the app
+    /// replaces it from `AdvancedRendererConfig` before presentation.
+    pub gamma_mode: GpuGammaMode,
     pub textures: Vec<GpuTextureResource>,
     pub commands: Vec<GpuCommand>,
 }
@@ -450,6 +478,7 @@ impl GpuSceneRecorder {
             logical_extent,
             clear,
             gamma: GpuGammaLut::from_ramp(gamma),
+            gamma_mode: GpuGammaMode::Fragment,
             textures,
             commands,
         }

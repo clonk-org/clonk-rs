@@ -1488,7 +1488,7 @@ impl SurfaceDrawTarget for Surface {
             GpuPrimitiveTopology::PointList,
             clip,
             GpuBlend::Normal,
-            gamma.is_some(),
+            gamma.is_some_and(|ramp| !ramp.is_passthrough()),
         ) {
             return Ok(());
         }
@@ -1605,6 +1605,27 @@ mod tests {
             vertices[0].color,
             [40.0 / 255.0, 80.0 / 255.0, 120.0 / 255.0, 128.0 / 255.0]
         );
+    }
+
+    #[test]
+    fn gpu_capture_identity_gamma_text_fragment_skips_shader_lookup() {
+        let mut destination = Surface::new(2, 2, PixelFormat::Rgba8888);
+        destination.begin_gpu_scene_capture();
+        let gamma = crate::GammaRamp::identity();
+        SurfaceDrawTarget::blend_fragment(
+            &mut destination,
+            1,
+            0,
+            [40.0, 80.0, 120.0, 128.0],
+            Some(&gamma),
+        )
+        .unwrap();
+
+        let scene = finish_gpu_scene(&mut destination);
+        let GpuCommand::Solid { gamma, .. } = &scene.commands[0] else {
+            panic!("text fragment did not lower to a solid point");
+        };
+        assert!(!*gamma);
     }
 
     #[test]

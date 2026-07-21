@@ -14,7 +14,71 @@
 //! - FreeType rasterization: callers supply the 8-bit coverage bitmap.
 
 use crate::{Color, GammaRamp, Rect, Surface, SurfaceDrawTarget};
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::rc::Rc;
+
+/// CStdGL device switches that affect the textured blits submitted by
+/// `CStdFont::DrawText`. AllowedBlitModes is retained for an exact device
+/// snapshot, although ordinary font blits request mode zero and masking it is
+/// therefore a no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClonkTextBlitConfig {
+    pub no_alpha_add: bool,
+    pub tex_indent: i32,
+    pub blit_offset: i32,
+    pub allowed_blit_modes: u32,
+    pub shader: bool,
+}
+
+impl ClonkTextBlitConfig {
+    fn texture_indent(self) -> f32 {
+        self.tex_indent as f32 / 1000.0
+    }
+
+    fn destination_offset(self) -> f32 {
+        self.blit_offset as f32 / 100.0
+    }
+
+    fn changes_geometry(self) -> bool {
+        self.tex_indent != 0 || self.blit_offset != 0
+    }
+
+    fn disables_fixed_alpha_add(self) -> bool {
+        !self.shader && self.no_alpha_add
+    }
+}
+
+thread_local! {
+    static ACTIVE_CLONK_TEXT_BLIT_CONFIG: Cell<Option<ClonkTextBlitConfig>> =
+        const { Cell::new(None) };
+}
+
+/// Nest-safe activation guard for CStdFont's low-level textured glyph blits.
+#[must_use = "the text blit configuration remains active only while the guard is alive"]
+pub struct ClonkTextBlitConfigGuard {
+    previous: Option<ClonkTextBlitConfig>,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl Drop for ClonkTextBlitConfigGuard {
+    fn drop(&mut self) {
+        ACTIVE_CLONK_TEXT_BLIT_CONFIG.with(|active| active.set(self.previous));
+    }
+}
+
+pub fn activate_clonk_text_blit_config(config: ClonkTextBlitConfig) -> ClonkTextBlitConfigGuard {
+    let previous = ACTIVE_CLONK_TEXT_BLIT_CONFIG.with(|active| active.replace(Some(config)));
+    ClonkTextBlitConfigGuard {
+        previous,
+        _not_send_or_sync: PhantomData,
+    }
+}
+
+fn active_clonk_text_blit_config() -> Option<ClonkTextBlitConfig> {
+    ACTIVE_CLONK_TEXT_BLIT_CONFIG.with(Cell::get)
+}
 
 /// Line height in pixels for a vector font, mirroring `CStdFont::Init`:
 /// `iLineHgt = (ascender - descender) * dwHeight / units_per_EM` with C++
@@ -279,6 +343,10 @@ pub struct ClonkFont {
     /// the active charmap has no entry for a decoded scalar. C++ obtains this
     /// through `FT_Load_Char` in `GetUnicodeCharacterFacet`.
     missing_glyph: Option<GlyphCell>,
+    /// Physical C4Surface texture dimension used by TexIndent's texture
+    /// matrix. Vector fonts use 128px atlases through height 40 and 512px
+    /// atlases above it (StdFont.cpp:331-337).
+    texture_size: i32,
     /// Replay identity for engine-wide scale-native text capture. Untagged
     /// fonts retain the historical immediate-raster behavior.
     role: Option<ClonkFontRole>,
@@ -294,8 +362,20 @@ impl ClonkFont {
             h_space: -1,
             cells: HashMap::new(),
             missing_glyph: None,
+            texture_size: 128,
             role: None,
         }
+    }
+
+    /// Override the physical font-atlas texture dimension selected by C++.
+    /// Call this before drawing; it does not affect legacy zero-indent output.
+    pub fn set_texture_size(&mut self, texture_size: u32) {
+        self.texture_size = i32::try_from(texture_size.max(1)).unwrap_or(i32::MAX);
+    }
+
+    /// Physical C4Surface tile size backing this font's glyph facets.
+    pub fn texture_size(&self) -> i32 {
+        self.texture_size
     }
 
     /// The semantic replay role, if this font participates in capture.
@@ -824,6 +904,7 @@ impl ClonkFont {
                         color[3],
                         gamma,
                         markup_shear(stack),
+                        transform_active,
                     );
                     pen_x = pen_x
                         .saturating_add(image_width)
@@ -844,6 +925,8 @@ impl ClonkFont {
                     color[3],
                     gamma,
                     markup_shear(stack),
+                    transform_active,
+                    self.texture_size,
                 );
             }
             // x += w2 + iHSpace (src/StdFont.cpp:927); empty facet → width 0.
@@ -1098,8 +1181,27 @@ fn blit_font_image<T: SurfaceDrawTarget + ?Sized>(
     color_alpha: u8,
     gamma: Option<&crate::GammaRamp>,
     shear: f32,
+    transform_active: bool,
 ) {
     if width <= 0 || height <= 0 || image.width == 0 || image.height == 0 {
+        return;
+    }
+    if let Some(config) = active_clonk_text_blit_config().filter(|config| config.changes_geometry())
+    {
+        blit_font_image_configured(
+            surface,
+            image,
+            width,
+            height,
+            x,
+            y,
+            mod_rgb,
+            color_alpha,
+            gamma,
+            shear,
+            transform_active,
+            config,
+        );
         return;
     }
     if shear != 0.0 {
@@ -1161,6 +1263,59 @@ fn blit_font_image<T: SurfaceDrawTarget + ?Sized>(
     }
 }
 
+/// Configured CStdGL font-image blit. Font images remain isolated source
+/// surfaces in Rust, so GL_CLAMP_TO_EDGE is reproduced at that source-facet
+/// boundary while the texture matrix retains C++'s physical texture size.
+#[allow(clippy::too_many_arguments)]
+fn blit_font_image_configured<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
+    image: FontImageRef<'_>,
+    width: i32,
+    height: i32,
+    x: i32,
+    y: i32,
+    mod_rgb: [u8; 3],
+    color_alpha: u8,
+    gamma: Option<&crate::GammaRamp>,
+    shear: f32,
+    _transform_active: bool,
+    config: ClonkTextBlitConfig,
+) {
+    let texture_size = font_image_texture_size(image);
+    let Some(mapping) = ConfiguredFontBlit::new(
+        x as f32,
+        y as f32,
+        width as f32,
+        height as f32,
+        image.width as f32,
+        image.height as f32,
+        texture_size,
+        shear,
+        config,
+    ) else {
+        return;
+    };
+    let Some((x0, y0, x1, y1)) = mapping.raster_bounds(surface) else {
+        return;
+    };
+    for target_y in y0..y1 {
+        for target_x in x0..x1 {
+            let Some((sample_x, sample_y)) = mapping.bilinear_sample(target_x, target_y) else {
+                continue;
+            };
+            blend_font_sample(
+                surface,
+                target_x as u32,
+                target_y as u32,
+                bilinear_font_image_sample(image, sample_x, sample_y),
+                mod_rgb,
+                color_alpha,
+                gamma,
+            );
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn blend_font_sample<T: SurfaceDrawTarget + ?Sized>(
     surface: &mut T,
@@ -1193,10 +1348,132 @@ fn blend_font_sample<T: SurfaceDrawTarget + ?Sized>(
 }
 
 fn font_sample_alpha(sample_alpha: f32, color_alpha: u8) -> f32 {
+    if active_clonk_text_blit_config().is_some_and(ClonkTextBlitConfig::disables_fixed_alpha_add) {
+        // Fixed-function NoAlphaAdd switches the texture environment from
+        // GL_COMBINE/GL_ADD to GL_MODULATE with an opaque primary alpha.
+        return sample_alpha.clamp(0.0, 255.0);
+    }
     // The font texture's inverted alpha and the primary modulation's
     // inverted alpha are added in the C++ shader. In normal-alpha form this
     // subtracts the modulation transparency instead of multiplying opacity.
     (sample_alpha - f32::from(255 - color_alpha)).max(0.0)
+}
+
+fn font_image_texture_size(image: FontImageRef<'_>) -> i32 {
+    // C4Surface::CreateTextures starts at the smaller surface dimension and
+    // deliberately chooses 2 even for a one-pixel source.
+    let required = image.width.min(image.height).max(1);
+    required
+        .max(2)
+        .checked_next_power_of_two()
+        .unwrap_or(4096)
+        .min(4096) as i32
+}
+
+/// Destination and texture-matrix state shared by configured glyph/image
+/// blits. CStdGL adds BlitOffset to vertices after CStdFont has centered its
+/// markup transform, so `pivot_y` deliberately remains unshifted.
+#[derive(Clone, Copy)]
+struct ConfiguredFontBlit {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    source_width: f32,
+    source_height: f32,
+    texture_scale: f32,
+    texture_indent: f32,
+    shear: f32,
+    pivot_y: f32,
+}
+
+impl ConfiguredFontBlit {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        source_width: f32,
+        source_height: f32,
+        texture_size: i32,
+        shear: f32,
+        config: ClonkTextBlitConfig,
+    ) -> Option<Self> {
+        let texture_size = texture_size as f32;
+        let texture_indent = config.texture_indent();
+        let texture_denominator = texture_size + texture_indent * 2.0;
+        if width <= 0.0
+            || height <= 0.0
+            || source_width <= 0.0
+            || source_height <= 0.0
+            || texture_size <= 0.0
+            || !x.is_finite()
+            || !y.is_finite()
+            || !width.is_finite()
+            || !height.is_finite()
+            || !source_width.is_finite()
+            || !source_height.is_finite()
+            || !texture_denominator.is_finite()
+            || texture_denominator == 0.0
+            || !shear.is_finite()
+        {
+            return None;
+        }
+        let destination_offset = config.destination_offset();
+        Some(Self {
+            x: x + destination_offset,
+            y: y + destination_offset,
+            width,
+            height,
+            source_width,
+            source_height,
+            texture_scale: texture_size / texture_denominator,
+            texture_indent,
+            shear,
+            pivot_y: y + height / 2.0,
+        })
+    }
+
+    fn raster_bounds<T: SurfaceDrawTarget + ?Sized>(
+        self,
+        surface: &T,
+    ) -> Option<(i32, i32, i32, i32)> {
+        transformed_raster_bounds(
+            surface,
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            self.shear,
+            self.pivot_y,
+        )
+    }
+
+    fn source_edge(self, target_x: i32, target_y: i32) -> Option<(f32, f32)> {
+        let pixel_x = target_x as f32 + 0.5;
+        let pixel_y = target_y as f32 + 0.5;
+        let unsheared_x = pixel_x - self.shear * (pixel_y - self.pivot_y);
+        let local_x = unsheared_x - self.x;
+        let local_y = pixel_y - self.y;
+        if local_x < 0.0 || local_y < 0.0 || local_x >= self.width || local_y >= self.height {
+            return None;
+        }
+        Some((
+            self.texture_indent + local_x * self.source_width / self.width * self.texture_scale,
+            self.texture_indent + local_y * self.source_height / self.height * self.texture_scale,
+        ))
+    }
+
+    fn bilinear_sample(self, target_x: i32, target_y: i32) -> Option<(f32, f32)> {
+        self.source_edge(target_x, target_y)
+            .map(|(x, y)| (x - 0.5, y - 0.5))
+    }
+
+    fn nearest_sample(self, target_x: i32, target_y: i32) -> Option<(i32, i32)> {
+        self.source_edge(target_x, target_y)
+            .map(|(x, y)| (x.floor() as i32, y.floor() as i32))
+    }
 }
 
 fn bilinear_font_image_sample(image: FontImageRef<'_>, sample_x: f32, sample_y: f32) -> [f32; 4] {
@@ -1282,6 +1559,18 @@ fn sheared_raster_bounds<T: SurfaceDrawTarget + ?Sized>(
     height: f32,
     shear: f32,
 ) -> Option<(i32, i32, i32, i32)> {
+    transformed_raster_bounds(surface, x, y, width, height, shear, y + height / 2.0)
+}
+
+fn transformed_raster_bounds<T: SurfaceDrawTarget + ?Sized>(
+    surface: &T,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    shear: f32,
+    pivot_y: f32,
+) -> Option<(i32, i32, i32, i32)> {
     if width <= 0.0
         || height <= 0.0
         || !x.is_finite()
@@ -1289,14 +1578,14 @@ fn sheared_raster_bounds<T: SurfaceDrawTarget + ?Sized>(
         || !width.is_finite()
         || !height.is_finite()
         || !shear.is_finite()
+        || !pivot_y.is_finite()
         || surface.width() == 0
         || surface.height() == 0
     {
         return None;
     }
-    let half_height = height / 2.0;
-    let top_shift = shear * -half_height;
-    let bottom_shift = shear * half_height;
+    let top_shift = shear * (y - pivot_y);
+    let bottom_shift = shear * (y + height - pivot_y);
     let surface_width = i32::try_from(surface.width()).unwrap_or(i32::MAX);
     let surface_height = i32::try_from(surface.height()).unwrap_or(i32::MAX);
     let x0 = ((x + top_shift.min(bottom_shift) - 0.5).ceil() as i32).max(0);
@@ -1360,7 +1649,27 @@ fn blit_cell<T: SurfaceDrawTarget + ?Sized>(
     color_alpha: u8,
     gamma: Option<&crate::GammaRamp>,
     shear: f32,
+    transform_active: bool,
+    texture_size: i32,
 ) {
+    if let Some(config) = active_clonk_text_blit_config().filter(|config| config.changes_geometry())
+    {
+        blit_cell_configured(
+            surface,
+            cell,
+            cell_height,
+            x,
+            y,
+            mod_rgb,
+            color_alpha,
+            gamma,
+            shear,
+            transform_active,
+            texture_size,
+            config,
+        );
+        return;
+    }
     if shear != 0.0 {
         let Some((x0, y0, x1, y1)) = sheared_raster_bounds(
             surface,
@@ -1435,6 +1744,80 @@ fn blit_cell<T: SurfaceDrawTarget + ?Sized>(
             );
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_cell_configured<T: SurfaceDrawTarget + ?Sized>(
+    surface: &mut T,
+    cell: &GlyphCell,
+    cell_height: i32,
+    x: i32,
+    y: i32,
+    mod_rgb: [u8; 3],
+    color_alpha: u8,
+    gamma: Option<&crate::GammaRamp>,
+    shear: f32,
+    transform_active: bool,
+    texture_size: i32,
+    config: ClonkTextBlitConfig,
+) {
+    let Some(mapping) = ConfiguredFontBlit::new(
+        x as f32,
+        y as f32,
+        cell.width as f32,
+        cell_height as f32,
+        cell.width as f32,
+        cell_height as f32,
+        texture_size,
+        shear,
+        config,
+    ) else {
+        return;
+    };
+    let Some((x0, y0, x1, y1)) = mapping.raster_bounds(surface) else {
+        return;
+    };
+    for target_y in y0..y1 {
+        for target_x in x0..x1 {
+            let sample = if transform_active {
+                let Some((sample_x, sample_y)) = mapping.bilinear_sample(target_x, target_y) else {
+                    continue;
+                };
+                bilinear_glyph_sample(cell, cell_height, sample_x, sample_y)
+            } else {
+                let Some((sample_x, sample_y)) = mapping.nearest_sample(target_x, target_y) else {
+                    continue;
+                };
+                glyph_sample(cell, cell_height, sample_x, sample_y)
+            };
+            blend_font_sample(
+                surface,
+                target_x as u32,
+                target_y as u32,
+                sample,
+                mod_rgb,
+                color_alpha,
+                gamma,
+            );
+        }
+    }
+}
+
+fn glyph_sample(cell: &GlyphCell, cell_height: i32, x: i32, y: i32) -> [f32; 4] {
+    if x < 0 || y < 0 || x >= cell.width || y >= cell_height {
+        return [0.0; 4];
+    }
+    cell.pixels
+        .get(y as usize * cell.width as usize + x as usize)
+        .map(|pixel| {
+            [
+                f32::from(pixel.r),
+                f32::from(pixel.g),
+                f32::from(pixel.b),
+                f32::from(pixel.a),
+            ]
+        })
+        .unwrap_or([0.0; 4])
 }
 
 /// `base + offset` as a surface coordinate; `None` when negative/overflowing.
@@ -1735,6 +2118,16 @@ mod tests {
     // ---- draw (CStdFont::DrawText + CStdDDraw::TextOut) ----
 
     const WHITE: [u8; 4] = [255, 255, 255, 255];
+
+    fn text_blit_config() -> ClonkTextBlitConfig {
+        ClonkTextBlitConfig {
+            no_alpha_add: false,
+            tex_indent: 0,
+            blit_offset: 0,
+            allowed_blit_modes: 15,
+            shader: false,
+        }
+    }
 
     fn surface() -> Surface {
         Surface::new(16, 8, PixelFormat::Rgba8888)
@@ -2254,6 +2647,140 @@ mod tests {
         // Filtered alpha 200 with opacity 128 becomes 200-(255-128)=73.
         // GL_SRC_ALPHA blending stores red 73 and alpha round(73²/255)=21.
         assert_eq!(px(&sfc, 0, 0), Color::new(73, 0, 0, 21));
+    }
+
+    #[test]
+    fn configured_glyph_blit_applies_blit_offset_and_tex_indent() {
+        let mut font = ClonkFont::new(3);
+        font.cell_height = 4;
+        font.h_space = 0;
+        font.set_texture_size(128);
+        let row = [
+            Color::opaque(10, 0, 0),
+            Color::opaque(100, 0, 0),
+            Color::opaque(200, 0, 0),
+        ];
+        font.add_glyph(
+            'X',
+            GlyphCell {
+                width: 3,
+                pixels: row.repeat(4),
+            },
+        );
+
+        let render = |tex_indent| {
+            let mut surface = Surface::new(5, 6, PixelFormat::Rgba8888);
+            let _config = activate_clonk_text_blit_config(ClonkTextBlitConfig {
+                tex_indent,
+                blit_offset: 100,
+                ..text_blit_config()
+            });
+            font.draw(&mut surface, 0, 0, "X", WHITE, TextAlign::Left, false);
+            surface
+        };
+        let unindented = render(0);
+        let indented = render(1000);
+
+        assert_eq!(px(&unindented, 0, 0).a, 0);
+        assert_eq!(px(&unindented, 1, 1), Color::opaque(10, 0, 0));
+        assert_eq!(px(&indented, 0, 0).a, 0);
+        assert_eq!(px(&indented, 1, 1), Color::opaque(100, 0, 0));
+    }
+
+    #[test]
+    fn configured_font_image_blit_applies_blit_offset_and_tex_indent() {
+        let mut font = ClonkFont::new(3);
+        font.cell_height = 4;
+        font.h_space = 0;
+        let row = [10, 0, 0, 255, 100, 0, 0, 255, 200, 0, 0, 255];
+        let images = TestImages {
+            tag: "TEST",
+            width: 3,
+            height: 4,
+            rgba: row.repeat(4),
+        };
+        let render = |tex_indent| {
+            let mut surface = Surface::new(5, 6, PixelFormat::Rgba8888);
+            let _config = activate_clonk_text_blit_config(ClonkTextBlitConfig {
+                tex_indent,
+                blit_offset: 100,
+                ..text_blit_config()
+            });
+            font.draw_with_images(
+                &mut surface,
+                0,
+                0,
+                "{{TEST}}",
+                WHITE,
+                TextAlign::Left,
+                true,
+                &images,
+            );
+            surface
+        };
+        let unindented = render(0);
+        let indented = render(1000);
+
+        assert_eq!(px(&unindented, 0, 0).a, 0);
+        assert_eq!(px(&unindented, 1, 1), Color::opaque(10, 0, 0));
+        assert_eq!(px(&indented, 0, 0).a, 0);
+        assert!(px(&indented, 1, 1).r > px(&unindented, 1, 1).r);
+    }
+
+    #[test]
+    fn fixed_no_alpha_add_preserves_glyph_and_font_image_opacity() {
+        let mut font = ClonkFont::new(0);
+        font.cell_height = 1;
+        font.h_space = 0;
+        font.add_glyph(
+            'X',
+            GlyphCell {
+                width: 1,
+                pixels: vec![Color::new(255, 0, 0, 200)],
+            },
+        );
+        let images = TestImages {
+            tag: "TEST",
+            width: 1,
+            height: 1,
+            rgba: vec![255, 0, 0, 200],
+        };
+        let render = |shader, image| {
+            let mut surface = Surface::new(2, 1, PixelFormat::Rgba8888);
+            let _config = activate_clonk_text_blit_config(ClonkTextBlitConfig {
+                no_alpha_add: true,
+                shader,
+                ..text_blit_config()
+            });
+            if image {
+                font.draw_with_images(
+                    &mut surface,
+                    0,
+                    0,
+                    "{{TEST}}",
+                    [255, 255, 255, 128],
+                    TextAlign::Left,
+                    true,
+                    &images,
+                );
+            } else {
+                font.draw(
+                    &mut surface,
+                    0,
+                    0,
+                    "X",
+                    [255, 255, 255, 128],
+                    TextAlign::Left,
+                    false,
+                );
+            }
+            px(&surface, 0, 0)
+        };
+
+        assert_eq!(render(false, false), Color::new(200, 0, 0, 157));
+        assert_eq!(render(false, true), Color::new(200, 0, 0, 157));
+        assert_eq!(render(true, false), Color::new(73, 0, 0, 21));
+        assert_eq!(render(true, true), Color::new(73, 0, 0, 21));
     }
 
     #[test]

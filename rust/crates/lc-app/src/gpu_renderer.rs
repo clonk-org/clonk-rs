@@ -9,12 +9,13 @@
 //! Scene blending happens in a physical-size `Rgba8Unorm` texture.  Keeping the
 //! intermediate target non-sRGB preserves LegacyClonk's byte-space blending,
 //! while a final shader converts to linear when the window surface is sRGB so
-//! the surface encode restores those same bytes.  The intermediate texture is
+//! the surface encode restores those same bytes. Fixed-function gamma resolves
+//! that completed image into a second unorm target; whichever image is final is
 //! also the screenshot and deterministic-test readback source.
 
 use lc_graphics::{
-    GpuBlend, GpuCommand, GpuPresentation, GpuPrimitiveTopology, GpuSampler, GpuScene,
-    GpuTextureFormat, GpuTextureId, GpuTextureResource, GpuVertex, Rect,
+    GpuBlend, GpuCommand, GpuGammaMode, GpuPresentation, GpuPrimitiveTopology, GpuSampler,
+    GpuScene, GpuTextureFormat, GpuTextureId, GpuTextureResource, GpuVertex, Rect,
 };
 use pixels::wgpu;
 use std::borrow::Cow;
@@ -282,6 +283,7 @@ struct VertexOutput {
 
 @group(0) @binding(0) var image: texture_2d<f32>;
 @group(0) @binding(1) var image_sampler: sampler;
+@group(1) @binding(0) var gamma_lut: texture_2d<u32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) index: u32) -> VertexOutput {
@@ -305,6 +307,20 @@ fn srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
     return select(high, low, color <= vec3<f32>(0.04045));
 }
 
+fn gamma_channel(channel: u32, value: f32) -> f32 {
+    let index = min(u32(clamp(value, 0.0, 1.0) * 256.0), 255u);
+    let sample = textureLoad(gamma_lut, vec2<i32>(i32(index), i32(channel)), 0).r;
+    return f32(sample) / 65535.0;
+}
+
+fn apply_gamma(color: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        gamma_channel(0u, color.r),
+        gamma_channel(1u, color.g),
+        gamma_channel(2u, color.b),
+    );
+}
+
 @fragment
 fn fs_linear(input: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(image, image_sampler, input.uv);
@@ -314,6 +330,18 @@ fn fs_linear(input: VertexOutput) -> @location(0) vec4<f32> {
 fn fs_srgb(input: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(image, image_sampler, input.uv);
     return vec4<f32>(srgb_to_linear(color.rgb), color.a);
+}
+
+@fragment
+fn fs_monitor_linear(input: VertexOutput) -> @location(0) vec4<f32> {
+    let color = textureSample(image, image_sampler, input.uv);
+    return vec4<f32>(apply_gamma(color.rgb), color.a);
+}
+
+@fragment
+fn fs_monitor_srgb(input: VertexOutput) -> @location(0) vec4<f32> {
+    let color = textureSample(image, image_sampler, input.uv);
+    return vec4<f32>(srgb_to_linear(apply_gamma(color.rgb)), color.a);
 }
 "#;
 
@@ -435,6 +463,9 @@ struct CompositionTarget {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     present_bind_group: wgpu::BindGroup,
+    gamma_resolved_texture: wgpu::Texture,
+    gamma_resolved_view: wgpu::TextureView,
+    gamma_resolved_present_bind_group: wgpu::BindGroup,
 }
 
 /// A submitted, padded texture-to-buffer copy.
@@ -518,6 +549,7 @@ pub struct RetainedGpuRenderer {
     solid_replace_pipelines: [wgpu::RenderPipeline; 3],
     solid_normal_pipelines: [wgpu::RenderPipeline; 3],
     solid_additive_pipelines: [wgpu::RenderPipeline; 3],
+    monitor_gamma_pipeline: wgpu::RenderPipeline,
     present_pipeline: wgpu::RenderPipeline,
 
     nearest_sampler: wgpu::Sampler,
@@ -646,6 +678,12 @@ impl RetainedGpuRenderer {
                 bind_group_layouts: &[&present_bind_group_layout],
                 push_constant_ranges: &[],
             });
+        let monitor_gamma_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("lc_gpu_monitor_gamma_pipeline_layout"),
+                bind_group_layouts: &[&present_bind_group_layout, &gamma_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let quad_replace_pipeline = scene_pipeline(
             device,
@@ -697,11 +735,19 @@ impl RetainedGpuRenderer {
             &solid_shader,
             GpuBlend::Additive,
         );
+        let monitor_gamma_pipeline = present_pipeline(
+            device,
+            &monitor_gamma_pipeline_layout,
+            &present_shader,
+            wgpu::TextureFormat::Rgba8Unorm,
+            true,
+        );
         let present_pipeline = present_pipeline(
             device,
             &present_pipeline_layout,
             &present_shader,
             surface_format,
+            false,
         );
 
         let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -787,6 +833,7 @@ impl RetainedGpuRenderer {
             solid_replace_pipelines,
             solid_normal_pipelines,
             solid_additive_pipelines,
+            monitor_gamma_pipeline,
             present_pipeline,
             nearest_sampler,
             linear_sampler,
@@ -941,8 +988,36 @@ impl RetainedGpuRenderer {
             }
         }
 
+        if scene.gamma_mode.monitor_postpass() {
+            let attachments = [Some(wgpu::RenderPassColorAttachment {
+                view: &composition.gamma_resolved_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: true,
+                },
+            })];
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("lc_gpu_monitor_gamma_pass"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+            });
+            pass.set_pipeline(&self.monitor_gamma_pipeline);
+            pass.set_bind_group(0, &composition.present_bind_group, &[]);
+            pass.set_bind_group(1, &self.gamma_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        let (presented_texture, presented_bind_group) = if scene.gamma_mode.monitor_postpass() {
+            (
+                &composition.gamma_resolved_texture,
+                &composition.gamma_resolved_present_bind_group,
+            )
+        } else {
+            (&composition.texture, &composition.present_bind_group)
+        };
         let readback = request_readback
-            .then(|| encode_readback(device, encoder, &composition.texture, composition.extent))
+            .then(|| encode_readback(device, encoder, presented_texture, composition.extent))
             .transpose()?;
 
         {
@@ -960,7 +1035,7 @@ impl RetainedGpuRenderer {
                 depth_stencil_attachment: None,
             });
             pass.set_pipeline(&self.present_pipeline);
-            pass.set_bind_group(0, &composition.present_bind_group, &[]);
+            pass.set_bind_group(0, presented_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
 
@@ -1162,7 +1237,12 @@ impl RetainedGpuRenderer {
                         let vertex = quad[index];
                         append_vertex(
                             &mut vertices,
-                            packed_quad_vertex(vertex, *base_mod2, *gamma, presentation)?,
+                            packed_quad_vertex(
+                                vertex,
+                                *base_mod2,
+                                fragment_gamma_flag(scene.gamma_mode, *gamma),
+                                presentation,
+                            )?,
                         );
                     }
                     let end = vertex_count(&vertices)?;
@@ -1222,7 +1302,7 @@ impl RetainedGpuRenderer {
                                 quad[index],
                                 liquid_scale,
                                 *phase,
-                                *gamma,
+                                fragment_gamma_flag(scene.gamma_mode, *gamma),
                                 presentation,
                             )?,
                         );
@@ -1285,7 +1365,7 @@ impl RetainedGpuRenderer {
                                     packed_solid_vertex(
                                         [x + offset_x * w, y + offset_y * w, w],
                                         vertex.color,
-                                        *gamma,
+                                        fragment_gamma_flag(scene.gamma_mode, *gamma),
                                         presentation,
                                     )?,
                                 );
@@ -1296,7 +1376,7 @@ impl RetainedGpuRenderer {
                                 packed_solid_vertex(
                                     vertex.position,
                                     vertex.color,
-                                    *gamma,
+                                    fragment_gamma_flag(scene.gamma_mode, *gamma),
                                     presentation,
                                 )?,
                             );
@@ -1460,42 +1540,55 @@ impl RetainedGpuRenderer {
         {
             return;
         }
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("lc_gpu_physical_composition"),
-            size: wgpu::Extent3d {
-                width: extent[0],
-                height: extent[1],
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let present_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("lc_gpu_present_bind_group"),
-            layout: &self.present_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
+        let create_target = |texture_label, bind_group_label| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(texture_label),
+                size: wgpu::Extent3d {
+                    width: extent[0],
+                    height: extent[1],
+                    depth_or_array_layers: 1,
                 },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.present_sampler),
-                },
-            ],
-        });
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(bind_group_label),
+                layout: &self.present_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.present_sampler),
+                    },
+                ],
+            });
+            (texture, view, bind_group)
+        };
+        let (texture, view, present_bind_group) =
+            create_target("lc_gpu_physical_composition", "lc_gpu_present_bind_group");
+        let (gamma_resolved_texture, gamma_resolved_view, gamma_resolved_present_bind_group) =
+            create_target(
+                "lc_gpu_monitor_gamma_composition",
+                "lc_gpu_monitor_gamma_present_bind_group",
+            );
         self.composition = Some(CompositionTarget {
             extent,
             texture,
             view,
             present_bind_group,
+            gamma_resolved_texture,
+            gamma_resolved_view,
+            gamma_resolved_present_bind_group,
         });
         self.last_stats.composition_recreated = true;
     }
@@ -1756,6 +1849,10 @@ const fn flag(value: bool) -> f32 {
     } else {
         0.0
     }
+}
+
+const fn fragment_gamma_flag(mode: GpuGammaMode, command_gamma: bool) -> bool {
+    mode.fragment_lookup() && command_gamma
 }
 
 fn topology_index(topology: GpuPrimitiveTopology) -> usize {
@@ -2081,6 +2178,7 @@ fn present_pipeline(
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     surface_format: wgpu::TextureFormat,
+    monitor_gamma: bool,
 ) -> wgpu::RenderPipeline {
     let targets = [Some(wgpu::ColorTargetState {
         format: surface_format,
@@ -2088,7 +2186,11 @@ fn present_pipeline(
         write_mask: wgpu::ColorWrites::ALL,
     })];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("lc_gpu_present_pipeline"),
+        label: Some(if monitor_gamma {
+            "lc_gpu_monitor_gamma_pipeline"
+        } else {
+            "lc_gpu_present_pipeline"
+        }),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
@@ -2100,10 +2202,11 @@ fn present_pipeline(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: if surface_format.is_srgb() {
-                "fs_srgb"
-            } else {
-                "fs_linear"
+            entry_point: match (monitor_gamma, surface_format.is_srgb()) {
+                (false, false) => "fs_linear",
+                (false, true) => "fs_srgb",
+                (true, false) => "fs_monitor_linear",
+                (true, true) => "fs_monitor_srgb",
             },
             targets: &targets,
         }),
@@ -2175,6 +2278,13 @@ mod tests {
             .flat_map(|value| (value as f32).to_ne_bytes())
             .collect::<Vec<_>>();
         assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn disabled_gamma_mode_clears_requested_fragment_gamma_flag() {
+        assert!(fragment_gamma_flag(GpuGammaMode::Fragment, true));
+        assert!(!fragment_gamma_flag(GpuGammaMode::Disabled, true));
+        assert!(!fragment_gamma_flag(GpuGammaMode::Monitor, true));
     }
 
     const LOGICAL: [u32; 2] = [8, 6];
@@ -2295,10 +2405,39 @@ mod tests {
         assert_eq!(renderer.last_stats().dirty_upload_bytes, 0);
         assert!(renderer.last_stats().composition_recreated);
 
+        let monitor_ramp = GammaRamp::from_control_points([0x102030, 0x708090, 0xd0e0f0]);
+        let mut raw_scene = scene.clone();
+        raw_scene.gamma = GpuGammaLut::from_ramp(&monitor_ramp);
+        raw_scene.gamma_mode = GpuGammaMode::Disabled;
+        let raw = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &raw_scene,
+            &GpuPresentation::identity(LOGICAL[0], LOGICAL[1]),
+        );
+        let mut expected_monitor = raw.rgba.clone();
+        monitor_ramp.apply_to_rgba_bytes(&mut expected_monitor);
+        let mut monitor_scene = raw_scene;
+        monitor_scene.gamma_mode = GpuGammaMode::Monitor;
+        let monitor = render_readback(
+            &mut renderer,
+            &device,
+            &queue,
+            &monitor_scene,
+            &GpuPresentation::identity(LOGICAL[0], LOGICAL[1]),
+        );
+        assert_ne!(monitor.rgba, raw.rgba);
+        assert_eq!(
+            monitor.rgba, expected_monitor,
+            "monitor gamma must resolve the complete composition before readback",
+        );
+
         let hidden = GpuScene {
             logical_extent: LOGICAL,
             clear: Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
             gamma: scene.gamma.clone(),
+            gamma_mode: scene.gamma_mode,
             textures: Vec::new(),
             commands: Vec::new(),
         };
@@ -2658,6 +2797,7 @@ mod tests {
             logical_extent: LOGICAL,
             clear: Color::new(CLEAR[0], CLEAR[1], CLEAR[2], CLEAR[3]),
             gamma: GpuGammaLut::from_ramp(&GammaRamp::standard()),
+            gamma_mode: GpuGammaMode::Fragment,
             textures: vec![
                 rgba_resource(ids.mutable, mutable),
                 rgba_resource(ids.half, HALF),

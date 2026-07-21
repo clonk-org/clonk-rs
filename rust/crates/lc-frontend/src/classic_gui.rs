@@ -375,6 +375,16 @@ pub fn draw_facet_stretch(
 ) {
     let (source_x, source_y, source_width, source_height) = source;
     let (target_x, target_y, target_width, target_height) = destination;
+    if crate::draw_image_source_with_active_renderer_config(
+        surface,
+        &GuiRect::new(target_x, target_y, target_width, target_height),
+        image,
+        source,
+        lc_graphics::BlitSampling::Linear,
+        gamma,
+    ) {
+        return;
+    }
     if source_width <= 0.0 || source_height <= 0.0 || target_width <= 0.0 || target_height <= 0.0 {
         return;
     }
@@ -534,6 +544,32 @@ pub fn draw_engine_box(
     color: u32,
     gamma: Option<&GammaRamp>,
 ) {
+    if crate::active_advanced_renderer_config()
+        .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
+    {
+        if x2 < x1 || y2 < y1 {
+            return;
+        }
+        let width = i64::from(x2) - i64::from(x1) + 1;
+        let height = i64::from(y2) - i64::from(y1) + 1;
+        crate::draw_color_rect(
+            surface,
+            lc_graphics::Rect::new(
+                x1,
+                y1,
+                width.clamp(0, i64::from(u32::MAX)) as u32,
+                height.clamp(0, i64::from(u32::MAX)) as u32,
+            ),
+            Color::new(
+                ((color >> 16) & 0xff) as u8,
+                ((color >> 8) & 0xff) as u8,
+                (color & 0xff) as u8,
+                255 - ((color >> 24) & 0xff) as u8,
+            ),
+            gamma,
+        );
+        return;
+    }
     let opacity = (255 - ((color >> 24) & 0xff)) as f32 / 255.0;
     if opacity <= 0.0 {
         return;

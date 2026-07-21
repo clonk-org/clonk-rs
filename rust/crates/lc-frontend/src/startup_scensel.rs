@@ -15,7 +15,7 @@ use anyhow::{ensure, Context, Result};
 use freetype::face::LoadFlag;
 use freetype::Library;
 use lc_graphics::clonk_font::{line_height_for, ClonkFont, ClonkFontRole, GlyphCell, TextAlign};
-use lc_graphics::{Color, GammaRamp, Surface};
+use lc_graphics::{BlitSampling, Color, GammaRamp, Rect as SurfaceRect, Surface};
 use lc_gui::Rect as GuiRect;
 
 // ---------------------------------------------------------------------------
@@ -130,6 +130,7 @@ pub(crate) fn build_shadowless_font(
     let (ascender, descender) = (i32::from(raw.ascender), i32::from(raw.descender));
     let line_height = line_height_for(ascender, descender, units_per_em, px_height);
     let mut font = ClonkFont::new(line_height);
+    font.set_texture_size(if px_height > 40 { 512 } else { 128 });
     // Shadowless metrics (StdFont.cpp:327,352): iHSpace = 0 and
     // iGfxLineHgt = iLineHgt + fDoShadow = iLineHgt.
     font.h_space = 0;
@@ -743,6 +744,16 @@ fn draw_facet_stretch(
 ) {
     let (fx, fy, fwdt, fhgt) = src;
     let (tx, ty, twdt, thgt) = dest;
+    if crate::draw_image_source_with_active_renderer_config(
+        surface,
+        &GuiRect::new(tx, ty, twdt, thgt),
+        image,
+        src,
+        BlitSampling::Linear,
+        gamma,
+    ) {
+        return;
+    }
     if fwdt <= 0.0 || fhgt <= 0.0 || twdt <= 0.0 || thgt <= 0.0 {
         return;
     }
@@ -825,6 +836,41 @@ fn draw_box_dw(
     clr: u32,
     gamma: Option<&GammaRamp>,
 ) {
+    if crate::active_advanced_renderer_config()
+        .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
+    {
+        if x2 < x1 || y2 < y1 {
+            return;
+        }
+        let width = x2.saturating_sub(x1).saturating_add(1) as u32;
+        let height = y2.saturating_sub(y1).saturating_add(1) as u32;
+        crate::draw_color_rect(
+            surface,
+            SurfaceRect::new(x1, y1, width, height),
+            Color::new(
+                (clr >> 16) as u8,
+                (clr >> 8) as u8,
+                clr as u8,
+                255 - (clr >> 24) as u8,
+            ),
+            gamma,
+        );
+        return;
+    }
+    draw_box_dw_unconfigured(surface, x1, y1, x2, y2, clr, gamma);
+}
+
+/// Compatibility rasterizer used both outside a configured renderer scope and
+/// by native lines, which intentionally ignore BlitOffset and NoBoxFades.
+fn draw_box_dw_unconfigured(
+    surface: &mut Surface,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    clr: u32,
+    gamma: Option<&GammaRamp>,
+) {
     let a = (clr >> 24) & 0xff;
     let opacity = (255 - a) as f32 / 255.0;
     if opacity <= 0.0 {
@@ -868,10 +914,10 @@ fn draw_line_dw(
 ) {
     if x1 == x2 {
         // vertical: y1..y2 excluding the end pixel
-        draw_box_dw(surface, x1, y1.min(y2), x1, y1.max(y2) - 1, clr, gamma);
+        draw_box_dw_unconfigured(surface, x1, y1.min(y2), x1, y1.max(y2) - 1, clr, gamma);
     } else {
         debug_assert_eq!(y1, y2);
-        draw_box_dw(surface, x1.min(x2), y1, x1.max(x2) - 1, y1, clr, gamma);
+        draw_box_dw_unconfigured(surface, x1.min(x2), y1, x1.max(x2) - 1, y1, clr, gamma);
     }
 }
 

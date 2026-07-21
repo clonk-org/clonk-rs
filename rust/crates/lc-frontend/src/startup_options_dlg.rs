@@ -54,7 +54,7 @@ use anyhow::{Context, Result};
 use freetype::face::LoadFlag;
 use freetype::Library;
 use lc_graphics::clonk_font::{ClonkFont, ClonkFontRole, GlyphCell, TextAlign};
-use lc_graphics::{Color, GammaRamp, Surface};
+use lc_graphics::{BlitSampling, Color, GammaRamp, Rect as SurfaceRect, Surface};
 use lc_gui::Rect as GuiRect;
 use lc_resources::LanguageInfo;
 
@@ -3436,6 +3436,44 @@ fn engine_opacity(clr: u32) -> f32 {
 
 /// `DrawBoxDw` (StdDDraw2.cpp:1401-1404): fills (x0,y0)-(x1,y1) INCLUSIVE.
 fn fill_box_dw(surface: &mut Surface, x0: i32, y0: i32, x1: i32, y1: i32, clr: u32, gamma: Option<&GammaRamp>) {
+    if crate::active_advanced_renderer_config()
+        .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
+    {
+        if x1 < x0 || y1 < y0 {
+            return;
+        }
+        crate::draw_color_rect(
+            surface,
+            SurfaceRect::new(
+                x0,
+                y0,
+                x1.saturating_sub(x0).saturating_add(1) as u32,
+                y1.saturating_sub(y0).saturating_add(1) as u32,
+            ),
+            Color::new(
+                (clr >> 16) as u8,
+                (clr >> 8) as u8,
+                clr as u8,
+                255 - (clr >> 24) as u8,
+            ),
+            gamma,
+        );
+        return;
+    }
+    fill_box_dw_unconfigured(surface, x0, y0, x1, y1, clr, gamma);
+}
+
+/// Compatibility box rasterizer retained for DrawLineDw: native lines do not
+/// consume BlitOffset and never run DrawQuadDw's NoBoxFades normalization.
+fn fill_box_dw_unconfigured(
+    surface: &mut Surface,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    clr: u32,
+    gamma: Option<&GammaRamp>,
+) {
     let opacity = engine_opacity(clr);
     if opacity <= 0.0 {
         return;
@@ -3455,10 +3493,10 @@ fn fill_box_dw(surface: &mut Surface, x0: i32, y0: i32, x1: i32, y1: i32, clr: u
 /// net/scensel dialogs and re-verified here on the group-frame corners).
 fn draw_line_dw(surface: &mut Surface, x0: i32, y0: i32, x1: i32, y1: i32, clr: u32, gamma: Option<&GammaRamp>) {
     match (x1 - x0, y1 - y0) {
-        (0, dy) if dy > 0 => fill_box_dw(surface, x0, y0, x1, y1 - 1, clr, gamma),
-        (0, dy) if dy < 0 => fill_box_dw(surface, x0, y1 + 1, x1, y0, clr, gamma),
-        (dx, 0) if dx > 0 => fill_box_dw(surface, x0, y0, x1 - 1, y1, clr, gamma),
-        (dx, 0) if dx < 0 => fill_box_dw(surface, x1 + 1, y0, x0, y1, clr, gamma),
+        (0, dy) if dy > 0 => fill_box_dw_unconfigured(surface, x0, y0, x1, y1 - 1, clr, gamma),
+        (0, dy) if dy < 0 => fill_box_dw_unconfigured(surface, x0, y1 + 1, x1, y0, clr, gamma),
+        (dx, 0) if dx > 0 => fill_box_dw_unconfigured(surface, x0, y0, x1 - 1, y1, clr, gamma),
+        (dx, 0) if dx < 0 => fill_box_dw_unconfigured(surface, x1 + 1, y0, x0, y1, clr, gamma),
         // Degenerate/diagonal lines are not drawn by this dialog.
         _ => {}
     }
@@ -3475,6 +3513,51 @@ fn draw_frame_dw(surface: &mut Surface, x0: i32, y0: i32, x1: i32, y1: i32, clr:
 /// `DrawQuadDw` (StdGL.cpp:846-891): convex quad fill with pixel centers
 /// inside the polygon (GL triangle-strip rasterization, blitOffset = 0).
 fn fill_quad_dw(surface: &mut Surface, vtx: &[(i32, i32); 4], clr: u32, gamma: Option<&GammaRamp>) {
+    if let Some(renderer_config) = crate::active_advanced_renderer_config()
+        .filter(|config| config.blit_offset != 0 || config.no_box_fades)
+    {
+        let mut color = Color::new(
+            (clr >> 16) as u8,
+            (clr >> 8) as u8,
+            clr as u8,
+            255 - (clr >> 24) as u8,
+        );
+        if renderer_config.no_box_fades {
+            color = crate::normalize_quad_colors([color; 4]);
+        }
+        if color.a == 0 {
+            return;
+        }
+        let offset = renderer_config.blit_offset as f32 / 100.0;
+        let vertices = vtx.map(|(x, y)| (x as f32 + offset, y as f32 + offset));
+        let y_min = vertices.iter().map(|v| v.1).reduce(f32::min).unwrap_or(0.0);
+        let y_max = vertices.iter().map(|v| v.1).reduce(f32::max).unwrap_or(0.0);
+        let first_y = (y_min - 0.5).ceil() as i32;
+        let last_y = (y_max - 0.5).ceil() as i32;
+        let opacity = f32::from(color.a) / 255.0;
+        for y in first_y..last_y {
+            let yc = y as f32 + 0.5;
+            let crossings: Vec<f32> = (0..4)
+                .filter_map(|i| {
+                    let (ax, ay) = vertices[i];
+                    let (bx, by) = vertices[(i + 1) % 4];
+                    ((ay <= yc) != (by <= yc)).then(|| ax + (yc - ay) / (by - ay) * (bx - ax))
+                })
+                .collect();
+            let (Some(enter), Some(exit)) = (
+                crossings.iter().copied().reduce(f32::min),
+                crossings.iter().copied().reduce(f32::max),
+            ) else {
+                continue;
+            };
+            let mut x = (enter - 0.5).ceil() as i32;
+            while (x as f32 + 0.5) < exit {
+                blend_engine_fragment(surface, x, y, [color.r, color.g, color.b], opacity, gamma);
+                x += 1;
+            }
+        }
+        return;
+    }
     let opacity = engine_opacity(clr);
     if opacity <= 0.0 {
         return;
@@ -3558,6 +3641,16 @@ fn draw_image_bilinear_white_pad(
     image: &ImageData,
     gamma: Option<&GammaRamp>,
 ) {
+    if crate::draw_image_source_with_active_renderer_config(
+        surface,
+        rect,
+        image,
+        (0.0, 0.0, image.width() as f32, image.height() as f32),
+        BlitSampling::Linear,
+        gamma,
+    ) {
+        return;
+    }
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 || image.width() == 0 || image.height() == 0 {
         return;
     }
@@ -3643,6 +3736,37 @@ fn draw_rotated_vfacet(
     dest_y: i32,
     gamma: Option<&GammaRamp>,
 ) {
+    if let Some(renderer_config) = crate::active_advanced_renderer_config()
+        .filter(|config| config.tex_indent != 0 || config.blit_offset != 0)
+    {
+        let transform =
+            lc_graphics::Transform::set_rotate(-90 * 100, dest_x as f32 + 8.0, dest_y as f32 + 8.0);
+        crate::draw_image_region_transformed_float_source(
+            surface,
+            (dest_x as f32, dest_y as f32, 16.0, src_h as f32),
+            &transform,
+            image,
+            None,
+            &crate::FloatSourceRect {
+                x: src_x as f32,
+                y: src_y as f32,
+                width: 16.0,
+                height: src_h as f32,
+            },
+            BlitSampling::Linear,
+            false,
+            None,
+            crate::SpriteBlitState {
+                mode: 0,
+                modulation: None,
+                fog_modulation: None,
+                renderer_config,
+            },
+            gamma,
+            None,
+        );
+        return;
+    }
     for dx in 0..src_h {
         for dy in 0..16 {
             let s = texel_or_white(image, src_x + 15 - dy, src_y + dx);
@@ -6826,6 +6950,37 @@ mod tests {
         assert_eq!(sfc2.get_pixel(10, 0).unwrap().r, 0);
     }
 
+    #[test]
+    fn advanced_box_and_quad_shift_but_native_lines_do_not() {
+        let _renderer = crate::activate_advanced_renderer_config(crate::AdvancedRendererConfig {
+            blit_offset: 100,
+            no_box_fades: true,
+            ..crate::AdvancedRendererConfig::DEFAULT
+        });
+        let expected = crate::normalize_quad_colors([Color::opaque(64, 0, 0); 4]);
+
+        let mut box_surface = Surface::new(8, 8, PixelFormat::Rgba8888);
+        fill_box_dw(&mut box_surface, 0, 0, 0, 0, 0x0040_0000, None);
+        assert_eq!(box_surface.get_pixel(1, 1), Some(expected));
+        assert_eq!(box_surface.get_pixel(0, 0).unwrap().r, 0);
+
+        let mut quad_surface = Surface::new(8, 8, PixelFormat::Rgba8888);
+        fill_quad_dw(
+            &mut quad_surface,
+            &[(3, 0), (5, 0), (5, 2), (3, 2)],
+            0x0040_0000,
+            None,
+        );
+        assert_eq!(quad_surface.get_pixel(4, 1), Some(expected));
+        assert_eq!(quad_surface.get_pixel(3, 0).unwrap().r, 0);
+
+        let mut line_surface = Surface::new(8, 8, PixelFormat::Rgba8888);
+        draw_line_dw(&mut line_surface, 1, 6, 3, 6, 0x0040_0000, None);
+        assert_eq!(line_surface.get_pixel(1, 6).unwrap().r, 64);
+        assert_eq!(line_surface.get_pixel(2, 6).unwrap().r, 64);
+        assert_eq!(line_surface.get_pixel(2, 7).unwrap().r, 0);
+    }
+
     // DrawHBarByVGfx rotation (C4Gui.cpp:347-361): dest (dx,dy) samples texel
     // (15-dy, dx) of the vertical facet.
     #[test]
@@ -6841,6 +6996,17 @@ mod tests {
         assert_eq!((px(0, 0).r, px(0, 0).g), (15, 0)); // dest(0,0) <- texel(15,0)
         assert_eq!((px(0, 15).r, px(0, 15).g), (0, 0)); // dest(0,15) <- texel(0,0)
         assert_eq!((px(5, 3).r, px(5, 3).g), (12, 5)); // dest(5,3) <- texel(12,5)
+
+        // BlitOffset is submitted before the -90 degree transform. A (+1,+1)
+        // native offset therefore rotates to (+1,-1) around the fixed pivot.
+        let _renderer = crate::activate_advanced_renderer_config(crate::AdvancedRendererConfig {
+            blit_offset: 100,
+            ..crate::AdvancedRendererConfig::DEFAULT
+        });
+        let mut shifted = Surface::new(20, 20, PixelFormat::Rgba8888);
+        draw_rotated_vfacet(&mut shifted, &image, 0, 0, 16, 2, 2, None);
+        assert_eq!(shifted.get_pixel(3, 1), Some(Color::new(15, 0, 0, 255)));
+        assert_eq!(shifted.get_pixel(2, 2).unwrap().a, 0);
     }
 
     /// Renders the reference frame and dumps it for external diffing against
