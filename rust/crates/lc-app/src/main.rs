@@ -9138,27 +9138,18 @@ impl AudioContext {
         self.options.set_sound_volume_percent(value);
     }
 
+    #[cfg(test)]
     fn process_audio(
         &mut self,
         snapshot: &SimulationSnapshot,
-        focus: Option<&ObjectSnapshot>,
-        viewport_center: Vector2,
         runtime_music_enabled: &mut bool,
     ) {
-        self.process_audio_with_viewports(
-            snapshot,
-            focus,
-            viewport_center,
-            &[],
-            runtime_music_enabled,
-        );
+        self.process_audio_with_viewports(snapshot, &[], runtime_music_enabled);
     }
 
     fn process_audio_with_viewports(
         &mut self,
         snapshot: &SimulationSnapshot,
-        focus: Option<&ObjectSnapshot>,
-        viewport_center: Vector2,
         viewports: &[ActiveViewportProjection],
         runtime_music_enabled: &mut bool,
     ) {
@@ -9167,13 +9158,11 @@ impl AudioContext {
             self.handle_events(
                 events,
                 snapshot,
-                focus,
-                viewport_center,
                 viewports,
                 runtime_music_enabled,
             );
         }
-        self.update_channels(snapshot, focus, viewport_center);
+        self.update_channels(snapshot, viewports);
     }
 
     fn reset_sfx(&mut self) {
@@ -9392,8 +9381,6 @@ impl AudioContext {
         &mut self,
         events: &[AudioCommand],
         snapshot: &SimulationSnapshot,
-        focus: Option<&ObjectSnapshot>,
-        viewport_center: Vector2,
         viewports: &[ActiveViewportProjection],
         runtime_music_enabled: &mut bool,
     ) {
@@ -9415,8 +9402,7 @@ impl AudioContext {
                         *multiple,
                         *custom_falloff,
                         snapshot,
-                        focus,
-                        viewport_center,
+                        viewports,
                     ) {
                         tracing::error!(sound = %name, error = %err, "failed to play sound");
                     }
@@ -9426,8 +9412,7 @@ impl AudioContext {
                         *target,
                         *position,
                         snapshot,
-                        focus,
-                        viewport_center,
+                        viewports,
                     );
                 }
                 AudioCommand::PlaySoundAt { name, position } => {
@@ -9442,8 +9427,7 @@ impl AudioContext {
                         None,
                         Some((f32::from(volume) / 100.0, pan)),
                         snapshot,
-                        focus,
-                        viewport_center,
+                        viewports,
                     ) {
                         tracing::error!(sound = %name, error = %err, "failed to play positional sound");
                     }
@@ -9461,8 +9445,7 @@ impl AudioContext {
                         *target,
                         *volume,
                         snapshot,
-                        focus,
-                        viewport_center,
+                        viewports,
                     );
                     if !updated {
                         if let Err(err) = self.start_sound(
@@ -9473,8 +9456,7 @@ impl AudioContext {
                             false,
                             None,
                             snapshot,
-                            focus,
-                            viewport_center,
+                            viewports,
                         ) {
                             tracing::error!(
                                 sound = %name,
@@ -9539,8 +9521,7 @@ impl AudioContext {
         multiple: bool,
         custom_falloff: Option<i32>,
         snapshot: &SimulationSnapshot,
-        focus: Option<&ObjectSnapshot>,
-        viewport_center: Vector2,
+        viewports: &[ActiveViewportProjection],
     ) -> Result<(), AudioError> {
         self.try_start_sound(
             name,
@@ -9550,8 +9531,7 @@ impl AudioContext {
             multiple,
             custom_falloff,
             snapshot,
-            focus,
-            viewport_center,
+            viewports,
         )
         .map(|_| ())
     }
@@ -9565,8 +9545,7 @@ impl AudioContext {
         multiple: bool,
         custom_falloff: Option<i32>,
         snapshot: &SimulationSnapshot,
-        focus: Option<&ObjectSnapshot>,
-        viewport_center: Vector2,
+        viewports: &[ActiveViewportProjection],
     ) -> Result<bool, AudioError> {
         self.try_start_sound_with_mix(
             name,
@@ -9577,8 +9556,7 @@ impl AudioContext {
             custom_falloff,
             None,
             snapshot,
-            focus,
-            viewport_center,
+            viewports,
         )
     }
 
@@ -9593,8 +9571,7 @@ impl AudioContext {
         custom_falloff: Option<i32>,
         initial_mix: Option<(f32, f32)>,
         snapshot: &SimulationSnapshot,
-        focus: Option<&ObjectSnapshot>,
-        viewport_center: Vector2,
+        viewports: &[ActiveViewportProjection],
     ) -> Result<bool, AudioError> {
         let sound_enabled = self.options.sound_enabled;
         self.try_start_sound_with_mix_enabled(
@@ -9606,8 +9583,7 @@ impl AudioContext {
             custom_falloff,
             initial_mix,
             snapshot,
-            focus,
-            viewport_center,
+            viewports,
             sound_enabled,
         )
     }
@@ -9632,8 +9608,7 @@ impl AudioContext {
             None,
             None,
             snapshot,
-            None,
-            Vector2::ZERO,
+            &[],
             sound_enabled,
         )
     }
@@ -9649,8 +9624,7 @@ impl AudioContext {
         custom_falloff: Option<i32>,
         initial_mix: Option<(f32, f32)>,
         snapshot: &SimulationSnapshot,
-        focus: Option<&ObjectSnapshot>,
-        viewport_center: Vector2,
+        viewports: &[ActiveViewportProjection],
         sound_enabled: bool,
     ) -> Result<bool, AudioError> {
         // FnSound checks IsSoundPlaying before StartSoundEffect unless the
@@ -9713,8 +9687,7 @@ impl AudioContext {
             started_at: Instant::now(),
             detached_mix: initial_mix,
         };
-        let (mut mix_volume, pan) =
-            compute_mix_values(&mut info, snapshot, focus, viewport_center);
+        let (mut mix_volume, pan) = compute_mix_values(&mut info, snapshot, viewports);
         mix_volume *= self.options.sound_volume;
         if sound_enabled && mix_volume > 0.0 {
             let channel = self.system.play_sound(&info.handle, looped)?;
@@ -9761,10 +9734,9 @@ impl AudioContext {
         target: ObjectId,
         position: Vector2,
         snapshot: &SimulationSnapshot,
-        focus: Option<&ObjectSnapshot>,
-        viewport_center: Vector2,
+        viewports: &[ActiveViewportProjection],
     ) {
-        let detached_mix = compute_positional_mix(position, snapshot, focus, viewport_center);
+        let detached_mix = compute_object_positional_mix(position, snapshot, viewports);
         let mut looping = Vec::new();
         let mut updates = Vec::new();
         for (key, info) in &mut self.active_channels {
@@ -9803,8 +9775,7 @@ impl AudioContext {
         target: Option<ObjectId>,
         volume: u8,
         snapshot: &SimulationSnapshot,
-        focus: Option<&ObjectSnapshot>,
-        viewport_center: Vector2,
+        viewports: &[ActiveViewportProjection],
     ) -> bool {
         let Some(key) = self.active_channel_key(name, target) else {
             return false;
@@ -9820,7 +9791,7 @@ impl AudioContext {
             let Some(channel) = info.channel else {
                 return true;
             };
-            let (mut mix_volume, pan) = compute_mix_values(info, snapshot, focus, viewport_center);
+            let (mut mix_volume, pan) = compute_mix_values(info, snapshot, viewports);
             mix_volume *= self.options.sound_volume;
             self.system
                 .channel_set_volume_and_pan(channel, mix_volume, pan);
@@ -9832,8 +9803,7 @@ impl AudioContext {
     fn update_channels(
         &mut self,
         snapshot: &SimulationSnapshot,
-        focus: Option<&ObjectSnapshot>,
-        viewport_center: Vector2,
+        viewports: &[ActiveViewportProjection],
     ) {
         let now = Instant::now();
         let mut finished = Vec::new();
@@ -9892,7 +9862,7 @@ impl AudioContext {
                 }
                 _ => {}
             }
-            let (mut mix_volume, pan) = compute_mix_values(info, snapshot, focus, viewport_center);
+            let (mut mix_volume, pan) = compute_mix_values(info, snapshot, viewports);
             mix_volume *= self.options.sound_volume;
             if mix_volume <= 0.0 {
                 if let Some(channel) = info.channel.take() {
@@ -44590,15 +44560,6 @@ impl GameApp {
     }
 
     fn play_control_message_sound(&mut self, name: &str) -> bool {
-        let fallback_center = {
-            let surface = self.graphics.surface();
-            Vector2::new((surface.width() as i32) / 2, (surface.height() as i32) / 2)
-        };
-        let viewport_center = self
-            .focus_snapshot
-            .as_ref()
-            .map(|object| object.position)
-            .unwrap_or(fallback_center);
         let Some(audio) = self.audio.as_mut() else {
             return false;
         };
@@ -44611,8 +44572,7 @@ impl GameApp {
                 true,
                 None,
                 &self.snapshot,
-                self.focus_snapshot.as_ref(),
-                viewport_center,
+                &[],
             ) {
                 Ok(true) => return true,
                 Ok(false) => {}
@@ -72333,15 +72293,6 @@ impl GameApp {
     }
 
     fn update_audio(&mut self) {
-        let fallback_center = {
-            let surface = self.graphics.surface();
-            Vector2::new((surface.width() as i32) / 2, (surface.height() as i32) / 2)
-        };
-        let viewport_center = self
-            .focus_snapshot
-            .as_ref()
-            .map(|object| object.position)
-            .unwrap_or(fallback_center);
         // Script Music(nil/name) mutates Game.IsMusicEnabled before asking
         // the music system to stop/play. Fold that flag in command order so
         // a SetPlayList restart sees the state at its exact event position.
@@ -72350,8 +72301,6 @@ impl GameApp {
         if let Some(audio) = self.audio.as_mut() {
             audio.process_audio_with_viewports(
                 &self.snapshot,
-                self.focus_snapshot.as_ref(),
-                viewport_center,
                 &viewports,
                 &mut runtime_music_enabled,
             );
@@ -90506,11 +90455,8 @@ fn find_music_group(paths: &AppPaths) -> Result<PathBuf> {
 fn compute_mix_values(
     info: &mut ChannelInfo,
     snapshot: &SimulationSnapshot,
-    focus: Option<&ObjectSnapshot>,
-    viewport_center: Vector2,
+    viewports: &[ActiveViewportProjection],
 ) -> (f32, f32) {
-    const AUDIBILITY_RADIUS: f32 = 700.0;
-
     let base_volume = (info.volume as f32 / 100.0).clamp(0.0, 1.0);
     let Some(target_id) = info.target else {
         return info.detached_mix.unwrap_or((base_volume, 0.0));
@@ -90518,74 +90464,22 @@ fn compute_mix_values(
     let Some(target) = snapshot.object(target_id) else {
         return info.detached_mix.unwrap_or((base_volume, 0.0));
     };
-    let (mut audibility, pan) =
-        compute_positional_mix(target.position, snapshot, focus, viewport_center);
-    info.detached_mix = Some((audibility, pan));
-    if let Some(falloff_distance) = info.custom_falloff {
-        if falloff_distance != 0 {
-            let scale = AUDIBILITY_RADIUS / falloff_distance as f32;
-            audibility = (1.0 + (audibility - 1.0) * scale).clamp(0.0, 1.0);
-        }
-    }
+    let (audibility, pan) = compute_positional_mix_values(target.position, snapshot, viewports);
+    info.detached_mix = Some((f32::from(audibility) / 100.0, pan));
 
-    (base_volume * audibility, pan)
+    (
+        base_volume * adjusted_audibility(audibility, info.custom_falloff),
+        pan,
+    )
 }
 
-fn compute_positional_mix(
+fn compute_object_positional_mix(
     source: Vector2,
     snapshot: &SimulationSnapshot,
-    focus: Option<&ObjectSnapshot>,
-    viewport_center: Vector2,
+    viewports: &[ActiveViewportProjection],
 ) -> (f32, f32) {
-    const AUDIBILITY_RADIUS: f32 = 700.0;
-    const PAN_DIVISOR: f32 = 5.0;
-    const PAN_LIMIT: f32 = 100.0;
-    let mut listeners: Vec<Vector2> = Vec::new();
-    if let Some(focus_object) = focus {
-        listeners.push(focus_object.position);
-    }
-    for player in &snapshot.hud.players {
-        if let Some(focus_id) = player.focus {
-            if let Some(object) = snapshot.object(focus_id) {
-                listeners.push(object.position);
-            }
-        }
-    }
-    if listeners.is_empty() {
-        listeners.push(viewport_center);
-    }
-
-    let mut best_audibility: f32 = 0.0;
-    for listener in &listeners {
-        let dx = (source.x - listener.x) as f32;
-        let dy = (source.y - listener.y) as f32;
-        let distance = (dx * dx + dy * dy).sqrt();
-        let audibility = (1.0 - distance / AUDIBILITY_RADIUS).clamp(0.0, 1.0);
-        best_audibility = best_audibility.max(audibility);
-    }
-
-    let mut pan_accumulator = 0.0;
-    let mut pan_contributors = 0;
-    if snapshot.hud.players.is_empty() {
-        pan_accumulator += (source.x - viewport_center.x) as f32 / PAN_DIVISOR;
-        pan_contributors = 1;
-    } else {
-        for player in &snapshot.hud.players {
-            let center = player
-                .focus
-                .and_then(|focus_id| snapshot.object(focus_id))
-                .map(|obj| obj.position)
-                .unwrap_or(viewport_center);
-            pan_accumulator += (source.x - center.x) as f32 / PAN_DIVISOR;
-            pan_contributors += 1;
-        }
-    }
-    if pan_contributors == 0 {
-        pan_accumulator += (source.x - viewport_center.x) as f32 / PAN_DIVISOR;
-    }
-    let pan = (pan_accumulator.clamp(-PAN_LIMIT, PAN_LIMIT)) / PAN_LIMIT;
-
-    (best_audibility, pan.clamp(-1.0, 1.0))
+    let (audibility, pan) = compute_positional_mix_values(source, snapshot, viewports);
+    (f32::from(audibility) / 100.0, pan)
 }
 
 fn compute_mix_values_for(
@@ -90593,11 +90487,8 @@ fn compute_mix_values_for(
     target_id: Option<ObjectId>,
     custom_falloff: Option<i32>,
     snapshot: &SimulationSnapshot,
-    focus: Option<&ObjectSnapshot>,
-    viewport_center: Vector2,
+    viewports: &[ActiveViewportProjection],
 ) -> (f32, f32) {
-    const AUDIBILITY_RADIUS: f32 = 700.0;
-
     let base_volume = (f32::from(volume) / 100.0).clamp(0.0, 1.0);
     let Some(target_id) = target_id else {
         return (base_volume, 0.0);
@@ -90605,20 +90496,25 @@ fn compute_mix_values_for(
     let Some(target) = snapshot.object(target_id) else {
         return (base_volume, 0.0);
     };
-    let (mut audibility, pan) =
-        compute_positional_mix(target.position, snapshot, focus, viewport_center);
-    if let Some(falloff_distance) = custom_falloff {
-        if falloff_distance != 0 {
-            let scale = AUDIBILITY_RADIUS / falloff_distance as f32;
-            audibility = (1.0 + (audibility - 1.0) * scale).clamp(0.0, 1.0);
-        }
-    }
-
-    (base_volume * audibility, pan)
+    let (audibility, pan) = compute_positional_mix_values(target.position, snapshot, viewports);
+    (
+        base_volume * adjusted_audibility(audibility, custom_falloff),
+        pan,
+    )
 }
 
-/// `C4GraphicsSystem::GetAudibility` for `StartSoundEffectAt`. Unlike
-/// object-bound sounds, C++ evaluates this once when the instance starts.
+fn adjusted_audibility(audibility: u8, custom_falloff: Option<i32>) -> f32 {
+    const AUDIBILITY_RADIUS: i32 = 700;
+
+    let mut audibility = i32::from(audibility);
+    if let Some(falloff_distance) = custom_falloff.filter(|distance| *distance != 0) {
+        audibility = 100 + (audibility - 100) * AUDIBILITY_RADIUS / falloff_distance;
+    }
+    audibility.clamp(0, 100) as f32 / 100.0
+}
+
+/// `C4GraphicsSystem::GetAudibility`. `StartSoundEffectAt` evaluates this
+/// once; object-bound instances evaluate it again on every sound-system tick.
 fn compute_positional_mix_values(
     source: Vector2,
     snapshot: &SimulationSnapshot,
@@ -103424,8 +103320,6 @@ func Award()
         snapshot.audio.push(test_sound_command(true));
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         snapshot.audio.clear();
@@ -103438,8 +103332,6 @@ func Award()
         audio.options.sound_enabled = false;
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         assert!(audio.active_channels.contains_key(&key));
@@ -103449,8 +103341,6 @@ func Award()
         audio.options.sound_enabled = true;
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         let restored_channel = audio.active_channels[&key]
@@ -103469,8 +103359,6 @@ func Award()
 
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         snapshot.audio.clear();
@@ -103481,8 +103369,6 @@ func Award()
         snapshot.audio.push(test_sound_command(true));
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         snapshot.audio.clear();
@@ -103492,8 +103378,6 @@ func Award()
         audio.options.sound_enabled = true;
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         let channel = audio.active_channels[&key]
@@ -103511,8 +103395,6 @@ func Award()
         snapshot.audio.push(test_sound_command(true));
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
 
@@ -103523,8 +103405,6 @@ func Award()
         }];
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         assert_eq!(audio.active_channels[&key].volume, 37);
@@ -103536,8 +103416,6 @@ func Award()
         }];
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         assert!(!audio.active_channels.contains_key(&key));
@@ -103546,8 +103424,6 @@ func Award()
         audio.options.sound_enabled = true;
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         assert!(!audio.active_channels.contains_key(&key));
@@ -103561,8 +103437,6 @@ func Award()
         snapshot.audio.push(test_sound_command(false));
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
 
@@ -103576,8 +103450,6 @@ func Award()
         }];
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
 
@@ -103595,8 +103467,6 @@ func Award()
         }];
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         assert!(!audio.active_channels.contains_key(&key));
@@ -103615,8 +103485,6 @@ func Award()
         }];
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
 
@@ -103635,8 +103503,6 @@ func Award()
         }];
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         let updated = &audio.active_channels[&key];
@@ -103652,8 +103518,6 @@ func Award()
         }];
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         assert!(!audio.active_channels.contains_key(&key));
@@ -103668,8 +103532,6 @@ func Award()
         snapshot.audio.push(test_sound_command(false));
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         let finished_channel = audio.active_channels[&key]
@@ -103684,8 +103546,6 @@ func Award()
         }];
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
 
@@ -103695,8 +103555,6 @@ func Award()
         );
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
 
@@ -103717,8 +103575,6 @@ func Award()
         snapshot.audio.push(test_sound_command(false));
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         snapshot.audio.clear();
@@ -103731,8 +103587,6 @@ func Award()
         audio.options.sound_enabled = false;
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         assert!(audio.active_channels.contains_key(&key));
@@ -103740,8 +103594,6 @@ func Award()
 
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         assert!(!audio.active_channels.contains_key(&key));
@@ -103749,8 +103601,6 @@ func Award()
         audio.options.sound_enabled = true;
         audio.process_audio(
             &snapshot,
-            None,
-            Vector2::ZERO,
             &mut runtime_music_enabled,
         );
         assert!(!audio.active_channels.contains_key(&key));
@@ -103795,8 +103645,7 @@ func Award()
                     true,
                     None,
                     &initial,
-                    Some(&listener),
-                    listener.position,
+                    &[audio_viewport(0, OWNER_NONE, listener.position)],
                 )
                 .expect("audible loop starts");
         }
@@ -103814,8 +103663,7 @@ func Award()
                 true,
                 None,
                 &initial,
-                Some(&listener),
-                listener.position,
+                &[audio_viewport(0, OWNER_NONE, listener.position)],
             )
             .expect("nearby sound uses a released mixer slot");
         let nearby_channel = audio
@@ -103853,8 +103701,7 @@ func Award()
                 true,
                 None,
                 &initial,
-                Some(&listener),
-                listener.position,
+                &[audio_viewport(0, OWNER_NONE, listener.position)],
             )
             .expect("audible one-shot starts");
         let key = SoundInstanceKey::new("Impact", Some(source.id));
@@ -103874,7 +103721,8 @@ func Award()
             ],
             Vec::new(),
         );
-        audio.update_channels(&moved, Some(&listener), listener.position);
+        let viewports = [audio_viewport(0, OWNER_NONE, listener.position)];
+        audio.update_channels(&moved, &viewports);
         assert!(
             audio.active_channels.contains_key(&key),
             "the release pass retains the logical one-shot instance"
@@ -103882,7 +103730,7 @@ func Award()
         assert!(audio.active_channels[&key].channel.is_none());
         assert!(!audio.system.channel_is_playing(channel));
 
-        audio.update_channels(&moved, Some(&listener), listener.position);
+        audio.update_channels(&moved, &viewports);
         assert!(
             !audio.active_channels.contains_key(&key),
             "the next pass culls an inaudible one-shot past half duration"
@@ -103971,8 +103819,7 @@ func Award()
             Some(source.id),
             None,
             &snapshot,
-            Some(&listener),
-            Vector2::new(1000, 1000),
+            &[audio_viewport(0, OWNER_NONE, listener.position)],
         );
         assert!((volume - 0.5).abs() < 1e-6, "volume={volume}");
         assert!((pan - 0.7).abs() < 1e-6, "pan={pan}");
@@ -103998,8 +103845,7 @@ func Award()
             Some(source.id),
             Some(1400),
             &snapshot,
-            Some(&listener),
-            Vector2::new(1000, 1000),
+            &[audio_viewport(0, OWNER_NONE, listener.position)],
         );
         assert!((volume - 0.5).abs() < 1e-6, "volume={volume}");
         assert!((pan - 1.0).abs() < 1e-6, "pan={pan}");
@@ -104024,8 +103870,7 @@ func Award()
             None,
             None,
             &snapshot,
-            Some(&listener),
-            Vector2::new(0, 0),
+            &[],
         );
         assert!((volume - 0.8).abs() < 1e-6);
         assert_eq!(pan, 0.0);
@@ -104184,6 +104029,112 @@ func Award()
     }
 
     #[test]
+    fn object_bound_mix_uses_only_active_viewport_listener_and_pan() {
+        let dir = tempdir().expect("tempdir");
+        let scenario = dir.path().join("ObjectMix.c4s");
+        fs::create_dir_all(&scenario).expect("create scenario group");
+        fs::write(scenario.join("Impact.wav"), silent_pcm_wav(10_000))
+            .expect("write object sound");
+
+        let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
+        assert!(audio.resolver.configure_scenario(Some(&scenario)));
+
+        let source = make_object(1, "SNDS", Vector2::new(350, 100));
+        let listener = make_object(2, "LIST", Vector2::new(500, 100));
+        let remote_listener = make_object(3, "RMTE", source.position);
+        let mut snapshot = make_snapshot(
+            vec![source.clone(), listener.clone(), remote_listener.clone()],
+            vec![HudPlayerSnapshot {
+                owner: 8,
+                crew: vec![remote_listener.id],
+                focus: Some(remote_listener.id),
+                eliminated: false,
+                wealth: 0,
+                score: 0,
+            }],
+        );
+        snapshot.players = vec![
+            PlayerState {
+                id: 7,
+                view_target: Some(listener.id),
+                cursor: Some(remote_listener.id),
+                ..Default::default()
+            },
+            PlayerState {
+                id: 8,
+                view_cursor: Some(remote_listener.id),
+                ..Default::default()
+            },
+        ];
+        let viewports = [audio_viewport(0, 7, Vector2::new(0, 100))];
+        let mut cursor_fallback = snapshot.clone();
+        cursor_fallback.players[0].view_cursor = Some(listener.id);
+        cursor_fallback.players[0].view_target = Some(remote_listener.id);
+        assert_eq!(
+            compute_positional_mix_values(source.position, &cursor_fallback, &viewports),
+            (79, 0.7),
+            "ViewCursor takes precedence over ViewTarget and Cursor",
+        );
+        cursor_fallback.players[0].view_cursor = None;
+        cursor_fallback.players[0].view_target = None;
+        cursor_fallback.players[0].cursor = Some(listener.id);
+        assert_eq!(
+            compute_positional_mix_values(source.position, &cursor_fallback, &viewports),
+            (79, 0.7),
+            "Cursor is used when ViewCursor and ViewTarget are null",
+        );
+        cursor_fallback.players[0].cursor = None;
+        assert_eq!(
+            compute_positional_mix_values(source.position, &cursor_fallback, &viewports),
+            (50, 0.7),
+            "the live viewport center is the final listener fallback",
+        );
+
+        audio
+            .start_sound(
+                "Impact",
+                Some(source.id),
+                100,
+                false,
+                false,
+                None,
+                &snapshot,
+                &viewports,
+            )
+            .expect("object sound starts");
+        let key = SoundInstanceKey::new("Impact", Some(source.id));
+        assert_eq!(audio.active_channels[&key].detached_mix, Some((0.79, 0.7)));
+        assert!(audio.active_channels[&key].channel.is_some());
+
+        audio.update_channels(&snapshot, &[]);
+        assert_eq!(audio.active_channels[&key].detached_mix, Some((0.0, 0.0)));
+        assert!(audio.active_channels[&key].channel.is_none());
+
+        let moved_viewports = [audio_viewport(0, 7, Vector2::new(100, 100))];
+        audio.update_channels(&snapshot, &moved_viewports);
+        assert_eq!(audio.active_channels[&key].detached_mix, Some((0.79, 0.5)));
+        assert!(audio.active_channels[&key].channel.is_some());
+
+        audio.detach_object_sounds(source.id, source.position, &snapshot, &viewports);
+        let info = audio
+            .active_channels
+            .values()
+            .find(|info| info.sample_name == "impact.wav")
+            .expect("detached instance remains live");
+        assert_eq!(info.target, None);
+        assert_eq!(info.detached_mix, Some((0.79, 0.7)));
+        audio.update_channels(&snapshot, &[]);
+        assert_eq!(
+            audio
+                .active_channels
+                .values()
+                .find(|info| info.sample_name == "impact.wav")
+                .and_then(|info| info.detached_mix),
+            Some((0.79, 0.7)),
+        );
+    }
+
+    #[test]
     fn positional_audio_handler_freezes_mix_and_rejects_second_global_instance() {
         let dir = tempdir().expect("tempdir");
         let scenario = dir.path().join("Goldrush.c4s");
@@ -104215,8 +104166,6 @@ func Award()
         audio.handle_events(
             std::slice::from_ref(&event),
             &snapshot,
-            Some(&listener),
-            Vector2::ZERO,
             &viewports,
             &mut runtime_music_enabled,
         );
@@ -104236,8 +104185,6 @@ func Award()
         audio.handle_events(
             std::slice::from_ref(&event),
             &snapshot,
-            Some(&listener),
-            Vector2::ZERO,
             &viewports,
             &mut runtime_music_enabled,
         );
@@ -104266,8 +104213,7 @@ func Award()
                 false,
                 None,
                 &snapshot,
-                Some(&source),
-                source.position,
+                &[audio_viewport(0, OWNER_NONE, source.position)],
             )
             .expect("extensionless loop starts");
         let channel = audio
@@ -104313,8 +104259,7 @@ func Award()
                     false,
                     None,
                     &snapshot,
-                    Some(&source),
-                    source.position,
+                    &[audio_viewport(0, OWNER_NONE, source.position)],
                 )
                 .expect("concrete blast starts")
         );
@@ -104330,8 +104275,7 @@ func Award()
                     false,
                     None,
                     &snapshot,
-                    Some(&source),
-                    source.position,
+                    &[audio_viewport(0, OWNER_NONE, source.position)],
                 )
                 .expect("wildcard lookup succeeds"),
             "the live Blast1 sample suppresses the request before Blast2 is resolved"
@@ -104368,8 +104312,7 @@ func Award()
                 false,
                 None,
                 &snapshot,
-                Some(&source),
-                source.position,
+                &[audio_viewport(0, OWNER_NONE, source.position)],
             )
         };
 
@@ -104384,8 +104327,7 @@ func Award()
             source.id,
             source.position,
             &snapshot,
-            Some(&source),
-            source.position,
+            &[audio_viewport(0, OWNER_NONE, source.position)],
         );
         start(&mut audio).expect("second one-shot starts");
 
@@ -104438,8 +104380,7 @@ func Award()
                     false,
                     None,
                     &snapshot,
-                    Some(source),
-                    source.position,
+                    &[audio_viewport(0, OWNER_NONE, source.position)],
                 )
                 .expect("one-shot starts");
             let channel = audio
@@ -104453,8 +104394,7 @@ func Award()
                 source.id,
                 source.position,
                 &snapshot,
-                Some(source),
-                source.position,
+                &[audio_viewport(0, OWNER_NONE, source.position)],
             );
         }
 
@@ -104499,8 +104439,7 @@ func Award()
                     false,
                     None,
                     &snapshot,
-                    Some(&source),
-                    source.position,
+                    &[audio_viewport(0, OWNER_NONE, source.position)],
                 )
                 .expect("tone starts");
         }
@@ -104556,8 +104495,7 @@ func Award()
                 false,
                 None,
                 &initial,
-                Some(&listener),
-                listener.position,
+                &[audio_viewport(0, OWNER_NONE, listener.position)],
             )
             .expect("loop starts");
         let key = SoundInstanceKey::new("Fire", Some(source.id));
@@ -104581,10 +104519,9 @@ func Award()
             position: source.position,
         }];
         let mut runtime_music_enabled = false;
-        audio.process_audio(
+        audio.process_audio_with_viewports(
             &removed,
-            Some(&listener),
-            listener.position,
+            &[audio_viewport(0, OWNER_NONE, listener.position)],
             &mut runtime_music_enabled,
         );
 
@@ -104624,8 +104561,7 @@ func Award()
                 false,
                 Some(1400),
                 &initial,
-                Some(&listener),
-                listener.position,
+                &[audio_viewport(0, OWNER_NONE, listener.position)],
             )
             .expect("one-shot starts");
         let key = SoundInstanceKey::new("Impact", Some(source.id));
@@ -104649,10 +104585,9 @@ func Award()
             position: source.position,
         }];
         let mut runtime_music_enabled = false;
-        audio.process_audio(
+        audio.process_audio_with_viewports(
             &removed,
-            Some(&listener),
-            listener.position,
+            &[audio_viewport(0, OWNER_NONE, listener.position)],
             &mut runtime_music_enabled,
         );
 
@@ -104666,11 +104601,7 @@ func Award()
 
         let moved_listener = make_object(1, "LIST", Vector2::new(2000, 1000));
         let moved = make_snapshot(vec![moved_listener.clone()], Vec::new());
-        audio.update_channels(
-            &moved,
-            Some(&moved_listener),
-            moved_listener.position,
-        );
+        audio.update_channels(&moved, &[]);
         assert_eq!(audio.active_channels[&key].detached_mix, Some(frozen_mix));
         assert!(!audio
             .try_start_sound(
@@ -104681,8 +104612,7 @@ func Award()
                 true,
                 None,
                 &moved,
-                Some(&moved_listener),
-                moved_listener.position,
+                &[],
             )
             .expect("global near-dedup check succeeds"));
 
@@ -104720,8 +104650,7 @@ func Award()
                 false,
                 None,
                 &snapshot,
-                Some(&horse),
-                horse.position,
+                &[audio_viewport(0, OWNER_NONE, horse.position)],
             )
         };
 
@@ -104760,8 +104689,7 @@ func Award()
                 true,
                 None,
                 &snapshot,
-                Some(&left),
-                left.position,
+                &[audio_viewport(0, OWNER_NONE, left.position)],
             )
             .expect("first nearby horse starts");
         audio
@@ -104773,8 +104701,7 @@ func Award()
                 true,
                 None,
                 &snapshot,
-                Some(&left),
-                left.position,
+                &[audio_viewport(0, OWNER_NONE, left.position)],
             )
             .expect("nearby horse reuses the sample instance");
     }
@@ -104817,8 +104744,7 @@ func Award()
                     true,
                     None,
                     &snapshot,
-                    horses.first(),
-                    horses[0].position,
+                    &[audio_viewport(0, OWNER_NONE, horses[0].position)],
                 )
                 .expect("C++ silently rejects the sample after twenty instances");
         }
@@ -122601,8 +122527,6 @@ public func Grant(password) { return GainMissionAccess(password); }
         audio.handle_events(
             &[event.clone()],
             &snapshot,
-            None,
-            Vector2::ZERO,
             &[],
             &mut runtime_music_enabled,
         );
@@ -122624,8 +122548,6 @@ public func Grant(password) { return GainMissionAccess(password); }
         audio.handle_events(
             &[event.clone()],
             &snapshot,
-            None,
-            Vector2::ZERO,
             &[],
             &mut runtime_music_enabled,
         );
@@ -122647,8 +122569,6 @@ public func Grant(password) { return GainMissionAccess(password); }
                 AudioCommand::StopMusic,
             ],
             &snapshot,
-            None,
-            Vector2::ZERO,
             &[],
             &mut runtime_music_enabled,
         );
@@ -122670,8 +122590,6 @@ public func Grant(password) { return GainMissionAccess(password); }
                 },
             ],
             &snapshot,
-            None,
-            Vector2::ZERO,
             &[],
             &mut runtime_music_enabled,
         );
@@ -123085,8 +123003,6 @@ public func Grant(password) { return GainMissionAccess(password); }
         audio.handle_events(
             &[AudioCommand::StopMusic],
             &make_snapshot(Vec::new(), Vec::new()),
-            None,
-            Vector2::ZERO,
             &[],
             &mut runtime_music_enabled,
         );
