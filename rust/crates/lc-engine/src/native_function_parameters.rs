@@ -19,7 +19,7 @@ use lc_script::C4VType::{Any, Array, Bool, C4Id, C4Object, Int, Map, Ref, String
 
 pub(crate) type NativeFunctionParameterEntry = (&'static str, &'static [C4VType]);
 
-pub(crate) const CPP_BACKED_NATIVE_FUNCTION_COUNT: usize = 449;
+pub(crate) const CPP_BACKED_NATIVE_FUNCTION_COUNT: usize = 450;
 pub(crate) const RUST_STANDIN_NATIVE_FUNCTIONS: &[&str] = &[
     "Find_AtPoint",
     "Find_Category",
@@ -190,6 +190,7 @@ pub(crate) const NATIVE_FUNCTION_PARAMETERS: &[NativeFunctionParameterEntry] = &
     ("Equal", &[Any, Any]),
     ("ExecuteCommand", &[C4Object]),
     ("Exit", &[C4Object, Int, Int, Int, Int, Int, Int]),
+    ("Explode", &[Int, C4Object, C4Id, String]),
     ("Extinguish", &[C4Object]),
     ("ExtractLiquid", &[Int, Int]),
     ("ExtractMaterialAmount", &[Int, Int, Int, Int]),
@@ -706,7 +707,7 @@ mod tests {
     #[test]
     fn every_production_registration_has_exactly_one_signature() {
         let registrations = production_registration_names();
-        assert_eq!(registrations.len(), 456);
+        assert_eq!(registrations.len(), 457);
 
         let mut registration_counts = BTreeMap::new();
         for name in registrations {
@@ -721,7 +722,7 @@ mod tests {
         for (name, _) in native_function_parameter_entries() {
             *signature_counts.entry(name).or_insert(0usize) += 1;
         }
-        assert_eq!(signature_counts.len(), 456);
+        assert_eq!(signature_counts.len(), 457);
         assert!(
             signature_counts.values().all(|count| *count == 1),
             "native host names must have exactly one signature"
@@ -788,7 +789,7 @@ mod tests {
                 .iter()
                 .map(|(_, parameters)| parameters.len())
                 .sum::<usize>(),
-            1_336
+            1_340
         );
     }
 }

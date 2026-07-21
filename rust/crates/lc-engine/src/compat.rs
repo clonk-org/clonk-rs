@@ -10308,6 +10308,27 @@ fn exit_object_at_position_with_full_motion_and_calls(
             scope.pending_update.shape_override = Some(None);
         }
         scope.refresh_shape_preview(&definition_metadata);
+        // Pending native creations are already real objects to C++. Keep the
+        // deferred SpawnConfig in the same post-Exit state so it can
+        // materialize even when its likewise-pending container is removed
+        // later in this call. The nested update still carries callback writes
+        // that happen after this point.
+        if let Some(spawn) = context
+            .pending_spawns
+            .iter_mut()
+            .find(|spawn| spawn.id == Some(target))
+        {
+            spawn.container = None;
+            spawn.position = position;
+            spawn.fixed_position = None;
+            spawn.rotation = rotation;
+            spawn.fixed_rotation = None;
+            spawn.velocity = Vector2::new(velocity.int_x(), velocity.int_y());
+            spawn.fixed_velocity = Some(velocity);
+            spawn.rotation_velocity = Some(rotation_velocity);
+            spawn.mobile = Some(true);
+            spawn.in_liquid = Some(false);
+        }
     });
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
@@ -11265,6 +11286,7 @@ pub(super) fn buy(args: &[Value]) -> Result<Value, RuntimeError> {
         creator,
         owner: for_player,
         controller: for_player,
+        construction: FULL_CON,
         position: Vector2::new(50, 50),
         rotation: 0,
         velocity: FixedVec2::ZERO,
@@ -15254,6 +15276,7 @@ fn cpp_native_parameter_count(name: &str) -> usize {
         | "DigFree"
         | "Distance"
         | "DoDamage"
+        | "Explode"
         | "ExtractMaterialAmount"
         | "FxFireStop"
         | "GetActMapVal"
@@ -15598,6 +15621,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("BlastFree", blast_free);
     script.register_host_function("BlastObject", blast_object);
     script.register_host_function("BlastObjects", blast_objects);
+    script.register_host_function("Explode", explode);
     script.register_host_function("ShakeFree", shake_free);
     script.register_host_function("ShakeObjects", shake_objects);
     script.register_host_function("SetSkyParallax", set_sky_parallax);
@@ -24459,6 +24483,247 @@ fn dispatch_effects_do_damage(
     Some(change)
 }
 
+/// FnExplode (C4Script.cpp:238-243) snapshots the immediate container and
+/// controller, removes the target, then lets C4Object::Explode read its final
+/// position while the removed object is still allocated.
+fn explode(args: &[Value]) -> Result<Value, RuntimeError> {
+    let level = value_to_i32(args.first().unwrap_or(&Value::Nil), "Explode", "level")?;
+    let explicit_target = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "Explode",
+        "object",
+    )?;
+    let effect_id = parse_native_c4id_argument(args.get(2), "Explode")?;
+    // FnStringPar always passes a non-null pointer to Explosion: a null C4String
+    // becomes "". Consequently an omitted string does not activate
+    // Explosion's `else if (idEffect)` particle-suppression arm.
+    let effect_name =
+        parse_native_c4_string_argument(args.get(3), "Explode", "effect")?.unwrap_or_default();
+
+    let target = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| explicit_target.or(context.script_object_context))
+    });
+    let Some(target) = target else {
+        return Ok(Value::Bool(false));
+    };
+
+    let pre_removal = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let object = context.get_world_object(target)?;
+        let scope = context.object_scope(target);
+        Some((
+            scope
+                .map(ObjectScopeContext::container)
+                .unwrap_or_else(|| object.container()),
+            scope
+                .map(ObjectScopeContext::controller)
+                .unwrap_or_else(|| object.controller()),
+        ))
+    });
+    let Some((in_object, caused_by)) = pre_removal else {
+        return Ok(Value::Bool(false));
+    };
+
+    let _ = assign_removal_live(target, false)?;
+    let position = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        context
+            .object_scope(target)
+            .map(ObjectScopeContext::effective_position)
+            .or_else(|| context.get_world_object(target).map(|object| object.position()))
+    });
+    // A resolved C4Object pointer remains allocated after AssignRemoval. The
+    // Rust scope normally remains as well; retain FnExplode's unconditional
+    // true result if a synthetic fixture cannot expose that retired scope.
+    if let Some(position) = position {
+        native_explosion(
+            position,
+            level,
+            in_object,
+            caused_by,
+            target,
+            effect_id,
+            &effect_name,
+        )?;
+    }
+    Ok(Value::Bool(true))
+}
+
+fn native_explosion(
+    position: Vector2,
+    level: i32,
+    in_object: Option<ObjectId>,
+    caused_by: i32,
+    by_object: ObjectId,
+    effect_id: Option<String>,
+    effect_name: &str,
+) -> Result<(), RuntimeError> {
+    let grade = (level / 10 - 1).clamp(1, 3);
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            // The current C++ oracle's std::format receives the promoted int
+            // value of '0' + grade, hence Blast49..Blast51.
+            context.audio_mut().events.push(AudioCommand::PlaySoundAt {
+                name: format!("Blast{}", i32::from(b'0') + grade),
+                position,
+            });
+        }
+    });
+
+    // Resolve containment once, before any visual-effect callbacks, and keep
+    // that pointer for the later second BlastObjects pass.
+    let contain_blast = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let mut container = in_object;
+        while let Some(candidate) = container {
+            let definition = effective_definition_id(context, candidate);
+            let contains = definition
+                .as_deref()
+                .and_then(|definition| context.definition_metadata(definition))
+                .is_some_and(|metadata| metadata.fire.contain_blast != 0);
+            if contains {
+                break;
+            }
+            container = context
+                .object_scope(candidate)
+                .map(ObjectScopeContext::container)
+                .unwrap_or_else(|| {
+                    context
+                        .get_world_object(candidate)
+                        .and_then(|object| object.container())
+                });
+        }
+        container
+    });
+
+    if contain_blast.is_none() {
+        if !incinerate_landscape_at(position.x, position.y)?.as_bool()
+            && !incinerate_landscape_at(position.x, position.y.wrapping_sub(10))?.as_bool()
+            && !incinerate_landscape_at(
+                position.x.wrapping_sub(5),
+                position.y.wrapping_sub(5),
+            )?
+            .as_bool()
+        {
+            let _ = incinerate_landscape_at(
+                position.x.wrapping_add(5),
+                position.y.wrapping_sub(5),
+            )?;
+        }
+        native_explosion_visual(position, level, caused_by, by_object, effect_id, effect_name)?;
+    }
+
+    native_blast_objects(position.x, position.y, level, in_object, caused_by, Some(by_object))?;
+    if contain_blast != in_object {
+        native_blast_objects(
+            position.x,
+            position.y,
+            level,
+            contain_blast,
+            caused_by,
+            Some(by_object),
+        )?;
+    }
+    if contain_blast.is_none() {
+        native_blast_free_absolute(position, level, Some(caused_by))?;
+    }
+    Ok(())
+}
+
+fn native_explosion_visual(
+    position: Vector2,
+    level: i32,
+    caused_by: i32,
+    by_object: ObjectId,
+    effect_id: Option<String>,
+    effect_name: &str,
+) -> Result<(), RuntimeError> {
+    let selected_particle = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let default = (context.particle_def_known("Blast") != Some(false))
+            .then(|| "Blast".to_string());
+        if !effect_name.is_empty()
+            && context.particle_def_known(effect_name) != Some(false)
+        {
+            Some(effect_name.to_string())
+        } else {
+            default
+        }
+    });
+
+    if let Some(definition_id) = selected_particle {
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            context.register_particle(ParticleCommand::Create(ParticleConfig {
+                definition_id: definition_id.clone(),
+                position: FloatVector2::new(position.x as f32, position.y as f32),
+                velocity: FloatVector2::new(0.0, 0.0),
+                life: 0,
+                parameter_a: level as f32,
+                parameter_b: 0,
+                layer: ParticleLayer::Global,
+            }));
+            if definition_id.starts_with("Blast")
+                && context.particle_def_known("FSpark") != Some(false)
+            {
+                context.register_particle(ParticleCommand::Cast {
+                    definition_id: "FSpark".to_string(),
+                    amount: level / 5 + 1,
+                    x: position.x as f32,
+                    y: position.y as f32,
+                    level,
+                    a0: (level / 2) as f32 + 1.0,
+                    b0: 0x00ef_0000,
+                    a1: level as f32 + 1.0,
+                    b1: 0xffff_1010,
+                    layer: ParticleLayer::Global,
+                });
+            }
+        });
+        return Ok(());
+    }
+
+    let definition = effect_id.unwrap_or_else(|| "FXB1".to_string());
+    let controller = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        context
+            .object_scope(by_object)
+            .map(ObjectScopeContext::controller)
+            .or_else(|| {
+                context
+                    .get_world_object(by_object)
+                    .map(|object| object.controller())
+            })
+    });
+    let Some(controller) = controller else {
+        return Ok(());
+    };
+    if let Some(effect) = create_native_object(NativeObjectCreation {
+        definition,
+        creator: Some(by_object),
+        owner: caused_by,
+        controller,
+        construction: level.wrapping_mul(FULL_CON) / 20,
+        position: Vector2::new(position.x, position.y.wrapping_add(level)),
+        rotation: 0,
+        velocity: FixedVec2::ZERO,
+        rotation_velocity: C4Fixed::ZERO,
+    })? {
+        call_object_own_fail_safe(effect, "Activate", &[]);
+    }
+    Ok(())
+}
+
 /// FnBlastObjects (C4Script.cpp:2269-2273) -> C4Game::BlastObjects
 /// (C4Game.cpp:1248-1296). Coordinates are already global. The calling
 /// object's layer restricts both contained children and outside victims;
@@ -24480,7 +24745,7 @@ fn blast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
 
     // Resolve both values before any blast callback. FnBlastObjects passes
     // cthr->Obj as pByObj, and C4Game immediately replaces it with pLayer.
-    let (caused_by, blast_layer) = HOST_CONTEXT.with(|cell| {
+    let (caused_by, by_object) = HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let context = borrow
             .as_ref()
@@ -24502,11 +24767,30 @@ fn blast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                 })
                 .unwrap_or(OWNER_NONE)
         };
-        Ok::<_, RuntimeError>((
-            caused_by,
-            caller.and_then(|caller| context.object_layer(caller)),
-        ))
+        Ok::<_, RuntimeError>((caused_by, caller))
     })?;
+
+    native_blast_objects(x, y, level, in_object, caused_by, by_object)?;
+    Ok(Value::Nil)
+}
+
+/// Absolute `C4Game::BlastObjects` entry used both by the script wrapper and
+/// `C4Object::Explode`. The latter must retain the removed source object's
+/// layer instead of inheriting the currently executing caller's layer. The
+/// layer is read at each invocation, matching C4Game's live `pByObj->pLayer`.
+fn native_blast_objects(
+    x: i32,
+    y: i32,
+    level: i32,
+    in_object: Option<ObjectId>,
+    caused_by: i32,
+    by_object: Option<ObjectId>,
+) -> Result<(), RuntimeError> {
+    let blast_layer = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        by_object.and_then(|object| context.object_layer(object))
+    });
 
     // Blast the container before obtaining Objects.First: its callbacks can
     // change the children that the subsequent master-list scan observes.
@@ -24539,7 +24823,7 @@ fn blast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                 let _ = native_blast_object(id, level, caused_by)?;
             }
         }
-        return Ok(Value::Nil);
+        return Ok(());
     }
 
     let ids = HOST_CONTEXT.with(|cell| {
@@ -24690,7 +24974,7 @@ fn blast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
             / mass_divisor;
         native_fling(id, FixedVec2::new(x_force, y_force), true, caused_by)?;
     }
-    Ok(Value::Nil)
+    Ok(())
 }
 
 /// FnBlastObject (C4Script.cpp:2281-2289) -> C4Object::Blast
@@ -24746,10 +25030,18 @@ fn blast_object(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some((target, caused_by)) = target_and_cause else {
         return Ok(Value::Bool(false));
     };
+    // FnBlastObject owns the Status gate. C4Game::BlastObjects deliberately
+    // calls its captured `inobj->Blast` without it, even when an earlier
+    // callback assigned removal to that container.
+    if !object_has_status(target) {
+        return Ok(Value::Bool(false));
+    }
     Ok(Value::Bool(native_blast_object(target, level, caused_by)?))
 }
 
-/// Exact-cause `C4Object::Blast` entry for engine helpers. An already-decoded
+/// Raw exact-cause `C4Object::Blast` entry for engine helpers. The method has
+/// no Status gate of its own; public FnBlastObject checks Status before this
+/// call, while C4Game::BlastObjects intentionally does not. An already-decoded
 /// `OWNER_NONE` must not be reinterpreted as encoded-zero caller fallback.
 fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<bool, RuntimeError> {
     let alive = HOST_CONTEXT.with(|cell| {
@@ -24757,8 +25049,7 @@ fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<b
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("BlastObject requires an active engine context"))?;
-        // `if (!pObj->Status) return false` (C4Script.cpp:2285).
-        if !context.object_status_present(target) || !context.ensure_object_scope(target) {
+        if !context.ensure_object_scope(target) {
             return Ok(None);
         }
         Ok(context.object_scope(target).map(ObjectScopeContext::alive))
@@ -24790,15 +25081,20 @@ fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<b
         });
         // The ~Damage engine call runs INSIDE DoDamage, before the energy
         // leg (C4Object.cpp:1290 — fail-safe exec, errors log and continue).
-        if let Some(Err(error)) = call_world_object_own_function(
-            target,
-            "Damage",
-            &[Value::Int(damage_change), Value::Int(caused_by)],
-        ) {
-            tracing::warn!(
-                %error,
-                "script error in Damage; continuing like the C++ fail-safe exec"
-            );
+        // C4Object::DoDamage always mutates the native field, but its
+        // C4Object::Call immediately returns on Status=0. This distinction
+        // matters for C4Game::BlastObjects' raw captured-container call.
+        if object_has_status(target) {
+            if let Some(Err(error)) = call_world_object_own_function(
+                target,
+                "Damage",
+                &[Value::Int(damage_change), Value::Int(caused_by)],
+            ) {
+                tracing::warn!(
+                    %error,
+                    "script error in Damage; continuing like the C++ fail-safe exec"
+                );
+            }
         }
     }
     // Energy leg (C4Object.cpp:1417-1418): only alive targets, reading
@@ -28849,10 +29145,10 @@ fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
     let caused_by_plus_one =
         value_to_i32(args.get(3).unwrap_or(&Value::Nil), "BlastFree", "caused by")?;
 
-    let (center, controller, counts) = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
+    let (center, controller) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
         let context = borrow
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| RuntimeError::new("BlastFree requires an active engine context"))?;
 
         let mut controller = if caused_by_plus_one != 0 {
@@ -28870,7 +29166,27 @@ fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         }
 
-        let center = Vector2::new(x, y);
+        Ok((Vector2::new(x, y), controller))
+    })?;
+    native_blast_free_absolute(center, level, controller)?;
+    // FnBlastFree is a void engine function; C4AulEngineFunc maps void to
+    // C4VNull after performing the landscape side effect.
+    Ok(Value::Nil)
+}
+
+/// Absolute C4Landscape::BlastFree entry for native engine operations.
+/// Unlike the public wrapper, `OWNER_NONE` is already decoded and the point
+/// must never be offset through the active script object.
+fn native_blast_free_absolute(
+    center: Vector2,
+    level: i32,
+    controller: Option<i32>,
+) -> Result<(), RuntimeError> {
+    let counts = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("BlastFree requires an active engine context"))?;
         let preview = context.preview_blast_circle(center, level);
         let counts = preview
             .as_ref()
@@ -28890,12 +29206,10 @@ fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
             },
         };
         context.register_landscape_operation(operation);
-        Ok((center, controller, counts))
+        Ok(counts)
     })?;
     process_preview_blast_reactions(center, controller, &counts)?;
-    // FnBlastFree is a void engine function; C4AulEngineFunc maps void to
-    // C4VNull after performing the landscape side effect.
-    Ok(Value::Nil)
+    Ok(())
 }
 
 /// The post-pixel evaluate loop of C4Landscape::BlastFree. Object creation
@@ -28952,6 +29266,7 @@ fn process_preview_blast_reactions(
                         creator: None,
                         owner: OWNER_NONE,
                         controller: controller.unwrap_or(OWNER_NONE),
+                        construction: FULL_CON,
                         position: center,
                         rotation,
                         velocity: FixedVec2::new(xdir, ydir),
@@ -29071,6 +29386,7 @@ fn process_preview_dig_reactions(
             creator: Some(target),
             owner: OWNER_NONE,
             controller: OWNER_NONE,
+            construction: FULL_CON,
             position,
             rotation,
             velocity: FixedVec2::ZERO,
@@ -39327,6 +39643,7 @@ struct NativeObjectCreation {
     creator: Option<ObjectId>,
     owner: i32,
     controller: i32,
+    construction: i32,
     position: Vector2,
     rotation: i32,
     velocity: FixedVec2,
@@ -39480,7 +39797,7 @@ fn create_native_object(request: NativeObjectCreation) -> Result<Option<ObjectId
         .map(object_reference_value)
         .unwrap_or(Value::Nil);
     call_object_own_fail_safe(target, "Construction", &[creator_arg]);
-    if !object_is_present(target) {
+    if !object_has_status(target) {
         return Ok(None);
     }
     HOST_CONTEXT.with(|cell| {
@@ -39500,49 +39817,141 @@ fn create_native_object(request: NativeObjectCreation) -> Result<Option<ObjectId
         })
         .unwrap_or(metadata);
 
-    let crossed_full_con = HOST_CONTEXT.with(|cell| {
+    let staged = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
+        let context = borrow.as_mut()?;
+        let before = context.object_scope(target)?.construction();
+        let entry_position = context.object_scope(target)?.effective_position();
+        let entry_shape = live_object_shape(context, target);
+        let was_full = before >= FULL_CON;
+        let Some(final_construction) =
+            context.stage_live_docon_construction(target, request.construction)
+        else {
+            return None;
         };
-        let was_full = context
-            .object_scope(target)
-            .is_some_and(|scope| scope.construction() >= FULL_CON);
-        let Some(final_construction) = context.adjust_object_construction(target, FULL_CON) else {
-            return false;
-        };
-        let (raw_position, adjusted_position) = {
+        let refresh = crate::docon_refreshes_construction(before, final_construction);
+        let _ = refresh_live_object_ocf(context, target);
+        if refresh {
             let Some(scope) = context.object_scope_mut(target) else {
-                return false;
+                return None;
             };
-            let raw_position = scope.effective_position();
-            let rotation = scope.rotation();
-            let adjusted_position = Vector2::new(
-                raw_position.x,
-                crate::docon_initial_center_y_with_rotation(
-                    metadata.shape,
-                    metadata.stretch_growth,
-                    metadata.line,
-                    metadata.rotateable,
-                    rotation,
-                    final_construction,
-                    raw_position.y,
-                ),
-            );
+            if metadata.line == 0 {
+                scope.pending_update.shape_override = Some(None);
+            }
+            scope.refresh_shape_preview(&metadata);
+            context.update_live_solid_mask(target, false);
+        }
+        if let Some(scope) = context.object_scope_mut(target) {
             scope.pending_update.construction = None;
-            scope.current_position = adjusted_position;
-            scope.pending_update.position = None;
-            scope.cached_ocf = Some(ocf::compute(
-                metadata.ocf_base,
-                metadata.crew_member,
-                scope.alive(),
-                ObjectStatus::Normal,
-                false,
-                final_construction,
-                metadata.category,
-            ));
-            (raw_position, adjusted_position)
+        }
+        if let Some(spawn) = context
+            .pending_spawns
+            .iter_mut()
+            .find(|spawn| spawn.id == Some(target))
+        {
+            spawn.construction = final_construction;
+            // Construction may have changed r. The nested update remains
+            // authoritative, but seed the spawn for the no-write case.
+            spawn.rotation = initial_rotation;
+        }
+        Some((was_full, final_construction, entry_position, entry_shape, refresh))
+    });
+    let Some((was_full, staged_construction, entry_position, entry_shape, refresh)) = staged else {
+        return Ok(None);
+    };
+
+    // Initial DoCon performs the same incomplete-construction side arms as
+    // an ordinary DoCon before its keep-bottom position update. Construction
+    // may have added contents or armed NeedEnergy, and Exit/Enter callbacks
+    // here are synchronously visible before NewObject returns.
+    if refresh && staged_construction < FULL_CON {
+        if !metadata.fire.incomplete_activity {
+            loop {
+                let next = HOST_CONTEXT.with(|cell| {
+                    let borrow = cell.borrow();
+                    let context = borrow.as_ref()?;
+                    let object = context.get_world_object(target)?;
+                    Some((object.contents().first().copied()?, object.container()))
+                });
+                let Some((child, destination)) = next else {
+                    break;
+                };
+                let moved = if let Some(destination) = destination {
+                    enter_object_live(child, destination)?
+                } else {
+                    exit_object_at_current_position(child)?
+                };
+                if !moved {
+                    let same_head = HOST_CONTEXT.with(|cell| {
+                        cell.borrow()
+                            .as_ref()
+                            .and_then(|context| context.get_world_object(target))
+                            .and_then(|object| object.contents().first().copied())
+                            == Some(child)
+                    });
+                    if same_head {
+                        break;
+                    }
+                }
+            }
+        }
+        HOST_CONTEXT.with(|cell| {
+            if let Some(scope) = cell
+                .borrow_mut()
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(target))
+            {
+                scope.set_need_energy(false);
+            }
+        });
+    }
+
+    // C4Object::DoCon idles an object that decays from full construction
+    // before applying its keep-bottom position adjustment. Construction and
+    // the incomplete-object side arms above can both change the live
+    // definition or construction, so re-read them at this exact point.
+    if refresh && was_full {
+        let should_idle = HOST_CONTEXT
+            .with(|cell| {
+                let borrow = cell.borrow();
+                let context = borrow.as_ref()?;
+                let scope = context.object_scope(target)?;
+                let definition = context.object_effective_definition_id(target)?;
+                let incomplete_activity = context
+                    .definition_metadata(&definition)
+                    .is_some_and(|metadata| metadata.fire.incomplete_activity);
+                Some(scope.construction() < FULL_CON && !incomplete_activity)
+            })
+            .unwrap_or(false);
+        if should_idle {
+            let _ = native_set_action_by_name(target, "Idle")?;
+        }
+    }
+
+    let final_construction = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        let current_shape = live_object_shape(context, target);
+        let scope = context.object_scope_mut(target)?;
+        let current_position = scope.effective_position();
+        let preserved_fixed_position = scope.fixed_position();
+        let adjusted_y = match (entry_shape, current_shape) {
+            (Some(entry), Some(current))
+                if entry.height != current.height || entry.y != current.y =>
+            {
+                entry_position
+                    .y
+                    .saturating_add(entry.y)
+                    .saturating_add(entry.height)
+                    .saturating_sub(current.height)
+                    .saturating_sub(current.y)
+            }
+            _ => current_position.y,
         };
+        let adjusted_position = Vector2::new(current_position.x, adjusted_y);
+        let final_construction = scope.construction();
+        scope.current_position = adjusted_position;
+        scope.pending_update.position = None;
         if let Some(spawn) = context
             .pending_spawns
             .iter_mut()
@@ -39550,22 +39959,36 @@ fn create_native_object(request: NativeObjectCreation) -> Result<Option<ObjectId
         {
             spawn.position = adjusted_position;
             spawn.construction = final_construction;
-            spawn.fixed_position = (adjusted_position != raw_position)
-                .then_some(FixedVec2::from_ints(raw_position.x, raw_position.y));
-            // Construction may have changed r. The nested update remains
-            // authoritative, but seed the spawn for the no-write case.
-            spawn.rotation = initial_rotation;
+            let adjusted_fixed =
+                FixedVec2::from_ints(adjusted_position.x, adjusted_position.y);
+            spawn.fixed_position = (preserved_fixed_position != adjusted_fixed)
+                .then_some(preserved_fixed_position);
         }
-        context.update_live_solid_mask(target, false);
-        !was_full && final_construction >= FULL_CON
+        if adjusted_position != current_position {
+            context.update_live_solid_mask(target, false);
+        }
+        Some(final_construction)
     });
-    if crossed_full_con {
+    let Some(final_construction) = final_construction else {
+        return Ok(None);
+    };
+    if final_construction <= 0 {
+        // C4Object::DoCon reaches AssignRemoval at Con=0 before NewObject's
+        // status re-check returns nullptr. Run the complete synchronous
+        // Destruction/effect/contents lifecycle. Keep the destroyed pending
+        // scope until the generic outcome fold filters its spawn; this is the
+        // same path used when Construction removes a newly created object.
+        let _ = assign_removal_live(target, false)?;
+        return Ok(None);
+    }
+    let crossed_full_con = !was_full && final_construction >= FULL_CON;
+    if crossed_full_con && object_has_status(target) {
         call_object_own_fail_safe(target, "Completion", &[]);
-        if object_is_present(target) {
+        if object_has_status(target) {
             call_object_own_fail_safe(target, "Initialize", &[]);
         }
     }
-    Ok(object_is_present(target).then_some(target))
+    Ok(object_has_status(target).then_some(target))
 }
 
 /// FnCreateContents (C4Script.cpp:1938-1951): create `count` (default 1)
@@ -39632,6 +40055,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             creator: Some(container),
             owner,
             controller: owner,
+            construction: FULL_CON,
             position: Vector2::new(50, 50),
             rotation: 0,
             velocity: FixedVec2::ZERO,
@@ -39983,6 +40407,7 @@ fn split_to_components(args: &[Value]) -> Result<Value, RuntimeError> {
                 creator: Some(source),
                 owner,
                 controller: owner,
+                construction: FULL_CON,
                 position,
                 rotation,
                 velocity: FixedVec2::new(itofix(xdir), itofix(ydir)),
@@ -42485,8 +42910,7 @@ fn set_killer(args: &[Value]) -> Result<Value, RuntimeError> {
 /// material lights one FLAM unless another already burns in the
 /// (x-4, y-1, 8, 20) rect (C4Game::FindObject center-in-rect range check,
 /// C4Game.cpp: `Inside(cObj->x - iX, 0, iWdt-1)`). C++ creates the FLAM
-/// mid-call (Game.CreateObject); the port registers a pending spawn, so
-/// its creation callbacks run at materialization within the same frame.
+/// mid-call (Game.CreateObject), including its synchronous lifecycle.
 fn incinerate_landscape(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut x = parse_optional_i32(args.first(), "IncinerateLandscape", "x")?.unwrap_or(0);
     let mut y = parse_optional_i32(args.get(1), "IncinerateLandscape", "y")?.unwrap_or(0);
@@ -42509,9 +42933,9 @@ fn incinerate_landscape(args: &[Value]) -> Result<Value, RuntimeError> {
 /// coordinates — shared by FnIncinerateLandscape and the fire timer's
 /// inflame arm (C4Object.cpp:803-804).
 fn incinerate_landscape_at(x: i32, y: i32) -> Result<Value, RuntimeError> {
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
+    let can_create = HOST_CONTEXT.with(|cell| -> Result<bool, RuntimeError> {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref().ok_or_else(|| {
             RuntimeError::new("IncinerateLandscape requires an active engine context")
         })?;
 
@@ -42520,16 +42944,16 @@ fn incinerate_landscape_at(x: i32, y: i32) -> Result<Value, RuntimeError> {
             _ => false,
         };
         if !inflammable {
-            return Ok(Value::Bool(false));
+            return Ok(false);
         }
 
-        let Some(metadata) = context
+        if context
             .definition_metadata(crate::FIRE_DEFINITION_ID)
-            .cloned()
-        else {
+            .is_none()
+        {
             // Unknown FLAM def: Game.CreateObject returns nullptr.
-            return Ok(Value::Bool(false));
-        };
+            return Ok(false);
+        }
 
         // "Not too much FLAMs" (C4Landscape.cpp:1436-1437) — pending
         // same-call spawns count like the live objects C++ would find.
@@ -42549,64 +42973,32 @@ fn incinerate_landscape_at(x: i32, y: i32) -> Result<Value, RuntimeError> {
                 .unwrap_or(false)
         });
         if burning {
-            return Ok(Value::Bool(false));
+            return Ok(false);
         }
+        Ok(true)
+    })?;
+    if !can_create {
+        return Ok(Value::Bool(false));
+    }
 
-        let id = context.allocate_object_id();
-        let spawn = SpawnConfig::new(crate::FIRE_DEFINITION_ID)
-            .with_position(Vector2::new(x, y))
-            .with_category(metadata.category)
-            .with_id(id);
-        let preview_ocf = ocf::compute(
-            metadata.ocf_base,
-            metadata.crew_member,
-            true,
-            ObjectStatus::Normal,
-            false,
-            FULL_CON,
-            metadata.category,
-        );
-        let preview = HostWorldObject::with_category(
-            id,
-            crate::FIRE_DEFINITION_ID,
-            ObjectStatus::Normal,
-            "Idle",
-            None,
-            None,
-            None,
-            OWNER_NONE,
-            metadata.category,
-            0,
-            FULL_CON,
-            0,
-            Vector2::new(x, y),
-            Vector2::ZERO,
-            0,
-            Vec::new(),
-            0,
-            0,
-            0,
-            None,
-            None,
-        )
-        .with_ocf(preview_ocf)
-        .with_full_state(Rc::new({
-            let mut state = crate::preview_spawn_state_with_components(
-                Vector2::new(x, y),
-                OWNER_NONE,
-                OWNER_NONE,
-                metadata.category,
-                FULL_CON,
-                metadata.contact_density(),
-                metadata.vertices.clone(),
-                metadata.components.as_slice(),
-            );
-            state.blit_mode = metadata.blit_mode;
-            state
-        }));
-        context.register_spawn(spawn, preview);
-        Ok(Value::Bool(true))
-    })
+    // Game.CreateObject completes Construction, initial DoCon and
+    // Completion/Initialize before Incinerate reports success. In particular,
+    // a FLAM that removes itself during Construction makes this probe fail so
+    // Explosion continues with the next ignition point.
+    Ok(Value::Bool(
+        create_native_object(NativeObjectCreation {
+            definition: crate::FIRE_DEFINITION_ID.to_string(),
+            creator: None,
+            owner: OWNER_NONE,
+            controller: OWNER_NONE,
+            construction: FULL_CON,
+            position: Vector2::new(x, y),
+            rotation: 0,
+            velocity: FixedVec2::ZERO,
+            rotation_velocity: C4Fixed::ZERO,
+        })?
+        .is_some(),
+    ))
 }
 
 /// FnDistance (C4Script.cpp:3316-3319) -> Distance (C4Math.cpp:22-31):
@@ -50821,10 +51213,10 @@ mod tests {
                         && !RAW_CPP_NATIVE_FUNCTIONS.contains(name)
                 })
                 .count();
-        assert_eq!(add_func, 441);
+        assert_eq!(add_func, 442);
         assert_eq!(
             add_func - REFERENCE_AWARE_CPP_NATIVE_FUNCTIONS.len(),
-            433
+            434
         );
     }
 
@@ -51077,6 +51469,7 @@ mod tests {
         "Equal",
         "ExecuteCommand",
         "Exit",
+        "Explode",
         "Extinguish",
         "ExtractLiquid",
         "ExtractMaterialAmount",
@@ -51458,7 +51851,7 @@ mod tests {
         register_host_functions(&mut engine);
 
         let names = engine.host_function_names();
-        assert_eq!(names.len(), 456);
+        assert_eq!(names.len(), 457);
         for name in names {
             assert_eq!(
                 engine.host_function_parameter_count(&name),

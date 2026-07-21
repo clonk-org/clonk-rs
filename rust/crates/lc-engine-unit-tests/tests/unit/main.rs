@@ -51427,6 +51427,573 @@ func Zap() { return DoEnergy(-10, FindObject(VCTM)); }
         );
     }
 
+    // FnExplode is an engine global even without System.c4g. It defaults a
+    // nil object to cthr->Obj, snapshots cause/container before removal, but
+    // reads x/y after Destruction. A nonempty known particle overrides both
+    // the default Blast particle and the otherwise-unused effect id.
+    #[test]
+    fn native_explode_is_registered_and_matches_object_default_effect_arguments() {
+        let script = r#"#strict 3
+protected func Destruction() { SetPosition(31, 47); return true; }
+public func Detonate() {
+    var no_object;
+    return Explode(14, no_object, FXID, "Custom");
+}
+"#;
+        let mut engine = Engine::with_seed(23);
+        for name in ["Blast", "Custom"] {
+            engine
+                .register_particle_definition(
+                    particles::ParticleDefCore {
+                        name: name.into(),
+                        init_fn: "StdInit".into(),
+                        exec_fn: "StdExec".into(),
+                        draw_fn: "Std".into(),
+                        delay: 1,
+                        repeats: 1000,
+                        ..Default::default()
+                    },
+                    4,
+                    1.0,
+                )
+                .expect("explosion particle registers");
+        }
+        engine
+            .register_definition(simple_definition("FXID"))
+            .expect("effect definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("BOOM", "Bomb", script)
+                    .expect("bare native Explode script compiles"),
+            )
+            .expect("bomb registers");
+        let bomb = engine
+            .spawn_object(
+                SpawnConfig::new("BOOM")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 20))
+                    .with_controller(7),
+            )
+            .expect("bomb spawns");
+        let bomb_index = engine.find_object_index(bomb).expect("bomb exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(bomb_index, "Detonate", Vec::new())
+                .expect("native Explode executes"),
+            Value::Bool(true)
+        );
+        assert!(engine.objects[bomb_index].destroyed, "Explode removes its target");
+        let particles = engine.particle_system().particles();
+        assert_eq!(particles.len(), 1, "the custom particle replaces Blast");
+        assert_eq!(particles[0].def_name, "Custom");
+        assert_eq!(particles[0].x.to_bits(), 31.0f32.to_bits());
+        assert_eq!(particles[0].y.to_bits(), 47.0f32.to_bits());
+        assert_eq!(particles[0].a.to_bits(), 14.0f32.to_bits());
+        assert!(engine.pending_audio.iter().any(|command| matches!(
+            command,
+            AudioCommand::PlaySoundAt { name, position }
+                if name == "Blast49" && *position == Vector2::new(31, 47)
+        )));
+        assert!(
+            engine.objects.iter().all(|object| object.definition_id != "FXID"),
+            "a resolved particle wins over idEffect"
+        );
+    }
+
+    #[test]
+    fn native_explode_builds_the_effect_id_when_no_particle_is_loaded() {
+        let caller_script = r#"#strict 3
+public func Detonate(object target) { return Explode(10, target, FXID); }
+"#;
+        let target_script = r#"#strict 3
+protected func Destruction() { SetController(8); return true; }
+"#;
+        let effect_script = r#"#strict 3
+local activated;
+protected func Activate() { activated = 1; return true; }
+"#;
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_player(PlayerConfig::new(7, "Original"))
+            .expect("original controller registers");
+        engine
+            .register_player(PlayerConfig::new(8, "Replacement"))
+            .expect("replacement controller registers");
+        for (id, name, script) in [
+            ("CALL", "Caller", caller_script),
+            ("TARG", "Target", target_script),
+            ("FXID", "Explosion effect", effect_script),
+            ("LAYR", "Layer", "#strict 3\n"),
+        ] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, name, script).expect("definition compiles"),
+                )
+                .expect("definition registers");
+        }
+        let layer = engine
+            .spawn_object(SpawnConfig::new("LAYR").with_position(Vector2::new(500, 500)))
+            .expect("layer spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(300, 300)))
+            .expect("caller spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("TARG")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(40, 50))
+                    .with_controller(7)
+                    .with_layer(layer),
+            )
+            .expect("target spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Detonate",
+                    vec![object_reference_value(target)],
+                )
+                .expect("foreign-target Explode executes"),
+            Value::Bool(true)
+        );
+        assert!(!engine.objects[caller_index].destroyed, "explicit target wins");
+        let effect = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "FXID")
+            .expect("id effect is constructed when Blast is unavailable");
+        assert_eq!(effect.state.owner, 7, "owner is the pre-removal cause");
+        assert_eq!(
+            effect.state.controller, 8,
+            "creator controller is read after Destruction"
+        );
+        assert_eq!(effect.state.layer, Some(layer), "creator layer is retained");
+        assert_eq!(effect.state.construction, FULL_CON / 2);
+        assert_eq!(
+            effect.state.local_vars.get("activated"),
+            Some(&Value::Int(1)),
+            "Activate follows successful construction"
+        );
+    }
+
+    #[test]
+    fn native_explode_initial_partial_effect_idles_after_full_construction() {
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "CALL",
+                    "Caller",
+                    "#strict 3\npublic func Detonate(object target) { return Explode(-10, target, FXID); }\n",
+                )
+                .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(simple_definition("TARG"))
+            .expect("target registers");
+        let mut effect = Definition::from_script(
+            "FXID",
+            "Explosion effect",
+            r#"#strict 3
+protected func Construction() {
+    DoCon(100);
+    SetAction("Active");
+    return true;
+}
+"#,
+        )
+        .expect("effect compiles");
+        effect.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                ("Active".to_string(), ActionSpec::default()),
+            ]),
+        );
+        engine
+            .register_definition(effect)
+            .expect("effect registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(300, 300)))
+            .expect("caller spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("TARG")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(40, 50)),
+            )
+            .expect("target spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Detonate",
+                    vec![object_reference_value(target)],
+                )
+                .expect("negative-level native Explode executes"),
+            Value::Bool(true)
+        );
+        let effect = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "FXID" && !object.destroyed)
+            .expect("partially constructed effect survives");
+        assert_eq!(effect.state.construction, FULL_CON / 2);
+        assert_eq!(
+            effect.state.action.name, "Idle",
+            "initial DoCon idles a Construction callback's full object when it decays"
+        );
+    }
+
+    #[test]
+    fn native_explode_script_overload_shadows_and_inherited_reaches_the_host() {
+        let mut engine = Engine::with_seed(23);
+        assert_eq!(
+            engine.install_global_scripts(&[(
+                "System.c4g/Explode.c".to_string(),
+                "#strict 3\n\
+                 global func Explode(int level, object target, id effect_id, string effect_name) {\n\
+                   if (level == 1) return 4242;\n\
+                   return inherited(level, target, effect_id, effect_name);\n\
+                 }\n"
+                    .to_string(),
+            )]),
+            1
+        );
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "BOOM",
+                    "Bomb",
+                    "#strict 3\npublic func Shadow() { return Explode(1); }\n\
+                     public func Chain() { return Explode(10); }\n",
+                )
+                .expect("overload probe compiles"),
+            )
+            .expect("bomb registers");
+        let bomb = engine
+            .spawn_object(SpawnConfig::new("BOOM").with_category(CATEGORY_OBJECT))
+            .expect("bomb spawns");
+        let bomb_index = engine.find_object_index(bomb).expect("bomb exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(bomb_index, "Shadow", Vec::new())
+                .expect("script overload executes"),
+            Value::Int(4242)
+        );
+        assert!(!engine.objects[bomb_index].destroyed, "shadow did not call host");
+        assert_eq!(
+            engine
+                .call_object_function(bomb_index, "Chain", Vec::new())
+                .expect("inherited host fallback executes"),
+            Value::Bool(true)
+        );
+        assert!(engine.objects[bomb_index].destroyed);
+    }
+
+    #[test]
+    fn native_explode_contain_blast_suppresses_visuals_and_blasts_contents() {
+        let caller_script =
+            "#strict 3\npublic func Detonate(object target) { return Explode(12, target); }\n";
+        let mut engine = Engine::with_seed(23);
+        engine
+            .register_particle_definition(
+                particles::ParticleDefCore {
+                    name: "Blast".into(),
+                    init_fn: "StdInit".into(),
+                    exec_fn: "StdExec".into(),
+                    draw_fn: "Std".into(),
+                    delay: 1,
+                    repeats: 1000,
+                    ..Default::default()
+                },
+                4,
+                1.0,
+            )
+            .expect("Blast particle registers");
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let mut shield_definition = simple_definition("SHLD");
+        shield_definition.set_contain_blast(1);
+        engine
+            .register_definition(shield_definition)
+            .expect("shield registers");
+        engine
+            .register_definition(simple_definition("TARG"))
+            .expect("target registers");
+        engine
+            .register_definition(simple_definition("SIBL"))
+            .expect("sibling registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(300, 300)))
+            .expect("caller spawns");
+        let shield = engine
+            .spawn_object(
+                SpawnConfig::new("SHLD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(40, 50)),
+            )
+            .expect("shield spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("TARG")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(shield),
+            )
+            .expect("target spawns in shield");
+        let sibling = engine
+            .spawn_object(
+                SpawnConfig::new("SIBL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(shield),
+            )
+            .expect("sibling spawns in shield");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Detonate",
+                    vec![object_reference_value(target)],
+                )
+                .expect("contained Explode executes"),
+            Value::Bool(true)
+        );
+        let shield_index = engine.find_object_index(shield).expect("shield remains");
+        let sibling_index = engine.find_object_index(sibling).expect("sibling remains");
+        assert_eq!(engine.objects[shield_index].state.damage, 12);
+        assert_eq!(engine.objects[sibling_index].state.damage, 12);
+        assert!(
+            engine.particle_system().particles().is_empty(),
+            "ContainBlast suppresses uncontained visuals"
+        );
+    }
+
+    #[test]
+    fn native_explode_blasts_a_captured_container_after_an_effect_removes_it() {
+        let caller_script = r#"#strict 3
+local hits;
+public func Mark() { hits++; return true; }
+public func Detonate(object target) { return Explode(10, target, FXID); }
+"#;
+        let shield_script = r#"#strict 3
+protected func Damage() { FindObject(CALL)->Mark(); return true; }
+"#;
+        let effect_script = r#"#strict 3
+protected func Activate() { RemoveObject(FindObject(SHLD)); return true; }
+"#;
+        let mut engine = Engine::with_seed(23);
+        for (id, name, script) in [
+            ("CALL", "Caller", caller_script),
+            ("SHLD", "Shield", shield_script),
+            ("FXID", "Explosion effect", effect_script),
+            ("TARG", "Target", "#strict 3\n"),
+        ] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, name, script).expect("definition compiles"),
+                )
+                .expect("definition registers");
+        }
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(300, 300)))
+            .expect("caller spawns");
+        let shield = engine
+            .spawn_object(
+                SpawnConfig::new("SHLD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(40, 50)),
+            )
+            .expect("shield spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("TARG")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(shield),
+            )
+            .expect("target spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        let shield_index = engine.find_object_index(shield).expect("shield exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Detonate",
+                    vec![object_reference_value(target)],
+                )
+                .expect("native Explode executes"),
+            Value::Bool(true)
+        );
+        assert!(
+            engine.objects[shield_index].destroyed,
+            "effect callback removes the captured container"
+        );
+        assert_eq!(
+            engine.objects[shield_index].state.damage, 10,
+            "the raw captured pointer still receives native Blast damage"
+        );
+        assert_eq!(
+            engine.objects[caller_index].state.local_vars.get("hits"),
+            Some(&Value::Nil),
+            "C4Object::Call suppresses the Damage callback after Status=0"
+        );
+    }
+
+    #[test]
+    fn native_explode_zero_level_runs_effect_destruction_without_activate() {
+        let caller_script = r#"#strict 3
+local events;
+public func Mark(int value) { events += value; return true; }
+public func Detonate(object target) { events = 0; return Explode(0, target, FXID); }
+"#;
+        let effect_script = r#"#strict 3
+protected func Construction() { CreateContents(CHLD); return true; }
+protected func Destruction() { FindObject(CALL)->Mark(1); return true; }
+protected func Activate() { FindObject(CALL)->Mark(10); return true; }
+"#;
+        let mut engine = Engine::with_seed(23);
+        for (id, name, script) in [
+            ("CALL", "Caller", caller_script),
+            ("CHLD", "Child", "#strict 3\n"),
+            ("FXID", "Explosion effect", effect_script),
+            ("TARG", "Target", "#strict 3\n"),
+        ] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, name, script).expect("definition compiles"),
+                )
+                .expect("definition registers");
+        }
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(300, 300)))
+            .expect("caller spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("TARG")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(40, 50)),
+            )
+            .expect("target spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Detonate",
+                    vec![object_reference_value(target)],
+                )
+                .expect("zero-level native Explode executes"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine.objects[caller_index].state.local_vars.get("events"),
+            Some(&Value::Int(1)),
+            "DoCon(0) assigns removal and skips Activate after creation fails"
+        );
+        assert!(
+            engine.objects.iter().all(|object| object.definition_id != "FXID"),
+            "the zero-construction effect never materializes"
+        );
+        let child = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "CHLD" && !object.destroyed)
+            .expect("initial DoCon ejects Construction-created contents");
+        assert_eq!(child.state.container, None);
+    }
+
+    #[test]
+    fn native_explode_retries_incineration_after_flam_removes_itself() {
+        let caller_script = r#"#strict 3
+local attempts;
+public func Mark() { attempts++; return true; }
+public func Detonate(object target) { return Explode(10, target); }
+"#;
+        let flam_script = r#"#strict 3
+protected func Construction() {
+    FindObject(CALL)->Mark();
+    RemoveObject();
+    return true;
+}
+"#;
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Oil]
+            Name=Oil
+            Density=100
+            Friction=25
+            Inflammable=1
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let oil = materials.id_of("Oil").expect("oil exists");
+        let mut engine = Engine::with_seed(23);
+        engine.set_materials(materials);
+        let mut landscape = Landscape::flat_with_material(17, 40, Some(oil));
+        landscape.set_world_height(80);
+        engine.set_landscape(landscape);
+        for (id, name, script) in [
+            ("CALL", "Caller", caller_script),
+            ("FLAM", "Fire", flam_script),
+            ("TARG", "Target", "#strict 3\n"),
+        ] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, name, script).expect("definition compiles"),
+                )
+                .expect("definition registers");
+        }
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(300, 300)))
+            .expect("caller spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("TARG")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(8, 45)),
+            )
+            .expect("target spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Detonate",
+                    vec![object_reference_value(target)],
+                )
+                .expect("native Explode executes"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine.objects[caller_index].state.local_vars.get("attempts"),
+            Some(&Value::Int(3)),
+            "failed FLAM creation probes the two other inflammable points"
+        );
+        assert!(
+            engine
+                .objects
+                .iter()
+                .all(|object| object.definition_id != "FLAM" || object.destroyed),
+            "self-removing FLAMs do not survive"
+        );
+    }
+
     // FnBlastObjects is an engine global even without System.c4g's
     // same-named Explode.c helper (C4Script.cpp:2269-2275,6875). The native
     // C4Game walk first applies a direct C4Object::Blast, then its living
