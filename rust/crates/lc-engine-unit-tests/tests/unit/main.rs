@@ -6788,6 +6788,28 @@ protected func Initialize() { initialize_xdir = GetXDir(); }
     }
 
     #[test]
+    fn maximum_wind_preserves_level_140_gain() {
+        let mut engine = Engine::with_seed(19);
+        engine.set_environment(EnvironmentSettings::new(100));
+
+        for _ in 0..9 {
+            assert!(engine
+                .tick()
+                .expect("pre-Tick10 frame succeeds")
+                .audio
+                .is_empty());
+        }
+        assert_eq!(
+            engine.tick().expect("maximum-wind Tick10 succeeds").audio,
+            vec![AudioCommand::SetSoundVolume {
+                name: "Wind".to_string(),
+                target: None,
+                volume: 140,
+            }]
+        );
+    }
+
+    #[test]
     fn negative_material_reaction_flags_are_truthy_like_cpp() {
         use material::{MaterialReactionKind, evaluate_corrosion};
 

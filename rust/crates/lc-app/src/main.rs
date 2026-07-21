@@ -9590,7 +9590,7 @@ impl AudioContext {
                     if let Err(err) = self.start_sound(
                         name,
                         *target,
-                        *volume,
+                        i32::from(*volume),
                         *looped,
                         *multiple,
                         *custom_falloff,
@@ -9614,7 +9614,7 @@ impl AudioContext {
                     if let Err(err) = self.try_start_sound_with_mix(
                         name,
                         None,
-                        volume,
+                        i32::from(volume),
                         false,
                         true,
                         None,
@@ -9709,7 +9709,7 @@ impl AudioContext {
         &mut self,
         name: &str,
         target: Option<ObjectId>,
-        volume: u8,
+        volume: i32,
         looped: bool,
         multiple: bool,
         custom_falloff: Option<i32>,
@@ -9733,7 +9733,7 @@ impl AudioContext {
         &mut self,
         name: &str,
         target: Option<ObjectId>,
-        volume: u8,
+        volume: i32,
         looped: bool,
         multiple: bool,
         custom_falloff: Option<i32>,
@@ -9758,7 +9758,7 @@ impl AudioContext {
         &mut self,
         name: &str,
         target: Option<ObjectId>,
-        volume: u8,
+        volume: i32,
         looped: bool,
         multiple: bool,
         custom_falloff: Option<i32>,
@@ -9825,7 +9825,7 @@ impl AudioContext {
         &mut self,
         name: &str,
         target: Option<ObjectId>,
-        volume: u8,
+        volume: i32,
         looped: bool,
         multiple: bool,
         custom_falloff: Option<i32>,
@@ -9980,7 +9980,7 @@ impl AudioContext {
         &mut self,
         name: &str,
         target: Option<ObjectId>,
-        volume: u8,
+        volume: i32,
         snapshot: &SimulationSnapshot,
         viewports: &[ActiveViewportProjection],
     ) -> bool {
@@ -9992,7 +9992,7 @@ impl AudioContext {
             if info.target.is_none() {
                 if let Some((_, pan)) = info.detached_mix {
                     info.detached_mix =
-                        Some(((f32::from(volume) / 100.0).clamp(0.0, 1.0), pan));
+                        Some(((volume as f32 / 100.0).max(0.0), pan));
                 }
             }
             let Some(channel) = info.channel else {
@@ -10224,7 +10224,7 @@ struct ChannelInfo {
     instance_order: u64,
     looped: bool,
     target: Option<ObjectId>,
-    volume: u8,
+    volume: i32,
     custom_falloff: Option<i32>,
     started_at: Instant,
     /// C4SoundSystem::Instance::DetachObj replaces the scripted volume/pan
@@ -90750,7 +90750,7 @@ fn compute_mix_values(
     snapshot: &SimulationSnapshot,
     viewports: &[ActiveViewportProjection],
 ) -> (f32, f32) {
-    let base_volume = (info.volume as f32 / 100.0).clamp(0.0, 1.0);
+    let base_volume = (info.volume as f32 / 100.0).max(0.0);
     let Some(target_id) = info.target else {
         return info.detached_mix.unwrap_or((base_volume, 0.0));
     };
@@ -104037,6 +104037,29 @@ func Award()
         );
         assert!(!audio.active_channels.contains_key(&key));
         assert!(!audio.system.channel_is_playing(original_channel));
+    }
+
+    #[test]
+    fn sound_level_above_100_reaches_app_instance_unchanged() {
+        let (_dir, mut audio, mut snapshot) = test_audio_context_with_sound(10_000);
+        let key = SoundInstanceKey::new("Loop", None);
+        let mut runtime_music_enabled = false;
+        snapshot.audio = vec![AudioCommand::SetSoundVolume {
+            name: "Loop".to_string(),
+            target: None,
+            volume: 140,
+        }];
+
+        audio.process_audio(&snapshot, &mut runtime_music_enabled);
+
+        assert_eq!(audio.active_channels[&key].volume, 140);
+        let (mix_volume, pan) = compute_mix_values(
+            audio.active_channels.get_mut(&key).expect("wind instance"),
+            &snapshot,
+            &[],
+        );
+        assert!((mix_volume - 1.4).abs() < 1.0e-6);
+        assert_eq!(pan, 0.0);
     }
 
     #[test]

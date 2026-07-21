@@ -21686,8 +21686,7 @@ fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
             None
         };
 
-        let volume = level.clamp(0, 100) as u8;
-        context.audio_mut().sound_level(&name, target_id, volume);
+        context.audio_mut().sound_level(&name, target_id, level);
         Ok(Value::Nil)
     })
 }
@@ -45959,8 +45958,8 @@ impl AudioRegistry {
         });
     }
 
-    pub(crate) fn sound_level(&mut self, name: &str, target: Option<ObjectId>, volume: u8) {
-        if volume == 0 {
+    pub(crate) fn sound_level(&mut self, name: &str, target: Option<ObjectId>, volume: i32) {
+        if volume <= 0 {
             self.stop_sound(name, target);
             return;
         }
@@ -59238,6 +59237,23 @@ func Announce()
                     target: Some(target),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn sound_level_preserves_positive_values_above_100() {
+        let (result, outcome) = with_object_host_context(|| {
+            sound_level(&[Value::String("Wind".into()), Value::Int(140)])
+        });
+
+        assert_eq!(result.expect("SoundLevel accepts level 140"), Value::Nil);
+        assert_eq!(
+            outcome.audio.events,
+            vec![AudioCommand::SetSoundVolume {
+                name: "Wind".into(),
+                target: None,
+                volume: 140,
+            }]
         );
     }
 

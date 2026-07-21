@@ -17575,7 +17575,7 @@ pub enum AudioCommand {
     SetSoundVolume {
         name: String,
         target: Option<ObjectId>,
-        volume: u8,
+        volume: i32,
     },
     PlayMusic {
         name: String,
@@ -31531,7 +31531,7 @@ impl Engine {
         }
         let volume = self.environment.wind.abs().saturating_sub(30) * 2;
         self.audio_registry
-            .sound_level("Wind", None, volume as u8);
+            .sound_level("Wind", None, volume);
         self.pending_audio.extend(self.audio_registry.take_events());
     }
 

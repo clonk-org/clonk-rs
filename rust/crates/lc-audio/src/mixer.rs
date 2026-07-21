@@ -13,6 +13,7 @@ const SDL_MIXER_MAX_PANNING: f32 = 255.0;
 const MAXIMUM_MUSIC_VOLUME: f32 = 80.0;
 const MAXIMUM_SOUND_VOLUME: f32 = 100.0;
 const MAXIMUM_PANNING_VOLUME: f32 = 192.0;
+const MAXIMUM_SOUND_INPUT: f32 = SDL_MIXER_MAX_VOLUME / MAXIMUM_SOUND_VOLUME;
 
 /// Mixer slot plus allocation generation; stale handles cannot control a
 /// later sound that reuses the same numeric slot.
@@ -700,7 +701,7 @@ impl AudioMixer {
         let Some(Some(playback)) = state.channels.get_mut(channel.0) else {
             return false;
         };
-        playback.volume = volume.clamp(0.0, 1.0);
+        playback.volume = volume.clamp(0.0, MAXIMUM_SOUND_INPUT);
         playback.pan = pan.clamp(-1.0, 1.0);
         playback.recalculate_gains();
         true
@@ -1001,7 +1002,11 @@ impl SampleWrite for f32 {
 impl ChannelPlayback {
     fn recalculate_gains(&mut self) {
         let pan = self.pan.clamp(-1.0, 1.0);
-        let volume = self.volume.clamp(0.0, 1.0);
+        // C4's instance volume is intentionally not a percentage cap:
+        // SoundLevel may exceed 100. SDL_mixer clamps the resulting
+        // Mix_Volume argument at 128, so normalized Rust input saturates at
+        // 128 / MaximumSoundVolume while level 100 retains its headroom.
+        let volume = self.volume.clamp(0.0, MAXIMUM_SOUND_INPUT);
         let volume_gain = volume * (MAXIMUM_SOUND_VOLUME / SDL_MIXER_MAX_VOLUME);
         let left = ((1.0 - pan) * MAXIMUM_PANNING_VOLUME).clamp(0.0, MAXIMUM_PANNING_VOLUME)
             / SDL_MIXER_MAX_PANNING;
@@ -1343,6 +1348,32 @@ mod tests {
             "hard-pan gain {} exceeds SDL cap {expected_loud_side}",
             playback.right_gain
         );
+    }
+
+    #[test]
+    fn sound_level_above_100_reaches_sdl_max_gain() {
+        let data = generate_sine_wave(20, 440.0, 44_100);
+        let mixer = AudioMixer::new(44_100, 1);
+        let sound_id = mixer.load_sound(&data).unwrap();
+        let channel = mixer.play_sound(sound_id, true).unwrap();
+        let centered_pan_gain = MAXIMUM_PANNING_VOLUME / SDL_MIXER_MAX_PANNING;
+
+        assert!(mixer.channel_set_volume_and_pan(channel, 1.0, 0.0));
+        {
+            let state = mixer.state.lock().unwrap();
+            let playback = state.channels[channel.0].as_ref().unwrap();
+            let expected = centered_pan_gain * MAXIMUM_SOUND_VOLUME / SDL_MIXER_MAX_VOLUME;
+            assert_eq!(playback.volume, 1.0);
+            assert!((playback.left_gain - expected).abs() < 1.0e-6);
+            assert!((playback.right_gain - expected).abs() < 1.0e-6);
+        }
+
+        assert!(mixer.channel_set_volume_and_pan(channel, 1.4, 0.0));
+        let state = mixer.state.lock().unwrap();
+        let playback = state.channels[channel.0].as_ref().unwrap();
+        assert_eq!(playback.volume, MAXIMUM_SOUND_INPUT);
+        assert!((playback.left_gain - centered_pan_gain).abs() < 1.0e-6);
+        assert!((playback.right_gain - centered_pan_gain).abs() < 1.0e-6);
     }
 
     #[test]
