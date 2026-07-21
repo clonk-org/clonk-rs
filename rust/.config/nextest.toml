@@ -18,6 +18,17 @@ store-success-output = false
 filter = 'package(lc-app) and test(install_definition_resolver_handles_case_insensitive_paths)'
 retries = 2
 
+# The same race intermittently hits other lc-app tests that stage real
+# planet/content fixtures (observed 2026-07-21: savegame_slot_probe /
+# slot_path / saved_game restores "unknown definition", font-bundle probes
+# "Missing", and one spawn ENOENT — one or two victims per ~8500-test gate,
+# different each run; see lc-parity-queue INFRA-001 for the evidence trail).
+# Retries absorb the nondeterminism; deterministic regressions still fail
+# all three attempts.
+[[profile.default.overrides]]
+filter = 'package(lc-app)'
+retries = 2
+
 # Host preparation uses a real background runtime and can exhaust its bounded
 # poll window when several worker gates saturate the machine simultaneously.
 [[profile.default.overrides]]
