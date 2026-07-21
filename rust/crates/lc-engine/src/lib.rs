@@ -4619,6 +4619,10 @@ fn i32_is_minus_one(value: &i32) -> bool {
     *value == -1
 }
 
+const fn default_last_attach_movement_frame() -> i32 {
+    -1
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectState {
     /// C4Object::CustomName: Some overrides the crew-info/definition name;
@@ -5284,6 +5288,9 @@ struct ObjectDelta {
     custom_name: Option<Option<String>>,
     /// Some(Some(object)) sets C4Object::pLayer; Some(None) clears it.
     layer: Option<Option<ObjectId>>,
+    /// Exact C4Object compiler-cache overwrite. Typed pointer assignment does
+    /// not touch this; literal-null resets and enumeration do.
+    compiler_cache: Option<ObjectCompilerCache>,
     /// C4Object::Visibility overwrite.
     visibility: Option<i32>,
     /// C4Object::BlitMode overwrite.
@@ -5433,6 +5440,9 @@ impl ObjectDelta {
         }
         if let Some(layer) = update.layer {
             self.layer = Some(layer);
+        }
+        if let Some(compiler_cache) = update.compiler_cache {
+            self.compiler_cache = Some(compiler_cache);
         }
         if let Some(visibility) = update.visibility {
             self.visibility = Some(visibility);
@@ -5635,6 +5645,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             change_def_reset_action_time: update.change_def_reset_action_time,
             custom_name: update.custom_name,
             layer: update.layer,
+            compiler_cache: update.compiler_cache,
             visibility: update.visibility,
             blit_mode: update.blit_mode,
             picture_rect: update.picture_rect,
@@ -5765,6 +5776,12 @@ pub struct ObjectUpdate {
         deserialize_with = "deserialize_double_option"
     )]
     pub layer: Option<Option<ObjectId>>,
+    /// Runtime-visible compiler caches. Kept separate from the associated live
+    /// pointers because C4EnumeratedObjectPtr only clears its number for a
+    /// literal-null assignment and only refreshes it during enumeration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[doc(hidden)]
+    pub compiler_cache: Option<ObjectCompilerCache>,
     /// SetVisibility (C4Script.cpp:3860-3869).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<i32>,
@@ -6219,6 +6236,7 @@ impl ObjectUpdate {
     pub fn is_empty(&self) -> bool {
         self.custom_name.is_none()
             && self.layer.is_none()
+            && self.compiler_cache.is_none()
             && self.visibility.is_none()
             && self.blit_mode.is_none()
             && self.picture_rect.is_none()
@@ -6453,6 +6471,10 @@ pub struct Object {
     /// DoMotion during the most recent DoMovement invocation.
     #[doc(hidden)] pub motion_x: i32,
     #[doc(hidden)] pub motion_y: i32,
+    /// Raw fields consumed by C4Object::CompileFunc rather than reconstructed
+    /// from their associated live pointers. C4EnumeratedObjectPtr keeps its
+    /// signed enumeration word independent of the resolved Object pointer.
+    compiler_cache: ObjectCompilerCache,
     /// 16.16 fixed-point rotation accumulator (C++ `fix_r`, `C4Object.h:149`).
     /// `state.rotation` (whole degrees) is its `fixtoi` projection.
     #[doc(hidden)]
@@ -6502,7 +6524,7 @@ pub struct Object {
     upright_t_attach: u32,
     /// C4Object::iLastAttachMovementFrame: prevents two moving masks from
     /// carrying the same object twice in one frame (C4SolidMask.cpp:187-193).
-    last_attach_movement_frame: Option<u64>,
+    last_attach_movement_frame: i32,
     /// Last energy-loss causing player (C4Object::LastEnergyLossCausePlayer,
     /// read by AssignDeath for kill attribution).
     #[doc(hidden)] pub last_energy_loss_cause: i32,
@@ -6526,6 +6548,31 @@ pub struct Object {
     /// complete shape from DefCore (C4Shape.cpp:495-510).
     shape_fire_top: i32,
     #[doc(hidden)] pub own_shape_vertices: Option<Vec<ObjectVertex>>,
+}
+
+/// Private C4Object compiler caches exposed verbatim by GetObjectVal. Pointer
+/// assignment and pointer denumeration do not refresh these words; an object
+/// enumeration pass does. Keeping them independent is observable for freshly
+/// assigned, stale, legacy-offset, and unresolved references.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[doc(hidden)]
+pub struct ObjectCompilerCache {
+    #[serde(default)]
+    pub info: String,
+    #[serde(default)]
+    pub contained: i32,
+    #[serde(default)]
+    pub action_target1: i32,
+    #[serde(default)]
+    pub action_target2: i32,
+    #[serde(default)]
+    pub layer: i32,
+}
+
+impl ObjectCompilerCache {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Stable position of C4Effect::Execute's live-list cursor. Effect numbers
@@ -6657,6 +6704,7 @@ impl Object {
             fixed_velocity,
             motion_x: 0,
             motion_y: 0,
+            compiler_cache: ObjectCompilerCache::default(),
             fixed_rotation,
             rotation_velocity: C4Fixed::ZERO,
             destroyed: matches!(state.status, ObjectStatus::Deleted),
@@ -6669,7 +6717,7 @@ impl Object {
             solid_mask_instance_sequence: None,
             state,
             upright_t_attach: 0,
-            last_attach_movement_frame: None,
+            last_attach_movement_frame: -1,
             last_energy_loss_cause: OWNER_NONE,
             in_mat: None,
             command_queue: VecDeque::new(),
@@ -6949,6 +6997,9 @@ impl Object {
             // pSolidMaskData before UpdateSolidMask constructs a new tail
             // instance (C4Object.cpp:382-400,1207-1244,3809-3817).
             self.solid_mask_instance_sequence = None;
+        }
+        if let Some(compiler_cache) = &delta.compiler_cache {
+            self.compiler_cache = compiler_cache.clone();
         }
         let previous_rect = self.current_shape_rect();
         let previous_construction = self.state.construction;
@@ -8879,6 +8930,12 @@ pub struct SpawnConfig {
     pub motion_x: i32,
     #[serde(default)]
     pub motion_y: i32,
+    /// Exact stale/raw C4Object compiler caches. Loaded Objects.txt records
+    /// populate these before pointer denumeration; fresh objects leave them
+    /// at the native zero/empty defaults.
+    #[serde(default, skip_serializing_if = "ObjectCompilerCache::is_default")]
+    #[doc(hidden)]
+    pub compiler_cache: ObjectCompilerCache,
     /// Exact sub-pixel velocity: savegame `XDir`/`YDir` are serialized
     /// C4Fixed values (C4Object.cpp:2765-2766), not whole pixels. Takes
     /// precedence over `velocity` when present.
@@ -9056,7 +9113,7 @@ pub struct SpawnConfig {
     pub fire_caused_by: Option<i32>,
     /// Saved private C4Object bookkeeping fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_attach_movement_frame: Option<u64>,
+    pub last_attach_movement_frame: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_energy_loss_cause: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -9121,6 +9178,7 @@ impl SpawnConfig {
             velocity: Vector2::ZERO,
             motion_x: 0,
             motion_y: 0,
+            compiler_cache: ObjectCompilerCache::default(),
             fixed_velocity: None,
             rotation: 0,
             energy: None,
@@ -10640,8 +10698,13 @@ pub struct PersistedObject {
     motion_x: i32,
     #[serde(default)]
     motion_y: i32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    last_attach_movement_frame: Option<u64>,
+    #[serde(default, skip_serializing_if = "ObjectCompilerCache::is_default")]
+    compiler_cache: ObjectCompilerCache,
+    #[serde(
+        default = "default_last_attach_movement_frame",
+        skip_serializing_if = "i32_is_minus_one"
+    )]
+    last_attach_movement_frame: i32,
     #[serde(default)]
     no_collect_delay: i32,
     #[serde(default, skip_serializing_if = "ShapeAttachRecord::is_unattached")]
@@ -10915,7 +10978,8 @@ impl EngineState {
                 command_stack: object.command_stack.clone(),
                 motion_x: 0,
                 motion_y: 0,
-                last_attach_movement_frame: None,
+                compiler_cache: ObjectCompilerCache::default(),
+                last_attach_movement_frame: -1,
                 no_collect_delay: 0,
                 shape_attach: ShapeAttachRecord::default(),
                 entrance_status: false,
@@ -25909,6 +25973,12 @@ impl Engine {
         .with_action_index(object.state.action.act_map_index)
         .with_unsorted(object.unsorted)
         .with_fixed_motion(object.fixed_position, object.fixed_velocity)
+        .with_compiler_fields(
+            object.motion_x,
+            object.motion_y,
+            object.last_attach_movement_frame,
+            object.compiler_cache.clone(),
+        )
         .with_fixed_rotation(object.fixed_rotation)
         .with_rotation_velocity(object.rotation_velocity)
         .with_own_vertices(object.own_shape_vertices.is_some())
@@ -29805,6 +29875,14 @@ impl Engine {
         mut config: SpawnConfig,
         creator: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, EngineError> {
+        // C4Object::Init copies both pCreator->pLayer and the wrapper's
+        // independently retained enumerated number. The latter may be a
+        // stale/unresolved word and therefore cannot be reconstructed from
+        // the live pointer (C4Object.cpp:153-170; C4Object.h:310-331).
+        if let Some(creator_index) = creator.and_then(|id| self.find_object_index(id)) {
+            config.layer = self.objects[creator_index].state.layer;
+            config.compiler_cache.layer = self.objects[creator_index].compiler_cache.layer;
+        }
         let initial_construction = config.construction;
         config.construction = 0;
         // The callbacks and initial DoCon run below against the now-live
@@ -32702,6 +32780,7 @@ impl Engine {
         let ObjectUpdate {
             custom_name,
             layer,
+            compiler_cache,
             visibility,
             blit_mode,
             picture_rect: update_picture_rect,
@@ -32812,6 +32891,9 @@ impl Engine {
             }
             if let Some(layer) = layer {
                 object.state.layer = layer;
+            }
+            if let Some(compiler_cache) = compiler_cache {
+                object.compiler_cache = compiler_cache;
             }
             if let Some(visibility) = visibility {
                 object.state.visibility = visibility;
@@ -34927,6 +35009,7 @@ impl Engine {
                     command_stack: object.commands.snapshot(),
                     motion_x: object.motion_x,
                     motion_y: object.motion_y,
+                    compiler_cache: object.compiler_cache.clone(),
                     last_attach_movement_frame: object.last_attach_movement_frame,
                     no_collect_delay: object.state.no_collect_delay,
                     shape_attach: object.state.shape_attach,
@@ -35452,6 +35535,7 @@ impl Engine {
             }
             object.motion_x = persisted.motion_x;
             object.motion_y = persisted.motion_y;
+            object.compiler_cache = persisted.compiler_cache.clone();
             object.last_attach_movement_frame = persisted.last_attach_movement_frame;
             // Restore authoritative sub-pixel state when the snapshot carried it
             // (whole-pixel objects fall back to the `itofix` set by `Object::new`).
@@ -37188,9 +37272,23 @@ impl Engine {
         let preserved = preserve_ids.into_iter().collect::<HashSet<_>>();
         let departing_pxs = self.pxs_system.clone();
         let departing_mass_movers = self.mass_movers.clone();
-        let mut state = self.capture_state();
         let departing_key = self.current_scenario_section.to_ascii_lowercase();
         let changing_section = key != departing_key;
+        // Objects.Save enumerates both active and inactive lists even though
+        // a section file decompiles active non-player objects only. Capture
+        // the enumerated wrappers for the frozen Objects.txt, then perform
+        // native Denumerate immediately so surviving inactive objects keep
+        // the same refreshed caches and normalized live pointers.
+        let object_enumeration = (changing_section && flags & 2 != 0)
+            .then(|| self.enumerate_object_compiler_caches_for_save());
+        if let Some(enumeration) = object_enumeration.as_ref() {
+            self.denumerate_object_compiler_caches_after_save(enumeration);
+        }
+        // Capture after Denumerate: preserved objects are restored from this
+        // state later in the switch and must not resurrect an off-list live
+        // pointer that native Denumerate just cleared. The refreshed number
+        // caches survive Denumerate and remain available to Objects.txt.
+        let mut state = self.capture_state();
         let saved_landscape_systems =
             (changing_section && flags & 1 != 0).then(|| scenario::ScenarioLandscapeSystems {
                 pxs: self.pxs_system.to_c4b().map(|bytes| {
@@ -41566,6 +41664,8 @@ impl Engine {
         if clear_targets {
             object.state.action.target = None;
             object.state.action.target2 = None;
+            object.compiler_cache.action_target1 = 0;
+            object.compiler_cache.action_target2 = 0;
         }
         object.state.command_direction = CommandDirection::Stop;
         object.set_velocity(Vector2::ZERO);
@@ -42980,6 +43080,7 @@ impl Engine {
             if let Some(idx) = self.find_object_index(object_id) {
                 if self.objects[idx].state.action.target == Some(target_id) {
                     self.objects[idx].state.action.target = None;
+                    self.objects[idx].compiler_cache.action_target1 = 0;
                 }
             }
             self.notify_attach_target_lost(object_id)?;
@@ -43039,6 +43140,7 @@ impl Engine {
         }) else {
             if self.objects[live_idx].state.action.target == Some(live_target_id) {
                 self.objects[live_idx].state.action.target = None;
+                self.objects[live_idx].compiler_cache.action_target1 = 0;
             }
             self.notify_attach_target_lost(object_id)?;
             return Ok(false);
@@ -43196,6 +43298,7 @@ impl Engine {
             self.grab_lost(puller_id)?;
             if let Some(puller_idx) = self.find_object_index(puller_id) {
                 self.objects[puller_idx].state.action.target = None;
+                self.objects[puller_idx].compiler_cache.action_target1 = 0;
             }
             return Ok(false);
         }
@@ -43323,6 +43426,7 @@ impl Engine {
             self.grab_lost(puller_id)?;
             if let Some(puller_idx) = self.find_object_index(puller_id) {
                 self.objects[puller_idx].state.action.target = None;
+                self.objects[puller_idx].compiler_cache.action_target1 = 0;
             }
             return Ok(false);
         }
@@ -46602,7 +46706,9 @@ impl Engine {
                 self.refresh_object_ocf(container_index);
             }
             if let Some(index) = self.find_object_index(object_id) {
-                self.objects[index].state.container = None;
+                let object = &mut self.objects[index];
+                object.state.container = None;
+                object.compiler_cache.contained = 0;
             }
         }
 
@@ -50128,6 +50234,7 @@ impl Engine {
         if dx == 0 && dy == 0 {
             return;
         }
+        let frame = self.frame as i32;
 
         for object_id in backup.object_ids {
             let Some(index) = self.find_object_index(object_id) else {
@@ -50139,12 +50246,12 @@ impl Engine {
             let old_position = self.objects[index].state.position;
             let new_position = Vector2::new(old_position.x + dx, old_position.y + dy);
             if self.object_shape_contacts_at(index, new_position)
-                || self.objects[index].last_attach_movement_frame == Some(self.frame)
+                || self.objects[index].last_attach_movement_frame == frame
             {
                 continue;
             }
 
-            self.objects[index].last_attach_movement_frame = Some(self.frame);
+            self.objects[index].last_attach_movement_frame = frame;
             let nested_backup = self.remove_solid_mask_for_movement(index);
             {
                 let object = &mut self.objects[index];
@@ -50799,6 +50906,12 @@ impl Engine {
                     *generation = generation.checked_add(1).unwrap_or(1);
                 }
 
+                if !loaded && previous.is_some() {
+                    // Enter transfers through Exit first. Exit's literal-null
+                    // assignment resets the raw enumeration cache; assigning
+                    // the new typed pointer does not repopulate it.
+                    self.objects[object_index].compiler_cache.contained = 0;
+                }
                 self.objects[object_index].state.container = Some(container_id);
                 // "Assume that the new container controls this object, if
                 // it cannot control itself (i.e.: Alive)" — projectile kill
@@ -50847,6 +50960,9 @@ impl Engine {
             }
             None => {
                 self.objects[object_index].state.container = None;
+                if !loaded {
+                    self.objects[object_index].compiler_cache.contained = 0;
+                }
                 // C4Object::Exit resets InLiquid and mobilizes
                 // (C4Object.cpp:1527-1528).
                 self.objects[object_index].state.in_liquid = false;
@@ -51065,7 +51181,9 @@ impl Engine {
             self.refresh_object_ocf(previous_index);
         }
         if let Some(object_index) = self.find_object_index(object_id) {
-            self.objects[object_index].state.container = None;
+            let object = &mut self.objects[object_index];
+            object.state.container = None;
+            object.compiler_cache.contained = 0;
         }
 
         let mut position = position;
@@ -51344,7 +51462,9 @@ impl Engine {
             self.refresh_object_ocf(previous_index);
         }
         if let Some(object_index) = self.find_object_index(object_id) {
-            self.objects[object_index].state.container = None;
+            let object = &mut self.objects[object_index];
+            object.state.container = None;
+            object.compiler_cache.contained = 0;
         }
 
         let mut target = Vector2::ZERO;
@@ -53295,6 +53415,7 @@ impl Engine {
                 .is_some_and(|layer| destroyed.contains(&layer))
             {
                 object.state.layer = None;
+                object.compiler_cache.layer = 0;
             }
         }
     }
@@ -53500,12 +53621,15 @@ impl Engine {
         for object in &mut self.objects {
             if object.state.action.target == Some(target) {
                 object.state.action.target = None;
+                object.compiler_cache.action_target1 = 0;
             }
             if object.state.action.target2 == Some(target) {
                 object.state.action.target2 = None;
+                object.compiler_cache.action_target2 = 0;
             }
             if object.state.layer == Some(target) {
                 object.state.layer = None;
+                object.compiler_cache.layer = 0;
             }
             object.commands.clear_object_reference(target);
             for value in object.state.local_vars.values_mut() {
@@ -56348,6 +56472,7 @@ impl Engine {
             velocity,
             motion_x,
             motion_y,
+            compiler_cache,
             fixed_velocity,
             rotation,
             energy,
@@ -56798,7 +56923,8 @@ impl Engine {
         }
         object.motion_x = motion_x;
         object.motion_y = motion_y;
-        object.last_attach_movement_frame = last_attach_movement_frame;
+        object.compiler_cache = compiler_cache;
+        object.last_attach_movement_frame = last_attach_movement_frame.unwrap_or(-1);
         object.last_energy_loss_cause = last_energy_loss_cause.unwrap_or(OWNER_NONE);
         if let Some(snapshot) = command_stack.as_ref() {
             object.commands.restore_from_snapshot(snapshot);
@@ -68050,6 +68176,100 @@ mod scenario_section_random_regression {
         );
         assert_eq!(engine.debug_current_scenario_section(), "Cave");
         assert_eq!(engine.landscape().map(Landscape::width), Some(80));
+    }
+
+    #[test]
+    fn section_object_save_enumerates_active_and_inactive_compiler_caches() {
+        // Objects.Save(false, false) writes active objects only, but native
+        // Enumerate/Denumerate still visits the inactive list on both sides
+        // of decompilation (C4GameObjects.cpp:691-713).
+        let mut engine = Engine::with_seed(11);
+        engine
+            .register_definition(
+                Definition::from_script("ITEM", "Item", "").expect("item compiles"),
+            )
+            .expect("item registers");
+        engine.configure_scenario_sections(&[
+            section("main", 80, true),
+            section("next", 100, true),
+        ]);
+        engine.set_landscape(vehicle_section_landscape(80, 40));
+
+        let active = engine
+            .spawn_object(SpawnConfig::new("ITEM"))
+            .expect("active object spawns");
+        let inactive = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_status(ObjectStatus::Inactive))
+            .expect("inactive object spawns");
+        let preserved = engine
+            .spawn_object(SpawnConfig::new("ITEM"))
+            .expect("preserved object spawns");
+        let inactive_number = i32::try_from(inactive.as_u64()).expect("small fixture id");
+        let active_index = engine.find_object_index(active).expect("active index");
+        engine.objects[active_index].state.action.target = Some(inactive);
+        engine.objects[active_index].compiler_cache.action_target1 = 991;
+        let inactive_index = engine
+            .find_object_index(inactive)
+            .expect("inactive index");
+        engine.objects[inactive_index].state.action.target = Some(inactive);
+        engine.objects[inactive_index].compiler_cache.action_target1 = 992;
+        let preserved_index = engine
+            .find_object_index(preserved)
+            .expect("preserved index");
+        let off_list = ObjectId::new(999);
+        engine.objects[preserved_index].state.action.target = Some(off_list);
+        engine.objects[preserved_index].state.layer = Some(off_list);
+        engine.objects[preserved_index].compiler_cache.action_target1 = 993;
+        engine.objects[preserved_index].compiler_cache.layer = 994;
+
+        assert!(engine
+            .load_scenario_section("next", 2, vec![inactive, preserved])
+            .expect("departing objects freeze"));
+
+        let frozen = engine
+            .scenario_sections
+            .get("main")
+            .and_then(|section| section.frozen_group.clone())
+            .expect("departing main section freezes");
+        let group = lc_resources::Group::from_raw_memory(
+            std::path::PathBuf::from("Sectmain.c4g"),
+            frozen,
+        )
+        .expect("frozen section group opens");
+        let objects_txt = group
+            .read_entry_bytes("Objects.txt")
+            .expect("frozen Objects.txt reads");
+        assert!(
+            String::from_utf8_lossy(&objects_txt)
+                .contains(&format!("ActionTarget1={inactive_number}\r\n")),
+            "active rows decompile the enumerated cache word",
+        );
+
+        let inactive_index = engine
+            .find_object_index(inactive)
+            .expect("inactive object survives section switch");
+        assert_eq!(
+            engine.objects[inactive_index].compiler_cache.action_target1,
+            inactive_number,
+            "inactive wrappers receive the same enumeration side effect",
+        );
+        assert_eq!(
+            engine.objects[inactive_index].state.action.target,
+            Some(inactive),
+            "inactive wrapper denumerates through the shared number table",
+        );
+        let preserved_index = engine
+            .find_object_index(preserved)
+            .expect("preserved object survives section switch");
+        assert_eq!(engine.objects[preserved_index].state.action.target, None);
+        assert_eq!(engine.objects[preserved_index].state.layer, None);
+        assert_eq!(
+            engine.objects[preserved_index]
+                .compiler_cache
+                .action_target1,
+            0,
+        );
+        assert_eq!(engine.objects[preserved_index].compiler_cache.layer, 0);
     }
 
     #[test]

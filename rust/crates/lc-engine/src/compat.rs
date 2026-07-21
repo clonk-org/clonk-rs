@@ -180,6 +180,10 @@ pub(crate) struct HostWorldObject {
     #[allow(dead_code)]
     pub velocity: Vector2,
     fixed_velocity: FixedVec2,
+    motion_x: i32,
+    motion_y: i32,
+    last_attach_movement_frame: i32,
+    compiler_cache: crate::ObjectCompilerCache,
     /// Raw 16.16 fixed-point rotation accumulator (`C4Object::fix_r`).
     fixed_rotation: C4Fixed,
     /// Raw 16.16 fixed-point angular velocity (`C4Object::rdir`).
@@ -1327,6 +1331,20 @@ impl HostWorldObject {
         self
     }
 
+    pub(crate) fn with_compiler_fields(
+        mut self,
+        motion_x: i32,
+        motion_y: i32,
+        last_attach_movement_frame: i32,
+        compiler_cache: crate::ObjectCompilerCache,
+    ) -> Self {
+        self.motion_x = motion_x;
+        self.motion_y = motion_y;
+        self.last_attach_movement_frame = last_attach_movement_frame;
+        self.compiler_cache = compiler_cache;
+        self
+    }
+
     pub(crate) fn with_rotation_velocity(mut self, rotation_velocity: C4Fixed) -> Self {
         self.rotation_velocity = rotation_velocity;
         self
@@ -1446,6 +1464,10 @@ impl HostWorldObject {
             fixed_position: FixedVec2::from_ints(position.x, position.y),
             velocity,
             fixed_velocity: FixedVec2::from_ints(velocity.x, velocity.y),
+            motion_x: 0,
+            motion_y: 0,
+            last_attach_movement_frame: -1,
+            compiler_cache: crate::ObjectCompilerCache::default(),
             fixed_rotation: itofix(rotation),
             rotation_velocity: C4Fixed::ZERO,
             rotation,
@@ -10262,6 +10284,7 @@ fn exit_object_at_position_with_full_motion_and_calls(
         scope.removed_contents_links.insert(previous);
         scope.current_container = None;
         scope.pending_update.container = Some(None);
+        scope.reset_contained_compiler_cache();
         scope.pending_update.construction_preserves_fixed_position = false;
         scope.exit_bounds_in_progress = true;
         context.relink_content_after_exit(previous, target);
@@ -36616,10 +36639,11 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 fire: DefinitionFireMetadata::default(),
             });
         let definition_category = metadata.category;
-        let creator_layer = context
-            .object_context()
-            .map(ObjectScopeContext::id)
-            .and_then(|creator| context.object_layer(creator));
+        let creator = context.object_context().map(ObjectScopeContext::id);
+        let creator_layer = creator.and_then(|creator| context.object_layer(creator));
+        let creator_layer_cache = creator
+            .map(|creator| context.object_layer_compiler_cache(creator))
+            .unwrap_or(0);
 
         let base_position = context
             .object_context()
@@ -36658,6 +36682,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(layer) = creator_layer {
             spawn = spawn.with_layer(layer);
         }
+        spawn.compiler_cache.layer = creator_layer_cache;
         // "Set initial controller to creating controller, so more
         // complicated cause-effect-chains can be traced back to the
         // causing player" (FnCreateObject, C4Script.cpp:1899-1900).
@@ -36709,6 +36734,15 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             0,
             None,
             None,
+        )
+        .with_compiler_fields(
+            0,
+            0,
+            -1,
+            crate::ObjectCompilerCache {
+                layer: creator_layer_cache,
+                ..crate::ObjectCompilerCache::default()
+            },
         )
         .with_alive(initial_alive)
         .with_ocf(preview_ocf)
@@ -37040,6 +37074,9 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
             // Init reads pCreator->pLayer for every object; an earlier
             // synchronous callback may have changed the creator's layer.
             let creator_layer = creator.and_then(|id| context.object_layer(id));
+            let creator_layer_cache = creator
+                .map(|id| context.object_layer_compiler_cache(id))
+                .unwrap_or(0);
             let raw_position = Vector2::new(
                 base_position.x.saturating_add(x_offset),
                 base_position.y.saturating_add(y_offset),
@@ -37067,6 +37104,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
             if let Some(layer) = creator_layer {
                 spawn = spawn.with_layer(layer);
             }
+            spawn.compiler_cache.layer = creator_layer_cache;
             // NewObject callbacks run below while this host call is live.
             spawn.initialized = true;
             spawn.position_adjusted = true;
@@ -37111,6 +37149,15 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                 0,
                 None,
                 None,
+            )
+            .with_compiler_fields(
+                0,
+                0,
+                -1,
+                crate::ObjectCompilerCache {
+                    layer: creator_layer_cache,
+                    ..crate::ObjectCompilerCache::default()
+                },
             )
             .with_rotation_velocity(rdir)
             .with_alive(initial_alive)
@@ -38044,6 +38091,9 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         let definition_category = metadata.category;
         let creator = context.object_context().map(ObjectScopeContext::id);
         let creator_layer = creator.and_then(|creator| context.object_layer(creator));
+        let creator_layer_cache = creator
+            .map(|creator| context.object_layer_compiler_cache(creator))
+            .unwrap_or(0);
 
         let base_position = context
             .object_context()
@@ -38104,6 +38154,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(layer) = creator_layer {
             spawn = spawn.with_layer(layer);
         }
+        spawn.compiler_cache.layer = creator_layer_cache;
         // The creating controller rides onto the site (FnCreateConstruction,
         // C4Script.cpp:1932-1933).
         let creator_controller = context
@@ -38154,6 +38205,15 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             0,
             None,
             None,
+        )
+        .with_compiler_fields(
+            0,
+            0,
+            -1,
+            crate::ObjectCompilerCache {
+                layer: creator_layer_cache,
+                ..crate::ObjectCompilerCache::default()
+            },
         )
         .with_alive(initial_alive)
         .with_ocf(preview_ocf)
@@ -39763,6 +39823,10 @@ fn create_native_object(request: NativeObjectCreation) -> Result<Option<ObjectId
         let creator_layer = request
             .creator
             .and_then(|creator| context.object_layer(creator));
+        let creator_layer_cache = request
+            .creator
+            .map(|creator| context.object_layer_compiler_cache(creator))
+            .unwrap_or(0);
         let id = context.allocate_object_id();
         let mut spawn = SpawnConfig::new(request.definition.clone())
             .with_position(request.position)
@@ -39777,6 +39841,7 @@ fn create_native_object(request: NativeObjectCreation) -> Result<Option<ObjectId
         if let Some(layer) = creator_layer {
             spawn = spawn.with_layer(layer);
         }
+        spawn.compiler_cache.layer = creator_layer_cache;
         spawn.initialized = true;
         spawn.position_adjusted = true;
 
@@ -39813,6 +39878,15 @@ fn create_native_object(request: NativeObjectCreation) -> Result<Option<ObjectId
             0,
             None,
             None,
+        )
+        .with_compiler_fields(
+            0,
+            0,
+            -1,
+            crate::ObjectCompilerCache {
+                layer: creator_layer_cache,
+                ..crate::ObjectCompilerCache::default()
+            },
         )
         .with_fixed_motion(
             FixedVec2::from_ints(request.position.x, request.position.y),
@@ -40881,6 +40955,15 @@ fn reflect_object_values(
         .or_else(|| state.map(|state| state.shape_vertices.clone()))
         .unwrap_or_default();
     let local_vars = reflected_object_locals(context, target, state, scope);
+    let compiler_cache = scope
+        .map(|scope| &scope.current_compiler_cache)
+        .or_else(|| {
+            world_object
+                .as_ref()
+                .map(|object| &object.compiler_cache)
+        })
+        .cloned()
+        .unwrap_or_default();
 
     let mut reflection = ObjectValueReflection::default();
     let object_path = |name| ["Object", name];
@@ -40906,8 +40989,12 @@ fn reflect_object_values(
                 .to_script_value(),
         ),
     );
-    // `Info` serializes the stale nInfo cache refreshed only by
-    // EnumeratePointers; the live crew-info name is not an equivalent value.
+    // C4Object::nInfo is a stale compiler cache. Pointer enumeration refreshes
+    // it, but ordinary Info changes do not.
+    reflection.push(
+        &object_path("Info"),
+        Value::String(compiler_cache.info.clone().into()),
+    );
     reflection.push(
         &object_path("Owner"),
         Value::Int(
@@ -40958,9 +41045,22 @@ fn reflect_object_values(
     reflection.push(&object_path("X"), Value::Int(position.x));
     reflection.push(&object_path("Y"), Value::Int(position.y));
     reflection.push(&object_path("Rotation"), Value::Int(rotation));
-    // MotionX/MotionY and iLastAttachMovementFrame are serialized engine
-    // caches that ObjectState does not retain. Omit them instead of exposing
-    // plausible-looking defaults that differ after movement.
+    reflection.push(
+        &object_path("MotionX"),
+        Value::Int(world_object.as_ref().map_or(0, |object| object.motion_x)),
+    );
+    reflection.push(
+        &object_path("MotionY"),
+        Value::Int(world_object.as_ref().map_or(0, |object| object.motion_y)),
+    );
+    reflection.push(
+        &object_path("LastSolidAtchFrame"),
+        Value::Int(
+            world_object
+                .as_ref()
+                .map_or(-1, |object| object.last_attach_movement_frame),
+        ),
+    );
     reflection.push(
         &object_path("NoCollectDelay"),
         Value::Int(
@@ -41347,9 +41447,21 @@ fn reflect_object_values(
         .unwrap_or(0);
     reflection.push(&object_path("PhaseDelay"), Value::Int(phase_delay));
 
-    // Contained, ActionTarget1/2 and Layer compile their independent
-    // C4EnumeratedObjectPtr::number caches, not the live ObjectId. Rust does
-    // not yet retain those raw cache values, so live IDs would be incorrect.
+    // These are C4EnumeratedObjectPtr::number, deliberately independent of
+    // the resolved live pointers above. Denumeration preserves zero,
+    // unresolved, negative, and legacy-offset words verbatim.
+    reflection.push(
+        &object_path("Contained"),
+        Value::Int(compiler_cache.contained),
+    );
+    reflection.push(
+        &object_path("ActionTarget1"),
+        Value::Int(compiler_cache.action_target1),
+    );
+    reflection.push(
+        &object_path("ActionTarget2"),
+        Value::Int(compiler_cache.action_target2),
+    );
 
     let components = scope
         .and_then(|scope| scope.pending_update.components.as_ref())
@@ -41458,6 +41570,10 @@ fn reflect_object_values(
                 .or_else(|| state.map(|state| state.crew_disabled))
                 .unwrap_or(false),
         ),
+    );
+    reflection.push(
+        &object_path("Layer"),
+        Value::Int(compiler_cache.layer),
     );
     let base_graphics = match scope {
         Some(scope) => scope.base_graphics.as_ref(),
@@ -45386,6 +45502,7 @@ impl EffectHostContext {
         });
         if let Some(scope) = object.as_mut() {
             if let Some(world_object) = world.get(scope.id()) {
+                scope.current_compiler_cache = world_object.compiler_cache.clone();
                 scope.unsorted = world_object.unsorted;
                 scope.staged_own_vertices = world_object.own_vertices;
                 scope
@@ -47227,6 +47344,7 @@ impl EffectHostContext {
                     }
                     if clears_layer {
                         scope.pending_update.layer = Some(None);
+                        scope.reset_layer_compiler_cache();
                     }
                 }
             }
@@ -47237,12 +47355,14 @@ impl EffectHostContext {
         for spawn in &mut self.pending_spawns {
             if spawn.layer == Some(target) {
                 spawn.layer = None;
+                spawn.compiler_cache.layer = 0;
             }
         }
         for object in self.pending_objects.values_mut() {
             if let Some(state) = object.state.as_mut() {
                 if state.layer == Some(target) {
                     Rc::make_mut(state).layer = None;
+                    object.compiler_cache.layer = 0;
                 }
             }
         }
@@ -47530,6 +47650,7 @@ impl EffectHostContext {
         scope.current_fixed_velocity = object.fixed_velocity;
         scope.current_fixed_rotation = object.fixed_rotation;
         scope.current_rotation_velocity = object.rotation_velocity;
+        scope.current_compiler_cache = object.compiler_cache.clone();
         scope.current_mobile = state.mobile;
         scope.current_t_attach = state.t_attach;
         scope.current_contact_density = state.contact_density;
@@ -47867,6 +47988,19 @@ impl EffectHostContext {
         }
         self.get_world_object(target)
             .and_then(|object| object.full_state().and_then(|state| state.layer))
+    }
+
+    /// The raw `C4EnumeratedObjectPtr::number` paired with pLayer. Fresh
+    /// children copy this word from their creator independently of whether
+    /// that creator's live pointer resolved (C4Object::Init copy assignment).
+    fn object_layer_compiler_cache(&self, target: ObjectId) -> i32 {
+        self.object_scope(target)
+            .map(|scope| scope.current_compiler_cache.layer)
+            .or_else(|| {
+                self.get_world_object(target)
+                    .map(|object| object.compiler_cache.layer)
+            })
+            .unwrap_or(0)
     }
 
     /// Stage one object's pLayer through the normal nested-scope fold.
@@ -49399,6 +49533,9 @@ struct ObjectScopeContext {
     /// changes every subsequent C4ObjectList::Add position in this call.
     unsorted: bool,
     current_container: Option<ObjectId>,
+    /// The independently serialized nInfo/C4EnumeratedObjectPtr cache words.
+    /// These cannot be reconstructed from the live pointer fields.
+    current_compiler_cache: crate::ObjectCompilerCache,
     /// Parents whose concrete contents link was removed in this VM call.
     /// Re-entering one of them must allocate a fresh link even if the final
     /// `Contained` value equals the frame-start value.
@@ -49563,6 +49700,7 @@ impl ObjectScopeContext {
             id,
             unsorted: false,
             current_container: container,
+            current_compiler_cache: crate::ObjectCompilerCache::default(),
             removed_contents_links: HashSet::new(),
             current_contents_link_generation: 0,
             exit_bounds_in_progress: false,
@@ -50267,6 +50405,10 @@ impl ObjectScopeContext {
     /// to the same live script scope. Command states only emit this core
     /// field set; cross-object writes travel as CommandEvents.
     fn stage_command_update(&mut self, mut update: ObjectUpdate) {
+        if let Some(compiler_cache) = update.compiler_cache.take() {
+            self.current_compiler_cache = compiler_cache.clone();
+            self.pending_update.compiler_cache = Some(compiler_cache);
+        }
         if let Some(position) = update.position.take() {
             self.set_position(position);
         }
@@ -50446,6 +50588,9 @@ impl ObjectScopeContext {
         self.exit_bounds_in_progress = false;
         self.current_container = container;
         self.pending_update.container = Some(container);
+        if container.is_none() {
+            self.reset_contained_compiler_cache();
+        }
         // Enter/Exit copy or explicitly assign position and therefore
         // resynchronize fix_x/fix_y after any earlier DoCon in this call.
         self.pending_update.construction_preserves_fixed_position = false;
@@ -51013,6 +51158,29 @@ impl ObjectScopeContext {
         }
     }
 
+    fn stage_compiler_cache(&mut self) {
+        self.pending_update.compiler_cache = Some(self.current_compiler_cache.clone());
+    }
+
+    fn reset_contained_compiler_cache(&mut self) {
+        self.current_compiler_cache.contained = 0;
+        self.stage_compiler_cache();
+    }
+
+    fn reset_action_target_compiler_cache(&mut self, index: usize) {
+        match index {
+            0 => self.current_compiler_cache.action_target1 = 0,
+            1 => self.current_compiler_cache.action_target2 = 0,
+            _ => return,
+        }
+        self.stage_compiler_cache();
+    }
+
+    fn reset_layer_compiler_cache(&mut self) {
+        self.current_compiler_cache.layer = 0;
+        self.stage_compiler_cache();
+    }
+
     fn references_object_pointer(&self, target: ObjectId) -> bool {
         self.current_action_target == Some(target)
             || self.current_action_target2 == Some(target)
@@ -51032,9 +51200,11 @@ impl ObjectScopeContext {
     fn clear_object_pointer(&mut self, target: ObjectId) {
         if self.current_action_target == Some(target) {
             self.set_action_target(0, None);
+            self.reset_action_target_compiler_cache(0);
         }
         if self.current_action_target2 == Some(target) {
             self.set_action_target(1, None);
+            self.reset_action_target_compiler_cache(1);
         }
         if self.live_commands.clear_object_reference(target) {
             self.command_count = self.live_commands.len();
@@ -70251,6 +70421,220 @@ func Probe(state) {
         assert_eq!(reflection.get("Locals", None, 1), Some(Value::Int(3)));
         assert_eq!(reflection.get("Locals", None, 2), Some(Value::from("S")));
         assert_eq!(reflection.get("Locals", None, 3), Some(Value::Int(-1)));
+    }
+
+    #[test]
+    fn get_object_val_reflects_serialized_object_cache_fields() {
+        let target = ObjectId::new(7);
+        let default_target = ObjectId::new(8);
+        let reset_target = ObjectId::new(9);
+        let container = ObjectId::new(2);
+        let resolved_target = ObjectId::new(42);
+        let layer = ObjectId::new(3);
+        let mut state = crate::preview_spawn_state(
+            Vector2::new(11, 22),
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        state.container = Some(container);
+        state.action.target2 = Some(resolved_target);
+        state.layer = Some(layer);
+        let world_object = HostWorldObject::new(
+            target,
+            "SELF",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            Some(resolved_target),
+            None,
+            OWNER_NONE,
+            0,
+            FULL_CON,
+            state.position,
+            state.velocity,
+            Vec::new(),
+            0,
+            0,
+            Some(container),
+        )
+        .with_compiler_fields(
+            12,
+            -9,
+            77,
+            crate::ObjectCompilerCache {
+                info: "stale crew name".to_string(),
+                // Live pointer is non-null, but the never-enumerated cache is
+                // still zero.
+                contained: 0,
+                // Missing target after Denumerate retains the unresolved word.
+                action_target1: 999,
+                // Old Game.Objects.Enumerated encoding survives Denumerate.
+                action_target2: 1_000_000_042,
+                // Signed cache words are reflected without ObjectId coercion.
+                layer: -7,
+            },
+        )
+        .with_full_state(Rc::new(state));
+        let default_world_object = HostWorldObject::new(
+            default_target,
+            "SELF",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        );
+        let mut reset_state = crate::preview_spawn_state(
+            Vector2::new(3, 4),
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        reset_state.container = Some(container);
+        let reset_world_object = HostWorldObject::new(
+            reset_target,
+            "SELF",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            FULL_CON,
+            reset_state.position,
+            reset_state.velocity,
+            Vec::new(),
+            0,
+            0,
+            Some(container),
+        )
+        .with_compiler_fields(
+            0,
+            0,
+            -1,
+            crate::ObjectCompilerCache {
+                contained: 321,
+                ..crate::ObjectCompilerCache::default()
+            },
+        )
+        .with_full_state(Rc::new(reset_state));
+        let world = HostWorldContext::from_objects(vec![
+            world_object,
+            default_world_object,
+            reset_world_object,
+        ])
+        .with_definition_metadata(Rc::new(HashMap::from([(
+            DefinitionId::from("SELF"),
+            DefinitionMetadata::default(),
+        )])));
+        let cases = [
+            ("Info", Value::String("stale crew name".into())),
+            ("MotionX", Value::Int(12)),
+            ("MotionY", Value::Int(-9)),
+            ("LastSolidAtchFrame", Value::Int(77)),
+            ("Contained", Value::Int(0)),
+            ("ActionTarget1", Value::Int(999)),
+            ("ActionTarget2", Value::Int(1_000_000_042)),
+            ("Layer", Value::Int(-7)),
+        ];
+
+        let (result, _) = with_effect_context(None, &[], world, 10, || {
+            for (entry, expected) in &cases {
+                for section in [Value::Nil, Value::String("Object".into())] {
+                    assert_eq!(
+                        get_object_val(&[
+                            Value::String((*entry).into()),
+                            section,
+                            object_reference_value(target),
+                            Value::Int(0),
+                        ])?,
+                        expected.clone(),
+                        "{entry} differs between root and Object-section lookup",
+                    );
+                }
+                assert_eq!(
+                    get_object_val(&[
+                        Value::String((*entry).into()),
+                        Value::Nil,
+                        object_reference_value(target),
+                        Value::Int(1),
+                    ])?,
+                    Value::Nil,
+                    "{entry} exposes more than its single compiler primitive",
+                );
+            }
+            assert_eq!(
+                get_object_val(&[
+                    Value::String("ActionTarget1".into()),
+                    Value::String("Action".into()),
+                    object_reference_value(target),
+                    Value::Int(0),
+                ])?,
+                Value::Nil,
+                "ActionTarget1 is inline under Object, not an Action section",
+            );
+            for (entry, expected) in [
+                ("Info", Value::String(String::new().into())),
+                ("MotionX", Value::Int(0)),
+                ("MotionY", Value::Int(0)),
+                ("LastSolidAtchFrame", Value::Int(-1)),
+                ("Contained", Value::Int(0)),
+                ("ActionTarget1", Value::Int(0)),
+                ("ActionTarget2", Value::Int(0)),
+                ("Layer", Value::Int(0)),
+            ] {
+                assert_eq!(
+                    get_object_val(&[
+                        Value::String(entry.into()),
+                        Value::String("Object".into()),
+                        object_reference_value(default_target),
+                        Value::Int(0),
+                    ])?,
+                    expected,
+                    "{entry} compiler default differs from C++",
+                );
+            }
+            assert_eq!(
+                get_object_val(&[
+                    Value::String("Contained".into()),
+                    Value::Nil,
+                    object_reference_value(reset_target),
+                    Value::Int(0),
+                ])?,
+                Value::Int(321),
+                "typed pointer assignment preserves a stale number cache",
+            );
+            assert!(exit_object_at_current_position(reset_target)?);
+            assert_eq!(
+                get_object_val(&[
+                    Value::String("Contained".into()),
+                    Value::Nil,
+                    object_reference_value(reset_target),
+                    Value::Int(0),
+                ])?,
+                Value::Int(0),
+                "Exit's literal-null assignment resets the cache immediately",
+            );
+            Ok::<_, RuntimeError>(())
+        });
+        result.expect("serialized cache reflection probes succeed");
     }
 
     #[test]

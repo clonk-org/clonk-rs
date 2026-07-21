@@ -5,7 +5,7 @@
 //! C4Group metadata because those values are coupled to its player-info and
 //! network-resource registries.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::PathBuf;
 
@@ -385,6 +385,16 @@ pub enum LiveC4SaveError {
     GroupRead(#[from] GroupError),
 }
 
+/// The object-number table installed by `C4GameObjects::EnumeratePointers`.
+///
+/// Native pointer denumeration only searches the active and inactive object
+/// lists. Objects retained elsewhere in the engine are therefore deliberately
+/// absent from this table even when their allocation is still alive.
+pub(super) struct LiveObjectPointerEnumeration {
+    wrapper_ids: Vec<ObjectId>,
+    objects_by_number: HashMap<i32, ObjectId>,
+}
+
 impl Engine {
     /// Capture every live C4 component owned by the simulation at the native
     /// `C4Network2::OnGameSynchronized` boundary.
@@ -393,7 +403,7 @@ impl Engine {
     /// `execute_synchronize_control_before_network(false)` and before
     /// `execute_synchronize_control_after_network(true)`.
     pub fn serialize_live_c4_save(
-        &self,
+        &mut self,
         spec: LiveC4SaveSpec<'_>,
     ) -> Result<LiveC4SaveComponents, LiveC4SaveError> {
         self.serialize_live_c4_save_with_policy(spec, LiveC4SavePolicy::RuntimeNetwork)
@@ -403,7 +413,7 @@ impl Engine {
     /// specialization. Application-owned copy/delete and player-file work is
     /// described by [`LiveC4SavePolicy`] and remains outside the simulation.
     pub fn serialize_live_c4_save_with_policy(
-        &self,
+        &mut self,
         spec: LiveC4SaveSpec<'_>,
         policy: LiveC4SavePolicy<'_>,
     ) -> Result<LiveC4SaveComponents, LiveC4SaveError> {
@@ -449,11 +459,19 @@ impl Engine {
             serialize_non_exact_game(script_engine, effects)
         };
 
+        // C4GameObjects::Save enumerates the active and inactive wrappers
+        // before decompiling Objects.txt. Pointer fields decompile their
+        // cached numbers rather than reading the live pointers directly.
+        let object_enumeration = self.enumerate_object_compiler_caches_for_save();
         let objects_txt = serialize_objects_for_save(
             self,
             &mut strings,
             matches!(policy, LiveC4SavePolicy::Scenario { .. }),
         );
+        // Denumeration resolves the live pointers through the same two object
+        // lists, but deliberately leaves nInfo/the number caches refreshed so
+        // a later GetObjectVal observes this save-time side effect.
+        self.denumerate_object_compiler_caches_after_save(&object_enumeration);
         let scenario_sections = if policy.is_exact() {
             serialize_scenario_sections(self, &mut strings)?
         } else {
@@ -506,6 +524,95 @@ impl Engine {
             script_c: spec.modified_script_c.map(<[u8]>::to_vec),
             scenario_sections,
         })
+    }
+
+    pub(super) fn enumerate_object_compiler_caches_for_save(
+        &mut self,
+    ) -> LiveObjectPointerEnumeration {
+        let mut seen = HashSet::new();
+        let listed_ids = self
+            .exec_list
+            .iter()
+            .chain(&self.inactive_exec_list)
+            .copied()
+            .filter(|id| seen.insert(*id) && self.find_object_index(*id).is_some())
+            .collect::<Vec<_>>();
+        // C4ObjectList::ObjectNumber searches every link, including a status
+        // zero object awaiting removal. C4ObjectList::Enumerate, however,
+        // invokes EnumeratePointers only for live source wrappers.
+        let wrapper_ids = listed_ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.find_object_index(*id).is_some_and(|index| {
+                    let object = &self.objects[index];
+                    !object.destroyed && object.state.status != ObjectStatus::Deleted
+                })
+            })
+            .collect::<Vec<_>>();
+        let object_numbers = listed_ids
+            .iter()
+            .filter_map(|id| i32::try_from(id.as_u64()).ok().map(|number| (*id, number)))
+            .collect::<HashMap<_, _>>();
+        let objects_by_number = object_numbers
+            .iter()
+            .map(|(id, number)| (*number, *id))
+            .collect::<HashMap<_, _>>();
+        let info_names = self
+            .crew_object_infos
+            .iter()
+            .map(|(id, info)| (*id, info.name.clone()))
+            .collect::<HashMap<_, _>>();
+        let object_number = |target: Option<ObjectId>| {
+            target
+                .and_then(|target| object_numbers.get(&target).copied())
+                .unwrap_or(0)
+        };
+
+        for id in &wrapper_ids {
+            let Some(index) = self.find_object_index(*id) else {
+                continue;
+            };
+            let object = &mut self.objects[index];
+            object.compiler_cache.info = info_names.get(&object.id).cloned().unwrap_or_default();
+            object.compiler_cache.contained = object_number(object.state.container);
+            object.compiler_cache.action_target1 = object_number(object.state.action.target);
+            object.compiler_cache.action_target2 = object_number(object.state.action.target2);
+            object.compiler_cache.layer = object_number(object.state.layer);
+        }
+
+        LiveObjectPointerEnumeration {
+            wrapper_ids,
+            objects_by_number,
+        }
+    }
+
+    pub(super) fn denumerate_object_compiler_caches_after_save(
+        &mut self,
+        enumeration: &LiveObjectPointerEnumeration,
+    ) {
+        for id in &enumeration.wrapper_ids {
+            let Some(index) = self.find_object_index(*id) else {
+                continue;
+            };
+            let object = &mut self.objects[index];
+            object.state.container = enumeration
+                .objects_by_number
+                .get(&object.compiler_cache.contained)
+                .copied();
+            object.state.action.target = enumeration
+                .objects_by_number
+                .get(&object.compiler_cache.action_target1)
+                .copied();
+            object.state.action.target2 = enumeration
+                .objects_by_number
+                .get(&object.compiler_cache.action_target2)
+                .copied();
+            object.state.layer = enumeration
+                .objects_by_number
+                .get(&object.compiler_cache.layer)
+                .copied();
+        }
     }
 }
 
@@ -1484,10 +1591,6 @@ fn serialize_objects_for_save(
                 engine,
                 object,
                 engine.effective_object_mass(index),
-                engine
-                    .crew_object_infos
-                    .get(&object.id)
-                    .map(|info| info.name.as_str()),
                 strings,
             );
         }
@@ -1519,7 +1622,6 @@ fn serialize_object(
     engine: &Engine,
     object: &Object,
     mass: i32,
-    info_name: Option<&str>,
     strings: &mut LegacyStringTable,
 ) {
     let state = &object.state;
@@ -1532,8 +1634,8 @@ fn serialize_object(
     if state.status != ObjectStatus::Normal {
         writer.field(0, "Status", state.status.to_script_value().to_string());
     }
-    if let Some(info_name) = info_name {
-        serialize_object_info_name(writer, info_name);
+    if !object.compiler_cache.info.is_empty() {
+        serialize_object_info_name(writer, &object.compiler_cache.info);
     }
     field_i32(writer, 0, "Owner", state.owner, -1);
     field_i32(writer, 0, "Timer", state.timer, 0);
@@ -1551,13 +1653,13 @@ fn serialize_object(
     field_i32(writer, 0, "Rotation", state.rotation, 0);
     field_i32(writer, 0, "MotionX", object.motion_x, 0);
     field_i32(writer, 0, "MotionY", object.motion_y, 0);
-    if let Some(frame) = object.last_attach_movement_frame {
-        writer.field(
-            0,
-            "LastSolidAtchFrame",
-            i32::try_from(frame).unwrap_or(i32::MAX).to_string(),
-        );
-    }
+    field_i32(
+        writer,
+        0,
+        "LastSolidAtchFrame",
+        object.last_attach_movement_frame,
+        -1,
+    );
     field_i32(writer, 0, "NoCollectDelay", state.no_collect_delay, 0);
     field_i32(writer, 0, "Base", state.base, -1);
     field_i32(writer, 0, "Size", state.construction, 0);
@@ -1701,9 +1803,21 @@ fn serialize_object(
     field_i32(writer, 0, "ActionData", state.action.data, 0);
     field_i32(writer, 0, "Phase", state.action.phase, 0);
     field_i32(writer, 0, "PhaseDelay", state.action.ticks, 0);
-    field_object(writer, 0, "Contained", state.container);
-    field_object(writer, 0, "ActionTarget1", state.action.target);
-    field_object(writer, 0, "ActionTarget2", state.action.target2);
+    field_i32(writer, 0, "Contained", object.compiler_cache.contained, 0);
+    field_i32(
+        writer,
+        0,
+        "ActionTarget1",
+        object.compiler_cache.action_target1,
+        0,
+    );
+    field_i32(
+        writer,
+        0,
+        "ActionTarget2",
+        object.compiler_cache.action_target2,
+        0,
+    );
     if !state.component_order.is_empty() {
         writer.field(
             0,
@@ -1761,7 +1875,7 @@ fn serialize_object(
         writer.field(0, "BlitMode", state.blit_mode.to_string());
     }
     field_bool(writer, 0, "CrewDisabled", state.crew_disabled, false);
-    field_object(writer, 0, "Layer", state.layer);
+    field_i32(writer, 0, "Layer", object.compiler_cache.layer, 0);
     if let Some(graphics) = state.base_graphics.as_ref().filter(|graphics| {
         graphics.definition != object.definition_id
             || graphics
@@ -2395,12 +2509,7 @@ fn serialize_persisted_objects(
             continue;
         }
         let mass = section_object_mass(engine, &objects, index, 0);
-        let info_name = engine
-            .is_script_player_object_snapshot(snapshot)
-            .then(|| engine.crew_object_infos.get(&object.id))
-            .flatten()
-            .map(|info| info.name.as_str());
-        serialize_object(&mut writer, engine, object, mass, info_name, strings);
+        serialize_object(&mut writer, engine, object, mass, strings);
     }
     writer.finish()
 }
@@ -2502,6 +2611,7 @@ fn restored_section_object(engine: &Engine, persisted: &crate::PersistedObject) 
     }
     object.motion_x = persisted.motion_x;
     object.motion_y = persisted.motion_y;
+    object.compiler_cache = persisted.compiler_cache.clone();
     object.last_attach_movement_frame = persisted.last_attach_movement_frame;
     if let Some(value) = snapshot.fixed_position {
         object.fixed_position = value;
@@ -2535,7 +2645,7 @@ fn serialize_initial_section_objects(
     let mut writer = TextComponentWriter::default();
     for (index, object) in objects.iter().enumerate().rev() {
         let mass = section_object_mass(engine, &objects, index, 0);
-        serialize_object(&mut writer, engine, object, mass, None, strings);
+        serialize_object(&mut writer, engine, object, mass, strings);
     }
     writer.finish()
 }
@@ -2653,6 +2763,8 @@ fn section_spawn_object(
     }
     object.motion_x = config.motion_x;
     object.motion_y = config.motion_y;
+    object.compiler_cache = config.compiler_cache.clone();
+    object.last_attach_movement_frame = config.last_attach_movement_frame.unwrap_or(-1);
     if let Some(rect) = config.shape_rect {
         object.shape_rect = Some(rect);
     }
@@ -3581,6 +3693,146 @@ mod tests {
     }
 
     #[test]
+    fn live_save_enumerates_only_listed_object_pointer_caches_before_serializing() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                crate::Definition::from_script("CACH", "Cache", "").expect("definition compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(crate::SpawnConfig::new("CACH").with_id(ObjectId::new(1)))
+            .expect("cache object spawns");
+        let referenced = engine
+            .spawn_object(crate::SpawnConfig::new("CACH").with_id(ObjectId::new(2)))
+            .expect("referenced object spawns");
+        let off_list = engine
+            .spawn_object(crate::SpawnConfig::new("CACH").with_id(ObjectId::new(3)))
+            .expect("off-list object spawns");
+        let deleted = engine
+            .spawn_object(crate::SpawnConfig::new("CACH").with_id(ObjectId::new(4)))
+            .expect("deleted linked object spawns");
+        engine.exec_list = vec![object, deleted];
+        engine.inactive_exec_list = vec![referenced];
+        let referenced_index = engine
+            .find_object_index(referenced)
+            .expect("referenced object index");
+        engine.objects[referenced_index].state.status = ObjectStatus::Inactive;
+        let deleted_index = engine
+            .find_object_index(deleted)
+            .expect("deleted object index");
+        engine.objects[deleted_index].state.status = ObjectStatus::Deleted;
+        engine.objects[deleted_index].compiler_cache.contained = 456;
+        let index = engine
+            .find_object_index(object)
+            .expect("cache object index");
+        engine.objects[index].state.container = Some(referenced);
+        engine.objects[index].state.action.target = Some(off_list);
+        engine.objects[index].state.action.target2 = Some(deleted);
+        engine.objects[index].state.layer = Some(object);
+        engine.objects[index].compiler_cache = crate::ObjectCompilerCache {
+            info: "stale info".to_owned(),
+            contained: -1,
+            action_target1: 999,
+            action_target2: 1_000_000_002,
+            layer: -7,
+        };
+        let off_list_index = engine
+            .find_object_index(off_list)
+            .expect("off-list object index");
+        engine.objects[off_list_index].compiler_cache.contained = 123;
+
+        let enumeration = engine.enumerate_object_compiler_caches_for_save();
+
+        assert_eq!(
+            engine.objects[index].compiler_cache,
+            crate::ObjectCompilerCache {
+                info: String::new(),
+                contained: 2,
+                action_target1: 0,
+                action_target2: 4,
+                layer: 1,
+            },
+            "Objects.Save enumeration leaves every compiler cache refreshed",
+        );
+        assert_eq!(
+            engine.objects[off_list_index].compiler_cache.contained, 123,
+            "objects outside the active and inactive lists are not enumerated",
+        );
+        assert_eq!(
+            engine.objects[deleted_index].compiler_cache.contained, 456,
+            "status-zero wrappers remain numberable but are not enumerated",
+        );
+
+        let objects_txt = String::from_utf8(serialize_objects_for_save(
+            &engine,
+            &mut LegacyStringTable::default(),
+            false,
+        ))
+        .expect("Objects.txt is UTF-8");
+        assert!(objects_txt.contains("Contained=2\r\n"));
+        assert!(objects_txt.contains("ActionTarget2=4\r\n"));
+        assert!(objects_txt.contains("Layer=1\r\n"));
+        assert!(!objects_txt.contains("ActionTarget1="));
+        assert!(!objects_txt.contains("Info=stale info"));
+
+        engine.denumerate_object_compiler_caches_after_save(&enumeration);
+        assert_eq!(engine.objects[index].state.container, Some(referenced));
+        assert_eq!(engine.objects[index].state.action.target, None);
+        assert_eq!(engine.objects[index].state.action.target2, Some(deleted));
+        assert_eq!(engine.objects[index].state.layer, Some(object));
+    }
+
+    #[test]
+    fn root_live_save_enumerates_cache_words_before_writing_objects_txt() {
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                crate::Definition::from_script("SAVE", "Save", "").expect("definition compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(crate::SpawnConfig::new("SAVE").with_id(ObjectId::new(1)))
+            .expect("saved object spawns");
+        let off_list = engine
+            .spawn_object(crate::SpawnConfig::new("SAVE").with_id(ObjectId::new(2)))
+            .expect("off-list object spawns");
+        engine.exec_list = vec![object];
+        engine.inactive_exec_list.clear();
+        let index = engine
+            .find_object_index(object)
+            .expect("saved object index");
+        engine.objects[index].state.action.target = Some(off_list);
+        engine.objects[index].compiler_cache.action_target1 = 777;
+
+        let definition_modules = Vec::new();
+        let save = engine
+            .serialize_live_c4_save_with_policy(
+                LiveC4SaveSpec {
+                    title: "Cache save",
+                    definition_modules: &definition_modules,
+                    definition_executable_path: "",
+                    definition_path: "",
+                    origin: "Cache.c4s",
+                    music_enabled: false,
+                    modified_title: None,
+                    modified_info_txt: None,
+                    modified_script_c: None,
+                },
+                LiveC4SavePolicy::Scenario {
+                    force_exact_landscape: false,
+                },
+            )
+            .expect("ordinary scenario save succeeds without a landscape");
+
+        let objects_txt = String::from_utf8(save.objects_txt).expect("Objects.txt is UTF-8");
+        assert!(!objects_txt.contains("ActionTarget1=777"));
+        assert!(!objects_txt.contains("ActionTarget1=2"));
+        assert_eq!(engine.objects[index].compiler_cache.action_target1, 0);
+        assert_eq!(engine.objects[index].state.action.target, None);
+    }
+
+    #[test]
     fn c4fixed_fields_use_raw_f_syntax_and_elide_zero() {
         let mut writer = TextComponentWriter::default();
         field_fixed(&mut writer, 0, "FixX", 0);
@@ -4421,7 +4673,14 @@ mod tests {
             y: -3,
             vtx: 2,
         };
-        object.last_attach_movement_frame = Some(77);
+        object.compiler_cache = crate::ObjectCompilerCache {
+            info: "Cached Crew".to_owned(),
+            contained: 42,
+            action_target1: -7,
+            action_target2: 1_000_000_042,
+            layer: 9,
+        };
+        object.last_attach_movement_frame = 77;
 
         let state = engine.capture_state();
         let bytes = serialize_persisted_objects(
@@ -4431,7 +4690,12 @@ mod tests {
             &mut LegacyStringTable::default(),
         );
         for expected in [
+            b"Info=Cached Crew\r\n".as_slice(),
             b"LastSolidAtchFrame=77\r\n".as_slice(),
+            b"Contained=42\r\n",
+            b"ActionTarget1=-7\r\n",
+            b"ActionTarget2=1000000042\r\n",
+            b"Layer=9\r\n",
             b"NoCollectDelay=9\r\n",
             b"AttachX=12\r\n",
             b"AttachY=-3\r\n",

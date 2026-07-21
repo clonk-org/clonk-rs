@@ -3781,6 +3781,7 @@ impl Scenario {
             for spawn in pending.drain(..) {
                 let info_name = spawn.info_name;
                 let mut config = spawn.config;
+                config.compiler_cache.info = info_name.clone().unwrap_or_default();
                 config.container = None;
                 let id = engine.spawn_object(config)?;
                 engine.remember_legacy_object_info(id, info_name);
@@ -11579,8 +11580,10 @@ pub(crate) fn collect_legacy_objects_with_definition_ids(
                 continue;
             }
             if let Some(child_index) = index_by_number.get(&child_number).copied() {
-                if records[child_index].contained.is_none() {
-                    records[child_index].contained = Some(parent_number);
+                if records[child_index].contained.is_none()
+                    && records[child_index].inferred_container.is_none()
+                {
+                    records[child_index].inferred_container = Some(parent_number);
                 }
             }
         }
@@ -11765,8 +11768,9 @@ struct LegacyObjectRecord {
     action_data: Option<i32>,
     action_target: Option<i32>,
     action_target2: Option<i32>,
-    /// C4Object::pLayer (`Layer=`, C4Object.cpp:2819).
-    layer: Option<u64>,
+    /// Raw C4EnumeratedObjectPtr::number for C4Object::pLayer. Keep the
+    /// signed cache word even when denumeration cannot resolve a pointer.
+    layer: Option<i32>,
     /// C4Object::Visibility (`Visibility=`, C4Object.cpp:2814).
     visibility: Option<i32>,
     /// C4Object::BlitMode (`BlitMode=`, C4Object.cpp:2817).
@@ -11788,7 +11792,12 @@ struct LegacyObjectRecord {
     commands: BTreeMap<usize, SerializedLegacyCommand>,
     /// Saved C4Object::Component (`Component=WOOD=5;METL=1;`).
     components: Option<Vec<(DefinitionId, i32)>>,
-    contained: Option<u64>,
+    /// Raw C4EnumeratedObjectPtr::number for C4Object::Contained.
+    contained: Option<i32>,
+    /// Live relationship inferred from a parent's Contents list when the
+    /// child's serialized Contained cache was absent. Keep this separate so
+    /// GetObjectVal still observes the native zero compiler default.
+    inferred_container: Option<u64>,
     contents: Vec<u64>,
 }
 
@@ -12496,15 +12505,13 @@ impl LegacyObjectRecord {
                 })?);
             }
             "layer" => {
-                let value = parse_i64(trimmed_value).map_err(|err| {
+                let value = parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
                         "Objects.txt line {}: invalid Layer `{}` ({})",
                         self.line, trimmed_value, err
                     ))
                 })?;
-                if value > 0 {
-                    self.layer = Some(value as u64);
-                }
+                self.layer = Some(value);
             }
             "visibility" => {
                 self.visibility = Some(parse_i32(trimmed_value).map_err(|err| {
@@ -12589,15 +12596,13 @@ impl LegacyObjectRecord {
                 self.components = Some(parse_legacy_object_components(trimmed_value, self.line)?);
             }
             "contained" => {
-                let value = parse_i64(trimmed_value).map_err(|err| {
+                let value = parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
                         "Objects.txt line {}: invalid Contained `{}` ({})",
                         self.line, trimmed_value, err
                     ))
                 })?;
-                if value > 0 {
-                    self.contained = Some(value as u64);
-                }
+                self.contained = Some(value);
             }
             "contents" => {
                 let mut entries = Vec::new();
@@ -12793,6 +12798,7 @@ impl LegacyObjectRecord {
             commands,
             components,
             contained,
+            inferred_container,
             contents,
         } = self;
 
@@ -12831,6 +12837,13 @@ impl LegacyObjectRecord {
             // Construction/Initialize (C4GameObjects.cpp:535-618).
             .with_loaded(true)
             .with_native_compiled_object_defaults();
+        config.compiler_cache = crate::ObjectCompilerCache {
+            info: info_name.clone().unwrap_or_default(),
+            contained: contained.unwrap_or(0),
+            action_target1: action_target.unwrap_or(0),
+            action_target2: action_target2.unwrap_or(0),
+            layer: layer.unwrap_or(0),
+        };
         let offset = shape_offset.unwrap_or_default();
         config = config
             .with_shape_rect(crate::DefinitionRect::new(
@@ -12846,7 +12859,10 @@ impl LegacyObjectRecord {
         if let Some(custom_name) = custom_name {
             config = config.with_custom_name(custom_name);
         }
-        if let Some(layer) = layer {
+        if let Some(layer) = layer
+            .and_then(|layer| u64::try_from(layer).ok())
+            .filter(|layer| *layer != 0)
+        {
             config = config.with_layer(ObjectId::new(layer));
         }
         if let Some(visibility) = visibility {
@@ -12876,8 +12892,7 @@ impl LegacyObjectRecord {
         config.compiled_mass = mass;
         config.on_fire = on_fire;
         config.fire_phase = fire_phase;
-        config.last_attach_movement_frame = last_attach_movement_frame
-            .and_then(|frame| u64::try_from(frame).ok());
+        config.last_attach_movement_frame = last_attach_movement_frame;
         config.last_energy_loss_cause = last_energy_loss_cause;
         config.no_collect_delay = no_collect_delay;
         config.base = base;
@@ -13106,9 +13121,20 @@ impl LegacyObjectRecord {
             config = config.with_action(action_state);
         }
 
+        let container_handle = contained
+            .map(|number| {
+                if (1_000_000_000..=1_001_000_000).contains(&number) {
+                    number - 1_000_000_000
+                } else {
+                    number
+                }
+            })
+            .filter(|number| *number > 0)
+            .map(|number| number.to_string())
+            .or_else(|| inferred_container.map(|number| number.to_string()));
         Ok(Some(ScenarioSpawn {
             handle: Some(number.to_string()),
-            container_handle: contained.map(|value| value.to_string()),
+            container_handle,
             contents_handles: contents
                 .into_iter()
                 .map(|value| value.to_string())
@@ -27504,6 +27530,10 @@ public func ActualizePhase(pClonk)
             "id=GOOD\n",
             "Number=1\n",
             "Info=Captain\n",
+            "Contained=0\n",
+            "ActionTarget1=999\n",
+            "ActionTarget2=1000000042\n",
+            "Layer=-7\n",
             "LastEngLossPlr=8\n",
             "LastSolidAtchFrame=77\n",
             "NoCollectDelay=9\n",
@@ -27603,6 +27633,17 @@ public func ActualizePhase(pClonk)
         assert_eq!(spawn.info_name.as_deref(), Some("Captain"));
         assert_eq!(spawn.contents_handles, ["3", "2", "3"]);
         let config = spawn.config;
+        assert_eq!(
+            config.compiler_cache,
+            crate::ObjectCompilerCache {
+                info: "Captain".to_string(),
+                contained: 0,
+                action_target1: 999,
+                action_target2: 1_000_000_042,
+                layer: -7,
+            },
+            "raw compiler caches survive parsing independently of denumeration",
+        );
         assert_eq!(config.last_energy_loss_cause, Some(8));
         assert_eq!(config.last_attach_movement_frame, Some(77));
         assert_eq!(config.no_collect_delay, Some(9));
@@ -27825,6 +27866,28 @@ public func ActualizePhase(pClonk)
         let gem_snapshot = engine
             .object_snapshot(ObjectId::new(101))
             .expect("gem object");
+        let gem_index = engine
+            .find_object_index(ObjectId::new(101))
+            .expect("gem object index");
+        assert_eq!(
+            engine.objects[gem_index].compiler_cache,
+            crate::ObjectCompilerCache {
+                info: String::new(),
+                // Contents repair resolved the live container to #100, but
+                // no Contained naming was compiled for this row.
+                contained: 0,
+                action_target1: 100,
+                action_target2: 0,
+                layer: 100,
+            },
+            "pointer denumeration must not overwrite raw compiler words",
+        );
+        let captured = engine.capture_state();
+        assert_eq!(
+            captured.objects[gem_index].compiler_cache,
+            engine.objects[gem_index].compiler_cache,
+            "exact engine snapshots preserve stale compiler caches",
+        );
         assert_eq!(gem_snapshot.definition_id, "GEM1");
         assert_eq!(gem_snapshot.custom_name.as_deref(), Some("ScriptWipf"));
         assert_eq!(gem_snapshot.layer, Some(ObjectId::new(100)));
@@ -27862,6 +27925,18 @@ public func ActualizePhase(pClonk)
         assert_eq!(gem_snapshot.action.time, 6);
         assert_eq!(gem_snapshot.action.data, 5);
         assert_eq!(gem_snapshot.action.target, Some(ObjectId::new(100)));
+
+        engine
+            .restore_state(&captured)
+            .expect("captured legacy state restores");
+        let restored_gem_index = engine
+            .find_object_index(ObjectId::new(101))
+            .expect("restored gem object index");
+        assert_eq!(
+            engine.objects[restored_gem_index].compiler_cache,
+            captured.objects[gem_index].compiler_cache,
+            "restore_state preserves raw compiler-cache words",
+        );
     }
 
     #[test]

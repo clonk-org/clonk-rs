@@ -43028,15 +43028,26 @@ func Trigger(object direct, object inactive, object grandchild) {
         let caller_script = r#"#strict
 local pObject, pConstruction, pContents;
 local pObjectLayer, pConstructionLayer, pContentsLayer;
+local iObjectLayerCache, iConstructionLayerCache, iContentsLayerCache;
+local iObjectLayerCacheAfter, iConstructionLayerCacheAfter, iContentsLayerCacheAfter;
 func Trigger(object pContainer) {
     SetObjectLayer(this());
     SetObjectLayer(pContainer, pContainer);
     pObject = CreateObject(ITEM, 0, 0, -1);
     pObjectLayer = GetObjectLayer(pObject);
+    iObjectLayerCache = GetObjectVal("Layer", "Object", pObject, 0);
     pConstruction = CreateConstruction(ITEM, 0, 0, -1, 100);
     pConstructionLayer = GetObjectLayer(pConstruction);
+    iConstructionLayerCache = GetObjectVal("Layer", "Object", pConstruction, 0);
     pContents = CreateContents(ITEM, pContainer);
     pContentsLayer = GetObjectLayer(pContents);
+    iContentsLayerCache = GetObjectVal("Layer", "Object", pContents, 0);
+    return(1);
+}
+func ProbeMaterializedCaches() {
+    iObjectLayerCacheAfter = GetObjectVal("Layer", "Object", pObject, 0);
+    iConstructionLayerCacheAfter = GetObjectVal("Layer", "Object", pConstruction, 0);
+    iContentsLayerCacheAfter = GetObjectVal("Layer", "Object", pContents, 0);
     return(1);
 }
 "#;
@@ -43058,6 +43069,30 @@ func Trigger(object pContainer) {
         let container_id = engine
             .spawn_object(SpawnConfig::new("ITEM").with_category(CATEGORY_OBJECT))
             .expect("foreign container spawns");
+        engine
+            .apply_object_update(
+                caller_id,
+                ObjectUpdate {
+                    compiler_cache: Some(ObjectCompilerCache {
+                        layer: 321,
+                        ..ObjectCompilerCache::default()
+                    }),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("caller raw layer cache seeds");
+        engine
+            .apply_object_update(
+                container_id,
+                ObjectUpdate {
+                    compiler_cache: Some(ObjectCompilerCache {
+                        layer: 654,
+                        ..ObjectCompilerCache::default()
+                    }),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("container raw layer cache seeds");
         let caller_index = engine.find_object_index(caller_id).expect("caller exists");
 
         engine
@@ -43067,6 +43102,9 @@ func Trigger(object pContainer) {
                 vec![Value::Object(container_id.as_u64())],
             )
             .expect("creation trigger runs");
+        engine
+            .call_object_function(caller_index, "ProbeMaterializedCaches", Vec::new())
+            .expect("materialized cache probe runs");
 
         let caller = engine.object_snapshot(caller_id).expect("caller remains");
         let object_id = match caller.local_vars.get("pObject") {
@@ -43096,6 +43134,25 @@ func Trigger(object pContainer) {
             Some(&Value::Object(container_id.as_u64())),
             "CreateContents uses the selected container as creator"
         );
+        for name in [
+            "iObjectLayerCache",
+            "iConstructionLayerCache",
+            "iObjectLayerCacheAfter",
+            "iConstructionLayerCacheAfter",
+        ] {
+            assert_eq!(
+                caller.local_vars.get(name),
+                Some(&Value::Int(321)),
+                "{name} copies the caller's raw layer cache",
+            );
+        }
+        for name in ["iContentsLayerCache", "iContentsLayerCacheAfter"] {
+            assert_eq!(
+                caller.local_vars.get(name),
+                Some(&Value::Int(654)),
+                "{name} copies the container's raw layer cache",
+            );
+        }
         assert_eq!(
             engine
                 .object_snapshot(object_id)
