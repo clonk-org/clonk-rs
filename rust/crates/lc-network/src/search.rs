@@ -14,6 +14,7 @@ use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 
+use crate::address_packet::decode_cpp_endpoint;
 use crate::{NetworkAddress, NetworkProtocol};
 
 pub const DEFAULT_MASTER_SERVER_URL: &str = "https://league.clonkspot.org/";
@@ -1767,7 +1768,7 @@ fn parse_reference_chunk(
             "LeagueAddress" => reference.league_address = value,
             "MaxPlayers" => reference.max_players = parse_i32(key, &value)?,
             "Address" => {
-                let addresses = parse_reference_addresses(&value)?;
+                let addresses = parse_reference_addresses(&value);
                 reference.tcp_addresses = addresses
                     .iter()
                     .filter(|address| address.protocol == NetworkProtocol::Tcp)
@@ -1930,7 +1931,7 @@ fn parse_bool(value: &str) -> bool {
     matches!(value.to_ascii_lowercase().as_str(), "true" | "1")
 }
 
-fn parse_reference_addresses(value: &str) -> Result<Vec<NetworkAddress>, ReferenceParseError> {
+fn parse_reference_addresses(value: &str) -> Vec<NetworkAddress> {
     value
         .split(',')
         .filter_map(|entry| {
@@ -1943,10 +1944,7 @@ fn parse_reference_addresses(value: &str) -> Result<Vec<NetworkAddress>, Referen
             Some((protocol, unquote(address)))
         })
         .map(|(protocol, address)| {
-            address
-                .parse()
-                .map_err(|_| ReferenceParseError::InvalidAddress(address.to_string()))
-                .map(|endpoint| NetworkAddress::new(protocol, endpoint))
+            NetworkAddress::new(protocol, decode_cpp_endpoint(address.as_bytes()))
         })
         .collect()
 }
@@ -2254,6 +2252,84 @@ Title=Recovered game\n"
         assert_eq!(
             references[0].tcp_addresses,
             vec![references[0].addresses[0].endpoint]
+        );
+    }
+
+    #[test]
+    fn reference_addresses_resolve_hostnames_and_keep_malformed_entries() {
+        // C4Network2EndpointAddress resolves the first getaddrinfo result and
+        // leaves a failed endpoint cleared. C4Network2Reference keeps that
+        // address and every following reference, then fills only its null host
+        // from the query source (pristine 9ffa0a5d
+        // src/C4Network2Address.cpp:263-325,489-505;
+        // src/C4Network2Reference.cpp:37-47,994-1039).
+        let mut references = parse_reference_response(
+            br#"[Reference]
+Title="R\344uber"
+Address=UDP:"localhost:31113",TCP:"127.0.0.1:31112",UDP:"[::1]:31114",TCP:"not-an-addr:"
+
+[Reference]
+Title="Still visible"
+Address=TCP:"192.0.2.8:41112"
+"#,
+        )
+        .expect("hostname and malformed endpoint compatibility");
+
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].title, "Räuber");
+        assert_eq!(references[1].title, "Still visible");
+        assert_eq!(
+            references[0]
+                .addresses
+                .iter()
+                .map(|address| address.protocol)
+                .collect::<Vec<_>>(),
+            [
+                NetworkProtocol::Udp,
+                NetworkProtocol::Tcp,
+                NetworkProtocol::Udp,
+                NetworkProtocol::Tcp,
+            ]
+        );
+        assert!(references[0].addresses[0].endpoint.ip().is_loopback());
+        assert_eq!(references[0].addresses[0].endpoint.port(), 31_113);
+        assert_eq!(
+            references[0].addresses[1].endpoint,
+            "127.0.0.1:31112".parse().unwrap()
+        );
+        assert_eq!(
+            references[0].addresses[2].endpoint,
+            "[::1]:31114".parse().unwrap()
+        );
+        assert_eq!(
+            references[0].addresses[3].endpoint,
+            "[::]:0".parse().unwrap()
+        );
+        assert_eq!(
+            references[1].addresses,
+            [NetworkAddress::new(
+                NetworkProtocol::Tcp,
+                "192.0.2.8:41112".parse().unwrap(),
+            )]
+        );
+
+        let source = "203.0.113.9:51111".parse().unwrap();
+        fill_reference_source_addresses(&mut references, source);
+
+        assert_eq!(
+            references[0].addresses[3].endpoint,
+            "203.0.113.9:0".parse().unwrap()
+        );
+        assert_eq!(
+            references[0].tcp_addresses,
+            [
+                "127.0.0.1:31112".parse().unwrap(),
+                "203.0.113.9:0".parse().unwrap(),
+            ]
+        );
+        assert_eq!(
+            references[1].addresses[0].endpoint,
+            "192.0.2.8:41112".parse().unwrap()
         );
     }
 

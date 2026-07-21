@@ -307,7 +307,7 @@ fn endpoint_wire_text(endpoint: SocketAddr) -> String {
     }
 }
 
-fn decode_cpp_endpoint(bytes: &[u8]) -> SocketAddr {
+pub(crate) fn decode_cpp_endpoint(bytes: &[u8]) -> SocketAddr {
     std::str::from_utf8(bytes)
         .ok()
         .and_then(split_cpp_endpoint)
