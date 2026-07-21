@@ -14,6 +14,27 @@ const MAXIMUM_MUSIC_VOLUME: f32 = 80.0;
 const MAXIMUM_SOUND_VOLUME: f32 = 100.0;
 const MAXIMUM_PANNING_VOLUME: f32 = 192.0;
 const MAXIMUM_SOUND_INPUT: f32 = SDL_MIXER_MAX_VOLUME / MAXIMUM_SOUND_VOLUME;
+
+fn sdl_mixer_volume_step(volume: f32, maximum: f32) -> i32 {
+    // C++ passes std::lrint's integer result to SDL_mixer. The process never
+    // changes the default floating-point rounding mode, so exact half steps
+    // round to the adjacent even integer rather than away from zero.
+    (volume * maximum)
+        .round_ties_even()
+        .clamp(0.0, SDL_MIXER_MAX_VOLUME) as i32
+}
+
+fn sdl_mixer_pan_steps(pan: f32) -> (i32, i32) {
+    let pan = pan.clamp(-1.0, 1.0);
+    let left = ((1.0 - pan) * MAXIMUM_PANNING_VOLUME)
+        .round_ties_even()
+        .clamp(0.0, MAXIMUM_PANNING_VOLUME) as i32;
+    let right = ((1.0 + pan) * MAXIMUM_PANNING_VOLUME)
+        .round_ties_even()
+        .clamp(0.0, MAXIMUM_PANNING_VOLUME) as i32;
+    (left, right)
+}
+
 /// SDL_mixer pulls music in callback-sized blocks. Keep the Rust music path
 /// similarly bounded instead of retaining one stereo-f32 frame per track
 /// frame for the complete duration.
@@ -698,7 +719,7 @@ struct MusicPlayback {
     buffer_position: usize,
     buffer_length: usize,
     looping: bool,
-    volume: f32,
+    volume_step: i32,
     fade_out: Option<FadeState>,
 }
 
@@ -968,7 +989,7 @@ impl AudioMixer {
     pub fn music_set_volume(&self, volume: f32) {
         let mut state = self.state.lock().unwrap();
         if let Some(music) = state.active_music.as_mut() {
-            music.volume = volume.clamp(0.0, 1.0);
+            music.volume_step = sdl_mixer_volume_step(volume.clamp(0.0, 1.0), MAXIMUM_MUSIC_VOLUME);
         }
     }
 
@@ -1113,8 +1134,7 @@ impl AudioMixer {
                 if !finished_music {
                     if let Some(music) = state.active_music.as_mut() {
                         if let Some(frame) = music.next_frame() {
-                            let mut volume =
-                                music.volume * (MAXIMUM_MUSIC_VOLUME / SDL_MIXER_MAX_VOLUME);
+                            let mut volume = music.volume_step as f32 / SDL_MIXER_MAX_VOLUME;
                             if let Some(fade) = music.fade_out.as_mut() {
                                 if fade.remaining_samples > 0 {
                                     let ratio =
@@ -1191,7 +1211,7 @@ impl MusicPlayback {
             buffer_position: 0,
             buffer_length: 0,
             looping,
-            volume: 1.0,
+            volume_step: sdl_mixer_volume_step(1.0, MAXIMUM_MUSIC_VOLUME),
             fade_out: None,
         }
     }
@@ -1335,11 +1355,11 @@ impl ChannelPlayback {
         // Mix_Volume argument at 128, so normalized Rust input saturates at
         // 128 / MaximumSoundVolume while level 100 retains its headroom.
         let volume = self.volume.clamp(0.0, MAXIMUM_SOUND_INPUT);
-        let volume_gain = volume * (MAXIMUM_SOUND_VOLUME / SDL_MIXER_MAX_VOLUME);
-        let left = ((1.0 - pan) * MAXIMUM_PANNING_VOLUME).clamp(0.0, MAXIMUM_PANNING_VOLUME)
-            / SDL_MIXER_MAX_PANNING;
-        let right = ((1.0 + pan) * MAXIMUM_PANNING_VOLUME).clamp(0.0, MAXIMUM_PANNING_VOLUME)
-            / SDL_MIXER_MAX_PANNING;
+        let volume_gain =
+            sdl_mixer_volume_step(volume, MAXIMUM_SOUND_VOLUME) as f32 / SDL_MIXER_MAX_VOLUME;
+        let (left_step, right_step) = sdl_mixer_pan_steps(pan);
+        let left = left_step as f32 / SDL_MIXER_MAX_PANNING;
+        let right = right_step as f32 / SDL_MIXER_MAX_PANNING;
         self.left_gain = left * volume_gain;
         self.right_gain = right * volume_gain;
     }
@@ -2191,6 +2211,99 @@ mod tests {
             "hard-pan gain {} exceeds SDL cap {expected_loud_side}",
             playback.right_gain
         );
+    }
+
+    #[test]
+    fn fractional_volume_and_pan_match_sdl_integer_steps() {
+        fn assert_channel_steps(
+            mixer: &AudioMixer,
+            channel: ChannelId,
+            volume: f32,
+            pan: f32,
+            volume_step: i32,
+            left_step: i32,
+            right_step: i32,
+        ) {
+            assert!(mixer.channel_set_volume_and_pan(channel, volume, pan));
+            let state = mixer.state.lock().unwrap();
+            let playback = state.channels[channel.0].as_ref().unwrap();
+            let volume_gain = volume_step as f32 / SDL_MIXER_MAX_VOLUME;
+            assert_eq!(
+                playback.left_gain,
+                (left_step as f32 / SDL_MIXER_MAX_PANNING) * volume_gain
+            );
+            assert_eq!(
+                playback.right_gain,
+                (right_step as f32 / SDL_MIXER_MAX_PANNING) * volume_gain
+            );
+        }
+
+        let data = generate_sine_wave(20, 440.0, 44_100);
+        let mixer = AudioMixer::new(44_100, 1);
+        let music_id = mixer.load_music(&data).unwrap();
+        mixer.play_music(music_id, true).unwrap();
+
+        let assert_music_step = |volume, expected| {
+            mixer.music_set_volume(volume);
+            let state = mixer.state.lock().unwrap();
+            assert_eq!(state.active_music.as_ref().unwrap().volume_step, expected);
+        };
+        let music_half = 1.0_f32 / 32.0;
+        assert_music_step(music_half - f32::EPSILON, 2);
+        assert_music_step(music_half, 2); // 2.5 ties to the even step 2.
+        assert_music_step(music_half + f32::EPSILON, 3);
+        assert_music_step(3.0 / 32.0, 8); // 7.5 ties to the even step 8.
+
+        let sound_id = mixer.load_sound(&data).unwrap();
+        let channel = mixer.play_sound(sound_id, true).unwrap();
+        let sound_half = 0.125_f32;
+        assert_channel_steps(
+            &mixer,
+            channel,
+            sound_half - f32::EPSILON,
+            0.0,
+            12,
+            192,
+            192,
+        );
+        assert_channel_steps(&mixer, channel, sound_half, 0.0, 12, 192, 192);
+        assert_channel_steps(
+            &mixer,
+            channel,
+            sound_half + f32::EPSILON,
+            0.0,
+            13,
+            192,
+            192,
+        );
+        assert_channel_steps(&mixer, channel, 0.375, 0.0, 38, 192, 192);
+
+        let pan_half = 1.0_f32 / 128.0;
+        assert_channel_steps(&mixer, channel, 1.0, pan_half - f32::EPSILON, 100, 191, 192);
+        assert_channel_steps(&mixer, channel, 1.0, pan_half, 100, 190, 192);
+        assert_channel_steps(&mixer, channel, 1.0, pan_half + f32::EPSILON, 100, 190, 192);
+        assert_channel_steps(&mixer, channel, 1.0, 3.0 / 128.0, 100, 188, 192);
+
+        assert_channel_steps(
+            &mixer,
+            channel,
+            1.0,
+            -pan_half - f32::EPSILON,
+            100,
+            192,
+            190,
+        );
+        assert_channel_steps(&mixer, channel, 1.0, -pan_half, 100, 192, 190);
+        assert_channel_steps(
+            &mixer,
+            channel,
+            1.0,
+            -pan_half + f32::EPSILON,
+            100,
+            192,
+            191,
+        );
+        assert_channel_steps(&mixer, channel, 1.0, -3.0 / 128.0, 100, 192, 188);
     }
 
     #[test]
