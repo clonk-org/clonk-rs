@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use crate::Landscape;
-use crate::action::ActionProcedure;
+use crate::action::{ActionProcedure, ScriptCallbackTarget};
 use crate::command::{CommandData, CommandId, CommandMode, CommandOperation, CommandRequest};
 use crate::compat;
 use crate::control::{
@@ -28,8 +28,9 @@ use crate::math::{self, itofix};
 use crate::player::CountedControlType;
 use crate::{
     C4Fixed, CATEGORY_MOUSE_SELECT, CommandDirection, CrewInfoLink, Direction, Engine, EngineError,
-    FixedVec2, MessageSpec, MouseDragCarryableCursor, MouseDragSource, ObjectEnterOutcome,
-    ObjectId, PhysicalInfo, Value, Vector2, message, ocf, tolerate_script_error,
+    DefinitionId, FixedVec2, MessageSpec, MouseDragCarryableCursor, MouseDragSource,
+    ObjectEnterOutcome, ObjectId, PhysicalInfo, Value, Vector2, message, ocf,
+    tolerate_script_error,
 };
 
 /// `C4DoubleClick` (C4Constants.h:156): frames within which a repeated com
@@ -607,10 +608,14 @@ fn internal_object_menu_iterator_next<S: InternalObjectMenuSource>(
         InternalObjectMenuIteratorPosition::End => return None,
     };
 
+    // C4ObjectListIterator walks the retained list links directly. Unlike
+    // C4ObjectList::Find/ObjectCount, GetNext does not test Obj->Status, so
+    // AssignRemoval callbacks can still observe a Status-zero object until
+    // the containing list actually unlinks it.
     let eligible = |index: usize| {
-        source
-            .object(links[index].object)
-            .is_some_and(|object| object.active && object.category & category_mask != 0)
+        source.object(links[index].object).is_some_and(|object| {
+            category_mask == 0 || object.category & category_mask != 0
+        })
     };
     while current_index < links.len() && !eligible(current_index) {
         current_index += 1;
@@ -669,8 +674,7 @@ fn internal_object_menu_iterator_next<S: InternalObjectMenuSource>(
         if candidate_object.definition_id != current.definition_id {
             break;
         }
-        if candidate_object.active
-            && candidate_object.category & category_mask != 0
+        if (category_mask == 0 || candidate_object.category & category_mask != 0)
             && source.can_concat_picture_with(candidate.object, current.id)
         {
             count = count.saturating_add(1);
@@ -2495,7 +2499,14 @@ impl Engine {
         let crew_id = self.objects[crew_index].id;
         let crew_owner = self.objects[crew_index].state.owner;
         let crew_contents = self.objects[crew_index].state.contents.clone();
-        let first_carried_definition = crew_contents
+        let present_crew_contents = crew_contents
+            .into_iter()
+            .filter(|object_id| {
+                self.find_object_index(*object_id)
+                    .is_some_and(|index| self.objects[index].has_nonzero_status())
+            })
+            .collect::<Vec<_>>();
+        let first_carried_definition = present_crew_contents
             .first()
             .and_then(|object_id| self.find_object_index(*object_id))
             .map(|index| self.objects[index].definition_id.clone());
@@ -2599,7 +2610,7 @@ impl Engine {
                 || (crew_pushing_base && base_grab_put_get & crate::GRAB_PUT_GET_PUT != 0))
         {
             if let Some(first_carried_definition) = first_carried_definition {
-                let command2 = if crew_contents.len() > 1
+                let command2 = if present_crew_contents.len() > 1
                     || self.selected_crew(crew_owner).len() > 1
                 {
                     format!(
@@ -3603,9 +3614,6 @@ impl Engine {
     pub fn mouse_region_drag_source(&self, target: ObjectId) -> Option<MouseDragSource> {
         let index = self.find_object_index(target)?;
         let object = &self.objects[index];
-        if object.state.status == crate::ObjectStatus::Deleted {
-            return None;
-        }
         if object.state.ocf & ocf::CARRYABLE != 0 {
             return Some(MouseDragSource::Carryable);
         }
@@ -3616,9 +3624,11 @@ impl Engine {
     }
 
     /// Build C4MouseControl's local Selection when dragging from a viewport
-    /// region. A right drag expands a contained target to every live object
-    /// with the exact same C4ID, preserving forward Contents order; otherwise
-    /// it contains only the copied region target (C4MouseControl.cpp:942-961).
+    /// region. A right drag expands when `Contents.ObjectCount(id)` finds
+    /// multiple nonzero-Status matches. The raw link walk then inserts via
+    /// `C4ObjectList::Add`, which applies the same Status filter; otherwise
+    /// it tries to add only the copied region target
+    /// (C4MouseControl.cpp:942-961).
     pub fn mouse_region_drag_objects(&self, target: ObjectId, right_button: bool) -> Vec<ObjectId> {
         if self.mouse_region_drag_source(target).is_none() {
             return Vec::new();
@@ -3627,11 +3637,17 @@ impl Engine {
             return Vec::new();
         };
         let object = &self.objects[index];
+        let single_target = || {
+            object
+                .has_nonzero_status()
+                .then_some(vec![target])
+                .unwrap_or_default()
+        };
         let Some(container) = right_button.then_some(object.state.container).flatten() else {
-            return vec![target];
+            return single_target();
         };
         let Some(container_index) = self.find_object_index(container) else {
-            return vec![target];
+            return single_target();
         };
         let same_id = self.objects[container_index]
             .state
@@ -3642,7 +3658,7 @@ impl Engine {
                 self.find_object_index(*candidate)
                     .is_some_and(|candidate_index| {
                         let candidate = &self.objects[candidate_index];
-                        candidate.state.status != crate::ObjectStatus::Deleted
+                        candidate.has_nonzero_status()
                             && candidate.definition_id == object.definition_id
                     })
             })
@@ -3650,7 +3666,7 @@ impl Engine {
         if same_id.len() > 1 {
             same_id
         } else {
-            vec![target]
+            single_target()
         }
     }
 
@@ -3872,6 +3888,7 @@ impl Engine {
             let target_id = ObjectId::new(data as u64);
             if let Some(container_index) = self
                 .find_object_index(target_id)
+                .filter(|&target_index| self.objects[target_index].has_nonzero_status())
                 .and_then(|target_index| self.objects[target_index].state.container)
                 .and_then(|container_id| self.find_object_index(container_id))
             {
@@ -4095,10 +4112,19 @@ impl Engine {
             let Some(index) = self.find_object_index(crew_id) else {
                 continue;
             };
-            if !self.objects[index].state.status.is_active() {
+            if !self.objects[index].has_nonzero_status() {
                 continue;
             }
-            let mut contents = self.objects[index].state.contents.clone();
+            let mut contents = self.objects[index]
+                .state
+                .contents
+                .iter()
+                .copied()
+                .filter(|object_id| {
+                    self.find_object_index(*object_id)
+                        .is_some_and(|index| self.objects[index].has_nonzero_status())
+                })
+                .collect::<Vec<_>>();
             if !put_all {
                 contents.truncate(1);
             }
@@ -4679,7 +4705,8 @@ impl Engine {
         let owner = self.objects[index].state.owner;
         let controller = self.objects[index].state.controller;
         let function = format!("Contained{}", com_name_raw(com));
-        let sf = self.object_has_function(container_index, &function);
+        let callback_definition_id = self.objects[container_index].definition_id.clone();
+        let sf = self.object_script_callback(container_index, &function);
         // New definitions may overload hardcoded controls; old definitions
         // receive the callback only after those controls have run
         // (C4Object.cpp:3246-3251,3284-3291).
@@ -4689,9 +4716,14 @@ impl Engine {
             .is_none_or(|definition| definition.version_at_least([4, 9, 1, 3]));
         let mut result = false;
         if call_sf_early {
-            if sf {
+            if let Some(sf) = sf.as_ref() {
                 let clonk_ref = compat::object_reference_value(self.objects[index].id);
-                let value = self.contained_call(container_index, &function, &[clonk_ref])?;
+                let value = self.contained_direct_callback(
+                    Some(container_index),
+                    &callback_definition_id,
+                    sf,
+                    &[clonk_ref],
+                )?;
                 if compat::value_raw_truthy(&value) {
                     result = true;
                 }
@@ -4747,21 +4779,24 @@ impl Engine {
             _ => {}
         }
         if !call_sf_early {
-            if sf {
-                if let Some(container_index) = self
+            if let Some(sf) = sf.as_ref() {
+                let container_index = self
                     .objects
                     .get(index)
                     .and_then(|object| object.state.container)
-                    .and_then(|id| self.find_object_index(id))
-                {
-                    let clonk_ref = compat::object_reference_value(self.objects[index].id);
-                    let _ = self.contained_call(container_index, &function, &[clonk_ref])?;
-                }
+                    .and_then(|id| self.find_object_index(id));
+                let clonk_ref = compat::object_reference_value(self.objects[index].id);
+                let _ = self.contained_direct_callback(
+                    container_index,
+                    &callback_definition_id,
+                    sf,
+                    &[clonk_ref],
+                )?;
             }
             self.contained_control_update(index, com, controller)?;
         }
         // Take/Take2 (:3293-3302).
-        if !sf || call_sf_early {
+        if sf.is_none() || call_sf_early {
             match com {
                 COM_LEFT => {
                     self.player_object_command(owner, CommandId::Take, None, 0, 0)?;
@@ -5106,8 +5141,7 @@ impl Engine {
             .filter_map(|candidate| self.find_object_index(*candidate))
             .filter(|&candidate| {
                 let candidate = &self.objects[candidate];
-                !candidate.destroyed
-                    && candidate.state.status.is_active()
+                candidate.has_nonzero_status()
                     && candidate.definition_id == definition_id
             })
             .count();
@@ -5118,10 +5152,7 @@ impl Engine {
         let count = contents
             .iter()
             .filter_map(|candidate| self.find_object_index(*candidate))
-            .filter(|&candidate| {
-                let candidate = &self.objects[candidate];
-                !candidate.destroyed && candidate.state.status.is_active()
-            })
+            .filter(|&candidate| self.objects[candidate].has_nonzero_status())
             .count();
         i32::try_from(count).unwrap_or(i32::MAX)
     }
@@ -5575,6 +5606,15 @@ impl Engine {
         {
             return Ok(Value::Nil);
         }
+        self.contained_call_unchecked(index, function, args)
+    }
+
+    fn contained_call_unchecked(
+        &mut self,
+        index: usize,
+        function: &str,
+        args: &[Value],
+    ) -> Result<Value, EngineError> {
         let definition_id = self.objects[index].definition_id.clone();
         let Some(library) = self
             .definitions
@@ -5593,6 +5633,42 @@ impl Engine {
             &definition_id,
         ))?
         .unwrap_or(Value::Nil))
+    }
+
+    /// `Contained{Com}` is invoked through the `C4AulFunc *sf` captured by
+    /// C4Object::ContainedControl, not through C4Object::Call. Preserve that
+    /// exact function and raw receiver; ContainedUpdate and ordinary
+    /// Control* calls use `contained_call` above and retain their Status gate
+    /// (C4Object.cpp:3237-3255,3297-3302; C4AulExec.cpp:1610-1625).
+    fn contained_direct_callback(
+        &mut self,
+        index: Option<usize>,
+        definition_id: &DefinitionId,
+        callback: &ScriptCallbackTarget,
+        args: &[Value],
+    ) -> Result<Value, EngineError> {
+        let result = match index {
+            Some(index) => self.call_direct_object_callback_from_definition(
+                index,
+                definition_id,
+                callback,
+                args.to_vec(),
+            ),
+            None => self.call_direct_definition_callback(definition_id, callback, args.to_vec()),
+        };
+        Ok(tolerate_script_error(result)?.unwrap_or(Value::Nil))
+    }
+
+    fn object_script_callback(
+        &self,
+        index: usize,
+        function: &str,
+    ) -> Option<ScriptCallbackTarget> {
+        let definition = self
+            .definitions
+            .get(&self.objects.get(index)?.definition_id)?;
+        let resolution = definition.script.resolve_function(function, false)?;
+        Some(ScriptCallbackTarget::linked(function, resolution))
     }
 
     fn object_has_function(&self, index: usize, function: &str) -> bool {
@@ -5672,7 +5748,7 @@ impl Engine {
             .into_iter()
             .filter(|candidate_id| {
                 self.find_object_index(*candidate_id).is_some_and(|candidate| {
-                    self.objects[candidate].state.status != crate::ObjectStatus::Deleted
+                    self.objects[candidate].has_nonzero_status()
                 })
             })
             .collect();
@@ -5714,7 +5790,7 @@ impl Engine {
         let Some(target_index) = self.find_object_index(target_id) else {
             return Ok(());
         };
-        if self.objects[target_index].state.status == crate::ObjectStatus::Deleted
+        if !self.objects[target_index].has_nonzero_status()
             || self.objects[target_index].state.container != Some(self.objects[index].id)
         {
             return Ok(());
@@ -5727,7 +5803,7 @@ impl Engine {
             .copied()
             .find(|candidate_id| {
                 self.find_object_index(*candidate_id).is_some_and(|candidate| {
-                    self.objects[candidate].state.status != crate::ObjectStatus::Deleted
+                    self.objects[candidate].has_nonzero_status()
                 })
             });
         if front == Some(target_id) {
@@ -6934,24 +7010,19 @@ impl Engine {
         if !self.close_object_menu(object_id, false)? {
             return Ok(false);
         }
-        if let Some(index) = self
-            .find_object_index(object_id)
-            .filter(|&index| self.objects[index].state.status != crate::ObjectStatus::Deleted)
-        {
+        if let Some(index) = self.find_object_index(object_id) {
             let target_ref = target
                 .map(compat::object_reference_value)
                 .unwrap_or(Value::Nil);
             self.contained_call(index, "Grab", &[target_ref, Value::Bool(false)])?;
             let actor_has_status = self.find_object_index(object_id).is_some_and(|index| {
-                self.objects[index].state.status != crate::ObjectStatus::Deleted
+                self.objects[index].has_nonzero_status()
             });
             if actor_has_status {
                 if let Some(target_index) =
                     target
                         .and_then(|id| self.find_object_index(id))
-                        .filter(|&index| {
-                            self.objects[index].state.status != crate::ObjectStatus::Deleted
-                        })
+                        .filter(|&index| self.objects[index].has_nonzero_status())
                 {
                     let self_ref = compat::object_reference_value(object_id);
                     self.contained_call(target_index, "Grabbed", &[self_ref, Value::Bool(false)])?;
@@ -7028,12 +7099,6 @@ impl Engine {
         let mut mode = PlayerObjectCommandMode::Set;
         let mut issued = false;
         for target in objects {
-            let active = self
-                .find_object_index(target)
-                .is_some_and(|index| self.objects[index].state.status.is_active());
-            if !active {
-                continue;
-            }
             self.player_crew_object_command(
                 owner,
                 command,
@@ -7066,12 +7131,7 @@ impl Engine {
     where
         I: IntoIterator<Item = ObjectId>,
     {
-        if !self.players.contains_key(&owner)
-            || !self.find_object_index(container).is_some_and(|index| {
-                let object = &self.objects[index];
-                object.state.status.is_active() && object.state.ocf & ocf::CONTAINER != 0
-            })
-        {
+        if !self.players.contains_key(&owner) {
             return Ok(false);
         }
         let mut mode = if append_to_existing {
@@ -7081,12 +7141,6 @@ impl Engine {
         };
         let mut issued = false;
         for object in objects {
-            let active = self
-                .find_object_index(object)
-                .is_some_and(|index| self.objects[index].state.status.is_active());
-            if !active {
-                continue;
-            }
             self.player_crew_object_command(
                 owner,
                 CommandId::Put,
@@ -7123,12 +7177,6 @@ impl Engine {
         if !self.players.contains_key(&owner) {
             return Ok(false);
         }
-        let put_target = put_target.filter(|target| {
-            self.find_object_index(*target).is_some_and(|index| {
-                let object = &self.objects[index];
-                object.state.status.is_active() && object.state.ocf & ocf::CONTAINER != 0
-            })
-        });
         let mut mode = if append_to_existing {
             PlayerObjectCommandMode::Append
         } else {
@@ -7136,17 +7184,6 @@ impl Engine {
         };
         let mut issued = false;
         for vehicle in vehicles {
-            let active_vehicle = self.find_object_index(vehicle).is_some_and(|index| {
-                let object = &self.objects[index];
-                object.state.status.is_active()
-                    && self
-                        .definitions
-                        .get(&object.definition_id)
-                        .is_some_and(|definition| definition.grab() == 1)
-            });
-            if !active_vehicle {
-                continue;
-            }
             self.player_crew_object_command(
                 owner,
                 CommandId::PushTo,
@@ -7229,7 +7266,7 @@ impl Engine {
             let Some(index) = self.find_object_index(crew_id) else {
                 continue;
             };
-            if !self.objects[index].state.status.is_active() {
+            if !self.objects[index].has_nonzero_status() {
                 continue;
             }
             if ranged {
@@ -7250,7 +7287,7 @@ impl Engine {
         if let Some(cursor_id) = cursor {
             if !cursor_processed && Some(cursor_id) != target {
                 if let Some(index) = self.find_object_index(cursor_id) {
-                    if self.objects[index].state.status.is_active() {
+                    if self.objects[index].has_nonzero_status() {
                         self.object_command_to_obj(
                             index, command, target, target2, tx, ty, data, mode, true,
                         )?;
@@ -10897,6 +10934,108 @@ protected func Destruction()
     }
 
     #[test]
+    fn contained_control_zero_payload_id_result_does_not_consume_control() {
+        // C4Value::operator bool tests the complete raw payload. C4ID_None
+        // is therefore false even though it remains a typed C4ID value
+        // (C4Value.h:76,183-185).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut_definition = Definition::from_script(
+            "HUT1",
+            "Hut",
+            r#"#strict 2
+                protected func ContainedLeft(object driver)
+                {
+                    return C4Id("NONE");
+                }
+            "#,
+        )
+        .expect("hut compiles");
+        hut_definition.set_version([4, 9, 1, 3, 0]);
+        engine
+            .register_definition(hut_definition)
+            .expect("register hut");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("spawn hut");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+
+        engine.player_in_com(1, COM_LEFT, 0).expect("in_com");
+
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew remains")
+                .command_stack
+                .command_names(),
+            vec!["Take"],
+            "a zero-payload C4ID result is false and reaches the hardcoded Take"
+        );
+    }
+
+    #[test]
+    fn contained_control_direct_function_runs_on_status_zero_container() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut_def = Definition::from_script(
+            "HUT1",
+            "Hut",
+            r#"
+                #strict 2
+                local direct_calls;
+                protected func ContainedLeft(object driver)
+                {
+                    direct_calls++;
+                    return true;
+                }
+            "#,
+        )
+        .expect("hut compiles");
+        hut_def.set_version([4, 9, 1, 3, 0]);
+        engine.register_definition(hut_def).expect("register");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("spawn hut");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+        let hut_index = engine.find_object_index(hut).expect("hut exists");
+        let _ = engine.objects[hut_index].mark_destroyed();
+
+        engine
+            .player_in_com(1, COM_LEFT, 0)
+            .expect("contained control executes");
+
+        let hut_index = engine.find_object_index(hut).expect("tombstone remains");
+        assert_eq!(
+            engine.objects[hut_index]
+                .state
+                .local_vars
+                .get("direct_calls"),
+            Some(&Value::Int(1)),
+            "sf->Exec bypasses C4Object::Call's Status gate"
+        );
+        assert!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew survives")
+                .command_stack
+                .is_empty(),
+            "the truthy direct handler consumes the control before Take"
+        );
+    }
+
+    #[test]
     fn old_contained_left_function_suppresses_take_even_when_falsy() {
         // Before 4.9.1.3 any ContainedLeft function suppresses the Take
         // fallback because the callback runs after hardcoded controls
@@ -11433,6 +11572,97 @@ protected func ContainedThrow(object clonk)
                 Some(later_full_red),
             ]
         );
+    }
+
+    #[test]
+    fn status_zero_menu_links_stay_iterator_visible_but_not_find_or_count_visible() {
+        // AssignRemoval sets Status=0 before it runs contained-object
+        // callbacks and only unlinks itself from its own container later.
+        // C4ObjectListIterator therefore still yields and groups that raw
+        // link, while Contents.Find/ObjectCount deliberately skip it.
+        let mut engine = Engine::new();
+        let mut container = Definition::from_script("CONT", "Container", "#strict 2\n")
+            .expect("container compiles");
+        container.set_category(crate::CATEGORY_STRUCTURE);
+        engine
+            .register_definition(container)
+            .expect("container registers");
+        for id in ["RAW1", "RAW2"] {
+            let mut item = Definition::from_script(id, id, "#strict 2\n")
+                .expect("item compiles");
+            item.set_category(crate::CATEGORY_OBJECT);
+            engine.register_definition(item).expect("item registers");
+        }
+
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("container spawns");
+        let raw1_live = engine
+            .spawn_object(SpawnConfig::new("RAW1").with_container(container))
+            .expect("live RAW1 spawns");
+        let raw1_status_zero = engine
+            .spawn_object(SpawnConfig::new("RAW1").with_container(container))
+            .expect("status-zero RAW1 spawns");
+        let raw2_live_full = engine
+            .spawn_object(SpawnConfig::new("RAW2").with_container(container))
+            .expect("live full-con RAW2 spawns");
+        let raw2_status_zero_full = engine
+            .spawn_object(SpawnConfig::new("RAW2").with_container(container))
+            .expect("status-zero full-con RAW2 spawns");
+        let raw2_live_incomplete = engine
+            .spawn_object(
+                SpawnConfig::new("RAW2")
+                    .with_construction(crate::FULL_CON / 2)
+                    .with_container(container),
+            )
+            .expect("live incomplete RAW2 spawns");
+
+        for object in [raw1_status_zero, raw2_status_zero_full] {
+            let index = engine.find_object_index(object).expect("object remains linked");
+            engine.objects[index].state.status = crate::ObjectStatus::Deleted;
+            engine.objects[index].destroyed = true;
+            assert_eq!(engine.objects[index].state.container, Some(container));
+        }
+        let contents = engine
+            .object_snapshot(container)
+            .expect("container remains")
+            .contents;
+        assert!(contents.contains(&raw1_status_zero));
+        assert!(contents.contains(&raw2_status_zero_full));
+
+        let source = EngineInternalObjectMenuSource(&mut engine);
+        let groups = internal_object_menu_picture_groups(
+            &source,
+            &contents,
+            crate::CATEGORY_OBJECT,
+        );
+        assert!(groups.iter().any(|group| {
+            group.representative == raw1_status_zero && group.count == 2
+        }), "a full-con Status-zero group head remains the raw representative");
+        assert!(groups.iter().any(|group| {
+            group.representative == raw2_live_full && group.count == 3
+        }), "grouping counts the raw Status-zero link, but Contents.Find skips it when choosing the full-con representative");
+
+        assert_eq!(
+            internal_live_contents_definition_count(&source, &contents, "RAW1"),
+            1,
+            "Contents.ObjectCount skips the Status-zero RAW1 link"
+        );
+        assert_eq!(
+            internal_live_contents_definition_count(&source, &contents, "RAW2"),
+            2,
+            "Contents.ObjectCount keeps only the two live RAW2 links"
+        );
+        assert_eq!(
+            internal_live_contents_count(&source, &contents),
+            3,
+            "the unfiltered ObjectCount form also skips both Status-zero links"
+        );
+
+        // Keep all identities live in the assertion diagnostics and make the
+        // intended same-ID grouping explicit.
+        assert_ne!(raw1_live, raw1_status_zero);
+        assert_ne!(raw2_live_incomplete, raw2_status_zero_full);
     }
 
     #[test]
@@ -12344,6 +12574,232 @@ protected func CalcValue(object pInBase)
                 .command_stack
                 .is_empty(),
             "the synchronous Throw command has finished"
+        );
+    }
+
+    #[test]
+    fn old_contained_throw_runs_captured_function_after_put_exits_driver() {
+        // Old definitions call the captured sf only after the synchronous
+        // hardcoded Throw. Put may have exited the driver by then; C++ still
+        // executes sf with a null object and the function owner's definition
+        // context (C4Object.cpp:3284-3298; C4AulExec.cpp:330-359).
+        let mut engine = Engine::new();
+        register_clonk(
+            &mut engine,
+            "CLNK",
+            "#strict\nprotected func Put() { Exit(); return(1); }\n",
+        );
+        let mut hut_definition = Definition::from_script(
+            "HUT1",
+            "Hut",
+            r#"
+                #strict 2
+                static late_calls, late_this;
+                protected func ContainedThrow(object driver)
+                {
+                    late_calls++;
+                    late_this = this();
+                    return true;
+                }
+                public func GetLateCalls() { return late_calls; }
+                public func GetLateThis() { return late_this; }
+            "#,
+        )
+        .expect("hut compiles");
+        hut_definition.set_version([4, 9, 1, 2, 0]);
+        engine
+            .register_definition(hut_definition)
+            .expect("register hut");
+        engine
+            .register_definition(
+                Definition::from_script("FLAG", "Flag", "#strict\n").expect("flag compiles"),
+            )
+            .expect("register flag");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("spawn hut");
+        let flag = engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(crew))
+            .expect("spawn carried flag");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("old contained throw completes");
+
+        assert_eq!(
+            engine.object_snapshot(crew).expect("crew remains").container,
+            None,
+            "the synchronous Put callback exits the driver before sf->Exec"
+        );
+        assert_eq!(
+            engine.object_snapshot(flag).expect("flag remains").container,
+            Some(hut)
+        );
+        let hut_index = engine.find_object_index(hut).expect("hut remains");
+        assert_eq!(
+            engine
+                .call_object_function(hut_index, "GetLateCalls", Vec::new())
+                .expect("read definition static"),
+            Value::Int(1),
+            "the pinned late function runs in definition context with this == nil"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(hut_index, "GetLateThis", Vec::new())
+                .expect("read captured this"),
+            Value::Nil,
+            "sf->Exec receives the current null Contained pointer, not the old hut"
+        );
+    }
+
+    #[test]
+    fn old_contained_throw_keeps_captured_host_after_driver_changes_container() {
+        // The C4AulFunc pointer comes from the original container, while the
+        // late receiver is whatever `Contained` points to after hardcoded
+        // controls. Helper/static lookup therefore stays on HUT1, but `this`
+        // and object locals belong to HUT2 (C4Object.cpp:3231-3239,3293-3298).
+        let mut engine = Engine::new();
+        register_clonk(
+            &mut engine,
+            "CLNK",
+            r#"#strict 2
+                local move_target;
+                protected func Put()
+                {
+                    if (move_target) Enter(move_target);
+                    return true;
+                }
+            "#,
+        );
+        let mut source_definition = Definition::from_script(
+            "HUT1",
+            "Source hut",
+            r#"#strict 2
+                static captured_host_calls;
+                local receiver_calls, seen_receiver;
+                private func MarkCapturedHost()
+                {
+                    captured_host_calls += 10;
+                    return true;
+                }
+                protected func ContainedThrow(object driver)
+                {
+                    MarkCapturedHost();
+                    captured_host_calls++;
+                    receiver_calls++;
+                    seen_receiver = this();
+                    return true;
+                }
+                public func GetCapturedHostCalls() { return captured_host_calls; }
+            "#,
+        )
+        .expect("source hut compiles");
+        source_definition.set_version([4, 9, 1, 2, 0]);
+        engine
+            .register_definition(source_definition)
+            .expect("register source hut");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "HUT2",
+                    "Destination hut",
+                    r#"#strict 2
+                        static wrong_host_calls;
+                        local receiver_calls, seen_receiver;
+                        private func MarkCapturedHost()
+                        {
+                            wrong_host_calls += 100;
+                            return true;
+                        }
+                        protected func ContainedThrow(object driver)
+                        {
+                            wrong_host_calls += 1000;
+                            return true;
+                        }
+                        public func GetWrongHostCalls() { return wrong_host_calls; }
+                        public func GetReceiverCalls() { return receiver_calls; }
+                        public func GetSeenReceiver() { return seen_receiver; }
+                    "#,
+                )
+                .expect("destination hut compiles"),
+            )
+            .expect("register destination hut");
+        engine
+            .register_definition(
+                Definition::from_script("FLAG", "Flag", "#strict\n").expect("flag compiles"),
+            )
+            .expect("register flag");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let source = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("spawn source hut");
+        let destination = engine
+            .spawn_object(SpawnConfig::new("HUT2"))
+            .expect("spawn destination hut");
+        let flag = engine
+            .spawn_object(SpawnConfig::new("FLAG").with_container(crew))
+            .expect("spawn carried flag");
+        let crew_index = engine.find_object_index(crew).expect("crew remains");
+        engine.objects[crew_index].state.local_vars.insert(
+            "move_target".to_string(),
+            compat::object_reference_value(destination),
+        );
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(source))
+            .expect("enter source hut");
+
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("old contained throw completes");
+
+        assert_eq!(
+            engine.object_snapshot(crew).expect("crew remains").container,
+            Some(destination)
+        );
+        assert_eq!(
+            engine.object_snapshot(flag).expect("flag remains").container,
+            Some(source)
+        );
+        let source_index = engine.find_object_index(source).expect("source remains");
+        assert_eq!(
+            engine
+                .call_object_function(source_index, "GetCapturedHostCalls", Vec::new())
+                .expect("read captured static"),
+            Value::Int(11),
+            "the pinned body and its helper resolve on the captured HUT1 host"
+        );
+        let destination_index = engine
+            .find_object_index(destination)
+            .expect("destination remains");
+        assert_eq!(
+            engine
+                .call_object_function(destination_index, "GetWrongHostCalls", Vec::new())
+                .expect("read destination static"),
+            Value::Nil,
+            "neither HUT2's same-named callback nor helper is resolved"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(destination_index, "GetReceiverCalls", Vec::new())
+                .expect("read receiver local"),
+            Value::Int(1),
+            "the captured body writes the current receiver's local cells"
+        );
+        assert_eq!(
+            engine
+                .call_object_function(destination_index, "GetSeenReceiver", Vec::new())
+                .expect("read current this"),
+            compat::object_reference_value(destination)
         );
     }
 
@@ -19224,6 +19680,32 @@ protected func ControlContents(idTarget) { return(1); }
             engine.mouse_region_drag_objects(first, true),
             vec![third, second, first],
             "inactive same-ID contents remain in the pointer-backed group"
+        );
+
+        let first_index = engine.find_object_index(first).expect("first item exists");
+        engine.objects[first_index].state.status = crate::ObjectStatus::Deleted;
+        engine.objects[first_index].destroyed = true;
+        assert!(
+            engine.mouse_region_drag_objects(first, false).is_empty(),
+            "ordinary Selection.Add rejects a Status-zero target"
+        );
+        assert_eq!(
+            engine.mouse_region_drag_objects(first, true),
+            vec![third, second],
+            "ObjectCount and Selection.Add both skip the Status-zero link"
+        );
+        let original_container = engine.objects[first_index].state.container.take();
+        assert!(
+            engine.mouse_region_drag_objects(first, true).is_empty(),
+            "the no-container right-drag branch still goes through Selection.Add"
+        );
+        engine.objects[first_index].state.container = original_container;
+        let second_index = engine.find_object_index(second).expect("second item exists");
+        engine.objects[second_index].state.status = crate::ObjectStatus::Deleted;
+        engine.objects[second_index].destroyed = true;
+        assert!(
+            engine.mouse_region_drag_objects(first, true).is_empty(),
+            "the single-object Selection.Add also rejects a Status-zero target"
         );
     }
 

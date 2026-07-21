@@ -85,8 +85,8 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     // it horizontally with the scenario wind while DFA_PUSH carries the CLNK.
     player.press(COM_UP)?;
     player.wait_until(
-        "stable balloon attachment reaches the flight corridor",
-        100,
+        "stable balloon attachment clears the central island",
+        160,
         |engine| {
             let Some(clonk_now) = engine.object_snapshot(clonk) else {
                 return false;
@@ -96,7 +96,10 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             };
             clonk_now.action.name == "Push"
                 && clonk_now.action.target == Some(balloon)
-                && balloon_now.position.y <= 275
+                // BALN's rideable platform extends below its object position.
+                // Keep ascending until that platform, not merely BALN's origin,
+                // is above the central island that the wind carries it across.
+                && balloon_now.position.y <= 190
                 && (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1
         },
     )?;
@@ -118,7 +121,8 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
          ScheduleCall before SetComDir(COMD_Stop)"
     );
 
-    player.wait_until(
+    let coast_start = player.engine().object_snapshot(balloon);
+    let coast = player.wait_until(
         "the stopped balloon coasts to the far island longitude",
         600,
         |engine| {
@@ -132,7 +136,14 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
                 && clonk_now.action.target == Some(balloon)
                 && balloon_now.position.x >= 520
         },
-    )?;
+    );
+    if let Err(error) = coast {
+        panic!(
+            "{error}; coast_start={coast_start:?}; clonk={:?}; balloon={:?}",
+            player.engine().object_snapshot(clonk),
+            player.engine().object_snapshot(balloon)
+        );
+    }
 
     // A second DownSingle, after the C4DoubleClick window, changes Stop to
     // Down so the Clonk enters Script3's island rectangle. Sending it sooner
@@ -178,11 +189,11 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     // Script3. BALN has no ControlDownDouble override, so DFA_PUSH handles it
     // as ObjectComUnGrab (src/C4Object.cpp:3520-3567).
     player.double_tap(COM_DOWN)?;
-    let landing = player.wait_until("Clonk lets go and lands on the far island", 100, |engine| {
+    let landing = player.wait_until("Clonk lets go in the far-island rectangle", 100, |engine| {
         engine.object_snapshot(clonk).is_some_and(|object| {
             object.action.name == "Walk"
                 && (450..710).contains(&object.position.x)
-                && (270..320).contains(&object.position.y)
+                && (250..320).contains(&object.position.y)
         })
     });
     if let Err(error) = landing {
@@ -193,9 +204,15 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         );
     }
 
-    player.wait_until("the landing collectible contact resolves", 20, |engine| {
-        clonk_carries(engine, clonk, "FLAG") || clonk_carries(engine, clonk, "LOAM")
-    })?;
+    player.hold_until(
+        COM_LEFT,
+        "the landed Clonk reaches a Tutorial02 collectible",
+        180,
+        |engine| clonk_carries(engine, clonk, "FLAG") || clonk_carries(engine, clonk, "LOAM"),
+    )?;
+    // Releasing a direction key does not stop DFA_WALK. Stop immediately so
+    // Script3's fixed wait cannot carry the Clonk off the far island.
+    player.tap(COM_DOWN)?;
 
     // Script3's wait(20) resumes the scenario script after 200 frames; Script4
     // observes the completed ungrab. The C++ counter then visits the missing
@@ -303,7 +320,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     player.tap(COM_DOWN)?;
     let move_left_prompt = player.wait_until(
         "Tutorial02 tells the Clonk to move to the island's left edge",
-        240,
+        450,
         |engine| tutorial_message_contains(engine, "Now move to the very left edge"),
     );
     if let Err(error) = move_left_prompt {
@@ -628,17 +645,25 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
                 .is_some_and(|object| object.action.name == "Walk")
         })?;
     }
-    let flag_pickup = if clonk_carries(player.engine(), clonk, "FLAG") {
-        Ok(0)
-    } else {
-        player.hold_until(
-            COM_RIGHT,
-            "Clonk walks back over all three bridges and collects FLAG",
-            180,
-            |engine| clonk_carries(engine, clonk, "FLAG"),
-        )
-    };
-    if let Err(error) = flag_pickup {
+    let flag_id = object_with_definition(player.engine(), "FLAG").expect("FLAG remains");
+    let flag_x = player
+        .engine()
+        .object_snapshot(flag_id)
+        .expect("FLAG remains visible")
+        .position
+        .x;
+    let flag_approach = player.hold_until(
+        COM_RIGHT,
+        "Clonk walks back into FLAG's collection window",
+        180,
+        |engine| {
+            clonk_carries(engine, clonk, "FLAG")
+                || engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.action.name == "Walk" && object.position.x >= flag_x - 6
+                })
+        },
+    );
+    if let Err(error) = flag_approach {
         let snapshot = player.engine().snapshot();
         let flag = snapshot
             .objects
@@ -652,6 +677,38 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         panic!(
             "{error}; clonk={:?}; flag={flag:?}; loam={loam:?}",
             player.engine().object_snapshot(clonk)
+        );
+    }
+    // C4GameObjects performs collection on Tick3. Stop while FLAG is inside
+    // CLNK's exact -8..+7 collection span and let that contact pass run,
+    // instead of holding Right past the island when pickup is one tick late.
+    player.tap(COM_DOWN)?;
+    if clonk_carries(player.engine(), clonk, "LOAM") {
+        // Four chunks exist for three bridges. Crossing the pile may fill the
+        // one-slot inventory again, so throw the final spare back to the left
+        // while stopped beside FLAG.
+        player.press(COM_LEFT)?;
+        player.ticks(1)?;
+        player.release(COM_LEFT)?;
+        player.tap(COM_DOWN)?;
+        player.tap(COM_THROW)?;
+        player.wait_until("last spare LOAM leaves the Clonk", 30, |engine| {
+            !clonk_carries(engine, clonk, "LOAM")
+        })?;
+        player.wait_until("Clonk finishes throwing the last spare LOAM", 30, |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        })?;
+    }
+    let flag_pickup = player.wait_until("FLAG enters the Clonk's inventory", 12, |engine| {
+        clonk_carries(engine, clonk, "FLAG")
+    });
+    if let Err(error) = flag_pickup {
+        panic!(
+            "{error}; clonk={:?}; flag={:?}",
+            player.engine().object_snapshot(clonk),
+            player.engine().object_snapshot(flag_id)
         );
     }
     let carried_flag = player

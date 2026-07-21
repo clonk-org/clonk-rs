@@ -15516,11 +15516,12 @@ func Construction(object creator)
         // DFA_BUILD compares the builder against the target's live Shape and
         // uses inclusive Inside bounds, including Wdt and Hgt+16
         // (C4Object.cpp:5027-5032).
-        for (label, position_case, should_build, no_other_action) in [
-            ("inclusive bottom-right", 0, true, false),
-            ("one past right", 1, false, false),
-            ("one past bottom margin", 2, false, false),
-            ("locked one past right", 1, false, true),
+        for (label, position_case, should_build, no_other_action, inactive) in [
+            ("inclusive bottom-right", 0, true, false, false),
+            ("inactive inclusive bottom-right", 0, true, false, true),
+            ("one past right", 1, false, false, false),
+            ("one past bottom margin", 2, false, false, false),
+            ("locked one past right", 1, false, true, false),
         ] {
             let mut engine = Engine::with_seed(67);
             engine
@@ -15542,6 +15543,9 @@ func Construction(object creator)
                 .expect("target spawns");
             let target_idx = engine.find_object_index(target).expect("target exists");
             engine.objects[target_idx].state.damage = 37;
+            if inactive {
+                engine.objects[target_idx].state.status = ObjectStatus::Inactive;
+            }
             let target_position = engine.objects[target_idx].state.position;
             let shape = engine.objects[target_idx]
                 .current_shape_rect()
@@ -17090,9 +17094,10 @@ protected func TurnStart()
     }
 
     #[test]
-    fn push_from_unrelated_container_still_applies_force() {
+    fn push_from_unrelated_container_still_applies_force_to_inactive_target() {
         // `Contained == Action.Target` is identity, not a generic contained
-        // check. Being inside some other object must leave PUSH unchanged.
+        // check. Being inside some other object must leave PUSH unchanged,
+        // and C4Object::Push accepts every nonzero target Status.
         let mut engine = push_containment_engine(true);
         let unrelated_id = engine
             .spawn_object(
@@ -17126,6 +17131,8 @@ protected func TurnStart()
             )
             .expect("pusher spawns");
         let pusher_idx = engine.find_object_index(pusher_id).expect("pusher exists");
+        let target_idx = engine.find_object_index(target_id).expect("target exists");
+        engine.objects[target_idx].state.status = ObjectStatus::Inactive;
 
         engine
             .apply_physics_at_index(pusher_idx)
@@ -18023,6 +18030,35 @@ protected func GrabLost()
             let fighter = &engine.objects[index];
             assert_eq!(fighter.state.action.name, "Fight", "{label}");
         }
+    }
+
+    #[test]
+    fn fight_procedure_retains_inactive_action_target_like_cpp() {
+        let mut engine = l073_fight_failure_engine();
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("L73O")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 0))
+                    .with_action(ActionState::new("Fight")),
+            )
+            .expect("fight target spawns");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        engine.objects[target_index].state.status = ObjectStatus::Inactive;
+        let fighter = l073_spawn_fighter(&mut engine, Some(target), None);
+        let fighter_index = engine.find_object_index(fighter).expect("fighter exists");
+
+        assert!(
+            !engine
+                .apply_physics_at_index(fighter_index)
+                .expect("Fight with inactive target executes"),
+            "the retained fight reaches the ordinary phase tail"
+        );
+        assert_eq!(
+            engine.objects[fighter_index].state.action.name,
+            "Fight",
+            "C4OS_INACTIVE does not clear Action.Target"
+        );
     }
 
     fn l074_wide_vertex_fight_pair(separation: i32) -> (Engine, ObjectId, ObjectId) {
@@ -34338,6 +34374,7 @@ func FxCorrosionProbeDamage(pTarget, iNumber, iChange, iCause, iCausePlr) {
             .expect("spawn succeeds");
         let target_idx = engine.find_object_index(target).expect("tree exists");
         assert_ne!(engine.objects[target_idx].state.ocf & ocf::CHOP, 0);
+        engine.objects[target_idx].state.status = ObjectStatus::Inactive;
 
         for frame in 1..30 {
             let snapshot = engine.tick().expect("tick succeeds");
@@ -46980,7 +47017,12 @@ public func Swap() { return(ChangeDef(NEWD)); }
     #[test]
     fn connect_lines_track_their_targets_like_cpp() {
         let mut engine = Engine::with_seed(0);
-        let mut beam = Definition::from_script("BEAM", "Beam", "#strict\n").expect("compiles");
+        let mut beam = Definition::from_script(
+            "BEAM",
+            "Beam",
+            "#strict\npublic func RemoveEndpoint(object endpoint) { return RemoveObject(endpoint); }\n",
+        )
+        .expect("compiles");
         beam.set_line(8); // C4D_Line_Vertex
         beam.set_line_intersect(1);
         beam.set_shape_vertices(vec![
@@ -47092,11 +47134,41 @@ public func Swap() { return(ChangeDef(NEWD)); }
         assert_eq!((vertices[0].x, vertices[0].y), (77, 250));
         assert_eq!((vertices[1].x, vertices[1].y), (28, 250));
 
-        // Removing a target breaks the line on the next exec.
-        {
-            let horse_idx = engine.find_object_index(horse).expect("horse exists");
-            engine.objects[horse_idx].mark_destroyed();
-        }
+        engine
+            .apply_object_update(
+                horse,
+                ObjectUpdate::new().with_status(ObjectStatus::Inactive),
+            )
+            .expect("deactivate first retained endpoint");
+        engine
+            .apply_object_update(
+                wagon,
+                ObjectUpdate::new().with_status(ObjectStatus::Inactive),
+            )
+            .expect("deactivate second retained endpoint");
+        engine
+            .tick_without_snapshot()
+            .expect("inactive endpoints remain connected");
+        assert!(
+            engine.find_object_index(beam_id).is_some(),
+            "C4OS_INACTIVE action targets retain their native pointers"
+        );
+
+        // Real AssignRemoval reaches Game.ClearPointers synchronously. Do
+        // not use the low-level mark_destroyed test seam here: it deliberately
+        // creates a status-zero tombstone before ClearPointers, during which
+        // native raw Action.Target references remain usable.
+        let beam_idx = engine.find_object_index(beam_id).expect("beam exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    beam_idx,
+                    "RemoveEndpoint",
+                    vec![object_reference_value(horse)],
+                )
+                .expect("endpoint removal succeeds"),
+            Value::Bool(true)
+        );
         engine.tick_without_snapshot().expect("tick");
         assert!(
             engine.find_object_index(beam_id).is_none(),

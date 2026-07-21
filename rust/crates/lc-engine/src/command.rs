@@ -151,10 +151,18 @@ impl CommandObjectSnapshot {
 }
 
 impl CommandObjectSnapshot {
+    /// C++ APIs that explicitly test `C4Object::Status` accept every
+    /// nonzero value, including C4OS_INACTIVE. Raw pointers are a separate
+    /// concern: a detached command may retain one even after Status reaches
+    /// zero, until an actual ClearPointers walk reaches that command.
+    pub fn has_nonzero_status(&self) -> bool {
+        !self.destroyed && self.status != ObjectStatus::Deleted
+    }
+
     /// C4Object::Status without C4Object::Alive. Structures and ordinary
     /// items are active command targets even though they are not living.
     pub fn is_status_active(&self) -> bool {
-        !self.destroyed && self.status.is_active()
+        self.has_nonzero_status() && self.status.is_active()
     }
 
     pub fn is_active(&self) -> bool {
@@ -2439,9 +2447,23 @@ mod tests {
         let follower = objects.get(&follower_id).expect("follower present");
         let removed_ctx = move_to_ctx_at_frame(follower, &objects, &players, &definitions, 1);
         let removed = state.step(&removed_ctx);
-        assert_eq!(removed.status, CommandStatus::Failed);
+        assert_eq!(removed.status, CommandStatus::Running);
         assert!(removed.update.is_none());
-        assert!(removed.operations.is_empty());
+        assert_eq!(
+            pushed_request(&removed.operations, CommandId::MoveTo),
+            first_move,
+            "a detached iExec command retains its raw target pointer"
+        );
+
+        let mut cleared = CommandStack::new();
+        cleared
+            .push_front(CommandRequest::new(CommandId::Follow).with_target(Some(target_id)))
+            .expect("Follow queues");
+        assert!(cleared.clear_object_reference(target_id));
+        assert_eq!(
+            cleared.execute_front(&removed_ctx).map(|result| result.status),
+            Some(CommandStatus::Failed)
+        );
     }
 
     // FnGetCommand serves the LIVE C4Command fields (C4Script.cpp:
@@ -2879,7 +2901,16 @@ mod tests {
         target.collectible = true;
         target.construction = FULL_CON;
 
-        let objects = HashMap::from([(actor_id, actor), (target_id, target)]);
+        let mut first_content = snapshot_with_id(513);
+        first_content.container = Some(actor_id);
+        let mut second_content = snapshot_with_id(514);
+        second_content.container = Some(actor_id);
+        let objects = HashMap::from([
+            (actor_id, actor),
+            (target_id, target),
+            (first_content.id, first_content),
+            (second_content.id, second_content),
+        ]);
         let players = HashMap::new();
         let definitions = HashMap::from([(
             actor_definition,
@@ -3234,9 +3265,11 @@ mod tests {
             CommandEvent::GetObject {
                 actor_id: event_actor,
                 object_id,
+                command_instance_id,
             } => {
                 assert_eq!(*event_actor, actor_id);
                 assert_eq!(*object_id, target_id);
+                assert_eq!(*command_instance_id, 0);
             }
             other => panic!("unexpected event: {:?}", other),
         }
@@ -3269,6 +3302,7 @@ mod tests {
                     .with_mode(CommandMode::SilentSub),
             )
             .expect("Get queues");
+        let get_instance_id = stack.entries.front().expect("Get remains").instance_id;
 
         let actor = objects.get(&actor_id).expect("actor present");
         let ctx = move_to_ctx_at_frame(actor, &objects, &players, &definitions, 4);
@@ -3278,6 +3312,7 @@ mod tests {
             vec![CommandEvent::GetObject {
                 actor_id,
                 object_id: target_id,
+                command_instance_id: get_instance_id,
             }]
         );
 
@@ -3415,7 +3450,7 @@ mod tests {
         assert_eq!(result.status, CommandStatus::Running);
         assert!(result.events.iter().any(|event| matches!(
             event,
-            CommandEvent::GetObject { actor_id: event_actor, object_id }
+            CommandEvent::GetObject { actor_id: event_actor, object_id, .. }
                 if *event_actor == actor_id && *object_id == item_id
         )));
     }
@@ -3806,6 +3841,7 @@ mod tests {
             vec![CommandEvent::GetObject {
                 actor_id,
                 object_id: item_id,
+                command_instance_id: 0,
             }]
         );
     }
@@ -3971,6 +4007,7 @@ mod tests {
                 target_id: container_id,
                 object_id: item_id,
                 ungrab_on_success: false,
+                command_instance_id: 0,
             }]
         );
         state.put_pending = false; // the engine event resolver clears this
@@ -4423,6 +4460,7 @@ mod tests {
                 target_id,
                 object_id: item_id,
                 ungrab_on_success: true,
+                command_instance_id: 0,
             }]
         );
     }
@@ -4647,6 +4685,43 @@ mod tests {
     }
 
     #[test]
+    fn exact_failed_result_does_not_touch_a_same_kind_replacement() {
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::Exit))
+            .expect("original Exit queues");
+        let original = stack.entries.front().expect("original Exit").instance_id;
+        stack
+            .push_front(CommandRequest::new(CommandId::Exit))
+            .expect("replacement Exit queues");
+        let replacement = stack.entries.front().expect("replacement Exit").instance_id;
+
+        assert!(stack.fail_command_instance(CommandId::Exit, original));
+        assert_eq!(
+            stack
+                .entries
+                .iter()
+                .find(|entry| entry.instance_id == original)
+                .expect("original Exit remains")
+                .failures,
+            1
+        );
+        assert_eq!(
+            stack
+                .entries
+                .iter()
+                .find(|entry| entry.instance_id == replacement)
+                .expect("replacement Exit remains")
+                .failures,
+            0
+        );
+
+        stack.entries.retain(|entry| entry.instance_id != original);
+        assert!(!stack.fail_command_instance(CommandId::Exit, original));
+        assert_eq!(stack.entries.front().expect("replacement remains").failures, 0);
+    }
+
+    #[test]
     fn command_instance_ids_survive_live_restore_but_persisted_stacks_get_fresh_ids() {
         let mut stack = CommandStack::new();
         stack
@@ -4711,6 +4786,386 @@ mod tests {
             restored_legacy.entries.front().unwrap().instance_id,
             migrated_id
         );
+    }
+
+    #[test]
+    fn persisted_zero_event_resolves_to_the_fresh_pending_command_identity() {
+        let actor_id = ObjectId::new(621);
+        let target_id = ObjectId::new(622);
+        let mut original = CommandStack::new();
+        original
+            .push_front(CommandRequest::new(CommandId::Throw))
+            .expect("Throw queues");
+        let original_id = original.entries.front().expect("Throw remains").instance_id;
+        let CommandState::Throw(state) = &mut original.entries.front_mut().unwrap().state else {
+            panic!("command should be Throw");
+        };
+        state.put_take_pending = true;
+
+        let encoded_snapshot =
+            serde_json::to_value(original.snapshot()).expect("snapshot serializes");
+        let encoded_event = serde_json::to_value(CommandEvent::ObjectComPutTake {
+            actor_id,
+            target_id,
+            requested_item: None,
+            command: CommandId::Throw,
+            command_instance_id: original_id,
+        })
+        .expect("event serializes");
+        let restored_event: CommandEvent =
+            serde_json::from_value(encoded_event).expect("event deserializes");
+        let CommandEvent::ObjectComPutTake {
+            command_instance_id,
+            ..
+        } = restored_event
+        else {
+            panic!("event should remain ObjectComPutTake");
+        };
+        assert_eq!(command_instance_id, 0, "runtime ids are omitted from saves");
+
+        let decoded: CommandStackSnapshot =
+            serde_json::from_value(encoded_snapshot).expect("snapshot deserializes");
+        let mut restored = CommandStack::new();
+        restored
+            .push_front(CommandRequest::new(CommandId::Wait))
+            .expect("advance the allocator");
+        restored.clear();
+        restored.restore_from_snapshot(&decoded);
+        let fresh_id = restored.entries.front().expect("Throw restored").instance_id;
+        assert_ne!(fresh_id, 0);
+        assert_ne!(fresh_id, original_id);
+        assert_eq!(
+            restored.resolve_event_instance_id(
+                CommandEventInstanceKind::PutTake(CommandId::Throw),
+                command_instance_id,
+            ),
+            fresh_id
+        );
+        assert_eq!(
+            restored.resolve_event_instance_id(
+                CommandEventInstanceKind::PutTake(CommandId::Throw),
+                987,
+            ),
+            987,
+            "an already-bound runtime event passes through unchanged"
+        );
+    }
+
+    #[test]
+    fn zero_event_resolution_uses_the_event_specific_pending_marker() {
+        let mut throws = CommandStack::new();
+        throws
+            .push_front(CommandRequest::new(CommandId::Throw))
+            .expect("outer Throw queues");
+        let pending_throw = throws.entries.front().expect("outer Throw").instance_id;
+        let CommandState::Throw(state) = &mut throws.entries.front_mut().unwrap().state else {
+            panic!("outer command should be Throw");
+        };
+        state.put_take_pending = true;
+        throws
+            .push_front(CommandRequest::new(CommandId::Throw))
+            .expect("inner Throw queues");
+        let exact_throw = throws.entries.front().expect("inner Throw").instance_id;
+        throws.entries.front_mut().unwrap().finished = Some(CommandStatus::Completed);
+        assert_eq!(
+            throws.resolve_event_instance_id(
+                CommandEventInstanceKind::Exact(CommandId::Throw),
+                0,
+            ),
+            exact_throw,
+            "Exact includes a still-linked finished command"
+        );
+        assert_eq!(
+            throws.resolve_event_instance_id(
+                CommandEventInstanceKind::PutTake(CommandId::Throw),
+                0,
+            ),
+            pending_throw,
+            "PutTake skips a same-kind command without its in-flight marker"
+        );
+
+        let mut digs = CommandStack::new();
+        digs.push_front(CommandRequest::new(CommandId::Dig))
+            .expect("outer Dig queues");
+        let pending_dig = digs.entries.front().expect("outer Dig").instance_id;
+        let CommandState::Dig(state) = &mut digs.entries.front_mut().unwrap().state else {
+            panic!("outer command should be Dig");
+        };
+        state.start_pending = true;
+        digs.push_front(CommandRequest::new(CommandId::Dig))
+            .expect("replacement Dig queues");
+        assert_eq!(
+            digs.resolve_event_instance_id(CommandEventInstanceKind::Dig, 0),
+            pending_dig,
+            "Dig skips a same-kind command without its in-flight marker"
+        );
+
+        let mut gets = CommandStack::new();
+        gets.push_front(
+            CommandRequest::new(CommandId::Get).with_target(Some(ObjectId::new(91))),
+        )
+        .expect("outer Get queues");
+        let pending_get = gets.entries.front().expect("outer Get").instance_id;
+        let CommandState::Get(state) = &mut gets.entries.front_mut().unwrap().state else {
+            panic!("outer command should be Get");
+        };
+        state.enter_pending = true;
+        gets.push_front(
+            CommandRequest::new(CommandId::Get).with_target(Some(ObjectId::new(92))),
+        )
+        .expect("replacement Get queues");
+        assert_eq!(
+            gets.resolve_event_instance_id(CommandEventInstanceKind::Get, 0),
+            pending_get,
+            "Get skips a same-kind command without its in-flight marker"
+        );
+
+        let acquire_request = || {
+            CommandRequest::new(CommandId::Acquire)
+                .with_data(CommandData::Text("WOOD".to_owned()))
+        };
+        let mut acquires = CommandStack::new();
+        acquires
+            .push_front(acquire_request())
+            .expect("outer Acquire queues");
+        let pending_acquire = acquires.entries.front().expect("outer Acquire").instance_id;
+        let CommandState::Acquire(state) = &mut acquires.entries.front_mut().unwrap().state else {
+            panic!("outer command should be Acquire");
+        };
+        state.script_pending = true;
+        acquires
+            .push_front(acquire_request())
+            .expect("inner Acquire queues");
+        assert_eq!(
+            acquires.resolve_event_instance_id(
+                CommandEventInstanceKind::Script(CommandId::Acquire),
+                0,
+            ),
+            pending_acquire
+        );
+
+        let mut constructs = CommandStack::new();
+        constructs
+            .push_front(
+                CommandRequest::new(CommandId::Construct)
+                    .with_data(CommandData::Text("HUT1".to_owned())),
+            )
+            .expect("Construct queues");
+        let pending_construct = constructs
+            .entries
+            .front()
+            .expect("Construct remains")
+            .instance_id;
+        let CommandState::Construct(state) = &mut constructs.entries.front_mut().unwrap().state
+        else {
+            panic!("command should be Construct");
+        };
+        state.script_pending = true;
+        assert_eq!(
+            constructs.resolve_event_instance_id(
+                CommandEventInstanceKind::Script(CommandId::Construct),
+                0,
+            ),
+            pending_construct
+        );
+    }
+
+    #[test]
+    fn zero_event_resolution_finds_detached_preludes_and_exit_activation() {
+        let mut exits = CommandStack::new();
+        exits
+            .push_front(CommandRequest::new(CommandId::Exit))
+            .expect("Exit queues");
+        let detached_exit = exits.entries.front().expect("Exit remains").instance_id;
+        let CommandState::Exit(state) = &mut exits.entries.front_mut().unwrap().state else {
+            panic!("command should be Exit");
+        };
+        state.stop_continuation = true;
+        exits.clear();
+        assert_eq!(
+            exits.resolve_event_instance_id(
+                CommandEventInstanceKind::Prelude(CommandId::Exit),
+                0,
+            ),
+            detached_exit
+        );
+        exits
+            .push_front(CommandRequest::new(CommandId::Exit))
+            .expect("replacement Exit queues");
+        let attached_exit = exits.entries.front().expect("replacement Exit").instance_id;
+        let CommandState::Exit(state) = &mut exits.entries.front_mut().unwrap().state else {
+            panic!("replacement command should be Exit");
+        };
+        state.stop_continuation = true;
+        assert_eq!(
+            exits.resolve_event_instance_id(
+                CommandEventInstanceKind::Prelude(CommandId::Exit),
+                0,
+            ),
+            attached_exit,
+            "an attached pending command takes precedence over retained bodies"
+        );
+
+        let mut throws = CommandStack::new();
+        throws
+            .push_front(CommandRequest::new(CommandId::Throw))
+            .expect("Throw queues");
+        let detached_throw = throws.entries.front().expect("Throw remains").instance_id;
+        let CommandState::Throw(state) = &mut throws.entries.front_mut().unwrap().state else {
+            panic!("command should be Throw");
+        };
+        state
+            .continuations
+            .push(ThrowContinuation::AfterObjectComStop);
+        throws.clear();
+        assert_eq!(
+            throws.resolve_event_instance_id(
+                CommandEventInstanceKind::Prelude(CommandId::Throw),
+                0,
+            ),
+            detached_throw
+        );
+
+        let mut drops = CommandStack::new();
+        drops
+            .push_front(CommandRequest::new(CommandId::Drop))
+            .expect("Drop queues");
+        let detached_drop = drops.entries.front().expect("Drop remains").instance_id;
+        let CommandState::Drop(state) = &mut drops.entries.front_mut().unwrap().state else {
+            panic!("command should be Drop");
+        };
+        state
+            .continuations
+            .push(DropContinuation::AfterObjectComStop);
+        drops.clear();
+        assert_eq!(
+            drops.resolve_event_instance_id(
+                CommandEventInstanceKind::Prelude(CommandId::Drop),
+                0,
+            ),
+            detached_drop
+        );
+
+        let mut activation = CommandStack::new();
+        activation
+            .push_front(CommandRequest::new(CommandId::Exit))
+            .expect("Exit queues");
+        let detached_activation = activation.entries.front().expect("Exit remains").instance_id;
+        let CommandState::Exit(state) = &mut activation.entries.front_mut().unwrap().state else {
+            panic!("command should be Exit");
+        };
+        state.activation_pending = 1;
+        activation.clear();
+        assert_eq!(
+            activation.resolve_event_instance_id(CommandEventInstanceKind::ExitActivation, 0),
+            detached_activation
+        );
+    }
+
+    #[test]
+    fn zero_token_throw_and_drop_preludes_pin_the_resolved_command_instance() {
+        let actor_id = ObjectId::new(624);
+        let item_id = ObjectId::new(625);
+        let mut digging = snapshot_with_id(actor_id.as_u64());
+        digging.action_procedure = ActionProcedure::Dig;
+        digging.contents = vec![item_id];
+        let mut item = snapshot_with_id(item_id.as_u64());
+        item.container = Some(actor_id);
+        let digging_objects = HashMap::from([(actor_id, digging.clone()), (item_id, item.clone())]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let digging_ctx = move_to_ctx_at_frame(
+            digging_objects.get(&actor_id).expect("actor present"),
+            &digging_objects,
+            &players,
+            &definitions,
+            1,
+        );
+        let mut walking = digging;
+        walking.action_procedure = ActionProcedure::Walk;
+        let walking_objects = HashMap::from([(actor_id, walking), (item_id, item)]);
+        let walking_ctx = move_to_ctx_at_frame(
+            walking_objects.get(&actor_id).expect("actor present"),
+            &walking_objects,
+            &players,
+            &definitions,
+            1,
+        );
+
+        let mut throws = CommandStack::new();
+        throws
+            .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(item_id)))
+            .expect("original Throw queues");
+        let original_throw = throws.entries.front().expect("original Throw").instance_id;
+        assert!(matches!(
+            throws
+                .execute_front(&digging_ctx)
+                .expect("Throw starts")
+                .events
+                .as_slice(),
+            [CommandEvent::ObjectComStopThrow { .. }]
+        ));
+        throws.clear();
+        throws
+            .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(item_id)))
+            .expect("replacement Throw queues");
+        let replacement_throw = throws.entries.front().expect("replacement Throw").instance_id;
+        let resumed_throw = throws
+            .execute_pending_throw_prelude(
+                &walking_ctx,
+                crate::PhysicsSettings::default().gravity_as_c4fixed(),
+                0,
+            )
+            .expect("deserialized Throw prelude resumes");
+        let [CommandEvent::ThrowObject {
+            command_instance_id,
+            ..
+        }] = resumed_throw.events.as_slice()
+        else {
+            panic!("unexpected Throw events: {:?}", resumed_throw.events);
+        };
+        assert_eq!(*command_instance_id, original_throw);
+        assert!(!throws.finish_command_instance(CommandId::Throw, *command_instance_id));
+        assert_eq!(throws.entries.front().unwrap().instance_id, replacement_throw);
+        assert_eq!(throws.entries.front().unwrap().finished, None);
+
+        let mut drops = CommandStack::new();
+        drops
+            .push_front(CommandRequest::new(CommandId::Drop).with_target(Some(item_id)))
+            .expect("original Drop queues");
+        let original_drop = drops.entries.front().expect("original Drop").instance_id;
+        assert!(matches!(
+            drops
+                .execute_front(&digging_ctx)
+                .expect("Drop starts")
+                .events
+                .as_slice(),
+            [CommandEvent::ObjectComStopDrop { .. }]
+        ));
+        drops.clear();
+        drops
+            .push_front(CommandRequest::new(CommandId::Drop).with_target(Some(item_id)))
+            .expect("replacement Drop queues");
+        let replacement_drop = drops.entries.front().expect("replacement Drop").instance_id;
+        let CommandState::Drop(replacement_state) = &mut drops.entries.front_mut().unwrap().state
+        else {
+            panic!("replacement command should be Drop");
+        };
+        replacement_state.completion_pending = true;
+        let resumed_drop = drops
+            .execute_pending_drop_prelude(&walking_ctx, 0)
+            .expect("deserialized Drop prelude resumes");
+        let [CommandEvent::ObjectComDrop {
+            command_instance_id,
+            ..
+        }] = resumed_drop.events.as_slice()
+        else {
+            panic!("unexpected Drop events: {:?}", resumed_drop.events);
+        };
+        assert_eq!(*command_instance_id, original_drop);
+        assert!(!drops.finish_pending_drop(*command_instance_id));
+        assert_eq!(drops.entries.front().unwrap().instance_id, replacement_drop);
+        assert_eq!(drops.entries.front().unwrap().finished, None);
     }
 
     #[test]
@@ -5956,6 +6411,424 @@ mod tests {
                 .map(|result| result.status),
             Some(CommandStatus::Failed)
         );
+
+        let mut retained_objects = objects.clone();
+        let retained_target = retained_objects
+            .get_mut(&target_id)
+            .expect("target tombstone remains addressable");
+        retained_target.status = ObjectStatus::Deleted;
+        retained_target.destroyed = true;
+        let retained_actor = retained_objects.get(&actor_id).expect("actor present");
+        let retained_ctx =
+            move_to_ctx_at_frame(retained_actor, &retained_objects, &players, &definitions, 0);
+        let mut retained = EnterState::from_request(
+            &CommandRequest::new(CommandId::Enter).with_target(Some(target_id)),
+        )
+        .expect("retained Enter state");
+        let result = retained.step(&retained_ctx);
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(
+            result.operations.is_empty(),
+            "GetEntranceArea rejects Status==0, so Enter stays pending without MoveTo"
+        );
+    }
+
+    #[test]
+    fn command_references_accept_inactive_status_and_contents_like_cpp() {
+        let actor_id = ObjectId::new(70);
+        let target_id = ObjectId::new(71);
+        let source_id = ObjectId::new(72);
+        let container_id = ObjectId::new(73);
+        let deleted_conkit_id = ObjectId::new(74);
+        let conkit_id = ObjectId::new(75);
+        let deleted_content_id = ObjectId::new(76);
+        let content_id = ObjectId::new(77);
+        let deleted_linekit_id = ObjectId::new(78);
+        let linekit_id = ObjectId::new(79);
+
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.owner = 0;
+        actor.controller = 0;
+        actor.command_direction = CommandDirection::Right;
+        actor.action_procedure = ActionProcedure::Walk;
+        actor.physical.can_chop = 1;
+        actor.physical.can_construct = 1;
+        actor.contents = vec![
+            deleted_conkit_id,
+            conkit_id,
+            deleted_linekit_id,
+            linekit_id,
+        ];
+
+        let mut target = snapshot_with_id(target_id.as_u64());
+        target.status = ObjectStatus::Inactive;
+        target.alive = false;
+        target.ocf = 0;
+        target.command_direction = CommandDirection::Left;
+        target.need_energy = true;
+        target.line_connect = LINE_CONNECT_POWER_INPUT;
+
+        let mut source = snapshot_with_id(source_id.as_u64());
+        source.status = ObjectStatus::Inactive;
+        source.alive = false;
+        source.ocf = ocf::POWER_SUPPLY;
+        source.line_connect = crate::LINE_CONNECT_POWER_OUTPUT;
+        source.shape = DefinitionRect::new(-10, -10, 20, 20);
+
+        let mut container = snapshot_with_id(container_id.as_u64());
+        container.status = ObjectStatus::Inactive;
+        container.alive = false;
+        container.ocf = ocf::ENTRANCE;
+        container.entrance_status = false;
+        container.contents = vec![deleted_content_id, content_id];
+
+        let mut deleted_conkit = snapshot_with_id(deleted_conkit_id.as_u64());
+        deleted_conkit.definition_id = CONKIT_DEFINITION.into();
+        deleted_conkit.status = ObjectStatus::Deleted;
+        deleted_conkit.destroyed = true;
+        deleted_conkit.container = Some(actor_id);
+
+        let mut conkit = snapshot_with_id(conkit_id.as_u64());
+        conkit.definition_id = CONKIT_DEFINITION.into();
+        conkit.status = ObjectStatus::Inactive;
+        conkit.alive = false;
+        conkit.container = Some(actor_id);
+
+        let mut deleted_linekit = snapshot_with_id(deleted_linekit_id.as_u64());
+        deleted_linekit.definition_id = LINEKIT_DEFINITION.into();
+        deleted_linekit.status = ObjectStatus::Deleted;
+        deleted_linekit.destroyed = true;
+        deleted_linekit.container = Some(actor_id);
+
+        let mut linekit = snapshot_with_id(linekit_id.as_u64());
+        linekit.definition_id = LINEKIT_DEFINITION.into();
+        linekit.status = ObjectStatus::Inactive;
+        linekit.alive = false;
+        linekit.container = Some(actor_id);
+
+        let mut deleted_content = snapshot_with_id(deleted_content_id.as_u64());
+        deleted_content.definition_id = "ROCK".into();
+        deleted_content.status = ObjectStatus::Deleted;
+        deleted_content.destroyed = true;
+        deleted_content.container = Some(container_id);
+
+        let mut content = snapshot_with_id(content_id.as_u64());
+        content.definition_id = "ROCK".into();
+        content.status = ObjectStatus::Inactive;
+        content.alive = false;
+        content.collectible = true;
+        content.container = Some(container_id);
+
+        let objects = HashMap::from([
+            (actor_id, actor.clone()),
+            (target_id, target),
+            (source_id, source),
+            (container_id, container),
+            (deleted_conkit_id, deleted_conkit),
+            (conkit_id, conkit),
+            (deleted_linekit_id, deleted_linekit),
+            (linekit_id, linekit),
+            (deleted_content_id, deleted_content),
+            (content_id, content),
+        ]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut transfer_zones = TransferZoneTable::default();
+        transfer_zones.set(
+            target_id,
+            TransferZoneRect {
+                x: -5,
+                y: -5,
+                width: 10,
+                height: 10,
+            },
+        );
+        let actor = objects.get(&actor_id).expect("actor present");
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: actor.position,
+            object: actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: true,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &transfer_zones,
+            rng: None,
+        };
+
+        let mut follow = FollowState::from_request(
+            &CommandRequest::new(CommandId::Follow).with_target(Some(target_id)),
+        )
+        .expect("Follow state");
+        let follow_result = follow.step(&ctx);
+        assert_eq!(follow_result.status, CommandStatus::Running);
+        assert_eq!(
+            follow_result
+                .update
+                .and_then(|update| update.command_direction),
+            Some(CommandDirection::Left),
+            "inactive Follow target remains a retained pointer"
+        );
+
+        let mut chop = ChopState::from_request(
+            &CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
+        )
+        .expect("Chop state");
+        assert_eq!(
+            chop.step(&ctx).status,
+            CommandStatus::Completed,
+            "an inactive non-choppable target takes C++'s assume-chopped success"
+        );
+
+        let mut push_to = PushToState::from_request(
+            &CommandRequest::new(CommandId::PushTo)
+                .with_target(Some(target_id))
+                .with_tx(Some(0))
+                .with_ty(Some(0))
+                .with_evaluated(true),
+        )
+        .expect("PushTo state");
+        assert_eq!(push_to.step(&ctx).status, CommandStatus::Completed);
+
+        let mut transfer = TransferState::from_request(
+            &CommandRequest::new(CommandId::Transfer).with_target(Some(target_id)),
+        )
+        .expect("Transfer state");
+        let transfer_result = transfer.step(&ctx);
+        assert_eq!(transfer_result.status, CommandStatus::Running);
+        assert!(matches!(
+            transfer_result.events.as_slice(),
+            [CommandEvent::ControlTransfer { object_id, .. }] if *object_id == target_id
+        ));
+
+        let mut context = ContextState::from_request(
+            &CommandRequest::new(CommandId::Context).with_target2(Some(target_id)),
+        )
+        .expect("Context state");
+        let context_result = context.step(&ctx);
+        assert_eq!(context_result.status, CommandStatus::Completed);
+        assert!(matches!(
+            context_result.events.as_slice(),
+            [CommandEvent::OpenMenu(MenuRequest {
+                kind: MenuRequestKind::Context { target, .. },
+                ..
+            })] if *target == target_id
+        ));
+
+        let mut call = CallState::from_request(
+            &CommandRequest::new(CommandId::Call)
+                .with_target(Some(target_id))
+                .with_target2(Some(source_id))
+                .with_data(CommandData::Text("Work".into())),
+        )
+        .expect("Call state");
+        let call_result = call.step(&ctx);
+        assert_eq!(call_result.status, CommandStatus::Completed);
+        assert!(matches!(
+            call_result.events.as_slice(),
+            [CommandEvent::CallObjectFunction {
+                object_id,
+                target2: Some(argument),
+                ..
+            }] if *object_id == target_id && *argument == source_id
+        ));
+
+        let mut energy = EnergyState::from_request(
+            &CommandRequest::new(CommandId::Energy)
+                .with_target(Some(target_id))
+                .with_target2(Some(source_id)),
+        )
+        .expect("Energy state");
+        let energy_result = energy.step(&ctx);
+        assert_eq!(energy_result.status, CommandStatus::Running);
+        assert!(matches!(
+            energy_result.events.as_slice(),
+            [CommandEvent::CreateLine { from, to, .. }]
+                if *from == source_id && *to == linekit_id
+        ));
+
+        let mut auto_energy = EnergyState::from_request(
+            &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
+        )
+        .expect("auto-source Energy state");
+        assert_eq!(
+            auto_energy.step(&ctx).status,
+            CommandStatus::Failed,
+            "inactive objects are retained references, not active Game.FindObject candidates"
+        );
+
+        let construct = ConstructState::from_request(
+            &CommandRequest::new(CommandId::Construct)
+                .with_data(CommandData::Text("HUT1".into())),
+        );
+        assert_eq!(construct.builder_has_conkit(&ctx), Some(conkit_id));
+
+        let activate = ActivateState::from_request(
+            &CommandRequest::new(CommandId::Activate)
+                .with_target2(Some(container_id))
+                .with_data(CommandData::Text("ROCK".into())),
+        )
+        .expect("Activate state");
+        assert_eq!(
+            activate.find_release_candidate(&ctx, container_id, &HashSet::new()),
+            Some(content_id)
+        );
+        let mut activate_inactive = ActivateState::from_request(
+            &CommandRequest::new(CommandId::Activate).with_target(Some(target_id)),
+        )
+        .expect("inactive-target Activate state");
+        assert_eq!(
+            activate_inactive.step(&ctx).status,
+            CommandStatus::Completed
+        );
+        let mut activate_deleted = CommandStack::new();
+        activate_deleted
+            .push_front(
+                CommandRequest::new(CommandId::Activate).with_target(Some(deleted_content_id)),
+            )
+            .expect("removed-target Activate queues");
+        assert!(activate_deleted.clear_object_reference(deleted_content_id));
+        assert_eq!(
+            activate_deleted
+                .execute_front(&ctx)
+                .map(|result| result.status),
+            Some(CommandStatus::Failed)
+        );
+
+        let mut get = GetState::from_request(
+            &CommandRequest::new(CommandId::Get)
+                .with_target2(Some(container_id))
+                .with_data(CommandData::Text("ROCK".into())),
+        )
+        .expect("Get state");
+        assert_eq!(get.resolve_target(&ctx), Some(content_id));
+
+        let mut put_contents = PutState::from_request(
+            &CommandRequest::new(CommandId::Put).with_target(Some(container_id)),
+        )
+        .expect("Put contents state");
+        assert_eq!(
+            put_contents
+                .resolve_item(&ctx)
+                .expect("contents lookup succeeds")
+                .map(|(id, _)| id),
+            Some(conkit_id)
+        );
+
+        let mut put = PutState::from_request(
+            &CommandRequest::new(CommandId::Put)
+                .with_target(Some(container_id))
+                .with_target2(Some(content_id)),
+        )
+        .expect("Put state");
+        assert_eq!(put.step(&ctx).status, CommandStatus::Completed);
+
+        let mut acquire = AcquireState::from_request(
+            &CommandRequest::new(CommandId::Acquire)
+                .with_data(CommandData::Text(CONKIT_DEFINITION.into()))
+                .with_evaluated(true),
+        )
+        .expect("Acquire state");
+        assert_eq!(acquire.step(&ctx).status, CommandStatus::Completed);
+
+        let mut drop_state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
+        assert_eq!(drop_state.resolve_item(&ctx).map(|(id, _)| id), Some(conkit_id));
+
+        let throw_state = ThrowState::from_request(&CommandRequest::new(CommandId::Throw))
+            .expect("Throw state");
+        let throw_result = throw_state.step_object_com_throw(&ctx, false);
+        assert!(matches!(
+            throw_result.events.as_slice(),
+            [CommandEvent::ThrowObject { object_id, .. }] if *object_id == conkit_id
+        ));
+        let mut cleared_throw_stack = CommandStack::new();
+        cleared_throw_stack
+            .push_front(
+                CommandRequest::new(CommandId::Throw).with_target(Some(deleted_content_id)),
+            )
+            .expect("removed-target Throw queues");
+        assert!(cleared_throw_stack.clear_object_reference(deleted_content_id));
+        let CommandState::Throw(cleared_throw) =
+            &mut cleared_throw_stack.entries.front_mut().expect("Throw remains").state
+        else {
+            panic!("Throw remains at the front");
+        };
+        let gravity = crate::PhysicsSettings::default().gravity_as_c4fixed();
+        let cleared_throw_result = cleared_throw.step_after_object_com_stop(&ctx, gravity);
+        assert_eq!(cleared_throw.target, None);
+        assert!(matches!(
+            cleared_throw_result.events.as_slice(),
+            [CommandEvent::ThrowObject { object_id, .. }] if *object_id == conkit_id
+        ));
+
+        let mut contained_actor = actor.clone();
+        contained_actor.container = Some(container_id);
+        let contained_ctx = CommandRuntimeContext {
+            object: &contained_actor,
+            ..ctx.clone()
+        };
+        let mut exit = ExitState::from_request(
+            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
+        )
+        .expect("Exit state");
+        let exit_result = exit.step(&contained_ctx);
+        assert_eq!(exit_result.status, CommandStatus::Running);
+        assert!(matches!(
+            exit_result.events.as_slice(),
+            [CommandEvent::ActivateEntrance { object_id, .. }] if *object_id == container_id
+        ));
+
+        let mut take2 = Take2State::from_request(&CommandRequest::new(CommandId::Take2))
+            .expect("Take2 state");
+        let take2_result = take2.step(&contained_ctx);
+        assert_eq!(take2_result.status, CommandStatus::Completed);
+        assert!(matches!(
+            take2_result.events.as_slice(),
+            [CommandEvent::OpenMenu(MenuRequest {
+                kind: MenuRequestKind::Get { container },
+                ..
+            })] if *container == container_id
+        ));
+
+        let required_targets = [
+            CommandRequest::new(CommandId::Build).with_target(Some(target_id)),
+            CommandRequest::new(CommandId::Transfer).with_target(Some(target_id)),
+            CommandRequest::new(CommandId::Chop).with_target(Some(target_id)),
+            CommandRequest::new(CommandId::Put).with_target(Some(target_id)),
+            CommandRequest::new(CommandId::Attack).with_target(Some(target_id)),
+            CommandRequest::new(CommandId::Context).with_target2(Some(target_id)),
+            CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
+        ];
+        for request in required_targets {
+            let command = request.id;
+            let mut stack = CommandStack::new();
+            stack.push_front(request).expect("command queues");
+            assert!(
+                stack.clear_object_reference(target_id),
+                "{} Target/Target2 is cleared",
+                command.to_name()
+            );
+            let cleared_target = match &stack.entries.front().expect("entry retained").state {
+                CommandState::Build(state) => state.target,
+                CommandState::Transfer(state) => state.target,
+                CommandState::Chop(state) => state.target,
+                CommandState::Put(state) => state.container,
+                CommandState::Attack(state) => state.target,
+                CommandState::Context(state) => state.target,
+                CommandState::Energy(state) => state.target,
+                _ => panic!("unexpected required-target state"),
+            };
+            assert_eq!(cleared_target, ObjectId::new(0), "{}", command.to_name());
+            assert_eq!(
+                stack.execute_front(&ctx).map(|result| result.status),
+                Some(CommandStatus::Failed),
+                "cleared {} cannot execute through the still-resolvable inactive object",
+                command.to_name()
+            );
+        }
     }
 
     #[test]
@@ -6590,11 +7463,11 @@ mod tests {
         actor.action_procedure = ActionProcedure::Walk;
 
         let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(10, 10);
-        target.shape = DefinitionRect::new(0, 0, 20, 20);
+        target.position = Vector2::new(40, 10);
+        target.shape = DefinitionRect::new(30, 0, 20, 20);
         target.ocf = ocf::NORMAL;
-        target.status = crate::ObjectStatus::Deleted;
-        target.destroyed = true;
+        target.status = crate::ObjectStatus::Inactive;
+        target.alive = false;
 
         let objects = HashMap::from([(actor_id, actor.clone()), (target_id, target)]);
         let players = HashMap::new();
@@ -6614,7 +7487,36 @@ mod tests {
             result.operations.as_slice(),
             [CommandOperation::PushFront(request)]
                 if request.id == CommandId::MoveTo
-                    && request.tx == Some(10)
+                    && request.tx == Some(40)
+                    && request.ty == Some(10)
+        ));
+
+        let mut retained_deleted_objects = objects.clone();
+        let deleted_target = retained_deleted_objects
+            .get_mut(&target_id)
+            .expect("target remains addressable as a tombstone");
+        deleted_target.status = crate::ObjectStatus::Deleted;
+        deleted_target.destroyed = true;
+        let deleted_ctx = move_to_ctx_at_frame(
+            retained_deleted_objects
+                .get(&actor_id)
+                .expect("actor present"),
+            &retained_deleted_objects,
+            &players,
+            &definitions,
+            0,
+        );
+        let mut deleted_state = GrabState::from_request(
+            &CommandRequest::new(CommandId::Grab).with_target(Some(target_id)),
+        )
+        .expect("deleted-target Grab state");
+        let deleted_result = deleted_state.step(&deleted_ctx);
+        assert_eq!(deleted_result.status, CommandStatus::Running);
+        assert!(matches!(
+            deleted_result.operations.as_slice(),
+            [CommandOperation::PushFront(request)]
+                if request.id == CommandId::MoveTo
+                    && request.tx == Some(40)
                     && request.ty == Some(10)
         ));
     }
@@ -9394,14 +10296,19 @@ mod tests {
         assert!(update.velocity.is_none());
 
         let execution = state.step(&ctx);
-        assert_eq!(execution.status, CommandStatus::Completed);
+        assert_eq!(execution.status, CommandStatus::Running);
         assert!(execution.operations.is_empty());
-        assert!(execution.events.is_empty());
-        let update = execution.update.expect("second Execute exits");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
-        assert_eq!(update.container, Some(None));
-        assert_eq!(update.position, Some(container.position));
-        assert_eq!(update.velocity, Some(Vector2::ZERO));
+        assert!(execution.update.is_none());
+        assert_eq!(
+            execution.events,
+            [CommandEvent::CommandExitObject {
+                object_id: actor_id,
+                previous_container: container_id,
+                position: actor.position,
+                jump_after: false,
+                command_instance_id: 0,
+            }]
+        );
     }
 
     #[test]
@@ -9443,19 +10350,18 @@ mod tests {
         assert!(result.operations.is_empty());
         assert_eq!(
             result.events,
-            [CommandEvent::ObjectComExitJump {
+            [CommandEvent::CommandExitObject {
                 object_id: actor_id,
+                previous_container: container_id,
+                position: Vector2::new(80, 94),
+                jump_after: true,
                 command_instance_id: 0,
             }]
         );
-        let update = result.update.expect("collection-area exit update");
         assert!(
-            update.command_direction.is_none(),
-            "ObjectComJump consumes the preserved Left ComDir"
+            result.update.is_none(),
+            "the live Exit event preserves Left ComDir for ObjectComJump"
         );
-        assert_eq!(update.container, Some(None));
-        assert_eq!(update.position, Some(Vector2::new(80, 94)));
-        assert_eq!(update.velocity, Some(Vector2::ZERO));
     }
 
     #[test]
@@ -9495,7 +10401,7 @@ mod tests {
     }
 
     #[test]
-    fn exit_moves_into_parent_container_when_nested() {
+    fn exit_attempts_live_enter_into_parent_container_when_nested() {
         let actor_id = ObjectId::new(60);
         let container_id = ObjectId::new(70);
         let parent_id = ObjectId::new(80);
@@ -9540,12 +10446,17 @@ mod tests {
                 .expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
-        let update = result.update.expect("exit should update actor");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
-        assert_eq!(update.container, Some(Some(parent_id)));
-        assert_eq!(update.position, Some(parent.position));
-        assert_eq!(update.velocity, Some(Vector2::ZERO));
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none());
+        assert_eq!(
+            result.events,
+            [CommandEvent::CommandExitIntoParent {
+                object_id: actor_id,
+                container_id: parent_id,
+                command_instance_id: 0,
+            }],
+            "C4Object::Enter, including callbacks and Status checks, runs live"
+        );
     }
 
     #[test]
@@ -9555,6 +10466,7 @@ mod tests {
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.container = Some(container_id);
+        actor.position = Vector2::new(7, 9);
         actor.command_direction = CommandDirection::Left;
 
         let mut container = snapshot_with_id(container_id.as_u64());
@@ -9588,12 +10500,18 @@ mod tests {
                 .expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
-        let update = result.update.expect("exit should update actor");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
-        assert_eq!(update.container, Some(None));
-        assert_eq!(update.position, Some(container.position));
-        assert_eq!(update.velocity, Some(Vector2::ZERO));
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none());
+        assert_eq!(
+            result.events,
+            [CommandEvent::CommandExitObject {
+                object_id: actor_id,
+                previous_container: container_id,
+                position: actor.position,
+                jump_after: false,
+                command_instance_id: 0,
+            }]
+        );
     }
 
     #[test]
@@ -9643,11 +10561,18 @@ mod tests {
                 .expect("state created");
 
         let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
-        let update = result.update.expect("exit should update actor");
-        assert_eq!(update.container, Some(None));
-        assert_eq!(update.position, Some(Vector2::new(576, 266)));
-        assert_eq!(update.velocity, Some(Vector2::ZERO));
+        assert_eq!(result.status, CommandStatus::Running);
+        assert!(result.update.is_none());
+        assert_eq!(
+            result.events,
+            [CommandEvent::CommandExitObject {
+                object_id: actor_id,
+                previous_container: container_id,
+                position: Vector2::new(576, 266),
+                jump_after: false,
+                command_instance_id: 0,
+            }]
+        );
     }
 
     #[test]
@@ -9697,6 +10622,7 @@ mod tests {
                 object_id,
                 caller,
                 on_result,
+                ..
             } => {
                 assert_eq!(*object_id, container_id);
                 assert_eq!(*caller, actor_id);
@@ -9714,7 +10640,7 @@ mod tests {
             armed.events.as_slice(),
             [CommandEvent::ActivateEntrance { .. }]
         ));
-        assert!(stack.resolve_exit_activation(false).is_some());
+        assert!(stack.resolve_exit_activation(false, 0).is_some());
         assert!(stack.finished_front_view().is_some());
     }
 
@@ -9756,14 +10682,18 @@ mod tests {
         let actor_snapshot = objects.get(&actor_id).expect("actor present");
         let next_ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 101);
         let next = state.step(&next_ctx);
-        assert_eq!(next.status, CommandStatus::Completed);
-        assert_eq!(next.update.and_then(|update| update.container), Some(None));
+        assert_eq!(next.status, CommandStatus::Running);
+        assert!(matches!(
+            next.events.as_slice(),
+            [CommandEvent::CommandExitObject { .. }]
+        ));
     }
 
     #[test]
-    fn exit_stops_building_procedure() {
+    fn exit_stops_building_then_rechecks_callback_mutated_containment() {
         let actor_id = ObjectId::new(110);
         let container_id = ObjectId::new(120);
+        let callback_container_id = ObjectId::new(121);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
         actor.container = Some(container_id);
@@ -9799,12 +10729,95 @@ mod tests {
             ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
                 .expect("state created");
 
-        let result = state.step(&ctx);
-        assert_eq!(result.status, CommandStatus::Completed);
-        let update = result.update.expect("exit should update actor");
-        let action = update.action.expect("exit should reset action");
-        assert_eq!(action.name.as_deref(), Some("Idle"));
-        assert!(action.force);
+        let stop = state.step(&ctx);
+        assert_eq!(stop.status, CommandStatus::Running);
+        assert!(stop.update.is_none(), "ObjectComStop must run live");
+        assert_eq!(
+            stop.events,
+            [CommandEvent::ObjectComStopExit {
+                object_id: actor_id,
+                command_instance_id: 0,
+            }]
+        );
+
+        // SetAction(Idle/Walk) may execute script callbacks. Native resumes
+        // this same Exit invocation only after those callbacks return, so it
+        // must re-read Contained and the actor coordinates rather than use
+        // the pre-stop snapshots (C4Command.cpp:624-653).
+        let mut callback_actor = actor.clone();
+        callback_actor.container = Some(callback_container_id);
+        callback_actor.action_procedure = ActionProcedure::Walk;
+        callback_actor.position = Vector2::new(31, 41);
+        let mut callback_container = snapshot_with_id(callback_container_id.as_u64());
+        callback_container.entrance_status = true;
+        let callback_objects = HashMap::from([
+            (actor_id, callback_actor.clone()),
+            (callback_container_id, callback_container),
+        ]);
+        let callback_ctx = move_to_ctx_at_frame(
+            &callback_actor,
+            &callback_objects,
+            &players,
+            &definitions,
+            30,
+        );
+
+        let resumed = state.resume_after_stop(&callback_ctx);
+        assert_eq!(resumed.status, CommandStatus::Running);
+        assert!(resumed.update.is_none());
+        assert_eq!(
+            resumed.events,
+            [CommandEvent::CommandExitObject {
+                object_id: actor_id,
+                previous_container: callback_container_id,
+                position: callback_actor.position,
+                jump_after: false,
+                command_instance_id: 0,
+            }]
+        );
+
+        // ClearCommands from either action callback unlinks the executing
+        // Exit, but its iExec lifetime continues through the rest of this
+        // invocation. A same-type replacement must not inherit the old
+        // completion, including through the legacy zero-token seam.
+        let mut stack = CommandStack::new();
+        stack
+            .push_front(CommandRequest::new(CommandId::Exit).with_evaluated(true))
+            .expect("original Exit queues");
+        let original_instance_id = stack.entries.front().expect("original Exit").instance_id;
+        let stop = stack.execute_front(&ctx).expect("original Exit stops Build");
+        assert!(matches!(
+            stop.events.as_slice(),
+            [CommandEvent::ObjectComStopExit {
+                command_instance_id,
+                ..
+            }] if *command_instance_id == original_instance_id
+        ));
+        stack.clear();
+        stack
+            .push_front(CommandRequest::new(CommandId::Exit).with_evaluated(true))
+            .expect("callback replacement Exit queues");
+        let replacement_instance_id = stack.entries.front().expect("replacement Exit").instance_id;
+        assert_ne!(replacement_instance_id, original_instance_id);
+
+        let resumed = stack
+            .execute_pending_exit_stop(&callback_ctx, 0)
+            .expect("detached original Exit resumes");
+        let [CommandEvent::CommandExitObject {
+            command_instance_id,
+            ..
+        }] = resumed.events.as_slice()
+        else {
+            panic!("unexpected detached Exit events: {:?}", resumed.events);
+        };
+        assert_eq!(*command_instance_id, original_instance_id);
+        assert!(
+            !stack.finish_command_instance(CommandId::Exit, *command_instance_id),
+            "the detached original is no longer in the visible stack"
+        );
+        let replacement = stack.entries.front().expect("replacement remains");
+        assert_eq!(replacement.instance_id, replacement_instance_id);
+        assert_eq!(replacement.finished, None);
     }
 
     #[test]
@@ -10683,34 +11696,27 @@ mod tests {
         assert_eq!(result.operations.len(), 0);
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
-            CommandEvent::CallObjectFunction {
+            CommandEvent::ControlTransfer {
                 object_id,
-                function,
                 caller,
-                tx,
                 tx_value,
-                tx_definition,
                 ty,
-                target2,
-                on_result,
+                command_instance_id,
             } => {
                 assert_eq!(*object_id, target_id);
-                assert_eq!(function, "ControlTransfer");
                 assert_eq!(*caller, actor_id);
-                assert_eq!(*tx, Some(42));
-                assert_eq!(tx_value, &Some(lc_script::Value::Int(42)));
-                assert!(tx_definition.is_none());
-                assert_eq!(*ty, Some(-5));
-                assert!(target2.is_none());
-                match on_result {
-                    Some(CallResultAction::CompleteCommandOnFalse { command }) => {
-                        assert_eq!(*command, CommandId::Transfer);
-                    }
-                    other => panic!("unexpected result action: {:?}", other),
-                }
+                assert_eq!(tx_value, &lc_script::Value::Int(42));
+                assert_eq!(*ty, -5);
+                assert_eq!(*command_instance_id, 0);
             }
             other => panic!("unexpected event: {:?}", other),
         }
+
+        let repeated_same_tick = state.step(&ctx);
+        assert!(matches!(
+            repeated_same_tick.events.as_slice(),
+            [CommandEvent::ControlTransfer { .. }]
+        ), "Tick5 is a frame predicate, not a per-command cooldown");
 
         let ctx_next = CommandRuntimeContext {
             landscape: None,
@@ -10735,6 +11741,19 @@ mod tests {
             "non-Tick5 Transfer leaves ComDir Right untouched"
         );
         assert!(follow_up.events.is_empty());
+
+        let tagged_tx = lc_script::Value::C4Id("GOLD".to_string());
+        let mut tagged_state = TransferState::from_request(
+            &CommandRequest::new(CommandId::Transfer)
+                .with_target(Some(target_id))
+                .with_tx_value(tagged_tx.clone()),
+        )
+        .expect("tagged Transfer state");
+        let tagged = tagged_state.step(&ctx);
+        assert!(matches!(
+            tagged.events.as_slice(),
+            [CommandEvent::ControlTransfer { tx_value, .. }] if tx_value == &tagged_tx
+        ));
     }
 
     #[test]
@@ -11048,13 +12067,31 @@ mod tests {
             objects: &deleted_objects,
             ..ctx
         };
-        let mut deleted = ActivateState::from_request(
+        let mut retained_deleted = ActivateState::from_request(
             &CommandRequest::new(CommandId::Activate).with_target2(Some(container_id)),
         )
         .expect("deleted-target activate state");
-        let deleted_result = deleted.step(&deleted_ctx);
-        assert_eq!(deleted_result.status, CommandStatus::Failed);
-        assert!(deleted_result.events.is_empty());
+        let deleted_result = retained_deleted.step(&deleted_ctx);
+        assert_eq!(deleted_result.status, CommandStatus::Completed);
+        assert!(matches!(
+            deleted_result.events.as_slice(),
+            [CommandEvent::OpenMenu(MenuRequest {
+                kind: MenuRequestKind::ActivateTarget { container },
+                ..
+            })] if *container == container_id
+        ));
+
+        let mut cleared = CommandStack::new();
+        cleared
+            .push_front(
+                CommandRequest::new(CommandId::Activate).with_target2(Some(container_id)),
+            )
+            .expect("Activate queues");
+        assert!(cleared.clear_object_reference(container_id));
+        assert_eq!(
+            cleared.execute_front(&deleted_ctx).map(|result| result.status),
+            Some(CommandStatus::Failed)
+        );
     }
 
     #[test]
@@ -12497,7 +13534,7 @@ mod tests {
                 &CommandRequest::new(CommandId::Energy).with_target(Some(target_id)),
             )
             .expect("energy state");
-            state.resolve_source(&ctx)
+            state.resolve_source(&ctx, target_id)
         };
 
         assert_eq!(choose(&objects), Some(higher_id_earlier));
@@ -14153,6 +15190,99 @@ mod tests {
     }
 
     #[test]
+    fn get_event_target_freezes_clear_pointer_order_at_detachment() {
+        let target = ObjectId::new(98);
+
+        let mut attached = CommandStack::new();
+        attached
+            .push_front(CommandRequest::new(CommandId::Get).with_target(Some(target)))
+            .expect("Get queues");
+        let attached_id = attached.entries.front().expect("Get remains").instance_id;
+        let CommandState::Get(state) = &mut attached.entries.front_mut().unwrap().state else {
+            panic!("command should be Get");
+        };
+        state.enter_pending = true;
+        assert!(attached.clear_object_reference(target));
+        assert_eq!(
+            attached.get_event_target_after_callback(attached_id, target),
+            None,
+            "ClearPointers reaches a still-linked executing Get"
+        );
+
+        let mut detached = CommandStack::new();
+        detached
+            .push_front(CommandRequest::new(CommandId::Get).with_target(Some(target)))
+            .expect("Get queues");
+        let detached_id = detached.entries.front().expect("Get remains").instance_id;
+        let CommandState::Get(state) = &mut detached.entries.front_mut().unwrap().state else {
+            panic!("command should be Get");
+        };
+        state.enter_pending = true;
+        detached.clear();
+        detached
+            .push_front(
+                CommandRequest::new(CommandId::Get).with_target(Some(ObjectId::new(99))),
+            )
+            .expect("replacement Get queues");
+        let CommandState::Get(state) = &mut detached.entries.front_mut().unwrap().state else {
+            panic!("replacement command should be Get");
+        };
+        state.enter_pending = true;
+        assert_eq!(
+            detached.get_event_target_after_callback(detached_id, target),
+            Some(target),
+            "an unlinked iExec Get retains its raw Target"
+        );
+        let detached_resolution = detached
+            .resolve_get_attempt(detached_id, GetAttemptDisposition::Fail)
+            .expect("the detached native Get still runs its failure tail");
+        assert_eq!(
+            detached_resolution
+                .feedback
+                .as_ref()
+                .map(|feedback| feedback.command.name.as_str()),
+            Some("Get")
+        );
+        assert!(matches!(
+            &detached.entries.front().expect("replacement remains").state,
+            CommandState::Get(state) if state.enter_pending
+        ));
+
+        let mut cleared_then_detached = CommandStack::new();
+        cleared_then_detached
+            .push_front(CommandRequest::new(CommandId::Get).with_target(Some(target)))
+            .expect("Get queues");
+        let cleared_id = cleared_then_detached
+            .entries
+            .front()
+            .expect("Get remains")
+            .instance_id;
+        let CommandState::Get(state) =
+            &mut cleared_then_detached.entries.front_mut().unwrap().state
+        else {
+            panic!("command should be Get");
+        };
+        state.enter_pending = true;
+        assert!(cleared_then_detached.clear_object_reference(target));
+        cleared_then_detached.clear();
+        let rebound_cleared_id = cleared_then_detached
+            .resolve_event_instance_id(CommandEventInstanceKind::Get, 0);
+        assert_eq!(rebound_cleared_id, cleared_id);
+        assert_eq!(
+            cleared_then_detached.get_event_target_after_callback(rebound_cleared_id, target),
+            None,
+            "a restored zero-token event must rebind to the detached null Target"
+        );
+        assert!(
+            cleared_then_detached
+                .resolve_get_attempt(rebound_cleared_id, GetAttemptDisposition::Continue)
+                .is_some(),
+            "the detached continuation consumes its frozen Get body"
+        );
+        assert!(cleared_then_detached.detached_get_attempts.is_empty());
+    }
+
+    #[test]
     fn async_get_and_cleared_grab_surface_failure_feedback() {
         let target = ObjectId::new(99);
 
@@ -14164,12 +15294,13 @@ mod tests {
                     .with_mode(CommandMode::Base),
             )
             .expect("Get queues");
+        let get_instance_id = get_stack.entries[0].instance_id;
         let CommandState::Get(get) = &mut get_stack.entries[0].state else {
             panic!("Get is front");
         };
         get.enter_pending = true;
         let get_resolution = get_stack
-            .resolve_get_attempt(GetAttemptDisposition::Fail)
+            .resolve_get_attempt(get_instance_id, GetAttemptDisposition::Fail)
             .expect("pending Get resolves");
         assert_eq!(
             get_resolution
@@ -14634,6 +15765,7 @@ mod tests {
             rng: None,
         };
 
+        let command_instance_id = stack.entries.front().expect("Put remains").instance_id;
         let result = stack.step(&ctx).expect("put evaluates");
         assert_eq!(result.status, CommandStatus::Running);
         assert!(result.operations.is_empty());
@@ -14644,9 +15776,12 @@ mod tests {
                 target_id: container_id,
                 object_id: item_id,
                 ungrab_on_success: false,
+                command_instance_id,
             }]
         );
-        assert!(stack.resolve_put_attempt(true).is_none());
+        assert!(stack
+            .resolve_put_attempt(command_instance_id, true)
+            .is_none());
 
         assert_eq!(stack.len(), 1, "Put finishes on the following execute");
         objects.get_mut(&item_id).expect("item present").container = Some(container_id);
@@ -14660,6 +15795,154 @@ mod tests {
         let result = stack.step(&ctx).expect("Put observes transferred item");
         assert_eq!(result.status, CommandStatus::Completed);
         assert_eq!(stack.len(), 0);
+    }
+
+    #[test]
+    fn object_com_put_result_stays_bound_to_detached_command_across_restore() {
+        let target_id = ObjectId::new(23);
+        let item_id = ObjectId::new(24);
+        let mut engine_stack = CommandStack::new();
+        engine_stack
+            .push_front(
+                CommandRequest::new(CommandId::Put)
+                    .with_target(Some(target_id))
+                    .with_target2(Some(item_id))
+                    .with_mode(CommandMode::Base),
+            )
+            .expect("outer Put queues");
+        let outer_id = engine_stack.entries.front().unwrap().instance_id;
+        let CommandState::Put(outer_state) = &mut engine_stack.entries.front_mut().unwrap().state
+        else {
+            panic!("outer command should be Put");
+        };
+        outer_state.put_pending = true;
+
+        // Model a callback-side SetCommand(Put): the old native C4Command is
+        // unlinked but retained by iExec while the replacement is visible.
+        let mut callback_stack = engine_stack.clone();
+        callback_stack.clear();
+        callback_stack
+            .push_front(
+                CommandRequest::new(CommandId::Put)
+                    .with_target(Some(target_id))
+                    .with_target2(Some(item_id)),
+            )
+            .expect("replacement Put queues");
+        let replacement_id = callback_stack.entries.front().unwrap().instance_id;
+        let CommandState::Put(replacement_state) =
+            &mut callback_stack.entries.front_mut().unwrap().state
+        else {
+            panic!("replacement command should be Put");
+        };
+        replacement_state.put_pending = true;
+
+        engine_stack.restore_from_snapshot(&callback_stack.snapshot());
+        assert_eq!(engine_stack.entries.front().unwrap().instance_id, replacement_id);
+        assert_eq!(engine_stack.detached_put_attempts.len(), 1);
+        assert_eq!(
+            engine_stack.resolve_event_instance_id(CommandEventInstanceKind::Put, 0),
+            replacement_id,
+            "a persisted zero token rebinds only to the visible pending Put"
+        );
+
+        let feedback = engine_stack
+            .resolve_put_attempt(outer_id, false)
+            .expect("detached Base Put runs its own failure tail");
+        assert_eq!(feedback.command.name, "Put");
+        assert!(feedback.command.finished);
+        assert!(engine_stack.detached_put_attempts.is_empty());
+        assert!(matches!(
+            &engine_stack.entries.front().unwrap().state,
+            CommandState::Put(state) if state.put_pending
+        ));
+        assert!(engine_stack.entries.front().unwrap().finished.is_none());
+
+        assert!(engine_stack
+            .resolve_put_attempt(replacement_id, true)
+            .is_none());
+        assert!(matches!(
+            &engine_stack.entries.front().unwrap().state,
+            CommandState::Put(state) if !state.put_pending
+        ));
+    }
+
+    #[test]
+    fn get_target_state_stays_bound_to_detached_command_across_restore() {
+        let target = ObjectId::new(25);
+        let replacement_target = ObjectId::new(26);
+
+        for clear_before_detach in [false, true] {
+            let mut engine_stack = CommandStack::new();
+            engine_stack
+                .push_front(CommandRequest::new(CommandId::Get).with_target(Some(target)))
+                .expect("outer Get queues");
+            let outer_id = engine_stack.entries.front().unwrap().instance_id;
+            let CommandState::Get(outer_state) =
+                &mut engine_stack.entries.front_mut().unwrap().state
+            else {
+                panic!("outer command should be Get");
+            };
+            outer_state.enter_pending = true;
+            if clear_before_detach {
+                assert!(engine_stack.clear_object_reference(target));
+            }
+
+            let mut callback_stack = engine_stack.clone();
+            callback_stack.clear();
+            callback_stack
+                .push_front(
+                    CommandRequest::new(CommandId::Get)
+                        .with_target(Some(replacement_target)),
+                )
+                .expect("replacement Get queues");
+            let replacement_id = callback_stack.entries.front().unwrap().instance_id;
+            let CommandState::Get(replacement_state) =
+                &mut callback_stack.entries.front_mut().unwrap().state
+            else {
+                panic!("replacement command should be Get");
+            };
+            replacement_state.enter_pending = true;
+
+            engine_stack.restore_from_snapshot(&callback_stack.snapshot());
+            assert_eq!(engine_stack.entries.front().unwrap().instance_id, replacement_id);
+            assert_eq!(engine_stack.detached_get_attempts.len(), 1);
+            assert_eq!(
+                engine_stack.get_event_target_after_callback(outer_id, target),
+                (!clear_before_detach).then_some(target),
+                "restore must preserve the old Get's pointer state at detachment"
+            );
+            assert!(engine_stack
+                .resolve_get_attempt(outer_id, GetAttemptDisposition::Continue)
+                .is_some());
+            assert!(engine_stack.detached_get_attempts.is_empty());
+            assert!(matches!(
+                &engine_stack.entries.front().unwrap().state,
+                CommandState::Get(state) if state.enter_pending
+            ));
+            assert!(engine_stack.entries.front().unwrap().finished.is_none());
+        }
+    }
+
+    #[test]
+    fn object_com_put_runtime_identity_is_not_persisted() {
+        let event = CommandEvent::ObjectComPut {
+            actor_id: ObjectId::new(25),
+            target_id: ObjectId::new(26),
+            object_id: ObjectId::new(27),
+            ungrab_on_success: true,
+            command_instance_id: 91,
+        };
+        let encoded = serde_json::to_value(event).expect("ObjectComPut serializes");
+        assert!(encoded.get("command_instance_id").is_none());
+        let decoded: CommandEvent =
+            serde_json::from_value(encoded).expect("ObjectComPut deserializes");
+        assert!(matches!(
+            decoded,
+            CommandEvent::ObjectComPut {
+                command_instance_id: 0,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -16050,6 +17333,8 @@ pub enum CommandEvent {
     GetObject {
         actor_id: ObjectId,
         object_id: ObjectId,
+        #[serde(skip)]
+        command_instance_id: u64,
     },
     /// Run Buy's callbackful GetValue preflight and, once contained, the
     /// complete C4Player::Buy loop against live state. Dynamic pricing may
@@ -16085,6 +17370,10 @@ pub enum CommandEvent {
         /// Put's internal Ty flag: a target grabbed solely for this command
         /// is released after a successful helper call.
         ungrab_on_success: bool,
+        /// Identity of the native Put whose callbackful helper is in flight.
+        /// Persisted legacy events rebind zero before their first callback.
+        #[serde(skip)]
+        command_instance_id: u64,
     },
     /// Throw/Drop call ObjectComPutTake inline and unconditionally finish
     /// only after its callbackful put or menu attempt returns. Keep this
@@ -16155,6 +17444,34 @@ pub enum CommandEvent {
     /// (C4Command.cpp:643-649). Keep this separate from the Jump-command
     /// event, which must not finish a callback-installed C4CMD_Jump.
     ObjectComExitJump {
+        object_id: ObjectId,
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
+    /// Run C4Command::Exit's live C4Object::Exit call, including ordered
+    /// Ejection/Departure callbacks, before its optional collection-area
+    /// ObjectComJump and final Finish(true). A field-only containment update
+    /// would skip both callbacks and finish the command too early
+    /// (C4Command.cpp:624-653; C4Object.cpp:1513-1545).
+    CommandExitObject {
+        object_id: ObjectId,
+        previous_container: ObjectId,
+        position: Vector2,
+        jump_after: bool,
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
+    /// Nested C4Command::Exit delegates to C4Object::Enter and calls
+    /// Finish(true) only after that complete callbackful operation returns.
+    CommandExitIntoParent {
+        object_id: ObjectId,
+        container_id: ObjectId,
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
+    /// DFA_BUILD Exit runs callbackful ObjectComStop and then resumes the
+    /// same C4Command::Exit invocation against callback-mutated live state.
+    ObjectComStopExit {
         object_id: ObjectId,
         #[serde(skip)]
         command_instance_id: u64,
@@ -16261,6 +17578,22 @@ pub enum CommandEvent {
         from: ObjectId,
         to: ObjectId,
     },
+    /// C4Command::Transfer invokes the definition host's cached
+    /// `SFn_ControlTransfer` pointer directly. Unlike C4Object::Call this
+    /// deliberately has no receiver-Status gate, and a missing/false
+    /// callback completes the Transfer successfully (C4Command.cpp:
+    /// 1931-1942; C4ScriptHost.cpp:178-189).
+    ControlTransfer {
+        object_id: ObjectId,
+        caller: ObjectId,
+        /// Exact tagged C4Command::Tx forwarded by `f->Exec`.
+        tx_value: lc_script::Value,
+        ty: i32,
+        /// Identity of the native Transfer whose direct callback is in
+        /// flight. Zero is reserved for direct fixtures/legacy events.
+        #[serde(skip)]
+        command_instance_id: u64,
+    },
     CallObjectFunction {
         object_id: ObjectId,
         function: String,
@@ -16284,6 +17617,8 @@ pub enum CommandEvent {
         caller: ObjectId,
         #[serde(default)]
         on_result: Option<CallResultAction>,
+        #[serde(skip)]
+        command_instance_id: u64,
     },
     /// An ordered `Finish(true)` that occurs before the same command later
     /// reaches another callback or a final failure. Most successful finishes
@@ -16731,12 +18066,22 @@ pub struct CommandStackSnapshot {
     next_instance_id: u64,
     #[serde(skip)]
     detached_grab_attempts: Vec<DetachedGrabAttempt>,
+    /// Runtime-only iExec-retained Get bodies. This crosses an in-memory
+    /// callback Restore but is deliberately absent from persisted saves.
+    #[serde(skip)]
+    detached_get_attempts: Vec<DetachedGetAttempt>,
+    /// Runtime-only iExec-retained Put bodies. This crosses an in-memory
+    /// callback Restore but is deliberately absent from persisted saves.
+    #[serde(skip)]
+    detached_put_attempts: Vec<DetachedPutAttempt>,
 }
 
 impl PartialEq for CommandStackSnapshot {
     fn eq(&self, other: &Self) -> bool {
         self.commands == other.commands
             && self.detached_grab_attempts == other.detached_grab_attempts
+            && self.detached_get_attempts == other.detached_get_attempts
+            && self.detached_put_attempts == other.detached_put_attempts
     }
 }
 
@@ -16905,6 +18250,8 @@ impl CommandStackSnapshot {
             commands: snapshots,
             next_instance_id: 0,
             detached_grab_attempts: Vec::new(),
+            detached_get_attempts: Vec::new(),
+            detached_put_attempts: Vec::new(),
         })
     }
 }
@@ -16915,6 +18262,9 @@ pub struct CommandStack {
     /// Nonzero identity allocator for native-command lifetime matching.
     next_instance_id: u64,
     detached_grab_attempts: Vec<DetachedGrabAttempt>,
+    /// GetTryEnter crosses several callback boundaries. Preserve the exact
+    /// executing Get if one of those callbacks unlinks it from the object.
+    detached_get_attempts: VecDeque<DetachedGetAttempt>,
     /// A callback may ClearCommands/SetCommand while ObjectComStop is
     /// running. Native keeps the executing C4Command alive through its
     /// iExec guard, so retain that detached MoveTo until the same-Execute
@@ -16923,6 +18273,9 @@ pub struct CommandStack {
     /// Build has the same callback-detachment hazard while its Dig stop is
     /// in flight; retain that exact executing state through the continuation.
     detached_build_stops: VecDeque<BuildState>,
+    /// Exit's DFA_BUILD ObjectComStop must likewise retain the exact command
+    /// (and its failure base chain) if a stop callback replaces the stack.
+    detached_exit_preludes: VecDeque<DetachedExitPrelude>,
     /// Throw has two callback boundaries inside one C4Command::Execute:
     /// ObjectComStop for a digging actor and SetDir's TurnAction at a
     /// targeted launch point. A callback may unlink the command while its
@@ -16932,6 +18285,9 @@ pub struct CommandStack {
     /// Drop has the same retained ObjectComStop boundary when it starts in
     /// DFA_DIG. Keep a detached body alive if callbacks replace the stack.
     detached_drop_preludes: VecDeque<DetachedDropPrelude>,
+    /// Put's callbackful ObjectComPut may unlink the executing command.
+    /// Retain its failure/base context until the helper returns.
+    detached_put_attempts: VecDeque<DetachedPutAttempt>,
     /// Live Grab callbacks resolve inside engine/compat event handling, so
     /// their failure feedback cannot travel on the original CommandEvent.
     /// Keep it transient and let that synchronous caller drain it before
@@ -16970,6 +18326,23 @@ pub(crate) struct ExitActivationResolution {
     pub feedback: Option<CommandFailureFeedback>,
 }
 
+/// The live-command predicate that identifies the native C4Command retained
+/// by a callbackful [`CommandEvent`]. Runtime instance ids are deliberately
+/// omitted from persisted snapshots, so a restored zero-token event must be
+/// rebound to the freshly allocated command identity before its callback can
+/// replace the visible stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandEventInstanceKind {
+    Exact(CommandId),
+    Dig,
+    Get,
+    Put,
+    PutTake(CommandId),
+    Prelude(CommandId),
+    ExitActivation,
+    Script(CommandId),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DetachedGrabAttempt {
     target: ObjectId,
@@ -16983,12 +18356,30 @@ struct DetachedThrowPrelude {
 }
 
 #[derive(Debug, Clone)]
+struct DetachedExitPrelude {
+    entry: ActiveCommand,
+    base_chain: Vec<DetachedCommandBase>,
+}
+
+#[derive(Debug, Clone)]
 struct DetachedDropPrelude {
     entry: ActiveCommand,
     base_chain: Vec<DetachedCommandBase>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq)]
+struct DetachedPutAttempt {
+    entry: ActiveCommand,
+    base_chain: Vec<DetachedCommandBase>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DetachedGetAttempt {
+    entry: ActiveCommand,
+    base_chain: Vec<DetachedCommandBase>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DetachedCommandBase {
     instance_id: u64,
     retries: i32,
@@ -17020,10 +18411,13 @@ impl CommandStack {
             entries: VecDeque::new(),
             next_instance_id: 1,
             detached_grab_attempts: Vec::new(),
+            detached_get_attempts: VecDeque::new(),
             detached_move_to_stops: VecDeque::new(),
             detached_build_stops: VecDeque::new(),
+            detached_exit_preludes: VecDeque::new(),
             detached_throw_preludes: VecDeque::new(),
             detached_drop_preludes: VecDeque::new(),
+            detached_put_attempts: VecDeque::new(),
             pending_failure_feedback: VecDeque::new(),
             pending_successful_finishes: VecDeque::new(),
         }
@@ -17038,6 +18432,137 @@ impl CommandStack {
     /// executing C++ command remains alive through its `iExec` guard.
     pub(crate) fn take_successful_finishes(&mut self) -> Vec<CommandId> {
         self.pending_successful_finishes.drain(..).collect()
+    }
+
+    /// Resolve the runtime identity of a command event before invoking its
+    /// first callback. A nonzero token already names the exact native command
+    /// and passes through unchanged. Zero is the persisted-event fallback:
+    /// select the same pending state that the event's eventual continuation
+    /// or finish method consumes, including an iExec-retained prelude that a
+    /// callback has detached from the visible stack.
+    pub(crate) fn resolve_event_instance_id(
+        &self,
+        kind: CommandEventInstanceKind,
+        supplied: u64,
+    ) -> u64 {
+        if supplied != 0 {
+            return supplied;
+        }
+
+        let attached = self.entries.iter().find(|entry| match kind {
+            CommandEventInstanceKind::Exact(command) => entry.id() == Some(command),
+            CommandEventInstanceKind::Dig => matches!(
+                &entry.state,
+                CommandState::Dig(state) if state.start_pending
+            ),
+            CommandEventInstanceKind::Get => matches!(
+                &entry.state,
+                CommandState::Get(state) if state.enter_pending
+            ),
+            CommandEventInstanceKind::Put => matches!(
+                &entry.state,
+                CommandState::Put(state) if state.put_pending
+            ),
+            CommandEventInstanceKind::PutTake(CommandId::Throw) => matches!(
+                &entry.state,
+                CommandState::Throw(state) if state.put_take_pending
+            ),
+            CommandEventInstanceKind::PutTake(CommandId::Drop) => matches!(
+                &entry.state,
+                CommandState::Drop(state) if state.completion_pending
+            ),
+            CommandEventInstanceKind::Prelude(CommandId::Exit) => matches!(
+                &entry.state,
+                CommandState::Exit(state) if state.stop_continuation
+            ),
+            CommandEventInstanceKind::Prelude(CommandId::Throw) => matches!(
+                &entry.state,
+                CommandState::Throw(state) if !state.continuations.is_empty()
+            ),
+            CommandEventInstanceKind::Prelude(CommandId::Drop) => matches!(
+                &entry.state,
+                CommandState::Drop(state) if !state.continuations.is_empty()
+            ),
+            CommandEventInstanceKind::ExitActivation => matches!(
+                &entry.state,
+                CommandState::Exit(state) if state.activation_pending != 0
+            ),
+            CommandEventInstanceKind::Script(CommandId::Acquire) => matches!(
+                &entry.state,
+                CommandState::Acquire(state) if state.script_pending
+            ),
+            CommandEventInstanceKind::Script(CommandId::Construct) => matches!(
+                &entry.state,
+                CommandState::Construct(state) if state.script_pending
+            ),
+            CommandEventInstanceKind::PutTake(_)
+            | CommandEventInstanceKind::Prelude(_)
+            | CommandEventInstanceKind::Script(_) => false,
+        });
+        if let Some(entry) = attached {
+            return entry.instance_id;
+        }
+
+        match kind {
+            CommandEventInstanceKind::Prelude(CommandId::Exit) => self
+                .detached_exit_preludes
+                .iter()
+                .find(|detached| {
+                    matches!(
+                        &detached.entry.state,
+                        CommandState::Exit(state) if state.stop_continuation
+                    )
+                })
+                .map(|detached| detached.entry.instance_id),
+            CommandEventInstanceKind::Prelude(CommandId::Throw) => self
+                .detached_throw_preludes
+                .iter()
+                .find(|detached| {
+                    matches!(
+                        &detached.entry.state,
+                        CommandState::Throw(state) if !state.continuations.is_empty()
+                    )
+                })
+                .map(|detached| detached.entry.instance_id),
+            CommandEventInstanceKind::Prelude(CommandId::Drop) => self
+                .detached_drop_preludes
+                .iter()
+                .find(|detached| {
+                    matches!(
+                        &detached.entry.state,
+                        CommandState::Drop(state) if !state.continuations.is_empty()
+                    )
+                })
+                .map(|detached| detached.entry.instance_id),
+            CommandEventInstanceKind::ExitActivation => self
+                .detached_exit_preludes
+                .iter()
+                .find(|detached| {
+                    matches!(
+                        &detached.entry.state,
+                        CommandState::Exit(state) if state.activation_pending != 0
+                    )
+                })
+                .map(|detached| detached.entry.instance_id),
+            CommandEventInstanceKind::Get => self
+                .detached_get_attempts
+                .iter()
+                .rev()
+                .find(|detached| {
+                    matches!(
+                        &detached.entry.state,
+                        CommandState::Get(state) if state.enter_pending
+                    )
+                })
+                .map(|detached| detached.entry.instance_id),
+            CommandEventInstanceKind::Exact(_)
+            | CommandEventInstanceKind::Dig
+            | CommandEventInstanceKind::Put
+            | CommandEventInstanceKind::PutTake(_)
+            | CommandEventInstanceKind::Prelude(_)
+            | CommandEventInstanceKind::Script(_) => None,
+        }
+        .unwrap_or(0)
     }
 
     fn pending_grab_attempt(entry: &ActiveCommand) -> Option<DetachedGrabAttempt> {
@@ -17079,6 +18604,19 @@ impl CommandStack {
         }
     }
 
+    fn remember_detached_exit_prelude(&mut self, entry: &ActiveCommand) {
+        if matches!(
+            &entry.state,
+            CommandState::Exit(state)
+                if state.stop_continuation || state.activation_pending != 0
+        ) {
+            self.detached_exit_preludes.push_back(DetachedExitPrelude {
+                entry: entry.clone(),
+                base_chain: self.entries.iter().map(DetachedCommandBase::from).collect(),
+            });
+        }
+    }
+
     fn remember_detached_throw_prelude(&mut self, entry: &ActiveCommand) {
         if let CommandState::Throw(state) = &entry.state {
             if !state.continuations.is_empty() {
@@ -17102,13 +18640,34 @@ impl CommandStack {
         }
     }
 
+    fn remember_detached_put_attempt(&mut self, entry: &ActiveCommand) {
+        if matches!(&entry.state, CommandState::Put(state) if state.put_pending) {
+            self.detached_put_attempts.push_back(DetachedPutAttempt {
+                entry: entry.clone(),
+                base_chain: self.entries.iter().map(DetachedCommandBase::from).collect(),
+            });
+        }
+    }
+
+    fn remember_detached_get_attempt(&mut self, entry: &ActiveCommand) {
+        if matches!(&entry.state, CommandState::Get(state) if state.enter_pending) {
+            self.detached_get_attempts.push_back(DetachedGetAttempt {
+                entry: entry.clone(),
+                base_chain: self.entries.iter().map(DetachedCommandBase::from).collect(),
+            });
+        }
+    }
+
     fn pop_front(&mut self) -> Option<ActiveCommand> {
         let entry = self.entries.pop_front()?;
         self.remember_detached_grab(&entry);
+        self.remember_detached_get_attempt(&entry);
         self.remember_detached_move_to_stop(&entry);
         self.remember_detached_build_stop(&entry);
+        self.remember_detached_exit_prelude(&entry);
         self.remember_detached_throw_prelude(&entry);
         self.remember_detached_drop_prelude(&entry);
+        self.remember_detached_put_attempt(&entry);
         Some(entry)
     }
 
@@ -17235,6 +18794,28 @@ impl CommandStack {
             })
             .collect::<Vec<_>>();
         self.detached_build_stops.extend(build_stops);
+        let exit_preludes = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match &entry.state {
+                CommandState::Exit(state)
+                    if state.stop_continuation || state.activation_pending != 0 =>
+                {
+                    Some(DetachedExitPrelude {
+                        entry: entry.clone(),
+                        base_chain: self
+                            .entries
+                            .iter()
+                            .skip(index + 1)
+                            .map(DetachedCommandBase::from)
+                            .collect(),
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.detached_exit_preludes.extend(exit_preludes);
         let throw_preludes = self
             .entries
             .iter()
@@ -17275,6 +18856,44 @@ impl CommandStack {
             })
             .collect::<Vec<_>>();
         self.detached_drop_preludes.extend(drop_preludes);
+        let get_attempts = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                matches!(&entry.state, CommandState::Get(state) if state.enter_pending).then(|| {
+                    DetachedGetAttempt {
+                        entry: entry.clone(),
+                        base_chain: self
+                            .entries
+                            .iter()
+                            .skip(index + 1)
+                            .map(DetachedCommandBase::from)
+                            .collect(),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        self.detached_get_attempts.extend(get_attempts);
+        let put_attempts = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                matches!(&entry.state, CommandState::Put(state) if state.put_pending).then(|| {
+                    DetachedPutAttempt {
+                        entry: entry.clone(),
+                        base_chain: self
+                            .entries
+                            .iter()
+                            .skip(index + 1)
+                            .map(DetachedCommandBase::from)
+                            .collect(),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        self.detached_put_attempts.extend(put_attempts);
         self.entries.clear();
     }
 
@@ -17313,6 +18932,8 @@ impl CommandStack {
             commands: self.entries.iter().map(CommandSnapshot::new).collect(),
             next_instance_id: self.next_instance_id,
             detached_grab_attempts: self.detached_grab_attempts.clone(),
+            detached_get_attempts: self.detached_get_attempts.iter().cloned().collect(),
+            detached_put_attempts: self.detached_put_attempts.iter().cloned().collect(),
         }
     }
 
@@ -17357,6 +18978,42 @@ impl CommandStack {
                 .collect::<Vec<_>>();
             self.detached_build_stops.extend(build_stops);
         }
+        let retained_exit_ids = snapshot
+            .commands
+            .iter()
+            .filter_map(|command| match &command.state {
+                CommandState::Exit(state)
+                    if state.stop_continuation || state.activation_pending != 0 =>
+                {
+                    Some(command.instance_id)
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let detached_exit_preludes = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match &entry.state {
+                CommandState::Exit(state)
+                    if (state.stop_continuation || state.activation_pending != 0)
+                        && !retained_exit_ids.contains(&entry.instance_id) =>
+                {
+                    Some(DetachedExitPrelude {
+                        entry: entry.clone(),
+                        base_chain: self
+                            .entries
+                            .iter()
+                            .skip(index + 1)
+                            .map(DetachedCommandBase::from)
+                            .collect(),
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.detached_exit_preludes
+            .extend(detached_exit_preludes);
         let retained_throw_ids = snapshot
             .commands
             .iter()
@@ -17423,6 +19080,90 @@ impl CommandStack {
             })
             .collect::<Vec<_>>();
         self.detached_drop_preludes.extend(detached_drop_preludes);
+        for attempt in &snapshot.detached_get_attempts {
+            if !self
+                .detached_get_attempts
+                .iter()
+                .any(|existing| existing.entry.instance_id == attempt.entry.instance_id)
+            {
+                self.detached_get_attempts.push_back(attempt.clone());
+            }
+        }
+        let retained_get_ids = snapshot
+            .commands
+            .iter()
+            .filter_map(|command| {
+                matches!(&command.state, CommandState::Get(state) if state.enter_pending)
+                    .then_some(command.instance_id)
+            })
+            .chain(
+                snapshot
+                    .detached_get_attempts
+                    .iter()
+                    .map(|attempt| attempt.entry.instance_id),
+            )
+            .collect::<HashSet<_>>();
+        let detached_get_attempts = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                (matches!(&entry.state, CommandState::Get(state) if state.enter_pending)
+                    && !retained_get_ids.contains(&entry.instance_id))
+                .then(|| DetachedGetAttempt {
+                    entry: entry.clone(),
+                    base_chain: self
+                        .entries
+                        .iter()
+                        .skip(index + 1)
+                        .map(DetachedCommandBase::from)
+                        .collect(),
+                })
+            })
+            .collect::<Vec<_>>();
+        self.detached_get_attempts.extend(detached_get_attempts);
+        for attempt in &snapshot.detached_put_attempts {
+            if !self
+                .detached_put_attempts
+                .iter()
+                .any(|existing| existing.entry.instance_id == attempt.entry.instance_id)
+            {
+                self.detached_put_attempts.push_back(attempt.clone());
+            }
+        }
+        let retained_put_ids = snapshot
+            .commands
+            .iter()
+            .filter_map(|command| {
+                matches!(&command.state, CommandState::Put(state) if state.put_pending)
+                    .then_some(command.instance_id)
+            })
+            .chain(
+                snapshot
+                    .detached_put_attempts
+                    .iter()
+                    .map(|attempt| attempt.entry.instance_id),
+            )
+            .collect::<HashSet<_>>();
+        let detached_put_attempts = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                (matches!(&entry.state, CommandState::Put(state) if state.put_pending)
+                    && !retained_put_ids.contains(&entry.instance_id))
+                .then(|| DetachedPutAttempt {
+                    entry: entry.clone(),
+                    base_chain: self
+                        .entries
+                        .iter()
+                        .skip(index + 1)
+                        .map(DetachedCommandBase::from)
+                        .collect(),
+                })
+            })
+            .collect::<Vec<_>>();
+        self.detached_put_attempts.extend(detached_put_attempts);
         let highest_restored_id = snapshot
             .commands
             .iter()
@@ -17653,6 +19394,107 @@ impl CommandStack {
         Some(result)
     }
 
+    /// Resume the exact Exit whose DFA_BUILD ObjectComStop just returned.
+    /// The stop callback may have replaced the visible stack; native iExec
+    /// still completes this retained command body against freshly read live
+    /// containment and entrance state.
+    pub(crate) fn execute_pending_exit_stop(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        command_instance_id: u64,
+    ) -> Option<CommandStepResult> {
+        let index = self.entries.iter().position(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(
+                    &entry.state,
+                    CommandState::Exit(state) if state.stop_continuation
+                )
+        });
+
+        let mut detached_failure = None;
+        let resumed_instance_id;
+        let mut result = if let Some(index) = index {
+            let entry = self.entries.get_mut(index)?;
+            resumed_instance_id = entry.instance_id;
+            let CommandState::Exit(state) = &mut entry.state else {
+                return None;
+            };
+            let result = state.resume_after_stop(ctx);
+            if matches!(
+                result.status,
+                CommandStatus::Completed | CommandStatus::Failed
+            ) {
+                entry.finished = Some(result.status);
+            }
+            result
+        } else {
+            let detached_index = self.detached_exit_preludes.iter().position(|detached| {
+                (command_instance_id == 0
+                    || detached.entry.instance_id == command_instance_id)
+                    && matches!(
+                        &detached.entry.state,
+                        CommandState::Exit(state) if state.stop_continuation
+                    )
+            })?;
+            let mut detached = self.detached_exit_preludes.remove(detached_index)?;
+            resumed_instance_id = detached.entry.instance_id;
+            let CommandState::Exit(state) = &mut detached.entry.state else {
+                return None;
+            };
+            let result = state.resume_after_stop(ctx);
+            if state.activation_pending != 0 {
+                self.detached_exit_preludes.push_back(detached);
+            } else if result.status == CommandStatus::Failed {
+                detached_failure = Some((detached.entry, detached.base_chain));
+            }
+            result
+        };
+
+        if result.status == CommandStatus::Completed {
+            self.record_native_success(CommandId::Exit);
+        }
+        if result.status == CommandStatus::Failed {
+            let feedback = if let Some(index) = index {
+                self.record_failure_at(index)
+            } else if let Some((entry, base_chain)) = detached_failure.as_ref() {
+                self.record_detached_failure(entry, base_chain)
+            } else {
+                None
+            };
+            if let Some(feedback) = feedback {
+                result.events.push(CommandEvent::FailureFeedback {
+                    actor_id: ctx.object.id,
+                    feedback,
+                });
+            }
+        }
+        for event in &mut result.events {
+            match event {
+                CommandEvent::CommandExitObject {
+                    command_instance_id: event_instance_id,
+                    ..
+                }
+                | CommandEvent::CommandExitIntoParent {
+                    command_instance_id: event_instance_id,
+                    ..
+                }
+                | CommandEvent::ActivateEntrance {
+                    command_instance_id: event_instance_id,
+                    ..
+                } if *event_instance_id == 0 => {
+                    // A zero input token is the persisted-event fallback, not
+                    // permission to leave the resumed event ambiguous. Pin
+                    // the actual retained command so a callback-installed
+                    // replacement Exit cannot be finished instead.
+                    *event_instance_id = resumed_instance_id;
+                }
+                _ => {}
+            }
+        }
+        self.apply_result_operations(&mut result);
+        Some(result)
+    }
+
     /// Resume the exact Throw body suspended across ObjectComStop or
     /// SetDir. This is still the same native Execute call, so neither the
     /// command interval nor retry bookkeeping advances a second time.
@@ -17671,8 +19513,10 @@ impl CommandStack {
         });
 
         let mut detached_failure = None;
+        let resumed_instance_id;
         let mut result = if let Some(index) = index {
             let entry = self.entries.get_mut(index)?;
+            resumed_instance_id = entry.instance_id;
             let CommandState::Throw(state) = &mut entry.state else {
                 return None;
             };
@@ -17693,6 +19537,7 @@ impl CommandStack {
                     )
             })?;
             let mut detached = self.detached_throw_preludes.remove(detached_index)?;
+            resumed_instance_id = detached.entry.instance_id;
             let CommandState::Throw(state) = &mut detached.entry.state else {
                 return None;
             };
@@ -17744,7 +19589,7 @@ impl CommandStack {
                     command_instance_id: event_instance_id,
                     ..
                 } if *event_instance_id == 0 => {
-                    *event_instance_id = command_instance_id;
+                    *event_instance_id = resumed_instance_id;
                 }
                 _ => {}
             }
@@ -17770,8 +19615,10 @@ impl CommandStack {
         });
 
         let mut detached_failure = None;
+        let resumed_instance_id;
         let mut result = if let Some(index) = index {
             let entry = self.entries.get_mut(index)?;
+            resumed_instance_id = entry.instance_id;
             let CommandState::Drop(state) = &mut entry.state else {
                 return None;
             };
@@ -17792,6 +19639,7 @@ impl CommandStack {
                     )
             })?;
             let mut detached = self.detached_drop_preludes.remove(detached_index)?;
+            resumed_instance_id = detached.entry.instance_id;
             let CommandState::Drop(state) = &mut detached.entry.state else {
                 return None;
             };
@@ -17835,7 +19683,7 @@ impl CommandStack {
                     command_instance_id: event_instance_id,
                     ..
                 } if *event_instance_id == 0 => {
-                    *event_instance_id = command_instance_id;
+                    *event_instance_id = resumed_instance_id;
                 }
                 _ => {}
             }
@@ -18073,6 +19921,25 @@ impl CommandStack {
         true
     }
 
+    /// Apply the legacy failed-result adjustment to the exact command which
+    /// emitted a callback event. A restored zero token keeps the historical
+    /// first-same-kind fallback, but runtime events cannot increment a
+    /// callback-installed replacement command.
+    pub(crate) fn fail_command_instance(
+        &mut self,
+        id: CommandId,
+        command_instance_id: u64,
+    ) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|entry| {
+            entry.id() == Some(id)
+                && (command_instance_id == 0 || entry.instance_id == command_instance_id)
+        }) else {
+            return false;
+        };
+        entry.failures = entry.failures.saturating_add(1);
+        true
+    }
+
     pub fn fail_front_if(&mut self, id: CommandId) -> bool {
         if let Some(front) = self.entries.front_mut() {
             if front.id() == Some(id) {
@@ -18205,11 +20072,42 @@ impl CommandStack {
         true
     }
 
+    /// Read the emitting Get's live Target after a callback may have run
+    /// `Game.ClearPointers`. Detachment freezes the pointer state at that
+    /// instant: an earlier clear remains null, while a later clear cannot
+    /// reach the unlinked native iExec command.
+    pub(crate) fn get_event_target_after_callback(
+        &self,
+        command_instance_id: u64,
+        captured_target: ObjectId,
+    ) -> Option<ObjectId> {
+        if let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| entry.instance_id == command_instance_id)
+        {
+            if let CommandState::Get(state) = &entry.state {
+                return state.target;
+            }
+        }
+        if let Some(detached) = self
+            .detached_get_attempts
+            .iter()
+            .find(|attempt| attempt.entry.instance_id == command_instance_id)
+        {
+            if let CommandState::Get(state) = &detached.entry.state {
+                return state.target;
+            }
+        }
+        Some(captured_target)
+    }
+
     /// Resolve only the Get command which emitted the live GetObject event.
     /// Callback-side SetCommand may have removed it and installed another
     /// Get, which must not inherit the old attempt's result.
     pub(crate) fn resolve_get_attempt(
         &mut self,
+        command_instance_id: u64,
         disposition: GetAttemptDisposition,
     ) -> Option<GetAttemptResolution> {
         if disposition == GetAttemptDisposition::Complete {
@@ -18218,25 +20116,54 @@ impl CommandStack {
             // stack entry in the meantime.
             self.record_native_success(CommandId::Get);
         }
-        let index = self.entries.iter().position(
-            |entry| matches!(&entry.state, CommandState::Get(state) if state.enter_pending),
-        )?;
-        if let CommandState::Get(state) = &mut self.entries[index].state {
+        let index = self.entries.iter().position(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(&entry.state, CommandState::Get(state) if state.enter_pending)
+        });
+        if let Some(index) = index {
+            if let CommandState::Get(state) = &mut self.entries[index].state {
+                state.enter_pending = false;
+            }
+
+            let mut feedback = None;
+            match disposition {
+                GetAttemptDisposition::Continue => {}
+                GetAttemptDisposition::Complete => {
+                    self.entries[index].finished = Some(CommandStatus::Completed);
+                }
+                GetAttemptDisposition::Fail => {
+                    self.entries[index].finished = Some(CommandStatus::Failed);
+                    feedback = self.record_failure_at(index);
+                }
+            }
+            return Some(GetAttemptResolution { feedback });
+        }
+
+        let detached_index = if command_instance_id == 0 {
+            self.detached_get_attempts.iter().rposition(|attempt| {
+                matches!(&attempt.entry.state, CommandState::Get(state) if state.enter_pending)
+            })
+        } else {
+            self.detached_get_attempts.iter().position(|attempt| {
+                attempt.entry.instance_id == command_instance_id
+                    && matches!(&attempt.entry.state, CommandState::Get(state) if state.enter_pending)
+            })
+        }?;
+        let mut detached = self.detached_get_attempts.remove(detached_index)?;
+        if let CommandState::Get(state) = &mut detached.entry.state {
             state.enter_pending = false;
         }
-
-        let mut feedback = None;
-        match disposition {
-            GetAttemptDisposition::Continue => {}
+        let feedback = match disposition {
+            GetAttemptDisposition::Continue => None,
             GetAttemptDisposition::Complete => {
-                self.entries[index].finished = Some(CommandStatus::Completed);
+                detached.entry.finished = Some(CommandStatus::Completed);
+                None
             }
             GetAttemptDisposition::Fail => {
-                self.entries[index].finished = Some(CommandStatus::Failed);
-                feedback = self.record_failure_at(index);
+                detached.entry.finished = Some(CommandStatus::Failed);
+                self.record_detached_failure(&detached.entry, &detached.base_chain)
             }
-        }
-
+        };
         Some(GetAttemptResolution { feedback })
     }
 
@@ -18405,20 +20332,44 @@ impl CommandStack {
     /// helper ran, so a plain front-command check is insufficient.
     pub(crate) fn resolve_put_attempt(
         &mut self,
+        command_instance_id: u64,
         succeeded: bool,
     ) -> Option<CommandFailureFeedback> {
-        let index = self.entries.iter().position(
-            |entry| matches!(&entry.state, CommandState::Put(state) if state.put_pending),
-        )?;
-        if let CommandState::Put(state) = &mut self.entries[index].state {
+        let index = self.entries.iter().position(|entry| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(&entry.state, CommandState::Put(state) if state.put_pending)
+        });
+        if let Some(index) = index {
+            if let CommandState::Put(state) = &mut self.entries[index].state {
+                state.put_pending = false;
+            }
+            if succeeded {
+                return None;
+            }
+
+            self.entries[index].finished = Some(CommandStatus::Failed);
+            return self.record_failure_at(index);
+        }
+
+        let detached_index = if command_instance_id == 0 {
+            self.detached_put_attempts.iter().rposition(|attempt| {
+                matches!(&attempt.entry.state, CommandState::Put(state) if state.put_pending)
+            })
+        } else {
+            self.detached_put_attempts.iter().position(|attempt| {
+                attempt.entry.instance_id == command_instance_id
+                    && matches!(&attempt.entry.state, CommandState::Put(state) if state.put_pending)
+            })
+        }?;
+        let mut detached = self.detached_put_attempts.remove(detached_index)?;
+        if let CommandState::Put(state) = &mut detached.entry.state {
             state.put_pending = false;
         }
         if succeeded {
             return None;
         }
-
-        self.entries[index].finished = Some(CommandStatus::Failed);
-        self.record_failure_at(index)
+        detached.entry.finished = Some(CommandStatus::Failed);
+        self.record_detached_failure(&detached.entry, &detached.base_chain)
     }
 
     /// Freeze the failure feedback of the Exit which emitted
@@ -18426,28 +20377,29 @@ impl CommandStack {
     /// result arrives, but C++ still runs the old command's Fail tail.
     pub(crate) fn pending_exit_activation_failure_feedback(
         &self,
+        command_instance_id: u64,
     ) -> Option<CommandFailureFeedback> {
         let index = self.entries.iter().position(|entry| {
-            matches!(
-                &entry.state,
-                CommandState::Exit(state) if state.activation_pending != 0
-            )
-        })?;
-        let mode = self.entries[index].mode;
-        let base = self
-            .entries
-            .iter()
-            .skip(index + 1)
-            .find(|entry| entry.finished.is_none());
-        let execute_feedback = match mode {
-            CommandMode::SilentSub => base.is_none(),
-            CommandMode::Sub => base.is_none_or(|entry| entry.retries == 0),
-            CommandMode::Base => true,
-            CommandMode::SilentBase | CommandMode::Unknown(_) => false,
-        };
-        execute_feedback.then(|| {
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(
+                    &entry.state,
+                    CommandState::Exit(state) if state.activation_pending != 0
+                )
+        });
+        if let Some(index) = index {
             let entry = &self.entries[index];
-            CommandFailureFeedback {
+            let base = self
+                .entries
+                .iter()
+                .skip(index + 1)
+                .find(|entry| entry.finished.is_none());
+            let execute_feedback = match entry.mode {
+                CommandMode::SilentSub => base.is_none(),
+                CommandMode::Sub => base.is_none_or(|entry| entry.retries == 0),
+                CommandMode::Base => true,
+                CommandMode::SilentBase | CommandMode::Unknown(_) => false,
+            };
+            return execute_feedback.then(|| CommandFailureFeedback {
                 command: CommandView::from_entry(
                     entry
                         .state
@@ -18460,7 +20412,39 @@ impl CommandStack {
                     entry.finished.is_some(),
                 ),
                 reason: None,
-            }
+            });
+        }
+        let detached = self.detached_exit_preludes.iter().find(|detached| {
+            (command_instance_id == 0 || detached.entry.instance_id == command_instance_id)
+                && matches!(
+                    &detached.entry.state,
+                    CommandState::Exit(state) if state.activation_pending != 0
+                )
+        })?;
+        let base = detached
+            .base_chain
+            .iter()
+            .find(|entry| entry.finished.is_none());
+        let execute_feedback = match detached.entry.mode {
+            CommandMode::SilentSub => base.is_none(),
+            CommandMode::Sub => base.is_none_or(|entry| entry.retries == 0),
+            CommandMode::Base => true,
+            CommandMode::SilentBase | CommandMode::Unknown(_) => false,
+        };
+        execute_feedback.then(|| CommandFailureFeedback {
+            command: CommandView::from_entry(
+                detached
+                    .entry
+                    .state
+                    .id()
+                    .map(CommandId::to_name)
+                    .unwrap_or("None")
+                    .to_string(),
+                detached.entry.request.as_ref(),
+                &detached.entry.state,
+                detached.entry.finished.is_some(),
+            ),
+            reason: None,
         })
     }
 
@@ -18470,21 +20454,46 @@ impl CommandStack {
     pub(crate) fn resolve_exit_activation(
         &mut self,
         activated: bool,
+        command_instance_id: u64,
     ) -> Option<ExitActivationResolution> {
         let index = self.entries.iter().position(|entry| {
-            matches!(
-                &entry.state,
-                CommandState::Exit(state) if state.activation_pending != 0
-            )
-        })?;
-        if let CommandState::Exit(state) = &mut self.entries[index].state {
-            state.activation_pending = state.activation_pending.saturating_sub(1);
+            (command_instance_id == 0 || entry.instance_id == command_instance_id)
+                && matches!(
+                    &entry.state,
+                    CommandState::Exit(state) if state.activation_pending != 0
+                )
+        });
+        if let Some(index) = index {
+            if let CommandState::Exit(state) = &mut self.entries[index].state {
+                state.activation_pending = state.activation_pending.saturating_sub(1);
+            }
+            if activated {
+                return Some(ExitActivationResolution { feedback: None });
+            }
+            self.entries[index].finished = Some(CommandStatus::Failed);
+            let feedback = self.record_failure_at(index);
+            return Some(ExitActivationResolution { feedback });
         }
+        let detached_index = self.detached_exit_preludes.iter().position(|detached| {
+            (command_instance_id == 0 || detached.entry.instance_id == command_instance_id)
+                && matches!(
+                    &detached.entry.state,
+                    CommandState::Exit(state) if state.activation_pending != 0
+                )
+        })?;
+        let mut detached = self.detached_exit_preludes.remove(detached_index)?;
+        let CommandState::Exit(state) = &mut detached.entry.state else {
+            unreachable!("detached Exit activation matched another command")
+        };
+        state.activation_pending = state.activation_pending.saturating_sub(1);
         if activated {
+            if state.activation_pending != 0 {
+                self.detached_exit_preludes.push_back(detached);
+            }
             return Some(ExitActivationResolution { feedback: None });
         }
-        self.entries[index].finished = Some(CommandStatus::Failed);
-        let feedback = self.record_failure_at(index);
+        detached.entry.finished = Some(CommandStatus::Failed);
+        let feedback = self.record_detached_failure(&detached.entry, &detached.base_chain);
         Some(ExitActivationResolution { feedback })
     }
 
@@ -18671,6 +20680,18 @@ impl CommandStack {
                 return Some(base.retries == 0);
             }
             if let Some(index) = self
+                .detached_exit_preludes
+                .iter()
+                .position(|entry| entry.entry.instance_id == candidate.instance_id)
+            {
+                let base = &mut self.detached_exit_preludes[index].entry;
+                if base.finished.is_some() {
+                    continue;
+                }
+                base.failures = base.failures.saturating_add(1);
+                return Some(base.retries == 0);
+            }
+            if let Some(index) = self
                 .detached_throw_preludes
                 .iter()
                 .position(|entry| entry.entry.instance_id == candidate.instance_id)
@@ -18688,6 +20709,30 @@ impl CommandStack {
                 .position(|entry| entry.entry.instance_id == candidate.instance_id)
             {
                 let base = &mut self.detached_drop_preludes[index].entry;
+                if base.finished.is_some() {
+                    continue;
+                }
+                base.failures = base.failures.saturating_add(1);
+                return Some(base.retries == 0);
+            }
+            if let Some(index) = self
+                .detached_put_attempts
+                .iter()
+                .position(|entry| entry.entry.instance_id == candidate.instance_id)
+            {
+                let base = &mut self.detached_put_attempts[index].entry;
+                if base.finished.is_some() {
+                    continue;
+                }
+                base.failures = base.failures.saturating_add(1);
+                return Some(base.retries == 0);
+            }
+            if let Some(index) = self
+                .detached_get_attempts
+                .iter()
+                .position(|entry| entry.entry.instance_id == candidate.instance_id)
+            {
+                let base = &mut self.detached_get_attempts[index].entry;
                 if base.finished.is_some() {
                     continue;
                 }
@@ -19684,13 +21729,6 @@ impl EnterState {
             return CommandStepResult::failed(None);
         }
 
-        // C4Command::Enter has no aliveness gate. Inactive is still a
-        // nonzero C++ Status and remains a valid target; removal clears the
-        // pointer and reaches the ordinary failed !Target finish.
-        if target_snapshot.destroyed || target_snapshot.status == ObjectStatus::Deleted {
-            return CommandStepResult::failed(None);
-        }
-
         if ctx.object.container == Some(target) {
             return CommandStepResult::completed(None);
         }
@@ -19722,7 +21760,8 @@ impl EnterState {
         let entrance_area = (target_snapshot.ocf & ocf::ENTRANCE != 0)
             .then_some(target_snapshot.entrance)
             .flatten();
-        let in_entrance_range = ctx.object.container.is_none()
+        let in_entrance_range = target_snapshot.has_nonzero_status()
+            && ctx.object.container.is_none()
             && target_snapshot.container.is_none()
             && target_snapshot.at_point(position.x, position.y)
             && entrance_area
@@ -19744,6 +21783,7 @@ impl EnterState {
                     object_id: target,
                     caller: ctx.object.id,
                     on_result: None,
+                    command_instance_id: 0,
                 };
                 return CommandStepResult::running(Some(update)).with_events(vec![event]);
             }
@@ -19752,6 +21792,14 @@ impl EnterState {
                 container_id: target,
             };
             return CommandStepResult::completed(Some(update)).with_events(vec![event]);
+        }
+
+        // GetEntranceArea is a method-level Status gate independent of the
+        // raw Target pointer. A detached command may still hold Target after
+        // Status reaches zero, but C++ leaves Enter pending without adding a
+        // MoveTo in that case (C4Object.cpp:2074-2093).
+        if !target_snapshot.has_nonzero_status() {
+            return CommandStepResult::running(None);
         }
 
         let mut result = CommandStepResult::running(None);
@@ -19791,6 +21839,11 @@ struct ExitState {
     evaluated: bool,
     #[serde(default, skip_serializing_if = "crate::u32_is_zero")]
     activation_pending: u32,
+    /// ObjectComStop is a synchronous callback boundary for DFA_BUILD.
+    /// Resume the same native Exit body afterward without spending another
+    /// command Execute/update interval.
+    #[serde(default)]
+    stop_continuation: bool,
 }
 
 impl ExitState {
@@ -19799,25 +21852,8 @@ impl ExitState {
             update_interval: positive_helper_interval_or_one(request.update_interval),
             evaluated: request.evaluated,
             activation_pending: 0,
+            stop_continuation: false,
         })
-    }
-
-    fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
-        if ctx.object.command_direction != CommandDirection::Stop {
-            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
-        } else {
-            None
-        }
-    }
-
-    fn prepare_update(&self, ctx: &CommandRuntimeContext<'_>) -> ObjectUpdate {
-        if ctx.object.action_procedure != ActionProcedure::Build {
-            return ObjectUpdate::new();
-        }
-        let mut update = self.update_to_stop(ctx).unwrap_or_default();
-        let action_update = ActionUpdate::default().with_name("Idle").with_force(true);
-        update = update.with_action_update(action_update);
-        update
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -19838,25 +21874,36 @@ impl ExitState {
                 .collect();
             return CommandStepResult::running(None).with_events(events);
         }
-        let Some(container_id) = ctx.object.container else {
-            return CommandStepResult::completed(self.update_to_stop(ctx));
-        };
+        if ctx.object.container.is_none() {
+            return CommandStepResult::completed(None);
+        }
+        if ctx.object.action_procedure == ActionProcedure::Build && !self.stop_continuation {
+            self.stop_continuation = true;
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::ObjectComStopExit {
+                    object_id: ctx.object.id,
+                    command_instance_id: 0,
+                },
+            ]);
+        }
+        self.step_after_stop(ctx)
+    }
 
-        let mut update = self.prepare_update(ctx);
+    fn resume_after_stop(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        self.stop_continuation = false;
+        self.step_after_stop(ctx)
+    }
+
+    fn step_after_stop(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
+        let Some(container_id) = ctx.object.container else {
+            return CommandStepResult::completed(None);
+        };
 
         let container_snapshot = match ctx.resolve(container_id) {
             // C4Command::Exit only needs the live Contained pointer;
             // structures are nonliving but valid containers.
-            Some(snapshot) if snapshot.is_status_active() => snapshot,
-            _ => {
-                if ctx.object.command_direction != CommandDirection::Stop {
-                    update.command_direction = Some(CommandDirection::Stop);
-                }
-                update.container = Some(None);
-                update.position = Some(ctx.position);
-                update.velocity = Some(Vector2::ZERO);
-                return CommandStepResult::completed(Some(update));
-            }
+            Some(snapshot) => snapshot,
+            None => return CommandStepResult::completed(None),
         };
 
         // A closed entrance is not an ejection point. C++ asks the
@@ -19868,27 +21915,31 @@ impl ExitState {
                 object_id: container_id,
                 caller: ctx.object.id,
                 on_result: Some(CallResultAction::ResolveExitActivation),
+                command_instance_id: 0,
             };
-            let update = (!update.is_empty()).then_some(update);
-            return CommandStepResult::running(update).with_events(vec![event]);
+            return CommandStepResult::running(None).with_events(vec![event]);
         }
 
-        if ctx.object.command_direction != CommandDirection::Stop {
-            update.command_direction = Some(CommandDirection::Stop);
-        }
-        update.velocity = Some(Vector2::ZERO);
-
-        if let Some(parent_id) = container_snapshot.container {
-            update.container = Some(Some(parent_id));
-            if let Some(parent_snapshot) = ctx.resolve(parent_id) {
-                update.position = Some(parent_snapshot.position);
-            } else {
-                update.position = Some(container_snapshot.position);
-            }
+        let retained_parent = container_snapshot
+            .container
+            .filter(|parent_id| ctx.resolve(*parent_id).is_some());
+        if let Some(parent_id) = retained_parent {
+            // Native calls C4Object::Enter and ignores its boolean before
+            // finishing Exit. Keep this as one live event: RejectEntrance,
+            // the old-container Exit callbacks, the target Status gate and
+            // Collection2/Entrance may all change the final containment
+            // (C4Command.cpp:629-632; C4Object.cpp:1566-1636).
+            return CommandStepResult::running(None).with_events(vec![
+                CommandEvent::CommandExitIntoParent {
+                    object_id: ctx.object.id,
+                    container_id: parent_id,
+                    command_instance_id: 0,
+                },
+            ]);
         } else {
-            update.container = Some(None);
             let entrance_position = if container_snapshot.entrance_status
                 && container_snapshot.ocf & ocf::ENTRANCE != 0
+                && container_snapshot.has_nonzero_status()
             {
                 container_snapshot.entrance.map(|entrance| {
                     Vector2::new(
@@ -19903,8 +21954,8 @@ impl ExitState {
             } else {
                 None
             };
-            if let Some(position) = entrance_position {
-                update.position = Some(position);
+            let (position, jump_after) = if let Some(position) = entrance_position {
+                (position, false)
             } else if let Some(collection) = ctx
                 .definition(container_snapshot.definition_id.as_str())
                 .and_then(|definition| definition.collection_rect)
@@ -19913,33 +21964,31 @@ impl ExitState {
                 // Def->Collection is container-local. C++ deliberately uses
                 // the container x (not Collection.x/center) and one pixel
                 // above its top before invoking ObjectComJump (:643-649).
-                update.position = Some(Vector2::new(
+                let position = Vector2::new(
                     container_snapshot.position.x,
                     container_snapshot
                         .position
                         .y
                         .saturating_add(collection.y)
                         .saturating_sub(1),
-                ));
-                // C4Object::Exit zeros velocity but preserves Action.ComDir;
-                // ObjectComJump uses that direction before falling back to
-                // facing (C4ObjectCom.cpp:284-296). BUILD's earlier
-                // ObjectComStop is the only arm that intentionally stops it.
-                if ctx.object.action_procedure != ActionProcedure::Build {
-                    update.command_direction = None;
-                }
-                return CommandStepResult::running(Some(update)).with_events(vec![
-                    CommandEvent::ObjectComExitJump {
-                        object_id: ctx.object.id,
-                        command_instance_id: 0,
-                    },
-                ]);
+                );
+                (position, true)
             } else {
-                update.position = Some(container_snapshot.position);
-            }
+                // Plain C4CMD_Exit keeps the contained object's own x/y;
+                // those can differ from the container after Enter with
+                // fCopyMotion=false or direct repositioning.
+                (ctx.position, false)
+            };
+            CommandStepResult::running(None).with_events(vec![
+                CommandEvent::CommandExitObject {
+                    object_id: ctx.object.id,
+                    previous_container: container_id,
+                    position,
+                    jump_after,
+                    command_instance_id: 0,
+                },
+            ])
         }
-
-        CommandStepResult::completed(Some(update))
     }
 }
 
@@ -19994,8 +22043,7 @@ impl BuildState {
     ) -> bool {
         object.contents.iter().any(|id| {
             ctx.resolve(*id).is_some_and(|item| {
-                !item.destroyed
-                    && item.status != ObjectStatus::Deleted
+                item.has_nonzero_status()
                     && item.ocf != 0
                     && item.definition_id == LINEKIT_DEFINITION
             })
@@ -20127,8 +22175,7 @@ impl BuildState {
         let same_container =
             target_snapshot.container.is_some() && builder.container == target_snapshot.container;
         let at_target = target_snapshot.container.is_none()
-            && !target_snapshot.destroyed
-            && target_snapshot.status != ObjectStatus::Deleted
+            && target_snapshot.has_nonzero_status()
             && !target_snapshot.definition_id.is_empty()
             && target_snapshot.ocf != 0
             && target_snapshot.at_point(ctx.position.x, ctx.position.y)
@@ -20251,7 +22298,8 @@ impl ConstructState {
         ctx.object.contents.iter().copied().find(|id| {
             ctx.resolve(*id)
                 .map(|snapshot| {
-                    snapshot.definition_id == CONKIT_DEFINITION && snapshot.is_status_active()
+                    snapshot.definition_id == CONKIT_DEFINITION
+                        && snapshot.has_nonzero_status()
                 })
                 .unwrap_or(false)
         })
@@ -20602,8 +22650,13 @@ impl ConstructState {
 struct TransferState {
     target: ObjectId,
     tx: Option<i32>,
+    /// Exact tagged C4Command::Tx. The integer/C4ID mirrors remain for
+    /// compatibility with older snapshots and GetCommand projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tx_value: Option<lc_script::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tx_definition: Option<DefinitionId>,
     ty: Option<i32>,
-    last_script_call: Option<u64>,
 }
 
 impl TransferState {
@@ -20612,9 +22665,24 @@ impl TransferState {
         Ok(Self {
             target,
             tx: request.tx,
+            tx_value: request.tx_value.clone(),
+            tx_definition: request.tx_definition.clone(),
             ty: request.ty,
-            last_script_call: None,
         })
+    }
+
+    fn effective_tx_value(&self) -> lc_script::Value {
+        self.tx_value
+            .clone()
+            .or_else(|| {
+                self.tx_definition
+                    .as_ref()
+                    .map(|value| lc_script::Value::C4Id(value.clone()))
+            })
+            .or_else(|| self.tx.map(lc_script::Value::Int))
+            // C4Object::AddCommand's ordinary overload supplies C4VInt(0)
+            // when no explicit Tx was given (C4Object.h:221-226).
+            .unwrap_or(lc_script::Value::Int(0))
     }
 
     fn within_zone(&self, ctx: &CommandRuntimeContext<'_>, zone: &TransferZone) -> bool {
@@ -20725,22 +22793,13 @@ impl TransferState {
         Some(Vector2::new(x, y))
     }
 
-    fn should_call_script(&mut self, frame: u64) -> bool {
-        if frame % 5 != 0 {
-            return false;
-        }
-        if self.last_script_call == Some(frame) {
-            return false;
-        }
-        self.last_script_call = Some(frame);
-        true
+    fn should_call_script(frame: u64) -> bool {
+        frame % 5 == 0
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let Some(target_snapshot) = ctx.resolve(self.target) else {
-            return CommandStepResult::failed(None);
-        };
-        if !target_snapshot.is_active() {
+        let target_id = self.target;
+        if ctx.resolve(target_id).is_none() {
             return CommandStepResult::failed(None);
         }
         let Some(zone) = ctx.transfer_zone(self.target) else {
@@ -20759,19 +22818,13 @@ impl TransferState {
                 .with_operations(vec![CommandOperation::PushFront(request)]);
         }
 
-        if self.should_call_script(ctx.frame) {
-            let event = CommandEvent::CallObjectFunction {
+        if Self::should_call_script(ctx.frame) {
+            let event = CommandEvent::ControlTransfer {
                 object_id: self.target,
-                function: "ControlTransfer".into(),
                 caller: ctx.object.id,
-                tx: self.tx,
-                tx_value: self.tx.map(lc_script::Value::Int),
-                tx_definition: None,
-                ty: self.ty,
-                target2: None,
-                on_result: Some(CallResultAction::CompleteCommandOnFalse {
-                    command: CommandId::Transfer,
-                }),
+                tx_value: self.effective_tx_value(),
+                ty: self.ty.unwrap_or(0),
+                command_instance_id: 0,
             };
             return CommandStepResult::running(None).with_events(vec![event]);
         }
@@ -20820,10 +22873,6 @@ impl ChopState {
             }
         };
 
-        if !target_snapshot.is_status_active() {
-            return CommandStepResult::failed(None);
-        }
-
         if target_snapshot.ocf & ocf::CHOP == 0 {
             return CommandStepResult::completed(self.update_to_stop(ctx));
         }
@@ -20859,7 +22908,8 @@ impl ChopState {
         const MAX_HORIZONTAL_RANGE: i32 = 9;
         const MOVE_AWAY_HORIZONTAL_RANGE: i32 = 5;
 
-        let at_target = ctx.object.container.is_none()
+        let at_target = target_snapshot.has_nonzero_status()
+            && ctx.object.container.is_none()
             && target_snapshot.container.is_none()
             && target_snapshot.at_point(ctx.position.x, ctx.position.y)
             && dx.abs() >= MIN_HORIZONTAL_RANGE
@@ -21211,8 +23261,7 @@ impl GrabState {
         // "At target object: grab": point-in-shape like C4Command::Grab
         // (Target->At(cObj->x, cObj->y, ocf), C4Command.cpp:689-691).
         let can_grab_here = ctx.object.container.is_none()
-            && !target_snapshot.destroyed
-            && target_snapshot.status != crate::ObjectStatus::Deleted
+            && target_snapshot.has_nonzero_status()
             && target_snapshot.container.is_none()
             && target_snapshot.at_point(ctx.position.x, ctx.position.y)
             && (target_snapshot.ocf & ocf::ALL) != 0;
@@ -21282,6 +23331,12 @@ impl ActivateState {
     }
 
     fn resolve_container(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+        if self
+            .container
+            .is_some_and(|container_id| ctx.resolve(container_id).is_none())
+        {
+            self.container = None;
+        }
         if self.container.is_none() {
             if let Some(target_id) = self.target {
                 if let Some(snapshot) = ctx.resolve(target_id) {
@@ -21307,7 +23362,7 @@ impl ActivateState {
         container.contents.iter().copied().find(|object_id| {
             !released.contains(object_id)
                 && ctx.resolve(*object_id).is_some_and(|snapshot| {
-                    snapshot.is_status_active()
+                    snapshot.has_nonzero_status()
                         && snapshot.definition_id == *definition_id
                         && snapshot.container == Some(container_id)
                         && snapshot
@@ -21344,9 +23399,7 @@ impl ActivateState {
                 result.status = CommandStatus::Failed;
                 return result;
             };
-            if !target.is_status_active()
-                || target.container != Some(container_id)
-                || !self.check_minimum_con(target)
+            if target.container != Some(container_id) || !self.check_minimum_con(target)
             {
                 result.status = CommandStatus::Failed;
                 return result;
@@ -21403,10 +23456,7 @@ impl ActivateState {
             let Some(container) = self.container else {
                 return CommandStepResult::failed(None);
             };
-            if !ctx
-                .resolve(container)
-                .is_some_and(|target| !target.destroyed && target.status != ObjectStatus::Deleted)
-            {
+            if ctx.resolve(container).is_none() {
                 return CommandStepResult::failed(None);
             }
             return CommandStepResult::completed(None).with_events(vec![CommandEvent::OpenMenu(
@@ -21419,12 +23469,11 @@ impl ActivateState {
         }
 
         if let Some(target_id) = self.target {
-            match ctx.resolve(target_id) {
-                Some(snapshot) if snapshot.container.is_none() => {
-                    return CommandStepResult::completed(None);
-                }
-                Some(_) => {}
-                None => return CommandStepResult::failed(None),
+            let Some(target) = ctx.resolve(target_id) else {
+                return CommandStepResult::failed(None);
+            };
+            if target.container.is_none() {
+                return CommandStepResult::completed(None);
             }
         }
 
@@ -21454,10 +23503,6 @@ impl ActivateState {
                 None => return CommandStepResult::failed(update),
             };
 
-            if !target_snapshot.is_status_active() {
-                return CommandStepResult::failed(update);
-            }
-
             if target_snapshot.container.is_none() {
                 return CommandStepResult::completed(update);
             }
@@ -21478,9 +23523,6 @@ impl ActivateState {
         }
 
         if let Some(container_snapshot) = ctx.resolve(container_id) {
-            if container_snapshot.destroyed || !container_snapshot.status.is_active() {
-                return CommandStepResult::failed(update);
-            }
             if container_snapshot.ocf & ocf::ENTRANCE != 0 {
                 return self.request_enter(container_id, update);
             }
@@ -21576,10 +23618,6 @@ impl PushToState {
             Some(snapshot) => snapshot,
             None => return CommandStepResult::failed(None),
         };
-
-        if !target_snapshot.is_active() {
-            return CommandStepResult::failed(None);
-        }
 
         if self.container == Some(target) {
             return CommandStepResult::failed(None);
@@ -21848,7 +23886,10 @@ impl PutState {
 
         if let Some(definition_id) = &self.definition_id {
             for object_id in &ctx.object.contents {
-                if let Some(snapshot) = ctx.resolve(*object_id) {
+                if let Some(snapshot) = ctx
+                    .resolve(*object_id)
+                    .filter(|snapshot| snapshot.has_nonzero_status())
+                {
                     if &snapshot.definition_id == definition_id {
                         self.requested_item = Some(*object_id);
                         return Ok(Some((*object_id, snapshot)));
@@ -21860,11 +23901,13 @@ impl PutState {
             return Err(());
         }
 
-        if let Some(object_id) = ctx.object.contents.first().copied() {
-            if let Some(snapshot) = ctx.resolve(object_id) {
-                self.requested_item = Some(object_id);
-                return Ok(Some((object_id, snapshot)));
-            }
+        if let Some((object_id, snapshot)) = ctx.object.contents.iter().find_map(|object_id| {
+            ctx.resolve(*object_id)
+                .filter(|snapshot| snapshot.has_nonzero_status())
+                .map(|snapshot| (*object_id, snapshot))
+        }) {
+            self.requested_item = Some(object_id);
+            return Ok(Some((object_id, snapshot)));
         }
 
         Ok(None)
@@ -21884,8 +23927,8 @@ impl PutState {
         }
 
         let container_snapshot = match ctx.resolve(self.container) {
-            Some(snapshot) if snapshot.is_status_active() => snapshot,
-            _ => return CommandStepResult::failed(None),
+            Some(snapshot) => snapshot,
+            None => return CommandStepResult::failed(None),
         };
 
         let (item_id, item_snapshot) = match self.resolve_item(ctx) {
@@ -21901,10 +23944,6 @@ impl PutState {
                 return CommandStepResult::running(None);
             }
             return CommandStepResult::completed(None);
-        }
-
-        if item_snapshot.destroyed {
-            return CommandStepResult::failed(None);
         }
 
         if item_snapshot.container != Some(ctx.object.id) {
@@ -21957,6 +23996,7 @@ impl PutState {
                     target_id: self.container,
                     object_id: item_id,
                     ungrab_on_success: false,
+                    command_instance_id: 0,
                 },
             ]);
         }
@@ -22030,6 +24070,7 @@ impl PutState {
                         target_id: self.container,
                         object_id: item_id,
                         ungrab_on_success: self.put_ty != 0,
+                        command_instance_id: 0,
                     },
                 ]);
             }
@@ -22105,16 +24146,13 @@ impl DropState {
             if let Some(snapshot) = ctx.resolve(item_id) {
                 return Some((item_id, snapshot));
             }
-            self.requested_item = None;
         }
 
-        if let Some(object_id) = ctx.object.contents.first().copied() {
-            if let Some(snapshot) = ctx.resolve(object_id) {
-                return Some((object_id, snapshot));
-            }
-        }
-
-        None
+        ctx.object.contents.iter().find_map(|object_id| {
+            ctx.resolve(*object_id)
+                .filter(|snapshot| snapshot.has_nonzero_status())
+                .map(|snapshot| (*object_id, snapshot))
+        })
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -22144,6 +24182,23 @@ impl DropState {
         // ObjectActionStand and the targeted at-position branch stop it
         // (C4Command.cpp:988-1049).
         let mut update = None;
+
+        // C4Command::Drop tests the raw Target link before dereferencing it.
+        // An executing command may have detached from the linked stack before
+        // AssignRemoval runs, so ClearPointers cannot null that retained
+        // status-zero pointer (C4Command.cpp:998-1010).
+        if let Some(item_id) = self
+            .requested_item
+            .filter(|item_id| !ctx.object.contents.contains(item_id))
+        {
+            let mut result = CommandStepResult::running(update.clone());
+            let request = CommandRequest::new(CommandId::Get)
+                .with_target(Some(item_id))
+                .with_update_interval(40)
+                .with_mode(CommandMode::SilentSub);
+            result.operations.push(CommandOperation::PushFront(request));
+            return result;
+        }
 
         let item = self.resolve_item(ctx);
         // Older snapshots may already have a delegated Put child in front
@@ -22344,7 +24399,8 @@ impl GetState {
         let container_snapshot = ctx.resolve(container_id)?;
         for item_id in &container_snapshot.contents {
             if let Some(item_snapshot) = ctx.resolve(*item_id) {
-                if item_snapshot.is_status_active() && item_snapshot.definition_id == definition_id
+                if item_snapshot.has_nonzero_status()
+                    && item_snapshot.definition_id == definition_id
                 {
                     self.target = Some(*item_id);
                     return self.target;
@@ -22375,6 +24431,7 @@ impl GetState {
         CommandStepResult::running(update).with_events(vec![CommandEvent::GetObject {
             actor_id: ctx.object.id,
             object_id: target_id,
+            command_instance_id: 0,
         }])
     }
 
@@ -22414,11 +24471,6 @@ impl GetState {
         let Some(container_snapshot) = ctx.resolve(container_id) else {
             return CommandStepResult::failed(update);
         };
-        // C++ accepts every nonzero Status here; inactive containers retain
-        // their definition policy and cached OCF just like normal ones.
-        if container_snapshot.destroyed || container_snapshot.status == ObjectStatus::Deleted {
-            return CommandStepResult::failed(update);
-        }
 
         let grab_get = ctx
             .definition(container_snapshot.definition_id.as_str())
@@ -22544,9 +24596,8 @@ impl GetState {
             None => return CommandStepResult::failed(None),
         };
 
-        let target_snapshot = match ctx.resolve(target_id) {
-            Some(snapshot) if snapshot.is_status_active() => snapshot,
-            _ => return CommandStepResult::failed(None),
+        let Some(target_snapshot) = ctx.resolve(target_id) else {
+            return CommandStepResult::failed(None);
         };
 
         if !target_snapshot.collectible {
@@ -22648,7 +24699,18 @@ impl GetState {
                     let collection_limit_reached = ctx
                         .definition(ctx.object.definition_id.as_str())
                         .and_then(|definition| definition.collection_limit)
-                        .is_some_and(|limit| ctx.object.contents.len() >= limit as usize);
+                        .is_some_and(|limit| {
+                            ctx.object
+                                .contents
+                                .iter()
+                                .filter(|object_id| {
+                                    ctx.resolve(**object_id).is_some_and(
+                                        CommandObjectSnapshot::has_nonzero_status,
+                                    )
+                                })
+                                .count()
+                                >= limit as usize
+                        });
                     if collection_limit_reached {
                         result
                             .operations
@@ -22727,10 +24789,6 @@ impl FollowState {
             Some(snapshot) => snapshot,
             None => return CommandStepResult::failed(None),
         };
-
-        if !target.is_status_active() {
-            return CommandStepResult::failed(None);
-        }
 
         if follower.container != target.container {
             if !follower.crew_member {
@@ -23001,7 +25059,12 @@ impl ThrowState {
         // explicit pointer even if the callback moved it out of Contents;
         // ClearPointers may instead have nulled it, in which case native
         // ObjectComThrow falls back to the current first content.
-        let item_id = self.target.or_else(|| ctx.object.contents.first().copied());
+        let item_id = self.target.or_else(|| {
+            ctx.object.contents.iter().copied().find(|id| {
+                ctx.resolve(*id)
+                    .is_some_and(CommandObjectSnapshot::has_nonzero_status)
+            })
+        });
         let Some(object_id) = item_id else {
             return if targeted {
                 CommandStepResult::running(update)
@@ -23042,9 +25105,8 @@ impl AttackState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let target = match ctx.resolve(self.target) {
-            Some(snapshot) => snapshot,
-            None => return CommandStepResult::failed(None),
+        let Some(target) = ctx.resolve(self.target) else {
+            return CommandStepResult::failed(None);
         };
 
         if target.ocf & ocf::CREW_MEMBER == 0 {
@@ -23152,7 +25214,6 @@ impl CallState {
         if ctx.resolve(target).is_none() {
             return CommandStepResult::failed(None);
         }
-
         let event = CommandEvent::CallObjectFunction {
             object_id: target,
             function: self.function.clone(),
@@ -23199,13 +25260,6 @@ impl ContextState {
         let Some(target_snapshot) = ctx.resolve(self.target) else {
             return CommandStepResult::failed(None);
         };
-
-        // C4Command::Context only requires a live Status target; buildings,
-        // items, and synthetic crew can be non-Alive (C4Command.cpp:1076-
-        // 1089; C4Object::ActivateMenu checks pTarget, not Alive).
-        if !target_snapshot.is_status_active() {
-            return CommandStepResult::failed(None);
-        }
 
         let mut update = None;
         if ctx.object.command_direction != CommandDirection::Stop {
@@ -23283,9 +25337,6 @@ impl Take2State {
         let Some(container) = ctx.resolve(container_id) else {
             return CommandStepResult::completed(None);
         };
-        if !container.is_active() {
-            return CommandStepResult::completed(None);
-        }
 
         let update = Self::update_to_stop(ctx);
 
@@ -23500,7 +25551,9 @@ impl AcquireState {
             .contents
             .iter()
             .filter_map(|id| ctx.resolve(*id))
-            .any(|snapshot| snapshot.definition_id == self.definition_id);
+            .any(|snapshot| {
+                snapshot.has_nonzero_status() && snapshot.definition_id == self.definition_id
+            });
 
         if has_item {
             self.script_pending = false;
@@ -23923,19 +25976,25 @@ impl EnergyState {
             .contents
             .iter()
             .filter_map(|id| ctx.resolve(*id))
-            .find(|snapshot| snapshot.definition_id == LINEKIT_DEFINITION)
+            .find(|snapshot| {
+                snapshot.has_nonzero_status() && snapshot.definition_id == LINEKIT_DEFINITION
+            })
             .map(|snapshot| snapshot.id)
     }
 
-    fn target_has_power_line(&self, ctx: &CommandRuntimeContext<'_>) -> bool {
+    fn target_has_power_line(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        target_id: ObjectId,
+    ) -> bool {
         ctx.objects.values().any(|snapshot| {
             snapshot.definition_id == POWERLINE_DEFINITION
                 && snapshot.is_status_active()
                 && snapshot.ocf != 0
                 && !snapshot.action_idle
                 && snapshot.action_name == CONNECT_ACTION
-                && (snapshot.action_target == Some(self.target)
-                    || snapshot.action_target2 == Some(self.target))
+                && (snapshot.action_target == Some(target_id)
+                    || snapshot.action_target2 == Some(target_id))
         })
     }
 
@@ -23947,7 +26006,7 @@ impl EnergyState {
             let Some(kit) = ctx.resolve(*kit_id) else {
                 continue;
             };
-            if kit.definition_id != LINEKIT_DEFINITION {
+            if !kit.has_nonzero_status() || kit.definition_id != LINEKIT_DEFINITION {
                 continue;
             }
 
@@ -23977,16 +26036,20 @@ impl EnergyState {
         None
     }
 
-    fn resolve_source(&mut self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectId> {
+    fn resolve_source(
+        &mut self,
+        ctx: &CommandRuntimeContext<'_>,
+        target_id: ObjectId,
+    ) -> Option<ObjectId> {
         if let Some(source) = self.source {
             return ctx.resolve(source).map(|_| source);
         }
-        let target = ctx.resolve(self.target)?;
+        let target = ctx.resolve(target_id)?;
         let source = ctx
             .objects
             .values()
             .filter(|snapshot| {
-                snapshot.id != self.target
+                snapshot.id != target_id
                     && snapshot.is_status_active()
                     && snapshot.ocf & ocf::POWER_SUPPLY != 0
             })
@@ -24024,24 +26087,21 @@ impl EnergyState {
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
-        let Some(target_snapshot) = ctx.resolve(self.target) else {
+        let target_id = self.target;
+        let Some(target_snapshot) = ctx.resolve(target_id) else {
             return CommandStepResult::failed(None);
         };
-
-        if !target_snapshot.is_status_active() {
-            return CommandStepResult::failed(None);
-        }
 
         if (target_snapshot.line_connect & LINE_CONNECT_POWER_INPUT) == 0 {
             return CommandStepResult::failed(None);
         }
         if !ctx.structures_need_energy
-            || (!target_snapshot.need_energy && self.target_has_power_line(ctx))
+            || (!target_snapshot.need_energy && self.target_has_power_line(ctx, target_id))
         {
             return CommandStepResult::completed(None);
         }
 
-        let Some(source_id) = self.resolve_source(ctx) else {
+        let Some(source_id) = self.resolve_source(ctx, target_id) else {
             return CommandStepResult::failed(None);
         };
         let Some(source_snapshot) = ctx.resolve(source_id) else {
@@ -24062,7 +26122,12 @@ impl EnergyState {
 
         let linekit_id = self
             .linekit
-            .filter(|id| ctx.object.contents.contains(id))
+            .filter(|id| {
+                ctx.object.contents.contains(id)
+                    && ctx
+                        .resolve(*id)
+                        .is_some_and(CommandObjectSnapshot::has_nonzero_status)
+            })
             .or_else(|| self.builder_linekit(ctx));
         let Some(mut linekit_id) = linekit_id else {
             if self.acquire_requested {
@@ -24107,7 +26172,11 @@ impl EnergyState {
         }
 
         if self.line.is_none() {
-            if !source_snapshot.at_point(ctx.position.x, ctx.position.y) {
+            if !source_snapshot.has_nonzero_status()
+                || source_snapshot.container.is_some()
+                || source_snapshot.ocf & ocf::ALL == 0
+                || !source_snapshot.at_point(ctx.position.x, ctx.position.y)
+            {
                 let request = CommandRequest::new(CommandId::MoveTo)
                     .with_target(Some(source_id))
                     .with_update_interval(50)
@@ -24125,9 +26194,13 @@ impl EnergyState {
             }]);
         }
 
-        if !target_snapshot.at_point(ctx.position.x, ctx.position.y) {
+        if !target_snapshot.has_nonzero_status()
+            || target_snapshot.container.is_some()
+            || target_snapshot.ocf & ocf::ALL == 0
+            || !target_snapshot.at_point(ctx.position.x, ctx.position.y)
+        {
             let request = CommandRequest::new(CommandId::MoveTo)
-                .with_target(Some(self.target))
+                .with_target(Some(target_id))
                 .with_update_interval(50)
                 .with_mode(CommandMode::SilentSub);
             return CommandStepResult::running(None)
@@ -24138,7 +26211,7 @@ impl EnergyState {
         let mut action_update = ActionUpdate::default()
             .with_name(CONNECT_ACTION)
             .with_force(true)
-            .with_target2(Some(self.target));
+            .with_target2(Some(target_id));
         if let Some(connection_source_id) = connection_source_id {
             action_update = action_update.with_target(Some(connection_source_id));
         }
@@ -24329,6 +26402,11 @@ impl CommandState {
                     view.ty = Some(site.y);
                 }
             }
+            CommandState::Transfer(state) => {
+                view.tx = state.tx;
+                view.tx_value = Some(state.effective_tx_value());
+                view.tx_definition = state.tx_definition.clone();
+            }
             CommandState::Put(state) => {
                 view.tx = (state.remaining_count != 0).then_some(state.remaining_count);
                 view.target2 = state.requested_item;
@@ -24372,6 +26450,11 @@ impl CommandState {
             }
             CommandState::Enter(state) => {
                 denumerate_object_reference(&mut state.target, object_numbers);
+            }
+            CommandState::Transfer(state) => {
+                if let Some(value) = &mut state.tx_value {
+                    *value = crate::denumerate_script_value(value, object_numbers);
+                }
             }
             CommandState::Construct(state) => {
                 denumerate_object_reference(&mut state.target, object_numbers);
@@ -24437,6 +26520,21 @@ impl CommandState {
             CommandState::Follow(state) => clear(&mut state.target),
             CommandState::MoveTo(state) => clear(&mut state.target),
             CommandState::Enter(state) => clear(&mut state.target),
+            CommandState::Build(state) => clear_required_object_reference(
+                &mut state.target,
+                removed,
+            ),
+            CommandState::Transfer(state) => {
+                let tx_changed = state
+                    .tx_value
+                    .as_mut()
+                    .is_some_and(|value| clear_value_object_reference(value, removed));
+                clear_required_object_reference(&mut state.target, removed) | tx_changed
+            }
+            CommandState::Chop(state) => clear_required_object_reference(
+                &mut state.target,
+                removed,
+            ),
             CommandState::Grab(state) if state.target == removed => {
                 let changed = !state.target_cleared;
                 state.target_cleared = true;
@@ -24449,7 +26547,10 @@ impl CommandState {
             }
             CommandState::Activate(state) => clear(&mut state.target) | clear(&mut state.container),
             CommandState::PushTo(state) => clear(&mut state.target) | clear(&mut state.container),
-            CommandState::Put(state) => clear(&mut state.requested_item),
+            CommandState::Put(state) => {
+                clear_required_object_reference(&mut state.container, removed)
+                    | clear(&mut state.requested_item)
+            }
             CommandState::Drop(state) => {
                 clear(&mut state.requested_item) | clear(&mut state.delegated_container)
             }
@@ -24457,6 +26558,10 @@ impl CommandState {
                 clear(&mut state.target) | clear(&mut state.fallback_container)
             }
             CommandState::Throw(state) => clear(&mut state.target),
+            CommandState::Attack(state) => clear_required_object_reference(
+                &mut state.target,
+                removed,
+            ),
             CommandState::Call(state) => {
                 let tx_changed = state
                     .tx_value
@@ -24471,8 +26576,15 @@ impl CommandState {
             CommandState::Buy(state) => clear(&mut state.target),
             CommandState::Home(state) => clear(&mut state.target),
             CommandState::Energy(state) => {
-                clear(&mut state.source) | clear(&mut state.linekit) | clear(&mut state.line)
+                clear_required_object_reference(&mut state.target, removed)
+                    | clear(&mut state.source)
+                    | clear(&mut state.linekit)
+                    | clear(&mut state.line)
             }
+            CommandState::Context(state) => clear_required_object_reference(
+                &mut state.target,
+                removed,
+            ),
             _ => false,
         }
     }
@@ -24520,6 +26632,19 @@ fn denumerate_object_reference(reference: &mut Option<ObjectId>, object_numbers:
 fn clear_matching_object_reference(reference: &mut Option<ObjectId>, removed: ObjectId) -> bool {
     if *reference == Some(removed) {
         *reference = None;
+        true
+    } else {
+        false
+    }
+}
+
+/// Required typed-state fields mirror nullable native Target/Target2 slots.
+/// Object id zero is reserved and resolves to no object, so it preserves the
+/// command variant/continuation while representing C4Command::ClearPointers'
+/// null write. The creating request is cleared separately for GetCommand.
+fn clear_required_object_reference(reference: &mut ObjectId, removed: ObjectId) -> bool {
+    if *reference == removed {
+        *reference = ObjectId::new(0);
         true
     } else {
         false
@@ -24835,7 +26960,11 @@ impl ActiveCommand {
         };
         for event in &mut result.events {
             match event {
-                CommandEvent::ObjectComPutTake {
+                CommandEvent::ObjectComPut {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::ObjectComPutTake {
                     command_instance_id,
                     ..
                 }
@@ -24851,11 +26980,27 @@ impl ActiveCommand {
                     command_instance_id,
                     ..
                 }
-                | CommandEvent::ObjectComExitJump {
+                | CommandEvent::CommandExitObject {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::CommandExitIntoParent {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::ObjectComStopExit {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::ActivateEntrance {
                     command_instance_id,
                     ..
                 }
                 | CommandEvent::ObjectComDig {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::GetObject {
                     command_instance_id,
                     ..
                 }
@@ -24864,6 +27009,10 @@ impl ActiveCommand {
                     ..
                 }
                 | CommandEvent::ControlCommandConstruction {
+                    command_instance_id,
+                    ..
+                }
+                | CommandEvent::ControlTransfer {
                     command_instance_id,
                     ..
                 } if *command_instance_id == 0 => {

@@ -731,8 +731,8 @@ fn script_context_function_metadata(function: &lc_script::Function) -> ScriptCon
 
 use command::{
     definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandData,
-    CommandDefinitionSnapshot, CommandEvent, CommandFailureFeedback, CommandId,
-    CommandObjectSnapshot, CommandOperation, CommandMode, CommandPlayerSnapshot, CommandRequest,
+    CommandDefinitionSnapshot, CommandEvent, CommandEventInstanceKind, CommandFailureFeedback,
+    CommandId, CommandObjectSnapshot, CommandOperation, CommandMode, CommandPlayerSnapshot, CommandRequest,
     CommandRuntimeContext, CommandStack, CommandStepResult, GetAttemptDisposition,
 };
 use compat::{
@@ -6610,6 +6610,13 @@ fn subpixel_or_none(fixed: FixedVec2, pixels: Vector2) -> Option<FixedVec2> {
 }
 
 impl Object {
+    /// C++ APIs that explicitly test Status accept every nonzero value,
+    /// including C4OS_INACTIVE. Raw pointers may remain dereferenceable
+    /// after Status reaches zero; callers must not use this as a pointer gate.
+    fn has_nonzero_status(&self) -> bool {
+        !self.destroyed && self.state.status != ObjectStatus::Deleted
+    }
+
     fn new(
         id: ObjectId,
         definition_id: DefinitionId,
@@ -12094,6 +12101,8 @@ pub struct Definition {
     timer_call: Option<String>,
     /// Runtime-only `C4Def::TimerCall` function pointer cache.
     timer_call_link: ScriptCallbackLink,
+    /// Runtime-only `C4DefScriptHost::SFn_ControlTransfer` pointer cache.
+    control_transfer_link: ScriptCallbackLink,
     components: Vec<DefinitionComponent>,
     line_connect: u32,
     /// ContactIncinerate=N: 1-in-N contact-fire chance (0 = not inflammable).
@@ -12355,6 +12364,7 @@ impl Definition {
             timer: 35,
             timer_call: None,
             timer_call_link: ScriptCallbackLink::default(),
+            control_transfer_link: ScriptCallbackLink::default(),
             components: Vec::new(),
             line_connect: 0,
             contact_incinerate: 0,
@@ -12520,10 +12530,12 @@ impl Definition {
         self.callbacks_linked = false;
         self.action_library.reset_callback_links();
         self.timer_call_link.reset();
+        self.control_transfer_link.reset();
     }
 
-    /// Cache ActMap and TimerCall functions after appends/includes are final.
-    /// C++'s two GetSFunc layers each consume one leading failsafe marker.
+    /// Cache ActMap, TimerCall and ControlTransfer functions after
+    /// appends/includes are final. C++'s two GetSFunc layers each consume
+    /// one leading failsafe marker.
     fn link_callbacks(&mut self) {
         if self.callbacks_linked {
             return;
@@ -12569,6 +12581,8 @@ impl Definition {
             target
         });
         self.timer_call_link.set_linked(timer_target);
+        self.control_transfer_link
+            .set_linked(resolve("~ControlTransfer"));
         self.callbacks_linked = true;
     }
 
@@ -13135,6 +13149,17 @@ impl Definition {
     /// join in `Engine::compute_object_ocf`. The raw `ocf_base` seed is the
     /// fixture shortcut for def flags this model does not carry.
     pub fn compute_ocf(&self, state: &ObjectState) -> u32 {
+        self.compute_ocf_with_contents_count(state, state.contents.len())
+    }
+
+    /// Live SetOCF variant. `C4ObjectList::ObjectCount` ignores removed list
+    /// holes but retains C4OS_INACTIVE entries, so Engine callers supply the
+    /// count resolved against the authoritative object table.
+    fn compute_ocf_with_contents_count(
+        &self,
+        state: &ObjectState,
+        contents_count: usize,
+    ) -> u32 {
         // OCF_Normal: the OCF is never zero (SetOCF, C4Object.cpp:547-548)
         let mut ocf = self.ocf_base | OCF_NORMAL;
         // OCF_NotContained (SetOCF, C4Object.cpp:627-629); OCF_Available
@@ -13234,11 +13259,7 @@ impl Definition {
         {
             ocf |= crate::ocf::INFLAMMABLE;
         }
-        if self.collection_ocf_enabled(
-            state,
-            state.contents.len(),
-            state.no_collect_delay,
-        ) {
+        if self.collection_ocf_enabled(state, contents_count, state.no_collect_delay) {
             ocf |= crate::ocf::COLLECTION;
         }
         // OCF_LineConstruct: FullCon + any LineConnect bit besides
@@ -13784,6 +13805,10 @@ impl Definition {
 
     fn timer_callback(&self) -> Option<ScriptCallbackTarget> {
         self.timer_call_link.target(self.timer_call.as_deref())
+    }
+
+    fn control_transfer_callback(&self) -> Option<ScriptCallbackTarget> {
+        self.control_transfer_link.target(Some("ControlTransfer"))
     }
 
     pub fn set_timer_call(&mut self, timer_call: Option<String>) {
@@ -15336,6 +15361,7 @@ impl Definition {
         audio: AudioRegistry,
     ) -> Result<(Value, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
         self.call_object_callback(
+            self,
             state,
             object_id,
             &ScriptCallbackTarget::unlinked(function),
@@ -15354,6 +15380,7 @@ impl Definition {
     #[allow(clippy::too_many_arguments)]
     fn call_object_callback(
         &self,
+        object_definition: &Definition,
         state: &ObjectState,
         object_id: ObjectId,
         callback: &ScriptCallbackTarget,
@@ -15381,7 +15408,8 @@ impl Definition {
 
         let arg_values: Vec<Value> = args.to_vec();
         let function = callback.function_name();
-        self.exec_in_object_context(
+        self.exec_in_object_context_for_definition(
+            object_definition,
             state,
             object_id,
             rng,
@@ -15657,6 +15685,51 @@ impl Definition {
             Value,
         ) -> Result<Value, lc_script::ScriptError>,
     {
+        self.exec_in_object_context_for_definition(
+            self,
+            state,
+            object_id,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            label,
+            invoke,
+        )
+    }
+
+    /// Execute a callback owned by `self` against an object whose live
+    /// definition may differ. Native retained function pointers preserve
+    /// their original script host while `Exec(pObj, ...)` derives `this`,
+    /// object locals and object metadata from the supplied receiver.
+    #[allow(clippy::too_many_arguments)]
+    fn exec_in_object_context_for_definition<F>(
+        &self,
+        object_definition: &Definition,
+        state: &ObjectState,
+        object_id: ObjectId,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+        label: &str,
+        invoke: F,
+    ) -> Result<(Value, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError>
+    where
+        F: FnOnce(
+            &lc_script::Engine,
+            &lc_script::LocalCells,
+            Value,
+        ) -> Result<Value, lc_script::ScriptError>,
+    {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
@@ -15678,7 +15751,7 @@ impl Definition {
             state.action.time,
             state.action.data,
             state.action.phase,
-            self.shared_action_library(&world),
+            object_definition.shared_action_library(&world),
             state.direction,
             state.command_direction,
             0,
@@ -15686,14 +15759,14 @@ impl Definition {
             state.action.target2,
             &state.vertices,
             state.category,
-            self.ocf_base,
-            self.crew_member,
+            object_definition.ocf_base,
+            object_definition.crew_member,
             state.draw_transform,
             state.base_graphics.clone(),
         )
         .with_action_index(state.action.act_map_index)
         .with_shape_vertices(&state.shape_vertices)
-        .with_definition_id(self.id.as_str())
+        .with_definition_id(object_definition.id.as_str())
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
         .with_alive(state.alive)
@@ -15704,9 +15777,9 @@ impl Definition {
             state.info_physical,
             state.temporary_physical,
             state.physical_changes.clone(),
-            *self.physical(),
+            *object_definition.physical(),
         )
-        .with_walk_rotation(self.walk_rotation_seed(state))
+        .with_walk_rotation(object_definition.walk_rotation_seed(state))
         .with_script_fixed_position(state.script_fixed_position)
         .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_script_rotation_velocity(state.script_rotation_velocity)
@@ -17607,6 +17680,7 @@ enum ImmediateCommandResume {
     Front,
     MoveToAfterStop,
     BuildAfterStop,
+    ExitAfterStop(u64),
     ThrowPrelude(u64),
     DropPrelude(u64),
 }
@@ -26093,6 +26167,7 @@ impl Engine {
                             silent_commands: definition.silent_commands(),
                             vehicle_control: definition.vehicle_control(),
                             action_library: definition.action_library().clone().into(),
+                            control_transfer_callback: definition.control_transfer_callback(),
                             action_graphics: definition.action_graphics().clone(),
                             value: definition.value(),
                             allow_picture_stack: definition.allow_picture_stack(),
@@ -26412,6 +26487,20 @@ impl Engine {
         .with_full_state(Rc::new(object.script_state_snapshot()))
         .with_material_contents(object.material_contents.clone())
         .with_last_energy_loss_cause(object.last_energy_loss_cause)
+    }
+
+    fn host_retained_contents_count(
+        world: &HostWorldContext,
+        contents: &[ObjectId],
+    ) -> usize {
+        contents
+            .iter()
+            .filter(|content_id| {
+                world
+                    .get(**content_id)
+                    .is_some_and(|object| object.is_present())
+            })
+            .count()
     }
 
     /// Materialize one callback object from an engine that is synchronously
@@ -28203,6 +28292,99 @@ impl Engine {
         callback: &ScriptCallbackTarget,
         args: Vec<Value>,
     ) -> Result<Value, EngineError> {
+        self.call_object_callback_with_status_gate(index, None, callback, args, true)
+    }
+
+    /// Execute an already resolved definition script function with the raw
+    /// receiver semantics of `C4AulScriptFunc::Exec`. Only native call sites
+    /// that bypass `C4Object::Call` may use this path.
+    fn call_direct_object_callback(
+        &mut self,
+        index: usize,
+        callback: &ScriptCallbackTarget,
+        args: Vec<Value>,
+    ) -> Result<Value, EngineError> {
+        self.call_object_callback_with_status_gate(index, None, callback, args, false)
+    }
+
+    /// Direct `C4AulFunc::Exec` with independently retained function owner
+    /// and receiver. The pinned body/helper/static lookup stays on
+    /// `callback_definition_id`; `this`, object locals and metadata come
+    /// from `index` (C4Object.cpp:3293-3298; C4AulExec.cpp:330-359).
+    fn call_direct_object_callback_from_definition(
+        &mut self,
+        index: usize,
+        callback_definition_id: &DefinitionId,
+        callback: &ScriptCallbackTarget,
+        args: Vec<Value>,
+    ) -> Result<Value, EngineError> {
+        self.call_object_callback_with_status_gate(
+            index,
+            Some(callback_definition_id),
+            callback,
+            args,
+            false,
+        )
+    }
+
+    /// Execute a captured definition function with `C4AulFunc::Exec`'s
+    /// null-object receiver. `C4Object::ContainedControl` uses this after
+    /// old-version hardcoded controls even when those controls moved the
+    /// clonk out of its container: the pinned function still runs with its
+    /// owner's definition context and `this == nil` (C4Object.cpp:3293-3298;
+    /// C4AulExec.cpp:330-359).
+    fn call_direct_definition_callback(
+        &mut self,
+        definition_id: &DefinitionId,
+        callback: &ScriptCallbackTarget,
+        args: Vec<Value>,
+    ) -> Result<Value, EngineError> {
+        let definition = self
+            .definitions
+            .get(definition_id)
+            .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+        let script = definition.script_arc();
+        let world = self.host_world_context();
+        let (value, _final_args, batch, audio_state, rng, script_error) =
+            ScenarioScript::execute_value_for_script(
+                definition_id,
+                Some(definition_id.clone()),
+                callback.function_name(),
+                &args,
+                world,
+                self.rng.clone(),
+                self.frame,
+                &self.global_effects.clone(),
+                self.physics,
+                self.environment,
+                self.audio_registry.clone(),
+                self.game_over_triggered,
+                || match callback.resolution() {
+                    Some(resolution) => script.call_pinned_with_ref_args(
+                        resolution.function.as_ref(),
+                        resolution.scope == lc_script::ScriptFunctionScope::Global,
+                        &args,
+                    ),
+                    None => script.call_with_ref_args(callback.function_name(), &args),
+                },
+            );
+        self.rng = rng;
+        self.audio_registry = audio_state;
+        self.apply_scenario_batch(batch)?;
+        if let Some(error) = script_error {
+            return Err(error);
+        }
+        Ok(value.unwrap_or(Value::Nil))
+    }
+
+    fn call_object_callback_with_status_gate(
+        &mut self,
+        index: usize,
+        callback_definition_id: Option<&DefinitionId>,
+        callback: &ScriptCallbackTarget,
+        args: Vec<Value>,
+        require_nonzero_status: bool,
+    ) -> Result<Value, EngineError> {
         let (object_id, definition_id, state_snapshot) = {
             let object = self
                 .objects
@@ -28212,7 +28394,9 @@ impl Engine {
             // (C4Object.cpp:2224-2227). The tombstone remains addressable
             // for the rest of the current native call, but scripts cannot
             // be re-entered through it.
-            if object.destroyed || object.state.status == ObjectStatus::Deleted {
+            if require_nonzero_status
+                && (object.destroyed || object.state.status == ObjectStatus::Deleted)
+            {
                 return Ok(Value::Nil);
             }
             (
@@ -28221,16 +28405,23 @@ impl Engine {
                 object.script_state_snapshot(),
             )
         };
-        let definition = self
+        let object_definition = self
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        let definitions_ref = &self.definitions;
-        let action_library = definition.action_library().clone();
+        let callback_definition = match callback_definition_id {
+            Some(callback_definition_id) => self
+                .definitions
+                .get(callback_definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(callback_definition_id.clone()))?,
+            None => object_definition,
+        };
+        let action_library = object_definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
         let world = self.host_world_context_for_object(index);
-        let call = definition.call_object_callback(
+        let call = callback_definition.call_object_callback(
+            object_definition,
             &state_snapshot,
             object_id,
             callback,
@@ -28753,7 +28944,16 @@ impl Engine {
         if !self.objects[crew_index].state.status.is_active() {
             return Ok(false);
         }
-        let Some(item_id) = self.objects[crew_index].state.contents.first().copied() else {
+        let Some(item_id) = self.objects[crew_index]
+            .state
+            .contents
+            .iter()
+            .copied()
+            .find(|item_id| {
+                self.find_object_index(*item_id)
+                    .is_some_and(|index| self.objects[index].has_nonzero_status())
+            })
+        else {
             return Ok(false);
         };
         self.object_com_drop(crew_id, item_id)
@@ -31404,6 +31604,17 @@ impl Engine {
         self.execute_object_command_now_inner(object_id, ImmediateCommandResume::BuildAfterStop)
     }
 
+    fn resume_exit_after_stop(
+        &mut self,
+        object_id: ObjectId,
+        command_instance_id: u64,
+    ) -> Result<(), EngineError> {
+        self.execute_object_command_now_inner(
+            object_id,
+            ImmediateCommandResume::ExitAfterStop(command_instance_id),
+        )
+    }
+
     fn resume_throw_after_prelude(
         &mut self,
         object_id: ObjectId,
@@ -31496,6 +31707,9 @@ impl Engine {
             ImmediateCommandResume::BuildAfterStop => self.objects[index]
                 .commands
                 .execute_pending_build_stop(&command_context),
+            ImmediateCommandResume::ExitAfterStop(command_instance_id) => self.objects[index]
+                .commands
+                .execute_pending_exit_stop(&command_context, command_instance_id),
             ImmediateCommandResume::ThrowPrelude(command_instance_id) => {
                 self.objects[index].commands.execute_pending_throw_prelude(
                     &command_context,
@@ -37375,7 +37589,12 @@ impl Engine {
                 let outcome = object.apply_delta(&delta, callback_action_library);
                 if definition_changed {
                     if let Some(current_definition) = definitions.get(&object.definition_id) {
-                        object.state.ocf = current_definition.compute_ocf(&object.state);
+                        let contents_count = Self::host_retained_contents_count(
+                            &world,
+                            &object.state.contents,
+                        );
+                        object.state.ocf = current_definition
+                            .compute_ocf_with_contents_count(&object.state, contents_count);
                     }
                 }
                 if let Some(change) = outcome.action_change {
@@ -39828,7 +40047,17 @@ impl Engine {
                             if let Some(current_definition) =
                                 contact_definitions.get(&object.definition_id)
                             {
-                                object.state.ocf = current_definition.compute_ocf(&object.state);
+                                let contents_count = {
+                                    let world = contact_world.borrow();
+                                    Self::host_retained_contents_count(
+                                        world
+                                            .as_ref()
+                                            .expect("contact world remains initialized"),
+                                        &object.state.contents,
+                                    )
+                                };
+                                object.state.ocf = current_definition
+                                    .compute_ocf_with_contents_count(&object.state, contents_count);
                             }
                         }
                         if preserves_position {
@@ -41530,12 +41759,6 @@ impl Engine {
             }
         };
 
-        if self.objects[target_idx].destroyed || !self.objects[target_idx].state.status.is_active()
-        {
-            let _ = self.object_com_stop_build(builder_id)?;
-            return Ok(false);
-        }
-
         // An internal construction is supported only while its live
         // container is itself building and has power (C4Object.cpp:
         // 5016-5020). This bare return deliberately precedes both the area
@@ -41584,7 +41807,9 @@ impl Engine {
             return Ok(false);
         }
 
-        if self.objects[target_idx].state.construction >= FULL_CON {
+        if !self.objects[target_idx].has_nonzero_status()
+            || self.objects[target_idx].state.construction >= FULL_CON
+        {
             // Target::Build returns false once full. The common failure tail
             // stops first and then may SetCommand(Exit) on an internal target.
             self.finish_failed_build(builder_id)?;
@@ -41938,8 +42163,7 @@ impl Engine {
         };
         let target_can_be_chopped = {
             let target = &self.objects[target_idx];
-            !target.destroyed
-                && target.state.status.is_active()
+            target.has_nonzero_status()
                 && target.state.container.is_none()
                 && self.definitions.contains_key(&target.definition_id)
                 && target.state.ocf & crate::ocf::CHOP != 0
@@ -41966,8 +42190,7 @@ impl Engine {
         };
         let chopper_position = self.objects[idx].state.position;
         let target = &self.objects[target_idx];
-        let target_is_at_chopper = !target.destroyed
-            && target.state.status.is_active()
+        let target_is_at_chopper = target.has_nonzero_status()
             && target.state.container.is_none()
             && target.state.ocf & crate::ocf::CHOP != 0
             && self
@@ -42416,10 +42639,7 @@ impl Engine {
                 target_id
                     .and_then(|id| self.find_object_index(id))
                     .filter(|&target_idx| {
-                        let target = &self.objects[target_idx];
-                        !target.destroyed
-                            && target.state.status.is_active()
-                            && target.state.construction >= FULL_CON
+                        self.objects[target_idx].state.construction >= FULL_CON
                     });
             match resolved {
                 None => broke = true,
@@ -44017,15 +44237,6 @@ impl Engine {
             return Ok(false);
         }
 
-        let target_removed = {
-            let target = &self.objects[target_idx];
-            target.destroyed || !target.state.status.is_active()
-        };
-        if target_removed {
-            let _ = self.object_action_stand_live(fighter_id)?;
-            return Ok(false);
-        }
-
         let target_definition_id = self.objects[target_idx].definition_id.clone();
         let target_action_name = self.objects[target_idx].state.action.name.clone();
         let target_action_index = self.objects[target_idx].state.action.act_map_index;
@@ -44140,19 +44351,30 @@ impl Engine {
     fn valid_compiled_object_mass(&self, index: usize) -> Option<i32> {
         fn valid(engine: &Engine, index: usize, visiting: &mut HashSet<ObjectId>) -> bool {
             let object = &engine.objects[index];
+            let retained_contents = object
+                .state
+                .contents
+                .iter()
+                .copied()
+                .filter(|content| {
+                    engine
+                        .find_object_index(*content)
+                        .is_some_and(|index| engine.objects[index].has_nonzero_status())
+                })
+                .collect::<Vec<_>>();
             if object.compiled_mass.is_none()
-                || object.compiled_mass_contents.len() != object.state.contents.len()
+                || object.compiled_mass_contents.len() != retained_contents.len()
                 || !object
                     .compiled_mass_contents
                     .iter()
-                    .all(|id| object.state.contents.contains(id))
+                    .all(|id| retained_contents.contains(id))
             {
                 return false;
             }
             if !visiting.insert(object.id) {
                 return true;
             }
-            let valid = object.state.contents.iter().all(|content| {
+            let valid = retained_contents.iter().all(|content| {
                 engine
                     .find_object_index(*content)
                     .is_some_and(|index| valid(engine, index, visiting))
@@ -44192,7 +44414,10 @@ impl Engine {
                 .max(1);
             if !no_component_mass {
                 for content in &object.state.contents {
-                    if let Some(content_idx) = engine.find_object_index(*content) {
+                    if let Some(content_idx) = engine
+                        .find_object_index(*content)
+                        .filter(|&index| engine.objects[index].has_nonzero_status())
+                    {
                         let m = inner(engine, content_idx, false, visiting);
                         if is_root
                             && object.state.contents.len() > 20
@@ -44223,10 +44448,7 @@ impl Engine {
     ) -> Result<bool, EngineError> {
         {
             let target = &self.objects[target_idx];
-            if target.destroyed
-                || !target.state.status.is_active()
-                || target.state.container.is_some()
-            {
+            if !target.has_nonzero_status() || target.state.container.is_some() {
                 return Ok(false);
             }
         }
@@ -44870,8 +45092,7 @@ impl Engine {
                 };
                 {
                     let obj2 = &self.objects[obj2_idx];
-                    if obj2.destroyed
-                        || !obj2.state.status.is_active()
+                    if !obj2.has_nonzero_status()
                         || obj2.state.container.is_none()
                         || obj2.state.layer != obj1_layer
                     {
@@ -45791,7 +46012,15 @@ impl Engine {
                     let Some(parent_index) = self.find_object_index(object_id) else {
                         break;
                     };
-                    let Some(child) = self.objects[parent_index].state.contents.first().copied()
+                    let Some(child) = self.objects[parent_index]
+                        .state
+                        .contents
+                        .iter()
+                        .copied()
+                        .find(|child| {
+                            self.find_object_index(*child)
+                                .is_some_and(|index| self.objects[index].has_nonzero_status())
+                        })
                     else {
                         break;
                     };
@@ -45808,11 +46037,13 @@ impl Engine {
                         let same_head = self
                             .find_object_index(object_id)
                             .and_then(|parent_index| {
-                                self.objects[parent_index]
-                                    .state
-                                    .contents
-                                    .first()
-                                    .copied()
+                                self.objects[parent_index].state.contents.iter().copied().find(
+                                    |candidate| {
+                                        self.find_object_index(*candidate).is_some_and(|index| {
+                                            self.objects[index].has_nonzero_status()
+                                        })
+                                    },
+                                )
                             }) == Some(child);
                         if same_head {
                             break;
@@ -46274,6 +46505,7 @@ impl Engine {
         for outer_id in contents {
             let nested = self
                 .find_object_index(outer_id)
+                .filter(|&index| self.objects[index].has_nonzero_status())
                 .map(|index| self.objects[index].state.contents.clone())
                 .unwrap_or_default();
             for object_id in nested {
@@ -46308,8 +46540,7 @@ impl Engine {
     fn object_is_base_auto_sell(&self, object_id: ObjectId) -> bool {
         self.find_object_index(object_id).is_some_and(|index| {
             let object = &self.objects[index];
-            object.state.status.is_active()
-                && !object.destroyed
+            object.has_nonzero_status()
                 && object.state.ocf & ocf::CREW_MEMBER == 0
                 && self
                     .definitions
@@ -46333,7 +46564,7 @@ impl Engine {
                 let flag = self.objects[idx].state.contents.iter().copied().find(|id| {
                     self.find_object_index(*id).is_some_and(|flag_index| {
                         let flag = &self.objects[flag_index];
-                        flag.state.status.is_active()
+                        flag.has_nonzero_status()
                             && flag.definition_id.as_str() == "FLAG"
                     })
                 });
@@ -47193,15 +47424,19 @@ impl Engine {
                 .find_object_index(object_id)
                 .and_then(|index| self.objects[index].state.contents.first().copied());
             let Some(child) = child else { break };
+            // Native's loop condition stops when First->Obj is null. A
+            // missing Rust object-table entry is the denumerated equivalent;
+            // do not spin forever on the retained list slot.
+            if self.find_object_index(child).is_none() {
+                break;
+            }
             if exit_contents {
-                if !self.exit_object_at_position_with_zero_motion(
+                let _ = self.exit_object_at_position_with_zero_motion(
                     child,
                     object_id,
                     exit_position,
                     0,
-                )? {
-                    break;
-                }
+                )?;
                 continue;
             }
             if let Some(index) = self.find_object_index(object_id) {
@@ -47305,6 +47540,7 @@ impl Engine {
     /// have already performed the synchronous Exit/RejectEntrance/Enter
     /// lifecycle; engine-owned callers use `change_object_def_live` below.
     fn apply_change_object_def(&mut self, idx: usize, new_def: &str) {
+        let contents_count = self.retained_contents_count(&self.objects[idx].state.contents);
         let Some(definition) = self.definitions.get(new_def) else {
             return;
         };
@@ -47321,6 +47557,9 @@ impl Engine {
             material_capacity,
             owner_color,
         );
+        let ocf = definition
+            .compute_ocf_with_contents_count(&self.objects[idx].state, contents_count);
+        self.objects[idx].state.ocf = ocf;
     }
 
     fn apply_change_object_def_to_object(
@@ -48183,9 +48422,15 @@ impl Engine {
             .objects
             .iter()
             .map(|object| {
+                let contents_count = self.retained_contents_count(&object.state.contents);
                 self.definitions
                     .get(&object.definition_id)
-                    .map(|definition| definition.compute_ocf(&object.state))
+                    .map(|definition| {
+                        definition.compute_ocf_with_contents_count(
+                            &object.state,
+                            contents_count,
+                        )
+                    })
                     .unwrap_or(OCF_NORMAL)
             })
             .collect::<Vec<_>>();
@@ -48607,11 +48852,6 @@ impl Engine {
         let Some(container_index) = self.find_object_index(container) else {
             return Ok(());
         };
-        if self.objects[container_index].destroyed
-            || self.objects[container_index].state.status == ObjectStatus::Deleted
-        {
-            return Ok(());
-        }
 
         let rejected = tolerate_script_error(self.call_object_function(
             container_index,
@@ -51073,11 +51313,24 @@ impl Engine {
         self.objects[index].state.ocf = ocf;
     }
 
+    fn retained_contents_count(&self, contents: &[ObjectId]) -> usize {
+        contents
+            .iter()
+            .filter(|object_id| {
+                self.find_object_index(**object_id)
+                    .is_some_and(|index| self.objects[index].has_nonzero_status())
+            })
+            .count()
+    }
+
     fn compute_object_ocf(&self, index: usize) -> u32 {
         let object = &self.objects[index];
         let definition = self.definitions.get(&object.definition_id);
+        let contents_count = self.retained_contents_count(&object.state.contents);
         let mut ocf = definition
-            .map(|definition| definition.compute_ocf(&object.state))
+            .map(|definition| {
+                definition.compute_ocf_with_contents_count(&object.state, contents_count)
+            })
             .unwrap_or_else(|| {
                 crate::ocf::compute(
                     OCF_NORMAL,
@@ -51630,9 +51883,6 @@ impl Engine {
             return Ok(false);
         };
         let object = &self.objects[object_index];
-        if object.destroyed || object.state.status == ObjectStatus::Deleted {
-            return Ok(false);
-        }
         let Some(previous) = object.state.container else {
             return Ok(false);
         };
@@ -51652,9 +51902,6 @@ impl Engine {
             return Ok(false);
         };
         let object = &self.objects[object_index];
-        if object.destroyed || object.state.status == ObjectStatus::Deleted {
-            return Ok(false);
-        }
         let Some(previous) = object.state.container else {
             return Ok(false);
         };
@@ -51699,10 +51946,7 @@ impl Engine {
         let Some(object_index) = self.find_object_index(object_id) else {
             return Ok(false);
         };
-        if self.objects[object_index].destroyed
-            || self.objects[object_index].state.status == ObjectStatus::Deleted
-            || self.objects[object_index].state.container != Some(previous)
-        {
+        if self.objects[object_index].state.container != Some(previous) {
             return Ok(false);
         }
 
@@ -52321,9 +52565,10 @@ impl Engine {
             }
         }
 
-        if let Some(index) = self.find_object_index(collector_id).filter(|&index| {
-            !self.objects[index].destroyed && self.objects[index].state.status.is_active()
-        }) {
+        if let Some(index) = self
+            .find_object_index(collector_id)
+            .filter(|&index| self.objects[index].has_nonzero_status())
+        {
             let _ = tolerate_script_error(self.call_object_function(
                 index,
                 "Collection",
@@ -52339,8 +52584,7 @@ impl Engine {
             let Some(index) = self.find_object_index(object_id) else {
                 break;
             };
-            if self.objects[index].destroyed
-                || !self.objects[index].state.status.is_active()
+            if !self.objects[index].has_nonzero_status()
                 || self.objects[index].state.ocf & flag == 0
             {
                 continue;
@@ -52372,9 +52616,6 @@ impl Engine {
         let Some(target_index) = self.find_object_index(target_id) else {
             return Ok(false);
         };
-        if !self.objects[actor_index].state.contents.contains(&object_id) {
-            return Ok(false);
-        }
         if self.objects[actor_index].state.container != Some(target_id)
             && self
                 .definitions
@@ -52398,9 +52639,16 @@ impl Engine {
             .definitions
             .get(&self.objects[target_index].definition_id)
             .and_then(Definition::collection_limit);
-        if collection_limit
-            .is_some_and(|limit| self.objects[target_index].state.contents.len() >= limit as usize)
-        {
+        let contents_count = self.objects[target_index]
+            .state
+            .contents
+            .iter()
+            .filter(|object_id| {
+                self.find_object_index(**object_id)
+                    .is_some_and(|index| self.objects[index].has_nonzero_status())
+            })
+            .count();
+        if collection_limit.is_some_and(|limit| contents_count >= limit as usize) {
             return Ok(false);
         }
 
@@ -52435,6 +52683,9 @@ impl Engine {
         let Some(actor_index) = self.find_object_index(actor_id) else {
             return Ok(ObjectComPutTakeOutcome::Finished);
         };
+        if self.find_object_index(target_id).is_none() {
+            return Ok(ObjectComPutTakeOutcome::Finished);
+        }
         let (contents, container, controller, owner) = {
             let actor = &self.objects[actor_index];
             (
@@ -52446,17 +52697,13 @@ impl Engine {
         };
         let item_id = match requested_item {
             Some(item_id) if contents.contains(&item_id) => Some(item_id),
-            Some(item_id)
-                if self
-                    .find_object_index(item_id)
-                    .is_some_and(|index| {
-                        !self.objects[index].destroyed
-                            && self.objects[index].state.status != ObjectStatus::Deleted
-                    }) =>
-            {
+            Some(item_id) if self.find_object_index(item_id).is_some() => {
                 return Ok(ObjectComPutTakeOutcome::NeedsGet(item_id));
             }
-            Some(_) | None => contents.first().copied(),
+            Some(_) | None => contents.into_iter().find(|item_id| {
+                self.find_object_index(*item_id)
+                    .is_some_and(|index| self.objects[index].has_nonzero_status())
+            }),
         };
 
         if let Some(item_id) = item_id {
@@ -52585,6 +52832,7 @@ impl Engine {
         &mut self,
         actor_id: ObjectId,
         object_id: ObjectId,
+        command_instance_id: u64,
     ) -> Result<GetEnterOutcome, EngineError> {
         let target_gate = self.find_object_index(object_id).map(|index| {
             let target = &self.objects[index];
@@ -52630,19 +52878,26 @@ impl Engine {
         // object's RejectEntrance/RejectCollect callbacks do not run on this
         // evaluation (C4Command.cpp:1099-1106).
         let collection_limit_reached = self.find_object_index(actor_id).is_some_and(|index| {
+            let contents_count = self.objects[index]
+                .state
+                .contents
+                .iter()
+                .filter(|object_id| {
+                    self.find_object_index(**object_id)
+                        .is_some_and(|index| self.objects[index].has_nonzero_status())
+                })
+                .count();
             self.definitions
                 .get(&self.objects[index].definition_id)
                 .and_then(Definition::collection_limit)
-                .is_some_and(|limit| self.objects[index].state.contents.len() >= limit as usize)
+                .is_some_and(|limit| contents_count >= limit as usize)
         });
         if collection_limit_reached {
-            let current_target = self
-                .find_object_index(object_id)
-                .filter(|&index| {
-                    !self.objects[index].destroyed
-                        && self.objects[index].state.status.is_active()
-                })
-                .map(|_| object_id);
+            let current_target = self.find_object_index(actor_id).and_then(|index| {
+                self.objects[index]
+                    .commands
+                    .get_event_target_after_callback(command_instance_id, object_id)
+            });
             return if self.put_away_unused_object(actor_id, current_target)? {
                 Ok(GetEnterOutcome::Retry)
             } else {
@@ -52653,7 +52908,16 @@ impl Engine {
         let was_contained = self
             .find_object_index(object_id)
             .is_some_and(|index| self.objects[index].state.container.is_some());
-        match self.try_object_enter_with_reject_collect(object_id, actor_id, true)? {
+        let enter_outcome = self.try_object_enter_with_reject_collect(object_id, actor_id, true)?;
+        let current_target = self.find_object_index(actor_id).and_then(|index| {
+            self.objects[index]
+                .commands
+                .get_event_target_after_callback(command_instance_id, object_id)
+        });
+        if current_target.is_none() {
+            return Ok(GetEnterOutcome::Completed);
+        }
+        match enter_outcome {
             ObjectEnterOutcome::Entered => {
                 if self.find_object_index(object_id).is_none() {
                     return Ok(GetEnterOutcome::Completed);
@@ -52670,7 +52934,7 @@ impl Engine {
                 Ok(GetEnterOutcome::Entered)
             }
             ObjectEnterOutcome::RejectedCollect => {
-                if self.put_away_unused_object(actor_id, Some(object_id))? {
+                if self.put_away_unused_object(actor_id, current_target)? {
                     Ok(GetEnterOutcome::Retry)
                 } else {
                     Ok(GetEnterOutcome::Failed)
@@ -52819,8 +53083,7 @@ impl Engine {
             .filter(|candidate| {
                 self.find_object_index(*candidate).is_some_and(|index| {
                     let object = &self.objects[index];
-                    object.state.status.is_active()
-                        && !object.destroyed
+                    object.has_nonzero_status()
                         && object.state.container == Some(base_id)
                 })
             })
@@ -52833,8 +53096,7 @@ impl Engine {
                     .find(|candidate| {
                         self.find_object_index(*candidate).is_some_and(|index| {
                             let object = &self.objects[index];
-                            object.state.status.is_active()
-                                && !object.destroyed
+                            object.has_nonzero_status()
                                 && object.definition_id == definition_id
                                 && object.state.container == Some(base_id)
                         })
@@ -52850,6 +53112,40 @@ impl Engine {
             return None;
         }
         Some((base_owner, candidate))
+    }
+
+    /// Bind a deserialized command event to the fresh runtime identity of
+    /// the command which emitted it before any live callback can replace the
+    /// object's command stack. Runtime-produced events already carry a
+    /// nonzero identity and pass through unchanged.
+    fn resolve_command_event_instance_id(
+        &self,
+        object_id: ObjectId,
+        kind: CommandEventInstanceKind,
+        command_instance_id: u64,
+    ) -> u64 {
+        self.find_object_index(object_id).map_or(command_instance_id, |index| {
+            self.objects[index]
+                .commands
+                .resolve_event_instance_id(kind, command_instance_id)
+        })
+    }
+
+    fn resolve_call_result_instance_id(
+        &self,
+        caller: ObjectId,
+        action: &CallResultAction,
+        command_instance_id: u64,
+    ) -> u64 {
+        let kind = match action {
+            CallResultAction::CompleteCommandOnFalse { command }
+            | CallResultAction::CompleteCommandOnTrue { command }
+            | CallResultAction::FailCommandOnFalse { command } => {
+                CommandEventInstanceKind::Exact(*command)
+            }
+            CallResultAction::ResolveExitActivation => CommandEventInstanceKind::ExitActivation,
+        };
+        self.resolve_command_event_instance_id(caller, kind, command_instance_id)
     }
 
     fn apply_command_event(&mut self, event: CommandEvent) -> Result<(), EngineError> {
@@ -52879,9 +53175,15 @@ impl Engine {
             CommandEvent::GetObject {
                 actor_id,
                 object_id,
+                command_instance_id,
             } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    actor_id,
+                    CommandEventInstanceKind::Get,
+                    command_instance_id,
+                );
                 let (disposition, message) = match self
-                    .try_get_object_enter(actor_id, object_id)?
+                    .try_get_object_enter(actor_id, object_id, command_instance_id)?
                 {
                     GetEnterOutcome::Entered | GetEnterOutcome::Retry => {
                         (GetAttemptDisposition::Continue, None)
@@ -52895,7 +53197,7 @@ impl Engine {
                 if let Some(actor_index) = self.find_object_index(actor_id) {
                     let resolution = self.objects[actor_index]
                         .commands
-                        .resolve_get_attempt(disposition);
+                        .resolve_get_attempt(command_instance_id, disposition);
                     if let Some(feedback) = resolution.and_then(|result| result.feedback) {
                         self.execute_command_failure_feedback(actor_id, feedback, message)?;
                     }
@@ -53057,7 +53359,13 @@ impl Engine {
                 target_id,
                 object_id,
                 ungrab_on_success,
+                command_instance_id,
             } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    actor_id,
+                    CommandEventInstanceKind::Put,
+                    command_instance_id,
+                );
                 let succeeded = self.try_object_com_put(actor_id, target_id, object_id)?;
                 if succeeded && ungrab_on_success {
                     if let Some(actor_index) = self.find_object_index(actor_id) {
@@ -53070,7 +53378,11 @@ impl Engine {
                 }
                 let feedback = self
                     .find_object_index(actor_id)
-                    .and_then(|index| self.objects[index].commands.resolve_put_attempt(succeeded));
+                    .and_then(|index| {
+                        self.objects[index]
+                            .commands
+                            .resolve_put_attempt(command_instance_id, succeeded)
+                    });
                 if let Some(feedback) = feedback {
                     self.execute_command_failure_feedback(actor_id, feedback, None)?;
                 }
@@ -53082,6 +53394,11 @@ impl Engine {
                 command,
                 command_instance_id,
             } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    actor_id,
+                    CommandEventInstanceKind::PutTake(command),
+                    command_instance_id,
+                );
                 let result = self.try_object_com_put_take(actor_id, target_id, requested_item)?;
                 if let Some(actor_index) = self.find_object_index(actor_id) {
                     match result {
@@ -53122,6 +53439,11 @@ impl Engine {
                 complete_command_on_success,
                 command_instance_id,
             } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    actor_id,
+                    CommandEventInstanceKind::Exact(CommandId::Throw),
+                    command_instance_id,
+                );
                 let success = self.try_object_action_throw(actor_id, object_id)?;
                 if success || !complete_command_on_success {
                     if let Some(actor_index) = self.find_object_index(actor_id) {
@@ -53136,6 +53458,11 @@ impl Engine {
                 object_id,
                 command_instance_id,
             } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    actor_id,
+                    CommandEventInstanceKind::PutTake(CommandId::Drop),
+                    command_instance_id,
+                );
                 let _ = self.object_com_drop(actor_id, object_id)?;
                 if let Some(actor_index) = self.find_object_index(actor_id) {
                     self.objects[actor_index]
@@ -53147,6 +53474,11 @@ impl Engine {
                 actor_id,
                 command_instance_id,
             } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    actor_id,
+                    CommandEventInstanceKind::Exact(CommandId::UnGrab),
+                    command_instance_id,
+                );
                 if let Some(actor_index) = self.find_object_index(actor_id) {
                     let _ = self.object_com_ungrab(actor_index)?;
                 }
@@ -53167,6 +53499,11 @@ impl Engine {
                 direction,
                 command_instance_id,
             } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    actor_id,
+                    CommandEventInstanceKind::Dig,
+                    command_instance_id,
+                );
                 let succeeded = match self.find_object_index(actor_id) {
                     Some(index) => self.object_com_dig(index)?,
                     None => false,
@@ -53201,6 +53538,11 @@ impl Engine {
                 object_id,
                 command_instance_id,
             } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Exact(CommandId::Exit),
+                    command_instance_id,
+                );
                 if let Some(index) = self.find_object_index(object_id) {
                     let _ = self.object_com_jump(index)?;
                 }
@@ -53209,6 +53551,64 @@ impl Engine {
                         .commands
                         .finish_command_instance(CommandId::Exit, command_instance_id);
                 }
+            }
+            CommandEvent::CommandExitObject {
+                object_id,
+                previous_container,
+                position,
+                jump_after,
+                command_instance_id,
+            } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Exact(CommandId::Exit),
+                    command_instance_id,
+                );
+                let _ = self.exit_object_at_position_with_zero_motion(
+                    object_id,
+                    previous_container,
+                    position,
+                    0,
+                )?;
+                if jump_after {
+                    if let Some(index) = self.find_object_index(object_id) {
+                        let _ = self.object_com_jump(index)?;
+                    }
+                }
+                if let Some(index) = self.find_object_index(object_id) {
+                    self.objects[index]
+                        .commands
+                        .finish_command_instance(CommandId::Exit, command_instance_id);
+                }
+            }
+            CommandEvent::CommandExitIntoParent {
+                object_id,
+                container_id,
+                command_instance_id,
+            } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Exact(CommandId::Exit),
+                    command_instance_id,
+                );
+                let _ = self.try_object_enter(object_id, container_id)?;
+                if let Some(index) = self.find_object_index(object_id) {
+                    self.objects[index]
+                        .commands
+                        .finish_command_instance(CommandId::Exit, command_instance_id);
+                }
+            }
+            CommandEvent::ObjectComStopExit {
+                object_id,
+                command_instance_id,
+            } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Prelude(CommandId::Exit),
+                    command_instance_id,
+                );
+                let _ = self.object_com_stop_live(object_id)?;
+                self.resume_exit_after_stop(object_id, command_instance_id)?;
             }
             CommandEvent::ObjectComStopMoveTo { object_id } => {
                 let _ = self.object_com_stop_live(object_id)?;
@@ -53232,6 +53632,11 @@ impl Engine {
                 object_id,
                 command_instance_id,
             } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Prelude(CommandId::Throw),
+                    command_instance_id,
+                );
                 let _ = self.object_com_stop_live(object_id)?;
                 self.resume_throw_after_prelude(object_id, command_instance_id)?;
             }
@@ -53239,6 +53644,11 @@ impl Engine {
                 object_id,
                 command_instance_id,
             } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Prelude(CommandId::Drop),
+                    command_instance_id,
+                );
                 let _ = self.object_com_stop_live(object_id)?;
                 self.resume_drop_after_prelude(object_id, command_instance_id)?;
             }
@@ -53247,6 +53657,11 @@ impl Engine {
                 direction,
                 command_instance_id,
             } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    object_id,
+                    CommandEventInstanceKind::Prelude(CommandId::Throw),
+                    command_instance_id,
+                );
                 if let Some(index) = self.find_object_index(object_id) {
                     let definition_id = self.objects[index].definition_id.clone();
                     self.set_command_action_direction(index, &definition_id, direction)?;
@@ -53286,6 +53701,11 @@ impl Engine {
                 definition_id,
                 command_instance_id,
             } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    caller,
+                    CommandEventInstanceKind::Script(CommandId::Acquire),
+                    command_instance_id,
+                );
                 let result = self.call_control_command_acquire(
                     caller,
                     target,
@@ -53304,6 +53724,11 @@ impl Engine {
                 definition_id,
                 command_instance_id,
             } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    caller,
+                    CommandEventInstanceKind::Script(CommandId::Construct),
+                    command_instance_id,
+                );
                 let result = self.call_control_command_construction(
                     caller,
                     target,
@@ -53342,6 +53767,30 @@ impl Engine {
             } => {
                 let _ = self.create_line_object(&definition_id, owner, from, to)?;
             }
+            CommandEvent::ControlTransfer {
+                object_id,
+                caller,
+                tx_value,
+                ty,
+                command_instance_id,
+            } => {
+                let command_instance_id = self.resolve_command_event_instance_id(
+                    caller,
+                    CommandEventInstanceKind::Exact(CommandId::Transfer),
+                    command_instance_id,
+                );
+                let Some(index) = self.find_object_index(object_id) else {
+                    return Err(EngineError::UnknownObject(object_id));
+                };
+                let handled = self.call_control_transfer(index, caller, tx_value, ty)?;
+                if !handled {
+                    if let Some(caller_index) = self.find_object_index(caller) {
+                        self.objects[caller_index]
+                            .commands
+                            .finish_command_instance(CommandId::Transfer, command_instance_id);
+                    }
+                }
+            }
             CommandEvent::CallObjectFunction {
                 object_id,
                 function,
@@ -53353,9 +53802,39 @@ impl Engine {
                 target2,
                 on_result,
             } => {
+                let command_instance_id = on_result.as_ref().map_or(0, |action| {
+                    self.resolve_call_result_instance_id(caller, action, 0)
+                });
                 let Some(index) = self.find_object_index(object_id) else {
                     return Err(EngineError::UnknownObject(object_id));
                 };
+                let legacy_transfer = function == "ControlTransfer"
+                    && matches!(
+                        &on_result,
+                        Some(CallResultAction::CompleteCommandOnFalse {
+                            command: CommandId::Transfer
+                        })
+                    );
+                if legacy_transfer {
+                    // Saves from before the dedicated ControlTransfer event
+                    // retain the old generic-call shape. Rebind its command
+                    // identity above, but execute the cached definition
+                    // function with native's Status bypass and getBool
+                    // return conversion just like a newly emitted event.
+                    let tx_value = tx_value
+                        .or_else(|| tx_definition.map(Value::C4Id))
+                        .or_else(|| tx.map(Value::Int))
+                        .unwrap_or(Value::Nil);
+                    let handled =
+                        self.call_control_transfer(index, caller, tx_value, ty.unwrap_or(0))?;
+                    self.apply_call_result(
+                        on_result.expect("legacy Transfer has a result action"),
+                        caller,
+                        handled,
+                        command_instance_id,
+                    )?;
+                    return Ok(());
+                }
                 let mut args = Vec::new();
                 args.push(object_reference_value(caller));
                 args.push(
@@ -53371,30 +53850,49 @@ impl Engine {
                 args.push(target2_value);
                 let value = self.call_object_function(index, &function, args)?;
                 if let Some(action) = on_result {
-                    self.apply_call_result(action, caller, value.as_bool())?;
+                    self.apply_call_result(
+                        action,
+                        caller,
+                        value.as_bool(),
+                        command_instance_id,
+                    )?;
                 }
             }
             CommandEvent::ActivateEntrance {
                 object_id,
                 caller,
                 on_result,
+                command_instance_id,
             } => {
+                let command_instance_id =
+                    on_result.as_ref().map_or(command_instance_id, |action| {
+                        self.resolve_call_result_instance_id(caller, action, command_instance_id)
+                    });
                 let detached_feedback =
                     matches!(&on_result, Some(CallResultAction::ResolveExitActivation))
                         .then(|| {
                             self.find_object_index(caller).and_then(|index| {
                                 self.objects[index]
                                     .commands
-                                    .pending_exit_activation_failure_feedback()
+                                    .pending_exit_activation_failure_feedback(
+                                        command_instance_id,
+                                    )
                             })
                         })
                         .flatten();
                 let result = self.activate_object_entrance(object_id, caller)?;
                 match on_result {
                     Some(CallResultAction::ResolveExitActivation) => {
-                        self.resolve_exit_activation_result(caller, result, detached_feedback)?;
+                        self.resolve_exit_activation_result(
+                            caller,
+                            result,
+                            command_instance_id,
+                            detached_feedback,
+                        )?;
                     }
-                    Some(action) => self.apply_call_result(action, caller, result)?,
+                    Some(action) => {
+                        self.apply_call_result(action, caller, result, command_instance_id)?
+                    }
                     None => {}
                 }
             }
@@ -53728,19 +54226,14 @@ impl Engine {
         let Some(index) = self.find_object_index(object_id) else {
             return Ok(false);
         };
-        if self.objects[index].destroyed
-            || self.objects[index].state.status == ObjectStatus::Deleted
-        {
-            return Ok(false);
-        }
         let Some(caller_index) = self.find_object_index(caller) else {
             return Ok(false);
         };
-        if self.objects[caller_index].destroyed
-            || self.objects[caller_index].state.status == ObjectStatus::Deleted
-        {
-            return Ok(false);
-        }
+        // ActivateEntrance is invoked through retained raw pointers. It
+        // reads the caller's Controller and the receiver's Base/Owner/OCF
+        // before its eventual C4Object::Call applies the Status gate, so a
+        // status-zero tombstone can still produce the hostile-base message
+        // (C4Object.cpp:1654-1670; C4Object.cpp:2224-2227).
         let by_player = self.objects[caller_index].state.controller;
         let (base, owner) = {
             let object = &self.objects[index];
@@ -53779,7 +54272,47 @@ impl Engine {
             "ActivateEntrance",
             vec![object_reference_value(caller)],
         ))?;
+        // Native uses C4Value::operator bool here (`if (Call(...))`), not
+        // `getBool`; preserve full raw-union truthiness for noncanonical
+        // C4VBool payloads.
         Ok(value.is_some_and(|value| value.as_bool()))
+    }
+
+    /// C4Command::Transfer's direct cached-function dispatch. Native reads
+    /// `Def->Script.SFn_ControlTransfer` and invokes that exact script body
+    /// with `f->Exec(Target, ...)`; it neither routes through C4Object::Call
+    /// nor rejects a Status-zero receiver (C4Command.cpp:1931-1942).
+    fn call_control_transfer(
+        &mut self,
+        index: usize,
+        caller: ObjectId,
+        tx_value: Value,
+        ty: i32,
+    ) -> Result<bool, EngineError> {
+        let callback = {
+            let object = self
+                .objects
+                .get(index)
+                .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?;
+            let definition = self
+                .definitions
+                .get(&object.definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(object.definition_id.clone()))?;
+            let Some(callback) = definition.control_transfer_callback() else {
+                return Ok(false);
+            };
+            callback
+        };
+        let value = tolerate_script_error(self.call_direct_object_callback(
+            index,
+            &callback,
+            vec![object_reference_value(caller), tx_value, Value::Int(ty)],
+        ))?;
+        Ok(value.is_some_and(|value| {
+            value
+                .c4_bool_raw()
+                .map_or_else(|| value.as_bool(), |raw| raw != 0)
+        }))
     }
 
     fn apply_call_result(
@@ -53787,25 +54320,46 @@ impl Engine {
         action: CallResultAction,
         caller: ObjectId,
         result: bool,
+        command_instance_id: u64,
     ) -> Result<(), EngineError> {
         match action {
             CallResultAction::CompleteCommandOnFalse { command } => {
                 if !result {
-                    self.complete_command(caller, command)?;
+                    let Some(index) = self.find_object_index(caller) else {
+                        return Err(EngineError::UnknownObject(caller));
+                    };
+                    self.objects[index]
+                        .commands
+                        .finish_command_instance(command, command_instance_id);
                 }
             }
             CallResultAction::CompleteCommandOnTrue { command } => {
                 if result {
-                    self.complete_command(caller, command)?;
+                    let Some(index) = self.find_object_index(caller) else {
+                        return Err(EngineError::UnknownObject(caller));
+                    };
+                    self.objects[index]
+                        .commands
+                        .finish_command_instance(command, command_instance_id);
                 }
             }
             CallResultAction::FailCommandOnFalse { command } => {
                 if !result {
-                    self.fail_command(caller, command)?;
+                    let Some(index) = self.find_object_index(caller) else {
+                        return Err(EngineError::UnknownObject(caller));
+                    };
+                    self.objects[index]
+                        .commands
+                        .fail_command_instance(command, command_instance_id);
                 }
             }
             CallResultAction::ResolveExitActivation => {
-                self.resolve_exit_activation_result(caller, result, None)?;
+                self.resolve_exit_activation_result(
+                    caller,
+                    result,
+                    command_instance_id,
+                    None,
+                )?;
             }
         }
         Ok(())
@@ -53815,11 +54369,16 @@ impl Engine {
         &mut self,
         caller: ObjectId,
         result: bool,
+        command_instance_id: u64,
         detached_feedback: Option<CommandFailureFeedback>,
     ) -> Result<(), EngineError> {
         let resolution = self
             .find_object_index(caller)
-            .and_then(|index| self.objects[index].commands.resolve_exit_activation(result));
+            .and_then(|index| {
+                self.objects[index]
+                    .commands
+                    .resolve_exit_activation(result, command_instance_id)
+            });
         let feedback = match resolution {
             Some(resolution) => resolution.feedback,
             None if !result => detached_feedback,
@@ -58754,6 +59313,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     silent_commands: false,
                     vehicle_control: 0,
                     action_library: ActionLibrary::default().into(),
+                    control_transfer_callback: None,
                     action_graphics: HashMap::new(),
                     value: 0,
                     allow_picture_stack: 0,
@@ -61041,6 +61601,54 @@ mod legacy_contents_order_regression {
         assert_eq!(deepest_after.container, deepest_before.container);
         assert_eq!(deepest_after.contents, deepest_before.contents);
         assert_eq!(engine.effective_object_mass(root_index), expected_mass);
+    }
+
+    #[test]
+    fn inactive_contents_count_while_deleted_holes_do_not_like_cpp() {
+        let mut engine = Engine::new();
+        let mut carrier =
+            Definition::from_script("MCAR", "Mass carrier", "").expect("carrier compiles");
+        carrier.set_mass(100);
+        carrier.set_collection_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
+        carrier.set_collection_limit(Some(2));
+        let mut item = Definition::from_script("MITM", "Mass item", "").expect("item compiles");
+        item.set_mass(25);
+        engine
+            .register_definition(carrier)
+            .expect("carrier registers");
+        engine.register_definition(item).expect("item registers");
+
+        let carrier = engine
+            .spawn_object(SpawnConfig::new("MCAR"))
+            .expect("carrier spawns");
+        let deleted = engine
+            .spawn_object(SpawnConfig::new("MITM").with_container(carrier))
+            .expect("deleted item spawns");
+        let inactive = engine
+            .spawn_object(SpawnConfig::new("MITM").with_container(carrier))
+            .expect("inactive item spawns");
+        let deleted_index = engine.find_object_index(deleted).expect("deleted item exists");
+        let _ = engine.objects[deleted_index].mark_destroyed();
+        let inactive_index = engine
+            .find_object_index(inactive)
+            .expect("inactive item exists");
+        engine.objects[inactive_index].state.status = ObjectStatus::Inactive;
+        let carrier_index = engine
+            .find_object_index(carrier)
+            .expect("carrier exists");
+        engine.objects[carrier_index].state.contents = vec![deleted, inactive];
+
+        engine.refresh_object_ocf(carrier_index);
+        assert_ne!(
+            engine.objects[carrier_index].state.ocf & ocf::COLLECTION,
+            0,
+            "ObjectCount sees one retained entry, not the deleted list hole"
+        );
+        assert_eq!(
+            engine.effective_object_mass(carrier_index),
+            125,
+            "MassCount includes inactive contents and skips Status==0"
+        );
     }
 
     #[test]
@@ -67761,7 +68369,7 @@ protected func Put()
 }
 "#;
         let target_script = r#"#strict
-local reject, reject_contents_actor;
+local reject, reject_contents_actor, nested_put_actor, nested_put_item, nested_put_depth;
 protected func RejectContents()
 {
   if (reject_contents_actor) reject_contents_actor->NoteRejectContents();
@@ -67770,6 +68378,14 @@ protected func RejectContents()
 protected func RejectCollect(idItem, pItem)
 {
   pItem->Mark(2);
+  if (nested_put_actor && !nested_put_depth)
+  {
+    nested_put_depth = 1;
+    SetCommand(nested_put_actor, "Put", this(), 0, 0, nested_put_item);
+    ExecuteCommand(nested_put_actor);
+    nested_put_depth = 0;
+    return(1);
+  }
   return(reject);
 }
 protected func Collection2(pItem)
@@ -67920,6 +68536,159 @@ protected func Departure(pTarget)
     }
 
     #[test]
+    fn object_com_put_accepts_an_explicit_non_content_object() {
+        let mut engine = put_fixture_engine();
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR"))
+            .expect("actor spawns");
+        let item = engine
+            .spawn_object(SpawnConfig::new("ITEM"))
+            .expect("uncontained item spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index]
+            .state
+            .local_vars
+            .insert("tracked".to_string(), object_reference_value(item));
+
+        assert!(engine
+            .try_object_com_put(actor, target, item)
+            .expect("ObjectComPut executes"));
+        let item_state = &engine.objects[engine.find_object_index(item).expect("item remains")].state;
+        assert_eq!(item_state.container, Some(target));
+        assert_eq!(
+            item_state.local_vars.get("callback_order"),
+            Some(&Value::Int(123_456))
+        );
+    }
+
+    #[test]
+    fn empty_put_take_opens_menu_on_a_retained_status_zero_target() {
+        let mut engine = put_fixture_engine();
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_container(target))
+            .expect("contained actor spawns");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        let _ = engine.objects[target_index].mark_destroyed();
+
+        assert_eq!(
+            engine
+                .try_object_com_put_take(actor, target, None)
+                .expect("ObjectComPutTake executes"),
+            ObjectComPutTakeOutcome::Finished
+        );
+        let menu = engine.objects[engine.find_object_index(actor).expect("actor remains")]
+            .state
+            .menu
+            .as_ref()
+            .expect("activate menu opens");
+        assert_eq!(menu.identification, Value::Int(6));
+        assert_eq!(menu.refill_object, Some(target));
+    }
+
+    #[test]
+    fn exit_unlinks_a_retained_status_zero_object() {
+        let mut engine = put_fixture_engine();
+        let container = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("container spawns");
+        let item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+            .expect("contained item spawns");
+        let item_index = engine.find_object_index(item).expect("item exists");
+        let position = engine.objects[item_index].state.position;
+        let rotation = engine.objects[item_index].state.rotation;
+        let _ = engine.objects[item_index].mark_destroyed();
+
+        assert!(engine
+            .exit_object_at_position_with_zero_motion(item, container, position, rotation)
+            .expect("Exit executes"));
+        assert_eq!(
+            engine.objects[engine.find_object_index(item).expect("item remains")]
+                .state
+                .container,
+            None
+        );
+        assert!(!engine.objects[engine
+            .find_object_index(container)
+            .expect("container remains")]
+        .state
+        .contents
+        .contains(&item));
+    }
+
+    #[test]
+    fn assign_removal_exit_contents_continues_after_a_child_reenters() {
+        let mut engine = put_fixture_engine();
+        let reentering_script = r#"#strict
+local reenter_target;
+protected func Departure(pTarget)
+{
+  if (reenter_target) Enter(reenter_target);
+  return(1);
+}
+"#;
+        let mut reentering = Definition::from_script(
+            "RITM",
+            "Reentering item",
+            reentering_script,
+        )
+        .expect("reentering item compiles");
+        reentering.set_c4_callback_convention(true);
+        engine
+            .register_definition(reentering)
+            .expect("reentering item registers");
+        let destination = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("destination spawns");
+        let parent = engine
+            .spawn_object(SpawnConfig::new("ACTR"))
+            .expect("parent spawns");
+        let first = engine
+            .spawn_object(SpawnConfig::new("RITM").with_container(parent))
+            .expect("first child spawns");
+        let second = engine
+            .spawn_object(SpawnConfig::new("RITM").with_container(parent))
+            .expect("second child spawns");
+        let parent_index = engine.find_object_index(parent).expect("parent exists");
+        let first_link = engine.objects[parent_index].state.contents[0];
+        let sibling = if first_link == first { second } else { first };
+        let first_link_index = engine
+            .find_object_index(first_link)
+            .expect("first linked child exists");
+        engine.objects[first_link_index].state.local_vars.insert(
+            "reenter_target".to_string(),
+            object_reference_value(destination),
+        );
+
+        assert!(engine
+            .assign_object_removal_with_contents(parent, true)
+            .expect("AssignRemoval executes"));
+        assert_eq!(
+            engine.objects[engine
+                .find_object_index(first_link)
+                .expect("reentered child remains")]
+            .state
+            .container,
+            Some(destination)
+        );
+        assert_eq!(
+            engine.objects[engine
+                .find_object_index(sibling)
+                .expect("exited sibling remains")]
+            .state
+            .container,
+            None,
+            "the loop re-reads Contents.First even when the prior Exit returned false"
+        );
+    }
+
+    #[test]
     fn put_event_runs_object_com_put_callbacks_and_ty_ungrab_only_on_success() {
         let mut engine = put_fixture_engine();
         let (actor, item, target) = spawn_push_put_triplet(&mut engine, false);
@@ -68059,6 +68828,96 @@ protected func Departure(pTarget)
     }
 
     #[test]
+    fn command_references_accept_inactive_live_put_take_helpers_like_cpp() {
+        for command in [CommandId::Throw, CommandId::Drop] {
+            let mut engine = put_fixture_engine();
+            let target = engine
+                .spawn_object(SpawnConfig::new("TARG"))
+                .expect("target spawns");
+            let actor = engine
+                .spawn_object(SpawnConfig::new("ACTR").with_container(target))
+                .expect("contained actor spawns");
+            let deleted = engine
+                .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+                .expect("tombstone item spawns");
+            let inactive = engine
+                .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+                .expect("inactive item spawns");
+
+            let deleted_index = engine.find_object_index(deleted).expect("tombstone exists");
+            let _ = engine.objects[deleted_index].mark_destroyed();
+            let inactive_index = engine.find_object_index(inactive).expect("inactive item exists");
+            engine.objects[inactive_index].state.status = ObjectStatus::Inactive;
+            let actor_index = engine.find_object_index(actor).expect("actor exists");
+            engine.objects[actor_index].state.contents = vec![deleted, inactive];
+            engine.objects[actor_index]
+                .commands
+                .push_front(CommandRequest::new(command))
+                .expect("put/take command queues");
+
+            engine
+                .execute_object_command_now(actor)
+                .expect("ObjectComPutTake executes");
+
+            assert_eq!(
+                engine
+                    .object_snapshot(inactive)
+                    .expect("inactive item remains")
+                    .container,
+                Some(target),
+                "{command:?} skips Status==0 and retains C4OS_INACTIVE"
+            );
+            assert_eq!(
+                engine
+                    .object_snapshot(deleted)
+                    .expect("tombstone remains until end-of-tick cleanup")
+                    .container,
+                Some(actor),
+                "the deleted contents hole is never selected"
+            );
+        }
+    }
+
+    #[test]
+    fn command_references_accept_inactive_sell_candidates_like_cpp() {
+        let mut engine = put_fixture_engine();
+        engine
+            .register_player(PlayerConfig::new(1, "Seller"))
+            .expect("seller registers");
+        let base = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("base spawns");
+        let base_index = engine.find_object_index(base).expect("base exists");
+        engine.objects[base_index].state.base = 1;
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_owner(1))
+            .expect("seller spawns");
+        let deleted = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(base))
+            .expect("tombstone item spawns");
+        let inactive = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(base))
+            .expect("inactive item spawns");
+
+        let deleted_index = engine.find_object_index(deleted).expect("tombstone exists");
+        let _ = engine.objects[deleted_index].mark_destroyed();
+        let inactive_index = engine.find_object_index(inactive).expect("inactive item exists");
+        engine.objects[inactive_index].state.status = ObjectStatus::Inactive;
+        engine.objects[base_index].state.contents = vec![deleted, inactive];
+
+        assert_eq!(
+            engine.command_sell_candidate(actor, base, "ITEM", Some(inactive)),
+            Some((1, inactive)),
+            "an explicit inactive Target2 remains preferred"
+        );
+        assert_eq!(
+            engine.command_sell_candidate(actor, base, "ITEM", Some(deleted)),
+            Some((1, inactive)),
+            "a deleted Target2 falls back to Contents.Find's inactive entry"
+        );
+    }
+
+    #[test]
     fn nested_put_take_does_not_consume_the_outer_put_result_marker() {
         let mut engine = put_fixture_engine();
         engine
@@ -68118,6 +68977,77 @@ protected func Departure(pTarget)
                 .snapshot()
                 .is_empty(),
             "the outer Put retained and consumed its own success result"
+        );
+    }
+
+    #[test]
+    fn recursive_same_kind_put_keeps_each_callback_result_with_its_emitter() {
+        let mut engine = put_fixture_engine();
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_container(target))
+            .expect("contained actor spawns");
+        let outer_item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+            .expect("outer item spawns");
+        let replacement_item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(actor))
+            .expect("replacement item spawns");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        engine.objects[target_index].state.local_vars.extend([
+            ("nested_put_actor".to_string(), object_reference_value(actor)),
+            (
+                "nested_put_item".to_string(),
+                object_reference_value(replacement_item),
+            ),
+        ]);
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index]
+            .state
+            .local_vars
+            .insert("tracked".to_string(), object_reference_value(replacement_item));
+        engine.objects[actor_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Put)
+                    .with_target(Some(target))
+                    .with_target2(Some(outer_item)),
+            )
+            .expect("outer Put queues");
+
+        engine
+            .execute_object_command_now(actor)
+            .expect("outer and replacement Put execute");
+
+        assert_eq!(
+            engine
+                .object_snapshot(outer_item)
+                .expect("outer item remains")
+                .container,
+            Some(actor),
+            "the outer RejectCollect result stays with the detached outer Put"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(replacement_item)
+                .expect("replacement item remains")
+                .container,
+            Some(target),
+            "recursive ExecuteCommand completes the replacement helper synchronously"
+        );
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let commands = engine.objects[actor_index].commands.command_views();
+        let [replacement] = commands.as_slice() else {
+            panic!("replacement Put must remain for its next native Execute: {commands:?}");
+        };
+        assert_eq!(replacement.name, "Put");
+        assert_eq!(replacement.target, Some(target));
+        assert_eq!(replacement.target2, Some(replacement_item));
+        assert!(
+            !replacement.finished,
+            "the outer failure must not consume the successful replacement Put"
         );
     }
 
@@ -70545,6 +71475,651 @@ mod pathfinder_host_state_regression {
         assert_eq!(graph.rays[0].start, Vector2::new(11, 49));
         assert_eq!(graph.rays[0].target, Vector2::new(89, 51));
         assert_eq!(script_get_path(&mut engine, from, to), Value::Nil);
+    }
+
+    #[test]
+    fn transfer_direct_callback_runs_on_status_zero_and_keeps_replacement_command() {
+        let mut engine = Engine::with_seed(1);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "GATE",
+                    "Transfer gate",
+                    r#"
+                        #strict 2
+                        protected func ControlTransfer(object actor, tx, int ty)
+                        {
+                            SetR(73, actor);
+                            SetCommand(actor, "Transfer", this(), 777, 9);
+                            return false;
+                        }
+                    "#,
+                )
+                .expect("gate definition compiles"),
+            )
+            .expect("gate definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Transfer actor", "")
+                    .expect("actor definition compiles"),
+            )
+            .expect("actor definition registers");
+
+        let gate = engine
+            .spawn_object(SpawnConfig::new("GATE").with_position(Vector2::new(100, 0)))
+            .expect("gate spawns");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_position(Vector2::new(95, 0)))
+            .expect("actor spawns");
+        engine
+            .set_transfer_zone(
+                gate,
+                TransferZoneRect {
+                    x: 90,
+                    y: -10,
+                    width: 20,
+                    height: 40,
+                },
+            )
+            .expect("transfer zone registers");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::Transfer)
+                    .with_target(Some(gate))
+                    .with_tx_value(Value::C4Id("GOLD".to_string()))
+                    .with_ty(Some(-5)),
+            )
+            .expect("Transfer queues");
+
+        let gate_index = engine.find_object_index(gate).expect("gate exists");
+        let _ = engine.objects[gate_index].mark_destroyed();
+        assert_eq!(
+            engine.objects[gate_index].state.status,
+            ObjectStatus::Deleted
+        );
+        assert!(
+            engine.transfer_zones.get(gate).is_some(),
+            "the synthetic tombstone retains its zone for the direct-call seam"
+        );
+
+        engine
+            .execute_object_command_now(actor)
+            .expect("Transfer executes");
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        assert_eq!(
+            engine.objects[actor_index].state.rotation, 73,
+            "the cached SFn executes even though C4Object::Call would reject Status zero"
+        );
+        let commands = engine.objects[actor_index].commands.command_views();
+        let [replacement] = commands.as_slice() else {
+            panic!("replacement Transfer must remain: {commands:?}");
+        };
+        assert_eq!(replacement.name, "Transfer");
+        assert_eq!(replacement.target, Some(gate));
+        assert_eq!(replacement.tx, Some(777));
+        assert_eq!(replacement.tx_value, Some(Value::Int(777)));
+        assert_eq!(replacement.ty, Some(9));
+        assert!(
+            !replacement.finished,
+            "false resolves only the detached emitting instance"
+        );
+    }
+
+    #[test]
+    fn restored_zero_token_events_pin_transfer_before_callback_replacement() {
+        let mut engine = Engine::with_seed(1);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "ZTRG",
+                    "Restored transfer gate",
+                    r#"
+                        #strict 2
+                        local answer;
+                        protected func ControlTransfer(object actor, tx, int ty)
+                        {
+                            SetCommand(actor, "Transfer", this(), 777, 9);
+                            return answer;
+                        }
+                    "#,
+                )
+                .expect("gate definition compiles"),
+            )
+            .expect("gate definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("ZTRA", "Restored transfer actor", "")
+                    .expect("actor definition compiles"),
+            )
+            .expect("actor definition registers");
+
+        let gate = engine
+            .spawn_object(SpawnConfig::new("ZTRG"))
+            .expect("gate spawns");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ZTRA"))
+            .expect("actor spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::Transfer).with_target(Some(gate)))
+            .expect("original Transfer queues");
+
+        let queued = QueuedCommand::immediate(ObjectUpdate::default()).with_events(vec![
+            CommandEvent::ControlTransfer {
+                object_id: gate,
+                caller: actor,
+                tx_value: Value::Nil,
+                ty: 0,
+                command_instance_id: u64::MAX,
+            },
+        ]);
+        let encoded = serde_json::to_value(queued).expect("queued event serializes");
+        let restored: QueuedCommand =
+            serde_json::from_value(encoded).expect("queued event restores");
+        let [event] = restored.events.as_slice() else {
+            panic!("one restored event expected");
+        };
+        assert!(matches!(
+            event,
+            CommandEvent::ControlTransfer {
+                command_instance_id: 0,
+                ..
+            }
+        ));
+
+        engine
+            .apply_command_event(event.clone())
+            .expect("restored direct callback executes");
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let commands = engine.objects[actor_index].commands.command_views();
+        let [replacement] = commands.as_slice() else {
+            panic!("callback replacement Transfer must remain: {commands:?}");
+        };
+        assert_eq!(replacement.target, Some(gate));
+        assert_eq!(replacement.tx, Some(777));
+        assert_eq!(replacement.ty, Some(9));
+        assert!(
+            !replacement.finished,
+            "the restored event resolves the original instance before its callback"
+        );
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        assert_eq!(
+            engine.objects[actor_index]
+                .commands
+                .take_successful_finishes(),
+            vec![CommandId::Transfer]
+        );
+        engine.objects[actor_index].commands.clear();
+        engine.objects[actor_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::Transfer).with_target(Some(gate)))
+            .expect("legacy original Transfer queues");
+        let gate_index = engine.find_object_index(gate).expect("gate remains");
+        let raw = 1usize.checked_shl(32).unwrap_or(0);
+        engine.objects[gate_index]
+            .state
+            .local_vars
+            .insert("answer".to_string(), Value::RawBool(raw));
+        let _ = engine.objects[gate_index].mark_destroyed();
+        let legacy = QueuedCommand::immediate(ObjectUpdate::default()).with_events(vec![
+            CommandEvent::CallObjectFunction {
+                object_id: gate,
+                function: "ControlTransfer".to_string(),
+                caller: actor,
+                tx: None,
+                tx_value: Some(Value::Nil),
+                tx_definition: None,
+                ty: Some(0),
+                target2: None,
+                on_result: Some(CallResultAction::CompleteCommandOnFalse {
+                    command: CommandId::Transfer,
+                }),
+            },
+        ]);
+        let encoded = serde_json::to_value(legacy).expect("legacy event serializes");
+        let restored: QueuedCommand =
+            serde_json::from_value(encoded).expect("legacy event restores");
+        let [legacy_event] = restored.events.as_slice() else {
+            panic!("one restored legacy event expected");
+        };
+        engine
+            .apply_command_event(legacy_event.clone())
+            .expect("legacy callback event executes");
+
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let commands = engine.objects[actor_index].commands.command_views();
+        let [replacement] = commands.as_slice() else {
+            panic!("legacy callback replacement Transfer must remain: {commands:?}");
+        };
+        assert_eq!(replacement.tx, Some(777));
+        assert_eq!(replacement.ty, Some(9));
+        assert_eq!(Value::RawBool(raw).c4_bool_raw(), Some(0));
+        assert_eq!(
+            engine.objects[gate_index].state.status,
+            ObjectStatus::Deleted,
+            "the restored direct callback bypasses the ordinary object-call Status gate"
+        );
+        assert!(
+            !replacement.finished,
+            "legacy CallObjectFunction binds its completion target before the callback"
+        );
+        assert_eq!(
+            engine.objects[actor_index]
+                .commands
+                .take_successful_finishes(),
+            vec![CommandId::Transfer],
+            "the restored callback consumes native's low bool word"
+        );
+    }
+
+    #[test]
+    fn transfer_direct_callback_uses_the_c4_bool_low_word() {
+        let mut engine = Engine::with_seed(1);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "GBOL",
+                    "Raw-bool transfer gate",
+                    r#"
+                        #strict 2
+                        local answer;
+                        protected func ControlTransfer(object actor, tx, int ty)
+                        {
+                            return answer;
+                        }
+                    "#,
+                )
+                .expect("gate definition compiles"),
+            )
+            .expect("gate definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("ABOL", "Raw-bool actor", "")
+                    .expect("actor definition compiles"),
+            )
+            .expect("actor definition registers");
+
+        // C4VBool stores a machine word but C4Value::getBool reads its signed
+        // 32-bit payload. On a 64-bit host this value is truthy to Rust's
+        // generic Value::as_bool while its native C4 bool word is zero.
+        let raw = 1usize.checked_shl(32).unwrap_or(0);
+        let gate = engine
+            .spawn_object(
+                SpawnConfig::new("GBOL")
+                    .with_local_vars(HashMap::from([("answer".to_string(), Value::RawBool(raw))])),
+            )
+            .expect("gate spawns");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ABOL"))
+            .expect("actor spawns");
+        let gate_index = engine.find_object_index(gate).expect("gate exists");
+
+        assert_eq!(Value::RawBool(raw).c4_bool_raw(), Some(0));
+        assert!(
+            !engine
+                .call_control_transfer(gate_index, actor, Value::Nil, 0)
+                .expect("direct callback executes"),
+            "ControlTransfer uses C4Value::getBool rather than generic truthiness"
+        );
+    }
+
+    #[test]
+    fn activate_entrance_uses_full_c4_value_truthiness() {
+        let mut engine = Engine::with_seed(1);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "EBOL",
+                    "Raw-bool entrance",
+                    r#"
+                        #strict 2
+                        local answer;
+                        protected func ActivateEntrance(object actor)
+                        {
+                            return answer;
+                        }
+                    "#,
+                )
+                .expect("entrance definition compiles"),
+            )
+            .expect("entrance definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("ACBE", "Entrance caller", "")
+                    .expect("caller definition compiles"),
+            )
+            .expect("caller definition registers");
+
+        let raw = 1usize.checked_shl(32).unwrap_or(0);
+        let entrance = engine
+            .spawn_object(
+                SpawnConfig::new("EBOL")
+                    .with_local_vars(HashMap::from([("answer".to_string(), Value::RawBool(raw))])),
+            )
+            .expect("entrance spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("ACBE"))
+            .expect("caller spawns");
+        let entrance_index = engine
+            .find_object_index(entrance)
+            .expect("entrance exists");
+        engine.objects[entrance_index].state.ocf |= ocf::ENTRANCE;
+
+        assert_eq!(Value::RawBool(raw).c4_bool_raw(), Some(0));
+        assert_eq!(
+            engine
+                .activate_object_entrance(entrance, caller)
+                .expect("entrance callback executes"),
+            raw != 0,
+            "C4Object::ActivateEntrance uses C4Value::operator bool, not getBool"
+        );
+    }
+
+    #[test]
+    fn restored_legacy_entrance_result_does_not_fail_callback_replacement() {
+        let mut engine = Engine::with_seed(1);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "ZENT",
+                    "Restored entrance",
+                    r#"
+                        #strict 2
+                        protected func ActivateEntrance(object actor)
+                        {
+                            SetCommand(actor, "Exit");
+                            return false;
+                        }
+                    "#,
+                )
+                .expect("entrance definition compiles"),
+            )
+            .expect("entrance definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("ZENA", "Restored entrance caller", "")
+                    .expect("caller definition compiles"),
+            )
+            .expect("caller definition registers");
+
+        let entrance = engine
+            .spawn_object(SpawnConfig::new("ZENT"))
+            .expect("entrance spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("ZENA"))
+            .expect("caller spawns");
+        let entrance_index = engine
+            .find_object_index(entrance)
+            .expect("entrance exists");
+        engine.objects[entrance_index].state.ocf |= ocf::ENTRANCE;
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        engine.objects[caller_index]
+            .commands
+            .push_front(CommandRequest::new(CommandId::Exit))
+            .expect("original Exit queues");
+
+        let queued = QueuedCommand::immediate(ObjectUpdate::default()).with_events(vec![
+            CommandEvent::ActivateEntrance {
+                object_id: entrance,
+                caller,
+                on_result: Some(CallResultAction::FailCommandOnFalse {
+                    command: CommandId::Exit,
+                }),
+                command_instance_id: u64::MAX,
+            },
+        ]);
+        let encoded = serde_json::to_value(queued).expect("legacy entrance event serializes");
+        let restored: QueuedCommand =
+            serde_json::from_value(encoded).expect("legacy entrance event restores");
+        let [event] = restored.events.as_slice() else {
+            panic!("one restored entrance event expected");
+        };
+        engine
+            .apply_command_event(event.clone())
+            .expect("legacy entrance event executes");
+
+        let caller_index = engine.find_object_index(caller).expect("caller remains");
+        let commands = engine.objects[caller_index].commands.legacy_save_commands();
+        let [replacement] = commands.as_slice() else {
+            panic!("callback replacement Exit must remain: {commands:?}");
+        };
+        assert_eq!(replacement.view.name, "Exit");
+        assert_eq!(
+            replacement.failures, 0,
+            "the false result fails only the detached original Exit"
+        );
+    }
+
+    #[test]
+    fn script_execute_command_runs_direct_transfer_before_returning() {
+        let mut engine = Engine::with_seed(1);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "GAT2",
+                    "Synchronous transfer gate",
+                    r#"
+                        #strict 2
+                        local seen_tx, seen_ty;
+                        protected func ControlTransfer(object actor, tx, int ty)
+                        {
+                            seen_tx = tx;
+                            seen_ty = ty;
+                            SetR(73, actor);
+                            SetCommand(actor, "Transfer", this(), 777, 9);
+                            return false;
+                        }
+                    "#,
+                )
+                .expect("gate definition compiles"),
+            )
+            .expect("gate definition registers");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "ACR2",
+                    "Synchronous transfer actor",
+                    r#"
+                        #strict 2
+                        public func Probe(object gate)
+                        {
+                            SetCommand(this(), "Transfer", gate, GOLD, -5);
+                            ExecuteCommand();
+                            return [GetR(), GetCommand(), GetCommand(0, 2), GetCommand(0, 3)];
+                        }
+                    "#,
+                )
+                .expect("actor definition compiles"),
+            )
+            .expect("actor definition registers");
+
+        let gate = engine
+            .spawn_object(SpawnConfig::new("GAT2").with_position(Vector2::new(100, 0)))
+            .expect("gate spawns");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACR2").with_position(Vector2::new(95, 0)))
+            .expect("actor spawns");
+        engine
+            .set_transfer_zone(
+                gate,
+                TransferZoneRect {
+                    x: 90,
+                    y: -10,
+                    width: 20,
+                    height: 40,
+                },
+            )
+            .expect("transfer zone registers");
+        let gate_index = engine.find_object_index(gate).expect("gate exists");
+        let _ = engine.objects[gate_index].mark_destroyed();
+
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        let result = engine
+            .call_object_function(actor_index, "Probe", vec![object_reference_value(gate)])
+            .expect("Probe executes");
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                Value::Int(73),
+                Value::String("Transfer".to_string().into()),
+                Value::Int(777),
+                Value::Int(9),
+            ]),
+            "the next VM instruction observes the direct callback and its replacement command"
+        );
+        let gate_index = engine.find_object_index(gate).expect("gate remains");
+        assert_eq!(
+            engine.objects[gate_index].state.local_vars.get("seen_tx"),
+            Some(&Value::C4Id("GOLD".to_string())),
+            "the direct callback receives the exact tagged Tx"
+        );
+        assert_eq!(
+            engine.objects[gate_index].state.local_vars.get("seen_ty"),
+            Some(&Value::Int(-5))
+        );
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let commands = engine.objects[actor_index].commands.command_views();
+        let [replacement] = commands.as_slice() else {
+            panic!("replacement Transfer must remain: {commands:?}");
+        };
+        assert_eq!(replacement.target, Some(gate));
+        assert_eq!(replacement.tx_value, Some(Value::Int(777)));
+        assert_eq!(replacement.ty, Some(9));
+        assert!(!replacement.finished);
+    }
+
+    #[test]
+    fn exit_command_runs_live_callbacks_before_finishing_in_both_execution_paths() {
+        fn setup() -> (Engine, ObjectId, ObjectId) {
+            let mut engine = Engine::with_seed(1);
+            let mut container = Definition::from_script(
+                "XCTR",
+                "Exit callback container",
+                r#"
+                    #strict 2
+                    protected func Ejection(object item)
+                    {
+                        item->NoteExit(1);
+                        return true;
+                    }
+                "#,
+            )
+            .expect("container definition compiles");
+            container.set_c4_callback_convention(true);
+            engine
+                .register_definition(container)
+                .expect("container definition registers");
+            let mut actor = Definition::from_script(
+                "XACT",
+                "Exit callback actor",
+                r#"
+                    #strict 2
+                    local exit_order, after_exit_order, after_exit_command, after_exit_rotation;
+                    public func NoteExit(int step)
+                    {
+                        exit_order = exit_order * 10 + step;
+                        return true;
+                    }
+                    protected func Departure(object old_container)
+                    {
+                        NoteExit(2);
+                        SetCommand(this(), "Wait", 0, 17);
+                        return true;
+                    }
+                    public func Probe()
+                    {
+                        ExecuteCommand();
+                        after_exit_order = exit_order;
+                        after_exit_command = GetCommand();
+                        after_exit_rotation = GetR();
+                        return true;
+                    }
+                "#,
+            )
+            .expect("actor definition compiles");
+            actor.set_c4_callback_convention(true);
+            engine
+                .register_definition(actor)
+                .expect("actor definition registers");
+
+            let container = engine
+                .spawn_object(SpawnConfig::new("XCTR").with_position(Vector2::new(80, 90)))
+                .expect("container spawns");
+            let actor = engine
+                .spawn_object(SpawnConfig::new("XACT").with_container(container))
+                .expect("actor spawns");
+            let container_index = engine
+                .find_object_index(container)
+                .expect("container exists");
+            engine.objects[container_index].state.entrance_status = true;
+            engine
+                .apply_object_update(
+                    actor,
+                    ObjectUpdate::new()
+                        .with_position(Vector2::new(7, 9))
+                        .with_rotation(45)
+                        .with_velocity(Vector2::new(6, -2))
+                        .with_command_direction(CommandDirection::Right),
+                )
+                .expect("contained actor is repositioned");
+            let actor_index = engine.find_object_index(actor).expect("actor exists");
+            engine.objects[actor_index]
+                .commands
+                .push_front(CommandRequest::new(CommandId::Exit).with_evaluated(true))
+                .expect("Exit queues");
+            (engine, actor, container)
+        }
+
+        fn assert_exit_result(engine: &Engine, actor: ObjectId, container: ObjectId) {
+            let actor_index = engine.find_object_index(actor).expect("actor remains");
+            let state = &engine.objects[actor_index].state;
+            assert_eq!(state.container, None);
+            assert_eq!(state.position, Vector2::new(7, 9));
+            assert_eq!(state.rotation, 0, "C4Object::Exit uses its default iR=0");
+            assert_eq!(engine.objects[actor_index].fixed_velocity, FixedVec2::ZERO);
+            assert_eq!(state.command_direction, CommandDirection::Right);
+            assert_eq!(state.local_vars.get("exit_order"), Some(&Value::Int(12)));
+            assert!(!engine.objects[engine
+                .find_object_index(container)
+                .expect("container remains")]
+            .state
+            .contents
+            .contains(&actor));
+            let commands = engine.objects[actor_index].commands.command_views();
+            let [replacement] = commands.as_slice() else {
+                panic!("Departure replacement Wait must remain: {commands:?}");
+            };
+            assert_eq!(replacement.name, "Wait");
+            assert_eq!(replacement.tx, Some(17));
+            assert!(!replacement.finished);
+        }
+
+        let (mut engine, actor, container) = setup();
+        engine
+            .execute_object_command_now(actor)
+            .expect("engine Exit executes");
+        assert_exit_result(&engine, actor, container);
+
+        let (mut engine, actor, container) = setup();
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_index, "Probe", Vec::new())
+            .expect("script ExecuteCommand returns");
+        assert_exit_result(&engine, actor, container);
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let locals = &engine.objects[actor_index].state.local_vars;
+        assert_eq!(locals.get("after_exit_order"), Some(&Value::Int(12)));
+        assert_eq!(
+            locals.get("after_exit_command"),
+            Some(&Value::String("Wait".to_string().into()))
+        );
+        assert_eq!(locals.get("after_exit_rotation"), Some(&Value::Int(0)));
     }
 
     #[test]

@@ -530,6 +530,134 @@ protected func RejectContents()
 }
 
 #[test]
+fn get_reject_contents_status_clear_mode_controls_put_away_target() {
+    #[derive(Clone, Copy)]
+    enum CallbackOrder {
+        Attached,
+        ClearThenDetach,
+        DetachThenClear,
+    }
+
+    fn run(clear_pointers: bool, order: CallbackOrder) -> (i32, i32) {
+        let mut engine = Engine::new();
+        let mut actor = Definition::from_script(
+            "CLNK",
+            "Clonk",
+            r#"#strict
+local nilDropTargetCount, retainedDropTargetCount;
+public func StartGet(pTarget) { return(SetCommand(this(), "Get", pTarget)); }
+protected func GetObject2Drop(pTarget)
+{
+  if (pTarget) retainedDropTargetCount += 1;
+  else nilDropTargetCount += 1;
+  return(Contents(0));
+}
+"#,
+        )
+        .expect("actor definition compiles");
+        actor.set_c4_callback_convention(true);
+        actor.set_collection_limit(Some(1));
+        let clear_pointers = if clear_pointers { "true" } else { "false" };
+        let callback_body = match order {
+            CallbackOrder::Attached => {
+                format!("SetObjectStatus(2, target, {clear_pointers});")
+            }
+            CallbackOrder::ClearThenDetach => format!(
+                "SetObjectStatus(2, target, {clear_pointers});\n  SetCommand(actor, \"Wait\");"
+            ),
+            CallbackOrder::DetachThenClear => format!(
+                "SetCommand(actor, \"Wait\");\n  SetObjectStatus(2, target, {clear_pointers});"
+            ),
+        };
+        let container_script = format!(
+            r#"#strict
+local actor, target;
+public func Configure(pActor, pTarget)
+{{
+  actor = pActor;
+  target = pTarget;
+  return(1);
+}}
+protected func RejectContents()
+{{
+  {callback_body}
+  return(0);
+}}
+"#
+        );
+        let mut container = Definition::from_script("HUT2", "Hut", &container_script)
+            .expect("container definition compiles");
+        container.set_c4_callback_convention(true);
+        let mut item = Definition::from_script("ITEM", "Item", "#strict\n")
+            .expect("item definition compiles");
+        item.set_collectible(true);
+        engine
+            .register_definition(actor)
+            .expect("actor definition registers");
+        engine
+            .register_definition(container)
+            .expect("container definition registers");
+        engine
+            .register_definition(item)
+            .expect("item definition registers");
+
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT2"))
+            .expect("container spawns");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK").with_container(hut))
+            .expect("actor spawns");
+        let _held = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(clonk))
+            .expect("held item spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(hut))
+            .expect("target spawns");
+        let hut_index = engine.find_object_index(hut).expect("container exists");
+        engine
+            .call_object_function(
+                hut_index,
+                "Configure",
+                vec![
+                    Value::Object(clonk.as_u64()),
+                    Value::Object(target.as_u64()),
+                ],
+            )
+            .expect("container configures");
+        arm_get(&mut engine, clonk, target);
+        engine
+            .tick_without_snapshot()
+            .expect("Get survives status callback");
+
+        (
+            local_int(&engine, clonk, "nilDropTargetCount"),
+            local_int(&engine, clonk, "retainedDropTargetCount"),
+        )
+    }
+
+    assert_eq!(
+        run(false, CallbackOrder::Attached),
+        (0, 1),
+        "StatusDeactivate(false) retains the executing Get's Target"
+    );
+    assert_eq!(
+        run(true, CallbackOrder::Attached),
+        (1, 0),
+        "StatusDeactivate(true) clears the linked executing Get's Target"
+    );
+    assert_eq!(
+        run(true, CallbackOrder::ClearThenDetach),
+        (1, 0),
+        "a clear followed by SetCommand freezes the executing Get's null Target"
+    );
+    assert_eq!(
+        run(true, CallbackOrder::DetachThenClear),
+        (0, 1),
+        "SetCommand unlinks the executing Get before the later ClearPointers walk"
+    );
+}
+
+#[test]
 fn get_collection_limit_puts_away_before_reject_collect() {
     let mut engine = Engine::new();
     let mut actor = Definition::from_script(
