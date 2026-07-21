@@ -131,9 +131,16 @@ pub(crate) struct MutableGroupEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MutableGroupEntryData {
     File(Vec<u8>),
-    ExistingFile { data: Vec<u8>, contents_crc: u32 },
+    ExistingFile {
+        data: Vec<u8>,
+        crc_state: u8,
+        stored_crc: u32,
+    },
     Child(Box<MutableGroup>),
-    PackedChild { data: Vec<u8>, contents_crc: u32 },
+    PackedChild {
+        data: Vec<u8>,
+        contents_crc: u32,
+    },
 }
 
 impl MutableGroup {
@@ -199,9 +206,9 @@ impl MutableGroup {
         )
     }
 
-    /// Imports an existing file core while preserving even C4Group's
-    /// otherwise-special zero timestamp. Rewrites after a deletion retain
-    /// untouched entry metadata byte-for-byte before refreshing its CRC.
+    /// Imports an existing file whose supplied CRC is already a trusted
+    /// `C4GECS_New` entry checksum. The otherwise-special zero timestamp is
+    /// retained verbatim.
     pub fn add_existing_file_with_metadata(
         &mut self,
         name: impl Into<String>,
@@ -227,9 +234,35 @@ impl MutableGroup {
         time: u32,
         executable: bool,
     ) -> Result<(), MutableGroupError> {
+        self.add_imported_file_core_bytes_with_metadata(
+            name,
+            data,
+            2,
+            contents_crc,
+            time,
+            executable,
+        )
+    }
+
+    /// Imports the raw CRC state from an existing ordinary-file core. C++
+    /// retains `C4GECS_New` verbatim, while `None`/`Old` are resolved only
+    /// when the group closes, after any intervening rename.
+    pub(crate) fn add_imported_file_core_bytes_with_metadata(
+        &mut self,
+        name: impl Into<Vec<u8>>,
+        data: Vec<u8>,
+        crc_state: u8,
+        stored_crc: u32,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
         self.add_entry_bytes(
             name.into(),
-            MutableGroupEntryData::ExistingFile { data, contents_crc },
+            MutableGroupEntryData::ExistingFile {
+                data,
+                crc_state,
+                stored_crc,
+            },
             time,
             executable,
         )
@@ -547,14 +580,6 @@ impl MutableGroup {
         let entry = &mut self.entries[index];
         entry.name = String::from_utf8_lossy(&new_name_bytes).into_owned();
         entry.name_bytes = new_name_bytes;
-        if let MutableGroupEntryData::ExistingFile { data, .. } = &mut entry.data {
-            // Imported file CRCs include the entry name. Once the name
-            // changes, materialize it as a rewritten file so pack/entry_crc
-            // recompute against the new bytes instead of retaining a stale
-            // cached source CRC.
-            let data = std::mem::take(data);
-            entry.data = MutableGroupEntryData::File(data);
-        }
         if let MutableGroupEntryData::Child(child) = &mut entry.data {
             child.filename = entry.name_bytes.clone();
         }
@@ -861,7 +886,11 @@ impl MutableGroupEntry {
     fn contents_crc(&self) -> u32 {
         match &self.data {
             MutableGroupEntryData::File(data) => c4group_entry_crc(data, &self.name_bytes),
-            MutableGroupEntryData::ExistingFile { contents_crc, .. } => *contents_crc,
+            MutableGroupEntryData::ExistingFile {
+                data,
+                crc_state,
+                stored_crc,
+            } => imported_file_entry_crc(data, &self.name_bytes, *crc_state, *stored_crc),
             MutableGroupEntryData::Child(child) => child.contents_crc(),
             MutableGroupEntryData::PackedChild { contents_crc, .. } => *contents_crc,
         }
@@ -892,6 +921,26 @@ pub(crate) fn c4group_entry_crc(data: &[u8], name: &[u8]) -> u32 {
     } else {
         crc32(crc32(0, data), name)
     }
+}
+
+/// Resolves one imported ordinary-file core at C4Group close time. New CRCs
+/// precede both the empty-file and child checks in native `CalcCRC32`; this
+/// helper handles ordinary files, so state two remains an unconditional cache
+/// hit. State one is the legacy data-only CRC seed, and every other state is
+/// recalculated like `C4GECS_None`.
+fn imported_file_entry_crc(data: &[u8], name: &[u8], crc_state: u8, stored_crc: u32) -> u32 {
+    if crc_state == 2 {
+        return stored_crc;
+    }
+    if data.is_empty() {
+        return 0;
+    }
+    let data_crc = if crc_state == 1 {
+        stored_crc
+    } else {
+        crc32(0, data)
+    };
+    crc32(data_crc, name)
 }
 
 fn crc32(initial: u32, data: &[u8]) -> u32 {

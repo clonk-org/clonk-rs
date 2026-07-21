@@ -503,10 +503,10 @@ impl MutableGroup {
             let data = group
                 .read_entry_bytes_exact(&entry)
                 .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
-            let contents_crc = group
-                .entry_contents_crc(&entry, &data)
-                .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
             if entry.is_directory {
+                let contents_crc = group
+                    .entry_contents_crc(&entry, &data)
+                    .map_err(|error| MutableGroupError::SourceGroup(error.to_string()))?;
                 mutable.add_packed_child_bytes_with_metadata(
                     entry.name_bytes,
                     data,
@@ -515,10 +515,11 @@ impl MutableGroup {
                     entry.executable,
                 )?;
             } else {
-                mutable.add_existing_file_bytes_with_metadata(
+                mutable.add_imported_file_core_bytes_with_metadata(
                     entry.name_bytes,
                     data,
-                    contents_crc,
+                    entry.crc_state,
+                    entry.stored_crc,
                     entry.time,
                     entry.executable,
                 )?;

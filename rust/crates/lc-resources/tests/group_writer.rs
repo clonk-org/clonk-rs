@@ -3,7 +3,7 @@
 #[path = "../src/group_writer.rs"]
 mod group_writer;
 
-use group_writer::{c4group_file_crc, compress_c4group_for_test};
+use group_writer::{c4group_entry_crc, c4group_file_crc, compress_c4group_for_test};
 use lc_resources::{Group, MutableGroup, MutableGroupChildMut, MutableGroupError};
 use std::io::Read;
 use std::path::PathBuf;
@@ -106,21 +106,149 @@ fn mutable_group_rename_is_collision_safe_and_preserves_entry_metadata() {
 }
 
 #[test]
-fn mutable_group_rename_recomputes_imported_file_crc_for_new_name() {
-    let mut source = MutableGroup::new("Files.c4g");
-    source.add_file("Old.txt", b"payload".to_vec()).unwrap();
-    let source = Group::from_memory(PathBuf::from("Files.c4g"), source.pack_raw().unwrap())
-        .unwrap();
-    let mut rewritten = MutableGroup::from_group(&source).unwrap();
-    let old_crc = rewritten.entry_crc("Old.txt").unwrap();
-    assert!(rewritten
-        .rename_entry_checked("Old.txt", "New.txt")
-        .unwrap());
+fn mutable_group_rename_preserves_cpp_cached_new_crc_for_imported_file() {
+    const OLD_FILE_NAME: &str = "Old.txt";
+    const NEW_FILE_NAME: &str = "New.txt";
+    const PAYLOAD: &[u8] = b"payload";
 
-    let mut expected = MutableGroup::new("Files.c4g");
-    expected.add_file("New.txt", b"payload".to_vec()).unwrap();
-    assert_eq!(rewritten.entry_crc("New.txt"), expected.entry_crc("New.txt"));
-    assert_ne!(rewritten.entry_crc("New.txt"), Some(old_crc));
+    let stored_data_crc = 0x1122_3344;
+    let cached_file_crc = 0xa1b2_c3d4;
+    for (crc_state, stored_crc, expected_crc) in [
+        (
+            0,
+            0x0102_0304,
+            c4group_entry_crc(PAYLOAD, NEW_FILE_NAME.as_bytes()),
+        ),
+        (
+            1,
+            stored_data_crc,
+            crc32_update(stored_data_crc, NEW_FILE_NAME.as_bytes()),
+        ),
+        (2, cached_file_crc, cached_file_crc),
+        (
+            7,
+            0x5566_7788,
+            c4group_entry_crc(PAYLOAD, NEW_FILE_NAME.as_bytes()),
+        ),
+    ] {
+        let mut source = MutableGroup::new("Files.c4g");
+        source.add_file(OLD_FILE_NAME, PAYLOAD.to_vec()).unwrap();
+        let source = Group::from_memory(
+            PathBuf::from("Files.c4g"),
+            with_first_entry_crc(source.pack_raw().unwrap(), crc_state, stored_crc),
+        )
+        .unwrap();
+        let mut rewritten = MutableGroup::from_group(&source).unwrap();
+
+        assert!(rewritten
+            .rename_entry_checked(OLD_FILE_NAME, NEW_FILE_NAME)
+            .unwrap());
+        assert_eq!(rewritten.entry_crc(NEW_FILE_NAME), Some(expected_crc));
+
+        let reopened =
+            Group::from_memory(PathBuf::from("Files.c4g"), rewritten.pack_raw().unwrap()).unwrap();
+        let renamed = reopened.entries().unwrap().remove(0);
+        assert_eq!(renamed.crc_state, 2, "source CRC state {crc_state}");
+        assert_eq!(
+            renamed.stored_crc, expected_crc,
+            "source CRC state {crc_state}"
+        );
+        assert_eq!(reopened.contents_crc().unwrap(), expected_crc);
+    }
+
+    let cached_empty_crc = 0xdec0_adde;
+    for (crc_state, stored_crc, expected_crc) in [
+        (0, 0x3141_5926, 0),
+        (1, 0x2718_2818, 0),
+        (2, cached_empty_crc, cached_empty_crc),
+        (7, 0x1618_0339, 0),
+    ] {
+        let mut source = MutableGroup::new("Empty.c4g");
+        source.add_file(OLD_FILE_NAME, Vec::new()).unwrap();
+        let source = Group::from_memory(
+            PathBuf::from("Empty.c4g"),
+            with_first_entry_crc(source.pack_raw().unwrap(), crc_state, stored_crc),
+        )
+        .unwrap();
+        let mut rewritten = MutableGroup::from_group(&source).unwrap();
+
+        assert!(rewritten
+            .rename_entry_checked(OLD_FILE_NAME, NEW_FILE_NAME)
+            .unwrap());
+        let reopened =
+            Group::from_memory(PathBuf::from("Empty.c4g"), rewritten.pack_raw().unwrap()).unwrap();
+        let renamed = reopened.entries().unwrap().remove(0);
+        assert_eq!(renamed.crc_state, 2, "empty source CRC state {crc_state}");
+        assert_eq!(
+            renamed.stored_crc, expected_crc,
+            "empty source CRC state {crc_state}"
+        );
+        assert_eq!(reopened.contents_crc().unwrap(), expected_crc);
+    }
+
+    let mut child = MutableGroup::new("Old.c4g");
+    child
+        .add_file("Inside.txt", b"child payload".to_vec())
+        .unwrap();
+    let child_crc = child.contents_crc();
+    let cached_child_crc = 0xcafe_babe;
+    for (crc_state, stored_crc, expected_crc) in [
+        (0, 0x1020_3040, child_crc),
+        (1, 0x5060_7080, child_crc),
+        (2, cached_child_crc, cached_child_crc),
+        (7, 0x90a0_b0c0, child_crc),
+    ] {
+        let mut source = MutableGroup::new("Parent.c4g");
+        source.add_child("Old.c4g", child.clone()).unwrap();
+        let source = Group::from_memory(
+            PathBuf::from("Parent.c4g"),
+            with_first_entry_crc(source.pack_raw().unwrap(), crc_state, stored_crc),
+        )
+        .unwrap();
+        let mut rewritten = MutableGroup::from_group(&source).unwrap();
+        let before_rename = rewritten.entry_crc("Old.c4g");
+
+        assert!(rewritten
+            .rename_entry_checked("Old.c4g", "Renamed.c4g")
+            .unwrap());
+        assert_eq!(rewritten.entry_crc("Renamed.c4g"), before_rename);
+
+        let reopened =
+            Group::from_memory(PathBuf::from("Parent.c4g"), rewritten.pack_raw().unwrap()).unwrap();
+        let renamed = reopened.entries().unwrap().remove(0);
+        assert_eq!(renamed.crc_state, 2, "child source CRC state {crc_state}");
+        assert_eq!(
+            renamed.stored_crc, expected_crc,
+            "child source CRC state {crc_state}"
+        );
+        assert_eq!(reopened.contents_crc().unwrap(), expected_crc);
+    }
+}
+
+fn with_first_entry_crc(mut image: Vec<u8>, crc_state: u8, stored_crc: u32) -> Vec<u8> {
+    const FIRST_ENTRY_CORE: usize = 204;
+    const CRC_STATE_OFFSET: usize = 284;
+    const STORED_CRC_OFFSET: usize = 285;
+
+    image[FIRST_ENTRY_CORE + CRC_STATE_OFFSET] = crc_state;
+    image[FIRST_ENTRY_CORE + STORED_CRC_OFFSET..FIRST_ENTRY_CORE + STORED_CRC_OFFSET + 4]
+        .copy_from_slice(&stored_crc.to_le_bytes());
+    image
+}
+
+fn crc32_update(initial: u32, data: &[u8]) -> u32 {
+    let mut crc = initial ^ u32::MAX;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    crc ^ u32::MAX
 }
 
 #[test]
