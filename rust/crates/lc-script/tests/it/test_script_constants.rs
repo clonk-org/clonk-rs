@@ -126,6 +126,208 @@ fn script_static_consts_are_callable_across_hosts_below_strict2() {
 }
 
 #[test]
+fn prior_static_constants_resolve_in_declaration_order() {
+    let globals = lc_script::new_global_variables();
+    let consts = lc_script::new_global_variables();
+    let mut engine = Engine::new();
+    engine.set_global_variables(globals);
+    engine.set_global_constants(consts);
+    engine.register_constant("ENGINE_VALUE", Value::Int(9));
+    engine.add_script(
+        Script::compile(
+            "#strict 3\n\
+             static const BASE_VALUE = 41, DERIVED_VALUE = BASE_VALUE, ENGINE_ALIAS = ENGINE_VALUE;\n\
+             func Probe() { return [DERIVED_VALUE, ENGINE_ALIAS]; }",
+        )
+        .expect("ordered static constants compile"),
+    );
+    engine.adopt_statics_into_globals();
+
+    assert_eq!(
+        engine
+            .call("Probe", &[])
+            .expect("derived constant resolves"),
+        Value::Array(vec![Value::Int(41), Value::Int(9)])
+    );
+}
+
+#[test]
+fn static_const_rejects_nonliteral_nonconstant_initializer() {
+    for initializer in [
+        "RuntimeCall()",
+        "1 + 2",
+        "(1)",
+        "-RuntimeValue",
+        "!false",
+        "[1]",
+        "{ value = 1 }",
+    ] {
+        let script = Script::compile(&format!(
+            "#strict 3\n\
+             static const BAD_VALUE = {initializer};\n\
+             func Good() {{ return 7; }}"
+        ))
+        .expect("recovering preparser returns the partial script");
+
+        assert!(
+            !script.parse_diagnostics().is_empty(),
+            "initializer unexpectedly accepted: {initializer}"
+        );
+        assert!(
+            script.functions().contains_key("Good"),
+            "recovery lost the following function for: {initializer}"
+        );
+
+        let globals = lc_script::new_global_variables();
+        let consts = lc_script::new_global_variables();
+        let registration = lc_script::register_global_declarations(
+            script.var_decls(),
+            &globals,
+            Some(&consts),
+        );
+        match initializer {
+            "RuntimeCall()" => {
+                let error = registration.expect_err("unknown call prefix must fail linking");
+                assert_eq!(error.initializer(), "RuntimeCall");
+                assert!(consts.borrow().get("BAD_VALUE").is_none());
+            }
+            "1 + 2" => {
+                registration.expect("literal prefix still registers before delimiter failure");
+                let value = consts
+                    .borrow()
+                    .get("BAD_VALUE")
+                    .expect("native preparser retains the literal prefix")
+                    .borrow()
+                    .clone();
+                assert_eq!(value, Value::Int(1));
+            }
+            _ => {
+                registration.expect("initializer failed before creating a declaration");
+                assert!(consts.borrow().get("BAD_VALUE").is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn signed_hex_static_constants_follow_cpp_token_boundary() {
+    for initializer in ["+0x1", "-0x1"] {
+        let script = Script::compile(&format!(
+            "#strict 3\nstatic const BAD_VALUE = {initializer};\n"
+        ))
+        .expect("recovering preparser returns the partial script");
+        assert!(
+            !script.parse_diagnostics().is_empty(),
+            "signed hexadecimal initializer unexpectedly accepted: {initializer}"
+        );
+        let globals = lc_script::new_global_variables();
+        let consts = lc_script::new_global_variables();
+        lc_script::register_global_declarations(script.var_decls(), &globals, Some(&consts))
+            .expect("signed decimal prefix is a valid native constant token");
+        let value = consts
+            .borrow()
+            .get("BAD_VALUE")
+            .expect("native preparser registers the signed zero prefix")
+            .borrow()
+            .clone();
+        assert_eq!(value, Value::Int(0));
+    }
+
+    let direct = Script::compile("#strict 3\nstatic const HEX_VALUE = 0x1;")
+        .expect("direct hexadecimal constant compiles");
+    assert!(direct.parse_diagnostics().is_empty());
+}
+
+#[test]
+fn unresolved_static_const_name_stops_registration_with_a_link_error() {
+    let script = Script::compile(
+        "#strict 3\n\
+         static const FIRST_VALUE = 1, BAD_VALUE = MISSING_VALUE, AFTER_VALUE = 2;\n\
+         static const RECOVERED_VALUE = 3;",
+    )
+    .expect("named initializer syntax compiles");
+    assert!(script.parse_diagnostics().is_empty());
+
+    let globals = lc_script::new_global_variables();
+    let consts = lc_script::new_global_variables();
+    let error =
+        lc_script::register_global_declarations(script.var_decls(), &globals, Some(&consts))
+            .expect_err("unknown named initializer must fail linking");
+
+    assert_eq!(error.declaration(), "BAD_VALUE");
+    assert_eq!(error.initializer(), "MISSING_VALUE");
+    assert_eq!(
+        consts
+            .borrow()
+            .get("FIRST_VALUE")
+            .expect("earlier declaration remains registered")
+            .borrow()
+            .clone(),
+        Value::Int(1)
+    );
+    assert!(consts.borrow().get("BAD_VALUE").is_none());
+    assert!(consts.borrow().get("AFTER_VALUE").is_none());
+    assert_eq!(
+        consts
+            .borrow()
+            .get("RECOVERED_VALUE")
+            .expect("later declaration resumes after the failed group")
+            .borrow()
+            .clone(),
+        Value::Int(3)
+    );
+}
+
+#[test]
+fn mutable_static_cannot_satisfy_constant_initializer_in_fallback_table() {
+    let script = Script::compile(
+        "#strict 3\nstatic mutable_value;\nstatic const BAD_VALUE = mutable_value;",
+    )
+    .expect("declaration syntax compiles");
+    let fallback = lc_script::new_global_variables();
+
+    let error = lc_script::register_global_declarations(script.var_decls(), &fallback, None)
+        .expect_err("GlobalNamed mutable cell is not a constant");
+
+    assert_eq!(error.initializer(), "mutable_value");
+    assert!(fallback.borrow().contains_key("mutable_value"));
+    assert!(!fallback.borrow().contains_key("BAD_VALUE"));
+}
+
+#[test]
+fn fallback_table_preserves_constants_across_registration_calls() {
+    let fallback = lc_script::new_global_variables();
+    for source in [
+        "#strict 3\nstatic const FIRST_VALUE = 12;",
+        "#strict 3\nstatic const SECOND_VALUE = FIRST_VALUE;",
+        "#strict 3\nstatic const THIRD_VALUE = FIRST_VALUE;\nstatic FIRST_VALUE;",
+    ] {
+        let script = Script::compile(source).expect("declaration syntax compiles");
+        lc_script::register_global_declarations(script.var_decls(), &fallback, None)
+            .expect("prior fallback constant resolves");
+    }
+
+    assert_eq!(
+        fallback
+            .borrow()
+            .get("SECOND_VALUE")
+            .expect("derived fallback constant registered")
+            .borrow()
+            .clone(),
+        Value::Int(12)
+    );
+    assert_eq!(
+        fallback
+            .borrow()
+            .get("THIRD_VALUE")
+            .expect("alias resolves before a later mutable declaration")
+            .borrow()
+            .clone(),
+        Value::Int(12)
+    );
+}
+
+#[test]
 fn later_static_const_declarations_overwrite_the_shared_value() {
     // C4AulScriptEngine::RegisterGlobalConstant reuses the existing name
     // index and assigns the new value (C4Aul.cpp:484-492). Existing hosts

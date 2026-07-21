@@ -808,11 +808,11 @@ impl<'a> Lexer<'a> {
                     // intentionally truncate to C4ValueInt's signed 32 bits.
                     let hex_slice = &self.input[hex_start..end_idx];
                     if hex_slice.is_empty() {
-                        return Ok(Token::new_number(0, 0, line, column));
+                        return Ok(Token::new_number(0, 0, true, line, column));
                     }
                     match u64::from_str_radix(hex_slice, 16) {
                         Ok(value) => {
-                            return Ok(Token::new_number(value as i32, value, line, column));
+                            return Ok(Token::new_number(value as i32, value, true, line, column));
                         }
                         Err(_) => {
                             return Err(ParseError::new(
@@ -884,7 +884,13 @@ impl<'a> Lexer<'a> {
             return self.lex_stupid_func_label(slice.to_owned(), line, column);
         }
         match slice.parse::<i64>() {
-            Ok(value) => Ok(Token::new_number(value as i32, value as u64, line, column)),
+            Ok(value) => Ok(Token::new_number(
+                value as i32,
+                value as u64,
+                false,
+                line,
+                column,
+            )),
             Err(_) => Err(ParseError::new(
                 format!("integer literal out of range: {slice}"),
                 line,

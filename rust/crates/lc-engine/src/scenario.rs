@@ -3507,12 +3507,20 @@ impl Scenario {
                                     "superseded definition parse error quarantined; continuing like C++"
                                 );
                             }
-                            lc_script::register_global_declarations_with_strings(
-                                script.var_decls(),
-                                &engine.script_globals,
-                                Some(&engine.script_global_consts),
-                                &engine.script_string_registrations,
-                            )
+                            if let Err(diagnostic) =
+                                lc_script::register_global_declarations_with_strings(
+                                    script.var_decls(),
+                                    &engine.script_globals,
+                                    Some(&engine.script_global_consts),
+                                    &engine.script_string_registrations,
+                                )
+                            {
+                                tracing::warn!(
+                                    definition = %name,
+                                    %diagnostic,
+                                    "superseded definition static-constant link diagnostic; continuing like C++"
+                                );
+                            }
                         }
                         Err(error) => tracing::warn!(
                             definition = %name,

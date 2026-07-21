@@ -552,14 +552,35 @@ pub fn new_global_slots() -> GlobalSlots {
     std::rc::Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::new()))
 }
 
+/// A named `static const` initializer that was not present in the engine's
+/// constant table when C4Aul's preparser reached it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "constant value expected for static const `{declaration}`, but found unknown `{initializer}`"
+)]
+pub struct StaticConstLinkError {
+    declaration: String,
+    initializer: String,
+}
+
+impl StaticConstLinkError {
+    pub fn declaration(&self) -> &str {
+        &self.declaration
+    }
+
+    pub fn initializer(&self) -> &str {
+        &self.initializer
+    }
+}
+
 /// Registers a script's `static` and `static const` declarations in the
 /// engine-global tables used by every script host.
 pub fn register_global_declarations(
     var_decls: &[VarDecl],
     table: &GlobalVariables,
     globals_consts: Option<&GlobalVariables>,
-) {
-    register_global_declarations_inner(var_decls, table, globals_consts, None);
+) -> Result<(), StaticConstLinkError> {
+    register_global_declarations_inner(var_decls, table, globals_consts, None, None)
 }
 
 /// Register globals while binding string constants into the exact shared
@@ -569,8 +590,8 @@ pub fn register_global_declarations_with_strings(
     table: &GlobalVariables,
     globals_consts: Option<&GlobalVariables>,
     strings: &StringRegistrationLedger,
-) {
-    register_global_declarations_inner(var_decls, table, globals_consts, Some(strings));
+) -> Result<(), StaticConstLinkError> {
+    register_global_declarations_inner(var_decls, table, globals_consts, Some(strings), None)
 }
 
 fn register_global_declarations_inner(
@@ -578,19 +599,36 @@ fn register_global_declarations_inner(
     table: &GlobalVariables,
     globals_consts: Option<&GlobalVariables>,
     strings: Option<&StringRegistrationLedger>,
-) {
+    engine_constants: Option<&HashMap<String, Value>>,
+) -> Result<(), StaticConstLinkError> {
+    // Legacy callers may use one fallback table for both mutable statics and
+    // constants. Track declarations as this pass encounters them so lookup
+    // retains Parse_Const's left-to-right ordering.
+    let mut fallback_constants = std::collections::HashSet::new();
+    let mut fallback_mutables = std::collections::HashSet::new();
+    let mut group_failed = false;
+    let mut first_error = None;
     for var_decl in var_decls {
+        if var_decl.starts_declaration_group {
+            group_failed = false;
+        }
+        if group_failed {
+            continue;
+        }
         match var_decl.kind {
             crate::ast::VarDeclKind::Static => {
-                table
-                    .borrow_mut()
-                    .entry(var_decl.name.clone())
-                    .or_insert_with(|| crate::vm::value_cell(Value::Nil));
+                let was_present = table.borrow().contains_key(&var_decl.name);
+                table.borrow_mut().entry(var_decl.name.clone()).or_insert_with(|| {
+                    crate::vm::value_cell(Value::Nil)
+                });
+                if globals_consts.is_none() && !was_present {
+                    fallback_mutables.insert(var_decl.name.clone());
+                }
             }
             crate::ast::VarDeclKind::StaticConst => {
-                // C4Aul accepts direct constants only. Its tokenizer folds a
-                // leading sign into ATT_INT when parsing a constant value;
-                // our parser represents a negative integer as Unary(Negate).
+                // The dedicated preparser grammar admits only these shapes.
+                // Keep this match exhaustive so an AST regression cannot
+                // silently turn a malformed initializer into nil.
                 let value = match &var_decl.init {
                     Some(crate::ast::Expr::Literal(crate::value::Literal::String(value))) => {
                         Value::String(match strings {
@@ -599,22 +637,54 @@ fn register_global_declarations_inner(
                         })
                     }
                     Some(crate::ast::Expr::Literal(literal)) => Value::from(literal.clone()),
-                    Some(crate::ast::Expr::Unary(
-                        crate::ast::UnaryOp::Negate,
-                        expression,
-                    )) => match expression.as_ref() {
-                        crate::ast::Expr::Literal(crate::value::Literal::Int(value)) => {
-                            Value::Int(value.wrapping_neg())
-                        }
-                        _ => Value::Nil,
-                    },
-                    Some(crate::ast::Expr::Variable(name)) => {
-                        let constants = globals_consts.unwrap_or(table);
-                        let cell = constants.borrow().get(name).cloned();
-                        cell.map(|cell| cell.borrow().clone())
-                            .unwrap_or(Value::Nil)
+                    Some(crate::ast::Expr::Unary(crate::ast::UnaryOp::Negate, expression))
+                        if matches!(
+                            expression.as_ref(),
+                            crate::ast::Expr::Literal(crate::value::Literal::Int(_))
+                        ) =>
+                    {
+                        let crate::ast::Expr::Literal(crate::value::Literal::Int(value)) =
+                            expression.as_ref()
+                        else {
+                            unreachable!("guarded static-constant integer shape")
+                        };
+                        Value::Int(value.wrapping_neg())
                     }
-                    _ => Value::Nil,
+                    Some(crate::ast::Expr::Variable(name)) => {
+                        let cell = match globals_consts {
+                            Some(constants) => constants.borrow().get(name).cloned(),
+                            None if fallback_constants.contains(name) => {
+                                table.borrow().get(name).cloned()
+                            }
+                            None if fallback_mutables.contains(name.as_str()) => None,
+                            None => table.borrow().get(name).cloned(),
+                        };
+                        let value = cell
+                            .map(|cell| cell.borrow().clone())
+                            .or_else(|| {
+                                engine_constants.and_then(|values| values.get(name).cloned())
+                            });
+                        let Some(value) = value else {
+                            // Parse_Const aborts this comma-delimited group.
+                            // Parse_Script recovery can then resume at a later
+                            // top-level declaration, while constants already
+                            // registered before the error stay live.
+                            let error = StaticConstLinkError {
+                                declaration: var_decl.name.clone(),
+                                initializer: name.clone(),
+                            };
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                            group_failed = true;
+                            continue;
+                        };
+                        value
+                    }
+                    Some(initializer) => unreachable!(
+                        "static-constant parser produced unsupported initializer: {initializer:?}"
+                    ),
+                    None => unreachable!("static constant without an initializer"),
                 };
                 // RegisterGlobalConstant overwrites an existing value
                 // (C4Aul.cpp:484-492). Keep the existing shared cell so
@@ -628,10 +698,15 @@ fn register_global_declarations_inner(
                     .or_insert_with(|| crate::vm::value_cell(Value::Nil))
                     .clone();
                 *cell.borrow_mut() = value;
+                if globals_consts.is_none() {
+                    fallback_constants.insert(var_decl.name.clone());
+                    fallback_mutables.remove(&var_decl.name);
+                }
             }
             crate::ast::VarDeclKind::Local => {}
         }
     }
+    first_error.map_or(Ok(()), Err)
 }
 
 #[derive(Clone, Default)]
@@ -803,6 +878,8 @@ pub struct Engine {
     /// Literals retained by scripts already installed in this host. This lets
     /// a late-attached game ledger recover the native link order.
     string_literals: Vec<String>,
+    /// Deferred preparser failures for named static-constant initializers.
+    static_const_link_errors: Vec<StaticConstLinkError>,
 }
 
 /// Ownership scope of a resolved script function. A global function is
@@ -851,7 +928,15 @@ impl Engine {
             // Embedders may replace it with their game-global shared ledger.
             string_registrations: Some(new_string_registrations()),
             string_literals: Vec::new(),
+            static_const_link_errors: Vec::new(),
         }
+    }
+
+    /// Named static-constant references that failed during declaration
+    /// registration. C++ reports these from its preparser and continues
+    /// loading the remaining script hosts.
+    pub fn static_const_link_errors(&self) -> &[StaticConstLinkError] {
+        &self.static_const_link_errors
     }
 
     /// Process-local identity of this destination script host. Native
@@ -905,21 +990,17 @@ impl Engine {
         // later global Parse pass marks function-body strings Hold. Preserve
         // that construction order even for this standalone immediate-link
         // path; it determines C4StringTable enumeration IDs.
-        if let Some(table) = &self.globals_named {
-            if let Some(strings) = self.string_registrations.as_deref() {
-                register_global_declarations_with_strings(
-                    &script.var_decls,
-                    table,
-                    self.globals_consts.as_ref(),
-                    strings,
-                );
-            } else {
-                register_global_declarations(
-                    &script.var_decls,
-                    table,
-                    self.globals_consts.as_ref(),
-                );
-            }
+        let registration = self.globals_named.as_ref().map(|table| {
+            register_global_declarations_inner(
+                &script.var_decls,
+                table,
+                self.globals_consts.as_ref(),
+                self.string_registrations.as_deref(),
+                Some(&self.constants),
+            )
+        });
+        if let Some(Err(error)) = registration {
+            self.static_const_link_errors.push(error);
         }
         if let Some(registrations) = &self.string_registrations {
             for literal in &script.string_literals {
@@ -992,23 +1073,20 @@ impl Engine {
         self.owner_strict_level = Some(script.strict_level);
         self.functions.clear();
         self.var_decls.clear();
+        self.static_const_link_errors.clear();
 
         if register_declarations {
-            if let Some(table) = &self.globals_named {
-                if let Some(strings) = self.string_registrations.as_deref() {
-                    register_global_declarations_with_strings(
-                        &script.var_decls,
-                        table,
-                        self.globals_consts.as_ref(),
-                        strings,
-                    );
-                } else {
-                    register_global_declarations(
-                        &script.var_decls,
-                        table,
-                        self.globals_consts.as_ref(),
-                    );
-                }
+            let registration = self.globals_named.as_ref().map(|table| {
+                register_global_declarations_inner(
+                    &script.var_decls,
+                    table,
+                    self.globals_consts.as_ref(),
+                    self.string_registrations.as_deref(),
+                    Some(&self.constants),
+                )
+            });
+            if let Some(Err(error)) = registration {
+                self.static_const_link_errors.push(error);
             }
         }
 
@@ -1398,15 +1476,15 @@ impl Engine {
             return;
         };
         let globals_consts = self.globals_consts.clone();
-        if let Some(strings) = self.string_registrations.as_deref() {
-            register_global_declarations_with_strings(
-                &self.var_decls,
-                &table,
-                globals_consts.as_ref(),
-                strings,
-            );
-        } else {
-            register_global_declarations(&self.var_decls, &table, globals_consts.as_ref());
+        let registration = register_global_declarations_inner(
+            &self.var_decls,
+            &table,
+            globals_consts.as_ref(),
+            self.string_registrations.as_deref(),
+            Some(&self.constants),
+        );
+        if let Err(error) = registration {
+            self.static_const_link_errors.push(error);
         }
         self.var_decls
             .retain(|var_decl| var_decl.kind == crate::ast::VarDeclKind::Local);

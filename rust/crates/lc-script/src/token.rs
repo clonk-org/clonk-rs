@@ -7,6 +7,10 @@ pub struct Token {
     /// truncation. Directive grammar uses this to distinguish a literal 2/3
     /// from a wider integer whose low 32 bits happen to equal 2/3.
     raw_number: Option<u64>,
+    /// Whether a numeric token used C4Aul's lowercase-`0x` spelling. The
+    /// static-constant preparser accepts hexadecimal integers directly, but
+    /// its special signed-integer scan never enters hexadecimal mode.
+    number_is_hex: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -187,19 +191,31 @@ impl Token {
             line,
             column,
             raw_number: None,
+            number_is_hex: false,
         }
     }
 
-    pub(crate) fn new_number(value: i32, raw_number: u64, line: usize, column: usize) -> Self {
+    pub(crate) fn new_number(
+        value: i32,
+        raw_number: u64,
+        number_is_hex: bool,
+        line: usize,
+        column: usize,
+    ) -> Self {
         Self {
             kind: TokenKind::Number(value),
             line,
             column,
             raw_number: Some(raw_number),
+            number_is_hex,
         }
     }
 
     pub(crate) fn raw_number(&self) -> Option<u64> {
         self.raw_number
+    }
+
+    pub(crate) fn number_is_hex(&self) -> bool {
+        self.number_is_hex
     }
 }

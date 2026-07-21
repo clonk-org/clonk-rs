@@ -32,6 +32,10 @@ pub struct VarDecl {
     pub kind: VarDeclKind,
     pub name: String,
     pub init: Option<Expr>,
+    /// Whether this is the first entry in its comma-delimited declaration.
+    /// Registration recovery skips only the failed group, then resumes at a
+    /// later declaration (including one compiled in another script host).
+    pub starts_declaration_group: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

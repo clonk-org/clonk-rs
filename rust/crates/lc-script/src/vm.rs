@@ -4072,13 +4072,11 @@ impl<'a> Vm<'a> {
                     if name == "this" {
                         return Ok(self.this_value.clone());
                     }
-                    if let Some(value) = self
-                        .constants
-                        .and_then(|constants| constants.get(name).cloned())
-                    {
+                    if let Some(value) = self.global_constant(name) {
                         return Ok(Self::fold_legacy_zero(value, env.strict_level));
                     }
-                    self.global_constant(name)
+                    self.constants
+                        .and_then(|constants| constants.get(name).cloned())
                         .map(|value| Self::fold_legacy_zero(value, env.strict_level))
                         .ok_or_else(|| RuntimeError::new(format!("undefined variable '{name}'")))
                 }
@@ -4578,17 +4576,10 @@ impl<'a> Vm<'a> {
                                     .unwrap_or(false)
                                 && !self.has_host_function(name)
                             {
-                                if let Some(value) = self
-                                    .constants
-                                    .and_then(|constants| constants.get(name).cloned())
-                                    .or_else(|| {
-                                        self.globals_consts.and_then(|table| {
-                                            table
-                                                .borrow()
-                                                .get(name)
-                                                .map(|cell| cell.borrow().clone())
-                                        })
-                                    })
+                                if let Some(value) = self.global_constant(name).or_else(|| {
+                                    self.constants
+                                        .and_then(|constants| constants.get(name).cloned())
+                                })
                                 {
                                     // C++ requires an immediate ')' after
                                     // the '(' (Match(ATT_BCLOSE),

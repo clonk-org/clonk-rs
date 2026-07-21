@@ -19547,13 +19547,15 @@ impl Engine {
 
     pub fn with_seed(seed: u64) -> Self {
         let script_string_registrations = lc_script::new_string_registrations();
+        let script_global_consts = lc_script::new_global_variables();
+        script_constants::register_script_constants_in_global_table(&script_global_consts);
         let mut engine = Self {
             definitions: HashMap::new(),
             definition_load_order: Vec::new(),
             runtime_definition_order: Rc::new(Vec::new()),
             script_globals: lc_script::new_global_variables(),
             script_global_slots: lc_script::new_global_slots(),
-            script_global_consts: lc_script::new_global_variables(),
+            script_global_consts,
             script_string_registrations: script_string_registrations.clone(),
             legacy_string_table: script_string_registrations,
             script_link_sources: Vec::new(),
@@ -25946,12 +25948,18 @@ impl Engine {
         script.c4_args = c4_args;
         // C4Aul's preparser installs Ref (non-Hold) static-constant strings
         // before its later function-body parse registers held operands.
-        lc_script::register_global_declarations_with_strings(
+        if let Err(diagnostic) = lc_script::register_global_declarations_with_strings(
             script.base_script.var_decls(),
             &self.script_globals,
             Some(&self.script_global_consts),
             &self.script_string_registrations,
-        );
+        ) {
+            tracing::warn!(
+                script = %script.name,
+                %diagnostic,
+                "scenario static-constant link diagnostic; continuing like C++"
+            );
+        }
         {
             let host = Arc::make_mut(&mut script.script);
             host.set_global_variables(self.script_globals.clone());
@@ -27943,12 +27951,18 @@ impl Engine {
         // without making the non-idempotent palette replacement repeat.
         definition.colorize_by_material(&self.materials);
         // Preparse constants precede the function-body Hold pass in C4Aul.
-        lc_script::register_global_declarations_with_strings(
+        if let Err(diagnostic) = lc_script::register_global_declarations_with_strings(
             definition.base_script.var_decls(),
             &self.script_globals,
             Some(&self.script_global_consts),
             &self.script_string_registrations,
-        );
+        ) {
+            tracing::warn!(
+                definition = %id,
+                %diagnostic,
+                "definition static-constant link diagnostic; continuing like C++"
+            );
+        }
         {
             // One GlobalNamed table for every script host: `static`
             // declarations compiled into the definition move to it.
@@ -28106,12 +28120,18 @@ impl Engine {
                     // the same engine-global GlobalNamed/GlobalConsts tables
                     // as definition scripts (C4Aul preparser and
                     // RegisterGlobalConstant, C4Aul.cpp:484-492).
-                    lc_script::register_global_declarations_with_strings(
+                    if let Err(diagnostic) = lc_script::register_global_declarations_with_strings(
                         compiled.var_decls(),
                         &self.script_globals,
                         Some(&self.script_global_consts),
                         &self.script_string_registrations,
-                    );
+                    ) {
+                        tracing::warn!(
+                            script = %name,
+                            %diagnostic,
+                            "global script static-constant link diagnostic; continuing like C++"
+                        );
+                    }
                     let mut script = ScriptEngine::new();
                     script.add_script(compiled.clone().without_static_declarations());
                     script.set_global_variables(self.script_globals.clone());
@@ -28436,12 +28456,18 @@ impl Engine {
         // Existing static cells keep their values; constants reuse and
         // overwrite their cells. Pure ReLink below must not re-register the
         // unchanged hosts.
-        lc_script::register_global_declarations_with_strings(
+        if let Err(diagnostic) = lc_script::register_global_declarations_with_strings(
             script.var_decls(),
             &self.script_globals,
             Some(&self.script_global_consts),
             &self.script_string_registrations,
-        );
+        ) {
+            tracing::warn!(
+                definition = %definition_id,
+                %diagnostic,
+                "definition reload static-constant link diagnostic; continuing like C++"
+            );
+        }
         self.definitions
             .get_mut(definition_id)
             .expect("definition existence checked")

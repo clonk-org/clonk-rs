@@ -19,7 +19,7 @@ pub use crate::engine::{
     register_global_declarations, register_global_declarations_with_strings,
     register_loaded_c4_string, resolve_c4_string, save_current_c4_string_enumeration, Engine,
     GlobalSlots, GlobalVariables, MethodReferenceDispatch, Script, ScriptFunctionResolution,
-    ScriptFunctionScope, StringRegistrationLedger, StringRegistrations,
+    ScriptFunctionScope, StaticConstLinkError, StringRegistrationLedger, StringRegistrations,
 };
 pub use crate::vm::{
     caller_host_identity, caller_is_temporary_script, caller_origin_strictness, caller_strictness,

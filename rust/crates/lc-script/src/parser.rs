@@ -2648,7 +2648,81 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse the preparser-only constant grammar used by `Parse_Const`.
+    /// C4Aul consumes exactly one value token here rather than an expression;
+    /// the declaration-list parser then requires an immediate comma or
+    /// semicolon. This intentionally excludes grouping, calls, containers,
+    /// and operators even when the ordinary expression parser could fold
+    /// them into a literal-shaped AST.
+    fn parse_static_const_initializer(&mut self) -> Result<Expr, ParseError> {
+        let token = self.consume()?;
+        match token.kind {
+            TokenKind::Number(value) => Ok(Expr::Literal(Literal::Int(value))),
+            TokenKind::String(value) => {
+                // Parse_Const uses Shift(Ref), so this string is owned by the
+                // resulting GlobalConsts value rather than the parser Hold
+                // ledger maintained for ordinary quoted operands.
+                self.lexer.discard_last_string_operand(&value);
+                Ok(Expr::Literal(Literal::String(value)))
+            }
+            TokenKind::C4Id(id) => Ok(Expr::Literal(Literal::C4Id(id))),
+            TokenKind::Keyword(Keyword::True) => Ok(Expr::Literal(Literal::Bool(true))),
+            TokenKind::Keyword(Keyword::False) => Ok(Expr::Literal(Literal::Bool(false))),
+            TokenKind::Keyword(Keyword::Nil) => Ok(Expr::Literal(Literal::Nil)),
+            TokenKind::Identifier(name) => Ok(Expr::Variable(name)),
+            // C4Aul's declaration words are contextual ATT_IDTF tokens. The
+            // Rust lexer distinguishes them for grammar dispatch, but in a
+            // constant-value slot they remain named-constant references.
+            TokenKind::Keyword(keyword) => Ok(Expr::Variable(keyword.lexeme().to_owned())),
+            TokenKind::Symbol(sign @ (Symbol::Plus | Symbol::Minus)) => {
+                let number = self.consume()?;
+                let number_line = number.line;
+                let number_column = number.column;
+                let number_is_hex = number.number_is_hex();
+                let TokenKind::Number(value) = number.kind else {
+                    return Err(ParseError::new(
+                        "expected integer after static constant sign",
+                        number_line,
+                        number_column,
+                    ));
+                };
+                // With Shift(..., false), native C4Aul starts the integer at
+                // the sign byte. Consequently `+0x1`/`-0x1` never take the
+                // unsigned token's lowercase-hex transition: it returns the
+                // signed decimal prefix as zero, then diagnoses the remaining
+                // `x...` token when Parse_Const expects a delimiter. Our lexer
+                // has already consumed the whole unsigned hex token, so put a
+                // synthetic suffix back to preserve both effects.
+                if number_is_hex {
+                    self.lookahead_buffer.insert(
+                        0,
+                        Token::new(
+                            TokenKind::Identifier("x".to_owned()),
+                            number_line,
+                            number_column.saturating_add(1),
+                        ),
+                    );
+                    return Ok(Expr::Literal(Literal::Int(0)));
+                }
+                if sign == Symbol::Minus {
+                    Ok(Expr::Unary(
+                        UnaryOp::Negate,
+                        Box::new(Expr::Literal(Literal::Int(value))),
+                    ))
+                } else {
+                    Ok(Expr::Literal(Literal::Int(value)))
+                }
+            }
+            _ => Err(ParseError::new(
+                "expected static constant value",
+                token.line,
+                token.column,
+            )),
+        }
+    }
+
     fn parse_var_decl_list(&mut self, kind: VarDeclKind) -> Result<(), ParseError> {
+        let mut starts_declaration_group = true;
         // Parse a comma-separated name list. Static constants additionally
         // require an initializer for every name.
         loop {
@@ -2657,14 +2731,10 @@ impl<'a> Parser<'a> {
                 self.expect_identifier("expected variable name in declaration")?;
 
             let init = if kind == VarDeclKind::StaticConst {
-                // Parse initializers BELOW the comma level so the declaration
-                // list owns its commas (`static const A = 5, B = 1;`).
+                // Parse exactly one preparser constant token; the declaration
+                // list owns and validates the following comma/semicolon.
                 if self.consume_if_symbol(Symbol::Equal)?.is_some() {
-                    let init = self.parse_assignment()?;
-                    if let Expr::Literal(Literal::String(value)) = &init {
-                        self.lexer.discard_last_string_operand(value);
-                    }
-                    Some(init)
+                    Some(self.parse_static_const_initializer()?)
                 } else {
                     return Err(ParseError::new(
                         "static const declaration requires an initializer",
@@ -2680,6 +2750,7 @@ impl<'a> Parser<'a> {
                     kind,
                     name: name.clone(),
                     init: None,
+                    starts_declaration_group,
                 });
                 if let Some(equal) = self.consume_if_symbol(Symbol::Equal)? {
                     return Err(ParseError::new(
@@ -2692,8 +2763,14 @@ impl<'a> Parser<'a> {
             };
 
             if kind == VarDeclKind::StaticConst {
-                self.script_var_decls.push(VarDecl { kind, name, init });
+                self.script_var_decls.push(VarDecl {
+                    kind,
+                    name,
+                    init,
+                    starts_declaration_group,
+                });
             }
+            starts_declaration_group = false;
 
             // Check for comma (more declarations) or semicolon (end)
             if self.consume_if_symbol(Symbol::Comma)?.is_some() {

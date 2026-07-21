@@ -311,6 +311,18 @@ pub(crate) fn register_script_constants(script: &mut ScriptEngine) {
     }
 }
 
+/// Seed the shared preparser table before any script host is loaded. C++ puts
+/// built-ins and script-declared constants in the same engine map, so a
+/// `static const` initializer may alias a built-in by name.
+pub(crate) fn register_script_constants_in_global_table(
+    constants: &lc_script::GlobalVariables,
+) {
+    let mut constants = constants.borrow_mut();
+    for (name, value) in C4_SCRIPT_CONSTANTS {
+        constants.insert((*name).to_owned(), lc_script::value_cell(Value::Int(*value)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +355,54 @@ mod tests {
             get("C4D_GrabGet"),
             Some(2),
             "swapped vs name order (C4Def.h:80-81)"
+        );
+    }
+
+    #[test]
+    fn builtins_are_available_to_static_const_initializers() {
+        let globals = lc_script::new_global_variables();
+        let constants = lc_script::new_global_variables();
+        register_script_constants_in_global_table(&constants);
+        let script = lc_script::Script::compile(
+            "#strict 3\nstatic const RIGHT_ALIAS = DIR_Right;",
+        )
+        .expect("static constant alias compiles");
+
+        lc_script::register_global_declarations(
+            script.var_decls(),
+            &globals,
+            Some(&constants),
+        )
+        .expect("built-in constant resolves during preparse");
+
+        assert_eq!(
+            constants
+                .borrow()
+                .get("RIGHT_ALIAS")
+                .expect("alias registered")
+                .borrow()
+                .clone(),
+            Value::Int(1)
+        );
+
+        let mut host = ScriptEngine::new();
+        host.set_global_constants(constants.clone());
+        register_script_constants(&mut host);
+        host.add_script(
+            lc_script::Script::compile(
+                "#strict\nfunc Probe() { return [DIR_Right + 0, DIR_Right()]; }",
+            )
+            .expect("built-in read probe compiles"),
+        );
+        *constants
+            .borrow()
+            .get("DIR_Right")
+            .expect("built-in shared cell exists")
+            .borrow_mut() = Value::Int(9);
+        assert_eq!(
+            host.call("Probe", &[]).expect("overridden constant resolves"),
+            Value::Array(vec![Value::Int(9), Value::Int(9)]),
+            "the canonical shared table wins over each host's stale built-in copy"
         );
     }
 }
