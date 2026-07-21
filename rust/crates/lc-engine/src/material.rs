@@ -1699,15 +1699,14 @@ fn parse_custom_reaction_kind(
     by_name: &HashMap<String, MaterialId>,
     script_reactions: &mut Vec<String>,
 ) -> Option<MaterialReactionKind> {
-    let reaction_type = definition
-        .value("type")
-        .map(normalize_key)
-        .unwrap_or_default();
-    match reaction_type.as_str() {
+    // C4MaterialReaction::CompileFunc walks ReactionFuncMap with SEqual.
+    // Unlike material names and TargetSpec keywords, these five dispatcher
+    // names are exact, case-sensitive strings.
+    match definition.value("type").unwrap_or_default() {
         // mrfScript (C4Material.cpp:40): the ScriptFunc name is retained
         // verbatim for call-time resolution. An over-full table degrades to
         // NoReaction rather than mis-indexing.
-        "script" => {
+        "Script" => {
             let name = definition
                 .value("scriptfunc")
                 .map(str::trim)
@@ -1717,7 +1716,7 @@ fn parse_custom_reaction_kind(
             script_reactions.push(name);
             Some(MaterialReactionKind::Script { func: index })
         }
-        "convert" => {
+        "Convert" => {
             let depth = definition.int("depth").filter(|value| *value != 0);
             let target = definition
                 .value("convertmat")
@@ -1734,9 +1733,9 @@ fn parse_custom_reaction_kind(
                 .unwrap_or(None);
             Some(MaterialReactionKind::Convert { target, depth })
         }
-        "poof" => Some(MaterialReactionKind::Poof),
-        "insert" => Some(MaterialReactionKind::Insert),
-        "corrode" => {
+        "Poof" => Some(MaterialReactionKind::Poof),
+        "Insert" => Some(MaterialReactionKind::Insert),
+        "Corrode" => {
             let rate = definition.int("corrosionrate").unwrap_or(100);
             Some(MaterialReactionKind::Corrode {
                 corrosive_strength: rate,
@@ -2332,6 +2331,149 @@ mod tests {
             set.script_reaction_name(func),
             Some("GooHitsEarth"),
             "the ScriptFunc name is retained verbatim"
+        );
+    }
+
+    #[test]
+    fn custom_reaction_type_names_are_case_sensitive_like_cpp() {
+        let canonical = [
+            ("Script", MaterialReactionKind::Script { func: 0 }),
+            (
+                "Convert",
+                MaterialReactionKind::Convert {
+                    target: None,
+                    depth: None,
+                },
+            ),
+            ("Poof", MaterialReactionKind::Poof),
+            (
+                "Corrode",
+                MaterialReactionKind::Corrode {
+                    corrosive_strength: 100,
+                    corrode_resistance: 100,
+                    corrosion_probability: Some(100),
+                },
+            ),
+            ("Insert", MaterialReactionKind::Insert),
+        ];
+        for (reaction_type, expected) in canonical {
+            let set = build_material_set(&format!(
+                "[Material Source]\nName=Source\nDensity=25\n\n\
+                 [Reaction]\nType={reaction_type}\nScriptFunc=Callback\n\
+                 TargetSpec=Target\n\n[Material Target]\nName=Target\nDensity=80\n"
+            ));
+            let source = set.id_of("Source").expect("source exists");
+            let target = set.id_of("Target").expect("target exists");
+            let reaction = set.reaction(Some(source), Some(target));
+            assert!(reaction.user_defined, "Type={reaction_type}");
+            assert_eq!(reaction.kind, expected, "Type={reaction_type}");
+        }
+
+        for reaction_type in [
+            "script", "SCRIPT", "sCrIpT", "convert", "CONVERT", "cOnVeRt", "poof", "POOF", "pOoF",
+            "corrode", "CORRODE", "cOrRoDe", "insert", "INSERT", "iNsErT",
+        ] {
+            let set = build_material_set(&format!(
+                "[Material Source]\nName=Source\nDensity=25\n\n\
+                 [Reaction]\nType={reaction_type}\nTargetSpec=Target\n\n\
+                 [Material Target]\nName=Target\nDensity=80\n"
+            ));
+            let source = set.id_of("Source").expect("source exists");
+            let target = set.id_of("Target").expect("target exists");
+            for event in MaterialInteractionEvent::ALL {
+                let reaction = set.reaction_for_event(Some(source), Some(target), event);
+                assert_eq!(
+                    reaction.kind,
+                    MaterialReactionKind::None,
+                    "mis-cased Type={reaction_type} must bind NoReaction for {event:?}"
+                );
+                assert!(
+                    reaction.user_defined,
+                    "mis-cased Type={reaction_type} must occupy the {event:?} pair slot"
+                );
+            }
+        }
+
+        let scripts = build_material_set(
+            r#"
+            [Material Source]
+            Name=Source
+            Density=25
+
+            [Reaction]
+            Type=sCrIpT
+            ScriptFunc=WrongCallback
+            TargetSpec=BadTarget
+
+            [Reaction]
+            Type=Script
+            ScriptFunc=RightCallback
+            TargetSpec=GoodTarget
+
+            [Material BadTarget]
+            Name=BadTarget
+            Density=80
+
+            [Material GoodTarget]
+            Name=GoodTarget
+            Density=80
+            "#,
+        );
+        let source = scripts.id_of("Source").expect("source exists");
+        let bad_target = scripts.id_of("BadTarget").expect("bad target exists");
+        let good_target = scripts.id_of("GoodTarget").expect("good target exists");
+        assert_eq!(
+            scripts.reaction(Some(source), Some(bad_target)).kind,
+            MaterialReactionKind::None,
+            "mis-cased Script must not resolve or register a callback"
+        );
+        assert_eq!(
+            scripts.reaction(Some(source), Some(good_target)).kind,
+            MaterialReactionKind::Script { func: 0 },
+            "the first exact Script keeps callback index zero"
+        );
+        assert_eq!(scripts.script_reaction_name(0), Some("RightCallback"));
+        assert_eq!(scripts.script_reaction_name(1), None);
+
+        let mut group = MutableGroup::new("Material.c4g");
+        group
+            .add_file(
+                "Trailing.c4m",
+                b"[Material]\r\nName=Trailing\r\nDensity=25\r\n\r\n[Reaction]\r\nType=Poof \r\nTargetSpec=Target\r\n"
+                    .to_vec(),
+            )
+            .expect("trailing-space material adds");
+        group
+            .add_file(
+                "Leading.c4m",
+                b"[Material]\r\nName=Leading\r\nDensity=25\r\n\r\n[Reaction]\r\nType=  Poof\r\nTargetSpec=Target\r\n"
+                    .to_vec(),
+            )
+            .expect("leading-space material adds");
+        group
+            .add_file(
+                "Target.c4m",
+                b"[Material]\r\nName=Target\r\nDensity=80\r\n".to_vec(),
+            )
+            .expect("target material adds");
+        let packed = group.pack_raw().expect("material group packs");
+        let group =
+            lc_resources::Group::from_raw_memory(std::path::PathBuf::from("Material.c4g"), packed)
+                .expect("material group reopens");
+        let library = MaterialLibrary::from_group(&group).expect("native materials compile");
+        let native = MaterialSet::from_resource_library(&library);
+        let trailing = native.id_of("Trailing").expect("trailing source exists");
+        let leading = native.id_of("Leading").expect("leading source exists");
+        let target = native.id_of("Target").expect("target exists");
+        for event in MaterialInteractionEvent::ALL {
+            let trailing_reaction = native.reaction_for_event(Some(trailing), Some(target), event);
+            assert_eq!(trailing_reaction.kind, MaterialReactionKind::None);
+            assert!(trailing_reaction.user_defined);
+        }
+        assert_eq!(
+            native.reaction(Some(leading), Some(target)).kind,
+            MaterialReactionKind::Poof,
+            "the native string compiler skips leading spaces and tabs"
         );
     }
 
