@@ -7579,7 +7579,7 @@ impl Object {
 
         if movement.live.get().border_bound & C4D_BORDER_TOP != 0 {
             let shape_y = self.current_shape_rect().map(|shape| shape.y).unwrap_or(0);
-            for cnat in target_bounds(target_y, -shape_y, i32::MAX, CNAT_TOP, CNAT_BOTTOM)
+            for cnat in target_bounds(target_y, -shape_y, 1_000_000, CNAT_TOP, CNAT_BOTTOM)
                 .into_iter()
                 .flatten()
             {
@@ -7591,7 +7591,7 @@ impl Object {
         if movement.live.get().border_bound & C4D_BORDER_BOTTOM != 0 {
             let shape_y = self.current_shape_rect().map(|shape| shape.y).unwrap_or(0);
             let bottom = landscape.estimated_height() + shape_y;
-            for cnat in target_bounds(target_y, i32::MIN, bottom, CNAT_TOP, CNAT_BOTTOM)
+            for cnat in target_bounds(target_y, -1_000_000, bottom, CNAT_TOP, CNAT_BOTTOM)
                 .into_iter()
                 .flatten()
             {
@@ -9998,6 +9998,189 @@ fn movement_circle_wrap_retains_pre_wrap_live_shape() {
         object.snapshot(None).current_shape,
         Some(DefinitionRect::new(-7, -7, 14, 14))
     );
+}
+
+#[cfg(test)]
+#[test]
+fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
+    struct Case {
+        name: &'static str,
+        border_bound: i32,
+        target: i32,
+        expected_target: i32,
+        initial_ydir: i32,
+        expected_contact: Option<u32>,
+    }
+
+    let mut engine = Engine::new();
+    let mut definition =
+        Definition::from_script("VBND", "Vertical bounds fixture", "")
+            .expect("definition compiles");
+    definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    let object_id = engine
+        .spawn_object(SpawnConfig::new("VBND"))
+        .expect("object spawns");
+    let object_index = engine
+        .find_object_index(object_id)
+        .expect("object index");
+    let landscape = Landscape::flat(8, 20);
+    let live = Cell::new(MovementLiveConfig {
+        border_bound: 0,
+        rotateable: 0,
+        action_procedure: ActionProcedure::Undefined,
+        layer_bounds: None,
+    });
+    let movement = MovementContactConfig {
+        live: &live,
+        solid_masks: &[],
+        object_id,
+    };
+    // A raw fix_y projects only to about +/-32K, but the preceding layer
+    // TargetBounds arm can replace that target with any i32. Exercise the
+    // shared vertical helper directly instead of walking a million pixels.
+    let original_fixed_position = FixedVec2::new(fixed100(25), fixed100(-25));
+
+    let cases = [
+        Case {
+            name: "top inside",
+            border_bound: C4D_BORDER_TOP,
+            target: 999_999,
+            expected_target: 999_999,
+            initial_ydir: 3,
+            expected_contact: None,
+        },
+        Case {
+            name: "top exact",
+            border_bound: C4D_BORDER_TOP,
+            target: 1_000_000,
+            expected_target: 1_000_000,
+            initial_ydir: 3,
+            expected_contact: None,
+        },
+        Case {
+            name: "top across",
+            border_bound: C4D_BORDER_TOP,
+            target: 1_000_001,
+            expected_target: 1_000_000,
+            initial_ydir: 3,
+            expected_contact: Some(CNAT_BOTTOM),
+        },
+        Case {
+            name: "bottom inside",
+            border_bound: C4D_BORDER_BOTTOM,
+            target: -999_999,
+            expected_target: -999_999,
+            initial_ydir: -3,
+            expected_contact: None,
+        },
+        Case {
+            name: "bottom exact",
+            border_bound: C4D_BORDER_BOTTOM,
+            target: -1_000_000,
+            expected_target: -1_000_000,
+            initial_ydir: -3,
+            expected_contact: None,
+        },
+        Case {
+            name: "bottom across",
+            border_bound: C4D_BORDER_BOTTOM,
+            target: -1_000_001,
+            expected_target: -1_000_000,
+            initial_ydir: -3,
+            expected_contact: Some(CNAT_TOP),
+        },
+    ];
+
+    for case in cases {
+        live.set(MovementLiveConfig {
+            border_bound: case.border_bound,
+            rotateable: 0,
+            action_procedure: ActionProcedure::Undefined,
+            layer_bounds: None,
+        });
+        let object = &mut engine.objects[object_index];
+        object.fixed_position = original_fixed_position;
+        object.fixed_velocity =
+            FixedVec2::new(itofix(2), itofix(case.initial_ydir));
+        object.state.velocity = object.velocity_pixels();
+        object.frame_t_contact = CNAT_LEFT;
+        object.frame_shape_contact_cnat = CNAT_RIGHT;
+        object.frame_shape_contact_count = 7;
+
+        let mut target = case.target;
+        let mut contacts = Vec::new();
+        {
+            let mut on_contact =
+                |object: &mut Object,
+                 _: &Landscape,
+                 dispatch: MovementContactDispatch| {
+                    let MovementContactDispatch::Direct(cnat) = dispatch else {
+                        panic!("TargetBounds must dispatch a direct contact");
+                    };
+                    contacts.push((
+                        cnat,
+                        object.fixed_velocity.x.val(),
+                        object.fixed_velocity.y.val(),
+                        object.state.velocity.x,
+                        object.state.velocity.y,
+                    ));
+                    Ok(())
+                };
+            object
+                .apply_vertical_bounds(
+                    &mut target,
+                    &landscape,
+                    movement,
+                    &mut on_contact,
+                )
+                .expect(case.name);
+        }
+
+        let expected_ydir = if case.expected_contact.is_some() {
+            C4Fixed::ZERO
+        } else {
+            itofix(case.initial_ydir)
+        };
+        let expected_contacts = case
+            .expected_contact
+            .into_iter()
+            .map(|cnat| (cnat, itofix(2).val(), 0, 2, 0))
+            .collect::<Vec<_>>();
+        assert_eq!(target, case.expected_target, "{} target", case.name);
+        assert_eq!(
+            object.fixed_velocity.y, expected_ydir,
+            "{} ydir",
+            case.name
+        );
+        assert_eq!(
+            object.state.velocity.y,
+            fixtoi(expected_ydir),
+            "{} integer ydir",
+            case.name
+        );
+        assert_eq!(object.fixed_velocity.x, itofix(2), "{} xdir", case.name);
+        assert_eq!(object.state.velocity.x, 2, "{} integer xdir", case.name);
+        assert_eq!(contacts, expected_contacts, "{} contacts", case.name);
+        assert_eq!(
+            object.fixed_position, original_fixed_position,
+            "{} must not resynchronize fix_y",
+            case.name
+        );
+        assert_eq!(object.frame_t_contact, CNAT_LEFT, "{} t_contact", case.name);
+        assert_eq!(
+            object.frame_shape_contact_cnat, CNAT_RIGHT,
+            "{} shape contact CNAT",
+            case.name
+        );
+        assert_eq!(
+            object.frame_shape_contact_count, 7,
+            "{} shape contact count",
+            case.name
+        );
+    }
 }
 
 #[cfg(test)]
