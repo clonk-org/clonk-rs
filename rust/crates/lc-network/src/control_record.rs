@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::legacy::{
     decode_control_entry_prefix, decode_control_list_prefix, encode_control_entry_payload,
-    encode_control_list_payload, LegacyControlError, LegacyEncodeError,
+    encode_control_list_payload, LegacyControlError, LegacyEncodeError, Reader,
 };
 
 /// One typed chunk from a C++ `CtrlRec.c4b` stream.
@@ -25,6 +25,15 @@ pub enum ControlRecordChunk {
     },
     /// Empty frame-distance filler (`RCT_Frame`).
     Frame { frame: u32 },
+    /// One diagnostic `C4PktDebugRec` chunk. The outer record type and the
+    /// embedded raw enum are retained independently because C++ does not
+    /// require them to match.
+    DebugRecord {
+        frame: u32,
+        chunk_type: u8,
+        debug_type: i32,
+        data: Vec<u8>,
+    },
     /// End-of-record marker (`RCT_End`).
     End { frame: u32 },
 }
@@ -35,9 +44,22 @@ impl ControlRecordChunk {
             Self::Controls { frame, .. }
             | Self::ControlPacket { frame, .. }
             | Self::Frame { frame }
+            | Self::DebugRecord { frame, .. }
             | Self::End { frame } => *frame,
         }
     }
+}
+
+fn decode_debug_record_prefix(payload: &[u8]) -> Result<(i32, Vec<u8>, usize), LegacyControlError> {
+    let mut reader = Reader::new(payload);
+    // C4PktDebugRec::eType is compiled through mkIntAdapt, whose default
+    // storage type is a native-endian int32. Its StdBuf then carries a packed
+    // uint32 byte count and exactly that many opaque bytes.
+    let debug_type = reader.read_raw_i32()?;
+    let size = reader.read_uint32()? as usize;
+    let data = reader.read_bytes(size)?.to_vec();
+    let consumed = payload.len() - reader.remaining();
+    Ok((debug_type, data, consumed))
 }
 
 /// Typed writer for the control-bearing subset of `CtrlRec.c4b`.
@@ -168,6 +190,19 @@ impl ControlRecordParser {
                 },
                 RCT_FRAME => Some((ControlRecordChunk::Frame { frame: 0 }, 0)),
                 RCT_END => Some((ControlRecordChunk::End { frame: 0 }, 0)),
+                other if other >= 0x80 => match decode_debug_record_prefix(payload) {
+                    Ok((debug_type, data, consumed)) => Some((
+                        ControlRecordChunk::DebugRecord {
+                            frame: 0,
+                            chunk_type: other,
+                            debug_type,
+                            data,
+                        },
+                        consumed,
+                    )),
+                    Err(LegacyControlError::UnexpectedEof) => None,
+                    Err(error) => return Err(error.into()),
+                },
                 other => return Err(ControlRecordDecodeError::UnsupportedChunkType(other)),
             };
 
@@ -181,6 +216,7 @@ impl ControlRecordParser {
                 ControlRecordChunk::Controls { frame, .. }
                 | ControlRecordChunk::ControlPacket { frame, .. }
                 | ControlRecordChunk::Frame { frame }
+                | ControlRecordChunk::DebugRecord { frame, .. }
                 | ControlRecordChunk::End { frame } => *frame = next_frame,
             }
 
@@ -267,6 +303,10 @@ impl ControlRecordPlayback {
                 } => controls.extend(recorded),
                 ControlRecordChunk::ControlPacket { control, .. } => controls.push(control),
                 ControlRecordChunk::Frame { .. } => {}
+                ControlRecordChunk::DebugRecord { .. } => {
+                    // Normal C++ builds parse diagnostic chunks so their
+                    // boundary is known, then advance without executing them.
+                }
                 ControlRecordChunk::End { .. } => {
                     self.finished = true;
                     break;
@@ -287,7 +327,10 @@ impl ControlRecordPlayback {
 
 #[cfg(test)]
 mod tests {
-    use lc_engine::{LegacyCString, ScriptControlData, ScriptStrictness, SynchronizeControlData};
+    use lc_engine::{
+        DebugRecordControlData, LegacyCString, ScriptControlData, ScriptStrictness,
+        SynchronizeControlData,
+    };
 
     use super::*;
 
@@ -374,6 +417,108 @@ mod tests {
     }
 
     #[test]
+    fn cpp_debug_chunks_do_not_block_later_record_controls() {
+        let later_control = synchronize();
+        let mut bytes = Vec::new();
+
+        // ReadBinary uses one generic C4PktDebugRec grammar for every outer
+        // type >= 0x80, including gaps and RCT_Undefined. Deliberately make
+        // the embedded raw i32 differ from the outer byte: C++ retains both
+        // and does not validate equality while loading the record.
+        for (index, chunk_type) in (0x80_u8..=0xff).enumerate() {
+            bytes.extend([if index == 0 { 7 } else { 0 }, chunk_type]);
+            let debug_type = 0x1234_0000 | i32::from(chunk_type);
+            bytes.extend(debug_type.to_ne_bytes());
+            let data = match chunk_type {
+                0x80 => Vec::new(),
+                0x81 => vec![chunk_type; 128],
+                _ => vec![chunk_type, 0x00, 0xff],
+            };
+            if data.len() == 128 {
+                bytes.extend([0x80, 0x01]);
+            } else {
+                bytes.push(data.len() as u8);
+            }
+            bytes.extend(data);
+        }
+
+        bytes.extend([0, RCT_CTRL_PKT]);
+        bytes.extend(encode_control_entry_payload(&later_control).unwrap());
+        bytes.extend([44, RCT_END]);
+
+        let expected = decode_control_record(&bytes).expect("C++ debug chunks decode");
+        assert_eq!(expected.len(), 130);
+        for (index, chunk) in expected.iter().take(128).enumerate() {
+            let chunk_type = (0x80_u16 + index as u16) as u8;
+            let data = match chunk_type {
+                0x80 => Vec::new(),
+                0x81 => vec![chunk_type; 128],
+                _ => vec![chunk_type, 0x00, 0xff],
+            };
+            assert_eq!(
+                chunk,
+                &ControlRecordChunk::DebugRecord {
+                    frame: 7,
+                    chunk_type,
+                    debug_type: 0x1234_0000 | i32::from(chunk_type),
+                    data,
+                }
+            );
+        }
+        assert_eq!(
+            expected[128],
+            ControlRecordChunk::ControlPacket {
+                frame: 7,
+                control: later_control.clone(),
+            }
+        );
+
+        let mut parser = ControlRecordParser::new();
+        let mut incremental = Vec::new();
+        for byte in &bytes {
+            incremental.extend(parser.push(std::slice::from_ref(byte)).unwrap());
+        }
+        parser.finish().unwrap();
+        assert_eq!(incremental, expected);
+
+        let mut playback = ControlRecordPlayback::from_bytes(&bytes).unwrap();
+        assert!(playback.take_controls(6).is_empty());
+        assert_eq!(playback.take_controls(7), vec![later_control]);
+        assert!(!playback.is_finished());
+        assert!(playback.take_controls(u32::MAX).is_empty());
+        assert!(playback.is_finished());
+    }
+
+    #[test]
+    fn cpp_debugrec_control_round_trips_as_noop() {
+        let control = EngineControlPacket::DebugRecord(DebugRecordControlData {
+            data: vec![0x00, 0xff, 0x40, b'C', b'4'],
+        });
+        let payload = encode_control_entry_payload(&control).unwrap();
+        assert_eq!(payload, [0xc0, 5, 0x00, 0xff, 0x40, b'C', b'4']);
+
+        let mut writer = ControlRecordWriter::new();
+        writer.record_packet(4, &control).unwrap();
+        let bytes = writer.finish(4);
+        assert_eq!(
+            decode_control_record(&bytes).unwrap(),
+            vec![
+                ControlRecordChunk::ControlPacket {
+                    frame: 4,
+                    control: control.clone(),
+                },
+                ControlRecordChunk::End { frame: 45 },
+            ]
+        );
+
+        // The runtime's exhaustive control-replay test executes this variant
+        // through the intentional C4ControlDebugRec no-op arm. This layer
+        // proves that its opaque bytes survive the C++ binary record codec.
+        let mut playback = ControlRecordPlayback::from_bytes(&bytes).unwrap();
+        assert_eq!(playback.take_controls(4), vec![control]);
+    }
+
+    #[test]
     fn large_frame_gap_decodes_the_cpp_filler_chunks() {
         let mut writer = ControlRecordWriter::new();
         writer.record_controls(600, &[synchronize()]).unwrap();
@@ -410,6 +555,15 @@ mod tests {
         assert!(truncated.push(&[5, RCT_CTRL, 0x86]).unwrap().is_empty());
         assert_eq!(truncated.finish(), Err(ControlRecordDecodeError::Truncated));
 
+        let mut truncated_debug = ControlRecordParser::new();
+        assert!(truncated_debug
+            .push(&[0, 0x81, 0x81, 0, 0, 0, 2, 0xaa])
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            truncated_debug.finish(),
+            Err(ControlRecordDecodeError::Truncated)
+        );
         assert_eq!(
             decode_control_record(&[0, 0x55]),
             Err(ControlRecordDecodeError::UnsupportedChunkType(0x55))
