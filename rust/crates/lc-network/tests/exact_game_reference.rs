@@ -214,14 +214,7 @@ fn replacing_netpuncher_state_updates_the_exact_reference_atomically() {
         .any(|window| window == b"NetpuncherAddr=\"puncher.invalid:11115\"\r\n"));
 
     let runtime = assigned
-        .replacing_runtime(
-            assigned.parameters().clone(),
-            "Running",
-            12,
-            34,
-            false,
-            0,
-        )
+        .replacing_runtime(assigned.parameters().clone(), "Running", 12, 34, false, 0)
         .unwrap();
     let game_over = runtime
         .replacing_game_over(
@@ -474,14 +467,17 @@ fn exact_host_reference_rejects_raw_team_names_with_line_breaks() {
 
 #[test]
 fn exact_advertiser_serves_the_complete_parameter_payload() {
+    let mut parameters = complete_parameters();
+    parameters.player_infos.clients[0].players[0].clan_tag = legacy(b"Cl\xe4n");
+    parameters.teams.teams[0].name = legacy(b"T\xe4m");
     let payload =
-        HostGameReference::new(fixture_summary(), fixture_metadata(), complete_parameters())
-            .unwrap();
+        HostGameReference::new(fixture_summary(), fixture_metadata(), parameters).unwrap();
     let expected = encode_host_game_reference_response(&payload).unwrap();
     let advertiser = NetworkGameAdvertiser::start_exact(
         NetworkGameAdvertiserConfig {
             discovery_port: 0,
             reference_port: Some(0),
+            language_charset: "RUSSIAN".to_string(),
         },
         payload,
     )
@@ -494,16 +490,25 @@ fn exact_advertiser_serves_the_complete_parameter_payload() {
     stream.write_all(b"GET / HTTP/1.0\r\n\r\n").unwrap();
     let mut response = Vec::new();
     stream.read_to_end(&mut response).unwrap();
-    let body = response
+    let header_end = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .map(|offset| &response[offset + 4..])
-        .unwrap();
+        .unwrap()
+        + 4;
+    let headers = String::from_utf8_lossy(&response[..header_end]);
+    let body = &response[header_end..];
 
+    assert!(headers.contains("Content-Type: text/plain; charset=CP1251\r\n"));
     assert_eq!(body, expected);
     assert!(body
         .windows(b"  [PlayerInfos]\r\n".len())
         .any(|window| window == b"  [PlayerInfos]\r\n"));
+    assert!(body
+        .windows(b"      ClanTag=Cl\xe4n\r\n".len())
+        .any(|window| window == b"      ClanTag=Cl\xe4n\r\n"));
+    assert!(body
+        .windows(b"    Name=T\xe4m\r\n".len())
+        .any(|window| window == b"    Name=T\xe4m\r\n"));
 }
 
 #[test]

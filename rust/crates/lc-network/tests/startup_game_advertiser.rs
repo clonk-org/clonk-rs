@@ -65,9 +65,7 @@ fn advertised_reference_round_trips_through_the_cpp_ini_shape() {
     let text = String::from_utf8(encoded.clone()).unwrap();
     assert!(text.starts_with("[Reference]\r\n"));
     assert!(text.contains("CtrlMode=2\r\n"));
-    assert!(text.contains(
-        "Address=UDP:\"0.0.0.0:11113\",TCP:\"0.0.0.0:11112\"\r\n"
-    ));
+    assert!(text.contains("Address=UDP:\"0.0.0.0:11113\",TCP:\"0.0.0.0:11112\"\r\n"));
     assert!(text.contains("MaxPlayers=13\r\n"));
     assert!(text.contains("  [Client]\r\n  ID=0\r\n"));
     assert!(text.contains("  Name=\"Host One\"\r\n  Nick=\"OracleNick\"\r\n"));
@@ -86,6 +84,7 @@ fn reference_server_answers_cpp_http_get_with_current_reference() {
         NetworkGameAdvertiserConfig {
             discovery_port: 0,
             reference_port: Some(0),
+            language_charset: String::new(),
         },
         advertised_game(),
     )
@@ -100,7 +99,7 @@ fn reference_server_answers_cpp_http_get_with_current_reference() {
         + 4;
     let headers = String::from_utf8_lossy(&response[..header_end]);
     assert!(headers.starts_with("HTTP/1.0 200 OK\r\n"));
-    assert!(headers.contains("Content-Type: text/plain; charset=ISO-8859-1\r\n"));
+    assert!(headers.contains("Content-Type: text/plain; charset=CP1252\r\n"));
     assert_eq!(
         parse_reference_response(&response[header_end..]).unwrap(),
         vec![advertised_game()]
@@ -136,6 +135,97 @@ fn reference_server_answers_cpp_http_get_with_current_reference() {
 }
 
 #[test]
+fn reference_server_uses_configured_legacy_charset() {
+    // GetCharsetCodeName compares only the classic names, ASCII-insensitively,
+    // and falls back to CP1252 without trimming or accepting CP aliases
+    // (pristine 9ffa0a5d src/C4Config.cpp:875-893). Reference text is already
+    // in that native byte domain before StdCompilerINIWrite quotes it.
+    for (configured, canonical, title, encoded) in [
+        ("SHIFTJIS", "CP932", "日", &[0x93, 0xfa][..]),
+        ("hangul", "CP949", "한", &[0xc7, 0xd1][..]),
+        ("JOHAB", "CP1361", "한", &[0xd0, 0x65][..]),
+        ("CHINESEBIG5", "CP950", "漢", &[0xba, 0x7e][..]),
+        ("GREEK", "CP1253", "Α", &[0xc1][..]),
+        ("TURKISH", "CP1254", "Ğ", &[0xd0][..]),
+        ("VIETNAMESE", "CP1258", "Đ", &[0xd0][..]),
+        ("HEBREW", "CP1255", "א", &[0xe0][..]),
+        ("ARABIC", "CP1256", "ا", &[0xc7][..]),
+        ("BALTIC", "CP1257", "Ą", &[0xc0][..]),
+        ("RUSSIAN", "CP1251", "А", &[0xc0][..]),
+        ("THAI", "CP874", "ก", &[0xa1][..]),
+        ("EASTEUROPE", "CP1250", "Ą", &[0xa5][..]),
+        ("UTF-8", "UTF-8", "€", &[0xe2, 0x82, 0xac][..]),
+        ("", "CP1252", "€", &[0x80][..]),
+        ("CP1251", "CP1252", "€", &[0x80][..]),
+        (" RUSSIAN ", "CP1252", "€", &[0x80][..]),
+    ] {
+        let mut reference = advertised_game();
+        reference.title = title.to_string();
+        let advertiser = NetworkGameAdvertiser::start(
+            NetworkGameAdvertiserConfig {
+                discovery_port: 0,
+                reference_port: Some(0),
+                language_charset: configured.to_string(),
+            },
+            reference,
+        )
+        .unwrap();
+
+        let response = http_request(
+            advertiser.reference_addr().port(),
+            b"GET / HTTP/1.0\r\n\r\n",
+        );
+        assert_reference_charset(&response, canonical, encoded, configured);
+
+        if configured == "RUSSIAN" {
+            let mut updated = advertised_game();
+            updated.title = "Б".to_string();
+            advertiser.update(&updated);
+            let response = http_request(
+                advertiser.reference_addr().port(),
+                b"GET /updated HTTP/1.0\r\n\r\n",
+            );
+            assert_reference_charset(&response, "CP1251", &[0xc1], "updated RUSSIAN");
+        }
+    }
+}
+
+fn assert_reference_charset(response: &[u8], charset: &str, encoded: &[u8], context: &str) {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap()
+        + 4;
+    let headers = String::from_utf8_lossy(&response[..header_end]);
+    assert!(
+        headers.contains(&format!("Content-Type: text/plain; charset={charset}\r\n")),
+        "{context}: {headers}"
+    );
+
+    let mut expected = b"Title=\"".to_vec();
+    let mut last_was_numeric_escape = false;
+    for byte in encoded {
+        if byte.is_ascii_graphic()
+            && !matches!(*byte, b'\\' | b'\"')
+            && !(last_was_numeric_escape && byte.is_ascii_digit())
+        {
+            expected.push(*byte);
+            last_was_numeric_escape = false;
+        } else {
+            expected.extend_from_slice(format!("\\{byte:o}").as_bytes());
+            last_was_numeric_escape = true;
+        }
+    }
+    expected.extend_from_slice(b"\"\r\n");
+    assert!(
+        response[header_end..]
+            .windows(expected.len())
+            .any(|window| window == expected),
+        "{context}: body does not contain {expected:?}"
+    );
+}
+
+#[test]
 fn disabled_reference_server_keeps_discovery_only_advertiser_clean() {
     let discovery_reservation = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
     let discovery_port = discovery_reservation.local_addr().unwrap().port();
@@ -145,6 +235,7 @@ fn disabled_reference_server_keeps_discovery_only_advertiser_clean() {
         NetworkGameAdvertiserConfig {
             discovery_port,
             reference_port: None,
+            language_charset: String::new(),
         },
         advertised_game(),
     )

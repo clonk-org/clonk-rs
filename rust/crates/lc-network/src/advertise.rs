@@ -8,26 +8,47 @@ use std::sync::{mpsc, Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
+use lc_engine::LegacyCString;
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
-use crate::search::{
-    multicast_interface_indices, multicast_targets, DISCOVERY_MULTICAST,
-};
 use crate::host_game_reference::{quote_legacy, serialize_reference_parameters};
+use crate::search::{multicast_interface_indices, multicast_targets, DISCOVERY_MULTICAST};
 use crate::{
     HostGameReference, HostGameReferenceError, NetworkAddress, NetworkGameReference,
     NetworkProtocol,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkGameAdvertiserConfig {
     pub discovery_port: u16,
     /// `None` mirrors a disabled `Config.Network.PortRefServer`. `Some(0)`
     /// remains useful for tests and embedders that need an ephemeral listener.
     pub reference_port: Option<u16>,
+    /// `Config.General.LanguageCharset`, before C++ code-page canonicalization.
+    pub language_charset: String,
+}
+
+fn canonical_legacy_charset_name(configured: &str) -> &'static str {
+    match configured.to_ascii_uppercase().as_str() {
+        "SHIFTJIS" => "CP932",
+        "HANGUL" => "CP949",
+        "JOHAB" => "CP1361",
+        "CHINESEBIG5" => "CP950",
+        "GREEK" => "CP1253",
+        "TURKISH" => "CP1254",
+        "VIETNAMESE" => "CP1258",
+        "HEBREW" => "CP1255",
+        "ARABIC" => "CP1256",
+        "BALTIC" => "CP1257",
+        "RUSSIAN" => "CP1251",
+        "THAI" => "CP874",
+        "EASTEUROPE" => "CP1250",
+        "UTF-8" => "UTF-8",
+        _ => "CP1252",
+    }
 }
 
 pub fn discovery_reply_for_packet(payload: &[u8], reference_port: u16) -> Option<[u8; 4]> {
@@ -39,6 +60,14 @@ pub fn discovery_reply_for_packet(payload: &[u8], reference_port: u16) -> Option
 }
 
 pub fn encode_reference_response(reference: &NetworkGameReference) -> Vec<u8> {
+    encode_reference_response_with_charset(reference, "CP1252")
+        .expect("the canonical CP1252 reference charset must be supported")
+}
+
+fn encode_reference_response_with_charset(
+    reference: &NetworkGameReference,
+    charset: &'static str,
+) -> Result<Vec<u8>, iconv_native::ConvertLossyError> {
     let mut output = String::new();
     let _ = write!(
         output,
@@ -56,7 +85,7 @@ PasswordNeeded={}\r\n",
         reference.control_mode,
         reference.time,
         reference.start_time,
-        quote_ini(&reference.comment),
+        quote_reference_text(&reference.comment, charset)?,
         reference.join_allowed,
         reference.password_needed,
     );
@@ -96,7 +125,7 @@ League={}\r\n\
 LeagueAddress={}\r\n\
 IsNetworkGame=true\r\n\
 Title={}\r\n",
-        quote_ini(&reference.game),
+        quote_reference_text(&reference.game, charset)?,
         reference.version[0],
         reference.version[1],
         reference.version[2],
@@ -105,28 +134,33 @@ Title={}\r\n",
         reference.official_server,
         reference.max_players,
         reference.use_fair_crew,
-        quote_ini(
+        quote_reference_text(
             &reference
                 .goals
                 .iter()
                 .map(|goal| format!("{goal}=1"))
                 .collect::<Vec<_>>()
-                .join(";")
-        ),
-        quote_ini(&reference.league),
-        quote_ini(&reference.league_address),
-        quote_ini(&reference.title),
+                .join(";"),
+            charset,
+        )?,
+        quote_reference_text(&reference.league, charset)?,
+        quote_reference_text(&reference.league_address, charset)?,
+        quote_reference_text(&reference.title, charset)?,
     );
     if !reference.player_names.is_empty() {
         output.push_str("\r\n  [PlayerInfos]\r\n");
-        let _ = write!(output, "  LastPlayerID={}\r\n", reference.player_names.len());
+        let _ = write!(
+            output,
+            "  LastPlayerID={}\r\n",
+            reference.player_names.len()
+        );
         output.push_str("\r\n    [Client]\r\n    ID=0\r\n    Flags=Initial\r\n");
         for (index, name) in reference.player_names.iter().enumerate() {
             output.push_str("\r\n      [Player]\r\n");
             let _ = write!(
                 output,
                 "      Name={}\r\n      Flags=Joined\r\n      ID={}\r\n",
-                quote_ini(name),
+                quote_reference_text(name, charset)?,
                 index + 1
             );
         }
@@ -135,8 +169,8 @@ Title={}\r\n",
     let _ = write!(
         output,
         "  Name={}\r\n  Nick={}\r\n",
-        quote_ini(&reference.host_name),
-        quote_ini(&reference.host_nick),
+        quote_reference_text(&reference.host_name, charset)?,
+        quote_reference_text(&reference.host_nick, charset)?,
     );
     if reference.netpuncher_ipv4 != 0 || reference.netpuncher_ipv6 != 0 {
         output.push_str("\r\n  [NetpuncherID]\r\n");
@@ -151,17 +185,14 @@ Title={}\r\n",
         let _ = write!(
             output,
             "NetpuncherAddr={}\r\n",
-            quote_ini(&reference.netpuncher_address)
+            quote_reference_text(&reference.netpuncher_address, charset)?
         );
     }
 
-    // The C++ reference server declares the configured legacy charset. The
-    // parity server uses ISO-8859-1 and substitutes characters it cannot
-    // represent, matching a lossy legacy-codepage conversion.
-    output
+    Ok(output
         .chars()
         .map(|character| u8::try_from(u32::from(character)).unwrap_or(b'?'))
-        .collect()
+        .collect())
 }
 
 /// Serializes the host-only exact reference path. Unlike the legacy summary
@@ -221,11 +252,7 @@ pub fn encode_host_game_reference_response(
                     unreachable!("reference metadata validates address protocols")
                 }
             };
-            let _ = write!(
-                output,
-                "{protocol}:\"{}\"",
-                reference_endpoint(address)
-            );
+            let _ = write!(output, "{protocol}:\"{}\"", reference_endpoint(address));
         }
         output.push_str("\r\n");
     }
@@ -296,8 +323,22 @@ fn quote_ini(value: &str) -> String {
     quoted
 }
 
+fn quote_reference_text(
+    value: &str,
+    charset: &'static str,
+) -> Result<String, iconv_native::ConvertLossyError> {
+    let mut encoded = iconv_native::convert_lossy(value.as_bytes(), "UTF-8", charset)?;
+    if let Some(nul) = encoded.iter().position(|byte| *byte == 0) {
+        encoded.truncate(nul);
+    }
+    let value = LegacyCString::from_bytes(encoded)
+        .expect("truncating at the first NUL produces a valid legacy string");
+    Ok(quote_legacy(&value))
+}
+
 pub struct NetworkGameAdvertiser {
     reference: Arc<RwLock<Vec<u8>>>,
+    charset: &'static str,
     stop: mpsc::Sender<()>,
     worker: Option<thread::JoinHandle<()>>,
     reference_addr: SocketAddr,
@@ -310,19 +351,29 @@ impl NetworkGameAdvertiser {
         config: NetworkGameAdvertiserConfig,
         reference: NetworkGameReference,
     ) -> io::Result<Self> {
-        Self::start_encoded(config, encode_reference_response(&reference))
+        let charset = canonical_legacy_charset_name(&config.language_charset);
+        let encoded =
+            encode_reference_response_with_charset(&reference, charset).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("configured reference charset {charset} is unavailable: {error}"),
+                )
+            })?;
+        Self::start_encoded(config, charset, encoded)
     }
 
     pub fn start_exact(
         config: NetworkGameAdvertiserConfig,
         reference: HostGameReference,
     ) -> Result<Self, HostGameAdvertiserError> {
+        let charset = canonical_legacy_charset_name(&config.language_charset);
         let encoded = encode_host_game_reference_response(&reference)?;
-        Self::start_encoded(config, encoded).map_err(HostGameAdvertiserError::Io)
+        Self::start_encoded(config, charset, encoded).map_err(HostGameAdvertiserError::Io)
     }
 
     fn start_encoded(
         config: NetworkGameAdvertiserConfig,
+        charset: &'static str,
         reference: Vec<u8>,
     ) -> io::Result<Self> {
         let reference_listener = config
@@ -372,6 +423,7 @@ impl NetworkGameAdvertiser {
                         config.discovery_port,
                         actual_reference_port,
                         worker_reference,
+                        charset,
                         stop_rx,
                     )
                     .await;
@@ -379,6 +431,7 @@ impl NetworkGameAdvertiser {
             })?;
         Ok(Self {
             reference,
+            charset,
             stop: stop_tx,
             worker: Some(worker),
             reference_addr,
@@ -390,8 +443,11 @@ impl NetworkGameAdvertiser {
     }
 
     pub fn update(&self, reference: &NetworkGameReference) {
+        let Ok(encoded) = encode_reference_response_with_charset(reference, self.charset) else {
+            return;
+        };
         if let Ok(mut current) = self.reference.write() {
-            *current = encode_reference_response(reference);
+            *current = encoded;
         }
     }
 
@@ -430,6 +486,7 @@ async fn run_advertiser(
     discovery_port: u16,
     reference_port: u16,
     reference: Arc<RwLock<Vec<u8>>>,
+    charset: &'static str,
     stop: mpsc::Receiver<()>,
 ) {
     if let Some(discovery) = discovery.as_ref() {
@@ -447,7 +504,7 @@ async fn run_advertiser(
             {
                 let reference = Arc::clone(&reference);
                 tokio::spawn(async move {
-                    serve_reference(stream, reference).await;
+                    serve_reference(stream, reference, charset).await;
                 });
             }
         } else {
@@ -460,13 +517,8 @@ async fn run_advertiser(
                 match discovery.0.try_recv_from(&mut datagram) {
                     Ok((size, _)) => {
                         if discovery_reply_for_packet(&datagram[..size], reference_port).is_some() {
-                            announce(
-                                &discovery.0,
-                                &discovery.1,
-                                discovery_port,
-                                reference_port,
-                            )
-                            .await;
+                            announce(&discovery.0, &discovery.1, discovery_port, reference_port)
+                                .await;
                         }
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
@@ -497,7 +549,11 @@ async fn announce(
     }
 }
 
-async fn serve_reference(mut stream: TcpStream, reference: Arc<RwLock<Vec<u8>>>) {
+async fn serve_reference(
+    mut stream: TcpStream,
+    reference: Arc<RwLock<Vec<u8>>>,
+    charset: &'static str,
+) {
     let mut request = Vec::with_capacity(1024);
     let mut buffer = [0_u8; 1024];
     let read_request = async {
@@ -533,7 +589,7 @@ async fn serve_reference(mut stream: TcpStream, reference: Arc<RwLock<Vec<u8>>>)
     let header = format!(
         "HTTP/1.0 200 OK\r\n\
 Content-Length: {}\r\n\
-Content-Type: text/plain; charset=ISO-8859-1\r\n\
+Content-Type: text/plain; charset={charset}\r\n\
 Server: LegacyClonk/4.9.11.0 [362]\r\n\r\n",
         body.len()
     );

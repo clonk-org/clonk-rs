@@ -24662,12 +24662,16 @@ fn load_network_advertiser_settings(
         return lc_network::NetworkGameAdvertiserConfig {
             discovery_port: 0,
             reference_port: Some(0),
+            language_charset: String::new(),
         };
     }
-    let ports = load_network_ports(paths);
+    let config = load_native_config_bytes(paths);
+    let ports = sanitized_network_ports(&config);
     lc_network::NetworkGameAdvertiserConfig {
         discovery_port: ports.discovery,
         reference_port: (ports.reference != 0).then_some(ports.reference),
+        language_charset: native_config_text(&config, "General", "LanguageCharset")
+            .unwrap_or_default(),
     }
 }
 
@@ -141214,6 +141218,10 @@ ScenInfoArea=70,5,25,90
                 language_sequence: "RU,US,DE".to_string(),
             }
         );
+        assert_eq!(
+            load_network_advertiser_settings(Some(&paths)).language_charset,
+            "RUSSIAN"
+        );
     }
 
     #[test]
@@ -141392,6 +141400,7 @@ ScenInfoArea=70,5,25,90
             lc_network::NetworkGameAdvertiserConfig {
                 discovery_port: 0,
                 reference_port: None,
+                language_charset: String::new(),
             }
         );
         let settings = client_settings_for_paths(
@@ -144750,10 +144759,11 @@ ScenInfoArea=70,5,25,90
         let config = lc_network::NetworkGameAdvertiserConfig {
             discovery_port: 0,
             reference_port: Some(occupied.local_addr().expect("occupied address").port()),
+            language_charset: String::new(),
         };
         let mut app = new_state_only_menu_app(320, 200);
 
-        app.start_network_game_advertiser_with_reference(config, reference);
+        app.start_network_game_advertiser_with_reference(config.clone(), reference);
 
         assert!(app.network_game_advertiser.is_none());
         assert_eq!(
@@ -144796,6 +144806,7 @@ ScenInfoArea=70,5,25,90
             lc_network::NetworkGameAdvertiserConfig {
                 discovery_port: 0,
                 reference_port: Some(0),
+                language_charset: String::new(),
             },
             retained,
         );
