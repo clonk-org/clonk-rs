@@ -193,7 +193,7 @@ use menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event}
 use network::{
     ClientSettings, HostSettings, LeagueEndAttempt, LeagueEndFailurePhase, LeagueRecordStreamStatus,
     NetworkControl, NetworkControlClock, NetworkEvent, NetworkManager, NetworkMode,
-    NetworkStartError,
+    NetworkStartError, NetworkStartupCancellation,
 };
 use network_host_preparation::NetworkHostPreparation;
 use network_team_assignment::{NetworkTeamAssignmentState, NetworkTeamControlError};
@@ -15344,11 +15344,105 @@ struct RecordingSession {
     description_definition_modules: Vec<Vec<u8>>,
 }
 
+type StartupNetworkResult =
+    std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>;
+
+struct StartupNetworkAttempt {
+    cancellation: NetworkStartupCancellation,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl StartupNetworkAttempt {
+    fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    fn join(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                tracing::error!("startup network launcher panicked during teardown");
+            }
+        }
+    }
+}
+
 struct StartupNetworkConnection {
-    receiver: Receiver<std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>>,
+    receiver: Option<Receiver<StartupNetworkResult>>,
     selected_scenario: Option<(String, String)>,
     purpose: StartupNetworkPurpose,
     authenticated_league_players: Option<Vec<lc_engine::ControlPlayerInfoEntry>>,
+    attempt: Option<StartupNetworkAttempt>,
+}
+
+impl StartupNetworkConnection {
+    fn new(
+        receiver: Receiver<StartupNetworkResult>,
+        selected_scenario: Option<(String, String)>,
+        purpose: StartupNetworkPurpose,
+    ) -> Self {
+        Self {
+            receiver: Some(receiver),
+            selected_scenario,
+            purpose,
+            authenticated_league_players: None,
+            attempt: None,
+        }
+    }
+
+    fn with_attempt(mut self, attempt: StartupNetworkAttempt) -> Self {
+        self.attempt = Some(attempt);
+        self
+    }
+
+    fn finish_attempt(&mut self) {
+        if let Some(mut attempt) = self.attempt.take() {
+            attempt.join();
+        }
+    }
+
+    fn cancel_attempt(&mut self) {
+        if let Some(attempt) = self.attempt.as_ref() {
+            attempt.cancel();
+        }
+        // If readiness won the cancellation race, dropping this receiver
+        // makes the producer drop its newly constructed NetworkManager and
+        // synchronously join the live transport before its launcher exits.
+        self.receiver.take();
+        if let Some(mut attempt) = self.attempt.take() {
+            attempt.join();
+        }
+    }
+}
+
+impl Drop for StartupNetworkConnection {
+    fn drop(&mut self) {
+        self.cancel_attempt();
+    }
+}
+
+fn spawn_startup_network_attempt<F>(
+    name: &str,
+    operation: F,
+) -> io::Result<(Receiver<StartupNetworkResult>, StartupNetworkAttempt)>
+where
+    F: FnOnce(NetworkStartupCancellation) -> StartupNetworkResult + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    let cancellation = NetworkStartupCancellation::new();
+    let worker_cancellation = cancellation.clone();
+    let worker = thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            let result = operation(worker_cancellation);
+            let _ = sender.send(result);
+        })?;
+    Ok((
+        receiver,
+        StartupNetworkAttempt {
+            cancellation,
+            worker: Some(worker),
+        },
+    ))
 }
 
 struct ClassicDirectReferenceQueryResult {
@@ -29655,12 +29749,10 @@ impl GameApp {
                 if sender.send(Ok((mode, manager))).is_err() {
                     return LeaguePlayerAuthStatus::Completed(false);
                 }
-                self.startup_network_connection = Some(StartupNetworkConnection {
-                    receiver,
-                    selected_scenario,
-                    purpose,
-                    authenticated_league_players: Some(players),
-                });
+                let mut connection =
+                    StartupNetworkConnection::new(receiver, selected_scenario, purpose);
+                connection.authenticated_league_players = Some(players);
+                self.startup_network_connection = Some(connection);
                 LeaguePlayerAuthStatus::Completed(true)
             }
             LeaguePlayerAuthContinuation::RuntimePlayer {
@@ -58220,13 +58312,38 @@ impl GameApp {
 
     fn begin_startup_network_connection(
         &mut self,
-        receiver: Receiver<
-            std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>,
-        >,
+        receiver: Receiver<StartupNetworkResult>,
         purpose: StartupNetworkPurpose,
         selected_scenario: Option<(String, String)>,
         connect_targets: Option<String>,
     ) -> Result<(), EngineError> {
+        self.install_startup_network_connection(
+            StartupNetworkConnection::new(receiver, selected_scenario, purpose),
+            connect_targets,
+        )
+    }
+
+    fn begin_cancellable_startup_network_connection(
+        &mut self,
+        receiver: Receiver<StartupNetworkResult>,
+        attempt: StartupNetworkAttempt,
+        purpose: StartupNetworkPurpose,
+        selected_scenario: Option<(String, String)>,
+        connect_targets: Option<String>,
+    ) -> Result<(), EngineError> {
+        self.install_startup_network_connection(
+            StartupNetworkConnection::new(receiver, selected_scenario, purpose)
+                .with_attempt(attempt),
+            connect_targets,
+        )
+    }
+
+    fn install_startup_network_connection(
+        &mut self,
+        connection: StartupNetworkConnection,
+        connect_targets: Option<String>,
+    ) -> Result<(), EngineError> {
+        let purpose = connection.purpose;
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
             // Transition guards suppress subsequent input, so release every
             // net-dialog press/capture before installing that guard.
@@ -58261,12 +58378,7 @@ impl GameApp {
                 MessageDialogContinuation::StartupNetworkConnectProgress,
             )?;
         }
-        self.startup_network_connection = Some(StartupNetworkConnection {
-            receiver,
-            selected_scenario,
-            purpose,
-            authenticated_league_players: None,
-        });
+        self.startup_network_connection = Some(connection);
         if purpose == StartupNetworkPurpose::StagedHost {
             let initial_fonts = self
                 .staged_network_host_scenario
@@ -58394,7 +58506,6 @@ impl GameApp {
         }
         self.prepare_network_join_game_state();
         self.startup_game_search = None;
-        let (sender, receiver) = mpsc::channel();
         let local_owner = self.local_owner;
         let player_name = self.player_name.clone();
         let app_paths = self.app_paths.clone();
@@ -58404,34 +58515,34 @@ impl GameApp {
             .map(|selection| selection.group_maker().clone());
         let (_, default_port) = load_network_startup_settings(self.app_paths.as_ref());
         let connect_target = address.clone();
-        let spawn = thread::Builder::new()
-            .name("lc-startup-network".to_string())
-            .spawn(move || {
-                let result = resolve_join_socket(&address, default_port)
-                    .map_err(|error| {
-                        NetworkStartError::Other(format!(
-                            "invalid network address: {error:#}"
-                        ))
-                    })
-                    .and_then(|server_addr| {
-                        let mut settings = client_settings_for_paths(
-                            server_addr,
-                            player_name,
-                            app_paths.as_ref(),
-                        );
-                        if let Some(group_maker) = group_maker {
-                            settings.group_maker = group_maker;
-                        }
-                        let mode = NetworkMode::Client(settings);
-                        NetworkManager::for_mode(mode.clone(), local_owner)
-                            .map(|manager| (mode, manager))
-                    });
-                let _ = sender.send(result);
-            });
+        let spawn = spawn_startup_network_attempt(
+            "lc-startup-network",
+            move |cancellation| {
+                let server_addr = resolve_join_socket(&address, default_port).map_err(|error| {
+                    NetworkStartError::Other(format!("invalid network address: {error:#}"))
+                })?;
+                if cancellation.is_cancelled() {
+                    return Err(NetworkStartError::Cancelled);
+                }
+                let mut settings =
+                    client_settings_for_paths(server_addr, player_name, app_paths.as_ref());
+                if let Some(group_maker) = group_maker {
+                    settings.group_maker = group_maker;
+                }
+                let mode = NetworkMode::Client(settings.clone());
+                NetworkManager::for_client_cancellable(
+                    settings,
+                    local_owner,
+                    cancellation,
+                )
+                .map(|manager| (mode, manager))
+            },
+        );
         match spawn {
-            Ok(_) => {
-                self.begin_startup_network_connection(
+            Ok((receiver, attempt)) => {
+                self.begin_cancellable_startup_network_connection(
                     receiver,
+                    attempt,
                     StartupNetworkPurpose::Join,
                     None,
                     Some(connect_target),
@@ -58501,20 +58612,24 @@ impl GameApp {
             return Ok(());
         };
         let connect_targets = startup_network_connect_targets(&settings);
-        let (sender, receiver) = mpsc::channel();
         let local_owner = self.local_owner;
-        let spawn = thread::Builder::new()
-            .name("lc-startup-network".to_string())
-            .spawn(move || {
-                let mode = NetworkMode::Client(settings);
-                let result = NetworkManager::for_mode(mode.clone(), local_owner)
-                    .map(|manager| (mode, manager));
-                let _ = sender.send(result);
-            });
+        let spawn = spawn_startup_network_attempt(
+            "lc-startup-network",
+            move |cancellation| {
+                let mode = NetworkMode::Client(settings.clone());
+                NetworkManager::for_client_cancellable(
+                    settings,
+                    local_owner,
+                    cancellation,
+                )
+                .map(|manager| (mode, manager))
+            },
+        );
         match spawn {
-            Ok(_) => {
-                if let Err(error) = self.begin_startup_network_connection(
+            Ok((receiver, attempt)) => {
+                if let Err(error) = self.begin_cancellable_startup_network_connection(
                     receiver,
+                    attempt,
                     StartupNetworkPurpose::Join,
                     None,
                     Some(connect_targets),
@@ -59436,16 +59551,23 @@ impl GameApp {
         };
         let selected_scenario = connection.selected_scenario.clone();
         let purpose = connection.purpose;
-        let result = match connection.receiver.try_recv() {
+        let result = match connection
+            .receiver
+            .as_ref()
+            .expect("installed startup network connection retains its receiver")
+            .try_recv()
+        {
             Ok(result) => Some(result),
             Err(TryRecvError::Empty) => return Ok(()),
             Err(TryRecvError::Disconnected) => None,
         };
-        let mut authenticated_league_players = self
+        let mut connection = self
             .startup_network_connection
             .take()
-            .expect("completed startup network connection remains installed")
-            .authenticated_league_players;
+            .expect("completed startup network connection remains installed");
+        let mut authenticated_league_players =
+            connection.authenticated_league_players.take();
+        connection.finish_attempt();
         if purpose == StartupNetworkPurpose::Join {
             // Resolution owns silent dismissal. Finishing the dialog would
             // run its continuation and incorrectly turn success into abort.
@@ -76088,10 +76210,12 @@ impl GameApp {
                     .as_ref()
                     .is_some_and(|connection| connection.purpose == StartupNetworkPurpose::Join)
                 {
-                    // Dropping this attempt's receiver makes any eventual
-                    // worker result unreachable; its manager is dropped when
-                    // the detached worker's send fails.
-                    self.startup_network_connection = None;
+                    // The attempt owns its cancellation signal and launcher.
+                    // Drop it before restoring NetDlg so its receiver closes,
+                    // every pending transport is interrupted, and both the
+                    // network worker and launcher have joined synchronously.
+                    let connection = self.startup_network_connection.take();
+                    drop(connection);
                     self.pending_network_join = None;
                     self.status_text.clear();
                     self.resume_startup_music_after_failed_open_game();
@@ -114822,12 +114946,11 @@ public func Grant(password) { return GainMissionAccess(password); }
         // path. The blocker is replaced with the existing socketless manager
         // stub immediately afterwards.
         let (blocker_sender, blocker_receiver) = mpsc::channel();
-        app.startup_network_connection = Some(StartupNetworkConnection {
-            receiver: blocker_receiver,
-            selected_scenario: None,
-            purpose: StartupNetworkPurpose::StagedHost,
-            authenticated_league_players: None,
-        });
+        app.startup_network_connection = Some(StartupNetworkConnection::new(
+            blocker_receiver,
+            None,
+            StartupNetworkPurpose::StagedHost,
+        ));
         app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
             .expect("warning OK stages the selected network scenario");
 
@@ -116275,12 +116398,11 @@ public func Grant(password) { return GainMissionAccess(password); }
             NetworkStartError,
         >>();
         drop(sender);
-        app.startup_network_connection = Some(StartupNetworkConnection {
+        app.startup_network_connection = Some(StartupNetworkConnection::new(
             receiver,
-            selected_scenario: None,
-            purpose: StartupNetworkPurpose::Join,
-            authenticated_league_players: None,
-        });
+            None,
+            StartupNetworkPurpose::Join,
+        ));
 
         app.poll_startup_network_connection()
             .expect("disconnected worker restarts startup with retained log");
@@ -116886,12 +117008,11 @@ public func Grant(password) { return GainMissionAccess(password); }
                 manager,
             )))
             .expect("queue completed host connection");
-        app.startup_network_connection = Some(StartupNetworkConnection {
+        app.startup_network_connection = Some(StartupNetworkConnection::new(
             receiver,
-            selected_scenario: None,
-            purpose: StartupNetworkPurpose::StagedHost,
-            authenticated_league_players: None,
-        });
+            None,
+            StartupNetworkPurpose::StagedHost,
+        ));
         app.poll_startup_network_connection()
             .expect("poll unstaged host transition");
         assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
@@ -124473,12 +124594,11 @@ public func Grant(password) { return GainMissionAccess(password); }
                 manager,
             )))
             .expect("queue completed client connection");
-        app.startup_network_connection = Some(StartupNetworkConnection {
+        app.startup_network_connection = Some(StartupNetworkConnection::new(
             receiver,
-            selected_scenario: None,
-            purpose: StartupNetworkPurpose::Join,
-            authenticated_league_players: None,
-        });
+            None,
+            StartupNetworkPurpose::Join,
+        ));
         app.poll_startup_network_connection()
             .expect("poll joined network transition");
         assert!(app.network.is_some());
@@ -146116,6 +146236,175 @@ ScenInfoArea=70,5,25,90
             .is_err());
     }
 
+    #[test]
+    fn network_connection_progress_cancel_interrupts_inflight_transport() {
+        use std::io::Read;
+        use std::net::{TcpListener, UdpSocket};
+
+        fn stalled_handshake_server() -> (
+            SocketAddr,
+            Receiver<()>,
+            Receiver<()>,
+            thread::JoinHandle<()>,
+        ) {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind stalled host");
+            let address = listener.local_addr().unwrap();
+            let (accepted_tx, accepted_rx) = mpsc::channel();
+            let (closed_tx, closed_rx) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept startup transport");
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(100)))
+                    .unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut bytes = [0_u8; 512];
+                loop {
+                    match stream.read(&mut bytes) {
+                        Ok(0) => panic!("startup transport closed before its handshake"),
+                        Ok(_) => break,
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                            ) && Instant::now() < deadline =>
+                        {
+                            continue;
+                        }
+                        Err(error) => panic!("startup handshake read failed: {error}"),
+                    }
+                }
+                accepted_tx.send(()).unwrap();
+                loop {
+                    match stream.read(&mut bytes) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                            ) && Instant::now() < deadline =>
+                        {
+                            continue;
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::ConnectionAborted
+                                    | io::ErrorKind::ConnectionReset
+                            ) =>
+                        {
+                            break;
+                        }
+                        Err(error) => panic!("stalled startup transport read failed: {error}"),
+                    }
+                }
+                closed_tx.send(()).unwrap();
+            });
+            (address, accepted_rx, closed_rx, worker)
+        }
+
+        fn reserve_mesh_addresses() -> (SocketAddr, SocketAddr) {
+            let tcp = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let tcp_address = tcp.local_addr().unwrap();
+            let udp = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+            let udp_address = udp.local_addr().unwrap();
+            (tcp_address, udp_address)
+        }
+
+        fn cancellable_settings(
+            server: SocketAddr,
+            mesh_tcp: SocketAddr,
+            mesh_udp: SocketAddr,
+        ) -> ClientSettings {
+            let mut settings = ClientSettings::new(server, "Player").with_netpuncher(
+                server.to_string(),
+                lc_network::NetpuncherGameIds { ipv4: 17, ipv6: 0 },
+            );
+            settings.mesh_tcp_bind_address = Some(mesh_tcp);
+            settings.mesh_udp_bind_address = Some(mesh_udp);
+            settings
+        }
+
+        let mut app = new_classic_menu_app(800, 600);
+        attach_l040_network_dialog(&mut app);
+
+        let (first_server, first_accepted, first_closed, first_server_worker) =
+            stalled_handshake_server();
+        app.activate_network_join(first_server.to_string())
+            .expect("launch direct cancellable join");
+        first_accepted
+            .recv_timeout(Duration::from_secs(4))
+            .expect("direct TCP transport sends its handshake to the stalled host");
+
+        // Cancel and Escape use this same continuation and are retained in
+        // the adjacent L084 input-route regressions.
+        let close = app
+            .top_message_dialog_layout()
+            .expect("direct join progress layout")
+            .close_button
+            .expect("direct join progress title close");
+        let close_point = PhysicalPosition::new(
+            f64::from(close.x + close.w / 2),
+            f64::from(close.y + close.h / 2),
+        );
+        app.handle_cursor_moved(close_point)
+            .expect("hover direct join title close");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press direct join title close");
+        assert!(app.startup_network_connection.is_some());
+        let cancellation_started = Instant::now();
+        app.handle_mouse_button(ElementState::Released)
+            .expect("title close cancels and joins the direct transport");
+        assert!(
+            cancellation_started.elapsed() < Duration::from_secs(1),
+            "transport cancellation must not wait for the stalled handshake"
+        );
+
+        first_closed
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cancel closes the admitted TCP transport before returning");
+        first_server_worker.join().unwrap();
+        assert!(app.startup_network_connection.is_none());
+        assert!(app.pending_network_join.is_none());
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.status_text.is_empty());
+        app.poll_startup_network_connection()
+            .expect("cancelled direct result remains silent");
+        assert!(app.message_dialogs.is_empty());
+
+        let (second_server, second_accepted, second_closed, second_server_worker) =
+            stalled_handshake_server();
+        let (second_mesh_tcp, second_mesh_udp) = reserve_mesh_addresses();
+        app.pending_network_join = Some(cancellable_settings(
+            second_server,
+            second_mesh_tcp,
+            second_mesh_udp,
+        ));
+        app.launch_pending_network_join()
+            .expect("launch independent second join");
+        second_accepted
+            .recv_timeout(Duration::from_secs(4))
+            .expect("the later join attempt sends an independent handshake");
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Cancel)
+            .expect("cancel and join the second transport independently");
+        second_closed
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second attempt closes only after its own cancellation");
+        second_server_worker.join().unwrap();
+        let rebound_tcp = TcpListener::bind(second_mesh_tcp)
+            .expect("cancel releases the client mesh TCP listener");
+        let rebound_udp =
+            UdpSocket::bind(second_mesh_udp).expect("cancel releases UDP and puncher state");
+        drop((rebound_tcp, rebound_udp));
+        app.poll_startup_network_connection()
+            .expect("cancelled reference result remains silent");
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.status_text.is_empty());
+    }
+
     fn attach_l040_network_dialog(app: &mut GameApp) {
         let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(
             app.assets
@@ -148057,12 +148346,11 @@ ScenInfoArea=70,5,25,90
                     .unwrap(),
             }))
             .expect("queue typed wrong-password result");
-        app.startup_network_connection = Some(StartupNetworkConnection {
+        app.startup_network_connection = Some(StartupNetworkConnection::new(
             receiver,
-            selected_scenario: None,
-            purpose: StartupNetworkPurpose::Join,
-            authenticated_league_players: None,
-        });
+            None,
+            StartupNetworkPurpose::Join,
+        ));
 
         app.poll_startup_network_connection()
             .expect("poll wrong-password result");
@@ -148100,12 +148388,11 @@ ScenInfoArea=70,5,25,90
         sender
             .send(Err(NetworkStartError::Other("join denied".to_string())))
             .expect("queue terminal rejection");
-        app.startup_network_connection = Some(StartupNetworkConnection {
+        app.startup_network_connection = Some(StartupNetworkConnection::new(
             receiver,
-            selected_scenario: None,
-            purpose: StartupNetworkPurpose::Join,
-            authenticated_league_players: None,
-        });
+            None,
+            StartupNetworkPurpose::Join,
+        ));
         app.poll_startup_network_connection()
             .expect("poll terminal join rejection");
         assert!(app.pending_network_join.is_none());

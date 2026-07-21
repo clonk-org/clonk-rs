@@ -178,6 +178,8 @@ fn client_join_protocol_enabled(
 pub enum NetworkStartError {
     #[error("host rejected the client password: {message:?}")]
     WrongPassword { message: lc_engine::LegacyCString },
+    #[error("network startup was cancelled")]
+    Cancelled,
     #[error("{0}")]
     Other(String),
 }
@@ -185,6 +187,52 @@ pub enum NetworkStartError {
 impl From<String> for NetworkStartError {
     fn from(message: String) -> Self {
         Self::Other(message)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NetworkStartupCancellation {
+    inner: Arc<NetworkStartupCancellationInner>,
+}
+
+#[derive(Debug)]
+struct NetworkStartupCancellationInner {
+    cancelled: AtomicBool,
+    notification: tokio::sync::Notify,
+}
+
+impl NetworkStartupCancellation {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(NetworkStartupCancellationInner {
+                cancelled: AtomicBool::new(false),
+                notification: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+
+    pub(crate) fn cancel(&self) -> bool {
+        if self.inner.cancelled.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        // `notify_one` retains a permit when cancellation races the first
+        // poll of `cancelled`; `notify_waiters` would lose that wake-up.
+        self.inner.notification.notify_one();
+        true
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.inner.cancelled.load(Ordering::Acquire)
+    }
+
+    async fn cancelled(&self) {
+        loop {
+            let notification = self.inner.notification.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notification.await;
+        }
     }
 }
 
@@ -2616,6 +2664,7 @@ enum WorkerMode {
     Client {
         settings: ClientSettings,
         local_owner: i32,
+        startup_cancellation: Option<NetworkStartupCancellation>,
     },
 }
 
@@ -2700,7 +2749,21 @@ impl NetworkManager {
             NetworkMode::Client(settings) => WorkerMode::Client {
                 settings,
                 local_owner,
+                startup_cancellation: None,
             },
+        };
+        Self::spawn(worker_mode)
+    }
+
+    pub(crate) fn for_client_cancellable(
+        settings: ClientSettings,
+        local_owner: i32,
+        startup_cancellation: NetworkStartupCancellation,
+    ) -> std::result::Result<Self, NetworkStartError> {
+        let worker_mode = WorkerMode::Client {
+            settings,
+            local_owner,
+            startup_cancellation: Some(startup_cancellation),
         };
         Self::spawn(worker_mode)
     }
@@ -2750,16 +2813,21 @@ impl NetworkManager {
             .map_err(|error| {
                 NetworkStartError::Other(format!("failed to spawn network worker thread: {error}"))
             })?;
-        let ready = match local_id_rx
-            .recv()
-            .map_err(|error| {
-                NetworkStartError::Other(format!(
-                    "network worker did not report local client id: {error}"
-                ))
-            })?
-        {
+        let ready = match local_id_rx.recv() {
             Ok(ready) => ready,
-            Err(error) => return Err(error),
+            Err(error) => {
+                let _ = worker.join();
+                return Err(NetworkStartError::Other(format!(
+                    "network worker did not report local client id: {error}"
+                )));
+            }
+        };
+        let ready = match ready {
+            Ok(ready) => ready,
+            Err(error) => {
+                let _ = worker.join();
+                return Err(error);
+            }
         };
 
         let league_runtime_available = AtomicBool::new(ready.league_runtime_available);
@@ -5003,6 +5071,7 @@ async fn run_worker(
         WorkerMode::Client {
             settings,
             local_owner,
+            startup_cancellation,
         } => {
             run_client_worker(
                 settings,
@@ -5014,6 +5083,7 @@ async fn run_worker(
                 local_id_tx,
                 netpuncher_state,
                 current_frame,
+                startup_cancellation,
             )
             .await
         }
@@ -6383,6 +6453,13 @@ async fn handle_host_event(
     Ok(())
 }
 
+async fn wait_for_startup_cancellation(cancellation: Option<&NetworkStartupCancellation>) {
+    match cancellation {
+        Some(cancellation) => cancellation.cancelled().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 async fn run_client_worker(
     settings: ClientSettings,
     local_owner: i32,
@@ -6393,17 +6470,24 @@ async fn run_client_worker(
     local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
     netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
     current_frame_source: Arc<AtomicI32>,
+    startup_cancellation: Option<NetworkStartupCancellation>,
 ) -> Result<()> {
     let player_name = settings.player_name.clone();
     let league_transport = settings.league_transport.clone();
     let tcp_enabled = settings.mesh_tcp_bind_address.is_some();
     let udp_enabled = settings.mesh_udp_bind_address.is_some();
     let mesh_punchers = if udp_enabled {
-        resolve_client_mesh_punchers(
-            settings.netpuncher_address.as_deref(),
-            settings.netpuncher_game_ids,
-        )
-        .await
+        tokio::select! {
+            biased;
+            _ = wait_for_startup_cancellation(startup_cancellation.as_ref()) => {
+                let _ = local_id_tx.send(Err(NetworkStartError::Cancelled));
+                return Ok(());
+            }
+            resolved = resolve_client_mesh_punchers(
+                settings.netpuncher_address.as_deref(),
+                settings.netpuncher_game_ids,
+            ) => resolved,
+        }
     } else {
         Vec::new()
     };
@@ -6431,7 +6515,15 @@ async fn run_client_worker(
         .server_addresses
         .into_iter()
         .filter(|address| client_join_protocol_enabled(address, tcp_enabled, udp_enabled));
-    let mut client = match connect_client_addresses(server_addresses, client_config).await {
+    let client_result = tokio::select! {
+        biased;
+        _ = wait_for_startup_cancellation(startup_cancellation.as_ref()) => {
+            let _ = local_id_tx.send(Err(NetworkStartError::Cancelled));
+            return Ok(());
+        }
+        result = connect_client_addresses(server_addresses, client_config) => result,
+    };
+    let mut client = match client_result {
         Ok(client) => client,
         Err(lc_network::ClientError::WrongPassword { message }) => {
             let startup_error = NetworkStartError::WrongPassword { message };
@@ -6445,6 +6537,13 @@ async fn run_client_worker(
             return Err(anyhow!(message));
         }
     };
+    if startup_cancellation
+        .as_ref()
+        .is_some_and(NetworkStartupCancellation::is_cancelled)
+    {
+        let _ = local_id_tx.send(Err(NetworkStartError::Cancelled));
+        return Ok(());
+    }
     let (client_id, initial_status, league_endpoint) =
         announce_connected_client(&mut client, player_name, &event_tx, &local_id_tx)?;
     let league_runtime = league_endpoint.and_then(|endpoint| {
@@ -7713,6 +7812,19 @@ mod tests {
 
     fn test_netpuncher_state() -> Arc<Mutex<NetworkNetpuncherState>> {
         Arc::new(Mutex::new(NetworkNetpuncherState::default()))
+    }
+
+    #[tokio::test]
+    async fn startup_cancellation_retains_early_signal_per_attempt() {
+        let cancelled_attempt = NetworkStartupCancellation::new();
+        let later_attempt = NetworkStartupCancellation::new();
+
+        assert!(cancelled_attempt.cancel());
+        assert!(!cancelled_attempt.cancel());
+        tokio::time::timeout(Duration::from_millis(100), cancelled_attempt.cancelled())
+            .await
+            .expect("cancellation sent before the waiter is retained");
+        assert!(!later_attempt.is_cancelled());
     }
 
     fn runtime_dynamic_fixture() -> lc_network::LiveNetworkDynamic {
@@ -9573,6 +9685,7 @@ Message=Server says Andr\xe9\r\n\
                 local_id_tx,
                 test_netpuncher_state(),
                 Arc::new(AtomicI32::new(0)),
+                None,
             )
             .await
         });
@@ -9635,6 +9748,7 @@ Message=Server says Andr\xe9\r\n\
                 local_id_tx,
                 test_netpuncher_state(),
                 Arc::new(AtomicI32::new(0)),
+                None,
             )
             .await
         });
@@ -9846,6 +9960,7 @@ Message=Server says Andr\xe9\r\n\
                 local_id_tx,
                 test_netpuncher_state(),
                 Arc::new(AtomicI32::new(0)),
+                None,
             )
             .await
         });
@@ -9952,6 +10067,7 @@ Message=Server says Andr\xe9\r\n\
                 local_id_tx,
                 test_netpuncher_state(),
                 Arc::new(AtomicI32::new(0)),
+                None,
             )
             .await
         });
@@ -10161,6 +10277,7 @@ Message=Server says Andr\xe9\r\n\
                 local_id_tx,
                 test_netpuncher_state(),
                 Arc::new(AtomicI32::new(0)),
+                None,
             )
             .await
         });
