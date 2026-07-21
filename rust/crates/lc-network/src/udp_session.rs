@@ -1503,9 +1503,15 @@ mod tests {
             ControlMessage::Ping(ping)
         );
 
-        let data = (0..1_600)
-            .map(|index| (index % 251) as u8)
-            .collect::<Vec<_>>();
+        let control = lc_engine::ControlPacket::Message(lc_engine::MessageControlData {
+            message_type: lc_engine::MESSAGE_TYPE_NORMAL,
+            player: 1,
+            to_player: -1,
+            message: lc_engine::LegacyCString::from_bytes(vec![b'x'; 1_600]).unwrap(),
+            by_client: 1,
+        });
+        let data = crate::encode_control_entry_payload(&control).unwrap();
+        assert!(data.len() > crate::RELIABLE_UDP_DATA_PAYLOAD_LIMIT * 3);
         outgoing
             .send_message(ControlMessage::Packet {
                 delivery: ControlDelivery::Direct,

@@ -310,10 +310,6 @@ pub fn decode_join_game_parameters_envelope(
     let restore_player_infos = decode_player_info_list(&mut reader)?;
     let teams = decode_join_team_list(&mut reader)?;
     let clients = decode_join_client_registry(&mut reader)?;
-    if reader.remaining() != 0 {
-        return Err(LegacyControlError::TrailingData);
-    }
-
     Ok(JoinGameParametersEnvelope {
         random_seed,
         startup_player_count,
@@ -459,20 +455,20 @@ impl From<SetControlData> for LegacyControlSet {
     }
 }
 
-/// The validated outer fields and opaque C4Control list body of one legacy
+/// The validated outer fields and raw C4Control list body of one legacy
 /// packet. The body excludes its final `PID_NONE`, so callers can concatenate
-/// multiple source lists exactly like `C4GameControlPacket::Add` without
-/// needing to understand every control ID.
+/// multiple source lists exactly like `C4GameControlPacket::Add`.
 pub(crate) struct LegacyControlEnvelope<'a> {
     pub(crate) client_id: ClientId,
     pub(crate) tick: Tick,
     pub(crate) control_body: &'a [u8],
 }
 
-/// Validate and split off the one final C4Control list terminator. Control
-/// entries deliberately stay opaque: C++
-/// `PackCompleteCtrl` appends packet lists rather than decoding individual
-/// control variants (src/C4GameControlNetwork.cpp:759-769).
+/// Validate and split off one terminated C4Control list. Decoding identifies
+/// the first list terminator and deliberately ignores a trailing packet
+/// suffix, matching the typed C++ packet compiler. Unknown control IDs remain
+/// errors, as they are in `C4IDPacket::CompileFunc` (src/C4Packet2.cpp:193-217,
+/// 298-335; src/C4GameControlNetwork.cpp:759-769).
 pub(crate) fn validate_control_envelope(
     packet: &ControlPacket,
 ) -> Result<LegacyControlEnvelope<'_>, LegacyControlError> {
@@ -481,12 +477,13 @@ pub(crate) fn validate_control_envelope(
         return Err(LegacyControlError::EmptyPayload);
     }
 
-    let Some((&terminator, control_body)) = payload.split_last() else {
-        return Err(LegacyControlError::MissingListTerminator);
-    };
-    if terminator != PID_NONE {
-        return Err(LegacyControlError::MissingListTerminator);
-    }
+    let (_, consumed) = decode_control_list_prefix(payload)?;
+    let control_body_len = consumed
+        .checked_sub(1)
+        .ok_or(LegacyControlError::MissingListTerminator)?;
+    let control_body = payload
+        .get(..control_body_len)
+        .ok_or(LegacyControlError::MissingListTerminator)?;
 
     Ok(LegacyControlEnvelope {
         client_id: packet.client_id(),
@@ -536,10 +533,6 @@ pub fn decode_control_payload(payload: &[u8]) -> Result<LegacyControlFrame, Lega
 
     let controls = decode_control_list(&mut reader)?;
 
-    if reader.remaining() != 0 {
-        return Err(LegacyControlError::TrailingData);
-    }
-
     Ok(LegacyControlFrame {
         client_id,
         tick,
@@ -556,20 +549,17 @@ pub fn decode_control_entry_payload(
     if payload.is_empty() {
         return Err(LegacyControlError::EmptyPayload);
     }
-    let (control, consumed) = decode_control_entry_prefix(payload)?;
-    if consumed != payload.len() {
-        return Err(LegacyControlError::TrailingData);
-    }
+    let (control, _) = decode_control_entry_prefix(payload)?;
     Ok(control)
 }
 
 /// Decode one binary `C4IDPacket` from the beginning of `payload` and return
 /// the number of bytes it consumed.
 ///
-/// Unlike [`decode_control_entry_payload`], this accepts bytes belonging to a
-/// following value. `CtrlRec.c4b` needs this because record chunks have no
-/// explicit payload lengths; C++ advances by the binary compiler's consumed
-/// position (C4Record.cpp:503-538).
+/// This reports the consumed prefix even though
+/// [`decode_control_entry_payload`] also ignores a suffix, because
+/// `CtrlRec.c4b` chunks have no explicit payload lengths and must advance by
+/// the binary compiler's exact position (C4Record.cpp:503-538).
 pub fn decode_control_entry_prefix(
     payload: &[u8],
 ) -> Result<(EngineControlPacket, usize), LegacyControlError> {
@@ -612,9 +602,6 @@ pub fn decode_player_info_update_payload(
     }
     let mut reader = Reader::new(payload);
     let (client_id, flags, players) = decode_player_info_contents(&mut reader)?;
-    if reader.remaining() != 0 {
-        return Err(LegacyControlError::TrailingData);
-    }
     Ok(PlayerInfoUpdateRequest {
         client_id,
         flags,
@@ -642,10 +629,7 @@ fn decode_control_list_payload(
     if payload.is_empty() {
         return Err(LegacyControlError::EmptyPayload);
     }
-    let (controls, consumed) = decode_control_list_prefix(payload)?;
-    if consumed != payload.len() {
-        return Err(LegacyControlError::TrailingData);
-    }
+    let (controls, _) = decode_control_list_prefix(payload)?;
     Ok(controls)
 }
 
@@ -2165,8 +2149,7 @@ pub fn encode_control_packet(
 /// `C4GameControlNetwork::PackCompleteCtrl` waits for every client, marks the
 /// result as `C4ClientIDAll`, and appends each client's control list in client
 /// ID order (src/C4GameControlNetwork.cpp:741-777). Envelope validation strips
-/// only final list terminators; individual control entries remain opaque so
-/// all C++ control IDs are preserved verbatim.
+/// each decoded list terminator and any following packet extension bytes.
 pub fn aggregate_ready_batch(batch: &ReadyBatch) -> Result<ControlPacket, LegacyAggregateError> {
     aggregate_control_packets_for_tick(batch.tick(), batch.packets())
 }
@@ -2684,7 +2667,7 @@ mod tests {
     }
 
     #[test]
-    fn message_rejects_truncated_fields_and_trailing_data() {
+    fn message_rejects_truncated_fields_and_accepts_trailing_data() {
         for encoded in [
             &[0xa3][..],
             &[0xa3, 0x00][..],
@@ -2703,7 +2686,7 @@ mod tests {
         let with_trailing_byte = [0xa3, 0x00, 0x00, b'x', 0x00, 0x00, 0xaa];
         assert_eq!(
             decode_control_entry_payload(&with_trailing_byte),
-            Err(LegacyControlError::TrailingData)
+            decode_control_entry_payload(&with_trailing_byte[..with_trailing_byte.len() - 1])
         );
     }
 
@@ -3585,35 +3568,53 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_preserves_opaque_unsupported_controls_in_client_order() {
-        let opaque_packet = |client_id: ClientId, body: &[u8]| {
-            let mut payload = body.to_vec();
-            payload.push(PID_NONE);
+    fn aggregate_rejects_unknown_control_ids_like_cpp_typed_unpack() {
+        let packet = ControlPacket::builder(0, 9).payload(vec![0x89, 0x31, PID_NONE]);
+        assert!(matches!(
+            aggregate_control_packets_for_tick(9, &[packet]),
+            Err(LegacyAggregateError::Decode {
+                client_id: 0,
+                source: LegacyControlError::UnsupportedPacket(0x89),
+            })
+        ));
+    }
+
+    #[test]
+    fn aggregate_strips_each_control_packet_trailing_suffix() {
+        let control = |player, by_client| {
+            EngineControlPacket::PlayerControl(PlayerControlData {
+                player,
+                command: 5,
+                data: 0,
+                by_client,
+            })
+        };
+        let packet = |client_id: ClientId, control: EngineControlPacket| {
+            let mut payload = encode_control_list_payload(std::slice::from_ref(&control))
+                .expect("control list encodes");
+            payload.extend_from_slice(&[0xaa, 0xbb]);
             ControlPacket::builder(client_id, 9).payload(payload)
         };
-        let host_body = [0x89, 0x31];
-        let client_body = [0x8a, 0x41, 0x42];
+        let host = control(0, 0);
+        let client = control(1, 1);
 
         let complete = aggregate_control_packets_for_tick(
             9,
-            &[opaque_packet(1, &client_body), opaque_packet(0, &host_body)],
+            &[packet(1, client.clone()), packet(0, host.clone())],
         )
-        .expect("opaque legacy controls aggregate");
-        let envelope = validate_control_envelope(&complete).expect("complete envelope validates");
+        .expect("trailing packet extensions are discarded before aggregation");
 
-        assert_eq!(complete.client_id(), BROADCAST_CLIENT_ID);
-        assert_eq!(envelope.client_id, BROADCAST_CLIENT_ID);
-        assert_eq!(envelope.tick, 9);
         assert_eq!(
-            envelope.control_body,
-            [host_body.as_slice(), client_body.as_slice()].concat(),
-            "PackCompleteCtrl preserves opaque lists and orders host before client"
+            complete.payload(),
+            encode_control_list_payload(&[host.clone(), client.clone()])
+                .expect("expected merged list encodes")
         );
-        assert_eq!(complete.payload().last(), Some(&0xff));
-        assert!(matches!(
-            decode_control_packet(&complete),
-            Err(LegacyControlError::UnsupportedPacket(0x89))
-        ));
+        assert_eq!(
+            decode_control_packet(&complete)
+                .expect("merged list decodes")
+                .controls,
+            vec![host, client]
+        );
     }
 
     #[test]
@@ -3621,16 +3622,10 @@ mod tests {
         let payload = vec![0x8a, 0x7f];
         let packet = ControlPacket::builder(3, 4).payload(payload);
 
-        assert!(matches!(
-            validate_control_envelope(&packet),
-            Err(LegacyControlError::MissingListTerminator)
-        ));
+        assert!(validate_control_envelope(&packet).is_err());
         assert!(matches!(
             aggregate_control_packets_for_tick(4, &[packet]),
-            Err(LegacyAggregateError::Decode {
-                client_id: 3,
-                source: LegacyControlError::MissingListTerminator,
-            })
+            Err(LegacyAggregateError::Decode { client_id: 3, .. })
         ));
     }
 }

@@ -7,14 +7,15 @@ use crate::forward_packet::{
     decode_forward_packet_payload, encode_forward_packet_payload, ForwardPacket,
     ForwardPacketCodecError, PID_FORWARD, PID_FORWARD_REQUEST,
 };
-use crate::legacy::{
-    decode_join_data_envelope, decode_player_info_update_payload, encode_join_data_envelope,
-    encode_player_info_update_payload, JoinDataEnvelope, LegacyControlError, LegacyEncodeError,
-};
 use crate::league_round_results_packet::{
     decode_league_round_results_payload, encode_league_round_results_payload,
     LeagueRoundResultsDecodeError, LeagueRoundResultsEncodeError, LeagueRoundResultsPacket,
     PID_LEAGUE_ROUND_RESULTS,
+};
+use crate::legacy::{
+    decode_control_entry_prefix, decode_control_list_prefix, decode_join_data_envelope,
+    decode_player_info_update_payload, encode_join_data_envelope,
+    encode_player_info_update_payload, JoinDataEnvelope, LegacyControlError, LegacyEncodeError,
 };
 use crate::name_validation::validate_name_no_empty;
 use crate::resource_packet::{
@@ -181,6 +182,10 @@ pub enum TransportError {
     NegativeControlTick(i32),
     #[error("control packet contained invalid negative client id {0}")]
     NegativeControlClientId(i32),
+    #[error("invalid complete control packet: {0}")]
+    ControlDecode(#[source] LegacyControlError),
+    #[error("invalid single-control packet: {0}")]
+    ControlEntryDecode(#[source] LegacyControlError),
     #[error("control tick {0} exceeds C++ int32 range")]
     ControlTickOutOfRange(Tick),
     #[error("control client id {0} exceeds C++ int32 range")]
@@ -804,22 +809,19 @@ fn parse_post_mortem(data: &[u8]) -> Result<ControlMessage, TransportError> {
         )?)?;
         offset = offset
             .checked_add(consumed)
-            .ok_or(TransportError::Malformed("post-mortem packet length overflow"))?;
+            .ok_or(TransportError::Malformed(
+                "post-mortem packet length overflow",
+            ))?;
         let end = offset
             .checked_add(length as usize)
-            .ok_or(TransportError::Malformed("post-mortem packet length overflow"))?;
-        let packet = data
-            .get(offset..end)
             .ok_or(TransportError::Malformed(
-                "post-mortem packet data is truncated",
+                "post-mortem packet length overflow",
             ))?;
+        let packet = data.get(offset..end).ok_or(TransportError::Malformed(
+            "post-mortem packet data is truncated",
+        ))?;
         packets.push(packet.to_vec());
         offset = end;
-    }
-    if offset != data.len() {
-        return Err(TransportError::Malformed(
-            "unexpected trailing bytes in post-mortem packet",
-        ));
     }
     Ok(ControlMessage::PostMortem(crate::PostMortemPacket {
         connection_id,
@@ -838,12 +840,7 @@ fn parse_network_status(data: &[u8]) -> Result<NetworkStatus, TransportError> {
         .split_first()
         .ok_or(TransportError::Malformed("status packet is missing state"))?;
     let (control_mode, mode_len) = decode_packed_i32(fields)?;
-    let (target_tick, tick_len) = decode_packed_i32(&fields[mode_len..])?;
-    if mode_len + tick_len != fields.len() {
-        return Err(TransportError::Malformed(
-            "unexpected trailing bytes in status packet",
-        ));
-    }
+    let (target_tick, _) = decode_packed_i32(&fields[mode_len..])?;
     Ok(NetworkStatus {
         state,
         control_mode,
@@ -895,12 +892,7 @@ fn parse_player_info_update(data: &[u8]) -> Result<ControlMessage, TransportErro
 }
 
 fn parse_activation_request(data: &[u8]) -> Result<ControlMessage, TransportError> {
-    let (tick, consumed) = decode_packed_i32(data)?;
-    if consumed != data.len() {
-        return Err(TransportError::Malformed(
-            "unexpected trailing bytes in activation request",
-        ));
-    }
+    let (tick, _) = decode_packed_i32(data)?;
     Ok(ControlMessage::ActivationRequest { tick })
 }
 
@@ -915,7 +907,15 @@ fn parse_control(data: &[u8]) -> Result<ControlMessage, TransportError> {
     if tick < 0 {
         return Err(TransportError::NegativeControlTick(tick));
     }
-    let payload = data[consumed_a + consumed_b..].to_vec();
+    let payload = &data[consumed_a + consumed_b..];
+    if payload.is_empty() {
+        return Err(TransportError::ControlDecode(
+            LegacyControlError::EmptyPayload,
+        ));
+    }
+    let (_, payload_len) =
+        decode_control_list_prefix(payload).map_err(TransportError::ControlDecode)?;
+    let payload = payload[..payload_len].to_vec();
     Ok(ControlMessage::Control(
         ControlPacket::builder(client_id, tick as Tick)
             .timestamp_ms(0)
@@ -942,16 +942,28 @@ fn parse_packet(data: &[u8]) -> Result<ControlMessage, TransportError> {
         ));
     }
     let delivery = ControlDelivery::try_from(data[0])?;
+    let data = &data[1..];
+    if data.is_empty() {
+        return Err(TransportError::ControlEntryDecode(
+            LegacyControlError::EmptyPayload,
+        ));
+    }
+    let (_, data_len) =
+        decode_control_entry_prefix(data).map_err(TransportError::ControlEntryDecode)?;
     Ok(ControlMessage::Packet {
         delivery,
-        data: data[1..].to_vec(),
+        data: data[..data_len].to_vec(),
     })
 }
 
 fn parse_exec_sync(data: &[u8]) -> Result<ControlMessage, TransportError> {
     let bytes: [u8; size_of::<i32>()] = data
+        .get(..size_of::<i32>())
+        .ok_or(TransportError::Malformed(
+            "execute-sync packet must contain one raw int32",
+        ))?
         .try_into()
-        .map_err(|_| TransportError::Malformed("execute-sync packet must contain one raw int32"))?;
+        .expect("execute-sync length checked above");
     let tick = i32::from_ne_bytes(bytes);
     if tick < 0 {
         return Err(TransportError::NegativeControlTick(tick));
@@ -1228,6 +1240,16 @@ mod tests {
             .resize(FRAME_HEADER_LEN + BODY_SIZE, 0x5a);
         transport.read_buf[FRAME_HEADER_LEN] = PID_CONTROL_PKT;
         transport.read_buf[FRAME_HEADER_LEN + 1] = u8::from(ControlDelivery::Direct);
+        let control = lc_engine::ControlPacket::PlayerControl(lc_engine::PlayerControlData {
+            player: 1,
+            command: 2,
+            data: 3,
+            by_client: 4,
+        });
+        let encoded_control = crate::encode_control_entry_payload(&control).unwrap();
+        let control_start = FRAME_HEADER_LEN + 2;
+        transport.read_buf[control_start..control_start + encoded_control.len()]
+            .copy_from_slice(&encoded_control);
         let ping = PingPacket {
             sent_at: 0x1122_3344,
             packet_counter: 7,
@@ -1244,7 +1266,7 @@ mod tests {
             InboundPacket::Message(ControlMessage::Packet {
                 delivery: ControlDelivery::Direct,
                 data,
-            }) if data.len() == BODY_SIZE - 2 && data.iter().all(|byte| *byte == 0x5a)
+            }) if data == encoded_control
         ));
         assert!(matches!(
             transport.extract_frame().unwrap(),
@@ -2522,17 +2544,160 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn rejects_activation_request_trailing_bytes() {
-        let frame = expect_frame(&[0x13, 0x25, 0x00]);
-        let (client, mut server) = duplex(16);
-        server.write_all(&frame).await.unwrap();
-        let mut transport = ControlTransport::new(client);
+    #[test]
+    fn live_cpp_packet_decoders_accept_trailing_bytes() {
+        // CompileFromBuf returns after the declared typed fields compile; it
+        // never asks StdCompilerBinRead to be at EOF (src/StdCompiler.h:
+        // 380-387; src/StdCompiler.cpp:228-244). Exercise every live packet
+        // family that previously imposed an exact-exhaustion check in Rust.
+        let trailing = [0xaa, 0xbb];
+
+        let post_mortem = crate::PostMortemPacket {
+            connection_id: 0x1122_3344,
+            packet_counter: 7,
+            packets: vec![vec![PID_STATUS, NETWORK_STATE_LOBBY, 0, 0]],
+        };
+        let mut body = encode_complete_post_mortem_packet(&post_mortem).unwrap();
+        body.extend_from_slice(&trailing);
+        assert_eq!(
+            parse_complete_packet(&body).unwrap(),
+            Some(ControlMessage::PostMortem(post_mortem))
+        );
+
+        let status = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: -1,
+            target_tick: 195_995,
+        };
+        for (packet_id, expected) in [
+            (PID_STATUS, ControlMessage::Status(status)),
+            (PID_STATUS_ACK, ControlMessage::StatusAck(status)),
+        ] {
+            let mut body = vec![packet_id];
+            encode_network_status(status, &mut body);
+            body.extend_from_slice(&trailing);
+            assert_eq!(parse_complete_packet(&body).unwrap(), Some(expected));
+        }
+
+        let mut body = vec![PID_CLIENT_ACT_REQ];
+        encode_packed_i32(37, &mut body);
+        body.extend_from_slice(&trailing);
+        assert_eq!(
+            parse_complete_packet(&body).unwrap(),
+            Some(ControlMessage::ActivationRequest { tick: 37 })
+        );
+
+        let mut body = vec![PID_EXEC_SYNC_CTRL];
+        body.extend_from_slice(&37_i32.to_ne_bytes());
+        body.extend_from_slice(&trailing);
+        assert_eq!(
+            parse_complete_packet(&body).unwrap(),
+            Some(ControlMessage::ExecSync { control_tick: 37 })
+        );
+
+        let join_data = crate::JoinDataEnvelope {
+            client_id: 3,
+            start_control_tick: 17,
+            status: NetworkStatus {
+                state: NETWORK_STATE_LOBBY,
+                control_mode: 1,
+                target_tick: -1,
+            },
+            dynamic: NetworkResourceCore::default(),
+            parameters: minimal_join_game_parameters(),
+        };
+        let mut body = vec![PID_JOIN_DATA];
+        body.extend(crate::encode_join_data_envelope(&join_data).unwrap());
+        body.extend_from_slice(&trailing);
+        assert_eq!(
+            parse_complete_packet(&body).unwrap(),
+            Some(ControlMessage::JoinData(Box::new(join_data)))
+        );
+
+        let player_info = PlayerInfoUpdateRequest {
+            client_id: 3,
+            flags: 0,
+            players: Vec::new(),
+        };
+        let mut body = vec![PID_PLAYER_INFO_UPDATE_REQ];
+        body.extend(crate::encode_player_info_update_payload(&player_info).unwrap());
+        body.extend_from_slice(&trailing);
+        assert_eq!(
+            parse_complete_packet(&body).unwrap(),
+            Some(ControlMessage::PlayerInfoUpdate(player_info))
+        );
+
+        let control_frame = crate::LegacyControlFrame {
+            client_id: 3,
+            tick: 7,
+            timestamp_ms: 0,
+            controls: Vec::new(),
+        };
+        let mut body = vec![PID_CONTROL];
+        body.extend(crate::encode_control_payload(&control_frame).unwrap());
+        body.extend_from_slice(&trailing);
+        let Some(ControlMessage::Control(packet)) = parse_complete_packet(&body).unwrap() else {
+            panic!("expected PID_Control");
+        };
+        assert_eq!(packet.payload(), &[0xff]);
+        assert_eq!(
+            crate::decode_control_packet(&packet).unwrap(),
+            control_frame
+        );
+        assert!(
+            crate::legacy::validate_control_envelope(&packet)
+                .unwrap()
+                .control_body
+                .is_empty(),
+            "pre-ingress validation must stop at PID_None before the suffix"
+        );
+
+        let control = lc_engine::ControlPacket::PlayerControl(lc_engine::PlayerControlData {
+            player: 1,
+            command: 2,
+            data: 3,
+            by_client: 4,
+        });
+        let encoded_control = crate::encode_control_entry_payload(&control).unwrap();
+        let mut body = vec![PID_CONTROL_PKT, u8::from(ControlDelivery::Direct)];
+        body.extend_from_slice(&encoded_control);
+        body.extend_from_slice(&trailing);
+        let Some(ControlMessage::Packet { delivery, data }) = parse_complete_packet(&body).unwrap()
+        else {
+            panic!("expected PID_ControlPkt");
+        };
+        assert_eq!(delivery, ControlDelivery::Direct);
+        assert_eq!(data, encoded_control);
+        assert_eq!(crate::decode_control_entry_payload(&data), Ok(control));
+    }
+
+    #[test]
+    fn live_cpp_packet_decoders_still_reject_truncated_declared_fields() {
+        for body in [
+            &[PID_POST_MORTEM][..],
+            &[PID_STATUS, NETWORK_STATE_GO, 0][..],
+            &[PID_STATUS_ACK, NETWORK_STATE_GO, 0][..],
+            &[PID_CLIENT_ACT_REQ][..],
+            &[PID_EXEC_SYNC_CTRL, 0, 0, 0][..],
+            &[PID_JOIN_DATA][..],
+            &[PID_PLAYER_INFO_UPDATE_REQ][..],
+        ] {
+            assert!(
+                parse_complete_packet(body).is_err(),
+                "truncated packet unexpectedly decoded: {body:02x?}"
+            );
+        }
 
         assert!(matches!(
-            transport.read_message().await,
-            Err(TransportError::Malformed(
-                "unexpected trailing bytes in activation request"
+            parse_complete_packet(&[PID_CONTROL, 3, 7]),
+            Err(TransportError::ControlDecode(
+                LegacyControlError::EmptyPayload
+            ))
+        ));
+        assert!(matches!(
+            parse_complete_packet(&[PID_CONTROL_PKT, u8::from(ControlDelivery::Direct), 0xa1,]),
+            Err(TransportError::ControlEntryDecode(
+                LegacyControlError::UnexpectedEof
             ))
         ));
     }
@@ -2834,7 +2999,7 @@ mod tests {
     // :1304): incomplete frames stay in the peer's IBuf until more bytes arrive.
     #[tokio::test(flavor = "current_thread")]
     async fn read_message_survives_cancellation_mid_frame() {
-        let frame = expect_frame(&[PID_CONTROL, 0x0C, 0x22, 0xAB]);
+        let frame = expect_frame(&[PID_CONTROL, 0x0C, 0x22, 0xFF]);
         let (client, mut server) = duplex(64);
         let mut transport = ControlTransport::new(client);
 
@@ -2856,7 +3021,7 @@ mod tests {
             ControlMessage::Control(packet) => {
                 assert_eq!(packet.client_id(), 12);
                 assert_eq!(packet.tick(), 34);
-                assert_eq!(packet.payload(), &[0xAB]);
+                assert_eq!(packet.payload(), &[0xFF]);
             }
             other => panic!("unexpected message: {other:?}"),
         }

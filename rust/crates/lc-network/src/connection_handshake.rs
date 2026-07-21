@@ -1763,7 +1763,7 @@ mod tests {
         host.send_message(ControlMessage::Resource(discovery.clone()))
             .await
             .unwrap();
-        let pending_control = ControlPacket::builder(0, 17).payload(vec![0xaa, 0xbb, 0xff]);
+        let pending_control = ControlPacket::builder(0, 17).payload(vec![0xff]);
         host.send_message(ControlMessage::Control(pending_control.clone()))
             .await
             .unwrap();
@@ -1860,7 +1860,7 @@ mod tests {
         }))
         .await
         .unwrap();
-        let pending_control = ControlPacket::builder(0, 17).payload(vec![0xaa, 0xff]);
+        let pending_control = ControlPacket::builder(0, 17).payload(vec![0xff]);
         host.send_message(ControlMessage::Forward(ForwardPacket {
             negative_list: true,
             clients: Vec::new(),
@@ -2567,9 +2567,17 @@ mod tests {
         host.send_message(ControlMessage::Request { from_tick: 17 })
             .await
             .unwrap();
+        let direct_control =
+            crate::encode_control_entry_payload(&lc_engine::ControlPacket::ActivateGameGoalMenu(
+                lc_engine::ActivateGameGoalMenuControlData {
+                    player: 0,
+                    by_client: 0,
+                },
+            ))
+            .unwrap();
         host.send_message(ControlMessage::Packet {
             delivery: ControlDelivery::Direct,
-            data: vec![0xaa],
+            data: direct_control,
         })
         .await
         .unwrap();

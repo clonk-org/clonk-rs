@@ -7690,17 +7690,11 @@ async fn ingest_control(packet: ControlPacket, ingress: ControlIngress, state: &
 
 /// Authenticate security-sensitive inner authors in a queued contribution.
 ///
-/// Complete packets deliberately remain opaque when they contain an
-/// unsupported control type, because the host must still aggregate legacy
-/// controls it does not execute. Such a packet cannot become a typed
-/// `ReadyTick` in the current app decoder. Every fully decodable frame that
-/// can reach that path is checked here before the coordinator consumes it.
+/// C++ typed packet unpack rejects unknown control IDs, so every queued frame
+/// reaching the coordinator is fully decoded and checked here.
 fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String> {
-    let frame = match crate::decode_control_packet(packet) {
-        Ok(frame) => frame,
-        Err(crate::LegacyControlError::UnsupportedPacket(_)) => return Ok(()),
-        Err(error) => return Err(format!("invalid control packet: {error}")),
-    };
+    let frame = crate::decode_control_packet(packet)
+        .map_err(|error| format!("invalid control packet: {error}"))?;
     let expected_author = i32::try_from(frame.client_id).map_err(|_| {
         format!(
             "queued control packet has unsupported author id {}",
@@ -8098,11 +8092,8 @@ fn validate_peer_control_packet(packet: &ControlPacket, peer_id: ClientId) -> Re
     }
     validate_control_envelope(packet).map_err(|error| format!("invalid control packet: {error}"))?;
     validate_queued_control_authors(packet)?;
-    let frame = match crate::decode_control_packet(packet) {
-        Ok(frame) => frame,
-        Err(crate::LegacyControlError::UnsupportedPacket(_)) => return Ok(()),
-        Err(error) => return Err(format!("invalid control packet: {error}")),
-    };
+    let frame = crate::decode_control_packet(packet)
+        .map_err(|error| format!("invalid control packet: {error}"))?;
     if frame.controls.iter().any(control_requires_host_ingress) {
         return Err("peer control contribution contains a host-authority control".to_string());
     }
@@ -18109,6 +18100,15 @@ mod tests {
     }
 
     #[test]
+    fn cpp_typed_control_unpack_rejects_unknown_ids_before_peer_ingress() {
+        let packet = ControlPacket::builder(7, 12).payload(vec![0x89, 0x31, 0xff]);
+
+        assert!(validate_queued_control_authors(&packet).is_err());
+        assert!(validate_peer_control_packet(&packet, 7).is_err());
+        assert!(validate_peer_control_or_recovery(&packet, 7, Some(12)).is_err());
+    }
+
+    #[test]
     fn mesh_peer_recovery_may_relay_complete_and_partial_controls() {
         let partial = legacy_packet(8, 12, 0x21);
         assert!(validate_peer_control_packet(&partial, 7).is_err());
@@ -22829,7 +22829,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn host_still_rejects_malformed_control_from_an_unregistered_client() {
+    async fn host_typed_unpack_rejects_malformed_control_from_an_unregistered_client() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");
@@ -22856,14 +22856,14 @@ mod tests {
             ))
             .await
             .expect("submit malformed inactive control");
-        raw_client_ping_barrier(&mut client).await;
         loop {
             match timeout(EVENT_WAIT, host_events.recv()).await {
                 Ok(Some(HostEvent::TransportError {
                     client_id: Some(source),
                     error,
                 })) if source == client_id => {
-                    assert!(error.contains("invalid control packet"));
+                    assert!(error.contains("invalid complete control packet"));
+                    assert!(error.contains("0x42"));
                     break;
                 }
                 Ok(Some(_)) => continue,
@@ -23003,7 +23003,8 @@ mod tests {
                 .expect("host event wait")
             {
                 Some(HostEvent::TransportError { error, .. }) => {
-                    assert!(error.contains("PID_NONE"));
+                    assert!(error.contains("invalid control packet"));
+                    assert!(error.contains("0x7f"));
                     saw_validation_error = true;
                 }
                 Some(HostEvent::Ready { packet }) => break packet,
@@ -24028,9 +24029,7 @@ mod tests {
             shutdown_rx,
         ));
 
-        let packet = ControlPacket::builder(7, 42)
-            .timestamp_ms(1234)
-            .payload(vec![0xDE, 0xAD, 0xBE, 0xFF]);
+        let packet = legacy_packet(7, 42, 0xDE);
         command_tx
             .send(ClientCommand::SubmitControl(packet.clone()))
             .await
