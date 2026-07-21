@@ -717,7 +717,10 @@ pub struct DefCore {
     pub contact_density: i32,
     pub contact_function_calls: bool,
     pub collection: Option<PictureRect>,
-    pub collection_limit: Option<u32>,
+    /// Raw signed `CollectionLimit`. Zero is unlimited; every other value
+    /// participates in the native signed count comparison, so negatives make
+    /// even an empty collector full.
+    pub collection_limit: i32,
     /// `Fragile` (C4Def.cpp:393): any nonzero value prevents Put from
     /// choosing the outdoor throw-in path.
     pub fragile: bool,
@@ -725,9 +728,10 @@ pub struct DefCore {
     /// C4Command::Attack from the attacker's contents.
     pub projectile: i32,
     pub explosive: i32,
-    /// ContactIncinerate=N: 1-in-N chance of catching fire on contact with a
-    /// burning object (CrossCheck pass 1, C4GameObjects.cpp:121-125); 0 = not
-    /// inflammable.
+    /// ContactIncinerate=N: positive N gives a 1-in-N chance of catching fire
+    /// on contact with a burning object (CrossCheck pass 1,
+    /// C4GameObjects.cpp:121-125). Incendiary material checks any nonzero
+    /// value instead (C4Object.cpp:932-938), including negatives.
     pub contact_incinerate: i32,
     /// BlastIncinerate=N: incinerate when accumulated Damage reaches N after
     /// a blast (C4Object::Blast, C4Object.cpp:1421-1423); 0 = off.
@@ -802,7 +806,9 @@ pub struct DefCore {
     pub basement: i32,
     pub rotateable: i32,
     pub border_bound: i32,
-    pub upright_attach: u32,
+    /// Raw signed `UprightAttach`; C4Object ORs this into Action.t_attach and
+    /// C4Shape later consumes its low byte.
+    pub upright_attach: i32,
     /// RotatedSolidmasks (C4Def.cpp:414, default 0): solid masks stay put
     /// while the object is rotated (C4Object.cpp:5655).
     pub rotated_solid_masks: bool,
@@ -1362,7 +1368,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut contact_density: i32 = C4M_SOLID;
     let mut contact_function_calls = false;
     let mut collection: Option<PictureRect> = None;
-    let mut collection_limit: Option<u32> = None;
+    let mut collection_limit: i32 = 0;
     let mut fragile = false;
     let mut projectile: i32 = 0;
     let mut explosive: i32 = 0;
@@ -1397,7 +1403,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut basement: i32 = 0;
     let mut rotateable: i32 = 0;
     let mut border_bound: i32 = 0;
-    let mut upright_attach: u32 = 0;
+    let mut upright_attach: i32 = 0;
     // RotatedSolidmasks (C4Def.cpp:414, default 0).
     let mut rotated_solid_masks = false;
     // AutoContextMenu (C4Def.cpp:416, default 0).
@@ -1617,8 +1623,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 explosive = parse_i32(value).unwrap_or(0);
             }
             "ContactIncinerate" => {
-                let raw = reflected_int!("ContactIncinerate", parse_i32(value).unwrap_or(0));
-                contact_incinerate = raw.max(0);
+                contact_incinerate =
+                    reflected_int!("ContactIncinerate", parse_i32(value).unwrap_or(0));
             }
             "BlastIncinerate" => {
                 blast_incinerate = parse_i32(value).unwrap_or(0);
@@ -1655,8 +1661,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 float_line = parse_i32(value).unwrap_or(0);
             }
             "Grab" => {
-                let raw = reflected_int!("Grab", parse_i32(value).unwrap_or(0));
-                grab = raw.max(0);
+                grab = reflected_int!("Grab", parse_i32(value).unwrap_or(0));
             }
             "VehicleControl" => {
                 // Plain integer compile (src/C4Def.cpp:398).
@@ -1685,8 +1690,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     reflected_int!("IncompleteActivity", parse_reflected_int(value)) != 0;
             }
             "CollectionLimit" => {
-                let raw = reflected_int!("CollectionLimit", parse_i32(value).unwrap_or(0));
-                collection_limit = (raw > 0).then_some(raw as u32);
+                collection_limit = reflected_int!("CollectionLimit", parse_i32(value).unwrap_or(0));
             }
             "Collectible" => {
                 collectible =
@@ -1700,8 +1704,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     reflected_int!("Construction", parse_reflected_int(value)) != 0;
             }
             "ConSizeOff" => {
-                let raw = reflected_int!("ConSizeOff", parse_i32(value).unwrap_or(0));
-                con_size_off = raw.max(0);
+                con_size_off = reflected_int!("ConSizeOff", parse_i32(value).unwrap_or(0));
             }
             "StretchGrowth" => {
                 stretch_growth =
@@ -1719,20 +1722,16 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 growth = parse_i32(value).unwrap_or(0);
             }
             "Basement" => {
-                let raw = reflected_int!("Basement", parse_i32(value).unwrap_or(0));
-                basement = raw.max(0);
+                basement = reflected_int!("Basement", parse_i32(value).unwrap_or(0));
             }
             "Rotate" => {
-                let raw = reflected_int!("Rotate", parse_i32(value).unwrap_or(0));
-                rotateable = raw.max(0);
+                rotateable = reflected_int!("Rotate", parse_i32(value).unwrap_or(0));
             }
             "BorderBound" => {
-                let raw = reflected_int!("BorderBound", parse_i32(value).unwrap_or(0));
-                border_bound = raw.max(0);
+                border_bound = reflected_int!("BorderBound", parse_i32(value).unwrap_or(0));
             }
             "UprightAttach" => {
-                let raw = reflected_int!("UprightAttach", parse_i32(value).unwrap_or(0));
-                upright_attach = raw.max(0) as u32;
+                upright_attach = reflected_int!("UprightAttach", parse_i32(value).unwrap_or(0));
             }
             "RotatedSolidmasks" => {
                 rotated_solid_masks =
@@ -4797,7 +4796,7 @@ Entrance=1,2,,4
         assert_eq!(parsed.blit_mode, 2);
         assert_eq!(parsed.move_to_range, 17);
         assert_eq!(parsed.collection, None);
-        assert_eq!(parsed.collection_limit, None);
+        assert_eq!(parsed.collection_limit, 0);
         assert!(!parsed.collectible);
 
         let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("default parses");
@@ -6474,7 +6473,7 @@ Default=Ghost
                 height: 20
             })
         );
-        assert_eq!(parsed.collection_limit, Some(3));
+        assert_eq!(parsed.collection_limit, 3);
         assert!(parsed.collectible);
     }
 

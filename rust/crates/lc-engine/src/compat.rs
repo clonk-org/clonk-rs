@@ -162,8 +162,8 @@ pub(crate) struct HostWorldObject {
     /// with the current limit and delay before callback-visible SetOCF.
     collection_enabled: bool,
     no_collect_delay: i32,
-    /// DefCore CollectionLimit; None means unlimited.
-    collection_limit: Option<u32>,
+    /// Raw signed DefCore CollectionLimit; zero alone means unlimited.
+    collection_limit: i32,
     pub energy: i32,
     /// C4Object::NeedEnergy at call entry, overlaid from active scopes.
     pub need_energy: bool,
@@ -495,13 +495,7 @@ impl DefCoreValueStore {
         );
         def_core.insert(
             "CollectionLimit",
-            reflected_int(
-                "CollectionLimit",
-                definition
-                    .collection_limit
-                    .and_then(|value| i32::try_from(value).ok())
-                    .unwrap_or(0),
-            ),
+            reflected_int("CollectionLimit", definition.collection_limit),
         );
         def_core.insert("Placement", Self::int(definition.placement));
         def_core.insert(
@@ -576,7 +570,7 @@ impl DefCoreValueStore {
         def_core.insert("LiftTop", Self::int(definition.lift_top));
         def_core.insert(
             "UprightAttach",
-            reflected_int("UprightAttach", definition.upright_attach as i32),
+            reflected_int("UprightAttach", definition.upright_attach),
         );
         def_core.insert(
             "StretchGrowth",
@@ -1452,7 +1446,7 @@ impl HostWorldObject {
             collection_available_ignoring_delay: false,
             collection_enabled: false,
             no_collect_delay: 0,
-            collection_limit: None,
+            collection_limit: 0,
             energy,
             need_energy: false,
             construction: construction.max(0),
@@ -1550,7 +1544,7 @@ impl HostWorldObject {
         self
     }
 
-    pub(crate) fn with_collection_limit(mut self, limit: Option<u32>) -> Self {
+    pub(crate) fn with_collection_limit(mut self, limit: i32) -> Self {
         self.collection_limit = limit;
         self
     }
@@ -9849,8 +9843,10 @@ fn live_collection_eligible(
         .fire
         .collection_rect
         .is_some_and(|rect| rect.width > 0 && rect.height > 0);
-    let below_limit = metadata.collection_limit <= 0
-        || retained_contents_count(context, target) < metadata.collection_limit as usize;
+    let below_limit = !crate::collection_limit_reached(
+        metadata.collection_limit,
+        retained_contents_count(context, target),
+    );
     construction_ready
         && positive_rect
         && below_limit
@@ -9979,7 +9975,7 @@ fn refresh_live_object_ocf(context: &mut EffectHostContext, target: ObjectId) ->
     if construction >= FULL_CON {
         mask |= ocf::FULL_CON;
     }
-    if metadata.rotateable > 0 && construction > 100 {
+    if metadata.rotateable != 0 && construction > 100 {
         mask |= ocf::ROTATE;
     }
     if metadata
@@ -33467,7 +33463,7 @@ fn preview_object_com_put(
                     .is_some_and(|object| object.is_present())
             })
             .count();
-        if collection_limit > 0 && contents_count >= collection_limit as usize {
+        if crate::collection_limit_reached(collection_limit, contents_count) {
             return PreviewObjectComPutGate::Reject;
         }
         PreviewObjectComPutGate::Put
@@ -33569,7 +33565,7 @@ impl crate::direct_com::InternalObjectMenuSource for PreviewInternalObjectMenuSo
                     .unwrap_or_default()
                     .to_string(),
                 no_get: metadata.fire.no_get,
-                collection_limit: u32::try_from(metadata.collection_limit).ok().unwrap_or(0),
+                collection_limit: metadata.collection_limit,
             })
         })
     }
@@ -47313,9 +47309,7 @@ impl EffectHostContext {
                         shape: metadata.shape,
                         category: metadata.category,
                         construction_offset: metadata.construction_offset,
-                        collection_limit: u32::try_from(metadata.collection_limit)
-                            .ok()
-                            .filter(|limit| *limit > 0),
+                        collection_limit: metadata.collection_limit,
                         collection_rect: metadata.fire.collection_rect,
                         fragile: metadata.fire.fragile,
                         projectile: metadata.fire.projectile,

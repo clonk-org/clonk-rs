@@ -1399,6 +1399,12 @@ pub const C4D_BORDER_TOP: i32 = 2;
 pub const C4D_BORDER_BOTTOM: i32 = 4;
 #[doc(hidden)]
 pub const C4D_BORDER_LAYER: i32 = 8;
+
+/// Native `CollectionLimit && ObjectCount() >= CollectionLimit` with the
+/// nonnegative list count narrowed to C++'s signed comparison domain.
+pub(crate) fn collection_limit_reached(limit: i32, contents_count: usize) -> bool {
+    limit != 0 && i32::try_from(contents_count).unwrap_or(i32::MAX) >= limit
+}
 const CONTACT_DENSITY_SOLID: i32 = 50;
 const C4M_VEHICLE: i32 = 100;
 /// `C4M_Solid` / `C4M_SemiSolid` (C4Material.h:201-202): the GBackSolid
@@ -12049,7 +12055,7 @@ pub struct Definition {
     contact_function_calls: bool,
     collection_rect: Option<DefinitionRect>,
     def_core_collection_rect: Option<DefinitionRect>,
-    collection_limit: Option<u32>,
+    collection_limit: i32,
     /// DefCore `Fragile`; outdoor Put must not throw these objects into a
     /// target's collection area.
     fragile: bool,
@@ -12080,7 +12086,7 @@ pub struct Definition {
     basement: i32,
     rotateable: i32,
     border_bound: i32,
-    upright_attach: u32,
+    upright_attach: i32,
     /// RotatedSolidmasks (C4Def.cpp:414): the solid mask stays put while
     /// the object is rotated (C4Object::UpdateSolidMask gate,
     /// C4Object.cpp:5655) and bakes through the rotated branch of
@@ -12339,7 +12345,7 @@ impl Definition {
             contact_function_calls: false,
             collection_rect: None,
             def_core_collection_rect: None,
-            collection_limit: None,
+            collection_limit: 0,
             fragile: false,
             projectile: 0,
             explosive: 0,
@@ -13125,11 +13131,11 @@ impl Definition {
 
     pub fn ocf_base(&self) -> u32 {
         let mut ocf = self.ocf_base;
-        if self.rotateable > 0 {
+        if self.rotateable != 0 {
             ocf |= crate::ocf::ROTATE;
         }
         // OCF_Grab from the Grab DefCore value (C4Object SetOCF).
-        if self.grab > 0 {
+        if self.grab != 0 {
             ocf |= crate::ocf::GRAB;
         }
         ocf
@@ -13144,7 +13150,7 @@ impl Definition {
     }
 
     pub fn set_rotateable(&mut self, rotateable: i32) {
-        self.rotateable = rotateable.max(0);
+        self.rotateable = rotateable;
     }
 
     /// The def+state arm of C4Object::SetOCF (C4Object.cpp:526-666).
@@ -13220,7 +13226,7 @@ impl Definition {
         }
         // OCF_Rotate: rotateable, but not a minimum (invisible)
         // construction site (SetOCF, C4Object.cpp:576-580)
-        if self.rotateable > 0 && state.construction > 100 {
+        if self.rotateable != 0 && state.construction > 100 {
             ocf |= crate::ocf::ROTATE;
         }
         // OCF_Exclusive (SetOCF, C4Object.cpp:581-583)
@@ -13239,7 +13245,7 @@ impl Definition {
         }
         // OCF_Grab: Grab DefCore value, never on StaticBack objects
         // (SetOCF, C4Object.cpp:553-555)
-        if self.grab > 0 && state.category & CATEGORY_STATIC_BACK == 0 {
+        if self.grab != 0 && state.category & CATEGORY_STATIC_BACK == 0 {
             ocf |= crate::ocf::GRAB;
         }
         if self.collectible {
@@ -13314,10 +13320,7 @@ impl Definition {
             && self
                 .collection_rect
                 .is_some_and(|rect| rect.is_positive())
-            && self
-                .collection_limit
-                .map(|limit| contents_len < limit as usize)
-                .unwrap_or(true)
+            && !collection_limit_reached(self.collection_limit, contents_len)
             && !self
                 .action_library
                 .disables_object_for_entry(&state.action.name, state.action.act_map_index)
@@ -13331,7 +13334,7 @@ impl Definition {
     pub fn set_value(&mut self, value: i32) {
         self.def_core_reflected_ints
             .insert("Value".to_string(), value);
-        self.value = value.max(0);
+        self.value = value;
     }
 
     pub fn no_sell(&self) -> i32 {
@@ -13405,7 +13408,7 @@ impl Definition {
     }
 
     pub fn set_grab(&mut self, grab: i32) {
-        self.grab = grab.max(0);
+        self.grab = grab;
     }
 
     pub fn picture(&self) -> Option<DefinitionPicture> {
@@ -13779,10 +13782,10 @@ impl Definition {
     }
 
     pub fn set_border_bound(&mut self, border_bound: i32) {
-        self.border_bound = border_bound.max(0);
+        self.border_bound = border_bound;
     }
 
-    pub fn upright_attach(&self) -> u32 {
+    pub fn upright_attach(&self) -> i32 {
         self.upright_attach
     }
 
@@ -13819,7 +13822,7 @@ impl Definition {
         self.mark_callbacks_unlinked();
     }
 
-    pub fn set_upright_attach(&mut self, upright_attach: u32) {
+    pub fn set_upright_attach(&mut self, upright_attach: i32) {
         self.upright_attach = upright_attach;
     }
 
@@ -13874,7 +13877,7 @@ impl Definition {
         self.collection_rect = rect.and_then(|r| if r.is_positive() { Some(r) } else { None });
     }
 
-    pub fn collection_limit(&self) -> Option<u32> {
+    pub fn collection_limit(&self) -> i32 {
         self.collection_limit
     }
 
@@ -13936,7 +13939,7 @@ impl Definition {
         no_burn_decay: bool,
         no_burn_damage: bool,
     ) {
-        self.contact_incinerate = contact_incinerate.max(0);
+        self.contact_incinerate = contact_incinerate;
         self.no_burn_decay = no_burn_decay;
         self.no_burn_damage = no_burn_damage;
     }
@@ -14033,8 +14036,8 @@ impl Definition {
         self.physical = physical;
     }
 
-    pub fn set_collection_limit(&mut self, limit: Option<u32>) {
-        self.collection_limit = limit.and_then(|value| if value > 0 { Some(value) } else { None });
+    pub fn set_collection_limit(&mut self, limit: i32) {
+        self.collection_limit = limit;
     }
 
     pub fn fragile(&self) -> bool {
@@ -14114,7 +14117,7 @@ impl Definition {
     }
 
     pub fn set_construction_offset(&mut self, offset: i32) {
-        self.construction_offset = offset.max(0);
+        self.construction_offset = offset;
     }
 
     pub fn stretch_growth(&self) -> bool {
@@ -14154,7 +14157,7 @@ impl Definition {
     }
 
     pub fn set_basement(&mut self, basement: i32) {
-        self.basement = basement.max(0);
+        self.basement = basement;
     }
 
     pub fn components(&self) -> &[DefinitionComponent] {
@@ -16784,7 +16787,7 @@ impl Definition {
 fn collection_ocf_scalar_overrides_match_materialized_state() -> Result<(), EngineError> {
     let mut definition = Definition::from_script("COLP", "Collection preview", "")?;
     definition.set_collection_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
-    definition.set_collection_limit(Some(2));
+    definition.set_collection_limit(2);
     let mut state = preview_spawn_state(
         Vector2::ZERO,
         OWNER_NONE,
@@ -19530,6 +19533,9 @@ fn shape_attach(
     contact_density: i32,
     record: &mut ShapeAttachRecord,
 ) -> bool {
+    // C4Shape::Attach receives Action.t_attach through a uint8_t parameter,
+    // so signed/high-bit UprightAttach values are narrowed at this boundary.
+    let attach = u32::from(attach as u8);
     // C4Shape::Attach resets AttachMat to MNone up front; the position/
     // vertex fields only overwrite on success (C4Shape.cpp:176,217-219,
     // 253-255).
@@ -26284,10 +26290,7 @@ impl Engine {
                                     (component.id.as_str().to_string(), component.count)
                                 })
                                 .collect(),
-                            collection_limit: definition
-                                .collection_limit()
-                                .and_then(|limit| i32::try_from(limit).ok())
-                                .unwrap_or(0),
+                            collection_limit: definition.collection_limit(),
                             grab_put_get: definition.grab_put_get(),
                             line_connect: definition.line_connect(),
                             stretch_growth: definition.stretch_growth(),
@@ -26576,7 +26579,7 @@ impl Engine {
             definition.collection_ocf_enabled(&object.state, 0, 0)
         }))
         .with_no_collect_delay(object.state.no_collect_delay)
-        .with_collection_limit(definition.and_then(Definition::collection_limit))
+        .with_collection_limit(definition.map_or(0, Definition::collection_limit))
         .with_in_liquid(object.state.in_liquid)
         .with_ocf(ocf)
         .with_commands(object.commands.command_views())
@@ -40599,7 +40602,7 @@ impl Engine {
                     rotation
                 };
                 if (-math::STABLE_RANGE..=math::STABLE_RANGE).contains(&signed) {
-                    object.upright_t_attach = upright_attach;
+                    object.upright_t_attach = upright_attach as u32;
                     object.state.mobile = true;
                 }
             }
@@ -52750,7 +52753,7 @@ impl Engine {
         let collection_limit = self
             .definitions
             .get(&self.objects[target_index].definition_id)
-            .and_then(Definition::collection_limit);
+            .map_or(0, Definition::collection_limit);
         let contents_count = self.objects[target_index]
             .state
             .contents
@@ -52760,7 +52763,7 @@ impl Engine {
                     .is_some_and(|index| self.objects[index].has_nonzero_status())
             })
             .count();
-        if collection_limit.is_some_and(|limit| contents_count >= limit as usize) {
+        if collection_limit_reached(collection_limit, contents_count) {
             return Ok(false);
         }
 
@@ -52999,10 +53002,11 @@ impl Engine {
                         .is_some_and(|index| self.objects[index].has_nonzero_status())
                 })
                 .count();
-            self.definitions
+            let collection_limit = self
+                .definitions
                 .get(&self.objects[index].definition_id)
-                .and_then(Definition::collection_limit)
-                .is_some_and(|limit| contents_count >= limit as usize)
+                .map_or(0, Definition::collection_limit);
+            crate::collection_limit_reached(collection_limit, contents_count)
         });
         if collection_limit_reached {
             let current_target = self.find_object_index(actor_id).and_then(|index| {
@@ -61722,7 +61726,7 @@ mod legacy_contents_order_regression {
             Definition::from_script("MCAR", "Mass carrier", "").expect("carrier compiles");
         carrier.set_mass(100);
         carrier.set_collection_rect(Some(DefinitionRect::new(-5, -5, 10, 10)));
-        carrier.set_collection_limit(Some(2));
+        carrier.set_collection_limit(2);
         let mut item = Definition::from_script("MITM", "Mass item", "").expect("item compiles");
         item.set_mass(25);
         engine
@@ -69036,7 +69040,7 @@ protected func Departure(pTarget)
             .definitions
             .get_mut(&DefinitionId::from("TARG"))
             .expect("target definition exists")
-            .set_collection_limit(Some(1));
+            .set_collection_limit(1);
         let (actor, first_item, target) = spawn_push_put_triplet(&mut engine, false);
         let second_item = engine
             .spawn_object(SpawnConfig::new("ITEM").with_container(actor))

@@ -93,7 +93,7 @@ pub(crate) struct InternalObjectMenuDefinition {
     pub name: String,
     pub description: String,
     pub no_get: bool,
-    pub collection_limit: u32,
+    pub collection_limit: i32,
 }
 
 pub(crate) trait InternalObjectMenuSource {
@@ -1008,9 +1008,11 @@ pub(crate) fn build_container_contents_menu_state<S: InternalObjectMenuSource>(
                 source
                     .definition(&crew.definition_id)
                     .is_some_and(|definition| {
-                        definition.collection_limit > 0
-                            && internal_live_contents_count(source, &crew.contents)
-                                >= i32::try_from(definition.collection_limit).unwrap_or(i32::MAX)
+                        crate::collection_limit_reached(
+                            definition.collection_limit,
+                            usize::try_from(internal_live_contents_count(source, &crew.contents))
+                                .unwrap_or(0),
+                        )
                     })
             });
             let rejected = source.reject_collection(crew_id, item_id, &menu)?;
@@ -1140,7 +1142,7 @@ impl InternalObjectMenuSource for EngineInternalObjectMenuSource<'_> {
                 name: definition.name().to_string(),
                 description: definition.description().unwrap_or_default().to_string(),
                 no_get: definition.no_get(),
-                collection_limit: definition.collection_limit().unwrap_or(0),
+                collection_limit: definition.collection_limit(),
             })
     }
 
@@ -6199,21 +6201,19 @@ impl Engine {
             let collection_limit = self
                 .definitions
                 .get(&self.objects[clonk_index].definition_id)
-                .and_then(crate::Definition::collection_limit);
-            if collection_limit.is_some_and(|limit| {
-                self.objects[clonk_index]
-                    .state
-                    .contents
-                    .iter()
-                    .filter(|object_id| {
-                        self.find_object_index(**object_id).is_some_and(|index| {
-                            !self.objects[index].destroyed
-                                && self.objects[index].state.status != crate::ObjectStatus::Deleted
-                        })
+                .map_or(0, crate::Definition::collection_limit);
+            let contents_count = self.objects[clonk_index]
+                .state
+                .contents
+                .iter()
+                .filter(|object_id| {
+                    self.find_object_index(**object_id).is_some_and(|index| {
+                        !self.objects[index].destroyed
+                            && self.objects[index].state.status != crate::ObjectStatus::Deleted
                     })
-                    .count()
-                    >= limit as usize
-            }) {
+                })
+                .count();
+            if crate::collection_limit_reached(collection_limit, contents_count) {
                 return Ok(false);
             }
 
@@ -7686,7 +7686,7 @@ public func Activate(object clonk)
     }
 
     fn line_pickup_gate_fixture(
-        collection_limit: Option<u32>,
+        collection_limit: i32,
         actor_has_rock: bool,
         other_endpoint_is_kit: bool,
     ) -> (Engine, ObjectId, ObjectId, ObjectId, ObjectId) {
@@ -7700,7 +7700,7 @@ public func Activate(object clonk)
     }
 
     fn line_pickup_gate_fixture_with_linekit(
-        collection_limit: Option<u32>,
+        collection_limit: i32,
         actor_has_rock: bool,
         other_endpoint_is_kit: bool,
         clonk_script: &str,
@@ -10523,7 +10523,7 @@ protected func Destruction()
         // line owner, collect it, and retarget the structure endpoint
         // (C4ObjectCom.cpp:559-567,392-427).
         let (mut engine, crew, line, _structure, endpoint) =
-            line_pickup_gate_fixture(None, false, false);
+            line_pickup_gate_fixture(0, false, false);
 
         let crew_index = engine.find_object_index(crew).expect("crew remains live");
         engine
@@ -10592,7 +10592,7 @@ protected func Entrance()
 }
 "#;
         let (mut engine, crew, line, structure, endpoint) =
-            line_pickup_gate_fixture_with_linekit(None, false, false, clonk_script, linekit_script);
+            line_pickup_gate_fixture_with_linekit(0, false, false, clonk_script, linekit_script);
         let linekit_definition = engine
             .definitions
             .get_mut("LNKT")
@@ -10664,7 +10664,7 @@ protected func Entrance()
         // The nonzero CollectionLimit gate precedes AtObject, line lookup,
         // and linekit creation (C4ObjectCom.cpp:394-395).
         let (mut engine, crew, line, structure, endpoint) =
-            line_pickup_gate_fixture(Some(1), true, false);
+            line_pickup_gate_fixture(1, true, false);
         let crew_index = engine.find_object_index(crew).expect("crew remains live");
 
         assert!(
@@ -10689,7 +10689,7 @@ protected func Entrance()
         // A kit at either endpoint prevents a second pickup kit
         // (C4ObjectCom.cpp:404-410).
         let (mut engine, crew, line, structure, endpoint_kit) =
-            line_pickup_gate_fixture(None, false, true);
+            line_pickup_gate_fixture(0, false, true);
         let crew_index = engine.find_object_index(crew).expect("crew remains live");
 
         assert!(
@@ -11678,7 +11678,7 @@ protected func RejectCollect(item_id, object item)
 "#;
         let mut crew_definition =
             Definition::from_script("CLNK", "Clonk", crew_script).expect("crew compiles");
-        crew_definition.set_collection_limit(Some(1));
+        crew_definition.set_collection_limit(1);
         engine
             .register_definition(crew_definition)
             .expect("crew registers");
@@ -17111,7 +17111,7 @@ public func ContextMagic(object caller)
             .definitions
             .get_mut("CLNK")
             .expect("clonk definition")
-            .set_collection_limit(Some(1));
+            .set_collection_limit(1);
         let mut hut = Definition::from_script("HUT3", "Hut", "#strict\n").expect("hut compiles");
         hut.set_category(crate::CATEGORY_STRUCTURE);
         hut.set_entrance_rect(Some(crate::DefinitionRect::new(-10, -10, 20, 20)));

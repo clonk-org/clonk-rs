@@ -61158,6 +61158,236 @@ Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
     }
 
     #[test]
+    fn negative_defcore_values_preserve_native_runtime_semantics() -> Result<(), EngineError> {
+        // C4DefCore::CompileFunc stores these fields as signed int32 values;
+        // C4DefCore::Load clamps only Mass after compilation (C4Def.cpp).
+        // The distinct negatives make both definition-loading paths prove
+        // that none of the other fields were collapsed to zero or unsigned.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Signed.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=SIGN\nName=Signed\nCategory=C4D_Object\n\
+Shape=-1,-1,2,2\nCollection=-1,-1,2,2\nConstruction=1\n\
+Value=-11\nMass=-99\nCollectionLimit=-12\nContactIncinerate=-13\n\
+Grab=-14\nRotate=-15\nBorderBound=-1\nUprightAttach=-255\n\
+Basement=-18\nConSizeOff=-20\n",
+        )
+        .expect("write defcore");
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+
+        assert_eq!(resource.core.value, -11);
+        assert_eq!(resource.core.mass, 0, "Mass alone is clamped after load");
+        assert_eq!(resource.core.collection_limit, -12);
+        assert_eq!(resource.core.contact_incinerate, -13);
+        assert_eq!(resource.core.grab, -14);
+        assert_eq!(resource.core.rotateable, -15);
+        assert_eq!(resource.core.border_bound, -1);
+        assert_eq!(resource.core.upright_attach, -255);
+        assert_eq!(resource.core.basement, -18);
+        assert_eq!(resource.core.con_size_off, -20);
+
+        let direct_definition = Definition::from_resource(&resource)?;
+        let mut legacy_definition = Definition::from_script(
+            "SIGN",
+            "Signed",
+            "func Incineration(int caused_by) { return(1); }",
+        )?;
+        Engine::apply_resource_core(&mut legacy_definition, &resource.core);
+        let assert_signed_fields = |definition: &Definition| {
+            assert_eq!(definition.value(), -11);
+            assert_eq!(definition.mass(), 0);
+            assert_eq!(definition.collection_limit(), -12);
+            assert_eq!(definition.contact_incinerate(), -13);
+            assert_eq!(definition.grab(), -14);
+            assert_eq!(definition.rotateable(), -15);
+            assert_eq!(definition.border_bound(), -1);
+            assert_eq!(definition.upright_attach(), -255);
+            assert_eq!(definition.basement(), -18);
+            assert_eq!(definition.construction_offset(), -20);
+        };
+        assert_signed_fields(&direct_definition);
+        assert_signed_fields(&legacy_definition);
+
+        // UprightAttach remains the raw int32 in Action.t_attach; only the
+        // later C4Shape::Attach call narrows that mask to its uint8_t input.
+        let mut upright_engine = Engine::with_seed(155);
+        upright_engine.set_physics(PhysicsSettings::new(0, 200, -200));
+        let mut upright_definition = direct_definition.clone();
+        upright_definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_LEFT)]);
+        upright_definition.configure_actions(
+            Some("Float".to_string()),
+            HashMap::from([(
+                "Float".to_string(),
+                ActionSpec::default().with_procedure("FLOAT"),
+            )]),
+        );
+        upright_engine.register_definition(upright_definition)?;
+        let mut wall_pixels = vec![0_u8; 25];
+        for y in 0..5 {
+            wall_pixels[y * 5 + 1] = 1;
+        }
+        let wall_grid = landscape::PixelGrid::new(
+            5,
+            5,
+            wall_pixels,
+            vec![0, 100],
+            vec![None, Some("Wall".to_string())],
+            vec![None; 2],
+        );
+        let mut wall = Landscape::new(5, vec![5; 5]).expect("wall landscape builds");
+        wall.set_pixel_grid(wall_grid);
+        upright_engine.set_landscape(wall);
+        let upright_id = upright_engine.spawn_object(
+            SpawnConfig::new("SIGN")
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(2, 2))
+                .with_construction(FULL_CON)
+                .with_action(ActionState::new("Float"))
+                .with_loaded(true),
+        )?;
+        let upright_index = upright_engine
+            .find_object_index(upright_id)
+            .expect("upright object exists");
+        upright_engine.tick_without_snapshot()?;
+        assert_eq!(
+            upright_engine.objects[upright_index].state.t_attach,
+            -255_i32 as u32
+        );
+        assert_eq!(
+            upright_engine.objects[upright_index].state.shape_attach.x, 1,
+            "C4Shape::Attach consumes the low-byte CNAT_Left mask"
+        );
+        assert!(
+            upright_engine.objects[upright_index]
+                .state
+                .shape_attach
+                .mat_valid
+        );
+
+        // CollectionLimit compares the nonnegative content count directly to
+        // the signed limit, so a negative limit is already full. Grab and
+        // Rotate use C++ integer truthiness, while ContactIncinerate requires
+        // a positive value for OCF_Inflammable.
+        let mut behavior_engine = Engine::with_seed(156);
+        behavior_engine.set_physics(PhysicsSettings::new(0, 200, -200));
+        behavior_engine.register_definition(legacy_definition.clone())?;
+        let behavior_id = behavior_engine.spawn_object(
+            SpawnConfig::new("SIGN")
+                .with_category(CATEGORY_OBJECT)
+                .with_construction(FULL_CON)
+                .with_rotation_velocity(itofix(4))
+                .with_mobile(true),
+        )?;
+        let behavior = behavior_engine
+            .object_snapshot(behavior_id)
+            .expect("signed object exists");
+        assert_eq!(behavior.ocf & ocf::COLLECTION, 0);
+        assert_eq!(behavior.ocf & ocf::INFLAMMABLE, 0);
+        assert_ne!(behavior.ocf & ocf::GRAB, 0);
+        assert_ne!(behavior.ocf & ocf::ROTATE, 0);
+        behavior_engine.tick_without_snapshot()?;
+        assert_ne!(
+            behavior_engine
+                .object_snapshot(behavior_id)
+                .expect("signed object survives")
+                .rotation,
+            0,
+            "negative Rotate remains truthy and has no positive angle cap"
+        );
+
+        // Material fire tests ContactIncinerate for nonzero, unlike the
+        // positive-only OCF path above.
+        let library =
+            MaterialLibrary::parse("[Material Lava]\nName=Lava\nDensity=0\nIncindiary=1\n")
+                .expect("material library parses");
+        let mut lava_engine = Engine::with_seed(157);
+        lava_engine.set_materials(MaterialSet::from_resource_library(&library));
+        lava_engine.set_landscape(exec_life_material_landscape(
+            20,
+            3,
+            "Lava",
+            &[(1, 0), (1, 1), (1, 2)],
+        ));
+        lava_engine.set_physics(PhysicsSettings::new(0, 200, -200));
+        lava_engine.register_definition(legacy_definition.clone())?;
+        let lava_id = lava_engine.spawn_object(
+            SpawnConfig::new("SIGN")
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(1, 1))
+                .with_construction(FULL_CON),
+        )?;
+        lava_engine.frame = 9;
+        lava_engine.tick_without_snapshot()?;
+        assert!(
+            lava_engine
+                .object_snapshot(lava_id)
+                .expect("lava object survives")
+                .on_fire,
+            "negative ContactIncinerate remains nonzero for incendiary material"
+        );
+
+        // BorderBound is a raw signed bit mask. -1 enables the top bit and
+        // clamps the same fixed-motion target as the native engine.
+        let mut border_engine = Engine::with_seed(158);
+        border_engine.set_landscape(Landscape::flat(10, 20));
+        border_engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        border_engine.register_definition(legacy_definition.clone())?;
+        let border_id = border_engine.spawn_object(
+            SpawnConfig::new("SIGN")
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(5, 2))
+                .with_construction(FULL_CON),
+        )?;
+        let border_index = border_engine
+            .find_object_index(border_id)
+            .expect("border object exists");
+        border_engine.objects[border_index].set_fixed_velocity(FixedVec2::new(
+            C4Fixed::ZERO,
+            -itofix(5),
+        ));
+        border_engine.objects[border_index].state.mobile = true;
+        border_engine.tick_without_snapshot()?;
+        assert_eq!(
+            border_engine
+                .object_snapshot(border_id)
+                .expect("border object survives")
+                .position
+                .y,
+            1
+        );
+
+        // ConstructionCheck subtracts ConSizeOff from the shape height.
+        // The blocker is inside the expanded negative-offset rectangle but
+        // well above the ordinary two-pixel construction rectangle.
+        let mut site_engine = Engine::with_seed(159);
+        site_engine.set_landscape(Landscape::flat(40, 30));
+        site_engine.register_definition(legacy_definition)?;
+        let mut ordinary = simple_definition("ZERO");
+        ordinary.set_category(CATEGORY_OBJECT);
+        ordinary.set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2)));
+        ordinary.set_constructable(true);
+        site_engine.register_definition(ordinary)?;
+        let mut blocker = simple_definition("BLCK");
+        blocker.set_category(CATEGORY_OBJECT);
+        blocker.set_shape_rect(Some(DefinitionRect::new(-1, -1, 2, 2)));
+        site_engine.register_definition(blocker)?;
+        let site = Vector2::new(20, 30);
+        assert!(site_engine.construction_site_valid("SIGN", site));
+        assert!(site_engine.construction_site_valid("ZERO", site));
+        site_engine.spawn_object(
+            SpawnConfig::new("BLCK")
+                .with_category(CATEGORY_OBJECT)
+                .with_position(Vector2::new(20, 15)),
+        )?;
+        assert!(!site_engine.construction_site_valid("SIGN", site));
+        assert!(site_engine.construction_site_valid("ZERO", site));
+        Ok(())
+    }
+
+    #[test]
     fn definition_version_fallback_matches_cpp_compare_version() -> Result<(), EngineError> {
         // C4Def::Load replaces versions older than 4.0 with 4.9.10.7
         // (src/C4Def.cpp:573-581). CompareVersion ignores the build slot
@@ -65023,7 +65253,7 @@ func Vanish(object parent) { DoCon(-100); return GetOCF(parent); }
         )?;
         let mut parent = simple_definition("HOLD");
         parent.set_collection_rect(Some(DefinitionRect::new(0, 0, 4, 4)));
-        parent.set_collection_limit(Some(1));
+        parent.set_collection_limit(1);
 
         let mut engine = Engine::with_seed(87);
         engine.register_definition(caller)?;
@@ -71640,7 +71870,7 @@ protected func WetStart()
                 friction: 10,
             },
         ]);
-        coach.set_upright_attach(CNAT_BOTTOM);
+        coach.set_upright_attach(CNAT_BOTTOM as i32);
         coach.configure_actions(
             None,
             HashMap::from([
@@ -71710,7 +71940,7 @@ protected func WetStart()
     #[test]
     fn upright_attach_rearms_mobile_every_frame_like_cpp() {
         let mut definition = simple_definition("Barrel");
-        definition.set_upright_attach(CNAT_BOTTOM);
+        definition.set_upright_attach(CNAT_BOTTOM as i32);
         definition.set_rotateable(1);
         let mut engine = Engine::with_seed(0);
         engine.set_physics(PhysicsSettings::new(100, 200, -200));
@@ -73610,7 +73840,7 @@ func ResortExplicit(object target) { Resort(target); }
                 friction: 10,
             },
         ]);
-        coach.set_upright_attach(CNAT_BOTTOM);
+        coach.set_upright_attach(CNAT_BOTTOM as i32);
         coach.set_mass(150);
         coach.set_grab(1);
         coach
@@ -73817,7 +74047,7 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
         wrap_def.set_c4_callback_convention(true);
         wrap_def.set_shape_rect(coach.shape_rect());
         wrap_def.set_shape_vertices(coach.shape_vertices().to_vec());
-        wrap_def.set_upright_attach(CNAT_BOTTOM);
+        wrap_def.set_upright_attach(CNAT_BOTTOM as i32);
         wrap_def.set_mass(150);
         wrap_def.set_grab(1);
         let mut actions = HashMap::new();
@@ -73928,7 +74158,7 @@ protected func StartGlide() { SetAction("Glide2"); return(1); }
                 friction: 10,
             },
         ]);
-        wagon.set_upright_attach(CNAT_BOTTOM);
+        wagon.set_upright_attach(CNAT_BOTTOM as i32);
         let mut actions = HashMap::new();
         actions.insert("Stand".to_string(), ActionSpec::default());
         wagon.configure_actions(Some("Stand".to_string()), actions);
@@ -77126,7 +77356,7 @@ protected func Hit()
             Definition::from_script("COLL", "Collector", collector_script)?;
         collector.set_c4_callback_convention(true);
         collector.set_collection_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
-        collector.set_collection_limit(Some(2));
+        collector.set_collection_limit(2);
         let mut item = Definition::from_script("ITEM", "Item", item_script)?;
         item.set_c4_callback_convention(true);
         item.set_collectible(true);
@@ -77399,7 +77629,7 @@ protected func RejectCollect(object_id, pObject) { return(1); }
         crew_definition.set_crew_member(true);
         crew_definition.set_shape_rect(Some(DefinitionRect::new(-8, -16, 16, 32)));
         crew_definition.set_collection_rect(Some(DefinitionRect::new(-6, -12, 12, 24)));
-        crew_definition.set_collection_limit(Some(1));
+        crew_definition.set_collection_limit(1);
         engine.register_definition(crew_definition)?;
 
         let mut item_definition = Definition::from_script("Gem", "Gem", BASIC_OBJECT_SCRIPT)?;

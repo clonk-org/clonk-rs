@@ -228,9 +228,9 @@ pub struct CommandDefinitionSnapshot {
     /// DefCore `ConSizeOff`, subtracted from shape height by ConstructionCheck.
     #[serde(default)]
     pub construction_offset: i32,
-    /// Positive DefCore `CollectionLimit`; `None` means unlimited.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub collection_limit: Option<u32>,
+    /// Raw signed DefCore `CollectionLimit`; zero alone means unlimited.
+    #[serde(default, skip_serializing_if = "crate::i32_is_zero")]
+    pub collection_limit: i32,
     /// DefCore collection area relative to the target object's position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection_rect: Option<DefinitionRect>,
@@ -2915,7 +2915,7 @@ mod tests {
         let definitions = HashMap::from([(
             actor_definition,
             CommandDefinitionSnapshot {
-                collection_limit: Some(2),
+                collection_limit: 2,
                 ..CommandDefinitionSnapshot::default()
             },
         )]);
@@ -24696,21 +24696,20 @@ impl GetState {
                             .with_tx(Some(jump_tx))
                             .with_ty(Some(self.jump_ty)),
                     ));
-                    let collection_limit_reached = ctx
+                    let collection_limit = ctx
                         .definition(ctx.object.definition_id.as_str())
-                        .and_then(|definition| definition.collection_limit)
-                        .is_some_and(|limit| {
-                            ctx.object
-                                .contents
-                                .iter()
-                                .filter(|object_id| {
-                                    ctx.resolve(**object_id).is_some_and(
-                                        CommandObjectSnapshot::has_nonzero_status,
-                                    )
-                                })
-                                .count()
-                                >= limit as usize
-                        });
+                        .map_or(0, |definition| definition.collection_limit);
+                    let contents_count = ctx
+                        .object
+                        .contents
+                        .iter()
+                        .filter(|object_id| {
+                            ctx.resolve(**object_id)
+                                .is_some_and(CommandObjectSnapshot::has_nonzero_status)
+                        })
+                        .count();
+                    let collection_limit_reached =
+                        crate::collection_limit_reached(collection_limit, contents_count);
                     if collection_limit_reached {
                         result
                             .operations

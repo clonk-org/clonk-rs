@@ -239,7 +239,7 @@ protected func Get(pObject)
     .expect("actor definition compiles");
     actor.set_c4_callback_convention(true);
     actor.set_crew_member(true);
-    actor.set_collection_limit(Some(1));
+    actor.set_collection_limit(1);
     let mut container = Definition::from_script(
         "HUT2",
         "Hut",
@@ -460,7 +460,7 @@ protected func GetObject2Drop(pTarget)
     )
     .expect("actor definition compiles");
     actor.set_c4_callback_convention(true);
-    actor.set_collection_limit(Some(1));
+    actor.set_collection_limit(1);
     let mut container = Definition::from_script(
         "HUT2",
         "Hut",
@@ -556,7 +556,7 @@ protected func GetObject2Drop(pTarget)
         )
         .expect("actor definition compiles");
         actor.set_c4_callback_convention(true);
-        actor.set_collection_limit(Some(1));
+        actor.set_collection_limit(1);
         let clear_pointers = if clear_pointers { "true" } else { "false" };
         let callback_body = match order {
             CallbackOrder::Attached => {
@@ -680,7 +680,7 @@ protected func RejectCollect(idObject, pObject)
     )
     .expect("actor definition compiles");
     actor.set_c4_callback_convention(true);
-    actor.set_collection_limit(Some(1));
+    actor.set_collection_limit(1);
     let mut held = Definition::from_script("HELD", "Held item", "#strict\n")
         .expect("held definition compiles");
     held.set_collectible(true);
