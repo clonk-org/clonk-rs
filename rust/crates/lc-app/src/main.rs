@@ -15550,6 +15550,23 @@ fn count_direct_stream_player_crew_files(group: &Group) -> std::result::Result<u
     Ok(direct_crew)
 }
 
+fn replay_control_record_playback(
+    group: &Group,
+) -> std::result::Result<ControlRecordPlayback, String> {
+    // C4Playback::Open tries LoadEntryString first. A successfully loaded text
+    // entry is authoritative even when parsing fails; only a load failure
+    // (including native's zero-sized-entry failure) selects CtrlRec.c4b.
+    if let Ok(text) = group.load_entry_string("CtrlRec.txt") {
+        return ControlRecordPlayback::from_text_bytes(&text)
+            .map_err(|error| format!("has an invalid CtrlRec.txt stream: {error}"));
+    }
+    let binary = group
+        .read_file("CtrlRec.c4b")
+        .map_err(|error| format!("has no readable CtrlRec.c4b: {error}"))?;
+    ControlRecordPlayback::from_bytes(&binary)
+        .map_err(|error| format!("has an invalid CtrlRec.c4b stream: {error}"))
+}
+
 const SEARCH_EDIT_MAX_BYTES: usize = 254;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84407,15 +84424,9 @@ impl GameApp {
                     })?
                     .map(|startup| startup.startup_player_count)
             };
-            let bytes = group.read_file("CtrlRec.c4b").map_err(|error| {
+            let playback = replay_control_record_playback(&group).map_err(|error| {
                 ScenarioActivationError::Recoverable(format!(
-                    "Replay {} has no readable CtrlRec.c4b: {error}",
-                    scenario.title
-                ))
-            })?;
-            let playback = ControlRecordPlayback::from_bytes(&bytes).map_err(|error| {
-                ScenarioActivationError::Recoverable(format!(
-                    "Replay {} has an invalid CtrlRec stream: {error}",
+                    "Replay {} {error}",
                     scenario.title
                 ))
             })?;
@@ -151864,6 +151875,110 @@ VendorNestedField=discard me\n";
             0,
             "recorded control executes before frame one's simulation tick"
         );
+    }
+
+    #[test]
+    fn replay_prefers_and_executes_cpp_ctrlrec_text_over_binary() {
+        let directory = tempdir().expect("replay control groups");
+        let replay_path = directory.path().join("TextWins.c4s");
+        fs::create_dir(&replay_path).expect("create dual-format replay");
+        let mut app = new_running_sandbox_app();
+        let player = app.local_owner;
+        let text = format!(
+            concat!(
+                "[Rec]\r\n",
+                "Frame=0\r\n",
+                "Type=0\r\n",
+                "\r\n",
+                "  [IDPacket]\r\n",
+                "  ID=161\r\n",
+                "\r\n",
+                "    [Player Control]\r\n",
+                "    Player={player}\r\n",
+                "    Com={}\r\n",
+                "    ByClient=0\r\n",
+                "\r\n",
+                "[Rec]\r\n",
+                "Frame=0\r\n",
+                "Type=1\r\n",
+                "ID=161\r\n",
+                "\r\n",
+                "  [Player Control]\r\n",
+                "  Player={player}\r\n",
+                "  Com={}\r\n",
+                "  ByClient=0\r\n",
+                "\r\n",
+                "[Rec]\r\n",
+                "Frame=1\r\n",
+                "Type=16\r\n",
+            ),
+            lc_engine::COM_RIGHT,
+            lc_engine::COM_UP,
+            player = player,
+        );
+        fs::write(replay_path.join("CtrlRec.txt"), text.as_bytes())
+            .expect("write C++ text record");
+
+        let binary_control = lc_engine::ControlPacket::PlayerControl(
+            lc_engine::PlayerControlData {
+                player,
+                command: i32::from(lc_engine::COM_LEFT),
+                data: 0,
+                by_client: 0,
+            },
+        );
+        let mut binary = ControlRecordWriter::new();
+        binary.record_packet(0, &binary_control).unwrap();
+        fs::write(replay_path.join("CtrlRec.c4b"), binary.finish(1))
+            .expect("write deliberately different binary record");
+
+        let replay_group = Group::open(&replay_path).expect("open dual-format replay");
+        app.control_playback = Some(
+            replay_control_record_playback(&replay_group).expect("text record takes precedence"),
+        );
+        app.engine.set_replay_control(true);
+        app.engine.set_control_host(false);
+        app.update().expect("execute frame-zero text controls");
+
+        let pressed = app
+            .engine
+            .player(player)
+            .expect("sandbox player remains")
+            .control
+            .pressed_coms;
+        assert_ne!(pressed & (1 << lc_engine::COM_RIGHT), 0);
+        assert_ne!(pressed & (1 << lc_engine::COM_UP), 0);
+        assert_eq!(
+            pressed & (1 << lc_engine::COM_LEFT),
+            0,
+            "the lower-priority binary control must not execute"
+        );
+
+        let binary_only_path = directory.path().join("BinaryFallback.c4s");
+        fs::create_dir(&binary_only_path).expect("create binary-only replay");
+        let mut binary = ControlRecordWriter::new();
+        binary.record_packet(0, &binary_control).unwrap();
+        fs::write(binary_only_path.join("CtrlRec.c4b"), binary.finish(1))
+            .expect("write fallback binary record");
+        let binary_only = Group::open(&binary_only_path).unwrap();
+        let mut fallback = replay_control_record_playback(&binary_only).unwrap();
+        assert_eq!(fallback.take_controls(0), vec![binary_control.clone()]);
+
+        let invalid_text_path = directory.path().join("InvalidTextWins.c4s");
+        fs::create_dir(&invalid_text_path).expect("create malformed text replay");
+        fs::write(
+            invalid_text_path.join("CtrlRec.txt"),
+            b"[Rec]\nFrame=0\nType=1\nID=255\n",
+        )
+        .unwrap();
+        let mut binary = ControlRecordWriter::new();
+        binary.record_packet(0, &binary_control).unwrap();
+        fs::write(invalid_text_path.join("CtrlRec.c4b"), binary.finish(1)).unwrap();
+        let invalid_text = Group::open(&invalid_text_path).unwrap();
+        let error = replay_control_record_playback(&invalid_text)
+            .expect_err("loaded malformed text must not fall back to binary");
+        assert!(error.contains("invalid CtrlRec.txt"));
+        assert!(error.contains("packet ID 0xff"));
     }
 
     #[test]
