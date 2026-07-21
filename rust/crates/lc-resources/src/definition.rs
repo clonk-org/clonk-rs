@@ -773,7 +773,8 @@ pub struct DefCore {
     pub smoke_rate: i32,
     /// NoBurnDamage=1: burning deals no damage (C4Object.cpp:780).
     pub no_burn_damage: bool,
-    /// BurnTurnTo=ID: definition change on incineration (C4Effect.cpp:580-585).
+    /// `BurnTo=ID` (`C4Def::BurnTurnTo`): definition change on incineration
+    /// (C4Effect.cpp:580-585).
     pub burn_turn_to: Option<String>,
     /// `ConstructTo=ID` (`C4Def::BuildTurnTo`): successful Build ticks
     /// change the construction target to this definition after DoCon.
@@ -1150,12 +1151,33 @@ pub enum DefinitionError {
 /// contain lowercase letters and `-`; `LooksLikeID` validates the packed
 /// result separately after this truncating read.
 fn parse_c4_id_token(value: &str) -> String {
-    value
-        .bytes()
+    lc_script::c4_string_from_bytes(&read_c4_id_token(value))
+}
+
+fn read_c4_id_token(value: &str) -> Vec<u8> {
+    lc_script::c4_string_bytes(value)
+        .into_iter()
+        .skip_while(|byte| matches!(byte, b' ' | b'\t'))
         .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
         .take(4)
-        .map(char::from)
         .collect()
+}
+
+/// Compile one optional C4ID through the native four-byte `C4IDAdapt`.
+///
+/// The adapter first reads at most four `RCT_ID` bytes, rejects a shorter
+/// token, and only then constructs the raw `C4ID`. Canonicalizing through the
+/// raw payload preserves accepted lowercase and `-` bytes without confusing
+/// them with ordinary Rust strings, while native zero IDs remain absent.
+fn parse_optional_c4_id_adapt(value: &str) -> Option<String> {
+    let token = read_c4_id_token(value);
+    if token.len() != 4 {
+        return None;
+    }
+
+    let token = lc_script::c4_string_from_bytes(&token);
+    let raw = lc_script::c4_id_parse(&token);
+    (raw != 0).then(|| lc_script::c4_id_from_raw(raw))
 }
 
 fn is_physical_compiler_key(name: &str) -> bool {
@@ -1653,17 +1675,10 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                     reflected_int!("NoBurnDamage", parse_reflected_int(value)) != 0;
             }
             "BurnTo" | "BurnTurnTo" => {
-                if !value.is_empty() {
-                    burn_turn_to = Some(value.to_string());
-                }
+                burn_turn_to = parse_optional_c4_id_adapt(raw_value);
             }
             "ConstructTo" => {
-                if !value.is_empty()
-                    && !value.eq_ignore_ascii_case("NONE")
-                    && value != "0000"
-                {
-                    build_turn_to = Some(value.to_string());
-                }
+                build_turn_to = parse_optional_c4_id_adapt(raw_value);
             }
             "IncompleteActivity" => {
                 incomplete_activity =
@@ -6705,6 +6720,65 @@ Default=Ghost
         let none = parse_def_core(b"[DefCore]\nid=SITE\nConstructTo=NONE\n")
             .expect("defcore parsed");
         assert!(none.build_turn_to.is_none());
+    }
+
+    #[test]
+    fn def_core_turn_to_fields_use_c4id_adapt() {
+        let literal = |bytes: [u8; 4]| u32::from_le_bytes(bytes) as usize;
+        let cases = [
+            ("", None),
+            ("ASH", None),
+            ("ASH1", Some(literal(*b"ASH1"))),
+            ("ASH1tail", Some(literal(*b"ASH1"))),
+            ("ABCD extra", Some(literal(*b"ABCD"))),
+            (" \tABCDtail", Some(literal(*b"ABCD"))),
+            ("\u{000c}ABCD", None),
+            ("\u{00a0}ABCD", None),
+            ("NONE", None),
+            ("NONEtail", None),
+            ("none", Some(literal(*b"none"))),
+            ("0000", None),
+            ("00000", None),
+            ("1234tail", Some(1234)),
+            ("ab_1tail", Some(literal(*b"ab_1"))),
+            ("AB-Ctail", Some(literal(*b"AB-C"))),
+            ("AB.C", None),
+            ("AB CD", None),
+        ];
+
+        for (input, expected_raw) in cases {
+            let source = format!(
+                "[DefCore]\nid=TEST\nBurnTo={input}\nConstructTo={input}\n"
+            );
+            let parsed = parse_def_core(source.as_bytes()).expect("DefCore turn-to IDs parse");
+            let burn_raw = parsed
+                .burn_turn_to
+                .as_deref()
+                .map(lc_script::c4_id_raw);
+            let construct_raw = parsed
+                .build_turn_to
+                .as_deref()
+                .map(lc_script::c4_id_raw);
+
+            assert_eq!(burn_raw, expected_raw, "BurnTo={input}");
+            assert_eq!(construct_raw, expected_raw, "ConstructTo={input}");
+        }
+
+        // L166 owns removal of this non-oracle alias. Until then, its value
+        // must pass through the same adapter instead of retaining a long ID.
+        let alias = parse_def_core(b"[DefCore]\nid=TEST\nBurnTurnTo=FIREtail\n")
+            .expect("temporary BurnTurnTo alias parses");
+        assert_eq!(alias.burn_turn_to.as_deref(), Some("FIRE"));
+
+        let high_byte_after_four =
+            parse_def_core(b"[DefCore]\nid=TEST\nBurnTo=FIRE\x80tail\n")
+                .expect("a suffix after the fixed buffer is ignored");
+        assert_eq!(high_byte_after_four.burn_turn_to.as_deref(), Some("FIRE"));
+
+        let high_byte_before_four =
+            parse_def_core(b"[DefCore]\nid=TEST\nBurnTo=FIR\x80E\n")
+                .expect("a non-identifier byte terminates the token");
+        assert!(high_byte_before_four.burn_turn_to.is_none());
     }
 
     #[test]

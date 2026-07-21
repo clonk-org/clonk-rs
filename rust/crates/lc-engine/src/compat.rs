@@ -335,12 +335,8 @@ impl DefCoreValueStore {
     }
 
     fn c4id(value: Option<&str>) -> Vec<DefCorePrimitive> {
-        vec![match value {
-            Some(value)
-                if !value.is_empty() && !value.eq_ignore_ascii_case("NONE") && value != "0000" =>
-            {
-                DefCorePrimitive::C4Id(value.to_string())
-            }
+        vec![match value.map(lc_script::c4_id_raw) {
+            Some(raw) if raw != 0 => DefCorePrimitive::C4Id(lc_script::c4_id_from_raw(raw)),
             _ => DefCorePrimitive::Nil,
         }]
     }
@@ -55770,6 +55766,26 @@ global func PreInitializePlayer(int player)
                 Value::Nil,
             ])
         );
+    }
+
+    #[test]
+    fn def_core_c4id_reflection_uses_the_native_typed_payload() {
+        let reflected = |value: Option<&str>| {
+            DefCoreValueStore::c4id(value)
+                .into_iter()
+                .next()
+                .expect("C4ID entries always expose one compiler primitive")
+                .into_value()
+        };
+        let typed = |value: &str| {
+            Value::C4Id(lc_script::c4_id_from_raw(lc_script::c4_id_parse(value)))
+        };
+
+        assert_eq!(reflected(Some("NONE")), Value::Nil);
+        assert_eq!(reflected(Some("0000")), Value::Nil);
+        assert_eq!(reflected(Some("none")), typed("none"));
+        assert_eq!(reflected(Some("AB-C")), typed("AB-C"));
+        assert_eq!(reflected(Some("0001")), Value::C4Id("0001".to_string()));
     }
 
     #[test]

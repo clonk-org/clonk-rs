@@ -2,7 +2,8 @@ use lc_engine::{
     ActionSpec, ActionState, Definition, Engine, PhysicalInfo, SpawnConfig, Vector2,
     CATEGORY_OBJECT, FULL_CON,
 };
-use std::collections::HashMap;
+use lc_resources::{Group, ResourceDefinition};
+use std::{collections::HashMap, fs};
 
 const BASIC_SCRIPT: &str = r#"
 global func Initialize(state, random) { return 0; }
@@ -39,6 +40,112 @@ fn target_definition() -> Definition {
     definition.configure_actions(Some("Idle".to_string()), actions);
     definition.set_mass(100);
     definition
+}
+
+#[test]
+fn resource_turn_to_c4id_adapt_precedes_live_morph_lookup() -> Result<(), Box<dyn std::error::Error>>
+{
+    fn load_definition(
+        root: &std::path::Path,
+        id: &str,
+        burn_to: &str,
+        construct_to: &str,
+    ) -> Result<Definition, Box<dyn std::error::Error>> {
+        let path = root.join(format!("{id}.c4d"));
+        fs::create_dir(&path)?;
+        fs::write(
+            path.join("DefCore.txt"),
+            format!(
+                "[DefCore]\nid={id}\nName={id}\nCategory=C4D_Structure\nMass=100\n\
+                 BurnTo={burn_to}\nConstructTo={construct_to}\n"
+            ),
+        )?;
+        fs::write(path.join("Script.c"), BASIC_SCRIPT)?;
+        let resource = ResourceDefinition::load(&Group::open(&path)?)?;
+        Ok(Definition::from_resource(&resource)?)
+    }
+
+    let temp = tempfile::tempdir()?;
+    let overlong = load_definition(temp.path(), "TURN", "ASH1tail", "DONEtail")?;
+    let short = load_definition(temp.path(), "SHRT", "ASH", "DON")?;
+
+    assert_eq!(overlong.burn_turn_to(), Some("ASH1"));
+    assert_eq!(overlong.build_turn_to(), Some("DONE"));
+    assert_eq!(short.burn_turn_to(), None);
+    assert_eq!(short.build_turn_to(), None);
+
+    let mut engine = Engine::new();
+    engine.register_definition(builder_definition())?;
+    engine.register_definition(overlong)?;
+    engine.register_definition(short)?;
+    for id in ["ASH1", "DONE", "ASH", "DON"] {
+        engine.register_definition(Definition::from_script(id, id, BASIC_SCRIPT)?)?;
+    }
+
+    let overlong_burn = engine.spawn_object(SpawnConfig::new("TURN"))?;
+    let short_burn = engine.spawn_object(SpawnConfig::new("SHRT"))?;
+    for object in [overlong_burn, short_burn] {
+        let index = engine
+            .find_object_index(object)
+            .expect("burn object exists");
+        assert!(engine.incinerate_object(index, 0, false, None)?);
+    }
+    assert_eq!(
+        engine
+            .object_snapshot(overlong_burn)
+            .expect("overlong burn object survives")
+            .definition_id,
+        "ASH1",
+        "BurnTo resolves the truncated four-byte target"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(short_burn)
+            .expect("short burn object survives")
+            .definition_id,
+        "SHRT",
+        "a registered three-byte target must not make short BurnTo live"
+    );
+
+    let overlong_build = engine.spawn_object(
+        SpawnConfig::new("TURN")
+            .with_position(Vector2::new(0, 0))
+            .with_construction(0),
+    )?;
+    let short_build = engine.spawn_object(
+        SpawnConfig::new("SHRT")
+            .with_position(Vector2::new(20, 0))
+            .with_construction(0),
+    )?;
+    for (target, x) in [(overlong_build, 0), (short_build, 20)] {
+        let mut action = ActionState::new("Build");
+        action.target = Some(target);
+        engine.spawn_object(
+            SpawnConfig::new("Builder")
+                .with_position(Vector2::new(x, 0))
+                .with_action(action),
+        )?;
+    }
+
+    let snapshot = engine.tick()?;
+    let overlong_built = snapshot
+        .object(overlong_build)
+        .expect("overlong build object survives");
+    let short_built = snapshot
+        .object(short_build)
+        .expect("short build object survives");
+    assert!(overlong_built.construction > 0, "the Build tick succeeded");
+    assert!(short_built.construction > 0, "the Build tick succeeded");
+    assert_eq!(
+        overlong_built.definition_id, "DONE",
+        "ConstructTo resolves the truncated four-byte target"
+    );
+    assert_eq!(
+        short_built.definition_id, "SHRT",
+        "a registered three-byte target must not make short ConstructTo live"
+    );
+
+    Ok(())
 }
 
 #[test]
