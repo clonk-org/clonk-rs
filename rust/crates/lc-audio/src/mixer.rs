@@ -18,6 +18,12 @@ const MAXIMUM_SOUND_INPUT: f32 = SDL_MIXER_MAX_VOLUME / MAXIMUM_SOUND_VOLUME;
 /// similarly bounded instead of retaining one stereo-f32 frame per track
 /// frame for the complete duration.
 const MUSIC_DECODE_BUFFER_FRAMES: usize = 4_096;
+#[cfg(feature = "cpal")]
+const CLASSIC_OUTPUT_SAMPLE_RATE: u32 = 44_100;
+#[cfg(feature = "cpal")]
+const CLASSIC_OUTPUT_CHANNELS: u16 = 2;
+#[cfg(feature = "cpal")]
+const MAX_CONVERTIBLE_OUTPUT_CHANNELS: u16 = 8;
 
 /// Mixer slot plus allocation generation; stale handles cannot control a
 /// later sound that reuses the same numeric slot.
@@ -337,38 +343,109 @@ struct CpalBackend {
 }
 
 #[cfg(feature = "cpal")]
-fn select_cpal_stereo_output_config(
+fn cpal_output_config_candidates(
     configs: impl IntoIterator<Item = cpal::SupportedStreamConfigRange>,
-) -> Option<cpal::SupportedStreamConfig> {
-    let range = configs
-        .into_iter()
-        .filter(|range| {
-            range.channels() == 2 && cpal_output_format_priority(range.sample_format()).is_some()
-        })
-        .max_by_key(|range| {
-            (
-                cpal_output_format_priority(range.sample_format()).unwrap_or_default(),
-                range.contains_rate(48_000),
-                range.contains_rate(44_100),
-                range.max_sample_rate(),
-            )
-        })?;
+) -> Vec<cpal::SupportedStreamConfig> {
+    let mut candidates = Vec::new();
+    for range in configs {
+        if !(1..=MAX_CONVERTIBLE_OUTPUT_CHANNELS).contains(&range.channels())
+            || cpal_output_format_cost(range.sample_format()).is_none()
+        {
+            continue;
+        }
 
-    let config = range
-        .try_with_sample_rate(48_000)
-        .or_else(|| range.try_with_sample_rate(44_100))
-        .unwrap_or_else(|| range.with_max_sample_rate());
-    Some(config)
+        // SDL begins with 44.1 kHz and accepts a changed frequency. A CPAL
+        // range is continuous, so its nearest boundary is the closest viable
+        // equivalent when the classic rate itself is unavailable.
+        let sample_rate =
+            CLASSIC_OUTPUT_SAMPLE_RATE.clamp(range.min_sample_rate(), range.max_sample_rate());
+        let candidate = range.with_sample_rate(sample_rate);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+
+    // SDL delegates ambiguous physical-device choices to its driver. Keep
+    // CPAL's enumeration order for equal choices while preferring no channel
+    // conversion, the nearest requested rate, and then the requested format.
+    candidates.sort_by_key(|config| {
+        (
+            cpal_output_channel_cost(config.channels()),
+            config.sample_rate().abs_diff(CLASSIC_OUTPUT_SAMPLE_RATE),
+            cpal_output_format_cost(config.sample_format()).unwrap_or(u8::MAX),
+        )
+    });
+    candidates
 }
 
 #[cfg(feature = "cpal")]
-fn cpal_output_format_priority(format: cpal::SampleFormat) -> Option<u8> {
+fn cpal_output_channel_cost(channels: u16) -> u8 {
+    match channels {
+        CLASSIC_OUTPUT_CHANNELS => 0,
+        1 | 3..=MAX_CONVERTIBLE_OUTPUT_CHANNELS => 1,
+        _ => u8::MAX,
+    }
+}
+
+#[cfg(feature = "cpal")]
+fn cpal_output_format_cost(format: cpal::SampleFormat) -> Option<u8> {
     match format {
-        cpal::SampleFormat::F32 => Some(3),
-        cpal::SampleFormat::I16 => Some(2),
+        cpal::SampleFormat::I16 => Some(0),
         cpal::SampleFormat::U16 => Some(1),
+        cpal::SampleFormat::I32 => Some(2),
+        cpal::SampleFormat::F32 => Some(3),
+        cpal::SampleFormat::U8 => Some(4),
+        cpal::SampleFormat::I8 => Some(5),
+        // SDL2 has no ordering oracle for these CPAL-only scalar formats.
+        cpal::SampleFormat::I24 => Some(6),
+        cpal::SampleFormat::U24 => Some(7),
+        cpal::SampleFormat::U32 => Some(8),
+        cpal::SampleFormat::F64 => Some(9),
+        cpal::SampleFormat::I64 => Some(10),
+        cpal::SampleFormat::U64 => Some(11),
         _ => None,
     }
+}
+
+#[cfg(feature = "cpal")]
+fn try_cpal_output_candidates<T, E>(
+    candidates: impl IntoIterator<Item = cpal::SupportedStreamConfig>,
+    mut open: impl FnMut(cpal::SupportedStreamConfig) -> Result<T, E>,
+) -> Result<T, E> {
+    let mut last_error = None;
+    for candidate in candidates {
+        match open(candidate) {
+            Ok(opened) => return Ok(opened),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.expect("at least one CPAL output configuration was attempted"))
+}
+
+#[cfg(feature = "cpal")]
+fn build_cpal_output_stream<T>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    mixer: Arc<AudioMixer>,
+) -> Result<cpal::Stream, AudioError>
+where
+    T: cpal::SizedSample + SampleWrite + Send + 'static,
+{
+    use cpal::traits::DeviceTrait;
+
+    let output_channels = usize::from(config.channels);
+    device
+        .build_output_stream(
+            config,
+            move |data: &mut [T], _| {
+                mixer.mix_into_channels(data, output_channels);
+            },
+            |error| {
+                tracing::error!(%error, "cpal stream error");
+            },
+            None,
+        )
+        .map_err(|error| AudioError::Stream(error.to_string()))
 }
 
 #[cfg(feature = "cpal")]
@@ -377,7 +454,7 @@ impl CpalBackend {
         max_channels: usize,
         resampling_mode: ResamplingMode,
     ) -> Result<(Arc<AudioMixer>, Self), AudioError> {
-        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use cpal::traits::{DeviceTrait, HostTrait};
 
         let host = cpal::default_host();
         let device = host
@@ -386,11 +463,26 @@ impl CpalBackend {
         let supported_configs = device.supported_output_configs().map_err(|err| {
             AudioError::Stream(format!("failed to enumerate output formats: {err}"))
         })?;
-        let config = select_cpal_stereo_output_config(supported_configs).ok_or_else(|| {
-            AudioError::Stream(
-                "no supported stereo output format (tried f32, i16, and u16)".to_string(),
-            )
-        })?;
+        let configs = cpal_output_config_candidates(supported_configs);
+        if configs.is_empty() {
+            return Err(AudioError::Stream(
+                "no safely convertible PCM output configuration with 1 to 8 channels".to_string(),
+            ));
+        }
+
+        try_cpal_output_candidates(configs, |config| {
+            Self::try_config(&device, config, max_channels, resampling_mode)
+        })
+    }
+
+    fn try_config(
+        device: &cpal::Device,
+        config: cpal::SupportedStreamConfig,
+        max_channels: usize,
+        resampling_mode: ResamplingMode,
+    ) -> Result<(Arc<AudioMixer>, Self), AudioError> {
+        use cpal::traits::StreamTrait;
+
         let sample_rate = config.sample_rate();
         let sample_format = config.sample_format();
         let stream_config = config.config();
@@ -400,45 +492,44 @@ impl CpalBackend {
             max_channels,
             resampling_mode,
         ));
-        let mix_i16 = mixer.clone();
-        let mix_f32 = mixer.clone();
-        let mix_u16 = mixer.clone();
-
-        let err_fn = |err| {
-            tracing::error!(error = %err, "cpal stream error");
-        };
 
         let stream = match sample_format {
-            cpal::SampleFormat::I16 => device
-                .build_output_stream(
-                    stream_config,
-                    move |data: &mut [i16], _| {
-                        mix_i16.mix_i16(data);
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|err| AudioError::Stream(err.to_string()))?,
-            cpal::SampleFormat::F32 => device
-                .build_output_stream(
-                    stream_config,
-                    move |data: &mut [f32], _| {
-                        mix_f32.mix_f32(data);
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|err| AudioError::Stream(err.to_string()))?,
-            cpal::SampleFormat::U16 => device
-                .build_output_stream(
-                    stream_config,
-                    move |data: &mut [u16], _| {
-                        mix_u16.mix_u16(data);
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|err| AudioError::Stream(err.to_string()))?,
+            cpal::SampleFormat::I8 => {
+                build_cpal_output_stream::<i8>(device, stream_config, mixer.clone())?
+            }
+            cpal::SampleFormat::I16 => {
+                build_cpal_output_stream::<i16>(device, stream_config, mixer.clone())?
+            }
+            cpal::SampleFormat::I24 => {
+                build_cpal_output_stream::<cpal::I24>(device, stream_config, mixer.clone())?
+            }
+            cpal::SampleFormat::I32 => {
+                build_cpal_output_stream::<i32>(device, stream_config, mixer.clone())?
+            }
+            cpal::SampleFormat::I64 => {
+                build_cpal_output_stream::<i64>(device, stream_config, mixer.clone())?
+            }
+            cpal::SampleFormat::U8 => {
+                build_cpal_output_stream::<u8>(device, stream_config, mixer.clone())?
+            }
+            cpal::SampleFormat::U16 => {
+                build_cpal_output_stream::<u16>(device, stream_config, mixer.clone())?
+            }
+            cpal::SampleFormat::U24 => {
+                build_cpal_output_stream::<cpal::U24>(device, stream_config, mixer.clone())?
+            }
+            cpal::SampleFormat::U32 => {
+                build_cpal_output_stream::<u32>(device, stream_config, mixer.clone())?
+            }
+            cpal::SampleFormat::U64 => {
+                build_cpal_output_stream::<u64>(device, stream_config, mixer.clone())?
+            }
+            cpal::SampleFormat::F32 => {
+                build_cpal_output_stream::<f32>(device, stream_config, mixer.clone())?
+            }
+            cpal::SampleFormat::F64 => {
+                build_cpal_output_stream::<f64>(device, stream_config, mixer.clone())?
+            }
             _ => {
                 return Err(AudioError::Stream(
                     "unsupported audio sample format".to_string(),
@@ -903,15 +994,15 @@ impl AudioMixer {
     }
 
     pub fn mix_i16(&self, output: &mut [i16]) {
-        self.mix_into(output);
+        self.mix_into_channels(output, 2);
     }
 
     pub fn mix_f32(&self, output: &mut [f32]) {
-        self.mix_into(output);
+        self.mix_into_channels(output, 2);
     }
 
     pub fn mix_u16(&self, output: &mut [u16]) {
-        self.mix_into(output);
+        self.mix_into_channels(output, 2);
     }
 
     pub fn set_channel_finished_callback_ffi(
@@ -959,21 +1050,23 @@ impl AudioMixer {
         })
     }
 
-    fn mix_into<T>(&self, output: &mut [T])
+    fn mix_into_channels<T>(&self, output: &mut [T], output_channels: usize)
     where
         T: SampleWrite,
     {
-        let frames = output.len() / 2;
+        for sample in output.iter_mut() {
+            sample.write_zero();
+        }
+        if output_channels == 0 {
+            return;
+        }
+        let frames = output.len() / output_channels;
         if frames == 0 {
             return;
         }
 
         let mut finished_channels: Vec<usize> = Vec::new();
         let mut finished_music = false;
-
-        for sample in output.iter_mut() {
-            sample.write_zero();
-        }
 
         let (callback, finished_list) = {
             let mut state = self.state.lock().unwrap();
@@ -1043,9 +1136,8 @@ impl AudioMixer {
                     }
                 }
 
-                let offset = frame_index * 2;
-                output[offset].write_sample(left);
-                output[offset + 1].write_sample(right);
+                let offset = frame_index * output_channels;
+                write_stereo_frame(&mut output[offset..offset + output_channels], left, right);
             }
 
             finished_channels.sort_unstable();
@@ -1149,10 +1241,24 @@ trait SampleWrite {
     fn write_zero(&mut self);
 }
 
+fn write_stereo_frame<T: SampleWrite>(output: &mut [T], left: f32, right: f32) {
+    match output {
+        [] => {}
+        [mono] => mono.write_sample((left.clamp(-1.0, 1.0) + right.clamp(-1.0, 1.0)) * 0.5),
+        [front_left, front_right, remaining @ ..] => {
+            front_left.write_sample(left);
+            front_right.write_sample(right);
+            for sample in remaining {
+                sample.write_zero();
+            }
+        }
+    }
+}
+
 impl SampleWrite for i16 {
     fn write_sample(&mut self, value: f32) {
         let clamped = value.clamp(-1.0, 1.0);
-        *self = (clamped * i16::MAX as f32) as i16;
+        *self = (clamped * 32_768.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
     }
 
     fn write_zero(&mut self) {
@@ -1162,19 +1268,58 @@ impl SampleWrite for i16 {
 
 impl SampleWrite for u16 {
     fn write_sample(&mut self, value: f32) {
-        let clamped = value.clamp(-1.0, 1.0);
-        let normalized = (clamped * 0.5 + 0.5) * u16::MAX as f32;
-        *self = normalized.clamp(0.0, u16::MAX as f32) as u16;
+        *self = if value >= 1.0 {
+            u16::MAX
+        } else if value <= -1.0 {
+            0
+        } else {
+            ((value + 1.0) * 32_767.0) as u16
+        };
     }
 
     fn write_zero(&mut self) {
-        *self = u16::MAX / 2;
+        *self = 32_767;
     }
 }
 
 impl SampleWrite for f32 {
     fn write_sample(&mut self, value: f32) {
         *self = value.clamp(-1.0, 1.0);
+    }
+
+    fn write_zero(&mut self) {
+        *self = 0.0;
+    }
+}
+
+#[cfg(feature = "cpal")]
+macro_rules! impl_cpal_sample_write {
+    ($($sample:ty),+ $(,)?) => {
+        $(
+            impl SampleWrite for $sample {
+                fn write_sample(&mut self, value: f32) {
+                    // dasp's integer conversions require -1 <= value < 1;
+                    // use the greatest representable f32 below one at the upper edge.
+                    let below_one = f32::from_bits(1.0_f32.to_bits() - 1);
+                    let clamped = value.clamp(-1.0, below_one);
+                    *self = <$sample as cpal::Sample>::from_sample(clamped);
+                }
+
+                fn write_zero(&mut self) {
+                    *self = <$sample as cpal::Sample>::EQUILIBRIUM;
+                }
+            }
+        )+
+    };
+}
+
+#[cfg(feature = "cpal")]
+impl_cpal_sample_write!(i8, cpal::I24, i32, i64, u8, cpal::U24, u32, u64,);
+
+#[cfg(feature = "cpal")]
+impl SampleWrite for f64 {
+    fn write_sample(&mut self, value: f32) {
+        *self = f64::from(value.clamp(-1.0, 1.0));
     }
 
     fn write_zero(&mut self) {
@@ -1512,64 +1657,179 @@ mod tests {
     }
 
     #[cfg(feature = "cpal")]
-    #[test]
-    fn cpal_output_config_prefers_supported_mixer_formats_in_order() {
-        let selected = select_cpal_stereo_output_config([
-            cpal_config_range(2, cpal::SampleFormat::I32, 48_000, 48_000),
-            cpal_config_range(2, cpal::SampleFormat::U16, 48_000, 48_000),
-            cpal_config_range(2, cpal::SampleFormat::I16, 48_000, 48_000),
-            cpal_config_range(2, cpal::SampleFormat::F32, 22_050, 32_000),
-        ])
-        .expect("a supported stereo mixer format should be selected");
+    fn first_cpal_output_config(
+        configs: impl IntoIterator<Item = cpal::SupportedStreamConfigRange>,
+    ) -> Option<cpal::SupportedStreamConfig> {
+        cpal_output_config_candidates(configs).into_iter().next()
+    }
 
-        assert_eq!(selected.channels(), 2);
-        assert_eq!(selected.sample_format(), cpal::SampleFormat::F32);
-        assert_eq!(selected.sample_rate(), 32_000);
+    #[cfg(feature = "cpal")]
+    fn assert_cpal_sample_writer<T>()
+    where
+        T: cpal::Sample + SampleWrite,
+    {
+        let mut sample = <T as cpal::Sample>::EQUILIBRIUM;
+        sample.write_zero();
+        let written_zero = sample;
+        sample.write_sample(0.5);
+        assert!(sample != written_zero);
+        sample.write_sample(1.0);
+        sample.write_zero();
+        assert!(sample == written_zero);
     }
 
     #[cfg(feature = "cpal")]
     #[test]
-    fn cpal_output_config_prefers_48khz_then_44_1khz() {
-        let selected = select_cpal_stereo_output_config([
+    fn cpal_negotiation_prefers_cpp_request_and_converts_viable_fallbacks() {
+        let exact_candidates = cpal_output_config_candidates([
+            cpal_config_range(1, cpal::SampleFormat::I16, 44_100, 44_100),
+            cpal_config_range(2, cpal::SampleFormat::I16, 48_000, 96_000),
             cpal_config_range(2, cpal::SampleFormat::F32, 44_100, 44_100),
-            cpal_config_range(2, cpal::SampleFormat::F32, 48_000, 96_000),
-        ])
-        .expect("a supported stereo mixer format should be selected");
+            cpal_config_range(2, cpal::SampleFormat::I16, 44_100, 44_100),
+        ]);
+        assert_eq!(exact_candidates.len(), 4);
+        let exact = exact_candidates
+            .first()
+            .copied()
+            .expect("the exact classic request should be selected");
+        assert_eq!(exact.channels(), 2);
+        assert_eq!(exact.sample_format(), cpal::SampleFormat::I16);
+        assert_eq!(exact.sample_rate(), 44_100);
 
-        assert_eq!(selected.sample_format(), cpal::SampleFormat::F32);
-        assert_eq!(selected.sample_rate(), 48_000);
-    }
+        let changed_formats = [
+            cpal::SampleFormat::I8,
+            cpal::SampleFormat::I24,
+            cpal::SampleFormat::I32,
+            cpal::SampleFormat::I64,
+            cpal::SampleFormat::U8,
+            cpal::SampleFormat::U16,
+            cpal::SampleFormat::U24,
+            cpal::SampleFormat::U32,
+            cpal::SampleFormat::U64,
+            cpal::SampleFormat::F32,
+            cpal::SampleFormat::F64,
+        ];
+        for format in changed_formats {
+            let selected = first_cpal_output_config([cpal_config_range(2, format, 44_100, 44_100)])
+                .expect("every scalar PCM format should remain viable");
+            assert_eq!(selected.sample_format(), format);
+            assert_eq!(selected.sample_rate(), 44_100);
+        }
 
-    #[cfg(feature = "cpal")]
-    #[test]
-    fn cpal_output_config_falls_back_to_44_1khz_then_range_maximum() {
-        let cd_rate = select_cpal_stereo_output_config([cpal_config_range(
+        assert_cpal_sample_writer::<i8>();
+        assert_cpal_sample_writer::<i16>();
+        assert_cpal_sample_writer::<cpal::I24>();
+        assert_cpal_sample_writer::<i32>();
+        assert_cpal_sample_writer::<i64>();
+        assert_cpal_sample_writer::<u8>();
+        assert_cpal_sample_writer::<u16>();
+        assert_cpal_sample_writer::<cpal::U24>();
+        assert_cpal_sample_writer::<u32>();
+        assert_cpal_sample_writer::<u64>();
+        assert_cpal_sample_writer::<f32>();
+        assert_cpal_sample_writer::<f64>();
+
+        let mut signed_16 = 0_i16;
+        signed_16.write_sample(-1.0);
+        assert_eq!(signed_16, i16::MIN);
+        signed_16.write_sample(1.0);
+        assert_eq!(signed_16, i16::MAX);
+        let mut unsigned_16 = 0_u16;
+        unsigned_16.write_sample(-1.0);
+        assert_eq!(unsigned_16, 0);
+        unsigned_16.write_sample(0.0);
+        assert_eq!(unsigned_16, 32_767);
+        unsigned_16.write_sample(1.0);
+        assert_eq!(unsigned_16, u16::MAX);
+        unsigned_16.write_zero();
+        assert_eq!(unsigned_16, 32_767);
+
+        for (minimum, maximum, expected) in [
+            (48_000, 96_000, 48_000),
+            (22_050, 32_000, 32_000),
+            (32_000, 48_000, 44_100),
+        ] {
+            let selected = first_cpal_output_config([cpal_config_range(
+                2,
+                cpal::SampleFormat::I16,
+                minimum,
+                maximum,
+            )])
+            .expect("the nearest viable sample rate should be selected");
+            assert_eq!(selected.sample_rate(), expected);
+        }
+
+        let i32_only = first_cpal_output_config([cpal_config_range(
             2,
+            cpal::SampleFormat::I32,
+            48_000,
+            48_000,
+        )])
+        .expect("an I32-only device is a viable PCM output");
+        assert_eq!(i32_only.sample_format(), cpal::SampleFormat::I32);
+        assert_eq!(i32_only.sample_rate(), 48_000);
+
+        let retry_candidates = cpal_output_config_candidates([
+            cpal_config_range(2, cpal::SampleFormat::I16, 44_100, 44_100),
+            cpal_config_range(2, cpal::SampleFormat::F32, 44_100, 44_100),
+        ]);
+        let mut attempts = 0;
+        let opened_after_retry = try_cpal_output_candidates(retry_candidates, |candidate| {
+            attempts += 1;
+            if attempts == 1 {
+                Err("injected first-candidate open failure")
+            } else {
+                Ok(candidate)
+            }
+        })
+        .expect("a later viable output candidate should be attempted");
+        assert_eq!(attempts, 2);
+        assert_eq!(opened_after_retry.sample_format(), cpal::SampleFormat::F32);
+
+        let mono_only = first_cpal_output_config([cpal_config_range(
+            1,
             cpal::SampleFormat::I16,
-            32_000,
+            44_100,
             44_100,
         )])
-        .expect("44.1 kHz should be selected when 48 kHz is unavailable");
-        assert_eq!(cd_rate.sample_rate(), 44_100);
+        .expect("SDL preserves its stereo mixer by converting to mono hardware");
+        assert_eq!(mono_only.channels(), 1);
+        let mut mono = [0.0_f32];
+        write_stereo_frame(&mut mono, 0.75, -0.25);
+        assert_eq!(mono, [0.25]);
+        write_stereo_frame(&mut mono, 2.0, 0.0);
+        assert_eq!(mono, [0.5]);
 
-        let range_max = select_cpal_stereo_output_config([cpal_config_range(
-            2,
-            cpal::SampleFormat::I16,
-            22_050,
-            32_000,
+        let surround_only = first_cpal_output_config([cpal_config_range(
+            6,
+            cpal::SampleFormat::F32,
+            44_100,
+            44_100,
         )])
-        .expect("the range maximum should be selected without a standard rate");
-        assert_eq!(range_max.sample_rate(), 32_000);
-    }
+        .expect("SDL maps stereo to the physical front pair");
+        assert_eq!(surround_only.channels(), 6);
+        let mut surround = [1.0_f32; 6];
+        write_stereo_frame(&mut surround, 0.75, -0.25);
+        assert_eq!(surround, [0.75, -0.25, 0.0, 0.0, 0.0, 0.0]);
 
-    #[cfg(feature = "cpal")]
-    #[test]
-    fn cpal_output_config_rejects_mono_and_unsupported_stereo_formats() {
-        assert!(select_cpal_stereo_output_config([
-            cpal_config_range(1, cpal::SampleFormat::F32, 48_000, 48_000),
-            cpal_config_range(2, cpal::SampleFormat::I32, 48_000, 48_000),
+        let maximum_channels = first_cpal_output_config([cpal_config_range(
+            8,
+            cpal::SampleFormat::I16,
+            44_100,
+            44_100,
+        )])
+        .expect("SDL's eight-channel conversion boundary should remain viable");
+        assert_eq!(maximum_channels.channels(), 8);
+
+        assert!(cpal_output_config_candidates([
+            cpal_config_range(2, cpal::SampleFormat::DsdU8, 44_100, 44_100),
+            cpal_config_range(2, cpal::SampleFormat::DsdU16, 44_100, 44_100),
+            cpal_config_range(2, cpal::SampleFormat::DsdU32, 44_100, 44_100),
+            cpal_config_range(0, cpal::SampleFormat::I16, 44_100, 44_100),
+            cpal_config_range(9, cpal::SampleFormat::I16, 44_100, 44_100),
         ])
-        .is_none());
+        .is_empty());
+        assert!(cpal_output_config_candidates(std::iter::empty()).is_empty());
     }
 
     #[test]
