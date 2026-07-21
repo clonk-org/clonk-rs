@@ -335,8 +335,9 @@ audit found another 8,343,469 bytes across the remaining workspace rlibs,
 expanded to 43,125,856 bytes after downstream-link fanout, plus 25,171,978
 bytes in loose debug-map objects. The follow-up therefore made `debug = false`
 the workspace-member test-profile default instead of accumulating package
-exceptions; the dependency wildcard retains its explicit override because the
-test profile also inherits the dev profile's package wildcard.
+exceptions. The later cold-profile follow-up below removed the dependency
+wildcard entirely by inheriting the release profile, while retaining explicit
+test assertions, overflow checks, and local incremental compilation.
 Panic-site text and function symbols remain available, while the development
 profile retains debug information for interactive use. Set
 `CARGO_PROFILE_TEST_DEBUG=line-tables-only` for a line-symbolized test build.
@@ -419,6 +420,62 @@ in 9.201s after a 6.05s wrapper build; five merged processes took 11.491s after
 an equivalent 6.06s build. Drachenfels' own slowest process also rose from
 6.873s to 7.110s. The measured 24.9% family regression outweighed the removed
 scenario preparations, so those process boundaries remain unchanged.
+
+### Script-call allocation and native-catalog follow-up
+
+A natural incremental `cargo test --workspace --no-run --timings` build took
+47.22s. Cargo's critical path was the 40.96s `lc-app` binary test harness;
+`engine_inline` took 13.22s and `frontend_inline` took 9.53s in parallel. This
+confirms that further scheduling changes cannot materially shorten the compile
+half of the loop without reducing the monolithic app harness or compiler work.
+
+A three-pair, interleaved same-source binary A/B used the real Tutorial03
+virtual-player route and macOS retired-instruction/cycle counters. The first
+candidate removes repeated `Vec` growth while balancing the ten script-call
+slots, moves diagnostic argument values into their frame with a compact
+reference mask, and borrows ordinary UTF-8 bytes instead of allocating native
+byte projections. The second candidate also shares the immutable 457-function,
+292-constant native registration catalog copy-on-write across script hosts;
+per-host world dispatch hooks remain independent.
+
+| Route binary | Mean wall | Retired instructions | CPU cycles | Peak memory |
+| --- | ---: | ---: | ---: | ---: |
+| Parent | 6.197s | 118.284B | 23.126B | 164.12 MB |
+| Call/string allocation changes | 5.580s | 109.965B | 21.481B | 163.96 MB |
+| Plus native registration cache | 5.287s | 105.530B | 20.561B | 82.86 MB |
+
+The combined binary retired 10.78% fewer instructions and 11.09% fewer cycles,
+used 49.51% less peak memory, and completed 14.68% faster in this route. Every
+pair used separately retained executables and the same test/content inputs, so
+source rebuilds and fleet contention are outside the measured interval.
+
+Five Tutorial01 real-Clonk assertions now share one immutable scenario parse
+while preserving a fresh engine and failure label for every subcase. Their
+retained independent-process samples totaled 10.248--11.287s of testcase work;
+the batched process took 2.937--3.490s. Because the old processes overlapped,
+this is an aggregate-work reduction rather than an isolated elapsed claim. The
+batch starts in the priority-60 real-scenario tier so it cannot become a late
+serial tail.
+
+The same source was then compiled from two empty target directories with
+`CARGO_INCREMENTAL=0`, offline dependencies, and a locked dependency graph.
+The baseline test profile inherited the development dependency wildcard; the
+candidate inherits release and lets Cargo's default host build-dependency
+profile apply, while the checked-in profile explicitly re-enables incremental
+compilation for normal local rebuilds.
+
+| Cold workspace test build | Wall | User CPU | System CPU | Target size |
+| --- | ---: | ---: | ---: | ---: |
+| Optimized host wildcard | 112.61s | 862.57s | 30.16s | 1,106,980 KiB |
+| Cargo host fast path | 103.17s | 765.25s | 27.53s | 1,124,792 KiB |
+
+The candidate saved 9.44s wall (8.4%) and 97.32 user CPU-seconds (11.3%) for a
+17,812 KiB (1.6%) target-size increase. Unit timings provide a source-local
+control against second-run filesystem caching: `syn` fell from 10.9s to 2.1s,
+`clap_derive` from 5.6s to 0.9s, `serde_derive` from 5.0s to 1.4s, and
+`tracing-attributes` from 4.4s to 0.8s. Normal runtime dependencies remain at
+the test profile's level 3; only host build scripts, procedural macros, and
+their host-only dependencies regain Cargo's compilation-oriented settings.
 
 The preceding rebased workspace gate's 127s compile, 176.742s nextest phase,
 and 310.20s command wall time are not a code-performance baseline. It ran with

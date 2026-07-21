@@ -54,8 +54,17 @@ pub fn c4_string_from_bytes(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Recover the native byte buffer represented by a script string.
-pub fn c4_string_bytes(value: &str) -> Vec<u8> {
+/// Borrow the native byte spelling when the Rust string needs no raw-byte
+/// projection. Ordinary UTF-8 is already the exact C4 string byte sequence;
+/// only the private-use escape range requires decoding into owned storage.
+fn c4_string_bytes_cow(value: &str) -> Cow<'_, [u8]> {
+    if !value
+        .chars()
+        .any(|character| c4_raw_byte_escape(character).is_some())
+    {
+        return Cow::Borrowed(value.as_bytes());
+    }
+
     let mut bytes = Vec::with_capacity(value.len());
     for character in value.chars() {
         if let Some(byte) = c4_raw_byte_escape(character) {
@@ -65,10 +74,22 @@ pub fn c4_string_bytes(value: &str) -> Vec<u8> {
             bytes.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
         }
     }
-    bytes
+    Cow::Owned(bytes)
+}
+
+/// Recover the native byte buffer represented by a script string.
+pub fn c4_string_bytes(value: &str) -> Vec<u8> {
+    c4_string_bytes_cow(value).into_owned()
 }
 
 pub fn c4_string_byte_len(value: &str) -> usize {
+    if !value
+        .chars()
+        .any(|character| c4_raw_byte_escape(character).is_some())
+    {
+        return value.len();
+    }
+
     value
         .chars()
         .map(|character| {
@@ -276,11 +297,11 @@ fn c4_string_literal_query(value: &str) -> Option<Cow<'_, str>> {
 }
 
 pub fn c4_string_byte(value: &str, index: usize) -> Option<u8> {
-    c4_string_bytes(value).get(index).copied()
+    c4_string_bytes_cow(value).get(index).copied()
 }
 
 pub fn c4_strings_equal(left: &str, right: &str) -> bool {
-    c4_string_bytes(left) == c4_string_bytes(right)
+    c4_string_bytes_cow(left) == c4_string_bytes_cow(right)
 }
 
 const C4_ID_RAW_PREFIX: &str = "\u{f0ffe}c4id:";
@@ -419,7 +440,9 @@ pub mod c4_optional_id_serde {
 }
 
 pub mod c4_string_serde {
-    use super::{c4_string_bytes, c4_string_from_bytes, c4_string_from_literal};
+    use std::borrow::Cow;
+
+    use super::{c4_string_bytes_cow, c4_string_from_bytes, c4_string_from_literal};
 
     #[derive(serde::Serialize, serde::Deserialize)]
     #[serde(untagged)]
@@ -435,13 +458,15 @@ pub mod c4_string_serde {
         where
             S: serde::Serializer,
         {
-            let bytes = c4_string_bytes(self.0);
-            match String::from_utf8(bytes) {
-                Ok(text) => serializer.serialize_str(&text),
-                Err(error) => Repr::Bytes {
-                    c4_bytes: error.into_bytes(),
-                }
-                .serialize(serializer),
+            match c4_string_bytes_cow(self.0) {
+                Cow::Borrowed(_) => serializer.serialize_str(self.0),
+                Cow::Owned(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => serializer.serialize_str(&text),
+                    Err(error) => Repr::Bytes {
+                        c4_bytes: error.into_bytes(),
+                    }
+                    .serialize(serializer),
+                },
             }
         }
     }
@@ -935,7 +960,7 @@ impl serde::Serialize for ValueMap {
         S: serde::Serializer,
     {
         if self.keys().all(|key| {
-            matches!(key, Value::String(value) if String::from_utf8(c4_string_bytes(value)).is_ok())
+            matches!(key, Value::String(value) if std::str::from_utf8(c4_string_bytes_cow(value).as_ref()).is_ok())
         }) {
             use serde::ser::SerializeMap;
 
@@ -1293,7 +1318,8 @@ fn c4_hash_typed(type_hash: usize, value_hash: usize) -> usize {
 }
 
 fn c4_string_hash(value: &str) -> usize {
-    c4_hash_typed(C4V_STRING, cpp_string_view_hash(&c4_string_bytes(value)))
+    let bytes = c4_string_bytes_cow(value);
+    c4_hash_typed(C4V_STRING, cpp_string_view_hash(bytes.as_ref()))
 }
 
 fn hash_i32(value: i32) -> usize {
@@ -1310,10 +1336,13 @@ pub fn c4_id_raw(id: &str) -> usize {
 /// Parse a C4 string through `C4Id(std::string_view)` without recognizing
 /// the Rust-only typed-ID storage tag.
 pub fn c4_id_parse(id: &str) -> usize {
-    let bytes = c4_string_bytes(id);
+    let native_bytes = c4_string_bytes_cow(id);
     // Script-facing C4Id receives a native C string (`FnStringPar`), so an
     // embedded NUL terminates the argument before C4Id(std::string_view).
-    let bytes = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+    let bytes = native_bytes
+        .split(|byte| *byte == 0)
+        .next()
+        .unwrap_or_default();
     if bytes.len() < 4 || bytes == b"NONE" {
         return 0;
     }
@@ -1863,6 +1892,52 @@ mod map_tests {
 #[cfg(test)]
 mod c4_string_tests {
     use super::*;
+
+    #[test]
+    fn native_byte_view_borrows_text_and_decodes_only_raw_byte_escapes() {
+        let ascii = "Clonk";
+        assert!(matches!(
+            c4_string_bytes_cow(ascii),
+            Cow::Borrowed(bytes) if bytes == ascii.as_bytes()
+        ));
+
+        let utf8 = "Clönk";
+        assert!(matches!(
+            c4_string_bytes_cow(utf8),
+            Cow::Borrowed(bytes) if bytes == utf8.as_bytes()
+        ));
+
+        let escaped_utf8 = [0xc3_u8, 0xb6]
+            .into_iter()
+            .map(|byte| {
+                char::from_u32(C4_RAW_BYTE_ESCAPE_BASE + u32::from(byte))
+                    .expect("raw-byte escape is a valid scalar")
+            })
+            .collect::<String>();
+        assert!(matches!(
+            c4_string_bytes_cow(&escaped_utf8),
+            Cow::Owned(bytes) if bytes == "ö".as_bytes()
+        ));
+        assert!(c4_strings_equal("ö", &escaped_utf8));
+        assert_eq!(c4_string_bytes(&escaped_utf8), "ö".as_bytes());
+
+        let utf8_value = Value::String("ö".into());
+        let escaped_value = Value::String(escaped_utf8.into());
+        assert_eq!(utf8_value, escaped_value);
+        let mut values = ValueMap::new();
+        values.insert_key(escaped_value, Value::Int(1));
+        assert_eq!(values.get_key(&utf8_value), Some(&Value::Int(1)));
+        assert_eq!(
+            serde_json::to_string(&utf8_value).expect("UTF-8 value serializes"),
+            serde_json::to_string(
+                values
+                    .keys()
+                    .next()
+                    .expect("raw-escape key remains present")
+            )
+            .expect("raw-escape value serializes")
+        );
+    }
 
     #[test]
     fn raw_byte_projection_round_trips_high_bytes_without_rewriting_utf8_literals() {

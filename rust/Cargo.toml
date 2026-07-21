@@ -69,8 +69,12 @@ opt-level = 3
 # disabling thin-local LTO avoids repeating an expensive whole-crate codegen
 # pass across the large test harnesses.
 [profile.test]
+inherits = "release"
 opt-level = 3
 lto = "off"
+# Release inheritance avoids the dev dependency wildcard, but local test
+# rebuilds still need the incremental cache that the test profile normally has.
+incremental = true
 # CI disables incremental compilation for cache portability. Keep the same
 # broad codegen parallelism Cargo gives incremental local builds so the large
 # app and engine test wrappers do not become single long LLVM/link tails.
@@ -82,12 +86,6 @@ codegen-units = 256
 debug = false
 debug-assertions = true
 overflow-checks = true
-
-# The test profile inherits the dev package wildcard, whose debug setting would
-# otherwise win. Keep registry dependencies optimized and debug-free explicitly.
-[profile.test.package."*"]
-opt-level = 3
-debug = false
 
 # The main application test harness is the largest final link in the workspace.
 # Level 2 keeps its gameplay-heavy tests close to fully optimized while

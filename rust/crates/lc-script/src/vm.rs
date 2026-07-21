@@ -383,7 +383,8 @@ enum DiagnosticFrameKind {
     Function {
         host_identity: Option<ScriptHostIdentity>,
         function: String,
-        arguments: Vec<(Value, bool)>,
+        arguments: Vec<Value>,
+        argument_reference_mask: u16,
         object_context: Option<String>,
         definition_context: Option<String>,
         source_host_identity: Option<ScriptHostIdentity>,
@@ -550,6 +551,7 @@ pub(crate) fn snapshot_active_runtime_frames() -> Vec<RuntimeCallFrame> {
                 DiagnosticFrameKind::Function {
                     function,
                     arguments,
+                    argument_reference_mask,
                     object_context,
                     definition_context,
                     source_host_identity,
@@ -557,19 +559,21 @@ pub(crate) fn snapshot_active_runtime_frames() -> Vec<RuntimeCallFrame> {
                     source_line,
                     ..
                 } => {
-                    let mut arguments = arguments.iter().collect::<Vec<_>>();
-                    while arguments.last().is_some_and(|(argument, reference)| {
-                        !reference && matches!(argument, Value::Nil)
-                    }) {
-                        arguments.pop();
+                    let mut argument_count = arguments.len();
+                    while argument_count != 0
+                        && argument_reference_mask & (1_u16 << (argument_count - 1)) == 0
+                        && matches!(arguments.get(argument_count - 1), Some(Value::Nil))
+                    {
+                        argument_count -= 1;
                     }
                     RuntimeCallFrame::new(
                         function.clone(),
-                        arguments
-                            .into_iter()
-                            .map(|(value, reference)| {
+                        arguments[..argument_count]
+                            .iter()
+                            .enumerate()
+                            .map(|(index, value)| {
                                 let mut value = diagnostic_value_display(value);
-                                if *reference {
+                                if argument_reference_mask & (1_u16 << index) != 0 {
                                     value.push('*');
                                 }
                                 value
@@ -719,8 +723,8 @@ impl ScriptDiagnosticGuard {
     fn enter(
         name: &str,
         profile_host_identity: Option<ScriptHostIdentity>,
-        args: &[Value],
-        arg_references: &[bool],
+        args: Vec<Value>,
+        argument_reference_mask: u16,
         this_value: &Value,
         owner_definition_name: Option<&str>,
         function: &Function,
@@ -758,11 +762,8 @@ impl ScriptDiagnosticGuard {
                 kind: DiagnosticFrameKind::Function {
                     host_identity: profile_host_identity,
                     function: name.to_string(),
-                    arguments: args
-                        .iter()
-                        .cloned()
-                        .zip(arg_references.iter().copied())
-                        .collect(),
+                    arguments: args,
+                    argument_reference_mask,
                     object_context,
                     definition_context: (function.access != AccessLevel::Global)
                         .then(|| owner_definition_name.map(str::to_owned))
@@ -4003,9 +4004,11 @@ impl<'a> Vm<'a> {
         let mut args = args;
         let debug_arg_count = args.len().min(MAX_CALL_PARAMETERS);
         args.truncate(MAX_CALL_PARAMETERS);
-        while args.len() < MAX_CALL_PARAMETERS {
-            args.push(CallArg::runtime(Value::Nil));
-        }
+        // `resize_with` reserves the complete ten-slot C4AulParSet once.
+        // Repeated `push` growth otherwise reallocates and moves the common
+        // zero-to-three-argument call vector several times on every script
+        // invocation.
+        args.resize_with(MAX_CALL_PARAMETERS, || CallArg::runtime(Value::Nil));
         Self::check_convert_function_parameters(name, function, &mut args, caller.as_ref())?;
 
         // The external C4AulScriptFunc::Exec overload converts its temporary
@@ -4021,10 +4024,12 @@ impl<'a> Vm<'a> {
             }
         }
 
-        let debug_arg_references = args[..debug_arg_count]
+        let debug_arg_reference_mask = args[..debug_arg_count]
             .iter()
-            .map(|arg| matches!(arg, CallArg::Reference(_)))
-            .collect::<Vec<_>>();
+            .enumerate()
+            .fold(0_u16, |mask, (index, arg)| {
+                mask | (u16::from(matches!(arg, CallArg::Reference(_))) << index)
+            });
         let mut env = Environment::new_with_params(
             &function.params,
             &args,
@@ -4070,22 +4075,30 @@ impl<'a> Vm<'a> {
         let function_var_count = env.function_vars.borrow().len();
         value_stack.grow(function_var_count)?;
 
-        let debug_args = self.call_args_to_values(&args)?;
+        let debug_args = self.call_args_to_values(&args[..debug_arg_count])?;
+        let debugger_callback = self
+            .debugger
+            .as_ref()
+            .and_then(|debugger| debugger.on_call());
+        let debugger_args = debugger_callback.map(|_| debug_args.clone());
         let profile_host_identity =
             (function.access != AccessLevel::Global).then_some(self.host_identity);
         let mut diagnostic = ScriptDiagnosticGuard::enter(
             name,
             profile_host_identity,
-            &debug_args[..debug_arg_count],
-            &debug_arg_references,
+            debug_args,
+            debug_arg_reference_mask,
             &self.this_value,
             self.owner_definition_name,
             function,
         );
-        if let Some(debugger) = &self.debugger {
-            if let Some(callback) = debugger.on_call() {
-                callback(name, &debug_args[..debug_arg_count]);
-            }
+        if let Some(callback) = debugger_callback {
+            callback(
+                name,
+                debugger_args
+                    .as_deref()
+                    .expect("debugger arguments are captured with its callback"),
+            );
         }
 
         // `define_object_local` preserves parameter/function-var bindings so

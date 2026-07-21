@@ -93,6 +93,50 @@ impl HostReferenceFunction {
     }
 }
 
+/// An immutable, shareable snapshot of one script host's native callbacks,
+/// parameter signatures, and engine constants.
+///
+/// Engines install snapshots copy-on-write: untouched hosts share the backing
+/// maps, while later registrations or overrides remain local to that host.
+/// Constants containing C4String values are rejected because their
+/// registration order belongs to each host's string-table construction.
+#[derive(Clone)]
+pub struct HostRegistrationSnapshot {
+    host_functions: Arc<HashMap<String, RegisteredHostFunction>>,
+    host_reference_functions: Arc<HashMap<String, HostReferenceFunction>>,
+    host_function_parameter_types: Arc<HashMap<String, Arc<[C4VType]>>>,
+    constants: Arc<HashMap<String, Value>>,
+}
+
+fn value_contains_c4_string(value: &Value) -> bool {
+    match value {
+        Value::String(_) => true,
+        Value::Array(values) => values.iter().any(value_contains_c4_string),
+        Value::Proplist(values) => {
+            values.iter().any(|(key, value)| {
+                value_contains_c4_string(key) || value_contains_c4_string(value)
+            })
+                || values.hidden_values().any(value_contains_c4_string)
+        }
+        Value::Int(_)
+        | Value::Bool(_)
+        | Value::RawBool(_)
+        | Value::C4Id(_)
+        | Value::Object(_)
+        | Value::Nil => false,
+    }
+}
+
+fn empty_host_registration_snapshot() -> &'static HostRegistrationSnapshot {
+    static EMPTY: std::sync::OnceLock<HostRegistrationSnapshot> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(|| HostRegistrationSnapshot {
+        host_functions: Arc::new(HashMap::new()),
+        host_reference_functions: Arc::new(HashMap::new()),
+        host_function_parameter_types: Arc::new(HashMap::new()),
+        constants: Arc::new(HashMap::new()),
+    })
+}
+
 /// Cross-object `func &` dispatch. Kept separate from [`HostFunction`] so an
 /// lvalue call result is never flattened to a copied [`Value`].
 pub type MethodReferenceDispatch =
@@ -909,17 +953,17 @@ pub struct Engine {
     /// The outer Option distinguishes an uninitialized bare Engine from a
     /// deliberately NONSTRICT base script.
     owner_strict_level: Option<Option<u8>>,
-    host_functions: HashMap<String, RegisteredHostFunction>,
-    host_reference_functions: HashMap<String, HostReferenceFunction>,
+    host_functions: Arc<HashMap<String, RegisteredHostFunction>>,
+    host_reference_functions: Arc<HashMap<String, HostReferenceFunction>>,
     /// Exact C++ `GetParType()` vectors for native registrations. An absent
     /// entry keeps the public embedding API variadic; game natives always
     /// install a vector, whose length is also their declared arity.
-    host_function_parameter_types: HashMap<String, Arc<[C4VType]>>,
+    host_function_parameter_types: Arc<HashMap<String, Arc<[C4VType]>>>,
     debugger_hooks: Option<DebuggerHooks>,
     var_decls: Vec<VarDecl>, // Script-level variable declarations (local variables)
     /// Engine script constants (RegisterGlobalConstant, C4Script.cpp:6581),
     /// consulted by the VM when an identifier matches no variable.
-    constants: HashMap<String, Value>,
+    constants: Arc<HashMap<String, Value>>,
     /// Engine-global script functions (System.c4g global funcs, owned by
     /// Game.ScriptEngine in C++): shared across every script host, resolved
     /// after the own script and before host functions.
@@ -980,6 +1024,7 @@ pub struct ScriptFunctionResolution {
 
 impl Engine {
     pub fn new() -> Self {
+        let empty_registrations = empty_host_registration_snapshot();
         Self {
             functions: HashMap::new(),
             local_function_order: Vec::new(),
@@ -990,12 +1035,14 @@ impl Engine {
             game_script_name: None,
             definition_context: false,
             owner_strict_level: None,
-            host_functions: HashMap::new(),
-            host_reference_functions: HashMap::new(),
-            host_function_parameter_types: HashMap::new(),
+            host_functions: Arc::clone(&empty_registrations.host_functions),
+            host_reference_functions: Arc::clone(&empty_registrations.host_reference_functions),
+            host_function_parameter_types: Arc::clone(
+                &empty_registrations.host_function_parameter_types,
+            ),
             debugger_hooks: None,
             var_decls: Vec::new(),
-            constants: HashMap::new(),
+            constants: Arc::clone(&empty_registrations.constants),
             global_functions: None,
             method_dispatch: None,
             method_reference_dispatch: None,
@@ -1071,6 +1118,94 @@ impl Engine {
             .unwrap_or(false)
     }
 
+    /// Captures this host's native registration surface for cheap reuse by
+    /// other script hosts. Script functions, globals, hooks, and host identity
+    /// are deliberately not part of the snapshot.
+    pub fn host_registration_snapshot(&self) -> HostRegistrationSnapshot {
+        assert!(
+            !self.constants.values().any(value_contains_c4_string),
+            "host registration snapshots cannot share C4String constants"
+        );
+        HostRegistrationSnapshot {
+            host_functions: Arc::clone(&self.host_functions),
+            host_reference_functions: Arc::clone(&self.host_reference_functions),
+            host_function_parameter_types: Arc::clone(&self.host_function_parameter_types),
+            constants: Arc::clone(&self.constants),
+        }
+    }
+
+    /// Installs a captured native surface with the same overwrite semantics as
+    /// replaying its registrations. Empty hosts take the O(1) shared-map path;
+    /// nonempty hosts retain unrelated embedding callbacks and constants.
+    pub fn apply_host_registration_snapshot(&mut self, snapshot: &HostRegistrationSnapshot) {
+        let registrations_already_shared =
+            Arc::ptr_eq(&self.host_functions, &snapshot.host_functions)
+                && Arc::ptr_eq(
+                    &self.host_reference_functions,
+                    &snapshot.host_reference_functions,
+                )
+                && Arc::ptr_eq(
+                    &self.host_function_parameter_types,
+                    &snapshot.host_function_parameter_types,
+                );
+        if !registrations_already_shared {
+            if self.host_functions.is_empty()
+                && self.host_reference_functions.is_empty()
+                && self.host_function_parameter_types.is_empty()
+            {
+                self.host_functions = Arc::clone(&snapshot.host_functions);
+                self.host_reference_functions = Arc::clone(&snapshot.host_reference_functions);
+                self.host_function_parameter_types =
+                    Arc::clone(&snapshot.host_function_parameter_types);
+            } else {
+                let host_functions = Arc::make_mut(&mut self.host_functions);
+                let host_reference_functions = Arc::make_mut(&mut self.host_reference_functions);
+                let host_function_parameter_types =
+                    Arc::make_mut(&mut self.host_function_parameter_types);
+
+                for name in snapshot.host_functions.keys() {
+                    host_reference_functions.remove(name);
+                    host_function_parameter_types.remove(name);
+                }
+                for name in snapshot.host_reference_functions.keys() {
+                    host_functions.remove(name);
+                    host_function_parameter_types.remove(name);
+                }
+                host_functions.extend(
+                    snapshot
+                        .host_functions
+                        .iter()
+                        .map(|(name, function)| (name.clone(), function.clone())),
+                );
+                host_reference_functions.extend(
+                    snapshot
+                        .host_reference_functions
+                        .iter()
+                        .map(|(name, function)| (name.clone(), function.clone())),
+                );
+                host_function_parameter_types.extend(
+                    snapshot
+                        .host_function_parameter_types
+                        .iter()
+                        .map(|(name, parameter_types)| (name.clone(), Arc::clone(parameter_types))),
+                );
+            }
+        }
+
+        if !Arc::ptr_eq(&self.constants, &snapshot.constants) {
+            if self.constants.is_empty() {
+                self.constants = Arc::clone(&snapshot.constants);
+            } else {
+                Arc::make_mut(&mut self.constants).extend(
+                    snapshot
+                        .constants
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone())),
+                );
+            }
+        }
+    }
+
     /// Registers an engine script constant (RegisterGlobalConstant,
     /// C4Script.cpp:6581): identifiers resolve to it when no variable
     /// matches; variables shadow constants.
@@ -1078,7 +1213,7 @@ impl Engine {
         if let Some(strings) = self.string_registrations.as_deref() {
             register_c4_value_strings(strings, &value);
         }
-        self.constants.insert(name.into(), value);
+        Arc::make_mut(&mut self.constants).insert(name.into(), value);
     }
 
     pub fn load_script(&mut self, source: &str) -> Result<(), ScriptError> {
@@ -1425,13 +1560,17 @@ impl Engine {
         func: HostFunction,
         parameter_count: Option<usize>,
     ) {
-        self.host_reference_functions.remove(&name);
-        self.host_function_parameter_types.remove(&name);
+        if self.host_reference_functions.contains_key(&name) {
+            Arc::make_mut(&mut self.host_reference_functions).remove(&name);
+        }
+        if self.host_function_parameter_types.contains_key(&name) {
+            Arc::make_mut(&mut self.host_function_parameter_types).remove(&name);
+        }
         let function = match parameter_count {
             Some(parameter_count) => RegisteredHostFunction::declared(func, parameter_count),
             None => RegisteredHostFunction::variadic(func),
         };
-        self.host_functions.insert(name, function);
+        Arc::make_mut(&mut self.host_functions).insert(name, function);
     }
 
     /// Register a host function whose listed zero-based parameters receive
@@ -1449,9 +1588,13 @@ impl Engine {
         I: IntoIterator<Item = usize>,
     {
         let name = name.into();
-        self.host_functions.remove(&name);
-        self.host_function_parameter_types.remove(&name);
-        self.host_reference_functions.insert(
+        if self.host_functions.contains_key(&name) {
+            Arc::make_mut(&mut self.host_functions).remove(&name);
+        }
+        if self.host_function_parameter_types.contains_key(&name) {
+            Arc::make_mut(&mut self.host_function_parameter_types).remove(&name);
+        }
+        Arc::make_mut(&mut self.host_reference_functions).insert(
             name,
             HostReferenceFunction::new(reference_parameters, None, func),
         );
@@ -1481,9 +1624,13 @@ impl Engine {
             "native reference parameters must be inside the declared parameter list"
         );
         let name = name.into();
-        self.host_functions.remove(&name);
-        self.host_function_parameter_types.remove(&name);
-        self.host_reference_functions.insert(
+        if self.host_functions.contains_key(&name) {
+            Arc::make_mut(&mut self.host_functions).remove(&name);
+        }
+        if self.host_function_parameter_types.contains_key(&name) {
+            Arc::make_mut(&mut self.host_function_parameter_types).remove(&name);
+        }
+        Arc::make_mut(&mut self.host_reference_functions).insert(
             name,
             HostReferenceFunction::new(reference_parameters, Some(parameter_count), func),
         );
@@ -1544,7 +1691,7 @@ impl Engine {
                 "native C4V Ref slots must match the reference-aware registration"
             );
         }
-        self.host_function_parameter_types
+        Arc::make_mut(&mut self.host_function_parameter_types)
             .insert(name.to_string(), Arc::from(parameter_types));
         true
     }
@@ -1562,20 +1709,30 @@ impl Engine {
     }
 
     pub fn clear_host_functions(&mut self) {
-        self.host_functions.clear();
-        self.host_reference_functions.clear();
-        self.host_function_parameter_types.clear();
+        let empty_registrations = empty_host_registration_snapshot();
+        self.host_functions = Arc::clone(&empty_registrations.host_functions);
+        self.host_reference_functions = Arc::clone(&empty_registrations.host_reference_functions);
+        self.host_function_parameter_types =
+            Arc::clone(&empty_registrations.host_function_parameter_types);
     }
 
     /// Remove either native-host registration kind under `name`. The return
     /// value remains the ordinary value-host callback for API compatibility;
     /// removing a reference-aware registration succeeds with `None`.
     pub fn remove_host_function(&mut self, name: &str) -> Option<HostFunction> {
-        self.host_reference_functions.remove(name);
-        self.host_function_parameter_types.remove(name);
-        self.host_functions
-            .remove(name)
-            .map(|function| function.callback)
+        if self.host_reference_functions.contains_key(name) {
+            Arc::make_mut(&mut self.host_reference_functions).remove(name);
+        }
+        if self.host_function_parameter_types.contains_key(name) {
+            Arc::make_mut(&mut self.host_function_parameter_types).remove(name);
+        }
+        if self.host_functions.contains_key(name) {
+            Arc::make_mut(&mut self.host_functions)
+                .remove(name)
+                .map(|function| function.callback)
+        } else {
+            None
+        }
     }
 
     /// Registers the cross-object method resolver for `obj->Method(args)`
@@ -2745,6 +2902,117 @@ mod tests {
     }
 
     #[test]
+    fn host_registration_snapshots_share_storage_and_detach_on_mutation() {
+        let mut template = Engine::new();
+        template.register_host_function_with_arity("Native", 1, |_| Ok(Value::Int(41)));
+        assert!(template.set_host_function_parameter_types("Native", [C4VType::Int]));
+        template.register_host_reference_function_with_arity("Reference", 1, [0], |_| {
+            Ok(Value::Int(7))
+        });
+        assert!(template.set_host_function_parameter_types("Reference", [C4VType::Ref]));
+        template.register_constant("BUILTIN", Value::Int(3));
+        let snapshot = template.host_registration_snapshot();
+
+        let mut first = Engine::new();
+        first.apply_host_registration_snapshot(&snapshot);
+        let mut second = Engine::new();
+        second.apply_host_registration_snapshot(&snapshot);
+
+        assert!(Arc::ptr_eq(&first.host_functions, &second.host_functions));
+        assert!(Arc::ptr_eq(
+            &first.host_reference_functions,
+            &second.host_reference_functions
+        ));
+        assert!(Arc::ptr_eq(
+            &first.host_function_parameter_types,
+            &second.host_function_parameter_types
+        ));
+        assert!(Arc::ptr_eq(&first.constants, &second.constants));
+
+        first.register_host_function_with_arity("Native", 1, |_| Ok(Value::Int(99)));
+        assert!(first.set_host_function_parameter_types("Native", [C4VType::Int]));
+        first.remove_host_function("Reference");
+        first.register_constant("BUILTIN", Value::Int(8));
+
+        assert_eq!(
+            first.call("Native", &[]).expect("override runs"),
+            Value::Int(99)
+        );
+        assert_eq!(
+            second.call("Native", &[]).expect("cached native runs"),
+            Value::Int(41)
+        );
+        assert!(!first.has_host_function("Reference"));
+        assert!(second.has_host_function("Reference"));
+        assert_eq!(first.constants.get("BUILTIN"), Some(&Value::Int(8)));
+        assert_eq!(second.constants.get("BUILTIN"), Some(&Value::Int(3)));
+    }
+
+    #[test]
+    fn applying_host_registration_snapshot_preserves_unrelated_entries() {
+        let mut template = Engine::new();
+        template.register_host_function_with_arity("Ordinary", 1, |_| Ok(Value::Int(1)));
+        assert!(template.set_host_function_parameter_types("Ordinary", [C4VType::Int]));
+        template.register_host_reference_function_with_arity("Reference", 1, [0], |_| {
+            Ok(Value::Int(2))
+        });
+        assert!(template.set_host_function_parameter_types("Reference", [C4VType::Ref]));
+        template.register_constant("BUILTIN", Value::Int(4));
+        let snapshot = template.host_registration_snapshot();
+
+        let mut destination = Engine::new();
+        destination.register_host_reference_function_with_arity("Ordinary", 1, [0], |_| {
+            Ok(Value::Int(10))
+        });
+        assert!(destination.set_host_function_parameter_types("Ordinary", [C4VType::Ref]));
+        destination.register_host_function_with_arity("Reference", 1, |_| Ok(Value::Int(20)));
+        assert!(destination.set_host_function_parameter_types("Reference", [C4VType::Int]));
+        destination.register_host_function("Custom", |_| Ok(Value::Int(30)));
+        destination.register_constant("BUILTIN", Value::Int(40));
+        destination.register_constant("CUSTOM", Value::Int(50));
+
+        destination.apply_host_registration_snapshot(&snapshot);
+
+        assert!(destination.host_functions.contains_key("Ordinary"));
+        assert!(
+            !destination
+                .host_reference_functions
+                .contains_key("Ordinary")
+        );
+        assert!(!destination.host_functions.contains_key("Reference"));
+        assert!(
+            destination
+                .host_reference_functions
+                .contains_key("Reference")
+        );
+        assert!(destination.has_host_function("Custom"));
+        assert_eq!(
+            destination.host_function_parameter_types["Ordinary"].as_ref(),
+            &[C4VType::Int]
+        );
+        assert_eq!(
+            destination.host_function_parameter_types["Reference"].as_ref(),
+            &[C4VType::Ref]
+        );
+        assert_eq!(destination.constants.get("BUILTIN"), Some(&Value::Int(4)));
+        assert_eq!(destination.constants.get("CUSTOM"), Some(&Value::Int(50)));
+    }
+
+    #[test]
+    fn host_registration_snapshot_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<HostRegistrationSnapshot>();
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot share C4String constants")]
+    fn host_registration_snapshots_reject_string_constants() {
+        let mut engine = Engine::new();
+        engine.register_constant("TEXT", Value::String("cached".into()));
+        let _ = engine.host_registration_snapshot();
+    }
+
+    #[test]
     fn renaming_a_script_host_updates_only_its_function_source_names() {
         let mut foreign = Engine::new();
         foreign.set_script_name("Foreign.c4d/Script.c");
@@ -2784,6 +3052,26 @@ mod tests {
             error.call_frames()[0].source_name(),
             Some("Scenario.c4s/Objects.c4d/Script.c")
         );
+    }
+
+    #[test]
+    fn runtime_call_frames_preserve_references_and_trim_nil_arguments() {
+        let mut engine = Engine::new();
+        engine
+            .load_script(
+                "#strict 3\n\
+                 func Fail(first, &second, third, &fourth) { return Missing(); }\n\
+                 func Run() { var value = 42; var trailing = nil; return Fail(nil, value, nil, trailing); }",
+            )
+            .expect("diagnostic script compiles");
+
+        let error = engine.call("Run", &[]).expect_err("Missing fails");
+        let fail = error
+            .call_frames()
+            .iter()
+            .find(|frame| frame.function() == "Fail")
+            .unwrap_or_else(|| panic!("Fail remains in the captured call stack: {error:?}"));
+        assert_eq!(fail.arguments(), "nil,42*,nil,nil*");
     }
 
     #[test]

@@ -50,7 +50,10 @@ use crate::{
 use crate::{LiquidSegment, PlayerViewport};
 use chrono::{Datelike, Local, Timelike};
 use lc_resources::PhysicalInfo;
-use lc_script::{C4VType, Engine as ScriptEngine, HostCallArg, RuntimeError, Value, ValueMap};
+use lc_script::{
+    C4VType, Engine as ScriptEngine, HostCallArg, HostRegistrationSnapshot, RuntimeError, Value,
+    ValueMap,
+};
 use std::mem;
 use std::sync::Arc;
 use tracing::{debug, error, info};
@@ -15491,7 +15494,7 @@ impl CppNativeHostRegistrar<'_> {
     }
 }
 
-pub fn register_host_functions(script: &mut ScriptEngine) {
+fn populate_host_registration_template(script: &mut ScriptEngine) {
     // Every script host knows the engine constant table
     // (RegisterGlobalConstant, C4Script.cpp:6580-6581).
     crate::script_constants::register_script_constants(script);
@@ -15828,14 +15831,6 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Contained", contained);
     script.register_host_function("GetCategory", get_category);
     script.register_host_function("SetCategory", set_category);
-    script.engine.register_method_dispatch(std::sync::Arc::new(arrow_method_dispatch));
-    script.engine.register_method_reference_dispatch(std::rc::Rc::new(
-        arrow_method_reference_dispatch,
-    ));
-    script.engine
-        .register_global_call_context_hook(std::sync::Arc::new(global_call_context_hook));
-    script.engine
-        .register_local_cell_hook(std::rc::Rc::new(foreign_local_cell_hook));
     script.register_host_function("NoContainer", no_container);
     script.register_host_function("AnyContainer", any_container);
     script.register_host_function("ActIdle", act_idle);
@@ -16005,6 +16000,25 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
             "native signature exists without a registered callback: {name}"
         );
     }
+}
+
+fn install_host_dispatch_hooks(script: &mut ScriptEngine) {
+    script.register_method_dispatch(std::sync::Arc::new(arrow_method_dispatch));
+    script.register_method_reference_dispatch(std::rc::Rc::new(arrow_method_reference_dispatch));
+    script.register_global_call_context_hook(std::sync::Arc::new(global_call_context_hook));
+    script.register_local_cell_hook(std::rc::Rc::new(foreign_local_cell_hook));
+}
+
+pub fn register_host_functions(script: &mut ScriptEngine) {
+    static REGISTRATIONS: std::sync::OnceLock<HostRegistrationSnapshot> =
+        std::sync::OnceLock::new();
+    let registrations = REGISTRATIONS.get_or_init(|| {
+        let mut template = ScriptEngine::new();
+        populate_host_registration_template(&mut template);
+        template.host_registration_snapshot()
+    });
+    script.apply_host_registration_snapshot(registrations);
+    install_host_dispatch_hooks(script);
 }
 
 /// One synced draw through the active random context (host-side engine
@@ -52670,6 +52684,70 @@ mod tests {
                 "native arity drift for {name}"
             );
         }
+    }
+
+    #[test]
+    fn cached_host_registration_overrides_remain_host_local() {
+        let mut overridden = ScriptEngine::new();
+        register_host_functions(&mut overridden);
+        let mut untouched = ScriptEngine::new();
+        register_host_functions(&mut untouched);
+
+        overridden.register_host_function_with_arity("Abs", 1, |_| Ok(Value::Int(99)));
+        assert!(overridden.set_host_function_parameter_types("Abs", [C4VType::Int]));
+        overridden.register_constant("NO_OWNER", Value::Int(77));
+        overridden
+            .load_script("func ReadConstant() { return NO_OWNER; }")
+            .expect("overridden constant probe compiles");
+        untouched
+            .load_script("func ReadConstant() { return NO_OWNER; }")
+            .expect("cached constant probe compiles");
+
+        assert_eq!(
+            overridden
+                .call("Abs", &[Value::Bool(true)])
+                .expect("host-local override runs"),
+            Value::Int(99)
+        );
+        assert_eq!(
+            untouched
+                .call("Abs", &[Value::Bool(true)])
+                .expect("cached C++ native remains installed"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            overridden
+                .call("ReadConstant", &[])
+                .expect("overridden constant resolves"),
+            Value::Int(77)
+        );
+        assert_eq!(
+            untouched
+                .call("ReadConstant", &[])
+                .expect("cached constant remains unchanged"),
+            Value::Int(OWNER_NONE)
+        );
+
+        overridden.register_host_function("EmbeddingOnly", |_| Ok(Value::Int(55)));
+        register_host_functions(&mut overridden);
+        assert_eq!(
+            overridden
+                .call("Abs", &[Value::Bool(true)])
+                .expect("reapplying the cache restores the builtin"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            overridden
+                .call("ReadConstant", &[])
+                .expect("reapplying the cache restores the builtin constant"),
+            Value::Int(OWNER_NONE)
+        );
+        assert_eq!(
+            overridden
+                .call("EmbeddingOnly", &[])
+                .expect("unrelated embedding callback survives cache application"),
+            Value::Int(55)
+        );
     }
 
     #[test]

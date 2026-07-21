@@ -683,7 +683,7 @@ mod tests {
     fn production_registration_names() -> Vec<&'static str> {
         let source = include_str!("compat.rs");
         let (_, after_start) = source
-            .split_once("pub fn register_host_functions(script: &mut ScriptEngine) {")
+            .split_once("fn populate_host_registration_template(script: &mut ScriptEngine) {")
             .expect("production registration function exists");
         let (registrations, _) = after_start
             .split_once("/// One synced draw through the active random context")

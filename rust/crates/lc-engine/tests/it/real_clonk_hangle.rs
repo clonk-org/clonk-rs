@@ -16,18 +16,63 @@ struct ContentResolver {
 }
 
 #[test]
-fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp() {
-    // C4Player::Execute flushes a buffered COM_Dig as COM_Dig_S after
-    // C4DoubleClick frames (C4Player.cpp:1215-1229). In DFA_WALK that calls
-    // ObjectComDig and selects the real CLNK "Dig" action
-    // (C4Object.cpp:3422-3434; C4ObjectCom.cpp:353-362).
+fn tutorial01_real_clonk_subcases_batch() {
     let content = content_root();
     let tutorial = content.join("Tutorial.c4f/Tutorial01.c4s");
+    assert!(
+        tutorial.is_dir(),
+        "Tutorial01 content is required at {}; set LC_CONTENT_ROOT for an isolated worktree",
+        content.display()
+    );
     let resolver = ContentResolver {
         root: content.clone(),
     };
     let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
         .expect("Tutorial01 and the real Objects.c4d load");
+    let subcases: &[(&str, fn(&Scenario))] = &[
+        (
+            "clonk_dig_control_starts_the_real_dig_action_like_cpp",
+            tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp,
+        ),
+        (
+            "hut_keeps_its_defcore_entrance_for_up_control",
+            tutorial_hut_keeps_its_defcore_entrance_for_up_control,
+        ),
+        (
+            "flag_throw_assigns_base_and_unlocks_digging",
+            tutorial_flag_throw_assigns_base_and_unlocks_digging,
+        ),
+        (
+            "clonk_jumps_into_a_ceiling_and_hangles_like_cpp",
+            tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp,
+        ),
+        (
+            "clonk_flight_keeps_accelerating_past_twelve_pixels_per_tick",
+            tutorial_clonk_flight_keeps_accelerating_past_twelve_pixels_per_tick,
+        ),
+    ];
+    let mut failures = Vec::new();
+
+    for &(name, subcase) in subcases {
+        eprintln!("running shared Tutorial01 real-Clonk subcase `{name}`");
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| subcase(&scenario))).is_err() {
+            eprintln!("shared Tutorial01 real-Clonk subcase `{name}` failed; continuing batch");
+            failures.push(name);
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Tutorial01 real-Clonk subcase(s) failed: {}",
+        failures.join(", ")
+    );
+}
+
+fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp(scenario: &Scenario) {
+    // C4Player::Execute flushes a buffered COM_Dig as COM_Dig_S after
+    // C4DoubleClick frames (C4Player.cpp:1215-1229). In DFA_WALK that calls
+    // ObjectComDig and selects the real CLNK "Dig" action
+    // (C4Object.cpp:3422-3434; C4ObjectCom.cpp:353-362).
     let mut engine = Engine::with_seed(0);
     scenario.apply(&mut engine).expect("Tutorial01 applies");
     let joined = engine
@@ -60,8 +105,7 @@ fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp() {
     }
     let settled = engine.object_snapshot(clonk).expect("settled CLNK");
     assert_eq!(
-        settled.action.name,
-        "Walk",
+        settled.action.name, "Walk",
         "the tutorial CLNK must be walking before the dig control"
     );
     assert_eq!(
@@ -90,7 +134,9 @@ fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp() {
         .player_in_com(joined.number, COM_DIG, 0)
         .expect("normal player Dig control");
     for _ in 0..=10 {
-        engine.tick_without_snapshot().expect("dig single-click timeout frame");
+        engine
+            .tick_without_snapshot()
+            .expect("dig single-click timeout frame");
     }
 
     assert_eq!(
@@ -159,10 +205,14 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
     // Exit spends its first C++ Execute in InitEvaluation, so Tick10 may
     // assign Base one frame before the ready crew actually leaves.
     for _ in 0..20 {
-        engine.tick_without_snapshot().expect("ready-base initialization frame");
-        let base_ready = engine.snapshot().objects.iter().any(|object| {
-            object.definition_id == "HUT3" && object.base == joined.number
-        });
+        engine
+            .tick_without_snapshot()
+            .expect("ready-base initialization frame");
+        let base_ready = engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "HUT3" && object.base == joined.number);
         let crew_exited = engine
             .object_snapshot(clonk)
             .is_some_and(|object| object.container.is_none());
@@ -273,7 +323,9 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
     engine
         .player_in_com(joined.number, COM_DIG, 0)
         .expect("close Buy");
-    engine.tick_without_snapshot().expect("auto-context reopens");
+    engine
+        .tick_without_snapshot()
+        .expect("auto-context reopens");
     assert_eq!(
         engine
             .debug_object_menu(clonk.as_u64())
@@ -293,19 +345,11 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
     assert!(contents.items.iter().any(|item| item.item_id == "LORY"));
 }
 
-#[test]
-fn tutorial_hut_keeps_its_defcore_entrance_for_up_control() {
+fn tutorial_hut_keeps_its_defcore_entrance_for_up_control(scenario: &Scenario) {
     // HUT2's DefCore Entrance=-18,8,16,17 must reach SetOCF's full-Con
     // OCF_Entrance bit (C4Object.cpp:586-589). ObjectComUp at the real
     // entrance then queues Enter before considering Jump
     // (C4ObjectCom.cpp:335-348).
-    let content = content_root();
-    let tutorial = content.join("Tutorial.c4f/Tutorial01.c4s");
-    let resolver = ContentResolver {
-        root: content.clone(),
-    };
-    let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
-        .expect("Tutorial01 and the real Objects.c4d load");
     let mut engine = Engine::with_seed(0);
     scenario.apply(&mut engine).expect("Tutorial01 applies");
     let joined = engine
@@ -368,7 +412,9 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control() {
         vec!["Enter".to_string()]
     );
 
-    engine.tick_without_snapshot().expect("first entrance command frame");
+    engine
+        .tick_without_snapshot()
+        .expect("first entrance command frame");
     assert_eq!(
         engine
             .object_snapshot(clonk)
@@ -412,20 +458,13 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control() {
     );
 }
 
-#[test]
-fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
+fn tutorial_flag_throw_assigns_base_and_unlocks_digging(scenario: &Scenario) {
     // Tutorial01's real sequence carries FLAG through Script60, teaches
     // contained COM_Throw in Script110, observes C4Object::Base through
     // GetBase in Script120, then unlocks digging in Script160. Contained
     // Throw is synchronous (C4Object.cpp:3280-3282; C4Command.cpp:966-970)
     // and ExecBase attaches the flag on Tick10 (C4Object.cpp:1000-1018).
     let content = content_root();
-    let tutorial = content.join("Tutorial.c4f/Tutorial01.c4s");
-    let resolver = ContentResolver {
-        root: content.clone(),
-    };
-    let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
-        .expect("Tutorial01 and the real Objects.c4d load");
     let mut engine = Engine::with_seed(0);
     let material_group =
         Group::open(content.join("Material.c4g")).expect("the real global Material.c4g opens");
@@ -468,7 +507,9 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
 
     let flag = (0..700)
         .find_map(|_| {
-            engine.tick_without_snapshot().expect("tutorial lead-in frame");
+            engine
+                .tick_without_snapshot()
+                .expect("tutorial lead-in frame");
             engine
                 .snapshot()
                 .objects
@@ -493,7 +534,9 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     let mut mask = engine.snapshot().players[0].show_control;
     let mut mask_changes = 0;
     for _ in 0..400 {
-        engine.tick_without_snapshot().expect("tutorial flag instruction frame");
+        engine
+            .tick_without_snapshot()
+            .expect("tutorial flag instruction frame");
         let next = engine.snapshot().players[0].show_control;
         if next != mask {
             mask = next;
@@ -512,7 +555,10 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
         .player_in_com(joined.number, COM_THROW, 0)
         .expect("contained Throw control");
     assert_eq!(
-        engine.object_snapshot(flag).expect("FLAG after Throw").container,
+        engine
+            .object_snapshot(flag)
+            .expect("FLAG after Throw")
+            .container,
         Some(hut),
         "COM_Throw puts FLAG into HUT2 before returning"
     );
@@ -625,7 +671,9 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
         .player_in_com(joined.number, COM_DIG, 0)
         .expect("normal player Dig control");
     for _ in 0..100 {
-        engine.tick_without_snapshot().expect("diagonal tutorial digging frame");
+        engine
+            .tick_without_snapshot()
+            .expect("diagonal tutorial digging frame");
     }
     let diagonal_digger = engine.object_snapshot(clonk).expect("CLNK after Dig");
     assert_eq!(diagonal_digger.action.name, "Dig");
@@ -663,7 +711,9 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     // (C4GameObjects.cpp:143-194; C4Object.cpp:5693-5713). Follow the real
     // tutorial tunnel until its Script150 GOLD enters the real CLNK.
     for _ in 0..140 {
-        engine.tick_without_snapshot().expect("horizontal tutorial digging frame");
+        engine
+            .tick_without_snapshot()
+            .expect("horizontal tutorial digging frame");
         if engine
             .object_snapshot(gold)
             .is_some_and(|object| object.container == Some(clonk))
@@ -685,15 +735,18 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     // teleports only after Script206's message proves the same Tick10 script
     // observation happened (Tutorial01 Script.c:151-169).
     for _ in 0..250 {
-        if engine.snapshot().hud.messages.iter().any(|message| {
-            message
-                .lines
-                .iter()
-                .any(|line| line.contains("Wonderful!"))
-        }) {
+        if engine
+            .snapshot()
+            .hud
+            .messages
+            .iter()
+            .any(|message| message.lines.iter().any(|line| line.contains("Wonderful!")))
+        {
             break;
         }
-        engine.tick_without_snapshot().expect("Script200 GOLD observation frame");
+        engine
+            .tick_without_snapshot()
+            .expect("Script200 GOLD observation frame");
     }
     assert!(
         engine.snapshot().hud.messages.iter().any(|message| {
@@ -732,7 +785,9 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     // (C4Game.cpp:1908; Tutorial01 Script.c:176-181).
     for _ in 0..7 {
         for _ in 0..35 {
-            engine.tick_without_snapshot().expect("pre-completion clock frame");
+            engine
+                .tick_without_snapshot()
+                .expect("pre-completion clock frame");
         }
         engine.sec1_timer();
     }
@@ -748,7 +803,9 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
         {
             break;
         }
-        engine.tick_without_snapshot().expect("final HUT2 entrance frame");
+        engine
+            .tick_without_snapshot()
+            .expect("final HUT2 entrance frame");
     }
     assert_eq!(
         engine
@@ -759,7 +816,10 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
         "the normal Up control must carry the CLNK into HUT2"
     );
     assert_eq!(
-        engine.player(joined.number).expect("player exists").wealth(),
+        engine
+            .player(joined.number)
+            .expect("player exists")
+            .wealth(),
         5,
         "HUT2 sells GOLD in the successful Enter call"
     );
@@ -772,7 +832,9 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     // enters (C4ScriptHost.cpp:222-230).
     let mut reached_tutorial02 = false;
     for _ in 0..20 {
-        engine.tick_without_snapshot().expect("Script215 approach frame");
+        engine
+            .tick_without_snapshot()
+            .expect("Script215 approach frame");
         if engine.next_mission().path == r"Tutorial.c4f\Tutorial02.c4s" {
             reached_tutorial02 = true;
             break;
@@ -858,25 +920,11 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
     assert_eq!(result.score_new, Some(240));
 }
 
-#[test]
-fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp() {
+fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp(scenario: &Scenario) {
     // C4PhysicalInfo::PromotionUpdate enables CanHangle for every ranked
     // crew member (C4InfoCore.cpp:207-213). A low-speed DFA_FLIGHT contact
     // through the CLNK top vertex then enters Hangle without changing its
     // facing (C4Object.cpp:4369-4404; C4ObjectCom.cpp:112-118).
-    let content = content_root();
-    let tutorial = content.join("Tutorial.c4f/Tutorial01.c4s");
-    assert!(
-        tutorial.is_dir(),
-        "Tutorial01 content is required at {}; set LC_CONTENT_ROOT for an isolated worktree",
-        content.display()
-    );
-
-    let resolver = ContentResolver {
-        root: content.clone(),
-    };
-    let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
-        .expect("Tutorial01 and the real Objects.c4d load");
     let mut engine = Engine::with_seed(0);
     scenario
         .apply_before_players(&mut engine)
@@ -973,7 +1021,9 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp() {
         {
             break;
         }
-        engine.tick_without_snapshot().expect("ceiling approach frame");
+        engine
+            .tick_without_snapshot()
+            .expect("ceiling approach frame");
     }
     let hangle = engine.object_snapshot(clonk).expect("CLNK after contact");
     assert_eq!(hangle.action.name, "Hangle");
@@ -981,25 +1031,11 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp() {
     assert_eq!(hangle.velocity, Vector2::ZERO);
 }
 
-#[test]
-fn tutorial_clonk_flight_keeps_accelerating_past_twelve_pixels_per_tick() {
+fn tutorial_clonk_flight_keeps_accelerating_past_twelve_pixels_per_tick(scenario: &Scenario) {
     // DFA_FLIGHT calls DoGravity every frame (C4Object.cpp:4893-4904), whose
     // free-fall branch only adds GravAccel (C4Object.cpp:4672-4674). C++ has
     // no generic terminal-velocity clamp, so a Clonk falling through enough
     // open space must accelerate past 12 px/tick.
-    let content = content_root();
-    let tutorial = content.join("Tutorial.c4f/Tutorial01.c4s");
-    assert!(
-        tutorial.is_dir(),
-        "Tutorial01 content is required at {}; set LC_CONTENT_ROOT for an isolated worktree",
-        content.display()
-    );
-
-    let resolver = ContentResolver {
-        root: content.clone(),
-    };
-    let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
-        .expect("Tutorial01 and the real Objects.c4d load");
     let mut engine = Engine::with_seed(0);
     scenario
         .apply_before_players(&mut engine)

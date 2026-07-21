@@ -416,6 +416,7 @@ fn debugger_hooks_capture_call_and_return() {
     {
         let call_log = Arc::clone(&call_log);
         hooks.set_on_call(move |name, args| {
+            assert_eq!(args, [Value::Int(41)]);
             let mut log = call_log.lock().unwrap();
             log.push(format!("{name}({})", args.len()));
         });
