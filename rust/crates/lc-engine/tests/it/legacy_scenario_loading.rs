@@ -137,6 +137,144 @@ fn legacy_scenario_loads_map_objects_and_definitions() -> Result<(), Box<dyn std
     Ok(())
 }
 
+#[test]
+fn legacy_objects_names_are_exact_case_like_cpp() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempdir()?;
+    let scenario_dir = temp.path();
+    let definition_dir = scenario_dir.join("Objects.ocd");
+    fs::create_dir_all(&definition_dir)?;
+    fs::write(
+        definition_dir.join("DefCore.txt"),
+        "[DefCore]\nid=CASE\nName=Case Probe\nCategory=16\nWidth=8\nHeight=8\n",
+    )?;
+    fs::write(definition_dir.join("Script.c"), "#strict\n")?;
+    write_definition_graphics(&definition_dir)?;
+    fs::write(
+        scenario_dir.join("Scenario.txt"),
+        "[Head]\nTitle=Exact Objects Names\nSaveGame=1\nNoInitialize=1\n\n\
+         [Definitions]\nDefinition1=Objects.ocd\n",
+    )?;
+    fs::write(
+        scenario_dir.join("Objects.txt"),
+        concat!(
+            // Only exact root [Object] sections are compiled.
+            "[object]\n",
+            "id=CASE\n",
+            "Number=not-a-number\n\n",
+            // Object names are exact too. These malformed/wrong values must
+            // remain unused, including the deliberately lowercase-only id.
+            "[Object]\n",
+            "id=CASE\n",
+            "Number=1\n",
+            "Status=2\n",
+            "ID=NOPE\n",
+            "number=99\n",
+            "owner=not-a-number\n",
+            "category=not-a-number\n",
+            "energy=not-a-number\n",
+            "x=not-a-number\n",
+            "PhysicalTemporary=1\n",
+            "[physical]\n",
+            "Energy=777\n\n",
+            // An exact Physical scope does not accept wrong-case fields, and
+            // a wrong-case Commands sibling is not attached to the object.
+            "[Object]\n",
+            "id=CASE\n",
+            "Number=2\n",
+            "Status=2\n",
+            "PhysicalTemporary=1\n",
+            "[Physical]\n",
+            "energy=888\n",
+            "changes=Energy=123\n",
+            "[commands]\n",
+            "Command1=$2,Wait,i0,0,0,0,0,0,0,0,0,0,0,0,0,wrong-section\n\n",
+            // Exact Commands likewise requires exact, canonical CommandN.
+            "[Object]\n",
+            "id=CASE\n",
+            "Number=3\n",
+            "Status=2\n",
+            "[Commands]\n",
+            "command1=$2,Wait,i0,0,0,0,0,0,0,0,0,0,0,0,0,wrong-key\n",
+            "Command01=$2,Wait,i0,0,0,0,0,0,0,0,0,0,0,0,0,wrong-index\n\n",
+            // Correctly cased native names retain their parsed values across
+            // the Object and both adjacent nested scopes.
+            "[Object]\n",
+            "id=CASE\n",
+            "Number=4\n",
+            "Status=2\n",
+            "Category=17\n",
+            "Energy=1234\n",
+            "X=40\n",
+            "Y=50\n",
+            "PhysicalTemporary=1\n",
+            "[Physical]\n",
+            "Energy=777\n",
+            "Changes=Energy=321\n",
+            "[Commands]\n",
+            "Command1=$2,Wait,i0,0,0,0,0,0,0,0,0,0,0,0,0,exact\n",
+        ),
+    )?;
+
+    let scenario = Scenario::load_from_path_with(scenario_dir, &LocalDefinitionResolver)?;
+    let mut engine = Engine::with_seed(0);
+    scenario.apply(&mut engine)?;
+
+    assert!(engine.object_snapshot(ObjectId::new(99)).is_none());
+    let wrong_object_names = engine
+        .object_snapshot(ObjectId::new(1))
+        .expect("wrong-case Object names leave the exact object intact");
+    assert_eq!(wrong_object_names.category, 0);
+    assert_eq!(wrong_object_names.energy, 0);
+    assert_eq!(wrong_object_names.position, Vector2::new(0, 0));
+    assert_eq!(
+        wrong_object_names
+            .temporary_physical
+            .expect("the exact PhysicalTemporary flag still creates defaults")
+            .energy,
+        0,
+        "wrong-case [physical] is not followed"
+    );
+
+    let wrong_nested_names = engine
+        .object_snapshot(ObjectId::new(2))
+        .expect("object with wrong-case nested names loads");
+    assert_eq!(
+        wrong_nested_names
+            .temporary_physical
+            .expect("exact [Physical] creates temporary physicals")
+            .energy,
+        0,
+        "wrong-case physical field is unused"
+    );
+    assert!(wrong_nested_names.physical_changes.is_empty());
+    assert!(wrong_nested_names.command_stack.is_empty());
+
+    assert!(
+        engine
+            .object_snapshot(ObjectId::new(3))
+            .expect("object with wrong-case command names loads")
+            .command_stack
+            .is_empty()
+    );
+
+    let exact = engine
+        .object_snapshot(ObjectId::new(4))
+        .expect("exact Object section loads");
+    assert_eq!(exact.category, 17);
+    assert_eq!(exact.energy, 1234);
+    assert_eq!(exact.position, Vector2::new(40, 50));
+    assert_eq!(
+        exact
+            .temporary_physical
+            .expect("exact [Physical] values load")
+            .energy,
+        777
+    );
+    assert_eq!(exact.physical_changes, [("Energy".to_string(), 321)]);
+    assert_eq!(exact.command_stack.command_names(), ["Wait"]);
+    Ok(())
+}
+
 fn write_effect_restore_fixture(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let definition = path.join("Carrier.ocd");
     fs::create_dir_all(&definition)?;
