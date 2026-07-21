@@ -497,6 +497,19 @@ the upstream fix for an LLVM miscompilation present since at least Rust 1.87.
 The workspace pins the compiler so local workers and CI share the same cache
 fingerprint.
 
+A follow-up compared Apple ld modes from fresh targets on the same source. The
+ordinary linker took 93.09s wall, 751.64s user, and 30.43s system CPU;
+`-no_deduplicate` took 92.42s and was rejected as noise. Apple's debug-build
+`-O0` mode took 87.28s wall, 742.05s user, and 27.61s system CPU: 5.81s (6.2%)
+less wall time and 9.59 fewer user CPU-seconds than the direct control. The
+checked-in linker shim applies that mode only when rustc's output is under the
+`debug` profile directory; `play` and `release` retain the normal layout.
+
+The candidate target then passed all 8,348 selected workspace tests, with 10
+skipped, in a 57.486s nextest phase. Apple documents `-O0` as disabling linker
+optimizations and layout algorithms specifically to speed debug incremental
+development; it does not change Rust or LLVM optimization levels.
+
 The faster-looking LLD `-no_deduplicate` experiment was rejected despite a
 97.38s build: an isolated panic probe passed, but the fresh full-workspace
 binary aborted while unwinding the same `#[should_panic]` test. The unmodified

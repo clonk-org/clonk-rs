@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+# Cargo has no stable per-profile linker-argument setting. Select the profile
+# from rustc's output path so debug and test links can use Apple's documented
+# incremental-development fast path without changing play or release layout.
+output=
+expect_output=false
+for argument do
+    if [ "$expect_output" = true ]; then
+        output=$argument
+        expect_output=false
+    elif [ "$argument" = "-o" ]; then
+        expect_output=true
+    fi
+done
+
+profile_directory=
+case "$output" in
+    */*)
+        output_directory=${output%/*}
+        case ${output_directory##*/} in
+            deps | examples)
+                profile_directory=${output_directory%/*}
+                ;;
+            *)
+                parent_directory=${output_directory%/*}
+                if [ "${parent_directory##*/}" = "build" ]; then
+                    profile_directory=${parent_directory%/*}
+                else
+                    profile_directory=$output_directory
+                fi
+                ;;
+        esac
+        ;;
+esac
+
+if [ "${profile_directory##*/}" = "debug" ]; then
+    exec /usr/bin/clang "$@" -Wl,-O0
+fi
+exec /usr/bin/clang "$@"

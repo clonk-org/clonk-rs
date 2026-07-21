@@ -3,7 +3,7 @@ xtask = "run --package xtask --bin xtask --"
 dev-check = "run --package xtask --bin xtask -- dev-check"
 
 # Rust 1.97's bundled Mach-O LLD emits invalid unwind metadata for some large
-# test binaries on this workspace. Apple Clang's system linker preserves panic
-# unwinding and is also faster for the measured cold workspace test build.
+# test binaries on this workspace. The shim keeps Apple Clang's correct system
+# linker and selects its debug-build fast path only for debug/test outputs.
 [target.aarch64-apple-darwin]
-linker = "/usr/bin/clang"
+linker = ".cargo/macos-system-clang"

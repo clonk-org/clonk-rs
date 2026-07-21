@@ -77,10 +77,12 @@ whose level-1 runtime is too slow for representative gameplay:
 cargo run --profile play -p lc-app
 ```
 
-On Apple Silicon macOS, Cargo invokes Apple Clang and the system linker. The
-Rust 1.97.1 toolchain's bundled Mach-O LLD does not preserve panic unwinding
-for every workspace test binary, so do not override the checked-in linker;
-other targets continue using their platform default linker.
+On Apple Silicon macOS, Cargo invokes Apple Clang and the system linker through
+the checked-in `.cargo/macos-system-clang` shim. Debug and test outputs use
+Apple ld's build-time-oriented `-O0` layout; the `play` and `release` profiles
+retain the normal linker layout. Rust 1.97.1's bundled Mach-O LLD does not
+preserve panic unwinding for every workspace test binary, so do not override
+the checked-in linker. Other targets continue using their platform default.
 
 ## Artifacts and replay reproduction
 
