@@ -13652,6 +13652,9 @@ struct GameApp {
     startup_tooltip_resources: HashMap<String, String>,
     /// Process-local Config.General.MissionAccess shared across fresh games.
     mission_access: MissionAccessStore,
+    /// Process-global C4Group maker captured from `Config.General.Name` once
+    /// during application initialization, like `C4Group_SetMaker`.
+    process_group_maker: LegacyCString,
     /// `Config.Graphics.ShowFolderMaps`, default-on like C4ConfigGraphics.
     show_folder_maps: bool,
     /// Process-local Config.Graphics.ShowCommands enable requests shared
@@ -22841,6 +22844,10 @@ fn load_native_config_bytes(paths: Option<&AppPaths>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+fn configured_process_group_maker(config: &[u8]) -> LegacyCString {
+    lc_app::configured_native_value(config, "General", "Name").unwrap_or_default()
+}
+
 /// C4Game's `Application.isFullScreen` distinguishes the graphical client from
 /// `/console`; it is unrelated to the OS window display mode. Console mode
 /// enables DebugMode by default, while the graphical client requires the
@@ -25352,6 +25359,7 @@ impl GameApp {
         let native_config = load_native_config_bytes(paths);
         let gamepads_enabled = configured_gamepads_enabled(&native_config);
         let allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
+        let process_group_maker = configured_process_group_maker(&native_config);
         // A real installation must establish C4GUI's process-global bundle
         // before any controller, discovery worker, renderer, or app-owned UI
         // state is constructed. Asset-less test apps install their explicit
@@ -25664,6 +25672,7 @@ impl GameApp {
             loaded_default_rank_names,
             startup_tooltip_resources,
             mission_access,
+            process_group_maker,
             show_folder_maps,
             show_commands_requests,
             allow_scripting_in_replays,
@@ -62251,6 +62260,7 @@ impl GameApp {
             &comment,
             &portrait,
             &big_icon,
+            self.process_group_maker.as_bytes(),
         );
         match result {
             Ok(saved) => self.finish_startup_player_properties_save(saved, origin),
@@ -62759,7 +62769,12 @@ impl GameApp {
             tracing::error!(index, "crew-participation action references a stale row");
             return Ok(());
         };
-        match set_crew_participation(&player_path, &file_name, participating) {
+        match set_crew_participation(
+            &player_path,
+            &file_name,
+            participating,
+            self.process_group_maker.as_bytes(),
+        ) {
             Ok(()) => {
                 if let Some(entry) = self.startup_crew_files.get_mut(index) {
                     entry.crew_info.participation = i32::from(participating);
@@ -63045,7 +63060,12 @@ impl GameApp {
         }
 
         let new_file_name = crew_file_name_for_title(&new_name);
-        match rename_crew(&player_path, &old_file_name, &new_name) {
+        match rename_crew(
+            &player_path,
+            &old_file_name,
+            &new_name,
+            self.process_group_maker.as_bytes(),
+        ) {
             Ok(persisted_file_name) => {
                 self.resolve_startup_crew_rename(RenameEditResult::Accepted);
                 let reload_error = self
@@ -63265,7 +63285,12 @@ impl GameApp {
                     tracing::error!(index, "accepted crew death message references a stale row");
                     return Ok(());
                 };
-                let result = set_crew_death_message(&player_path, &file_name, &text);
+                let result = set_crew_death_message(
+                    &player_path,
+                    &file_name,
+                    &text,
+                    self.process_group_maker.as_bytes(),
+                );
                 if result.is_ok() {
                     if let Err(error) = self.reload_startup_crew_list(Some(&file_name)) {
                         tracing::error!(%error, "failed to reload startup crew death message");
@@ -74994,7 +75019,11 @@ impl GameApp {
         player_path: &Path,
         file_name: &str,
     ) -> Result<(), EngineError> {
-        let deletion = delete_crew_file(player_path, file_name);
+        let deletion = delete_crew_file(
+            player_path,
+            file_name,
+            self.process_group_maker.as_bytes(),
+        );
         if let Err(error) = deletion.as_ref() {
             tracing::error!(path = %player_path.display(), %file_name, %error, "failed to delete crew file");
         }
@@ -142342,6 +142371,18 @@ ScenInfoArea=70,5,25,90
         assert!(!configured_gamepads_enabled(
             b"[General]\nGamepadEnabled=0\n"
         ));
+    }
+
+    #[test]
+    fn startup_group_maker_snapshot_preserves_configured_native_bytes() {
+        assert_eq!(configured_process_group_maker(b"").as_bytes(), b"");
+        assert_eq!(
+            configured_process_group_maker(
+                b"[General]\nName=\"M\\201ker\"\nName=Ignored\n"
+            )
+            .as_bytes(),
+            b"M\x81ker"
+        );
     }
 
     #[test]

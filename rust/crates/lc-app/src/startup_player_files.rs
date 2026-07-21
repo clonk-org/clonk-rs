@@ -268,12 +268,14 @@ pub fn set_crew_participation(
     player_path: &Path,
     child_name: &str,
     participating: bool,
+    group_maker: &[u8],
 ) -> Result<(), StartupCrewMutationError> {
     rewrite_crew_value(
         player_path,
         child_name,
         b"Participation",
         (!participating).then_some(b"0".as_slice()),
+        group_maker,
     )
 }
 
@@ -282,6 +284,7 @@ pub fn set_crew_death_message(
     player_path: &Path,
     child_name: &str,
     message: &str,
+    group_maker: &[u8],
 ) -> Result<(), StartupCrewMutationError> {
     let mut message = c4_input_bytes(message);
     message.truncate(75);
@@ -290,6 +293,7 @@ pub fn set_crew_death_message(
         child_name,
         b"DeathMessage",
         (!message.is_empty()).then_some(message.as_slice()),
+        group_maker,
     )
 }
 
@@ -299,6 +303,7 @@ pub fn rename_crew(
     player_path: &Path,
     child_name: &str,
     new_display_name: &str,
+    group_maker: &[u8],
 ) -> Result<String, StartupCrewMutationError> {
     let mut requested_name = c4_input_bytes(new_display_name);
     if requested_name.is_empty() {
@@ -355,7 +360,7 @@ pub fn rename_crew(
             let reopened = Group::open(player_path)?;
             let renamed_entry = find_crew_entry(&reopened, &persisted_name)?;
             let renamed_child = open_direct_child(&reopened, &renamed_entry)?;
-            persist_object_info_to_standalone_child(&renamed_child, &rewritten)
+            persist_object_info_to_standalone_child(&renamed_child, &rewritten, group_maker)
         })();
         if let Err(source) = rewrite_result {
             return Err(
@@ -383,7 +388,7 @@ pub fn rename_crew(
             });
         }
         let lookup = if rename_due { new_utf8 } else { actual_utf8 };
-        replace_mutable_child_core(&mut mutable, lookup, rewritten)?;
+        replace_mutable_child_core(&mut mutable, lookup, rewritten, group_maker)?;
         persist_packed_group(player_path, &mutable)?;
     }
     Ok(new_file_name)
@@ -394,6 +399,7 @@ pub fn rename_crew(
 pub fn delete_crew_file(
     player_path: &Path,
     child_name: &str,
+    group_maker: &[u8],
 ) -> Result<(), StartupCrewMutationError> {
     let player_group = Group::open(player_path)?;
     let entry = find_crew_entry(&player_group, child_name)?;
@@ -419,6 +425,7 @@ pub fn delete_crew_file(
             file_name: child_name.to_string(),
         });
     }
+    stamp_nonempty_group_maker(&mut mutable, group_maker);
     persist_packed_group(player_path, &mutable)
 }
 
@@ -427,6 +434,7 @@ fn rewrite_crew_value(
     child_name: &str,
     key: &[u8],
     value: Option<&[u8]>,
+    group_maker: &[u8],
 ) -> Result<(), StartupCrewMutationError> {
     let player_group = Group::open(player_path)?;
     let entry = find_crew_entry(&player_group, child_name)?;
@@ -438,7 +446,7 @@ fn rewrite_crew_value(
         }
     })?;
     if player_group.is_directory() {
-        persist_object_info_to_standalone_child(&child, &rewritten)
+        persist_object_info_to_standalone_child(&child, &rewritten, group_maker)
     } else {
         let actual_name = std::str::from_utf8(&entry.name_bytes).map_err(|_| {
             StartupCrewMutationError::InvalidCrewCore {
@@ -446,7 +454,7 @@ fn rewrite_crew_value(
             }
         })?;
         let mut mutable = MutableGroup::from_group(&player_group)?;
-        replace_mutable_child_core(&mut mutable, actual_name, rewritten)?;
+        replace_mutable_child_core(&mut mutable, actual_name, rewritten, group_maker)?;
         persist_packed_group(player_path, &mutable)
     }
 }
@@ -455,9 +463,13 @@ fn replace_mutable_child_core(
     parent: &mut MutableGroup,
     child_name: &str,
     source: Vec<u8>,
+    group_maker: &[u8],
 ) -> Result<(), StartupCrewMutationError> {
     match parent.child_mut(child_name)? {
-        MutableGroupChildMut::Child(child) => child.add_file("ObjectInfo.txt", source)?,
+        MutableGroupChildMut::Child(child) => {
+            child.add_file("ObjectInfo.txt", source)?;
+            stamp_nonempty_group_maker(child, group_maker);
+        }
         MutableGroupChildMut::Missing | MutableGroupChildMut::File => {
             return Err(StartupCrewMutationError::EntryNotFound {
                 file_name: child_name.to_string(),
@@ -470,6 +482,7 @@ fn replace_mutable_child_core(
 fn persist_object_info_to_standalone_child(
     child: &Group,
     source: &[u8],
+    group_maker: &[u8],
 ) -> Result<(), StartupCrewMutationError> {
     if child.is_directory() {
         let entry = child
@@ -483,7 +496,17 @@ fn persist_object_info_to_standalone_child(
     }
     let mut mutable = MutableGroup::from_group(child)?;
     mutable.add_file("ObjectInfo.txt", source.to_vec())?;
+    stamp_nonempty_group_maker(&mut mutable, group_maker);
     persist_packed_group(child.root(), &mutable)
+}
+
+fn stamp_nonempty_group_maker(group: &mut MutableGroup, group_maker: &[u8]) {
+    // C4Group::Close only copies the process maker when its first byte is
+    // nonzero. An empty maker therefore retains an imported header (or a new
+    // group's native "New C4Group" default) instead of clearing it.
+    if group_maker.first().is_some_and(|byte| *byte != 0) {
+        group.set_maker_bytes(group_maker);
+    }
 }
 
 fn persist_packed_group(path: &Path, group: &MutableGroup) -> Result<(), StartupCrewMutationError> {
@@ -954,6 +977,7 @@ pub fn save_player_properties(
     comment: &str,
     portrait: &PlayerImageWrite,
     big_icon: &PlayerImageWrite,
+    group_maker: &[u8],
 ) -> Result<SavedStartupPlayer, PlayerPropertiesSaveError> {
     let config = match Config::load(paths.config_file()) {
         Ok(config) => config,
@@ -968,6 +992,7 @@ pub fn save_player_properties(
         comment,
         portrait,
         big_icon,
+        group_maker,
     )
 }
 
@@ -980,6 +1005,7 @@ pub fn save_player_properties_in(
     comment: &str,
     portrait: &PlayerImageWrite,
     big_icon: &PlayerImageWrite,
+    group_maker: &[u8],
 ) -> Result<SavedStartupPlayer, PlayerPropertiesSaveError> {
     let filename = player_group_filename(&player.name)?;
     let player_path = configured_player_path(config);
@@ -1033,6 +1059,7 @@ pub fn save_player_properties_in(
             mutable.remove_entry("C4Player.c4b");
             apply_packed_image(&mut mutable, "Portrait.png", &encoded_portrait)?;
             apply_packed_image(&mut mutable, "BigIcon.png", &encoded_big_icon)?;
+            stamp_nonempty_group_maker(&mut mutable, group_maker);
             let bytes = mutable
                 .pack()
                 .map_err(|error| PlayerPropertiesSaveError::Group(error.to_string()))?;
@@ -1046,6 +1073,7 @@ pub fn save_player_properties_in(
             .map_err(|error| PlayerPropertiesSaveError::Group(error.to_string()))?;
         apply_packed_image(&mut mutable, "Portrait.png", &encoded_portrait)?;
         apply_packed_image(&mut mutable, "BigIcon.png", &encoded_big_icon)?;
+        stamp_nonempty_group_maker(&mut mutable, group_maker);
         let bytes = mutable
             .pack()
             .map_err(|error| PlayerPropertiesSaveError::Group(error.to_string()))?;
@@ -1916,6 +1944,7 @@ mod tests {
                 "",
                 &PlayerImageWrite::Keep,
                 &PlayerImageWrite::Keep,
+                b"",
             ),
             Err(PlayerPropertiesSaveError::NameTaken { .. })
         ));
@@ -1933,6 +1962,7 @@ mod tests {
             "self",
             &PlayerImageWrite::Keep,
             &PlayerImageWrite::Keep,
+            b"",
         )
         .expect("own filename is allowed");
         assert_eq!(saved.path, players.join("Taken.c4p"));
@@ -1962,6 +1992,7 @@ mod tests {
             "I'm new.",
             &PlayerImageWrite::Replace(portrait.clone()),
             &PlayerImageWrite::Replace(icon.clone()),
+            b"",
         )
         .expect("create player");
         assert_eq!(saved.file_name, "Players/Ada.c4p");
@@ -2125,6 +2156,7 @@ control=6\n";
             "old comment",
             &PlayerImageWrite::Replace(replacement.clone()),
             &PlayerImageWrite::Clear,
+            b"",
         )
         .expect("edit directory player");
 
@@ -2189,6 +2221,7 @@ control=6\n";
             "packed",
             &PlayerImageWrite::Keep,
             &PlayerImageWrite::Clear,
+            b"",
         )
         .expect("edit packed player");
         let edited = Group::open(&saved.path).expect("open edited");
@@ -2204,6 +2237,129 @@ control=6\n";
         assert!(
             lc_script::c4_string_from_bytes(&edited.read_file("Player.txt").expect("core"))
                 .contains("RankName=Captain")
+        );
+    }
+
+    #[test]
+    fn startup_player_properties_stamps_nonempty_configured_group_maker() {
+        let root = tempdir().expect("player root");
+        let mut config = Config::new();
+        config.set_in(Some("General"), "PlayerPath", "Players");
+        fs::create_dir_all(root.path().join("Players")).expect("player directory");
+        let configured_maker = b"Configured \x81 Maker";
+
+        let new_player = PlayerFile {
+            name: "New".to_string(),
+            ..PlayerFile::default()
+        };
+        let saved = save_player_properties_in(
+            root.path(),
+            &config,
+            None,
+            &new_player,
+            "",
+            &PlayerImageWrite::Keep,
+            &PlayerImageWrite::Keep,
+            configured_maker,
+        )
+        .expect("save new player");
+        assert_eq!(
+            Group::open(&saved.path).expect("open new player").maker_bytes(),
+            Some(configured_maker.as_slice())
+        );
+
+        let existing_path = root.path().join("Players/Existing.c4p");
+        let mut existing = MutableGroup::new("Existing.c4p");
+        existing.set_maker_bytes(b"Original Maker");
+        existing
+            .add_file(
+                "Player.txt",
+                b"[Player]\nName=Existing\n".to_vec(),
+            )
+            .expect("existing core");
+        fs::write(&existing_path, existing.pack().expect("pack existing"))
+            .expect("write existing");
+        let existing_player = PlayerFile::load(
+            &Group::open(&existing_path).expect("open existing player"),
+        )
+        .expect("load existing core");
+        let saved = save_player_properties_in(
+            root.path(),
+            &config,
+            Some(&existing_path),
+            &existing_player,
+            "updated",
+            &PlayerImageWrite::Keep,
+            &PlayerImageWrite::Keep,
+            configured_maker,
+        )
+        .expect("rewrite existing player");
+        assert_eq!(
+            Group::open(&saved.path)
+                .expect("open rewritten player")
+                .maker_bytes(),
+            Some(configured_maker.as_slice())
+        );
+    }
+
+    #[test]
+    fn startup_player_properties_empty_maker_preserves_new_and_existing_defaults() {
+        let root = tempdir().expect("player root");
+        let mut config = Config::new();
+        config.set_in(Some("General"), "PlayerPath", "Players");
+        fs::create_dir_all(root.path().join("Players")).expect("player directory");
+
+        let new_player = PlayerFile {
+            name: "Default".to_string(),
+            ..PlayerFile::default()
+        };
+        let saved = save_player_properties_in(
+            root.path(),
+            &config,
+            None,
+            &new_player,
+            "",
+            &PlayerImageWrite::Keep,
+            &PlayerImageWrite::Keep,
+            b"",
+        )
+        .expect("save new player");
+        assert_eq!(
+            Group::open(&saved.path).expect("open new player").maker_bytes(),
+            Some(b"New C4Group".as_slice())
+        );
+
+        let existing_path = root.path().join("Players/Existing.c4p");
+        let mut existing = MutableGroup::new("Existing.c4p");
+        existing.set_maker_bytes(b"Original Maker");
+        existing
+            .add_file(
+                "Player.txt",
+                b"[Player]\nName=Existing\n".to_vec(),
+            )
+            .expect("existing core");
+        fs::write(&existing_path, existing.pack().expect("pack existing"))
+            .expect("write existing");
+        let existing_player = PlayerFile::load(
+            &Group::open(&existing_path).expect("open existing player"),
+        )
+        .expect("load existing core");
+        let saved = save_player_properties_in(
+            root.path(),
+            &config,
+            Some(&existing_path),
+            &existing_player,
+            "updated",
+            &PlayerImageWrite::Keep,
+            &PlayerImageWrite::Keep,
+            b"",
+        )
+        .expect("rewrite existing player");
+        assert_eq!(
+            Group::open(&saved.path)
+                .expect("open rewritten player")
+                .maker_bytes(),
+            Some(b"Original Maker".as_slice())
         );
     }
 
@@ -2269,26 +2425,27 @@ control=6\n";
             "[ObjectInfo]\nid=CLNK\nName=Target\n",
         );
 
-        set_crew_participation(&player, "SCOUT.C4I", false).expect("disable crew");
+        set_crew_participation(&player, "SCOUT.C4I", false, b"").expect("disable crew");
         assert_eq!(load_crew(&player, "Scout.c4i").participation, 0);
-        set_crew_participation(&player, "Scout.c4i", true).expect("enable crew");
+        set_crew_participation(&player, "Scout.c4i", true, b"").expect("enable crew");
         assert_eq!(load_crew(&player, "Scout.c4i").participation, 1);
 
-        set_crew_death_message(&player, "Scout.c4i", &"x".repeat(90)).expect("set death message");
+        set_crew_death_message(&player, "Scout.c4i", &"x".repeat(90), b"")
+            .expect("set death message");
         assert_eq!(load_crew(&player, "Scout.c4i").death_message.len(), 75);
 
-        let renamed =
-            rename_crew(&player, "Scout.c4i", "A!li.ce§").expect("rename sanitized crew filename");
+        let renamed = rename_crew(&player, "Scout.c4i", "A!li.ce§", b"")
+            .expect("rename sanitized crew filename");
         assert_eq!(renamed, "Alice.c4i");
         assert!(!player.join("Scout.c4i").exists());
         assert_eq!(load_crew(&player, "Alice.c4i").name, "A!li.ce§");
         assert!(matches!(
-            rename_crew(&player, "Alice.c4i", "Target"),
+            rename_crew(&player, "Alice.c4i", "Target", b""),
             Err(StartupCrewMutationError::NameCollision { file_name })
                 if file_name == "Target.c4i"
         ));
 
-        delete_crew_file(&player, "Alice.c4i").expect("delete crew");
+        delete_crew_file(&player, "Alice.c4i", b"").expect("delete crew");
         assert!(!player.join("Alice.c4i").exists());
         assert!(player.join("Target.c4i").exists());
     }
@@ -2313,9 +2470,12 @@ control=6\n";
         packed.add_child("Crew.c4i", crew).expect("crew child");
         fs::write(&player, packed.pack().expect("pack player")).expect("write player");
 
-        set_crew_participation(&player, "Crew.c4i", false).expect("disable packed crew");
-        set_crew_death_message(&player, "Crew.c4i", "Farewell").expect("packed death message");
-        let renamed = rename_crew(&player, "Crew.c4i", "Pack?ed").expect("rename packed crew");
+        set_crew_participation(&player, "Crew.c4i", false, b"")
+            .expect("disable packed crew");
+        set_crew_death_message(&player, "Crew.c4i", "Farewell", b"")
+            .expect("packed death message");
+        let renamed =
+            rename_crew(&player, "Crew.c4i", "Pack?ed", b"").expect("rename packed crew");
         assert_eq!(renamed, "Packed.c4i");
 
         let reopened = Group::open(&player).expect("rewritten player remains valid");
@@ -2325,10 +2485,160 @@ control=6\n";
         assert_eq!(crew.participation, 0);
         assert_eq!(crew.death_message, "Farewell");
 
-        delete_crew_file(&player, "Packed.c4i").expect("delete packed crew");
+        delete_crew_file(&player, "Packed.c4i", b"").expect("delete packed crew");
         let reopened = Group::open(&player).expect("player remains valid after delete");
         assert!(!reopened.exists("Packed.c4i"));
         assert_eq!(reopened.read_file("Keep.txt").unwrap(), b"untouched");
+    }
+
+    #[test]
+    fn startup_crew_core_rewrite_stamps_child_maker_but_preserves_parent_maker() {
+        let root = tempdir().expect("player root");
+        let player = root.path().join("Packed.c4p");
+        let configured_maker = b"Configured \x81 Maker";
+        let mut crew = MutableGroup::new("Crew.c4i");
+        crew.set_maker_bytes(b"Original Child Maker");
+        crew.add_file(
+            "ObjectInfo.txt",
+            b"[ObjectInfo]\nid=CLNK\nName=Crew\n".to_vec(),
+        )
+        .expect("crew core");
+        let mut packed = MutableGroup::new("Packed.c4p");
+        packed.set_maker_bytes(b"Original Parent Maker");
+        packed
+            .add_file("Player.txt", b"[Player]\nName=Packed\n".to_vec())
+            .expect("player core");
+        packed.add_child("Crew.c4i", crew).expect("crew child");
+        fs::write(&player, packed.pack().expect("pack player")).expect("write player");
+
+        set_crew_participation(&player, "Crew.c4i", false, configured_maker)
+            .expect("rewrite crew core");
+        let parent = Group::open(&player).expect("open rewritten parent");
+        assert_eq!(parent.maker_bytes(), Some(b"Original Parent Maker".as_slice()));
+        assert_eq!(
+            parent
+                .open_child("Crew.c4i")
+                .expect("open rewritten child")
+                .maker_bytes(),
+            Some(configured_maker.as_slice())
+        );
+
+        let renamed = rename_crew(&player, "Crew.c4i", "Renamed", configured_maker)
+            .expect("rename and rewrite crew");
+        let parent = Group::open(&player).expect("open renamed parent");
+        assert_eq!(renamed, "Renamed.c4i");
+        assert_eq!(parent.maker_bytes(), Some(b"Original Parent Maker".as_slice()));
+        assert_eq!(
+            parent
+                .open_child("Renamed.c4i")
+                .expect("open renamed child")
+                .maker_bytes(),
+            Some(configured_maker.as_slice())
+        );
+    }
+
+    #[test]
+    fn startup_crew_core_rewrite_with_empty_maker_preserves_both_headers() {
+        let root = tempdir().expect("player root");
+        let player = root.path().join("Packed.c4p");
+        let mut crew = MutableGroup::new("Crew.c4i");
+        crew.set_maker_bytes(b"Original Child Maker");
+        crew.add_file(
+            "ObjectInfo.txt",
+            b"[ObjectInfo]\nid=CLNK\nName=Crew\n".to_vec(),
+        )
+        .expect("crew core");
+        let mut packed = MutableGroup::new("Packed.c4p");
+        packed.set_maker_bytes(b"Original Parent Maker");
+        packed
+            .add_file("Player.txt", b"[Player]\nName=Packed\n".to_vec())
+            .expect("player core");
+        packed.add_child("Crew.c4i", crew).expect("crew child");
+        fs::write(&player, packed.pack().expect("pack player")).expect("write player");
+
+        set_crew_death_message(&player, "Crew.c4i", "Farewell", b"")
+            .expect("rewrite crew core");
+        let parent = Group::open(&player).expect("open rewritten parent");
+        assert_eq!(parent.maker_bytes(), Some(b"Original Parent Maker".as_slice()));
+        assert_eq!(
+            parent
+                .open_child("Crew.c4i")
+                .expect("open rewritten child")
+                .maker_bytes(),
+            Some(b"Original Child Maker".as_slice())
+        );
+    }
+
+    #[test]
+    fn startup_crew_rewrite_stamps_standalone_packed_child_in_directory_player() {
+        let root = tempdir().expect("player root");
+        let player = root.path().join("Directory.c4p");
+        fs::create_dir_all(&player).expect("directory player");
+        fs::write(player.join("Player.txt"), b"[Player]\nName=Directory\n")
+            .expect("player core");
+        let mut crew = MutableGroup::new("Crew.c4i");
+        crew.set_maker_bytes(b"Original Child Maker");
+        crew.add_file(
+            "ObjectInfo.txt",
+            b"[ObjectInfo]\nid=CLNK\nName=Crew\n".to_vec(),
+        )
+        .expect("crew core");
+        fs::write(
+            player.join("Crew.c4i"),
+            crew.pack().expect("pack crew child"),
+        )
+        .expect("write crew child");
+
+        set_crew_participation(&player, "Crew.c4i", false, b"Configured Maker")
+            .expect("rewrite crew core");
+        assert_eq!(
+            Group::open(player.join("Crew.c4i"))
+                .expect("open rewritten child")
+                .maker_bytes(),
+            Some(b"Configured Maker".as_slice())
+        );
+    }
+
+    #[test]
+    fn startup_crew_delete_stamps_parent_when_native_group_close_persists_it() {
+        let root = tempdir().expect("player root");
+        let player = root.path().join("Packed.c4p");
+        let mut crew = MutableGroup::new("Crew.c4i");
+        crew.add_file(
+            "ObjectInfo.txt",
+            b"[ObjectInfo]\nid=CLNK\nName=Crew\n".to_vec(),
+        )
+        .expect("crew core");
+        let mut packed = MutableGroup::new("Packed.c4p");
+        packed.set_maker_bytes(b"Original Parent Maker");
+        packed
+            .add_file("Player.txt", b"[Player]\nName=Packed\n".to_vec())
+            .expect("player core");
+        packed.add_child("Crew.c4i", crew).expect("crew child");
+        let mut other = MutableGroup::new("Other.c4i");
+        other
+            .add_file(
+                "ObjectInfo.txt",
+                b"[ObjectInfo]\nid=CLNK\nName=Other\n".to_vec(),
+            )
+            .expect("other crew core");
+        packed.add_child("Other.c4i", other).expect("other crew child");
+        fs::write(&player, packed.pack().expect("pack player")).expect("write player");
+
+        delete_crew_file(&player, "Crew.c4i", b"").expect("delete with empty maker");
+        let parent = Group::open(&player).expect("open first rewritten parent");
+        assert!(!parent.exists("Crew.c4i"));
+        assert!(parent.exists("Other.c4i"));
+        assert_eq!(parent.maker_bytes(), Some(b"Original Parent Maker".as_slice()));
+
+        delete_crew_file(&player, "Other.c4i", b"Configured Delete Maker")
+            .expect("delete crew");
+        let parent = Group::open(&player).expect("open rewritten parent");
+        assert!(!parent.exists("Other.c4i"));
+        assert_eq!(
+            parent.maker_bytes(),
+            Some(b"Configured Delete Maker".as_slice())
+        );
     }
 
     #[test]
