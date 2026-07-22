@@ -461,7 +461,7 @@ pub struct TeamSelectionEntry {
 }
 
 impl TeamSelectionEntry {
-    pub(crate) fn symbol(&self) -> MenuSymbol {
+    pub fn symbol(&self) -> MenuSymbol {
         MenuSymbol::Team {
             id: self.id,
             icon_spec: self.icon_spec.clone(),
@@ -519,7 +519,7 @@ pub struct IngameMenuState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IngameMenuPointerTarget {
+pub enum IngameMenuPointerTarget {
     Item(usize),
     Close,
     Title,
@@ -1196,13 +1196,13 @@ impl IngameMenuState {
     }
 
     /// Current logical-pixel `C4GUI::ScrollWindow` displacement.
-    pub(crate) fn scroll_y(&self) -> i32 {
+    pub fn scroll_y(&self) -> i32 {
         self.scroll_y.get()
     }
 
     /// `C4GUI::ScrollWindow::ScrollBy`: clamp a logical-pixel displacement
     /// without changing the menu selection.
-    pub(crate) fn scroll_by(
+    pub fn scroll_by(
         &self,
         amount: i32,
         area: Rect,
@@ -1221,7 +1221,7 @@ impl IngameMenuState {
 
     /// Restore C4MainMenu's anchored placement. Reinitializing a location
     /// also reruns `AdjustPosition` for the current selection.
-    pub(crate) fn reset_location(&mut self) {
+    pub fn reset_location(&mut self) {
         self.location.set(None);
         self.last_area.set(None);
         self.normal_lines.set(None);
@@ -1230,19 +1230,19 @@ impl IngameMenuState {
 
     /// Install an absolute top-left position from title dragging. Native
     /// `Element::DoDragging` does not clamp each motion to the viewport.
-    pub(crate) fn set_location(&mut self, location: (i32, i32)) {
+    pub fn set_location(&mut self, location: (i32, i32)) {
         self.location.set(Some(location));
     }
 
     /// Current externally drawn dialog bounds in screen coordinates.
-    pub(crate) fn bounds(&self, area: Rect, font: &HudFont<'_>, gfx: &IngameMenuGraphics) -> Rect {
+    pub fn bounds(&self, area: Rect, font: &HudFont<'_>, gfx: &IngameMenuGraphics) -> Rect {
         self.layout(area, font, gfx).bounds
     }
 
     /// Whether a point lies in the visible `ScrollWindow` client. The title,
     /// frame and optional command strip deliberately do not receive wheel
     /// input through this helper.
-    pub(crate) fn client_contains(
+    pub fn client_contains(
         &self,
         area: Rect,
         font: &HudFont<'_>,
@@ -1387,7 +1387,7 @@ impl IngameMenuState {
     /// `C4GUI::Screen::MouseInput` first filters to `pForVP`, clips external
     /// dialogs to that viewport's output rect, and only then forwards to the
     /// menu elements (C4GUI.cpp:802-845).
-    pub(crate) fn pointer_target(
+    pub fn pointer_target(
         &self,
         area: Rect,
         font: &HudFont<'_>,
@@ -1417,7 +1417,7 @@ impl IngameMenuState {
         rect_contains_point(layout.bounds, point).then_some(IngameMenuPointerTarget::Background)
     }
 
-    pub(crate) fn close_button_rect(
+    pub fn close_button_rect(
         &self,
         area: Rect,
         font: &HudFont<'_>,
@@ -2135,7 +2135,7 @@ fn draw_menu(
 /// `DrawCommandKey` (C4ObjectCom.cpp:930-945): key cap (fctKey, Control.png
 /// (0,100) 64x64) + command symbol (fctCommand, Control.png (0,36) 32x32
 /// phases) + the key name in the small font when ShowCommandKeys is set.
-pub(crate) fn draw_command_key(
+pub fn draw_command_key(
     surface: &mut Surface,
     gfx: &IngameMenuGraphics,
     tiny_font: &HudFont<'_>,
@@ -2171,7 +2171,7 @@ pub(crate) fn draw_command_key(
 }
 
 /// `GfxR->fctOKCancel.Draw(cgo, true, px, py)` (C4Menu.cpp:860,880).
-pub(crate) fn draw_ok_cancel(
+pub fn draw_ok_cancel(
     surface: &mut Surface,
     gfx: &IngameMenuGraphics,
     x: i32,
@@ -2193,7 +2193,7 @@ pub(crate) fn draw_ok_cancel(
 }
 
 /// `C4GUI::Screen::DrawToolTip` (C4Gui.cpp:907-928).
-pub(crate) fn draw_tooltip(
+pub fn draw_tooltip(
     surface: &mut Surface,
     font: &HudFont<'_>,
     facet: Rect,
@@ -2231,7 +2231,7 @@ pub(crate) fn draw_tooltip(
     );
 }
 
-pub(crate) fn tooltip_wrap_width(facet: Rect) -> i32 {
+pub fn tooltip_wrap_width(facet: Rect) -> i32 {
     MAX_TOOLTIP_WDT.min((facet.width as i32).max(50))
 }
 
@@ -2239,13 +2239,7 @@ fn tooltip_line_count(text: &str) -> usize {
     text.split(['\n', '|']).count()
 }
 
-pub(crate) fn tooltip_position(
-    facet: Rect,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-) -> (i32, i32) {
+pub fn tooltip_position(facet: Rect, x: i32, y: i32, width: i32, height: i32) -> (i32, i32) {
     let bottom = facet.y.saturating_add(facet.height as i32);
     let tooltip_y = if y < facet.y.saturating_add(height).saturating_add(5) {
         (y + 5).min(bottom - height)
@@ -2259,7 +2253,7 @@ pub(crate) fn tooltip_position(
 
 /// `C4GUI::Element::Draw3DFrame` (C4Gui.cpp:264-279) with the default border
 /// colors at `C4GUI_BorderAlpha`.
-pub(crate) fn draw_3d_frame(surface: &mut Surface, rect: Rect, gamma: Option<&GammaRamp>) {
+pub fn draw_3d_frame(surface: &mut Surface, rect: Rect, gamma: Option<&GammaRamp>) {
     let x0 = rect.x;
     let y0 = rect.y;
     let x1 = rect.x + rect.width as i32 - 1;
@@ -2306,7 +2300,7 @@ pub(crate) fn draw_3d_frame(surface: &mut Surface, rect: Rect, gamma: Option<&Ga
 
 /// The zoomed branch of `C4GUI::Element::DrawBar` (C4Gui.cpp:313-329) for
 /// `GetRes()->barCaption`: GUICaption.png sliced 32/128/32 horizontally.
-pub(crate) fn draw_caption_bar(
+pub fn draw_caption_bar(
     surface: &mut Surface,
     rect: Rect,
     image: &ImageData,
@@ -2355,7 +2349,7 @@ pub(crate) fn draw_caption_bar(
 
 /// Nearest-neighbour stretch blit of `src` (source-pixel rect) into `dest`
 /// with alpha blending — the software analogue of `C4Facet::DrawX`.
-pub(crate) fn draw_image_region(
+pub fn draw_image_region(
     surface: &mut Surface,
     image: &ImageData,
     src: Rect,
@@ -2368,7 +2362,7 @@ pub(crate) fn draw_image_region(
 /// `C4Facet::Draw` with `fAspect=true`: scale to fit, keep the aspect ratio
 /// and center in the target. `colorize` applies the default blue player
 /// color like `fctPlayerClr.Surface->SetClr(0xff)` (C4MainMenu.cpp:69-70).
-pub(crate) fn draw_image_region_aspect(
+pub fn draw_image_region_aspect(
     surface: &mut Surface,
     image: &ImageData,
     src: Rect,

@@ -687,6 +687,401 @@ dependencies = [
 ]
 
 [[package]]
+name = "clonk-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "clap",
+ "clonk-app-menus",
+ "clonk-app-render",
+ "clonk-audio",
+ "clonk-core",
+ "clonk-engine",
+ "clonk-frontend",
+ "clonk-graphics",
+ "clonk-gui",
+ "clonk-logging",
+ "clonk-network",
+ "clonk-platform",
+ "clonk-resources",
+ "clonk-scaling",
+ "clonk-script",
+ "flate2",
+ "freetype-rs",
+ "gethostname",
+ "gilrs",
+ "image",
+ "objc2-foundation",
+ "parking_lot",
+ "pixels",
+ "png",
+ "rfd",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "tracing",
+ "ttf-parser 0.25.1",
+ "windows 0.54.0",
+ "winit",
+ "zbus",
+]
+
+[[package]]
+name = "clonk-app-menus"
+version = "0.1.0"
+dependencies = [
+ "clonk-engine",
+ "clonk-frontend",
+ "clonk-graphics",
+ "clonk-gui",
+]
+
+[[package]]
+name = "clonk-app-render"
+version = "0.1.0"
+dependencies = [
+ "clonk-engine",
+ "clonk-frontend",
+ "clonk-graphics",
+ "clonk-gui",
+ "pixels",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "clonk-audio"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "hound",
+ "lewton",
+ "libloading 0.8.9",
+ "midly",
+ "minimp3",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "clonk-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "indexmap 2.11.4",
+ "libc",
+ "once_cell",
+ "rand 0.8.5",
+ "tempfile",
+ "tracing",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "clonk-engine"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clonk-core",
+ "clonk-engine-core",
+ "clonk-resources",
+ "clonk-script",
+ "criterion",
+ "image",
+ "indexmap 2.11.4",
+ "proptest",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "clonk-engine-core"
+version = "0.1.0"
+dependencies = [
+ "rand_core 0.6.4",
+ "serde",
+]
+
+[[package]]
+name = "clonk-engine-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clonk-core",
+ "clonk-engine",
+ "clonk-engine-core",
+ "clonk-resources",
+ "clonk-script",
+ "image",
+ "indexmap 2.11.4",
+ "libc",
+ "memchr",
+ "once_cell",
+ "proptest",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rustix",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "tracing-subscriber",
+ "yoke-derive",
+ "zerofrom-derive",
+]
+
+[[package]]
+name = "clonk-engine-unit-tests"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clonk-core",
+ "clonk-engine",
+ "clonk-engine-core",
+ "clonk-resources",
+ "clonk-script",
+ "image",
+ "indexmap 2.11.4",
+ "libc",
+ "memchr",
+ "once_cell",
+ "proptest",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "rustix",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "tracing-subscriber",
+ "yoke-derive",
+ "zerofrom-derive",
+]
+
+[[package]]
+name = "clonk-frontend"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clonk-engine",
+ "clonk-graphics",
+ "clonk-gui",
+ "clonk-resources",
+ "clonk-scaling",
+ "clonk-script",
+ "freetype-rs",
+ "image",
+ "libc",
+ "memchr",
+ "rayon",
+ "rustix",
+ "serde_json",
+ "tempfile",
+ "tracing-core",
+ "yoke-derive",
+ "zerofrom-derive",
+]
+
+[[package]]
+name = "clonk-frontend-unit-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clonk-engine",
+ "clonk-graphics",
+ "clonk-gui",
+ "clonk-resources",
+ "clonk-scaling",
+ "clonk-script",
+ "freetype-rs",
+ "image",
+ "libc",
+ "memchr",
+ "rayon",
+ "rustix",
+ "serde_json",
+ "tempfile",
+ "tracing-core",
+ "yoke-derive",
+ "zerofrom-derive",
+]
+
+[[package]]
+name = "clonk-game"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clonk-core",
+ "clonk-launcher",
+ "clonk-logging",
+ "clonk-platform",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "windows-sys 0.52.0",
+ "zip",
+]
+
+[[package]]
+name = "clonk-graphics"
+version = "0.1.0"
+dependencies = [
+ "font8x8",
+ "rand 0.8.5",
+ "rusttype",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "clonk-gui"
+version = "0.1.0"
+dependencies = [
+ "clonk-graphics",
+]
+
+[[package]]
+name = "clonk-launcher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clonk-core",
+ "clonk-platform",
+ "clonk-resources",
+ "open",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "zip",
+]
+
+[[package]]
+name = "clonk-launcher-shell"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "clonk-graphics",
+ "clonk-gui",
+ "clonk-launcher",
+ "clonk-launcher-ui",
+ "clonk-logging",
+ "clonk-platform",
+ "pixels",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "winit",
+]
+
+[[package]]
+name = "clonk-launcher-ui"
+version = "0.1.0"
+dependencies = [
+ "clonk-graphics",
+ "clonk-gui",
+ "clonk-launcher",
+ "clonk-platform",
+ "tempfile",
+]
+
+[[package]]
+name = "clonk-logging"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "clonk-network"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "clonk-engine",
+ "clonk-resources",
+ "flate2",
+ "iconv-native",
+ "libc",
+ "log",
+ "reqwest",
+ "serde",
+ "sha1",
+ "socket2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing-core",
+ "xml-rs",
+]
+
+[[package]]
+name = "clonk-platform"
+version = "0.1.0"
+dependencies = [
+ "clonk-core",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "clonk-resources"
+version = "0.1.0"
+dependencies = [
+ "byteorder",
+ "clonk-script",
+ "encoding_rs",
+ "flate2",
+ "image",
+ "libc",
+ "libz-sys",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "walkdir",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "clonk-scaling"
+version = "0.1.0"
+dependencies = [
+ "clonk-graphics",
+ "rayon",
+]
+
+[[package]]
+name = "clonk-script"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "indexmap 2.11.4",
+ "serde",
+ "serde_json",
+ "stacker",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2025,390 +2420,6 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
-
-[[package]]
-name = "clonk-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "clap",
- "flate2",
- "freetype-rs",
- "gethostname",
- "gilrs",
- "image",
- "clonk-app-render",
- "clonk-audio",
- "clonk-core",
- "clonk-engine",
- "clonk-frontend",
- "clonk-graphics",
- "clonk-gui",
- "clonk-logging",
- "clonk-network",
- "clonk-platform",
- "clonk-resources",
- "clonk-scaling",
- "clonk-script",
- "objc2-foundation",
- "parking_lot",
- "pixels",
- "png",
- "rfd",
- "serde",
- "serde_json",
- "sha1",
- "tempfile",
- "thiserror 1.0.69",
- "time",
- "tokio",
- "tracing",
- "ttf-parser 0.25.1",
- "windows 0.54.0",
- "winit",
- "zbus",
-]
-
-[[package]]
-name = "clonk-app-render"
-version = "0.1.0"
-dependencies = [
- "clonk-engine",
- "clonk-frontend",
- "clonk-graphics",
- "clonk-gui",
- "pixels",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "clonk-audio"
-version = "0.1.0"
-dependencies = [
- "cpal",
- "hound",
- "lewton",
- "libloading 0.8.9",
- "midly",
- "minimp3",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "clonk-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "indexmap 2.11.4",
- "libc",
- "once_cell",
- "rand 0.8.5",
- "tempfile",
- "tracing",
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "clonk-engine"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "criterion",
- "image",
- "indexmap 2.11.4",
- "clonk-core",
- "clonk-engine-core",
- "clonk-resources",
- "clonk-script",
- "proptest",
- "rand 0.8.5",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "clonk-engine-core"
-version = "0.1.0"
-dependencies = [
- "rand_core 0.6.4",
- "serde",
-]
-
-[[package]]
-name = "clonk-engine-integration-tests"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "image",
- "indexmap 2.11.4",
- "clonk-core",
- "clonk-engine",
- "clonk-engine-core",
- "clonk-resources",
- "clonk-script",
- "libc",
- "memchr",
- "once_cell",
- "proptest",
- "rand 0.8.5",
- "rand_core 0.6.4",
- "rustix",
- "serde",
- "serde_json",
- "smallvec",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
- "tracing-subscriber",
- "yoke-derive",
- "zerofrom-derive",
-]
-
-[[package]]
-name = "clonk-engine-unit-tests"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "image",
- "indexmap 2.11.4",
- "clonk-core",
- "clonk-engine",
- "clonk-engine-core",
- "clonk-resources",
- "clonk-script",
- "libc",
- "memchr",
- "once_cell",
- "proptest",
- "rand 0.8.5",
- "rand_core 0.6.4",
- "rustix",
- "serde",
- "serde_json",
- "smallvec",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
- "tracing-subscriber",
- "yoke-derive",
- "zerofrom-derive",
-]
-
-[[package]]
-name = "clonk-frontend"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "freetype-rs",
- "image",
- "clonk-engine",
- "clonk-graphics",
- "clonk-gui",
- "clonk-resources",
- "clonk-scaling",
- "clonk-script",
- "libc",
- "memchr",
- "rayon",
- "rustix",
- "serde_json",
- "tempfile",
- "tracing-core",
- "yoke-derive",
- "zerofrom-derive",
-]
-
-[[package]]
-name = "clonk-frontend-unit-tests"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "freetype-rs",
- "image",
- "clonk-engine",
- "clonk-graphics",
- "clonk-gui",
- "clonk-resources",
- "clonk-scaling",
- "clonk-script",
- "libc",
- "memchr",
- "rayon",
- "rustix",
- "serde_json",
- "tempfile",
- "tracing-core",
- "yoke-derive",
- "zerofrom-derive",
-]
-
-[[package]]
-name = "clonk-game"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "clonk-core",
- "clonk-launcher",
- "clonk-logging",
- "clonk-platform",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
- "windows-sys 0.52.0",
- "zip",
-]
-
-[[package]]
-name = "clonk-graphics"
-version = "0.1.0"
-dependencies = [
- "font8x8",
- "rand 0.8.5",
- "rusttype",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "clonk-gui"
-version = "0.1.0"
-dependencies = [
- "clonk-graphics",
-]
-
-[[package]]
-name = "clonk-launcher"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clonk-core",
- "clonk-platform",
- "clonk-resources",
- "open",
- "serde",
- "serde_json",
- "tempfile",
- "zip",
-]
-
-[[package]]
-name = "clonk-launcher-shell"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "clonk-graphics",
- "clonk-gui",
- "clonk-launcher",
- "clonk-launcher-ui",
- "clonk-logging",
- "clonk-platform",
- "pixels",
- "rfd",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
- "winit",
-]
-
-[[package]]
-name = "clonk-launcher-ui"
-version = "0.1.0"
-dependencies = [
- "clonk-graphics",
- "clonk-gui",
- "clonk-launcher",
- "clonk-platform",
- "tempfile",
-]
-
-[[package]]
-name = "clonk-logging"
-version = "0.1.0"
-dependencies = [
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "clonk-network"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.13.1",
- "flate2",
- "iconv-native",
- "clonk-engine",
- "clonk-resources",
- "libc",
- "log",
- "reqwest",
- "serde",
- "sha1",
- "socket2",
- "thiserror 1.0.69",
- "tokio",
- "tracing-core",
- "xml-rs",
-]
-
-[[package]]
-name = "clonk-platform"
-version = "0.1.0"
-dependencies = [
- "clonk-core",
- "tempfile",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "clonk-resources"
-version = "0.1.0"
-dependencies = [
- "byteorder",
- "encoding_rs",
- "flate2",
- "image",
- "clonk-script",
- "libc",
- "libz-sys",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
- "walkdir",
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "clonk-scaling"
-version = "0.1.0"
-dependencies = [
- "clonk-graphics",
- "rayon",
-]
-
-[[package]]
-name = "clonk-script"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "indexmap 2.11.4",
- "serde",
- "serde_json",
- "stacker",
- "thiserror 1.0.69",
-]
 
 [[package]]
 name = "lewton"

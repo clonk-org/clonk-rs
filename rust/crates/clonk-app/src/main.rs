@@ -10,7 +10,6 @@
 
 mod advanced_config;
 mod classic_record_stream;
-mod clonk_fonts;
 mod control_message;
 mod control_options;
 mod desktop_notification;
@@ -18,14 +17,12 @@ mod developer_console_save;
 mod display_sleep_inhibitor;
 use clonk_app_render::draw_commands;
 mod game_message;
-mod game_over;
 mod gamepad;
 use clonk_app_render::gpu_renderer;
 mod host_game_resource_sources;
-mod ingame_menu;
+use clonk_app_menus::ingame_menu;
 mod input;
 mod local_control;
-mod menu_controls;
 mod network;
 mod network_host_preparation;
 mod network_team_assignment;
@@ -66,7 +63,7 @@ use control_message::{mentions_nick, ControlMessageState};
 use control_options::{binding_display_name, format_key_label};
 use desktop_notification::{DesktopNotification, DesktopNotifier};
 use display_sleep_inhibitor::DisplaySleepInhibitor;
-use game_over::{
+use clonk_app_menus::game_over::{
     EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction, GameOverActivationKey,
     GameOverClassicResources, GameOverEntry, GameOverFocus, GameOverOutcome, GameOverSound,
     GameOverState, NextMissionButton,
@@ -75,7 +72,7 @@ use gamepad::{
     GamepadActionType, GamepadEvent, GamepadManager, GamepadSlot, GuiButtonClass,
     LegacyGamepadAxis, LegacyGamepadButton, SourcedGamepadEvent,
 };
-use ingame_menu::{
+use clonk_app_menus::ingame_menu::{
     DisplayFlags, DisplayToggle, GoalRuleEntry, HostDisconnectClientEntry, HostilityEntry,
     IngameMenuGraphics, IngameMenuPointerTarget, IngameMenuState, MainMenuConditions, MenuAction,
     MenuOutcome, NewPlayerEntry, ObserverPlayerEntry, ObserverTarget, OptionFlags, SaveSlotState,
@@ -89,6 +86,10 @@ use clonk_app::{
     load_snapshotted_client_players,
     publish_initial_configured_client_players, resolve_client_game_resources,
     resolve_client_scenario_resources, snapshot_configured_client_player_selection,
+};
+use clonk_app_menus::menu_images::{
+    composite_software_picture_layer, copy_menu_image, copy_menu_image_aspect,
+    copy_stretched_picture, menu_aspect_fit_rect, software_blit_menu_image,
 };
 use clonk_audio::{
     AudioError, AudioSystem, ChannelId, MusicHandle, ResamplingMode, SoundHandle,
@@ -193,7 +194,7 @@ use clonk_resources::{
     ResolvedFontSpec, ResourceDefinition as ResourceDefinitionData,
 };
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
-use menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event};
+use clonk_app_menus::menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event};
 use network::{
     ClientSettings, HostSettings, LeagueEndAttempt, LeagueEndFailurePhase, LeagueRecordStreamStatus,
     NetworkControl, NetworkControlClock, NetworkEvent, NetworkManager, NetworkMode,
@@ -279,31 +280,6 @@ const DEFAULT_SCENARIO_MAX_PLAYERS: usize = 12;
 const CLASSIC_ENGINE_BUILD: i32 = 362;
 const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
 const OFFICIAL_LEAGUE_SERVER: &str = "https://league.clonkspot.org";
-
-#[cfg(test)]
-fn tutorial_seven_gamma() -> clonk_graphics::GammaRamp {
-    // The regression must track the shipped scenario rather than a synthetic
-    // approximation (Tutorial07.c4s/Script.c:12).
-    let script = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../content/Tutorial.c4f/Tutorial07.c4s/Script.c"
-    ));
-    assert!(script.contains("SetGamma(RGB(0,0,0),RGB(100,128,100),RGB(200,255,200))"));
-    clonk_graphics::GammaRamp::from_control_points([0x000000, 0x648064, 0xc8ffc8])
-}
-
-#[cfg(test)]
-fn tutorial_seven_gamma_color(color: Color) -> Color {
-    use clonk_graphics::gamma::GammaChannel;
-
-    let gamma = tutorial_seven_gamma();
-    Color::new(
-        gamma.encode_channel(GammaChannel::Red, color.r),
-        gamma.encode_channel(GammaChannel::Green, color.g),
-        gamma.encode_channel(GammaChannel::Blue, color.b),
-        color.a,
-    )
-}
 
 const BACK_ENTRY_TITLE: &str = "← Back";
 const SAVE_DIR_NAME: &str = "Savegames";
@@ -92989,48 +92965,6 @@ fn crop_menu_image(
     Some(ImageData::new(width, height, pixels))
 }
 
-fn copy_menu_image(surface: &mut Surface, image: &ImageData, destination: Rect) -> Option<()> {
-    let source = Surface::from_bytes(
-        image.width(),
-        image.height(),
-        PixelFormat::Rgba8888,
-        image.pixels().to_vec(),
-    )
-    .ok()?;
-    copy_stretched_picture(
-        &source,
-        Rect::new(0, 0, image.width(), image.height()),
-        surface,
-        destination,
-    )
-}
-
-fn menu_aspect_fit_rect(source_width: u32, source_height: u32, destination: Rect) -> Option<Rect> {
-    if source_width == 0 || source_height == 0 {
-        return None;
-    }
-    let mut fitted = destination;
-    let width_ratio = 100_u64 * u64::from(destination.width) / u64::from(source_width);
-    let height_ratio = 100_u64 * u64::from(destination.height) / u64::from(source_height);
-    if width_ratio < height_ratio {
-        fitted.height = source_height.saturating_mul(destination.width) / source_width;
-        fitted.y += destination.height.saturating_sub(fitted.height) as i32 / 2;
-    } else if height_ratio < width_ratio {
-        fitted.width = source_width.saturating_mul(destination.height) / source_height;
-        fitted.x += destination.width.saturating_sub(fitted.width) as i32 / 2;
-    }
-    Some(fitted)
-}
-
-fn copy_menu_image_aspect(
-    surface: &mut Surface,
-    image: &ImageData,
-    destination: Rect,
-) -> Option<()> {
-    let fitted = menu_aspect_fit_rect(image.width(), image.height(), destination)?;
-    copy_menu_image(surface, image, fitted)
-}
-
 fn menu_rank_picture(
     engine: &Engine,
     hud: &HudGraphics,
@@ -94040,81 +93974,6 @@ fn prepare_owned_menu_pixels(
     }
 }
 
-/// Nearest-neighbour copy used when a native software blit first touches a
-/// fully transparent picture cache. `BltAlpha`/`BltAlphaAdd` copy that source
-/// pixel verbatim, retaining straight alpha for the later menu/HUD draw.
-fn copy_stretched_picture(
-    source: &Surface,
-    source_rect: Rect,
-    destination: &mut Surface,
-    destination_rect: Rect,
-) -> Option<()> {
-    if source_rect.width == 0
-        || source_rect.height == 0
-        || destination_rect.width == 0
-        || destination_rect.height == 0
-    {
-        return Some(());
-    }
-    for row in 0..destination_rect.height {
-        let source_y = source_rect.y
-            + (u64::from(row) * u64::from(source_rect.height)
-                / u64::from(destination_rect.height)) as i32;
-        let destination_y = destination_rect.y + row as i32;
-        for column in 0..destination_rect.width {
-            let source_x = source_rect.x
-                + (u64::from(column) * u64::from(source_rect.width)
-                    / u64::from(destination_rect.width)) as i32;
-            let destination_x = destination_rect.x + column as i32;
-            if source_x < 0 || source_y < 0 || destination_x < 0 || destination_y < 0 {
-                continue;
-            }
-            let color = source.get_pixel(source_x as u32, source_y as u32)?;
-            destination
-                .set_pixel(destination_x as u32, destination_y as u32, color)
-                .ok()?;
-        }
-    }
-    Some(())
-}
-
-fn software_blit_menu_image(
-    destination: &mut Surface,
-    image: &ImageData,
-    destination_rect: Rect,
-    mode: BlitMode,
-) -> Option<()> {
-    let source = Surface::from_bytes(
-        image.width(),
-        image.height(),
-        PixelFormat::Rgba8888,
-        image.pixels().to_vec(),
-    )
-    .ok()?;
-    let source_rect = Rect::new(0, 0, image.width(), image.height());
-    let mut layer = Surface::new(
-        destination.width(),
-        destination.height(),
-        PixelFormat::Rgba8888,
-    );
-    copy_stretched_picture(&source, source_rect, &mut layer, destination_rect)?;
-    let mut coverage_source =
-        Surface::new(image.width(), image.height(), PixelFormat::Rgba8888);
-    coverage_source.fill(Color::opaque(255, 255, 255));
-    let mut coverage = Surface::new(
-        destination.width(),
-        destination.height(),
-        PixelFormat::Rgba8888,
-    );
-    copy_stretched_picture(
-        &coverage_source,
-        source_rect,
-        &mut coverage,
-        destination_rect,
-    )?;
-    composite_software_picture_layer(destination, &layer, &coverage, mode)
-}
-
 fn composite_inventory_picture_layer(
     destination: &mut Surface,
     source: &Surface,
@@ -94190,56 +94049,6 @@ fn blend_straight_picture_additive(source: Color, destination: Color) -> Color {
         channel(source.b, destination.b),
         destination.a,
     )
-}
-
-/// Exact `BltAlpha`/`BltAlphaAdd` composition used by non-primary C4Surface
-/// picture caches. Rust stores opacity, the inverse of C4's packed alpha byte.
-fn composite_software_picture_layer(
-    destination: &mut Surface,
-    source: &Surface,
-    coverage: &Surface,
-    mode: BlitMode,
-) -> Option<()> {
-    if destination.width() != source.width()
-        || destination.height() != source.height()
-        || destination.width() != coverage.width()
-        || destination.height() != coverage.height()
-    {
-        return None;
-    }
-    let additive = matches!(mode, BlitMode::Additive | BlitMode::Mod2Additive);
-    for y in 0..destination.height() {
-        for x in 0..destination.width() {
-            if coverage.get_pixel(x, y)?.a == 0 {
-                continue;
-            }
-            let foreground = source.get_pixel(x, y)?;
-            let background = destination.get_pixel(x, y)?;
-            let output = if background.a == 0 {
-                foreground
-            } else {
-                let alpha = u16::from(foreground.a);
-                let channel = |source: u8, destination: u8| -> u8 {
-                    if additive {
-                        (u16::from(destination) + (u16::from(source) * alpha >> 8))
-                            .min(255) as u8
-                    } else {
-                        ((u16::from(source) * alpha
-                            + u16::from(destination) * (255 - alpha))
-                            >> 8) as u8
-                    }
-                };
-                Color::new(
-                    channel(foreground.r, background.r),
-                    channel(foreground.g, background.g),
-                    channel(foreground.b, background.b),
-                    background.a.saturating_add(foreground.a),
-                )
-            };
-            destination.set_pixel(x, y, output).ok()?;
-        }
-    }
-    Some(())
 }
 
 fn select_focus_candidate(

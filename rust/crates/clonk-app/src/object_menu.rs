@@ -12,7 +12,7 @@ use clonk_graphics::clonk_font::TextAlign;
 use clonk_graphics::{Color, GammaRamp, PixelFormat, Rect, Surface, TextFont};
 use clonk_gui::ImageData;
 
-use crate::ingame_menu::{
+use clonk_app_menus::ingame_menu::{
     IngameMenuGraphics, draw_3d_frame, draw_caption_bar, draw_command_key, draw_image_region,
     draw_image_region_aspect, draw_ok_cancel, draw_tooltip, tooltip_position, tooltip_wrap_width,
 };

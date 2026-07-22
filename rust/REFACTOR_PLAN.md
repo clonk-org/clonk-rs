@@ -39,6 +39,17 @@ extraction is the standing "next lever". Do not re-try rejected experiments
 4. **clonk-app-core**: shared leaf types out of main.rs (AppMode, boundary
    enums, staging structs, resource-bundle structs, paths/config plumbing) so
    steps 2-3 and later peels depend on it instead of on main.rs.
+   Step-2 deferrals to absorb here: the shared software picture pipeline that
+   kept `object_menu.rs` in clonk-app (`object_menu_item_picture` and its
+   `_with_text_spec_resources`/`_with_renderer_modes` variants,
+   `cached_menu_object_picture*`, `menu_rank_picture`,
+   `menu_object_rank_picture`, `compose_owned_menu_picture*`,
+   `crop_menu_image`, the `inventory_*` picture helpers,
+   `prepare_owned_menu_definition_pixels`, `centered_picture_transform`,
+   `inventory_object_picture_with_allowed_modes`, `resolve_script_font_image`,
+   `ScriptTextSpecResources`), plus the interim `clonk_app_menus::menu_images`
+   leaves which can sink to app-core (or clonk-graphics) once that pipeline
+   moves; finish by moving `object_menu.rs` into clonk-app-menus.
 5. **main_tests.rs decomposition**: split by area into `tests/` submodule files
    mounted from the same `#[path]` root (keeps ids); move tests that only
    exercise an extracted crate INTO that crate.
@@ -81,3 +92,11 @@ extraction is the standing "next lever". Do not re-try rejected experiments
   costs the same — this step buys navigability, not build time). Moving
   render-only tests into clonk-app-render was skipped: no test exercises that
   crate alone (both candidates also drive GameApp).
+- Step 2 landed (clonk-app-menus): ingame_menu/game_over/menu_controls/
+  clonk_fonts + the menu_images leaf compositors moved out of the app bin
+  (object_menu.rs deferred on the shared picture pipeline — see step 4);
+  focused 78/78 in the new crate + consumer sweep 170/170 in clonk-app; warm
+  incremental `cargo check -p clonk-app --tests` after a touch of main.rs
+  ≈ 2.0-2.3s (parity with step 1); menu-crate edits now re-typecheck only
+  clonk-app-menus (≈18s full lib+lib-test worst case) instead of the
+  212k-line bin+bin-test pair.

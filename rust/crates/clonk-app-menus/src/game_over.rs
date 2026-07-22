@@ -629,8 +629,7 @@ impl GameOverState {
         self.show_winners
     }
 
-    #[cfg(test)]
-    pub(crate) fn custom_evaluation_scroll(&self) -> i32 {
+    pub fn custom_evaluation_scroll(&self) -> i32 {
         self.custom_evaluation_scroll
     }
 
@@ -1237,7 +1236,7 @@ impl GameOverState {
         }
     }
 
-    pub(crate) fn classic_evaluation_layout(
+    pub fn classic_evaluation_layout(
         &self,
         surface_width: u32,
         surface_height: u32,
