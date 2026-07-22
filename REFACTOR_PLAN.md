@@ -201,3 +201,33 @@ landing, render first (clonk-app-render already exists):
 4. Direction rule: area crates never depend on clonk-app, nor on each other
    except through clonk-app-core. Order after render: sound, saves, chat
    (smallest coupling surface), then lobby/network last (widest overlap).
+
+## Wave 2 — remaining monolith decomposition (2026-07-22)
+
+Targets (lines at wave start): clonk-engine/compat.rs 85,672;
+clonk-engine-unit-tests/tests/unit/main.rs 78,217; clonk-engine/lib.rs 74,275;
+clonk-engine/scenario.rs 36,731; clonk-frontend/lib.rs 34,918;
+clonk-engine/command.rs 29,144; clonk-network/session.rs 26,488;
+clonk-engine/direct_com.rs 20,165.
+
+Recipes (structural only, byte-verbatim moves, full gate per landing):
+- PRODUCTION monoliths → real child modules (`<name>/` directory modules),
+  byte-verbatim item moves, compiler-enumerated minimal pub(crate)
+  promotions, parent re-imports children into the original scope so call
+  sites and `super::*` in tests do not churn. Inline `#[cfg(test)] mod`
+  blocks STAY in the parent file — running test ids must never change
+  (frontend inline tests are mounted by clonk-frontend-unit-tests; nextest
+  overrides and queue evidence cite `tests::` ids). Engine files are
+  determinism-critical: moves only, zero expression edits.
+- TEST monoliths → `include!`-spliced part files (the main_tests.rs
+  mechanism): same module, ids byte-stable, byte-partition proof required.
+- After each area lands: DRY/clippy follow-up pass may consolidate
+  duplication the split exposes (separate commits; parity-sensitive lints
+  stay untouched, as in step 7).
+
+Order: wave A parallel across disjoint crates (compat.rs, frontend lib.rs,
+network session.rs, engine-unit-tests main.rs); wave B engine siblings
+(scenario.rs, command.rs, direct_com.rs — parallel, disjoint files, module
+file→dir conversions leave lib.rs decls untouched), then engine lib.rs
+last (crate root, biggest care); wave C per-crate DRY/clippy. GameApp 6b
+state extraction remains queued behind wave 2.
