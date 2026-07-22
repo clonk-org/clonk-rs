@@ -236,6 +236,12 @@ impl NetworkStartupCancellation {
     }
 }
 
+impl Default for NetworkStartupCancellation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 const HOST_CLIENT_ID: ClientId = 0;
 const NETWORK_TELEMETRY_CAPACITY: usize = 256;
 
@@ -370,9 +376,7 @@ impl NetworkControlClock {
     }
 
     fn update_control_presend(&mut self) -> Option<ControlPreSendChange> {
-        let Some(round_trip_ms) = self.host_round_trip_ms.filter(|rtt| *rtt != 0) else {
-            return None;
-        };
+        let round_trip_ms = self.host_round_trip_ms.filter(|rtt| *rtt != 0)?;
         // Both fields and both expressions are `int32_t` in C++. Preserve
         // the target's full script-visible range and the platform's two's-
         // complement arithmetic instead of silently widening extreme values.
@@ -725,7 +729,7 @@ async fn run_league_record_runtime(
                     tracing::error!(%error, "league record upload acknowledgement failed");
                 }
                 let shutdown_result = if shutdown_completion.is_some() {
-                    let shutdown_result = if !success {
+                    if !success {
                         Some(Err(upload_error.unwrap_or_else(|| {
                             "league record upload failed during shutdown".to_string()
                         })))
@@ -741,8 +745,7 @@ async fn run_league_record_runtime(
                         )
                         .err()
                         .map(|error| Err(error.to_string()))
-                    };
-                    shutdown_result
+                    }
                 } else {
                     None
                 };

@@ -1782,7 +1782,12 @@ impl GameOverState {
             if let Some(highlight) = resources.icon_button_highlight {
                 clonk_frontend::draw_image_bilinear_additive(
                     surface,
-                    &clonk_gui::Rect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32),
+                    &clonk_gui::Rect::new(
+                        rect.x as f32,
+                        rect.y as f32,
+                        rect.w as f32,
+                        rect.h as f32,
+                    ),
                     highlight,
                     gamma,
                 );
@@ -2016,7 +2021,7 @@ fn classic_multiline_label_lines(
 
     let indent_width = font.measure(INDENT, true).0;
     let mut lines = Vec::new();
-    for paragraph in text.split(|character| matches!(character, '\r' | '\n' | '|')) {
+    for paragraph in text.split(['\r', '\n', '|']) {
         if paragraph.is_empty() {
             continue;
         }
@@ -2289,7 +2294,16 @@ fn draw_stat(
     let text = format!("{value}");
     let metrics = font.measure_text(&text, ROW_FONT_SIZE);
     let x = column_x as f32 + STAT_COLUMN_WIDTH as f32 - metrics.width;
-    clonk_frontend::draw_text_with_gamma(font, surface, x, y, &text, ROW_FONT_SIZE, TEXT_COLOR, gamma);
+    clonk_frontend::draw_text_with_gamma(
+        font,
+        surface,
+        x,
+        y,
+        &text,
+        ROW_FONT_SIZE,
+        TEXT_COLOR,
+        gamma,
+    );
 }
 
 fn draw_text_centered(
@@ -2306,7 +2320,16 @@ fn draw_text_centered(
     let metrics = font.measure_text(text, size);
     let width = metrics.width;
     let x = (left as f32 + right as f32 - width) * 0.5;
-    clonk_frontend::draw_text_with_gamma(font, surface, x, baseline as f32, text, size, color, gamma);
+    clonk_frontend::draw_text_with_gamma(
+        font,
+        surface,
+        x,
+        baseline as f32,
+        text,
+        size,
+        color,
+        gamma,
+    );
 }
 
 fn fill_rect(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&GammaRamp>) {

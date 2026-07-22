@@ -140,3 +140,23 @@ extraction is the standing "next lever". Do not re-try rejected experiments
   body edit ≈ 1.9s (parity with steps 1-3); a core body edit cascades
   core→menus→netplay→app in ≈ 2.1s, while the core-only
   `cargo check -p clonk-app-core --tests` loop is ≈ 0.16s.
+- Step 7 first pass over the extracted crates (dead code + mechanical
+  clippy): per-crate `clippy --all-targets -W clippy::all` warnings
+  core 6→1, render 9→0, menus 15→11, netplay 23→18 (53→30 total).
+  Deleted the extraction-flagged dead code (menus GAP_BEFORE_FOOTER,
+  netplay `fn source`); NetworkWorkerReady.local_addresses stays — the
+  host_worker_binds_and_advertises… unit test asserts on it. Remaining
+  warnings are deliberate skips: 16× too_many_arguments, 4×
+  large_enum_variant (boxing), 2× type_complexity, netplay's
+  frame%control_rate is_multiple_of pair (divisor-zero panic semantics
+  in the control cadence), one collapsible_match whose fix hoists a
+  mutating commit() into a match guard, and cfg(test)-region lints
+  (test edits out of scope for the pass). Manifest sweep: no unused
+  deps; the dev-dep feature-union comments were already uniform.
+  Dedupe visible from the split: only the test-helper repository_root
+  ×3 (all in test code — deferred with the menu_images→clonk-graphics
+  sink). game_over.rs, gpu_renderer.rs and prepared_host_bootstrap.rs
+  are rustfmt-clean again; ingame_menu/object_menu/network.rs keep
+  their pre-extraction deviations (many sit inside test modules).
+  Focused suites after the pass: core 8, render 27, menus 115,
+  netplay 230 — identical counts, all green.

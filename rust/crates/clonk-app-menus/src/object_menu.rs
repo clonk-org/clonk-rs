@@ -980,11 +980,7 @@ fn component_footer_cells(
     // capacity rule: a 16px-high strip reports width/16 sections, while each
     // actual component cell consumes 16*3/2 = 24 pixels from the right
     // (C4IDList.cpp:207-227; C4Facet.cpp:38-42,182-213).
-    let section_count = if remaining.height == 0 {
-        0
-    } else {
-        remaining.width / remaining.height
-    } as usize;
+    let section_count = remaining.width.checked_div(remaining.height).unwrap_or(0) as usize;
     let cell_width = remaining.height.saturating_mul(3) / 2;
     components
         .iter()

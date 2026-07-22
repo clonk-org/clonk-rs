@@ -915,9 +915,10 @@ pub fn inventory_owner_modulation(object_color: u32) -> Color {
 }
 
 pub fn combine_inventory_modulations(owner: Color, global: Color) -> Color {
-    let multiply = |left: u8, right: u8| -> u8 { (u16::from(left) * u16::from(right) >> 8) as u8 };
+    let multiply =
+        |left: u8, right: u8| -> u8 { ((u16::from(left) * u16::from(right)) >> 8) as u8 };
     let screen_transparency = |left: u8, right: u8| -> u8 {
-        let product = u16::from(left) * u16::from(right) >> 8;
+        let product = (u16::from(left) * u16::from(right)) >> 8;
         (u16::from(left) + u16::from(right) - product).min(255) as u8
     };
     Color::new(
@@ -1167,10 +1168,10 @@ pub fn prepare_owned_menu_pixels(pixels: &mut [u8], modulation: Option<Color>, m
     };
     let packed_modulate = |source: Color| {
         let multiply = |source: u8, modulation: u8| -> u8 {
-            (u16::from(source) * u16::from(modulation) >> 8) as u8
+            ((u16::from(source) * u16::from(modulation)) >> 8) as u8
         };
         let screen_transparency = |source: u8, modulation: u8| -> u8 {
-            let product = u16::from(source) * u16::from(modulation) >> 8;
+            let product = (u16::from(source) * u16::from(modulation)) >> 8;
             (u16::from(source) + u16::from(modulation) - product).min(255) as u8
         };
         Color::new(

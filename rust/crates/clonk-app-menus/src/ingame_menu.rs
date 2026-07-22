@@ -1750,7 +1750,7 @@ impl IngameMenuGraphics {
                 RefCell::new(HashMap::new());
         }
         let definition = self.definition_icons.get(id);
-        let captain = fulfilled.then(|| self.hud.captain.as_ref()).flatten();
+        let captain = fulfilled.then_some(self.hud.captain.as_ref()).flatten();
         let key = (
             id.to_owned(),
             fulfilled,

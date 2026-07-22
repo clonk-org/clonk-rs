@@ -1824,389 +1824,6 @@ impl LegacyDefinitionResolver for InstallRootDefinitionResolver<'_> {
     }
 }
 
-#[cfg(test)]
-mod definition_root_graphics_tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    fn league_prepared_host(control_mode: i32) -> PreparedHostBootstrap {
-        let mut host_config = HostConfig::default();
-        host_config.initial_status.control_mode = control_mode;
-        let parameters = &mut host_config
-            .initial_join_snapshot
-            .as_mut()
-            .expect("default host JoinData")
-            .parameters;
-        parameters.random_seed = 77;
-        parameters.max_players = 8;
-        parameters.league_address = legacy_string("https://league.example/");
-        PreparedHostBootstrap {
-            host_config,
-            initial_game: InitialNetworkGameData::default(),
-            scenario_defaults: InitialNetworkScenarioDefaults::default(),
-            has_initial_game: false,
-            admission: PreparedHostAdmission {
-                max_players: 8,
-                no_runtime_join: false,
-            },
-            start_time: 1,
-            initial_host_player_info_control: PlayerInfoControlData::default(),
-            runtime_team_metadata: InitialNetworkTeamMetadata {
-                active: false,
-                custom: false,
-                allow_hostility_change: true,
-                allow_team_switch: false,
-                auto_generate_teams: false,
-                last_team_id: 0,
-                team_distribution: clonk_engine::InitialNetworkTeamDistribution::Free,
-                team_colors: false,
-                max_script_players: 0,
-                script_player_names: LegacyCString::default(),
-                random_team_count: 0,
-                teams: Vec::new(),
-            },
-            scenario_wire_name: LegacyCString::default(),
-            scenario_origin: String::new(),
-            dynamic_filename_seed: String::new(),
-            dynamic_wire_name: LegacyCString::default(),
-            definition_modules: Vec::new(),
-            definition_executable_path: String::new(),
-            definition_path: String::new(),
-            material_resource_groups: Vec::new(),
-            reference_icon: 0,
-            reference_comment: LegacyCString::default(),
-            netpuncher_address: LegacyCString::default(),
-            league: Some(PreparedLeagueHostConfig {
-                endpoint: "https://league.example/".to_string(),
-                transport: LeagueHttpTransportConfig::default(),
-                update_period_secs: 120,
-                league_server_signup: true,
-            }),
-            stream_address: legacy_string("old-stream"),
-            local_player_resources: Vec::new(),
-            local_player_alternate_colors_by_resource: HashMap::new(),
-            pending_initial_league_players: None,
-            lifetime: Arc::new(PreparedHostLifetime {
-                temporary_files: Vec::new(),
-                scenario: Mutex::new(None),
-                host_launched: AtomicBool::new(false),
-                initial_player_info_installed: AtomicBool::new(false),
-            }),
-        }
-    }
-
-    #[test]
-    fn l085_lobby_runtime_join_choice_updates_retained_admission_policy() {
-        let mut prepared = league_prepared_host(1);
-        assert!(prepared.admission().runtime_join_allowed());
-
-        prepared.set_runtime_join_allowed(false);
-        assert!(!prepared.admission().runtime_join_allowed());
-
-        prepared.set_runtime_join_allowed(true);
-        assert!(prepared.admission().runtime_join_allowed());
-    }
-
-    #[test]
-
-    fn league_start_applies_nonempty_overrides_and_forces_only_async_central() {
-        let mut prepared = league_prepared_host(2);
-        prepared
-            .apply_league_start_response(&LeagueStartResponse {
-                league: legacy_string("Gold League"),
-                stream_to: legacy_string("https://stream.example/upload?"),
-                seed: None,
-                max_players: 0,
-                ..LeagueStartResponse::default()
-            })
-            .expect("apply Start response");
-        let parameters = &prepared
-            .host_config()
-            .initial_join_snapshot
-            .as_ref()
-            .expect("prepared JoinData")
-            .parameters;
-        assert_eq!(parameters.league.as_bytes(), b"Gold League");
-        assert_eq!(
-            parameters.random_seed, 77,
-            "absent Seed retains the old value"
-        );
-        assert_eq!(parameters.max_players, 8, "zero MaxPlayers is no override");
-        assert_eq!(prepared.admission().max_players(), 8);
-        assert_eq!(prepared.host_config().initial_status.control_mode, 1);
-        assert_eq!(
-            prepared.stream_address().as_bytes(),
-            b"https://stream.example/upload?"
-        );
-    }
-
-    #[test]
-    fn l082_live_league_deinit_clears_identity_but_retains_start_overrides() {
-        let mut prepared = league_prepared_host(1);
-        prepared
-            .apply_league_start_response(&LeagueStartResponse {
-                league: legacy_string("Gold League"),
-                stream_to: legacy_string("https://stream.example/upload?"),
-                seed: Some(123),
-                max_players: 4,
-                ..LeagueStartResponse::default()
-            })
-            .expect("apply Start response");
-        prepared
-            .clear_live_league_registration()
-            .expect("clear live league registration");
-
-        let parameters = &prepared
-            .host_config()
-            .initial_join_snapshot
-            .as_ref()
-            .expect("prepared JoinData")
-            .parameters;
-        assert!(parameters.league.is_empty());
-        assert!(parameters.league_address.is_empty());
-        assert_eq!(parameters.random_seed, 123);
-        assert_eq!(parameters.max_players, 4);
-        assert_eq!(
-            prepared.stream_address().as_bytes(),
-            b"https://stream.example/upload?"
-        );
-    }
-
-    #[test]
-    fn league_host_finalization_assigns_survivors_before_join_check_and_appends_scripts() {
-        let mut prepared = league_prepared_host(1);
-        let player = |name: &str, color| ControlPlayerInfoEntry {
-            name: legacy_string(name),
-            color,
-            original_color: color,
-            ..ControlPlayerInfoEntry::default()
-        };
-        let script = ControlPlayerInfoEntry {
-            name: legacy_string("Script"),
-            id: 40,
-            player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
-            color: 0x000a_0b0c,
-            original_color: 0x000a_0b0c,
-            ..ControlPlayerInfoEntry::default()
-        };
-        let a = player("A", 0x0001_0203);
-        let b = player("B", 0x0004_0506);
-        let c = player("C", 0x0007_0809);
-        prepared.pending_initial_league_players = Some(PendingInitialLeaguePlayers {
-            players: vec![a, b.clone(), c.clone()],
-            alternate_colors_by_resource: HashMap::new(),
-            restore_players: vec![script],
-            restore_last_player_id: 40,
-            team_metadata: prepared.runtime_team_metadata.clone(),
-        });
-        let mut checked = Vec::new();
-        let mut oracle = ProcessInitialHostTeamAssignmentOracle::with_shipped_team_name();
-
-        assert!(prepared
-            .finalize_initial_league_players(vec![c, b], &mut oracle, |player| {
-                checked.push((player.name.clone(), player.id));
-                true
-            })
-            .expect("finalize authenticated initial players"));
-
-        assert_eq!(
-            prepared
-                .initial_host_player_info_control()
-                .players
-                .iter()
-                .map(|player| (player.name.as_bytes(), player.id, player.savegame_player))
-                .collect::<Vec<_>>(),
-            vec![
-                (b"C".as_slice(), 41, 0),
-                (b"B".as_slice(), 42, 0),
-                (b"Script".as_slice(), 40, 40),
-            ]
-        );
-        assert_eq!(
-            checked
-                .iter()
-                .map(|(name, id)| (name.as_bytes(), *id))
-                .collect::<Vec<_>>(),
-            vec![(b"C".as_slice(), 41), (b"B".as_slice(), 42)]
-        );
-
-        let snapshot = prepared
-            .host_config()
-            .initial_join_snapshot
-            .as_ref()
-            .unwrap();
-        assert_eq!(snapshot.parameters.player_infos.last_player_id, 42);
-        assert_eq!(snapshot.parameters.player_infos.clients[0].players.len(), 3);
-        assert!(prepared.pending_initial_league_players().is_none());
-    }
-
-    #[test]
-    fn league_reordering_keeps_host_local_alternate_color_by_resource_identity() {
-        let mut prepared = league_prepared_host(1);
-        let player = |name: &str, resource_id: i32, color: u32, original_color: u32| {
-            ControlPlayerInfoEntry {
-                name: legacy_string(name),
-                color,
-                original_color,
-                resource: Some(NetworkResourceCore {
-                    id: resource_id,
-                    ..NetworkResourceCore::default()
-                }),
-                ..ControlPlayerInfoEntry::default()
-            }
-        };
-        let blocker = player("Blocker", 11, 0x00f4_0000, 0x00f4_0000);
-        let candidate = player("Candidate", 22, 0x0000_c800, 0x00f4_0000);
-        prepared.pending_initial_league_players = Some(PendingInitialLeaguePlayers {
-            players: vec![blocker.clone(), candidate.clone()],
-            alternate_colors_by_resource: HashMap::from([(11, 0), (22, 0x0000_00e8)]),
-            restore_players: Vec::new(),
-            restore_last_player_id: 0,
-            team_metadata: prepared.runtime_team_metadata.clone(),
-        });
-        let mut oracle = ProcessInitialHostTeamAssignmentOracle::with_shipped_team_name();
-
-        prepared
-            .finalize_initial_league_players(vec![candidate, blocker], &mut oracle, |_| true)
-            .expect("reordered authenticated players finalize");
-
-        let players = &prepared.initial_host_player_info_control().players;
-        assert_eq!(players[0].name.as_bytes(), b"Candidate");
-        assert_eq!(
-            players[0].resource.as_ref().map(|resource| resource.id),
-            Some(22)
-        );
-        assert_eq!(players[0].color, 0x0000_00e8);
-        assert_eq!(players[1].name.as_bytes(), b"Blocker");
-        assert_eq!(players[1].color, 0x00f4_0000);
-    }
-
-    #[test]
-    fn league_start_capacity_is_applied_before_initial_player_ids_are_assigned() {
-        let mut prepared = league_prepared_host(1);
-        let player = |name: &str, color| ControlPlayerInfoEntry {
-            name: legacy_string(name),
-            color,
-            original_color: color,
-            ..ControlPlayerInfoEntry::default()
-        };
-        let b = player("B", 0x0001_0203);
-        let c = player("C", 0x0004_0506);
-        prepared.pending_initial_league_players = Some(PendingInitialLeaguePlayers {
-            players: vec![c.clone(), b.clone()],
-            alternate_colors_by_resource: HashMap::new(),
-            restore_players: Vec::new(),
-            restore_last_player_id: 0,
-            team_metadata: prepared.runtime_team_metadata.clone(),
-        });
-        prepared
-            .apply_league_start_response(&LeagueStartResponse {
-                league: legacy_string("Gold League"),
-                max_players: 1,
-                ..LeagueStartResponse::default()
-            })
-            .expect("apply Start capacity");
-        let mut checked = Vec::new();
-        let mut oracle = ProcessInitialHostTeamAssignmentOracle::with_shipped_team_name();
-        prepared
-            .finalize_initial_league_players(vec![c, b], &mut oracle, |player| {
-                checked.push(player.name.clone());
-                true
-            })
-            .expect("finalize capped initial players");
-
-        let players = &prepared.initial_host_player_info_control().players;
-        assert_eq!(players.len(), 1);
-        assert_eq!(players[0].name.as_bytes(), b"C");
-        assert_eq!(players[0].id, 1);
-        assert_eq!(
-            checked
-                .iter()
-                .map(LegacyCString::as_bytes)
-                .collect::<Vec<_>>(),
-            vec![b"C".as_slice()]
-        );
-        assert_eq!(
-            prepared
-                .host_config()
-                .initial_join_snapshot
-                .as_ref()
-                .unwrap()
-                .parameters
-                .player_infos
-                .last_player_id,
-            1
-        );
-    }
-
-    #[test]
-    fn empty_start_league_clears_addresses_and_applies_zero_seed_and_capacity() {
-        let mut prepared = league_prepared_host(2);
-        prepared
-            .apply_league_start_response(&LeagueStartResponse {
-                league: LegacyCString::default(),
-                stream_to: legacy_string("ignored-stream"),
-                seed: Some(0),
-                max_players: 4,
-                ..LeagueStartResponse::default()
-            })
-            .expect("apply Start response");
-
-        let parameters = &prepared
-            .host_config()
-            .initial_join_snapshot
-            .as_ref()
-            .expect("prepared JoinData")
-            .parameters;
-        assert!(parameters.league_address.is_empty());
-        assert!(prepared.stream_address().is_empty());
-        assert_eq!(parameters.random_seed, 0);
-        assert_eq!(parameters.max_players, 4);
-        assert_eq!(prepared.host_config().max_players, 4);
-        assert_eq!(prepared.admission().max_players(), 4);
-        assert_eq!(prepared.host_config().initial_status.control_mode, 2);
-    }
-
-    #[test]
-    fn generated_team_name_formats_resource_percent_and_c4_name_limit() {
-        let template =
-            LegacyCString::from_bytes(b"Very long %% localized team %d suffix".to_vec()).unwrap();
-        let formatted = format_generated_team_name(&template, 12);
-        assert_eq!(formatted.as_bytes().len(), 30);
-        assert_eq!(formatted.as_bytes(), b"Very long % localized team 12 ");
-    }
-
-    #[test]
-    fn definition_pack_graphics_precede_prepared_host_base_graphics() {
-        let dir = tempdir().expect("prepared host graphics fixture");
-        let scenario = dir.path().join("Scenario.c4s");
-        let definition = dir.path().join("Objects.c4d");
-        let definition_graphics = definition.join("Graphics.c4g");
-        let base_graphics = dir.path().join("Graphics.c4g");
-        fs::create_dir_all(&scenario).expect("scenario group");
-        fs::create_dir_all(&definition_graphics).expect("definition graphics");
-        fs::create_dir_all(&base_graphics).expect("base graphics");
-
-        let roots = [dir.path().to_path_buf()];
-        let language_packs = LanguagePacks::default();
-        let resolver = InstallRootDefinitionResolver::new(&roots, &language_packs, &[], &[], false);
-        let graphics = resolver
-            .resolve_graphics_groups_with_definition_roots(
-                &Group::open(&scenario).expect("scenario root"),
-                &[Group::open(&definition).expect("definition root")],
-            )
-            .expect("prepared host graphics chain");
-
-        assert_eq!(
-            graphics
-                .iter()
-                .map(|group| group.root().to_path_buf())
-                .collect::<Vec<_>>(),
-            [definition_graphics, base_graphics]
-        );
-    }
-}
-
 fn validate_inputs(spec: &PreparedHostBootstrapSpec<'_>) -> Result<(), PrepareHostBootstrapError> {
     for source in spec.player_sources {
         let wire_name = source.resource.wire_name.as_bytes();
@@ -2759,5 +2376,388 @@ fn empty_team_snapshot() -> JoinTeamListSnapshot {
         script_player_names: LegacyCString::default(),
         random_team_count: 0,
         teams: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod definition_root_graphics_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn league_prepared_host(control_mode: i32) -> PreparedHostBootstrap {
+        let mut host_config = HostConfig::default();
+        host_config.initial_status.control_mode = control_mode;
+        let parameters = &mut host_config
+            .initial_join_snapshot
+            .as_mut()
+            .expect("default host JoinData")
+            .parameters;
+        parameters.random_seed = 77;
+        parameters.max_players = 8;
+        parameters.league_address = legacy_string("https://league.example/");
+        PreparedHostBootstrap {
+            host_config,
+            initial_game: InitialNetworkGameData::default(),
+            scenario_defaults: InitialNetworkScenarioDefaults::default(),
+            has_initial_game: false,
+            admission: PreparedHostAdmission {
+                max_players: 8,
+                no_runtime_join: false,
+            },
+            start_time: 1,
+            initial_host_player_info_control: PlayerInfoControlData::default(),
+            runtime_team_metadata: InitialNetworkTeamMetadata {
+                active: false,
+                custom: false,
+                allow_hostility_change: true,
+                allow_team_switch: false,
+                auto_generate_teams: false,
+                last_team_id: 0,
+                team_distribution: clonk_engine::InitialNetworkTeamDistribution::Free,
+                team_colors: false,
+                max_script_players: 0,
+                script_player_names: LegacyCString::default(),
+                random_team_count: 0,
+                teams: Vec::new(),
+            },
+            scenario_wire_name: LegacyCString::default(),
+            scenario_origin: String::new(),
+            dynamic_filename_seed: String::new(),
+            dynamic_wire_name: LegacyCString::default(),
+            definition_modules: Vec::new(),
+            definition_executable_path: String::new(),
+            definition_path: String::new(),
+            material_resource_groups: Vec::new(),
+            reference_icon: 0,
+            reference_comment: LegacyCString::default(),
+            netpuncher_address: LegacyCString::default(),
+            league: Some(PreparedLeagueHostConfig {
+                endpoint: "https://league.example/".to_string(),
+                transport: LeagueHttpTransportConfig::default(),
+                update_period_secs: 120,
+                league_server_signup: true,
+            }),
+            stream_address: legacy_string("old-stream"),
+            local_player_resources: Vec::new(),
+            local_player_alternate_colors_by_resource: HashMap::new(),
+            pending_initial_league_players: None,
+            lifetime: Arc::new(PreparedHostLifetime {
+                temporary_files: Vec::new(),
+                scenario: Mutex::new(None),
+                host_launched: AtomicBool::new(false),
+                initial_player_info_installed: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    #[test]
+    fn l085_lobby_runtime_join_choice_updates_retained_admission_policy() {
+        let mut prepared = league_prepared_host(1);
+        assert!(prepared.admission().runtime_join_allowed());
+
+        prepared.set_runtime_join_allowed(false);
+        assert!(!prepared.admission().runtime_join_allowed());
+
+        prepared.set_runtime_join_allowed(true);
+        assert!(prepared.admission().runtime_join_allowed());
+    }
+
+    #[test]
+
+    fn league_start_applies_nonempty_overrides_and_forces_only_async_central() {
+        let mut prepared = league_prepared_host(2);
+        prepared
+            .apply_league_start_response(&LeagueStartResponse {
+                league: legacy_string("Gold League"),
+                stream_to: legacy_string("https://stream.example/upload?"),
+                seed: None,
+                max_players: 0,
+                ..LeagueStartResponse::default()
+            })
+            .expect("apply Start response");
+        let parameters = &prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters;
+        assert_eq!(parameters.league.as_bytes(), b"Gold League");
+        assert_eq!(
+            parameters.random_seed, 77,
+            "absent Seed retains the old value"
+        );
+        assert_eq!(parameters.max_players, 8, "zero MaxPlayers is no override");
+        assert_eq!(prepared.admission().max_players(), 8);
+        assert_eq!(prepared.host_config().initial_status.control_mode, 1);
+        assert_eq!(
+            prepared.stream_address().as_bytes(),
+            b"https://stream.example/upload?"
+        );
+    }
+
+    #[test]
+    fn l082_live_league_deinit_clears_identity_but_retains_start_overrides() {
+        let mut prepared = league_prepared_host(1);
+        prepared
+            .apply_league_start_response(&LeagueStartResponse {
+                league: legacy_string("Gold League"),
+                stream_to: legacy_string("https://stream.example/upload?"),
+                seed: Some(123),
+                max_players: 4,
+                ..LeagueStartResponse::default()
+            })
+            .expect("apply Start response");
+        prepared
+            .clear_live_league_registration()
+            .expect("clear live league registration");
+
+        let parameters = &prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters;
+        assert!(parameters.league.is_empty());
+        assert!(parameters.league_address.is_empty());
+        assert_eq!(parameters.random_seed, 123);
+        assert_eq!(parameters.max_players, 4);
+        assert_eq!(
+            prepared.stream_address().as_bytes(),
+            b"https://stream.example/upload?"
+        );
+    }
+
+    #[test]
+    fn league_host_finalization_assigns_survivors_before_join_check_and_appends_scripts() {
+        let mut prepared = league_prepared_host(1);
+        let player = |name: &str, color| ControlPlayerInfoEntry {
+            name: legacy_string(name),
+            color,
+            original_color: color,
+            ..ControlPlayerInfoEntry::default()
+        };
+        let script = ControlPlayerInfoEntry {
+            name: legacy_string("Script"),
+            id: 40,
+            player_type: clonk_engine::PLAYER_INFO_TYPE_SCRIPT,
+            color: 0x000a_0b0c,
+            original_color: 0x000a_0b0c,
+            ..ControlPlayerInfoEntry::default()
+        };
+        let a = player("A", 0x0001_0203);
+        let b = player("B", 0x0004_0506);
+        let c = player("C", 0x0007_0809);
+        prepared.pending_initial_league_players = Some(PendingInitialLeaguePlayers {
+            players: vec![a, b.clone(), c.clone()],
+            alternate_colors_by_resource: HashMap::new(),
+            restore_players: vec![script],
+            restore_last_player_id: 40,
+            team_metadata: prepared.runtime_team_metadata.clone(),
+        });
+        let mut checked = Vec::new();
+        let mut oracle = ProcessInitialHostTeamAssignmentOracle::with_shipped_team_name();
+
+        assert!(prepared
+            .finalize_initial_league_players(vec![c, b], &mut oracle, |player| {
+                checked.push((player.name.clone(), player.id));
+                true
+            })
+            .expect("finalize authenticated initial players"));
+
+        assert_eq!(
+            prepared
+                .initial_host_player_info_control()
+                .players
+                .iter()
+                .map(|player| (player.name.as_bytes(), player.id, player.savegame_player))
+                .collect::<Vec<_>>(),
+            vec![
+                (b"C".as_slice(), 41, 0),
+                (b"B".as_slice(), 42, 0),
+                (b"Script".as_slice(), 40, 40),
+            ]
+        );
+        assert_eq!(
+            checked
+                .iter()
+                .map(|(name, id)| (name.as_bytes(), *id))
+                .collect::<Vec<_>>(),
+            vec![(b"C".as_slice(), 41), (b"B".as_slice(), 42)]
+        );
+
+        let snapshot = prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .unwrap();
+        assert_eq!(snapshot.parameters.player_infos.last_player_id, 42);
+        assert_eq!(snapshot.parameters.player_infos.clients[0].players.len(), 3);
+        assert!(prepared.pending_initial_league_players().is_none());
+    }
+
+    #[test]
+    fn league_reordering_keeps_host_local_alternate_color_by_resource_identity() {
+        let mut prepared = league_prepared_host(1);
+        let player = |name: &str, resource_id: i32, color: u32, original_color: u32| {
+            ControlPlayerInfoEntry {
+                name: legacy_string(name),
+                color,
+                original_color,
+                resource: Some(NetworkResourceCore {
+                    id: resource_id,
+                    ..NetworkResourceCore::default()
+                }),
+                ..ControlPlayerInfoEntry::default()
+            }
+        };
+        let blocker = player("Blocker", 11, 0x00f4_0000, 0x00f4_0000);
+        let candidate = player("Candidate", 22, 0x0000_c800, 0x00f4_0000);
+        prepared.pending_initial_league_players = Some(PendingInitialLeaguePlayers {
+            players: vec![blocker.clone(), candidate.clone()],
+            alternate_colors_by_resource: HashMap::from([(11, 0), (22, 0x0000_00e8)]),
+            restore_players: Vec::new(),
+            restore_last_player_id: 0,
+            team_metadata: prepared.runtime_team_metadata.clone(),
+        });
+        let mut oracle = ProcessInitialHostTeamAssignmentOracle::with_shipped_team_name();
+
+        prepared
+            .finalize_initial_league_players(vec![candidate, blocker], &mut oracle, |_| true)
+            .expect("reordered authenticated players finalize");
+
+        let players = &prepared.initial_host_player_info_control().players;
+        assert_eq!(players[0].name.as_bytes(), b"Candidate");
+        assert_eq!(
+            players[0].resource.as_ref().map(|resource| resource.id),
+            Some(22)
+        );
+        assert_eq!(players[0].color, 0x0000_00e8);
+        assert_eq!(players[1].name.as_bytes(), b"Blocker");
+        assert_eq!(players[1].color, 0x00f4_0000);
+    }
+
+    #[test]
+    fn league_start_capacity_is_applied_before_initial_player_ids_are_assigned() {
+        let mut prepared = league_prepared_host(1);
+        let player = |name: &str, color| ControlPlayerInfoEntry {
+            name: legacy_string(name),
+            color,
+            original_color: color,
+            ..ControlPlayerInfoEntry::default()
+        };
+        let b = player("B", 0x0001_0203);
+        let c = player("C", 0x0004_0506);
+        prepared.pending_initial_league_players = Some(PendingInitialLeaguePlayers {
+            players: vec![c.clone(), b.clone()],
+            alternate_colors_by_resource: HashMap::new(),
+            restore_players: Vec::new(),
+            restore_last_player_id: 0,
+            team_metadata: prepared.runtime_team_metadata.clone(),
+        });
+        prepared
+            .apply_league_start_response(&LeagueStartResponse {
+                league: legacy_string("Gold League"),
+                max_players: 1,
+                ..LeagueStartResponse::default()
+            })
+            .expect("apply Start capacity");
+        let mut checked = Vec::new();
+        let mut oracle = ProcessInitialHostTeamAssignmentOracle::with_shipped_team_name();
+        prepared
+            .finalize_initial_league_players(vec![c, b], &mut oracle, |player| {
+                checked.push(player.name.clone());
+                true
+            })
+            .expect("finalize capped initial players");
+
+        let players = &prepared.initial_host_player_info_control().players;
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0].name.as_bytes(), b"C");
+        assert_eq!(players[0].id, 1);
+        assert_eq!(
+            checked
+                .iter()
+                .map(LegacyCString::as_bytes)
+                .collect::<Vec<_>>(),
+            vec![b"C".as_slice()]
+        );
+        assert_eq!(
+            prepared
+                .host_config()
+                .initial_join_snapshot
+                .as_ref()
+                .unwrap()
+                .parameters
+                .player_infos
+                .last_player_id,
+            1
+        );
+    }
+
+    #[test]
+    fn empty_start_league_clears_addresses_and_applies_zero_seed_and_capacity() {
+        let mut prepared = league_prepared_host(2);
+        prepared
+            .apply_league_start_response(&LeagueStartResponse {
+                league: LegacyCString::default(),
+                stream_to: legacy_string("ignored-stream"),
+                seed: Some(0),
+                max_players: 4,
+                ..LeagueStartResponse::default()
+            })
+            .expect("apply Start response");
+
+        let parameters = &prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters;
+        assert!(parameters.league_address.is_empty());
+        assert!(prepared.stream_address().is_empty());
+        assert_eq!(parameters.random_seed, 0);
+        assert_eq!(parameters.max_players, 4);
+        assert_eq!(prepared.host_config().max_players, 4);
+        assert_eq!(prepared.admission().max_players(), 4);
+        assert_eq!(prepared.host_config().initial_status.control_mode, 2);
+    }
+
+    #[test]
+    fn generated_team_name_formats_resource_percent_and_c4_name_limit() {
+        let template =
+            LegacyCString::from_bytes(b"Very long %% localized team %d suffix".to_vec()).unwrap();
+        let formatted = format_generated_team_name(&template, 12);
+        assert_eq!(formatted.as_bytes().len(), 30);
+        assert_eq!(formatted.as_bytes(), b"Very long % localized team 12 ");
+    }
+
+    #[test]
+    fn definition_pack_graphics_precede_prepared_host_base_graphics() {
+        let dir = tempdir().expect("prepared host graphics fixture");
+        let scenario = dir.path().join("Scenario.c4s");
+        let definition = dir.path().join("Objects.c4d");
+        let definition_graphics = definition.join("Graphics.c4g");
+        let base_graphics = dir.path().join("Graphics.c4g");
+        fs::create_dir_all(&scenario).expect("scenario group");
+        fs::create_dir_all(&definition_graphics).expect("definition graphics");
+        fs::create_dir_all(&base_graphics).expect("base graphics");
+
+        let roots = [dir.path().to_path_buf()];
+        let language_packs = LanguagePacks::default();
+        let resolver = InstallRootDefinitionResolver::new(&roots, &language_packs, &[], &[], false);
+        let graphics = resolver
+            .resolve_graphics_groups_with_definition_roots(
+                &Group::open(&scenario).expect("scenario root"),
+                &[Group::open(&definition).expect("definition root")],
+            )
+            .expect("prepared host graphics chain");
+
+        assert_eq!(
+            graphics
+                .iter()
+                .map(|group| group.root().to_path_buf())
+                .collect::<Vec<_>>(),
+            [definition_graphics, base_graphics]
+        );
     }
 }

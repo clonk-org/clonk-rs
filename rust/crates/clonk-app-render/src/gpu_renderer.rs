@@ -1197,7 +1197,7 @@ impl RetainedGpuRenderer {
             .retain(|key, _| used_landscape_bindings.contains(key));
         self.ensure_vertex_buffer(device, vertex_bytes.len())?;
         if !vertex_bytes.is_empty() {
-            queue.write_buffer(&self.vertex_buffer, 0, &vertex_bytes);
+            queue.write_buffer(&self.vertex_buffer, 0, vertex_bytes);
         }
         self.last_stats.draw_calls = calls.len();
         self.last_stats.resident_source_textures = self.textures.len();
@@ -1490,7 +1490,7 @@ impl RetainedGpuRenderer {
                     else {
                         continue;
                     };
-                    let start = vertex_count(&vertices)?;
+                    let start = vertex_count(vertices)?;
                     for index in [0, 1, 2, 2, 1, 3] {
                         let vertex = quad[index];
                         append_vertex(
@@ -1503,7 +1503,7 @@ impl RetainedGpuRenderer {
                             )?,
                         );
                     }
-                    let end = vertex_count(&vertices)?;
+                    let end = vertex_count(vertices)?;
                     calls.push(DrawCall {
                         vertices: start..end,
                         scissor: projection.scissor,
@@ -1554,7 +1554,7 @@ impl RetainedGpuRenderer {
                             base_extent[1] as f32 / extent[1] as f32,
                         ]
                     });
-                    let start = vertex_count(&vertices)?;
+                    let start = vertex_count(vertices)?;
                     for index in [0, 1, 2, 2, 1, 3] {
                         append_vertex(
                             vertices,
@@ -1567,7 +1567,7 @@ impl RetainedGpuRenderer {
                             )?,
                         );
                     }
-                    let end = vertex_count(&vertices)?;
+                    let end = vertex_count(vertices)?;
                     calls.push(DrawCall {
                         vertices: start..end,
                         scissor: projection.scissor,
@@ -1596,7 +1596,7 @@ impl RetainedGpuRenderer {
                     else {
                         continue;
                     };
-                    let start = vertex_count(&vertices)?;
+                    let start = vertex_count(vertices)?;
                     if !solid
                         .iter()
                         .flat_map(|vertex| vertex.color)
@@ -1640,7 +1640,7 @@ impl RetainedGpuRenderer {
                             }
                         }
                     }
-                    let end = vertex_count(&vertices)?;
+                    let end = vertex_count(vertices)?;
                     if start != end {
                         calls.push(DrawCall {
                             vertices: start..end,
@@ -2862,8 +2862,8 @@ fn validate_primitive_count(
     vertices: usize,
 ) -> Result<(), GpuRendererError> {
     let valid = match topology {
-        GpuPrimitiveTopology::TriangleList => vertices % 3 == 0,
-        GpuPrimitiveTopology::LineList => vertices % 2 == 0,
+        GpuPrimitiveTopology::TriangleList => vertices.is_multiple_of(3),
+        GpuPrimitiveTopology::LineList => vertices.is_multiple_of(2),
         GpuPrimitiveTopology::PointList => true,
     };
     if valid {

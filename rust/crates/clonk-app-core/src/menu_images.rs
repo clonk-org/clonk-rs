@@ -154,7 +154,7 @@ pub fn composite_software_picture_layer(
                 let alpha = u16::from(foreground.a);
                 let channel = |source: u8, destination: u8| -> u8 {
                     if additive {
-                        (u16::from(destination) + (u16::from(source) * alpha >> 8)).min(255) as u8
+                        (u16::from(destination) + ((u16::from(source) * alpha) >> 8)).min(255) as u8
                     } else {
                         ((u16::from(source) * alpha + u16::from(destination) * (255 - alpha)) >> 8)
                             as u8
