@@ -65591,11 +65591,71 @@ impl GameApp {
             }
             Err(error) => {
                 tracing::error!(%error, "failed to save startup player properties");
+                let message = self.startup_player_properties_save_failure_text(&error);
                 self.finish_startup_player_properties_save_failure(
-                    error.to_string(),
+                    message,
                     &origin,
                     &player.name,
                 );
+            }
+        }
+    }
+
+    /// Composes the classic modal body for a post-validation save failure.
+    /// Each storage step keeps C++'s own string for that branch
+    /// (`C4StartupPlrPropertiesDlg::OnClosed`: `IDS_FAIL_RENAME`,
+    /// `IDS_FAIL_MODIFY`, and the `ShowErrorMessage`d group step errors) and
+    /// names the affected path like the startup rename neighbors do with
+    /// `IDS_ERR_RENAMEFILE`/`IDS_ERR_OPENFILE`.
+    fn startup_player_properties_save_failure_text(
+        &self,
+        error: &PlayerPropertiesSaveError,
+    ) -> String {
+        match error {
+            PlayerPropertiesSaveError::Rename { from, to, detail } => {
+                let step = self.runtime_resource_text("IDS_FAIL_RENAME", "Rename failure.");
+                let body = format_resource_string_with_opaque_arguments(
+                    self.runtime_resource_text(
+                        "IDS_ERR_RENAMEFILE",
+                        "Error renaming file \"%s\" to \"%s\".",
+                    ),
+                    &[&from.display().to_string(), &to.display().to_string()],
+                );
+                format!("{step}\n{body}\n{detail}")
+            }
+            PlayerPropertiesSaveError::Open { path, detail } => {
+                format_resource_string_with_opaque_arguments(
+                    self.runtime_resource_text(
+                        "IDS_ERR_OPENFILE",
+                        "Error opening file \"%s\": %s",
+                    ),
+                    &[&path.display().to_string(), detail],
+                )
+            }
+            PlayerPropertiesSaveError::WriteCore {
+                path,
+                entry,
+                detail,
+            } => {
+                let step =
+                    self.runtime_resource_text("IDS_FAIL_MODIFY", "File modification failure.");
+                format!("{step}\n\"{}/{entry}\": {detail}", path.display())
+            }
+            PlayerPropertiesSaveError::WriteImage {
+                path,
+                entry,
+                detail,
+            } => format_resource_string_with_opaque_arguments(
+                self.runtime_resource_text("IDS_PRC_NOGFXFILE", "Error at graphics file %s: %s"),
+                &[&format!("{}/{entry}", path.display()), detail],
+            ),
+            // C++ surfaces a failed group flush as the raw "Close:"-step
+            // C4Group error; carry the affected path with it.
+            PlayerPropertiesSaveError::Close { path, detail } => {
+                format!("Close: \"{}\": {detail}", path.display())
+            }
+            PlayerPropertiesSaveError::EmptyName | PlayerPropertiesSaveError::NameTaken { .. } => {
+                error.to_string()
             }
         }
     }
@@ -141094,7 +141154,7 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let modal = app.message_dialogs.last().expect("classic save-error dialog");
         assert_eq!(modal.state.caption(), "Error");
-        assert!(modal.state.message().contains("failed to rewrite player group"));
+        assert!(modal.state.message().starts_with("Error opening file \""));
         assert!(modal.state.message().contains(&renamed.display().to_string()));
         assert_eq!(modal.state.buttons(), MessageDialogButtons::OK);
         assert_eq!(modal.state.icon(), MessageDialogIcon::ERROR);
@@ -141184,6 +141244,108 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .as_ref()
                 .and_then(|dialog| dialog.selected_index()),
             None
+        );
+    }
+
+    #[test]
+    fn startup_player_properties_save_failure_modal_names_step_and_path() {
+        use lc_frontend::message_dialog::MessageDialogResult;
+
+        let user_data = tempdir().expect("step-context user data");
+        let (_guard, paths, player_root, mut app) =
+            startup_player_properties_validation_app(user_data.path());
+        app.startup_player_properties_dialog = None;
+
+        let old = player_root.join("Old.c4p");
+        fs::create_dir(&old).expect("create selected player group");
+        fs::write(old.join("Player.txt"), b"[Player]\nName=Old\n")
+            .expect("write selected player core");
+        persist_config_value(
+            &paths,
+            "General",
+            "Participants",
+            old.to_string_lossy(),
+        )
+        .expect("activate selected player");
+        app.refresh_startup_player_list();
+        app.open_existing_startup_player_properties(0);
+        app.startup_player_properties_dialog
+            .as_mut()
+            .expect("open player-properties form")
+            .controller
+            .set_name("Renamed");
+
+        // The source group vanishes behind the open form, so the rename step
+        // fails and must report itself with both filenames like C++'s
+        // IDS_FAIL_RENAME/IDS_ERR_RENAMEFILE composition.
+        fs::remove_dir_all(&old).expect("remove source group behind open form");
+        app.process_startup_player_properties_actions(vec![
+            lc_frontend::startup_plrproperties::PlayerPropertiesAction::Submit,
+        ]);
+
+        let renamed = player_root.join("Renamed.c4p");
+        let modal = app.message_dialogs.last().expect("classic rename-error dialog");
+        assert_eq!(modal.state.caption(), "Error");
+        let message = modal.state.message().to_string();
+        let expected_body = format!(
+            "Rename failure.\nError renaming file \"{}\" to \"{}\".\n",
+            old.display(),
+            renamed.display()
+        );
+        assert!(
+            message.starts_with(&expected_body),
+            "rename modal must lead with step and both paths: {message}"
+        );
+        assert!(
+            message.len() > expected_body.len(),
+            "rename modal must keep the underlying error detail: {message}"
+        );
+        app.finish_message_dialog(MessageDialogResult::Ok)
+            .expect("dismiss rename-error dialog");
+
+        // The remaining storage steps compose the same way; pin each branch's
+        // localized step string and path.
+        assert_eq!(
+            app.startup_player_properties_save_failure_text(&PlayerPropertiesSaveError::Open {
+                path: PathBuf::from("/players/Ada.c4p"),
+                detail: "boom".to_string(),
+            }),
+            "Error opening file \"/players/Ada.c4p\": boom"
+        );
+        assert_eq!(
+            app.startup_player_properties_save_failure_text(
+                &PlayerPropertiesSaveError::WriteCore {
+                    path: PathBuf::from("/players/Ada.c4p"),
+                    entry: "Player.txt",
+                    detail: "boom".to_string(),
+                }
+            ),
+            "File modification failure.\n\"/players/Ada.c4p/Player.txt\": boom"
+        );
+        assert_eq!(
+            app.startup_player_properties_save_failure_text(
+                &PlayerPropertiesSaveError::WriteImage {
+                    path: PathBuf::from("/players/Ada.c4p"),
+                    entry: "BigIcon.png",
+                    detail: "boom".to_string(),
+                }
+            ),
+            "Error at graphics file /players/Ada.c4p/BigIcon.png: boom"
+        );
+        assert_eq!(
+            app.startup_player_properties_save_failure_text(&PlayerPropertiesSaveError::Close {
+                path: PathBuf::from("/players/Ada.c4p"),
+                detail: "boom".to_string(),
+            }),
+            "Close: \"/players/Ada.c4p\": boom"
+        );
+        assert_eq!(
+            app.startup_player_properties_save_failure_text(&PlayerPropertiesSaveError::Rename {
+                from: PathBuf::from("/players/Old.c4p"),
+                to: PathBuf::from("/players/Ada.c4p"),
+                detail: "boom".to_string(),
+            }),
+            "Rename failure.\nError renaming file \"/players/Old.c4p\" to \"/players/Ada.c4p\".\nboom"
         );
     }
 

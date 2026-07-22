@@ -44,18 +44,49 @@ pub struct PlayerActivationRefusal {
 }
 
 /// Typed failures from player name validation and `.c4p` persistence.
+///
+/// Every storage variant names its failing step and path so the classic
+/// screen-owned error modal can compose per-branch text the way
+/// `C4StartupPlrPropertiesDlg::OnClosed` does (`IDS_FAIL_RENAME`,
+/// `IDS_FAIL_MODIFY`, and the step-prefixed `C4Group` error strings).
 #[derive(Debug, thiserror::Error)]
 pub enum PlayerPropertiesSaveError {
     #[error("You must specify a player name!")]
     EmptyName,
     #[error("{name} is already taken")]
     NameTaken { name: String, path: PathBuf },
-    #[error(transparent)]
-    Io(#[from] io::Error),
-    #[error("failed to rewrite player group: {0}")]
-    Group(String),
-    #[error("failed to encode player image: {0}")]
-    Image(String),
+    /// Moving the player group onto its new filename failed
+    /// (C++ `PlayerListItem::MoveFilename` -> `IDS_FAIL_RENAME`).
+    #[error("rename \"{}\" to \"{}\": {detail}", from.display(), to.display())]
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+        detail: String,
+    },
+    /// Opening the player group, scanning its directory, or reading the
+    /// configuration failed (C++ `C4Group::Open` -> "Open:" errors).
+    #[error("open \"{}\": {detail}", path.display())]
+    Open { path: PathBuf, detail: String },
+    /// Rewriting the info core inside the group failed
+    /// (C++ `PlayerListItem::UpdateCore` -> `IDS_FAIL_MODIFY`).
+    #[error("write core \"{}/{entry}\": {detail}", path.display())]
+    WriteCore {
+        path: PathBuf,
+        entry: &'static str,
+        detail: String,
+    },
+    /// Encoding or storing a portrait/big-icon entry failed
+    /// (C++ `SavePNG` into the group -> group error).
+    #[error("write image \"{}/{entry}\": {detail}", path.display())]
+    WriteImage {
+        path: PathBuf,
+        entry: &'static str,
+        detail: String,
+    },
+    /// Flushing the rewritten group back to disk failed
+    /// (C++ `C4Group::Close` -> "Close:" errors).
+    #[error("close \"{}\": {detail}", path.display())]
+    Close { path: PathBuf, detail: String },
 }
 
 /// Sanitizes the player core name into the filename used by
@@ -982,7 +1013,12 @@ pub fn save_player_properties(
     let config = match Config::load(paths.config_file()) {
         Ok(config) => config,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            return Err(PlayerPropertiesSaveError::Open {
+                path: paths.config_file().to_path_buf(),
+                detail: error.to_string(),
+            });
+        }
     };
     save_player_properties_in(
         paths.install_root(),
@@ -1021,7 +1057,12 @@ pub fn save_player_properties_in(
         });
     let target = parent.join(&filename);
 
-    if let Some(occupant) = find_case_insensitive_entry(&parent, &filename)? {
+    if let Some(occupant) = find_case_insensitive_entry(&parent, &filename).map_err(|error| {
+        PlayerPropertiesSaveError::Open {
+            path: parent.clone(),
+            detail: error.to_string(),
+        }
+    })? {
         let owns_occupant =
             existing_path.is_some_and(|existing| paths_identify_same_item(existing, &occupant));
         if !owns_occupant {
@@ -1032,52 +1073,88 @@ pub fn save_player_properties_in(
         }
     }
 
-    let encoded_portrait = encode_image_write(portrait)?;
-    let encoded_big_icon = encode_image_write(big_icon)?;
+    let encoded_portrait =
+        encode_image_write(portrait).map_err(|detail| PlayerPropertiesSaveError::WriteImage {
+            path: target.clone(),
+            entry: "Portrait.png",
+            detail,
+        })?;
+    let encoded_big_icon =
+        encode_image_write(big_icon).map_err(|detail| PlayerPropertiesSaveError::WriteImage {
+            path: target.clone(),
+            entry: "BigIcon.png",
+            detail,
+        })?;
 
     if let Some(existing) = existing_path {
         if existing != target {
-            fs::rename(existing, &target)?;
+            fs::rename(existing, &target).map_err(|error| PlayerPropertiesSaveError::Rename {
+                from: existing.to_path_buf(),
+                to: target.clone(),
+                detail: error.to_string(),
+            })?;
         }
-        let source = Group::open(&target).map_err(|error| {
-            PlayerPropertiesSaveError::Group(format!("open {}: {error}", target.display()))
+        let source = Group::open(&target).map_err(|error| PlayerPropertiesSaveError::Open {
+            path: target.clone(),
+            detail: error.to_string(),
         })?;
         let original_core = source.read_file("Player.txt").ok();
         let core = rewrite_player_core(original_core.as_deref(), player, comment);
         if source.is_directory() {
-            replace_directory_file(&target, "Player.txt", Some(&core))?;
-            replace_directory_file(&target, "C4Player.c4b", None)?;
+            replace_directory_file(&target, "Player.txt", Some(&core)).map_err(|error| {
+                PlayerPropertiesSaveError::WriteCore {
+                    path: target.clone(),
+                    entry: "Player.txt",
+                    detail: error.to_string(),
+                }
+            })?;
+            replace_directory_file(&target, "C4Player.c4b", None).map_err(|error| {
+                PlayerPropertiesSaveError::WriteCore {
+                    path: target.clone(),
+                    entry: "C4Player.c4b",
+                    detail: error.to_string(),
+                }
+            })?;
             apply_directory_image(&target, "Portrait.png", &encoded_portrait)?;
             apply_directory_image(&target, "BigIcon.png", &encoded_big_icon)?;
         } else {
-            let mut mutable = MutableGroup::from_group(&source)
-                .map_err(|error| PlayerPropertiesSaveError::Group(error.to_string()))?;
+            let mut mutable = MutableGroup::from_group(&source).map_err(|error| {
+                PlayerPropertiesSaveError::Open {
+                    path: target.clone(),
+                    detail: error.to_string(),
+                }
+            })?;
             mutable.remove_entry("Player.txt");
-            mutable
-                .add_file("Player.txt", core)
-                .map_err(|error| PlayerPropertiesSaveError::Group(error.to_string()))?;
+            mutable.add_file("Player.txt", core).map_err(|error| {
+                PlayerPropertiesSaveError::WriteCore {
+                    path: target.clone(),
+                    entry: "Player.txt",
+                    detail: error.to_string(),
+                }
+            })?;
             mutable.remove_entry("C4Player.c4b");
-            apply_packed_image(&mut mutable, "Portrait.png", &encoded_portrait)?;
-            apply_packed_image(&mut mutable, "BigIcon.png", &encoded_big_icon)?;
+            apply_packed_image(&mut mutable, &target, "Portrait.png", &encoded_portrait)?;
+            apply_packed_image(&mut mutable, &target, "BigIcon.png", &encoded_big_icon)?;
             stamp_nonempty_group_maker(&mut mutable, group_maker);
-            let bytes = mutable
-                .pack()
-                .map_err(|error| PlayerPropertiesSaveError::Group(error.to_string()))?;
-            fs::write(&target, bytes)?;
+            write_packed_group(&mutable, &target)?;
         }
     } else {
-        fs::create_dir_all(&parent)?;
+        fs::create_dir_all(&parent).map_err(|error| PlayerPropertiesSaveError::Open {
+            path: parent.clone(),
+            detail: error.to_string(),
+        })?;
         let mut mutable = MutableGroup::new(filename.clone());
         mutable
             .add_file("Player.txt", rewrite_player_core(None, player, comment))
-            .map_err(|error| PlayerPropertiesSaveError::Group(error.to_string()))?;
-        apply_packed_image(&mut mutable, "Portrait.png", &encoded_portrait)?;
-        apply_packed_image(&mut mutable, "BigIcon.png", &encoded_big_icon)?;
+            .map_err(|error| PlayerPropertiesSaveError::WriteCore {
+                path: target.clone(),
+                entry: "Player.txt",
+                detail: error.to_string(),
+            })?;
+        apply_packed_image(&mut mutable, &target, "Portrait.png", &encoded_portrait)?;
+        apply_packed_image(&mut mutable, &target, "BigIcon.png", &encoded_big_icon)?;
         stamp_nonempty_group_maker(&mut mutable, group_maker);
-        let bytes = mutable
-            .pack()
-            .map_err(|error| PlayerPropertiesSaveError::Group(error.to_string()))?;
-        fs::write(&target, bytes)?;
+        write_packed_group(&mutable, &target)?;
     }
 
     Ok(SavedStartupPlayer {
@@ -1093,9 +1170,7 @@ enum EncodedImageWrite {
     Clear,
 }
 
-fn encode_image_write(
-    update: &PlayerImageWrite,
-) -> Result<EncodedImageWrite, PlayerPropertiesSaveError> {
+fn encode_image_write(update: &PlayerImageWrite) -> Result<EncodedImageWrite, String> {
     match update {
         PlayerImageWrite::Keep => Ok(EncodedImageWrite::Keep),
         PlayerImageWrite::Clear => Ok(EncodedImageWrite::Clear),
@@ -1108,29 +1183,23 @@ fn encode_image_write(
                         .and_then(|height| width.checked_mul(height))
                 })
                 .and_then(|pixels| pixels.checked_mul(4))
-                .ok_or_else(|| {
-                    PlayerPropertiesSaveError::Image("image dimensions overflow".to_string())
-                })?;
+                .ok_or_else(|| "image dimensions overflow".to_string())?;
             if image.pixels().len() != expected {
-                return Err(PlayerPropertiesSaveError::Image(format!(
+                return Err(format!(
                     "RGBA image has {} bytes, expected {expected}",
                     image.pixels().len()
-                )));
+                ));
             }
             let mut bytes = Vec::new();
             {
                 let mut encoder = png::Encoder::new(&mut bytes, image.width(), image.height());
                 encoder.set_color(ColorType::Rgba);
                 encoder.set_depth(BitDepth::Eight);
-                let mut writer = encoder
-                    .write_header()
-                    .map_err(|error| PlayerPropertiesSaveError::Image(error.to_string()))?;
+                let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
                 writer
                     .write_image_data(image.pixels())
-                    .map_err(|error| PlayerPropertiesSaveError::Image(error.to_string()))?;
-                writer
-                    .finish()
-                    .map_err(|error| PlayerPropertiesSaveError::Image(error.to_string()))?;
+                    .map_err(|error| error.to_string())?;
+                writer.finish().map_err(|error| error.to_string())?;
             }
             Ok(EncodedImageWrite::Replace(bytes))
         }
@@ -1139,41 +1208,53 @@ fn encode_image_write(
 
 fn apply_packed_image(
     group: &mut MutableGroup,
-    name: &str,
+    path: &Path,
+    entry: &'static str,
     update: &EncodedImageWrite,
 ) -> Result<(), PlayerPropertiesSaveError> {
     match update {
         EncodedImageWrite::Keep => Ok(()),
         EncodedImageWrite::Clear => {
-            group.remove_entry(name);
+            group.remove_entry(entry);
             Ok(())
         }
         EncodedImageWrite::Replace(bytes) => {
-            group.remove_entry(name);
-            group
-                .add_file(name, bytes.clone())
-                .map_err(|error| PlayerPropertiesSaveError::Group(error.to_string()))
+            group.remove_entry(entry);
+            group.add_file(entry, bytes.clone()).map_err(|error| {
+                PlayerPropertiesSaveError::WriteImage {
+                    path: path.to_path_buf(),
+                    entry,
+                    detail: error.to_string(),
+                }
+            })
         }
     }
 }
 
 fn apply_directory_image(
     directory: &Path,
-    name: &str,
+    entry: &'static str,
     update: &EncodedImageWrite,
 ) -> Result<(), PlayerPropertiesSaveError> {
-    match update {
-        EncodedImageWrite::Keep => Ok(()),
-        EncodedImageWrite::Clear => replace_directory_file(directory, name, None),
-        EncodedImageWrite::Replace(bytes) => replace_directory_file(directory, name, Some(bytes)),
-    }
+    let replacement = match update {
+        EncodedImageWrite::Keep => return Ok(()),
+        EncodedImageWrite::Clear => None,
+        EncodedImageWrite::Replace(bytes) => Some(bytes.as_slice()),
+    };
+    replace_directory_file(directory, entry, replacement).map_err(|error| {
+        PlayerPropertiesSaveError::WriteImage {
+            path: directory.to_path_buf(),
+            entry,
+            detail: error.to_string(),
+        }
+    })
 }
 
 fn replace_directory_file(
     directory: &Path,
     name: &str,
     replacement: Option<&[u8]>,
-) -> Result<(), PlayerPropertiesSaveError> {
+) -> io::Result<()> {
     if let Some(existing) = find_case_insensitive_entry(directory, name)? {
         let kind = fs::symlink_metadata(&existing)?.file_type();
         if kind.is_dir() {
@@ -1186,6 +1267,22 @@ fn replace_directory_file(
         fs::write(directory.join(name), bytes)?;
     }
     Ok(())
+}
+
+/// The packed-group close step: repack the rewritten group and flush it back
+/// to disk (C++ `C4Group::Close` rewriting the group file).
+fn write_packed_group(
+    group: &MutableGroup,
+    target: &Path,
+) -> Result<(), PlayerPropertiesSaveError> {
+    let close_error = |detail: String| PlayerPropertiesSaveError::Close {
+        path: target.to_path_buf(),
+        detail,
+    };
+    let bytes = group
+        .pack()
+        .map_err(|error| close_error(error.to_string()))?;
+    fs::write(target, bytes).map_err(|error| close_error(error.to_string()))
 }
 
 fn configured_player_path(config: &Config) -> PathBuf {
@@ -2238,6 +2335,106 @@ control=6\n";
             lc_script::c4_string_from_bytes(&edited.read_file("Player.txt").expect("core"))
                 .contains("RankName=Captain")
         );
+    }
+
+    #[test]
+    fn save_failure_steps_carry_their_paths() {
+        let root = tempdir().expect("player root");
+        let mut config = Config::new();
+        config.set_in(Some("General"), "PlayerPath", "Players");
+        let players = root.path().join("Players");
+        fs::create_dir_all(&players).expect("player directory");
+        let core = PlayerFile {
+            name: "Renamed".to_string(),
+            ..PlayerFile::default()
+        };
+        let save = |existing: Option<&Path>, portrait: &PlayerImageWrite| {
+            save_player_properties_in(
+                root.path(),
+                &config,
+                existing,
+                &core,
+                "",
+                portrait,
+                &PlayerImageWrite::Keep,
+                b"",
+            )
+        };
+        let missing = players.join("Old.c4p");
+        let target = players.join("Renamed.c4p");
+
+        // Rename: the source group vanished, so the move has nothing to rename.
+        assert!(matches!(
+            save(Some(&missing), &PlayerImageWrite::Keep),
+            Err(PlayerPropertiesSaveError::Rename { from, to, .. })
+                if from == missing && to == target
+        ));
+
+        // Open: the destination is not a valid player group.
+        fs::write(&target, b"not a C4Group").expect("corrupt packed group");
+        assert!(matches!(
+            save(Some(&target), &PlayerImageWrite::Keep),
+            Err(PlayerPropertiesSaveError::Open { path, .. }) if path == target
+        ));
+        fs::remove_file(&target).expect("drop corrupt group");
+
+        // WriteImage: a broken RGBA payload names the entry it was meant for.
+        let broken = ImageData::new(2, 1, vec![0, 0, 0]);
+        assert!(matches!(
+            save(None, &PlayerImageWrite::Replace(broken)),
+            Err(PlayerPropertiesSaveError::WriteImage {
+                path,
+                entry: "Portrait.png",
+                ..
+            }) if path == target
+        ));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // Close: the packed destination file cannot be rewritten.
+            let mut group = MutableGroup::new("Renamed.c4p");
+            group
+                .add_file("Player.txt", b"[Player]\nName=Renamed\n".to_vec())
+                .expect("core entry");
+            fs::write(&target, group.pack().expect("pack source")).expect("write source");
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o444))
+                .expect("make packed group read-only");
+            assert!(matches!(
+                save(Some(&target), &PlayerImageWrite::Keep),
+                Err(PlayerPropertiesSaveError::Close { path, .. }) if path == target
+            ));
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o644))
+                .expect("restore packed group permissions");
+            fs::remove_file(&target).expect("drop packed group");
+
+            // WriteCore: the directory group's Player.txt cannot be replaced.
+            fs::create_dir(&target).expect("directory group");
+            fs::write(target.join("Player.txt"), b"[Player]\nName=Renamed\n")
+                .expect("directory core");
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o555))
+                .expect("make directory group read-only");
+            assert!(matches!(
+                save(Some(&target), &PlayerImageWrite::Keep),
+                Err(PlayerPropertiesSaveError::WriteCore {
+                    path,
+                    entry: "Player.txt",
+                    ..
+                }) if path == target
+            ));
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o755))
+                .expect("restore directory group permissions");
+            fs::remove_dir_all(&target).expect("drop directory group");
+        }
+
+        // Open: the players directory itself cannot be scanned for occupants.
+        fs::remove_dir_all(&players).expect("remove player root");
+        fs::write(&players, b"not a directory").expect("occupy player root path");
+        assert!(matches!(
+            save(None, &PlayerImageWrite::Keep),
+            Err(PlayerPropertiesSaveError::Open { path, .. }) if path == players
+        ));
     }
 
     #[test]
