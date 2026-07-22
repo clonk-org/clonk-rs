@@ -62,3 +62,7 @@ extraction is the standing "next lever". Do not re-try rejected experiments
 
 - Baseline after rename+test-split (2026-07-21): body-edit loop ≈ 23.5s
   (`cargo check -p clonk-app --tests`, warm deps).
+- Step 1 landed (clonk-app-render): focused 30/30; warm incremental
+  `cargo check -p clonk-app --tests` after a touch of main.rs ≈ 2.2s
+  (the 23.5s baseline above was a first-build, not incremental — treat the
+  pair as cache-state bounds, not a strict before/after).

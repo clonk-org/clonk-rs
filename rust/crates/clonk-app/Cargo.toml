@@ -8,6 +8,7 @@ autotests = false
 anyhow = "1.0"
 arboard = { version = "3.3", default-features = false }
 gilrs = "0.10"
+clonk-app-render = { path = "../clonk-app-render" }
 clonk-audio = { path = "../clonk-audio" }
 clonk-core = { path = "../clonk-core" }
 clonk-engine = { path = "../clonk-engine" }

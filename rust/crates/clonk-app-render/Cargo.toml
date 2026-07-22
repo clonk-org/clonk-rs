@@ -1,0 +1,22 @@
+[package]
+name = "clonk-app-render"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clonk-engine = { path = "../clonk-engine" }
+clonk-frontend = { path = "../clonk-frontend" }
+clonk-graphics = { path = "../clonk-graphics" }
+pixels = "0.13"
+thiserror = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+# Keep clonk-engine's property-test dependencies in this test graph so focused
+# render-crate runs share one clonk-engine fingerprint with the workspace gate.
+clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
+clonk-gui = { path = "../clonk-gui" }
+# The renderer tests only need a current-thread runtime (`rt`), but request the
+# workspace test graph's full Tokio feature union so focused render-crate runs
+# share one Tokio fingerprint with the app and workspace gates.
+tokio = { version = "1.32", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time", "test-util"] }

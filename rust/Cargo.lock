@@ -2038,6 +2038,7 @@ dependencies = [
  "gethostname",
  "gilrs",
  "image",
+ "clonk-app-render",
  "clonk-audio",
  "clonk-core",
  "clonk-engine",
@@ -2067,6 +2068,20 @@ dependencies = [
  "windows 0.54.0",
  "winit",
  "zbus",
+]
+
+[[package]]
+name = "clonk-app-render"
+version = "0.1.0"
+dependencies = [
+ "clonk-engine",
+ "clonk-frontend",
+ "clonk-graphics",
+ "clonk-gui",
+ "pixels",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
