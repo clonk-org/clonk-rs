@@ -61,7 +61,6 @@ const ROW_HEIGHT: i32 = 40;
 const GAP_AFTER_TITLE: i32 = 14;
 const GAP_AFTER_SUBTITLE: i32 = 20;
 const GAP_AFTER_HEADER: i32 = 12;
-const GAP_BEFORE_FOOTER: i32 = 18;
 const COLUMN_GAP: i32 = 14;
 const OUTCOME_WIDTH: i32 = 130;
 const STAT_COLUMN_WIDTH: i32 = 96;

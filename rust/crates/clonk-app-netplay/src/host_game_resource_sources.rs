@@ -425,14 +425,6 @@ fn group_source_error(
     }
 }
 
-fn source(
-    path: PathBuf,
-    wire_path: &Path,
-) -> Result<HostInitialResourceSource, HostGameResourceSourceError> {
-    let name = path_wire_bytes(wire_path);
-    source_from_names(path, name.clone(), name.clone(), name, wire_path)
-}
-
 fn source_from_names(
     path: PathBuf,
     lookup_name: Vec<u8>,
