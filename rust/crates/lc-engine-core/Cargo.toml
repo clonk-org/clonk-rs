@@ -1,8 +1,0 @@
-[package]
-name = "lc-engine-core"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-rand_core = "0.6"
-serde = { version = "1", features = ["derive"] }

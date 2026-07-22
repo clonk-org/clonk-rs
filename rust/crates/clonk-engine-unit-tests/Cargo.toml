@@ -1,0 +1,58 @@
+[package]
+name = "clonk-engine-unit-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+autotests = false
+
+[features]
+# Mirror clonk-engine's cfg namespace because engine_inline compiles that crate
+# root directly. The complete workspace gate uses the same default feature set
+# as clonk-engine's former built-in unit harness.
+default = []
+bench = []
+ffi = []
+test-graph = []
+
+[[test]]
+name = "unit"
+path = "tests/unit/main.rs"
+
+[[test]]
+name = "engine_inline"
+path = "../clonk-engine/src/lib.rs"
+
+[dev-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
+indexmap = { version = "2", features = ["serde"] }
+clonk-core = { path = "../clonk-core" }
+# Match clonk-app's test-only engine feature request. The feature only exposes
+# proptest to clonk-engine's cfg(test) modules, but an unmatched request gives
+# focused engine-then-app runs two separate optimized clonk-engine artifacts.
+clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
+clonk-engine-core = { path = "../clonk-engine-core" }
+clonk-resources = { path = "../clonk-resources" }
+clonk-script = { path = "../clonk-script" }
+# Resolver-v2 feature anchors used by the complete workspace graph. Test code
+# does not import these directly; they prevent a second focused dependency set.
+memchr = "2"
+once_cell = "1"
+proptest = { version = "1", default-features = false, features = ["std"] }
+rand = { version = "0.8", default-features = false, features = ["std"] }
+rand_core = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = { version = "1", features = ["const_generics", "const_new"] }
+tempfile = "3"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+yoke-derive = "0.8"
+zerofrom-derive = "0.1"
+
+# Match Unix feature fingerprints from the app-backed workspace gate so a
+# focused wrapper build remains reusable during landing.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { version = "0.2", features = ["use_std"] }
+rustix = { version = "1", features = ["system"] }

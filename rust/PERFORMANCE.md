@@ -103,7 +103,7 @@ result to a different toolchain or runner.
 
 The next feedback-loop pass kept production engine code at test-profile
 optimization while moving all three engine test wrappers into the
-`lc-engine-unit-tests` leaf package at optimization level 0. Test inventories
+`clonk-engine-unit-tests` leaf package at optimization level 0. Test inventories
 were compared before and after the move; the 1,951 inline tests were
 byte-identical, and the unchanged integration source contributed another 266
 tests. On the same M4 Max/Rust 1.87.0 checkout:
@@ -151,9 +151,9 @@ dominant remaining surfaces and should not be compared with an idle gate.
 The resulting changes keep compile-bound wrappers cheap while optimizing only
 the runtime-heavy leaves:
 
-- the 666-test frontend inline surface moved to `lc-frontend-unit-tests` at
+- the 666-test frontend inline surface moved to `clonk-frontend-unit-tests` at
   level 1; its isolated execution fell from 12.798s at level 0 to 3.409s;
-- `engine_it` moved to `lc-engine-integration-tests` at level 1, while the much
+- `engine_it` moved to `clonk-engine-integration-tests` at level 1, while the much
   larger `engine_inline` and `unit` wrappers remain at level 0;
 - both engine leaf packages request the app's `test-graph` feature, preventing
   a focused engine-then-app cycle from producing two optimized engine copies;
@@ -188,7 +188,7 @@ measurement.
 ### Serialized-fleet and scenario-batching follow-up
 
 The next pass separated host contention from Cargo and test costs. Multiple
-worktrees had independently compiled the 162k-line `lc-app` harness while a
+worktrees had independently compiled the 162k-line `clonk-app` harness while a
 workspace gate was running; one observed contended gate took 50.92s to compile
 and 73.736s to execute, with host load around 25--30 on 16 logical cores. That
 sample is evidence of contention, not a profile baseline. The shared worker
@@ -212,7 +212,7 @@ second lock or a redundant test pass.
 With the host build slot isolated, a same-source, one-line incremental app
 change compared warmed test-profile artifacts (`n = 1` each):
 
-| `lc-app` test optimization | Compile | 1,463-test suite | Compile + suite |
+| `clonk-app` test optimization | Compile | 1,463-test suite | Compile + suite |
 | --- | ---: | ---: | ---: |
 | level 3 | 30.98s | 34.025s | 65.005s |
 | level 2 | 29.02s | 32.075s | 61.095s |
@@ -359,7 +359,7 @@ instead of using Cargo's `--all-targets` expansion. The workspace has no
 examples, and both explicit Criterion benches require opt-in `bench` features,
 so lint coverage is unchanged. The old expansion additionally created five
 implicit benchmark-mode roots across targets that disable ordinary test
-harnesses: `lc-engine`, `lc-frontend`, `lc-logging`, and both `xtask` binaries.
+harnesses: `clonk-engine`, `clonk-frontend`, `clonk-logging`, and both `xtask` binaries.
 Those roots span 98,217 source lines; engine and frontend account for 96,512
 of them. The explicit target set avoids that duplicate codegen while retaining
 every production and test target.
@@ -390,7 +390,7 @@ the Arctic cargo case. The newer Arctic rowing regression has no retained
 pre-change profile sample. These totals identify four redundant preparations;
 they are not an elapsed A/B because the old test processes ran concurrently.
 
-The same pass tested a package-only `lc-engine` test-profile reduction from
+The same pass tested a package-only `clonk-engine` test-profile reduction from
 optimization level 3 to 2 in an isolated target. Its two unit samples took
 33.80s and 37.36s, versus a 35.56s level-3 workspace reference; fleet overlap
 invalidated the requested brackets, so none is promoted to a clean A/B. Even
@@ -424,7 +424,7 @@ scenario preparations, so those process boundaries remain unchanged.
 ### Script-call allocation and native-catalog follow-up
 
 A natural incremental `cargo test --workspace --no-run --timings` build took
-47.22s. Cargo's critical path was the 40.96s `lc-app` binary test harness;
+47.22s. Cargo's critical path was the 40.96s `clonk-app` binary test harness;
 `engine_inline` took 13.22s and `frontend_inline` took 9.53s in parallel. This
 confirms that further scheduling changes cannot materially shorten the compile
 half of the loop without reducing the monolithic app harness or compiler work.
@@ -583,7 +583,7 @@ Apple M4 Max. The representative command was:
 
 ```sh
 cargo dev-check \
-  --changed rust/crates/lc-engine/src/compat.rs \
+  --changed rust/crates/clonk-engine/src/compat.rs \
   --budget-seconds 60 --keep-going
 ```
 
@@ -646,7 +646,7 @@ Build once, then run the real Deep Sea scenario through the windowed GPU path:
 
 ```sh
 cd rust
-cargo build --release --offline --locked -p lc-app --bin lc-app
+cargo build --release --offline --locked -p clonk-app --bin clonk-app
 scripts/run-deep-sea-gpu-benchmark.sh 20
 ```
 
@@ -685,7 +685,7 @@ Render one explicit replay snapshot:
 LC_DEV_CHECK_SNAPSHOT=target/dev-check/path/to/snapshot-final.json \
 LC_DEV_CHECK_FRAME_PNG=target/dev-check/repro/frame-final.png \
 LC_DEV_CHECK_RENDER_METRICS=target/dev-check/repro/render-metrics.json \
-  cargo nextest run -p lc-frontend --features dev-feedback-render \
+  cargo nextest run -p clonk-frontend --features dev-feedback-render \
   --test dev_feedback_render -- dev_feedback_render --ignored --exact
 ```
 
@@ -693,7 +693,7 @@ Or let the probe select the newest `snapshot-final.json` recursively:
 
 ```sh
 LC_DEV_CHECK_ARTIFACT_DIR=target/dev-check \
-  cargo nextest run -p lc-frontend --features dev-feedback-render \
+  cargo nextest run -p clonk-frontend --features dev-feedback-render \
   --test dev_feedback_render -- dev_feedback_render --ignored --exact
 ```
 

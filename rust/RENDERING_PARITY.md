@@ -22,12 +22,12 @@ presentation path.
 
 Normal graphical presentation is retained and GPU-composed:
 
-1. `lc-graphics::Surface` records painter-ordered `GpuCommand`s while ordinary
+1. `clonk-graphics::Surface` records painter-ordered `GpuCommand`s while ordinary
    frontend code draws. Textures carry a stable id, current revision, complete
    CPU regeneration backing, and optional dirty rectangles.
-2. `lc-frontend` lowers sky, landscape/liquid, sprites, particles, HUD, GUI,
+2. `clonk-frontend` lowers sky, landscape/liquid, sprites, particles, HUD, GUI,
    menus, and solid primitives into those commands.
-3. `lc-app` builds an ordered `RetainedGpuFrame`. Logical game/chrome layers use
+3. `clonk-app` builds an ordered `RetainedGpuFrame`. Logical game/chrome layers use
    the scaled and cropped presentation transform. Scale-native font layers use
    an identity transform at the same physical extent.
 4. `RetainedGpuRenderer::render_layers` validates the complete frame before GPU
@@ -136,7 +136,7 @@ facets, refresh phases, inventory chrome, glyphs, and inline images retain one
 GPU identity instead of forcing uploads every frame.
 
 `pixels` already reconfigures the surface and retries acquisition once. A
-`Lost` or `Outdated` error returned after that retry causes `lc-app` to rebuild
+`Lost` or `Outdated` error returned after that retry causes `clonk-app` to rebuild
 `Pixels`, then call `RetainedGpuRenderer::recreate` with the replacement device,
 queue, and surface format. The renderer also records uncaptured wgpu validation
 and allocation failures. Pinned wgpu 0.16 reports some native device-loss paths

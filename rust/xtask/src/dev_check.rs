@@ -472,11 +472,11 @@ fn plan_checks(changes: &ChangeSet, options: &Options) -> CheckPlan {
     for path in &changes.paths {
         let reason = format!("changed {path}");
         if path.starts_with("rust/snapshots/engine/")
-            || path == "rust/crates/lc-engine/src/fixtures.rs"
+            || path == "rust/crates/clonk-engine/src/fixtures.rs"
         {
             add_snapshots(&mut plan, &reason);
         }
-        if path.starts_with("parity/") || path == "rust/crates/lc-engine/src/parity_differential.rs"
+        if path.starts_with("parity/") || path == "rust/crates/clonk-engine/src/parity_differential.rs"
         {
             add_parity(&mut plan, &reason);
         }
@@ -486,12 +486,12 @@ fn plan_checks(changes: &ChangeSet, options: &Options) -> CheckPlan {
         }
         if path.starts_with("rust/xtask/") {
             add_package(&mut plan, "xtask", &reason);
-        } else if path.starts_with("rust/crates/lc-engine/src/") {
+        } else if path.starts_with("rust/crates/clonk-engine/src/") {
             add_engine_checks(&mut plan, path, &reason);
-        } else if path.starts_with("rust/crates/lc-script/src/") {
+        } else if path.starts_with("rust/crates/clonk-script/src/") {
             add_script_checks(&mut plan, &reason);
-        } else if path.starts_with("rust/crates/lc-resources/src/") {
-            add_package(&mut plan, "lc-resources", &reason);
+        } else if path.starts_with("rust/crates/clonk-resources/src/") {
+            add_package(&mut plan, "clonk-resources", &reason);
             add_engine_filter(
                 &mut plan,
                 "resource-scenario-loading",
@@ -514,11 +514,11 @@ fn plan_checks(changes: &ChangeSet, options: &Options) -> CheckPlan {
 }
 
 fn gameplay_path(path: &str) -> bool {
-    path.starts_with("rust/crates/lc-engine/src/")
-        || path.starts_with("rust/crates/lc-script/src/")
-        || path.starts_with("rust/crates/lc-resources/src/")
-        || path.starts_with("rust/crates/lc-frontend/src/")
-        || path.starts_with("rust/crates/lc-app/src/")
+    path.starts_with("rust/crates/clonk-engine/src/")
+        || path.starts_with("rust/crates/clonk-script/src/")
+        || path.starts_with("rust/crates/clonk-resources/src/")
+        || path.starts_with("rust/crates/clonk-frontend/src/")
+        || path.starts_with("rust/crates/clonk-app/src/")
         || path == "content"
         || path.starts_with("content/")
         || path.starts_with("planet/System.c4g/")
@@ -535,7 +535,7 @@ fn add_replay_and_render(plan: &mut CheckPlan, reason: &str) {
             "nextest",
             "run",
             "-p",
-            "lc-engine-integration-tests",
+            "clonk-engine-integration-tests",
             "--test",
             "engine_it",
             "--",
@@ -553,7 +553,7 @@ fn add_replay_and_render(plan: &mut CheckPlan, reason: &str) {
             "nextest",
             "run",
             "-p",
-            "lc-frontend",
+            "clonk-frontend",
             "--features",
             "dev-feedback-render",
             "--test",
@@ -623,8 +623,8 @@ fn add_test_target(
     filter: Option<&str>,
     reason: &str,
 ) {
-    let (package, target) = if package == "lc-engine" && target == "it" {
-        ("lc-engine-integration-tests", "engine_it")
+    let (package, target) = if package == "clonk-engine" && target == "it" {
+        ("clonk-engine-integration-tests", "engine_it")
     } else {
         (package, target)
     };
@@ -648,7 +648,7 @@ fn add_test_target(
 
 fn add_engine_checks(plan: &mut CheckPlan, path: &str, reason: &str) {
     plan.add(
-        "lc-engine-inline",
+        "clonk-engine-inline",
         CheckKind::Unit,
         CheckCwd::Workspace,
         "cargo",
@@ -656,14 +656,14 @@ fn add_engine_checks(plan: &mut CheckPlan, path: &str, reason: &str) {
             "nextest",
             "run",
             "-p",
-            "lc-engine-unit-tests",
+            "clonk-engine-unit-tests",
             "--test",
             "engine_inline",
         ],
         reason,
     );
     plan.add(
-        "lc-engine-unit",
+        "clonk-engine-unit",
         CheckKind::Unit,
         CheckCwd::Workspace,
         "cargo",
@@ -671,7 +671,7 @@ fn add_engine_checks(plan: &mut CheckPlan, path: &str, reason: &str) {
             "nextest",
             "run",
             "-p",
-            "lc-engine-unit-tests",
+            "clonk-engine-unit-tests",
             "--test",
             "unit",
         ],
@@ -759,19 +759,19 @@ fn add_engine_checks(plan: &mut CheckPlan, path: &str, reason: &str) {
 
 fn add_script_checks(plan: &mut CheckPlan, reason: &str) {
     plan.add(
-        "lc-script-lib",
+        "clonk-script-lib",
         CheckKind::Unit,
         CheckCwd::Workspace,
         "cargo",
-        &["nextest", "run", "-p", "lc-script", "--lib"],
+        &["nextest", "run", "-p", "clonk-script", "--lib"],
         reason,
     );
     plan.add(
-        "lc-script-it",
+        "clonk-script-it",
         CheckKind::Integration,
         CheckCwd::Workspace,
         "cargo",
-        &["nextest", "run", "-p", "lc-script", "--test", "it"],
+        &["nextest", "run", "-p", "clonk-script", "--test", "it"],
         reason,
     );
 }
@@ -786,7 +786,7 @@ fn add_engine_filter(plan: &mut CheckPlan, id: &str, filter: &str, kind: CheckKi
             "nextest",
             "run",
             "-p",
-            "lc-engine-integration-tests",
+            "clonk-engine-integration-tests",
             "--test",
             "engine_it",
             filter,
@@ -796,9 +796,9 @@ fn add_engine_filter(plan: &mut CheckPlan, id: &str, filter: &str, kind: CheckKi
 }
 
 fn add_package(plan: &mut CheckPlan, package: &str, reason: &str) {
-    if package == "lc-frontend" {
+    if package == "clonk-frontend" {
         plan.add(
-            "lc-frontend-inline",
+            "clonk-frontend-inline",
             CheckKind::Unit,
             CheckCwd::Workspace,
             "cargo",
@@ -806,7 +806,7 @@ fn add_package(plan: &mut CheckPlan, package: &str, reason: &str) {
                 "nextest",
                 "run",
                 "-p",
-                "lc-frontend-unit-tests",
+                "clonk-frontend-unit-tests",
                 "--test",
                 "frontend_inline",
             ],
@@ -870,7 +870,7 @@ fn plan_content(plan: &mut CheckPlan, path: &str, reason: &str) {
             reason,
         );
         if path == "planet/System.c4g/LanguageUS.txt" {
-            add_test_target(plan, "lc-core", "language_fixture", None, reason);
+            add_test_target(plan, "clonk-core", "language_fixture", None, reason);
         }
     } else if let Some(pack) = content_pack(path) {
         add_sweep(plan, Some(&pack), reason);
@@ -1556,7 +1556,7 @@ mod tests {
             "--base",
             "origin/main",
             "--changed",
-            "rust/crates/lc-engine/src/compat.rs",
+            "rust/crates/clonk-engine/src/compat.rs",
             "--changed=content/Foo.c4s/Script.c",
             "--plan",
             "--full",
@@ -1694,7 +1694,7 @@ mod tests {
 
     #[test]
     fn gameplay_plan_starts_with_replay_and_render_then_engine_checks() {
-        let plan = plan_for_paths(&["rust/crates/lc-engine/src/compat.rs"], false);
+        let plan = plan_for_paths(&["rust/crates/clonk-engine/src/compat.rs"], false);
         assert_eq!(plan.commands[0].kind, CheckKind::Replay);
         assert_eq!(plan.commands[1].kind, CheckKind::RenderProbe);
         assert_eq!(plan.commands[2].kind, CheckKind::Hygiene);
@@ -1702,7 +1702,7 @@ mod tests {
             "nextest",
             "run",
             "-p",
-            "lc-engine-unit-tests",
+            "clonk-engine-unit-tests",
             "--test",
             "engine_inline",
         ]));
@@ -1710,7 +1710,7 @@ mod tests {
             "nextest",
             "run",
             "-p",
-            "lc-engine-unit-tests",
+            "clonk-engine-unit-tests",
             "--test",
             "unit",
         ]));
@@ -1718,7 +1718,7 @@ mod tests {
             "nextest",
             "run",
             "-p",
-            "lc-engine-integration-tests",
+            "clonk-engine-integration-tests",
             "--test",
             "engine_it",
             "real_scenario_harness::",
@@ -1728,19 +1728,19 @@ mod tests {
     #[test]
     fn frontend_and_app_sources_start_with_replay_and_render() {
         for path in [
-            "rust/crates/lc-frontend/src/renderer.rs",
-            "rust/crates/lc-app/src/input.rs",
+            "rust/crates/clonk-frontend/src/renderer.rs",
+            "rust/crates/clonk-app/src/input.rs",
         ] {
             let plan = plan_for_paths(&[path], false);
             assert_eq!(plan.commands[0].kind, CheckKind::Replay, "{path}");
             assert_eq!(plan.commands[1].kind, CheckKind::RenderProbe, "{path}");
             assert_eq!(plan.commands[2].kind, CheckKind::Hygiene, "{path}");
-            if path.starts_with("rust/crates/lc-frontend/") {
+            if path.starts_with("rust/crates/clonk-frontend/") {
                 assert!(plan.has_args(&[
                     "nextest",
                     "run",
                     "-p",
-                    "lc-frontend-unit-tests",
+                    "clonk-frontend-unit-tests",
                     "--test",
                     "frontend_inline",
                 ]));
@@ -1757,7 +1757,7 @@ mod tests {
             "nextest",
             "run",
             "-p",
-            "lc-engine-integration-tests",
+            "clonk-engine-integration-tests",
             "--test",
             "engine_it",
             "real_scenario_harness::",
@@ -1767,7 +1767,7 @@ mod tests {
 
     #[test]
     fn landscape_maps_to_movement_and_balloon_families() {
-        let plan = plan_for_paths(&["rust/crates/lc-engine/src/landscape.rs"], false);
+        let plan = plan_for_paths(&["rust/crates/clonk-engine/src/landscape.rs"], false);
         for filter in [
             "walk_movement::",
             "flight_movement::",
@@ -1778,7 +1778,7 @@ mod tests {
                 "nextest",
                 "run",
                 "-p",
-                "lc-engine-integration-tests",
+                "clonk-engine-integration-tests",
                 "--test",
                 "engine_it",
                 filter,
@@ -1789,14 +1789,14 @@ mod tests {
     #[test]
     fn direct_module_maps_to_only_its_coalesced_test_target() {
         let plan = plan_for_paths(
-            &["rust/crates/lc-engine/tests/it/real_alchemy_revision.rs"],
+            &["rust/crates/clonk-engine/tests/it/real_alchemy_revision.rs"],
             false,
         );
         assert!(plan.has_args(&[
             "nextest",
             "run",
             "-p",
-            "lc-engine-integration-tests",
+            "clonk-engine-integration-tests",
             "--test",
             "engine_it",
             "real_alchemy_revision::",
@@ -1812,7 +1812,7 @@ mod tests {
             "nextest",
             "run",
             "-p",
-            "lc-engine-integration-tests",
+            "clonk-engine-integration-tests",
             "--test",
             "engine_it",
             "tutorial02_",
@@ -1838,15 +1838,15 @@ mod tests {
     fn plan_dedupes_commands_and_accumulates_stable_reasons() {
         let plan = plan_for_paths(
             &[
-                "rust/crates/lc-engine/src/compat.rs",
-                "rust/crates/lc-engine/src/effect.rs",
+                "rust/crates/clonk-engine/src/compat.rs",
+                "rust/crates/clonk-engine/src/effect.rs",
             ],
             false,
         );
         let unit: Vec<_> = plan
             .commands
             .iter()
-            .filter(|check| check.id == "lc-engine-unit")
+            .filter(|check| check.id == "clonk-engine-unit")
             .collect();
         assert_eq!(unit.len(), 1);
         assert_eq!(unit[0].reasons.len(), 2);
@@ -1867,7 +1867,7 @@ mod tests {
     #[test]
     fn budget_waits_for_render_probe_then_skips_ordinary_checks() {
         let changes = fake_changes();
-        let plan = plan_for_paths(&["rust/crates/lc-engine/src/compat.rs"], false);
+        let plan = plan_for_paths(&["rust/crates/clonk-engine/src/compat.rs"], false);
         let root = test_dir("budget");
         fs::create_dir_all(&root).unwrap();
         let roots = fake_roots(&root);
@@ -1906,7 +1906,7 @@ mod tests {
     #[test]
     fn replay_failure_runs_render_diagnostic_when_snapshot_exists() {
         let changes = fake_changes();
-        let plan = plan_for_paths(&["rust/crates/lc-engine/src/compat.rs"], false);
+        let plan = plan_for_paths(&["rust/crates/clonk-engine/src/compat.rs"], false);
         let root = test_dir("replay-failure");
         fs::create_dir_all(&root).unwrap();
         let roots = fake_roots(&root);
@@ -2008,7 +2008,7 @@ mod tests {
     fn cargo_build_time_is_separated_from_test_execution() {
         assert_eq!(
             cargo_reported_build_ms(
-                b"   Compiling lc-engine v0.1.0\n    Finished `test` profile [optimized] target(s) in 2.34s\n"
+                b"   Compiling clonk-engine v0.1.0\n    Finished `test` profile [optimized] target(s) in 2.34s\n"
             ),
             Some(2_340)
         );
@@ -2106,7 +2106,7 @@ mod tests {
 
     fn fake_changes() -> ChangeSet {
         ChangeSet {
-            paths: vec!["rust/crates/lc-engine/src/compat.rs".to_string()],
+            paths: vec!["rust/crates/clonk-engine/src/compat.rs".to_string()],
             diff_base: "HEAD".to_string(),
             resolved_base: None,
         }

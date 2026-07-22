@@ -1,7 +1,0 @@
-[package]
-name = "lc-gui"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-lc-graphics = { path = "../lc-graphics" }

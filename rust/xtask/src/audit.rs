@@ -167,33 +167,33 @@ fn measure_world(
     repo_root: &Path,
     content_root: &Path,
 ) -> Result<WorldReport> {
-    let global_material_library = lc_resources::MaterialLibrary::from_group(
-        &lc_resources::Group::open(content_root.join("Material.c4g"))
+    let global_material_library = clonk_resources::MaterialLibrary::from_group(
+        &clonk_resources::Group::open(content_root.join("Material.c4g"))
             .context("opening content/Material.c4g")?,
     )
     .map_err(|error| anyhow!("loading material library: {error}"))?;
-    let local_material_library = lc_resources::Group::open(scenario_path.join("Material.c4g"))
+    let local_material_library = clonk_resources::Group::open(scenario_path.join("Material.c4g"))
         .ok()
-        .and_then(|group| lc_resources::MaterialLibrary::from_group(&group).ok());
+        .and_then(|group| clonk_resources::MaterialLibrary::from_group(&group).ok());
     let material_library = match &local_material_library {
-        Some(local) => lc_resources::MaterialLibrary::from_overloaded_loads(&[
+        Some(local) => clonk_resources::MaterialLibrary::from_overloaded_loads(&[
             local,
             &global_material_library,
         ])
         .map_err(|error| anyhow!("merging material libraries: {error}"))?,
         None => global_material_library,
     };
-    let system_scripts = lc_resources::Group::open(repo_root.join("planet/System.c4g"))
+    let system_scripts = clonk_resources::Group::open(repo_root.join("planet/System.c4g"))
         .ok()
-        .and_then(|group| lc_engine::scenario::load_system_scripts(&group).ok())
+        .and_then(|group| clonk_engine::scenario::load_system_scripts(&group).ok())
         .unwrap_or_default();
 
     let roots = vec![content_root.to_path_buf(), repo_root.to_path_buf()];
     let resolver = crate::SweepResolver { roots };
 
-    let scenario = lc_engine::Scenario::load_from_path_with(scenario_path, &resolver)
+    let scenario = clonk_engine::Scenario::load_from_path_with(scenario_path, &resolver)
         .map_err(|error| anyhow!("load failed: {error}"))?;
-    let mut engine = lc_engine::Engine::new();
+    let mut engine = clonk_engine::Engine::new();
     engine.configure_materials_from_library(&material_library);
     engine.install_global_scripts(&system_scripts);
     scenario

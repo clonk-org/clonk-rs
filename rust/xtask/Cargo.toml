@@ -8,9 +8,9 @@ default-run = "xtask"
 [features]
 default = []
 engine-tools = [
-    "dep:lc-engine",
-    "dep:lc-logging",
-    "dep:lc-resources",
+    "dep:clonk-engine",
+    "dep:clonk-logging",
+    "dep:clonk-resources",
     "dep:tracing",
     "dep:walkdir",
     "dep:zip",
@@ -20,9 +20,9 @@ engine-tools = [
 anyhow = "1"
 walkdir = { version = "2", optional = true }
 zip = { version = "0.6", default-features = false, features = ["deflate"], optional = true }
-lc-engine = { path = "../crates/lc-engine", optional = true }
-lc-logging = { path = "../crates/lc-logging", optional = true }
-lc-resources = { path = "../crates/lc-resources", optional = true }
+clonk-engine = { path = "../crates/clonk-engine", optional = true }
+clonk-logging = { path = "../crates/clonk-logging", optional = true }
+clonk-resources = { path = "../crates/clonk-resources", optional = true }
 tracing = { version = "0.1", optional = true }
 
 [lib]

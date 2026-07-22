@@ -1,0 +1,18 @@
+[package]
+name = "clonk-graphics"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+ffi = []
+
+[dependencies]
+thiserror = "1"
+font8x8 = "0.3"
+rusttype = "0.9"
+
+[dev-dependencies]
+# std+small_rng matches the union the normal build graph already enables
+# (clonk-engine: std, clonk-core: std+small_rng) so rand keeps one flavor.
+rand = { version = "0.8", default-features = false, features = ["std", "small_rng"] }

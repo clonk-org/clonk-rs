@@ -1,0 +1,13 @@
+[package]
+name = "clonk-launcher-ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clonk-launcher = { path = "../clonk-launcher" }
+clonk-gui = { path = "../clonk-gui" }
+clonk-graphics = { path = "../clonk-graphics" }
+
+[dev-dependencies]
+clonk-platform = { path = "../clonk-platform" }
+tempfile = "3.10"

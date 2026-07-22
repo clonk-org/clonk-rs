@@ -70,20 +70,20 @@ built — `USE_RUST_ENGINE_VALIDATION` + `LC_RUST_ENGINE_*` env vars in
 
 ## Architecture notes / gotchas
 
-- **Two scripting paths coexist.** `lc-engine`'s `Engine` runs scripts via a
+- **Two scripting paths coexist.** `clonk-engine`'s `Engine` runs scripts via a
   *command-DSL convenience*: lifecycle callbacks (`Initialize`/`Step`) may *return*
   a proplist of state deltas which `parse_command` (`lib.rs`) applies. This is an
   additive shortcut for the synthetic snapshot fixtures (`fixtures.rs`). **Real
   C4Script content** mutates state through host-function calls and its callback
   return values are ignored (matching C++). Do not make the engine *require*
   command-proplist returns from real content.
-- `lc-script` is the actual C4Script VM port (AST tree-walk today; C++ is an
+- `clonk-script` is the actual C4Script VM port (AST tree-walk today; C++ is an
   84-opcode stack VM). `Expr::This` currently returns `Nil` (`vm.rs:417`) — a
   major correctness bug for object-relative code.
 - Snapshots/FFI carry integer positions because C++ converts via `fixtoi()` at the
   boundary; this hides the fixed-point gap. A real differential harness must
   compare **pre-conversion** fixed-point state, or it will mask desyncs.
-- Stray `*.bak` files in `lc-engine/src/` are not part of the build — ignore/remove.
+- Stray `*.bak` files in `clonk-engine/src/` are not part of the build — ignore/remove.
 
 ## Useful commands
 

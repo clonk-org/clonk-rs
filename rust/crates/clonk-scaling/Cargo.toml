@@ -1,0 +1,8 @@
+[package]
+name = "clonk-scaling"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clonk-graphics = { path = "../clonk-graphics" }
+rayon = "1.11.0"

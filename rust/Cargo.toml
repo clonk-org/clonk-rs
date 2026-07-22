@@ -1,30 +1,30 @@
 [workspace]
 members = [
-    "crates/lc-core",
-    "crates/lc-logging",
-    "crates/lc-resources",
-    "crates/lc-script",
-    "crates/lc-engine",
-    "crates/lc-engine-unit-tests",
-    "crates/lc-engine-integration-tests",
-    "crates/lc-engine-core",
-    "crates/lc-app",
-    "crates/lc-graphics",
-    "crates/lc-frontend",
-    "crates/lc-frontend-unit-tests",
-    "crates/lc-launcher",
-    "crates/lc-launcher-ui",
-    "crates/lc-launcher-shell",
-    "crates/lc-audio",
-    "crates/lc-network",
-    "crates/lc-gui",
-    "crates/lc-platform",
-    "crates/lc-game",
-    "crates/lc-scaling",
+    "crates/clonk-core",
+    "crates/clonk-logging",
+    "crates/clonk-resources",
+    "crates/clonk-script",
+    "crates/clonk-engine",
+    "crates/clonk-engine-unit-tests",
+    "crates/clonk-engine-integration-tests",
+    "crates/clonk-engine-core",
+    "crates/clonk-app",
+    "crates/clonk-graphics",
+    "crates/clonk-frontend",
+    "crates/clonk-frontend-unit-tests",
+    "crates/clonk-launcher",
+    "crates/clonk-launcher-ui",
+    "crates/clonk-launcher-shell",
+    "crates/clonk-audio",
+    "crates/clonk-network",
+    "crates/clonk-gui",
+    "crates/clonk-platform",
+    "crates/clonk-game",
+    "crates/clonk-scaling",
     "xtask",
 ]
 resolver = "2"
-default-members = ["crates/lc-app"]
+default-members = ["crates/clonk-app"]
 
 # Keep the ordinary edit/build loop lightly optimized. Live gameplay uses the
 # `play` profile below so runtime-heavy rendering and simulation do not force
@@ -40,7 +40,7 @@ debug = "line-tables-only"
 
 # Full-frame output upscaling is hot per-pixel code on the present path;
 # the crate is tiny and rarely changes, so opt 3 costs no iteration time.
-[profile.dev.package.lc-scaling]
+[profile.dev.package.clonk-scaling]
 opt-level = 3
 
 # Scenario presentation and script callbacks dominate live gameplay. The
@@ -49,19 +49,19 @@ opt-level = 3
 [profile.play]
 inherits = "dev"
 
-[profile.play.package.lc-app]
+[profile.play.package.clonk-app]
 opt-level = 3
 
-[profile.play.package.lc-frontend]
+[profile.play.package.clonk-frontend]
 opt-level = 3
 
-[profile.play.package.lc-engine]
+[profile.play.package.clonk-engine]
 opt-level = 3
 
-[profile.play.package.lc-script]
+[profile.play.package.clonk-script]
 opt-level = 3
 
-[profile.play.package.lc-graphics]
+[profile.play.package.clonk-graphics]
 opt-level = 3
 
 # Simulation-heavy integration tests spend most of their time in workspace
@@ -90,29 +90,29 @@ overflow-checks = true
 # The main application test harness is the largest final link in the workspace.
 # Level 2 keeps its gameplay-heavy tests close to fully optimized while
 # avoiding the longest level-3 codegen tail on this 192k-line wrapper.
-[profile.test.package.lc-app]
+[profile.test.package.clonk-app]
 opt-level = 2
 
-# The large async lc-network harness is a cold-build tail, while its complete
+# The large async clonk-network harness is a cold-build tail, while its complete
 # suite remains only a few seconds without LLVM optimization. Skip optimization
 # for this crate's test-profile copy to shorten that tail.
-[profile.test.package.lc-network]
+[profile.test.package.clonk-network]
 opt-level = 0
 
 # The inline and small unit wrappers are compile-bound, so avoid LLVM
 # optimization for their leaf package.
-[profile.test.package.lc-engine-unit-tests]
+[profile.test.package.clonk-engine-unit-tests]
 opt-level = 0
 
 # The integration wrapper spends most of its wall time running scenario and
 # virtual-player loops. Light optimization pays for itself there without
 # restoring the level-3 compiler tail for the much larger inline wrapper.
-[profile.test.package.lc-engine-integration-tests]
+[profile.test.package.clonk-engine-integration-tests]
 opt-level = 1
 
 # Keep the production frontend optimized for the app and render-heavy tests,
 # while using only light optimization for its large inline unit-test wrapper.
 # Level 1 keeps the 666-test software-render suite fast
 # without restoring the level-3 compiler tail.
-[profile.test.package.lc-frontend-unit-tests]
+[profile.test.package.clonk-frontend-unit-tests]
 opt-level = 1

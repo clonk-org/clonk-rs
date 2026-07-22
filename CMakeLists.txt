@@ -68,8 +68,8 @@ if(USE_RUST_CONFIG OR USE_RUST_GROUP_VALIDATION OR USE_RUST_ENGINE_VALIDATION OR
         add_definitions(-DUSE_RUST_PLATFORM_PATHS)
     endif()
 
-    add_library(lc_core STATIC IMPORTED GLOBAL)
-    set_target_properties(lc_core PROPERTIES
+    add_library(clonk_core STATIC IMPORTED GLOBAL)
+    set_target_properties(clonk_core PROPERTIES
         IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_core.a"
     )
     add_library(lc_core_cdylib SHARED IMPORTED GLOBAL)
@@ -81,8 +81,8 @@ if(USE_RUST_CONFIG OR USE_RUST_GROUP_VALIDATION OR USE_RUST_ENGINE_VALIDATION OR
         IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_core.a"
     )
 
-    add_library(lc_resources STATIC IMPORTED GLOBAL)
-    set_target_properties(lc_resources PROPERTIES
+    add_library(clonk_resources STATIC IMPORTED GLOBAL)
+    set_target_properties(clonk_resources PROPERTIES
         IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_resources.a"
     )
     add_library(lc_resources_cdylib SHARED IMPORTED GLOBAL)
@@ -94,21 +94,21 @@ if(USE_RUST_CONFIG OR USE_RUST_GROUP_VALIDATION OR USE_RUST_ENGINE_VALIDATION OR
         IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_resources.a"
     )
 
-    add_library(lc_engine STATIC IMPORTED GLOBAL)
-    set_target_properties(lc_engine PROPERTIES
-        IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_engine.a"
+    add_library(clonk_engine STATIC IMPORTED GLOBAL)
+    set_target_properties(clonk_engine PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/libclonk_engine.a"
     )
-    add_library(lc_engine_cdylib SHARED IMPORTED GLOBAL)
-    set_target_properties(lc_engine_cdylib PROPERTIES
-        IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_engine.dylib"
+    add_library(clonk_engine_cdylib SHARED IMPORTED GLOBAL)
+    set_target_properties(clonk_engine_cdylib PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/libclonk_engine.dylib"
     )
-    add_library(lc_engine_static STATIC IMPORTED GLOBAL)
-    set_target_properties(lc_engine_static PROPERTIES
-        IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_engine.a"
+    add_library(clonk_engine_static STATIC IMPORTED GLOBAL)
+    set_target_properties(clonk_engine_static PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/libclonk_engine.a"
     )
 
-    add_library(lc_gui STATIC IMPORTED GLOBAL)
-    set_target_properties(lc_gui PROPERTIES
+    add_library(clonk_gui STATIC IMPORTED GLOBAL)
+    set_target_properties(clonk_gui PROPERTIES
         IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_gui.a"
     )
     add_library(lc_gui_cdylib SHARED IMPORTED GLOBAL)
@@ -121,8 +121,8 @@ if(USE_RUST_CONFIG OR USE_RUST_GROUP_VALIDATION OR USE_RUST_ENGINE_VALIDATION OR
     )
 
     if (USE_RUST_PLATFORM_PATHS)
-        add_library(lc_platform STATIC IMPORTED GLOBAL)
-        set_target_properties(lc_platform PROPERTIES
+        add_library(clonk_platform STATIC IMPORTED GLOBAL)
+        set_target_properties(clonk_platform PROPERTIES
             IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/rust/target/${CMAKE_BUILD_TYPE_LOWER}/liblc_platform.a"
         )
         add_library(lc_platform_cdylib SHARED IMPORTED GLOBAL)
@@ -402,7 +402,7 @@ if (USE_RUST_GROUP_VALIDATION)
 	target_link_libraries(clonk PRIVATE lc_resources_static Threads::Threads)
 endif ()
 if (USE_RUST_ENGINE_VALIDATION)
-	target_link_libraries(clonk PRIVATE lc_engine_static Threads::Threads)
+	target_link_libraries(clonk PRIVATE clonk_engine_static Threads::Threads)
 endif ()
 if (USE_RUST_GUI_VALIDATION)
 	target_link_libraries(clonk PRIVATE lc_gui_static Threads::Threads)
@@ -799,4 +799,4 @@ endif ()
 
 # Rust integration notes
 # - Build Rust with `cargo build --release --lib` when enabling USE_RUST_CONFIG.
-# - Set lc_core linkage accordingly for your platform (staticlib/cdylib).
+# - Set clonk_core linkage accordingly for your platform (staticlib/cdylib).

@@ -41,27 +41,27 @@ For an uncommitted or otherwise explicit path, add `--changed` once per path:
 
 ```sh
 cargo dev-check \
-  --changed rust/crates/lc-engine/src/compat.rs \
+  --changed rust/crates/clonk-engine/src/compat.rs \
   --budget-seconds 60
 ```
 
 Use a focused crate test when its name is already known:
 
 ```sh
-cargo nextest run -p lc-engine-unit-tests --test engine_inline test_name
-cargo nextest run -p lc-engine-unit-tests --test unit test_name
-cargo nextest run -p lc-engine-integration-tests --test engine_it module_name::test_name
-cargo nextest run -p lc-frontend-unit-tests --test frontend_inline test_name
+cargo nextest run -p clonk-engine-unit-tests --test engine_inline test_name
+cargo nextest run -p clonk-engine-unit-tests --test unit test_name
+cargo nextest run -p clonk-engine-integration-tests --test engine_it module_name::test_name
+cargo nextest run -p clonk-frontend-unit-tests --test frontend_inline test_name
 ```
 
 The engine wrappers live in dedicated leaf packages so Cargo can keep their
-orchestration code cheap while retaining an optimized production `lc-engine`
+orchestration code cheap while retaining an optimized production `clonk-engine`
 library. The scenario-heavy `engine_it` wrapper uses light optimization; the
-larger compile-bound inline wrapper does not. A bare `-p lc-engine` selection
+larger compile-bound inline wrapper does not. A bare `-p clonk-engine` selection
 therefore checks the library package but does not select these test binaries.
 
 The frontend's inline unit surface likewise lives in
-`lc-frontend-unit-tests`; `lc-frontend` retains the opt-in
+`clonk-frontend-unit-tests`; `clonk-frontend` retains the opt-in
 `dev_feedback_render` integration target and the optimized production library.
 
 Do not run `cargo clean` between feedback cycles. Cargo's local incremental
@@ -74,7 +74,7 @@ but applies level-3 optimization to the rendering, simulation, and script crates
 whose level-1 runtime is too slow for representative gameplay:
 
 ```sh
-cargo run --profile play -p lc-app
+cargo run --profile play -p clonk-app
 ```
 
 On Apple Silicon macOS, Cargo invokes Apple Clang and the system linker through
@@ -106,7 +106,7 @@ a fixed 320x180 resolution:
 
 ```sh
 LC_DEV_CHECK_ARTIFACT_DIR=target/dev-check \
-  cargo nextest run -p lc-frontend --features dev-feedback-render \
+  cargo nextest run -p clonk-frontend --features dev-feedback-render \
   --test dev_feedback_render -- dev_feedback_render --ignored --exact
 ```
 
@@ -118,7 +118,7 @@ artifact:
 LC_DEV_CHECK_SNAPSHOT=target/dev-check/path/to/snapshot-final.json \
 LC_DEV_CHECK_FRAME_PNG=target/dev-check/repro/frame-final.png \
 LC_DEV_CHECK_RENDER_METRICS=target/dev-check/repro/render-metrics.json \
-  cargo nextest run -p lc-frontend --features dev-feedback-render \
+  cargo nextest run -p clonk-frontend --features dev-feedback-render \
   --test dev_feedback_render -- dev_feedback_render --ignored --exact
 ```
 

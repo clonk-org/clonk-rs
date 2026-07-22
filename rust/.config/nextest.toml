@@ -12,15 +12,15 @@ final-status-level = "fail"
 path = "junit.xml"
 store-success-output = false
 
-# Known-flaky lc-app path-case probe with an env-lock/process race predating
+# Known-flaky clonk-app path-case probe with an env-lock/process race predating
 # INFRA-001; its schedule window does not overlap the fixed perpetrator, so
 # the retry stays until it is separately root-caused.
 [[profile.default.overrides]]
-filter = 'package(lc-app) and test(install_definition_resolver_handles_case_insensitive_paths)'
+filter = 'package(clonk-app) and test(install_definition_resolver_handles_case_insensitive_paths)'
 retries = 2
 
 # The 2026-07-21 package-wide retries=2 that absorbed random fixture-shaped
-# lc-app failures was removed after INFRA-001 root-caused them: a filename-
+# clonk-app failures was removed after INFRA-001 root-caused them: a filename-
 # less player profile resolved to the install root itself, and each slot save
 # renamed the whole worktree aside for ~1.4ms, blinding every concurrent
 # fixture read (fix + regression test in synchronized_player_profile_path).
@@ -28,22 +28,22 @@ retries = 2
 # Host preparation uses a real background runtime and can exhaust its bounded
 # poll window when several worker gates saturate the machine simultaneously.
 [[profile.default.overrides]]
-filter = 'package(lc-app) and test(selected_network_scenario_installs_prepared_host_before_admission)'
+filter = 'package(clonk-app) and test(selected_network_scenario_installs_prepared_host_before_admission)'
 retries = 2
 
 [[profile.default.overrides]]
-filter = 'package(lc-network) and test(control_sync_and_reconnect_smoke)'
+filter = 'package(clonk-network) and test(control_sync_and_reconnect_smoke)'
 retries = 2
 
 # Nextest otherwise launches tests lexicographically. Start the longest
 # scenario routes first so they overlap the thousands of short unit tests
 # instead of becoming a serial tail at the end of the workspace gate.
 [[profile.default.overrides]]
-filter = '(package(lc-app) and test(/app_virtual_keyboard_(completes_real_tutorial0[1-3]_route|delivers_tutorial08_surface_wipfs_to_hut|flings_tutorial05_wood_to_the_right_hill)/)) or (package(lc-engine-integration-tests) and test(/(dragon_rock_princess_scream_is_|tutorial(01|02|03|08|09|10)_virtual_player_completes_)/))'
+filter = '(package(clonk-app) and test(/app_virtual_keyboard_(completes_real_tutorial0[1-3]_route|delivers_tutorial08_surface_wipfs_to_hut|flings_tutorial05_wood_to_the_right_hill)/)) or (package(clonk-engine-integration-tests) and test(/(dragon_rock_princess_scream_is_|tutorial(01|02|03|08|09|10)_virtual_player_completes_)/))'
 priority = 100
 
 [[profile.default.overrides]]
-filter = '(package(lc-app) and test(/(classic_host_zero_countdown_|complete_resource_join_|fair_crew_set_|locally_authored_join_|offline_player_info_control_|secondary_local_player_|simultaneous_local_team_selection_|synchronized_team_selection_|unknown_loadable_resource_join_|regicide_assigns_the_initial_host_player_|tutorial01_builds_the_exact_supported_initial_host_bootstrap|selected_network_scenario_installs_prepared_host_|staged_host_installs_activated_participant_|l052_(ready_tick_local_join|synchronized_remote_join)|real_alchemy_mouse_subcases_batch_[12]|real_tutorial01_(message_render|saved_game_music)_subcases_batch|real_tutorial09_hud_names_subcases_batch)/)) or (package(lc-engine-integration-tests) and test(/(tutorial08_empty_messages_clear_|alchemy_real_scenario_subcases_batch_1|drachenfels_real_scenario_subcases_batch_1|sky_race_finish_eliminates_|goldrush_shared_scenario_subcases_batch_[12]|committed_real_scenario_replays_|tutorial05_(jump_and_run_held_down_|shared_scenario_subcases_batch_[12])|replayed_section_load_realigns_)/))'
+filter = '(package(clonk-app) and test(/(classic_host_zero_countdown_|complete_resource_join_|fair_crew_set_|locally_authored_join_|offline_player_info_control_|secondary_local_player_|simultaneous_local_team_selection_|synchronized_team_selection_|unknown_loadable_resource_join_|regicide_assigns_the_initial_host_player_|tutorial01_builds_the_exact_supported_initial_host_bootstrap|selected_network_scenario_installs_prepared_host_|staged_host_installs_activated_participant_|l052_(ready_tick_local_join|synchronized_remote_join)|real_alchemy_mouse_subcases_batch_[12]|real_tutorial01_(message_render|saved_game_music)_subcases_batch|real_tutorial09_hud_names_subcases_batch)/)) or (package(clonk-engine-integration-tests) and test(/(tutorial08_empty_messages_clear_|alchemy_real_scenario_subcases_batch_1|drachenfels_real_scenario_subcases_batch_1|sky_race_finish_eliminates_|goldrush_shared_scenario_subcases_batch_[12]|committed_real_scenario_replays_|tutorial05_(jump_and_run_held_down_|shared_scenario_subcases_batch_[12])|replayed_section_load_realigns_)/))'
 priority = 80
 
 # The remaining real-scenario and real-resource cases are individually slower
@@ -51,7 +51,7 @@ priority = 80
 # work so their final few multi-second cases do not become the workspace's
 # serial tail; the especially long cases above retain their higher priority.
 [[profile.default.overrides]]
-filter = '(package(lc-engine-integration-tests) and test(/(real_scenario_harness::|real_clonk_hangle::tutorial01_real_clonk_subcases_batch|goldrush_scenario_batches::goldrush_shared_scenario_subcases_batch_3|far_worlds_deep_shared_scenario_subcases|jungle_amulet_real_scenario_subcases|arctic_occupied_kayak_rows_with_jump_and_run_direction_updates|elevator_motion_oracle::tutorial07_seed_zero_landscape_matches_cpp_surface8|elevator_motion_oracle::tutorial07_elevator_matches_cpp_fixed_motion_and_shaft_contact|real_tutorial07_virtual_play::tutorial07_workshop_basement_keeps_cpp_pre_growth_creation_position|weather_audio::tutorial07_real_acid_rain_starts_on_each_cpp_phase_call|weather_audio::tutorial07_tick10_starts_cpp_wind_loop_at_level_40)/)) or (package(lc-frontend-unit-tests) and test(/tests::(real_fish_overlay_uses_its_live_object_color_without_an_owner|real_tutorial_seven_acid_(landscape_matches_cpp_material_color|rain_matches_cpp_animated_pxs_sequence)|real_tutorial_elevator_facets_construction_and_live_frame_delta_match_cpp)/))'
+filter = '(package(clonk-engine-integration-tests) and test(/(real_scenario_harness::|real_clonk_hangle::tutorial01_real_clonk_subcases_batch|goldrush_scenario_batches::goldrush_shared_scenario_subcases_batch_3|far_worlds_deep_shared_scenario_subcases|jungle_amulet_real_scenario_subcases|arctic_occupied_kayak_rows_with_jump_and_run_direction_updates|elevator_motion_oracle::tutorial07_seed_zero_landscape_matches_cpp_surface8|elevator_motion_oracle::tutorial07_elevator_matches_cpp_fixed_motion_and_shaft_contact|real_tutorial07_virtual_play::tutorial07_workshop_basement_keeps_cpp_pre_growth_creation_position|weather_audio::tutorial07_real_acid_rain_starts_on_each_cpp_phase_call|weather_audio::tutorial07_tick10_starts_cpp_wind_loop_at_level_40)/)) or (package(clonk-frontend-unit-tests) and test(/tests::(real_fish_overlay_uses_its_live_object_color_without_an_owner|real_tutorial_seven_acid_(landscape_matches_cpp_material_color|rain_matches_cpp_animated_pxs_sequence)|real_tutorial_elevator_facets_construction_and_live_frame_delta_match_cpp)/))'
 priority = 60
 
 # These small families repeatedly formed the final cached-suite tail after all
@@ -59,5 +59,5 @@ priority = 60
 # without competing with the scenario tiers above; priority changes ordering,
 # not nextest's process isolation or concurrency.
 [[profile.default.overrides]]
-filter = '(package(lc-network) and test(/^initial_network_dynamic::/)) or (package(xtask) and test(/^dev_check::tests::(base_collection_includes_committed_and_worktree_changes|git_collection_unions_staged_unstaged_untracked_and_rename_ends)$/))'
+filter = '(package(clonk-network) and test(/^initial_network_dynamic::/)) or (package(xtask) and test(/^dev_check::tests::(base_collection_includes_committed_and_worktree_changes|git_collection_unions_staged_unstaged_untracked_and_rename_ends)$/))'
 priority = 20

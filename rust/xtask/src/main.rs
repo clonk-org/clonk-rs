@@ -1,8 +1,8 @@
 mod audit;
 
 use anyhow::{anyhow, bail, Context, Result};
-use lc_engine::fixtures::SNAPSHOT_SCENARIOS;
-use lc_engine::{Playback, Recording};
+use clonk_engine::fixtures::SNAPSHOT_SCENARIOS;
+use clonk_engine::{Playback, Recording};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
@@ -16,7 +16,7 @@ use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 fn main() -> Result<()> {
-    lc_logging::init();
+    clonk_logging::init();
 
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
@@ -79,25 +79,25 @@ pub(crate) struct SweepResolver {
     pub(crate) roots: Vec<PathBuf>,
 }
 
-impl lc_engine::scenario::LegacyDefinitionResolver for SweepResolver {
+impl clonk_engine::scenario::LegacyDefinitionResolver for SweepResolver {
     fn resolve_definition_groups(
         &self,
-        _scenario: &lc_resources::Group,
+        _scenario: &clonk_resources::Group,
         identifier: &str,
-    ) -> std::result::Result<Vec<lc_resources::Group>, lc_engine::ScenarioError> {
-        let mut groups: Vec<lc_resources::Group> = Vec::new();
+    ) -> std::result::Result<Vec<clonk_resources::Group>, clonk_engine::ScenarioError> {
+        let mut groups: Vec<clonk_resources::Group> = Vec::new();
         let normalized = identifier.replace('\\', "/");
         let path = Path::new(&normalized);
 
         // DefinitionFilenames are opened from executable-data roots. Folder
-        // and scenario-local definitions are appended by lc-engine's
+        // and scenario-local definitions are appended by clonk-engine's
         // separate InitDefs passes (C4Game.cpp:81-103, 184-213).
         for root in &self.roots {
             let candidate = root.join(path);
             if !candidate.exists() {
                 continue;
             }
-            let group = lc_resources::Group::open(&candidate)?;
+            let group = clonk_resources::Group::open(&candidate)?;
             if groups
                 .iter()
                 .all(|existing| existing.root() != group.root())
@@ -107,7 +107,7 @@ impl lc_engine::scenario::LegacyDefinitionResolver for SweepResolver {
         }
 
         if groups.is_empty() {
-            return Err(lc_engine::ScenarioError::LegacyDefinitionNotFound {
+            return Err(clonk_engine::ScenarioError::LegacyDefinitionNotFound {
                 path: identifier.to_string(),
             });
         }
@@ -116,8 +116,8 @@ impl lc_engine::scenario::LegacyDefinitionResolver for SweepResolver {
 
     fn resolve_material_groups(
         &self,
-        scenario: &lc_resources::Group,
-    ) -> std::result::Result<Vec<lc_resources::Group>, lc_engine::ScenarioError> {
+        scenario: &clonk_resources::Group,
+    ) -> std::result::Result<Vec<clonk_resources::Group>, clonk_engine::ScenarioError> {
         let mut groups = Vec::new();
         let mut candidates = scenario
             .root()
@@ -126,12 +126,12 @@ impl lc_engine::scenario::LegacyDefinitionResolver for SweepResolver {
             .collect::<Vec<_>>();
         candidates.extend(self.roots.iter().map(|root| root.join("Material.c4g")));
         for candidate in candidates {
-            let Ok(group) = lc_resources::Group::open(&candidate) else {
+            let Ok(group) = clonk_resources::Group::open(&candidate) else {
                 continue;
             };
             if groups
                 .iter()
-                .all(|existing: &lc_resources::Group| existing.root() != group.root())
+                .all(|existing: &clonk_resources::Group| existing.root() != group.root())
             {
                 groups.push(group);
             }
@@ -191,16 +191,16 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
         bail!("content directory not found at {}", content_root.display());
     }
 
-    let material_library = lc_resources::MaterialLibrary::from_group(
-        &lc_resources::Group::open(content_root.join("Material.c4g"))
+    let material_library = clonk_resources::MaterialLibrary::from_group(
+        &clonk_resources::Group::open(content_root.join("Material.c4g"))
             .context("opening content/Material.c4g")?,
     )
     .map_err(|error| anyhow!("loading material library: {error}"))?;
 
     // System.c4g global scripts (Game.ScriptEngine in C++).
-    let system_scripts = lc_resources::Group::open(repo_root.join("planet/System.c4g"))
+    let system_scripts = clonk_resources::Group::open(repo_root.join("planet/System.c4g"))
         .ok()
-        .and_then(|group| lc_engine::scenario::load_system_scripts(&group).ok())
+        .and_then(|group| clonk_engine::scenario::load_system_scripts(&group).ok())
         .unwrap_or_default();
     if system_scripts.is_empty() {
         tracing::warn!("no System.c4g scripts found; global functions unavailable");
@@ -257,10 +257,10 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
         let worker_system_scripts = system_scripts.clone();
         std::thread::spawn(move || {
             let resolver = SweepResolver { roots };
-            let outcome = match lc_engine::Scenario::load_from_path_with(&worker_path, &resolver)
+            let outcome = match clonk_engine::Scenario::load_from_path_with(&worker_path, &resolver)
             {
                 Ok(scenario) => {
-                    let mut engine = lc_engine::Engine::new();
+                    let mut engine = clonk_engine::Engine::new();
                     engine.configure_materials_from_library(&worker_library);
                     engine.install_global_scripts(&worker_system_scripts);
                     match scenario.apply(&mut engine) {
@@ -348,7 +348,7 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Loads + applies one scenario the way lc-app does (materials, System.c4g,
+/// Loads + applies one scenario the way clonk-app does (materials, System.c4g,
 /// player registration, simulation ticks) so every script-error warning the
 /// C++ engine would not produce becomes visible headlessly. The C++ engine
 /// runs official content without script errors; each distinct warning this
@@ -396,33 +396,33 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         .ok_or_else(|| anyhow!("no content/**/*.c4s matches `{filter}`"))?;
     tracing::info!("scenario-errors: {}", scenario_path.display());
 
-    let global_material_library = lc_resources::MaterialLibrary::from_group(
-        &lc_resources::Group::open(content_root.join("Material.c4g"))
+    let global_material_library = clonk_resources::MaterialLibrary::from_group(
+        &clonk_resources::Group::open(content_root.join("Material.c4g"))
             .context("opening content/Material.c4g")?,
     )
     .map_err(|error| anyhow!("loading material library: {error}"))?;
     // Scenario-local materials load FIRST, the global set after
     // (C4Game::InitMaterialTexture, C4Game.cpp:882-960); each load
     // prepends new names (C4Material.cpp:263-299).
-    let local_material_library = lc_resources::Group::open(scenario_path.join("Material.c4g"))
+    let local_material_library = clonk_resources::Group::open(scenario_path.join("Material.c4g"))
         .ok()
-        .and_then(|group| lc_resources::MaterialLibrary::from_group(&group).ok());
+        .and_then(|group| clonk_resources::MaterialLibrary::from_group(&group).ok());
     let local_material_library = if std::env::var("LC_XTASK_GLOBAL_MATS_ONLY").is_ok() {
         None
     } else {
         local_material_library
     };
     let material_library = match &local_material_library {
-        Some(local) => lc_resources::MaterialLibrary::from_overloaded_loads(&[
+        Some(local) => clonk_resources::MaterialLibrary::from_overloaded_loads(&[
             local,
             &global_material_library,
         ])
         .map_err(|error| anyhow!("merging material libraries: {error}"))?,
         None => global_material_library,
     };
-    let system_scripts = lc_resources::Group::open(repo_root.join("planet/System.c4g"))
+    let system_scripts = clonk_resources::Group::open(repo_root.join("planet/System.c4g"))
         .ok()
-        .and_then(|group| lc_engine::scenario::load_system_scripts(&group).ok())
+        .and_then(|group| clonk_engine::scenario::load_system_scripts(&group).ok())
         .unwrap_or_default();
 
     let mut roots: Vec<PathBuf> = scenario_path
@@ -435,15 +435,15 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
     roots.push(repo_root.clone());
     let resolver = SweepResolver { roots };
 
-    let scenario = lc_engine::Scenario::load_from_path_with(&scenario_path, &resolver)
+    let scenario = clonk_engine::Scenario::load_from_path_with(&scenario_path, &resolver)
         .map_err(|error| anyhow!("load failed: {error}"))?;
-    let mut engine = lc_engine::Engine::new();
+    let mut engine = clonk_engine::Engine::new();
     engine.configure_materials_from_library(&material_library);
     engine.install_global_scripts(&system_scripts);
     // Game.Names: the standard clonk names live next to the System.c4g
     // scripts (C4Game::InitScriptEngine, C4Game.cpp:2772).
     engine.set_standard_names(
-        lc_resources::Group::open(repo_root.join("planet/System.c4g"))
+        clonk_resources::Group::open(repo_root.join("planet/System.c4g"))
             .ok()
             .and_then(|group| group.read_file("Names.txt").ok())
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
@@ -455,7 +455,7 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         .initialize_scenario_script()
         .map_err(|error| anyhow!("scenario Initialize failed: {error}"))?;
 
-    let log_watched = |engine: &lc_engine::Engine, stage: &str| {
+    let log_watched = |engine: &clonk_engine::Engine, stage: &str| {
         if watched_defs.is_empty() {
             return;
         }
@@ -535,7 +535,7 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
     let player_file = repo_root.join("build/Tyler.c4p");
     let (name, color_dw, pref_color, pref_position, control_style, auto_context_menu, crew) =
         match player_file.exists() {
-            true => match lc_engine::player_file::PlayerFile::load_from_path(&player_file) {
+            true => match clonk_engine::player_file::PlayerFile::load_from_path(&player_file) {
                 Ok(file) => (
                     file.name,
                     file.pref_color_dw & 0xffffff,
@@ -577,7 +577,7 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         }
     }
     let joined = engine
-        .join_player(lc_engine::JoinPlayerConfig {
+        .join_player(clonk_engine::JoinPlayerConfig {
             name,
             player_info_id: 0,
             score: 0,
@@ -804,7 +804,7 @@ fn parity_command(args: &[String]) -> Result<()> {
                     "nextest",
                     "run",
                     "-p",
-                    "lc-engine-unit-tests",
+                    "clonk-engine-unit-tests",
                     "--test",
                     "engine_inline",
                     "-E",
@@ -918,35 +918,35 @@ struct FfiCrate {
 
 const FFI_CRATES: &[FfiCrate] = &[
     FfiCrate {
-        name: "lc-core",
+        name: "clonk-core",
         feature: Some("ffi"),
     },
     FfiCrate {
-        name: "lc-resources",
+        name: "clonk-resources",
         feature: Some("ffi"),
     },
     FfiCrate {
-        name: "lc-engine",
+        name: "clonk-engine",
         feature: Some("ffi"),
     },
     FfiCrate {
-        name: "lc-gui",
+        name: "clonk-gui",
         feature: None,
     },
     FfiCrate {
-        name: "lc-platform",
+        name: "clonk-platform",
         feature: Some("ffi"),
     },
     FfiCrate {
-        name: "lc-graphics",
+        name: "clonk-graphics",
         feature: Some("ffi"),
     },
     FfiCrate {
-        name: "lc-audio",
+        name: "clonk-audio",
         feature: Some("ffi"),
     },
     FfiCrate {
-        name: "lc-script",
+        name: "clonk-script",
         feature: Some("ffi"),
     },
 ];
@@ -1202,9 +1202,9 @@ fn package() -> Result<()> {
 }
 
 fn build_lc_game(paths: &WorkspacePaths) -> Result<()> {
-    tracing::info!("building lc-game (release)");
+    tracing::info!("building clonk-game (release)");
     let status = Command::new("cargo")
-        .args(["build", "--release", "-p", "lc-game"])
+        .args(["build", "--release", "-p", "clonk-game"])
         .current_dir(&paths.workspace_dir)
         .status()
         .context("failed to invoke cargo build")?;
@@ -1229,14 +1229,14 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
     fs::create_dir_all(&bin_dir)
         .with_context(|| format!("failed to create {}", bin_dir.display()))?;
 
-    let exe_name = format!("lc-game{}", env::consts::EXE_SUFFIX);
+    let exe_name = format!("clonk-game{}", env::consts::EXE_SUFFIX);
     let built_binary = paths
         .workspace_dir
         .join("target")
         .join("release")
         .join(&exe_name);
     if !built_binary.exists() {
-        bail!("expected lc-game binary at {}", built_binary.display());
+        bail!("expected clonk-game binary at {}", built_binary.display());
     }
     let packaged_binary = bin_dir.join(&exe_name);
     fs::copy(&built_binary, &packaged_binary).with_context(|| {

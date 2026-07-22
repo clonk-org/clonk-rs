@@ -1,0 +1,15 @@
+[package]
+name = "clonk-platform"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+ffi = []
+
+[dependencies]
+clonk-core = { path = "../clonk-core" }
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3.8"

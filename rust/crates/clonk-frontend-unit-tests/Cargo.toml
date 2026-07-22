@@ -1,0 +1,46 @@
+[package]
+name = "clonk-frontend-unit-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+autotests = false
+
+[features]
+# Mirror clonk-frontend's cfg namespace because frontend_inline compiles that
+# crate root directly. The complete workspace gate uses the same default
+# feature set as clonk-frontend's former built-in unit harness.
+default = []
+dev-feedback-render = []
+
+[[test]]
+name = "frontend_inline"
+path = "../clonk-frontend/src/lib.rs"
+
+[dev-dependencies]
+anyhow = "1.0.102"
+freetype-rs = "0.38.0"
+image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
+# Match the mandatory workspace gate so a focused frontend run does not build
+# a default-feature engine that Cargo must replace with test-graph moments
+# later during landing.
+clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
+clonk-graphics = { path = "../clonk-graphics" }
+clonk-gui = { path = "../clonk-gui" }
+clonk-resources = { path = "../clonk-resources" }
+clonk-scaling = { path = "../clonk-scaling" }
+clonk-script = { path = "../clonk-script" }
+# Match target- and host-side features enabled elsewhere in the workspace so
+# this focused wrapper reuses the gate's dependency artifacts.
+memchr = "2"
+rayon = "1.11.0"
+serde_json = "1.0"
+tempfile = "3"
+tracing-core = "0.1"
+yoke-derive = "0.8"
+zerofrom-derive = "0.1"
+
+# Match the workspace's Unix dependency features to avoid rebuilding the
+# frontend's engine/resource chain between a focused run and the full gate.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { version = "0.2", features = ["use_std"] }
+rustix = { version = "1", features = ["system"] }

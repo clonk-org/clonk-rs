@@ -2027,7 +2027,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
-name = "lc-app"
+name = "clonk-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2038,18 +2038,18 @@ dependencies = [
  "gethostname",
  "gilrs",
  "image",
- "lc-audio",
- "lc-core",
- "lc-engine",
- "lc-frontend",
- "lc-graphics",
- "lc-gui",
- "lc-logging",
- "lc-network",
- "lc-platform",
- "lc-resources",
- "lc-scaling",
- "lc-script",
+ "clonk-audio",
+ "clonk-core",
+ "clonk-engine",
+ "clonk-frontend",
+ "clonk-graphics",
+ "clonk-gui",
+ "clonk-logging",
+ "clonk-network",
+ "clonk-platform",
+ "clonk-resources",
+ "clonk-scaling",
+ "clonk-script",
  "objc2-foundation",
  "parking_lot",
  "pixels",
@@ -2070,7 +2070,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-audio"
+name = "clonk-audio"
 version = "0.1.0"
 dependencies = [
  "cpal",
@@ -2084,7 +2084,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-core"
+name = "clonk-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -2098,17 +2098,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-engine"
+name = "clonk-engine"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "criterion",
  "image",
  "indexmap 2.11.4",
- "lc-core",
- "lc-engine-core",
- "lc-resources",
- "lc-script",
+ "clonk-core",
+ "clonk-engine-core",
+ "clonk-resources",
+ "clonk-script",
  "proptest",
  "rand 0.8.5",
  "rand_core 0.6.4",
@@ -2120,7 +2120,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-engine-core"
+name = "clonk-engine-core"
 version = "0.1.0"
 dependencies = [
  "rand_core 0.6.4",
@@ -2128,17 +2128,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-engine-integration-tests"
+name = "clonk-engine-integration-tests"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "image",
  "indexmap 2.11.4",
- "lc-core",
- "lc-engine",
- "lc-engine-core",
- "lc-resources",
- "lc-script",
+ "clonk-core",
+ "clonk-engine",
+ "clonk-engine-core",
+ "clonk-resources",
+ "clonk-script",
  "libc",
  "memchr",
  "once_cell",
@@ -2158,17 +2158,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-engine-unit-tests"
+name = "clonk-engine-unit-tests"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "image",
  "indexmap 2.11.4",
- "lc-core",
- "lc-engine",
- "lc-engine-core",
- "lc-resources",
- "lc-script",
+ "clonk-core",
+ "clonk-engine",
+ "clonk-engine-core",
+ "clonk-resources",
+ "clonk-script",
  "libc",
  "memchr",
  "once_cell",
@@ -2188,18 +2188,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-frontend"
+name = "clonk-frontend"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "freetype-rs",
  "image",
- "lc-engine",
- "lc-graphics",
- "lc-gui",
- "lc-resources",
- "lc-scaling",
- "lc-script",
+ "clonk-engine",
+ "clonk-graphics",
+ "clonk-gui",
+ "clonk-resources",
+ "clonk-scaling",
+ "clonk-script",
  "libc",
  "memchr",
  "rayon",
@@ -2212,18 +2212,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-frontend-unit-tests"
+name = "clonk-frontend-unit-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "freetype-rs",
  "image",
- "lc-engine",
- "lc-graphics",
- "lc-gui",
- "lc-resources",
- "lc-scaling",
- "lc-script",
+ "clonk-engine",
+ "clonk-graphics",
+ "clonk-gui",
+ "clonk-resources",
+ "clonk-scaling",
+ "clonk-script",
  "libc",
  "memchr",
  "rayon",
@@ -2236,15 +2236,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-game"
+name = "clonk-game"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "lc-core",
- "lc-launcher",
- "lc-logging",
- "lc-platform",
+ "clonk-core",
+ "clonk-launcher",
+ "clonk-logging",
+ "clonk-platform",
  "serde",
  "serde_json",
  "tempfile",
@@ -2254,7 +2254,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-graphics"
+name = "clonk-graphics"
 version = "0.1.0"
 dependencies = [
  "font8x8",
@@ -2264,20 +2264,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-gui"
+name = "clonk-gui"
 version = "0.1.0"
 dependencies = [
- "lc-graphics",
+ "clonk-graphics",
 ]
 
 [[package]]
-name = "lc-launcher"
+name = "clonk-launcher"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "lc-core",
- "lc-platform",
- "lc-resources",
+ "clonk-core",
+ "clonk-platform",
+ "clonk-resources",
  "open",
  "serde",
  "serde_json",
@@ -2286,17 +2286,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-launcher-shell"
+name = "clonk-launcher-shell"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
- "lc-graphics",
- "lc-gui",
- "lc-launcher",
- "lc-launcher-ui",
- "lc-logging",
- "lc-platform",
+ "clonk-graphics",
+ "clonk-gui",
+ "clonk-launcher",
+ "clonk-launcher-ui",
+ "clonk-logging",
+ "clonk-platform",
  "pixels",
  "rfd",
  "serde",
@@ -2307,18 +2307,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-launcher-ui"
+name = "clonk-launcher-ui"
 version = "0.1.0"
 dependencies = [
- "lc-graphics",
- "lc-gui",
- "lc-launcher",
- "lc-platform",
+ "clonk-graphics",
+ "clonk-gui",
+ "clonk-launcher",
+ "clonk-platform",
  "tempfile",
 ]
 
 [[package]]
-name = "lc-logging"
+name = "clonk-logging"
 version = "0.1.0"
 dependencies = [
  "tracing",
@@ -2326,14 +2326,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-network"
+name = "clonk-network"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.13.1",
  "flate2",
  "iconv-native",
- "lc-engine",
- "lc-resources",
+ "clonk-engine",
+ "clonk-resources",
  "libc",
  "log",
  "reqwest",
@@ -2347,23 +2347,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-platform"
+name = "clonk-platform"
 version = "0.1.0"
 dependencies = [
- "lc-core",
+ "clonk-core",
  "tempfile",
  "thiserror 1.0.69",
 ]
 
 [[package]]
-name = "lc-resources"
+name = "clonk-resources"
 version = "0.1.0"
 dependencies = [
  "byteorder",
  "encoding_rs",
  "flate2",
  "image",
- "lc-script",
+ "clonk-script",
  "libc",
  "libz-sys",
  "serde",
@@ -2376,15 +2376,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "lc-scaling"
+name = "clonk-scaling"
 version = "0.1.0"
 dependencies = [
- "lc-graphics",
+ "clonk-graphics",
  "rayon",
 ]
 
 [[package]]
-name = "lc-script"
+name = "clonk-script"
 version = "0.1.0"
 dependencies = [
  "criterion",
@@ -5545,9 +5545,9 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "lc-engine",
- "lc-logging",
- "lc-resources",
+ "clonk-engine",
+ "clonk-logging",
+ "clonk-resources",
  "tracing",
  "walkdir",
  "zip",

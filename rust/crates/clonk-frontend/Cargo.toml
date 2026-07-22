@@ -1,0 +1,55 @@
+[package]
+name = "clonk-frontend"
+version = "0.1.0"
+edition = "2021"
+
+# The inline unit surface is compiled from this crate root by the lightly optimized
+# clonk-frontend-unit-tests leaf package. Keep the production frontend optimized
+# without also emitting a second optimized copy for its unit harness.
+[lib]
+test = false
+
+[features]
+default = []
+# The deterministic render probe is an explicitly invoked developer tool. Its
+# only test is ignored, so compiling and linking it in every workspace gate is
+# pure cold-build overhead.
+dev-feedback-render = []
+
+[dependencies]
+anyhow = "1.0.102"
+freetype-rs = "0.38.0"
+clonk-engine = { path = "../clonk-engine" }
+clonk-graphics = { path = "../clonk-graphics" }
+clonk-gui = { path = "../clonk-gui" }
+clonk-resources = { path = "../clonk-resources" }
+clonk-script = { path = "../clonk-script" }
+rayon = "1.11.0"
+
+[dev-dependencies]
+# Same feature set as clonk-engine's image dep: a diverging dev-dep request makes
+# the test graph compile a second 18-codec flavor of image (openexr/webp/tiff).
+image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
+# Focused render probes should produce the same engine fingerprint as the
+# workspace test graph, allowing the landing gate to reuse that compilation.
+clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
+clonk-scaling = { path = "../clonk-scaling" }
+# Match target- and host-side features enabled elsewhere in the workspace so
+# the focused render probe reuses the gate's dependency artifacts.
+memchr = "2"
+serde_json = "1.0"
+tempfile = "3"
+tracing-core = "0.1"
+yoke-derive = "0.8"
+zerofrom-derive = "0.1"
+
+# Focused render probes and the full workspace gate should share the same Unix
+# transitive feature fingerprints.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { version = "0.2", features = ["use_std"] }
+rustix = { version = "1", features = ["system"] }
+
+[[test]]
+name = "dev_feedback_render"
+path = "tests/dev_feedback_render.rs"
+required-features = ["dev-feedback-render"]
