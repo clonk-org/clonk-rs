@@ -2251,7 +2251,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             "Startup",
             &[(
                 "LastPortraitFolderIdx",
-                clonk_app::NativeConfigValue::RawAscii("1"),
+                clonk_app_netplay::NativeConfigValue::RawAscii("1"),
             )],
         )
         .expect("seed remembered portrait location");
@@ -2300,7 +2300,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             .iter()
             .any(|item| item.filename() == Some("Custom.PNG")));
         assert_eq!(
-            clonk_app::configured_native_value(
+            clonk_app_netplay::configured_native_value(
                 &fs::read(paths.config_file()).expect("read portrait config"),
                 "Startup",
                 "LastPortraitFolderIdx",

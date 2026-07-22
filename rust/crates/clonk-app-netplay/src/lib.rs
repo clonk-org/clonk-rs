@@ -1,19 +1,20 @@
-mod client_network_scenario;
-mod client_start_barrier;
-mod configured_client_players;
-mod resource_path_identity;
+pub mod client_network_scenario;
+pub mod client_start_barrier;
+pub mod configured_client_players;
+pub mod control_message;
+pub mod host_game_resource_sources;
+pub mod network;
+pub mod network_host_preparation;
+pub mod prepared_host_bootstrap;
+pub mod resource_path_identity;
 
-// Keep these suites in the library test harness instead of Cargo integration
-// targets. Integration targets make Cargo also build the normal clonk-app binary,
-// even though neither suite executes it.
+// Real-content suites for the host resource/bootstrap chain. They live in the
+// library test harness instead of Cargo integration targets so the package
+// keeps a single test binary.
 #[cfg(test)]
-#[path = "../tests/host_game_resource_sources.rs"]
-pub mod host_game_resource_sources_tests;
+mod host_game_resource_sources_tests;
 #[cfg(test)]
-pub(crate) use host_game_resource_sources_tests::host_game_resource_sources;
-#[cfg(test)]
-#[path = "../tests/prepared_host_bootstrap.rs"]
-pub mod prepared_host_bootstrap_tests;
+mod prepared_host_bootstrap_tests;
 
 pub use client_network_scenario::{
     compose_client_network_scenario, resolve_client_game_resources,

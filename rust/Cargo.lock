@@ -694,6 +694,7 @@ dependencies = [
  "arboard",
  "clap",
  "clonk-app-menus",
+ "clonk-app-netplay",
  "clonk-app-render",
  "clonk-audio",
  "clonk-core",
@@ -739,6 +740,26 @@ dependencies = [
  "clonk-frontend",
  "clonk-graphics",
  "clonk-gui",
+]
+
+[[package]]
+name = "clonk-app-netplay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clonk-core",
+ "clonk-engine",
+ "clonk-network",
+ "clonk-platform",
+ "clonk-resources",
+ "clonk-script",
+ "flate2",
+ "image",
+ "parking_lot",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

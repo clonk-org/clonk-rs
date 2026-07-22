@@ -10,7 +10,6 @@
 
 mod advanced_config;
 mod classic_record_stream;
-mod control_message;
 mod control_options;
 mod desktop_notification;
 mod developer_console_save;
@@ -19,18 +18,17 @@ use clonk_app_render::draw_commands;
 mod game_message;
 mod gamepad;
 use clonk_app_render::gpu_renderer;
-mod host_game_resource_sources;
+use clonk_app_netplay::host_game_resource_sources;
 use clonk_app_menus::ingame_menu;
 mod input;
 mod local_control;
-mod network;
-mod network_host_preparation;
+use clonk_app_netplay::network;
 mod network_team_assignment;
 mod object_menu;
 mod offline_savegame;
 mod offline_startup;
-mod prepared_host_bootstrap;
-mod resource_path_identity;
+use clonk_app_netplay::prepared_host_bootstrap;
+use clonk_app_netplay::resource_path_identity;
 mod runtime_join_save;
 mod save_browser;
 mod settings;
@@ -59,7 +57,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use control_message::{mentions_nick, ControlMessageState};
+use clonk_app_netplay::control_message::{mentions_nick, ControlMessageState};
 use control_options::{binding_display_name, format_key_label};
 use desktop_notification::{DesktopNotification, DesktopNotifier};
 use display_sleep_inhibitor::DisplaySleepInhibitor;
@@ -79,7 +77,7 @@ use clonk_app_menus::ingame_menu::{
     TeamSelectionEntry, UpperBoardMode,
 };
 use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
-use clonk_app::{
+use clonk_app_netplay::{
     ClientScenarioResources, ClientStartBarrier, ClientStartResourceRole,
     ConfiguredClientPlayerSelection, PendingClientStartResource, ResolvedClientStartResource,
     SelectedClientPlayer, compose_client_network_scenario, load_configured_mission_access,
@@ -195,12 +193,12 @@ use clonk_resources::{
 };
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
 use clonk_app_menus::menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event};
-use network::{
+use clonk_app_netplay::network::{
     ClientSettings, HostSettings, LeagueEndAttempt, LeagueEndFailurePhase, LeagueRecordStreamStatus,
     NetworkControl, NetworkControlClock, NetworkEvent, NetworkManager, NetworkMode,
     NetworkStartError, NetworkStartupCancellation,
 };
-use network_host_preparation::NetworkHostPreparation;
+use clonk_app_netplay::network_host_preparation::NetworkHostPreparation;
 use network_team_assignment::{NetworkTeamAssignmentState, NetworkTeamControlError};
 use object_menu::{
     apply_definition_owner_color, definition_menu_picture, engine_script_menu_inline_image_specs,
@@ -220,7 +218,7 @@ use offline_startup::{
 };
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
-use prepared_host_bootstrap::{
+use clonk_app_netplay::prepared_host_bootstrap::{
     PreparedHostBootstrap, PreparedHostPlayerIdentity, PreparedHostPlayerSource,
     ProcessInitialHostTeamAssignmentOracle, CLASSIC_SAFE_RANDOM_LOCK,
 };
@@ -8023,7 +8021,7 @@ fn parse_startup_config_integer(value: &[u8]) -> Option<i32> {
 }
 
 fn startup_config_integer(config: &[u8], section: &str, key: &str, default: i32) -> i32 {
-    clonk_app::configured_native_scalar(config, section, key)
+    clonk_app_netplay::configured_native_scalar(config, section, key)
         .and_then(parse_startup_config_integer)
         .unwrap_or(default)
 }
@@ -8104,7 +8102,7 @@ fn parse_startup_config_unsigned(value: &[u8]) -> Option<u32> {
 }
 
 fn startup_config_unsigned(config: &[u8], section: &str, key: &str, default: u32) -> u32 {
-    clonk_app::configured_native_scalar(config, section, key)
+    clonk_app_netplay::configured_native_scalar(config, section, key)
         .and_then(parse_startup_config_unsigned)
         .unwrap_or(default)
 }
@@ -8112,7 +8110,7 @@ fn startup_config_unsigned(config: &[u8], section: &str, key: &str, default: u32
 fn load_advanced_renderer_config(config: &[u8]) -> clonk_frontend::AdvancedRendererConfig {
     let defaults = clonk_frontend::AdvancedRendererConfig::DEFAULT;
     let boolean = |key: &str, default: bool| {
-        clonk_app::configured_native_boolean(config, "Graphics", key).unwrap_or(default)
+        clonk_app_netplay::configured_native_boolean(config, "Graphics", key).unwrap_or(default)
     };
     clonk_frontend::AdvancedRendererConfig {
         no_alpha_add: boolean("NoAlphaAdd", defaults.no_alpha_add),
@@ -8172,14 +8170,14 @@ fn canonicalize_startup_integrity_scalars(config: &[u8]) -> Result<Option<Vec<u8
             CLASSIC_DEFAULT_RESOLUTION_X,
         ),
     ] {
-        if clonk_app::configured_native_scalar(&canonical, section, key).is_none() {
+        if clonk_app_netplay::configured_native_scalar(&canonical, section, key).is_none() {
             continue;
         }
         let value = startup_config_integer(&canonical, section, key, default).to_string();
-        canonical = clonk_app::update_configured_native_values(
+        canonical = clonk_app_netplay::update_configured_native_values(
             &canonical,
             section,
-            &[(key, clonk_app::NativeConfigValue::RawAscii(&value))],
+            &[(key, clonk_app_netplay::NativeConfigValue::RawAscii(&value))],
         )
         .with_context(|| format!("failed to canonicalize startup configuration {section}.{key}"))?;
     }
@@ -23016,7 +23014,7 @@ fn c4group_is_group(path: &Path) -> bool {
 
 fn classic_save_folder_language(paths: Option<&AppPaths>) -> Vec<u8> {
     let config = load_native_config_bytes(paths);
-    clonk_app::configured_native_value(&config, "General", "Language")
+    clonk_app_netplay::configured_native_value(&config, "General", "Language")
         .filter(|language| !language.is_empty())
         .map(|language| language.as_bytes().iter().copied().take(2).collect())
         .unwrap_or_else(|| {
@@ -24453,7 +24451,7 @@ fn load_gamepad_gui_control(paths: Option<&AppPaths>) -> bool {
 /// fair-crew icon. The field name is `FairCrew`, but the serialized key is not.
 fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
     let config = load_native_config_bytes(paths);
-    clonk_app::configured_native_boolean(&config, "General", "NoCrew")
+    clonk_app_netplay::configured_native_boolean(&config, "General", "NoCrew")
         .unwrap_or(false)
 }
 
@@ -24461,7 +24459,7 @@ fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
 /// `Config.General.GamepadEnabled` is true. `C4ConfigGeneral` defaults the
 /// field on, so a missing or malformed serialized value retains that default.
 fn configured_gamepads_enabled(config: &[u8]) -> bool {
-    clonk_app::configured_native_boolean(config, "General", "GamepadEnabled").unwrap_or(true)
+    clonk_app_netplay::configured_native_boolean(config, "General", "GamepadEnabled").unwrap_or(true)
 }
 
 fn load_gamepads_enabled(paths: Option<&AppPaths>) -> bool {
@@ -24488,31 +24486,31 @@ fn save_config_preserving_native_general_booleans(
     };
     let gamepads_enabled = updated_gamepads_enabled.or_else(|| {
         existing.as_deref().and_then(|config| {
-            clonk_app::configured_native_boolean(config, "General", "GamepadEnabled")
+            clonk_app_netplay::configured_native_boolean(config, "General", "GamepadEnabled")
         })
     });
     let always_debug = updated_always_debug.or_else(|| {
         existing
             .as_deref()
-            .and_then(|config| clonk_app::configured_native_boolean(config, "General", "DebugMode"))
+            .and_then(|config| clonk_app_netplay::configured_native_boolean(config, "General", "DebugMode"))
     });
     config.save(path)?;
     let mut updates = Vec::new();
     if let Some(enabled) = gamepads_enabled {
         updates.push((
             "GamepadEnabled",
-            clonk_app::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
+            clonk_app_netplay::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
         ));
     }
     if let Some(enabled) = always_debug {
         updates.push((
             "DebugMode",
-            clonk_app::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
+            clonk_app_netplay::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
         ));
     }
     if !updates.is_empty() {
         let saved = fs::read(path)?;
-        let updated = clonk_app::update_configured_native_values(&saved, "General", &updates)?;
+        let updated = clonk_app_netplay::update_configured_native_values(&saved, "General", &updates)?;
         fs::write(path, updated)?;
     }
     Ok(())
@@ -24563,11 +24561,11 @@ fn update_dirty_gamepad_axis_calibration_config(
             .map(|(key, value)| {
                 (
                     key.as_str(),
-                    clonk_app::NativeConfigValue::RawAscii(value.as_str()),
+                    clonk_app_netplay::NativeConfigValue::RawAscii(value.as_str()),
                 )
             })
             .collect::<Vec<_>>();
-        config = clonk_app::update_configured_native_values(
+        config = clonk_app_netplay::update_configured_native_values(
             &config,
             &format!("Gamepad{gamepad}"),
             &updates,
@@ -25072,7 +25070,7 @@ fn load_native_config_bytes(paths: Option<&AppPaths>) -> Vec<u8> {
 }
 
 fn materialized_save_description_language(config: &[u8]) -> Vec<u8> {
-    match clonk_app::configured_native_value(config, "General", "Language") {
+    match clonk_app_netplay::configured_native_value(config, "General", "Language") {
         Some(value) => {
             value
                 .as_bytes()
@@ -25095,7 +25093,7 @@ fn materialized_save_description_language(config: &[u8]) -> Vec<u8> {
 }
 
 fn configured_process_group_maker(config: &[u8]) -> LegacyCString {
-    clonk_app::configured_native_value(config, "General", "Name").unwrap_or_default()
+    clonk_app_netplay::configured_native_value(config, "General", "Name").unwrap_or_default()
 }
 
 /// C4Game's `Application.isFullScreen` distinguishes the graphical client from
@@ -25104,7 +25102,7 @@ fn configured_process_group_maker(config: &[u8]) -> LegacyCString {
 /// persisted AlwaysDebug switch. Both remain gated by Parameters.AllowDebug.
 fn arm_engine_debug_mode(engine: &mut Engine, config: &[u8], console_mode: bool) {
     let always_debug =
-        clonk_app::configured_native_boolean(config, "General", "DebugMode").unwrap_or(false);
+        clonk_app_netplay::configured_native_boolean(config, "General", "DebugMode").unwrap_or(false);
     engine.set_debug_mode((console_mode || always_debug) && engine.allow_debug());
 }
 
@@ -25125,12 +25123,12 @@ fn arm_configured_engine_debug_mode(
 }
 
 fn configured_allow_scripting_in_replays(config: &[u8]) -> bool {
-    clonk_app::configured_native_boolean(config, "General", "AllowScriptingInReplays")
+    clonk_app_netplay::configured_native_boolean(config, "General", "AllowScriptingInReplays")
         .unwrap_or(false)
 }
 
 fn configured_auto_frame_skip(config: &[u8]) -> bool {
-    clonk_app::configured_native_boolean(config, "Graphics", "AutoFrameSkip").unwrap_or(true)
+    clonk_app_netplay::configured_native_boolean(config, "Graphics", "AutoFrameSkip").unwrap_or(true)
 }
 
 /// Freeze C4GameParameters at game activation. Network JoinData is
@@ -25147,7 +25145,7 @@ fn frozen_auto_frame_skip(
 }
 
 fn configured_console_script_strictness(config: &[u8]) -> clonk_engine::ScriptStrictness {
-    let Some(value) = clonk_app::configured_native_scalar(
+    let Some(value) = clonk_app_netplay::configured_native_scalar(
         config,
         "Developer",
         "ConsoleScriptStrictness",
@@ -25285,7 +25283,7 @@ fn native_bytes_as_legacy_text(bytes: &[u8]) -> String {
 }
 
 fn native_config_text(config: &[u8], section: &str, key: &str) -> Option<String> {
-    clonk_app::configured_native_value(config, section, key)
+    clonk_app_netplay::configured_native_value(config, section, key)
         .map(|value| native_bytes_as_legacy_text(value.as_bytes()))
 }
 
@@ -25422,7 +25420,7 @@ fn load_lobby_ready_check_cooldown(paths: Option<&AppPaths>) -> LobbyReadyCheckC
 }
 
 fn ready_check_toasts_enabled_from_config(config: &[u8]) -> bool {
-    clonk_app::configured_native_boolean(config, "Toasts", "ReadyCheck").unwrap_or(true)
+    clonk_app_netplay::configured_native_boolean(config, "Toasts", "ReadyCheck").unwrap_or(true)
 }
 
 fn load_ready_check_toasts_enabled(paths: Option<&AppPaths>) -> bool {
@@ -25734,7 +25732,7 @@ fn load_reference_query_settings(paths: Option<&AppPaths>) -> clonk_network::Ref
 
 fn load_league_auth_settings(paths: Option<&AppPaths>) -> clonk_network::LeagueAuthRequestHead {
     let config = load_native_config_bytes(paths);
-    let value = |key| clonk_app::configured_native_value(&config, "Network", key).unwrap_or_default();
+    let value = |key| clonk_app_netplay::configured_native_value(&config, "Network", key).unwrap_or_default();
     clonk_network::LeagueAuthRequestHead {
         account: value("LeagueNick"),
         // C4Config deliberately omits LeaguePassword from its compiler. It
@@ -25747,14 +25745,14 @@ fn load_league_auth_settings(paths: Option<&AppPaths>) -> clonk_network::LeagueA
 
 fn load_league_auto_login(paths: Option<&AppPaths>) -> bool {
     let config = load_native_config_bytes(paths);
-    clonk_app::configured_native_value(&config, "Network", "LeagueAutoLogin")
+    clonk_app_netplay::configured_native_value(&config, "Network", "LeagueAutoLogin")
         .map(|value| parse_config_bool(&legacy_presentation_text(value.as_bytes())))
         .unwrap_or(true)
 }
 
 fn load_network_nick(paths: Option<&AppPaths>) -> LegacyCString {
     let config = load_native_config_bytes(paths);
-    clonk_app::configured_native_value(&config, "Network", "Nick").unwrap_or_default()
+    clonk_app_netplay::configured_native_value(&config, "Network", "Nick").unwrap_or_default()
 }
 
 /// Curl's C++ HTTP backend exposes only `Uri::Part::Host` to the signup
@@ -25918,11 +25916,11 @@ fn load_classic_lobby_identity_with_hostname_provider(
         Err(error) => return Err(error).context("cannot read lobby configuration"),
     };
     let value = |section, key| {
-        clonk_app::configured_native_value(&config, section, key)
+        clonk_app_netplay::configured_native_value(&config, section, key)
             .map(|value| native_bytes_as_legacy_text(value.as_bytes()))
     };
     let network_name = |key| {
-        clonk_app::configured_native_dynamic_value(&config, "Network", key)
+        clonk_app_netplay::configured_native_dynamic_value(&config, "Network", key)
             .map(|value| native_bytes_as_legacy_text(value.as_bytes()))
     };
     let configured_local_name = sanitize_classic_lobby_name(
@@ -25967,7 +25965,7 @@ fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> GameOptionValue
             .unwrap_or(default)
     };
     let string_value = |section: &str, key: &str, default: &str| {
-        clonk_app::configured_native_value(&config, section, key)
+        clonk_app_netplay::configured_native_value(&config, section, key)
             .map(|value| native_bytes_as_legacy_text(value.as_bytes()))
             .unwrap_or_else(|| default.to_string())
     };
@@ -25978,7 +25976,7 @@ fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> GameOptionValue
         password: String::new(),
         last_password: string_value("Network", "LastPassword", "Wipf"),
         comment: string_value("Network", "Comment", ""),
-        fair_crew: clonk_app::configured_native_boolean(&config, "General", "NoCrew")
+        fair_crew: clonk_app_netplay::configured_native_boolean(&config, "General", "NoCrew")
             .unwrap_or(false),
         fair_crew_strength,
         record: bool_value("General", "Record", false),
@@ -26050,14 +26048,14 @@ fn persist_irc_login_settings(
         paths,
         "IRC",
         &[
-            ("Nick", clonk_app::NativeConfigValue::CppEscapedString(&nick)),
+            ("Nick", clonk_app_netplay::NativeConfigValue::CppEscapedString(&nick)),
             (
                 "RealName",
-                clonk_app::NativeConfigValue::CppEscapedString(&real_name),
+                clonk_app_netplay::NativeConfigValue::CppEscapedString(&real_name),
             ),
             (
                 "Channel",
-                clonk_app::NativeConfigValue::CppEscapedString(&channel),
+                clonk_app_netplay::NativeConfigValue::CppEscapedString(&channel),
             ),
         ],
     )
@@ -26069,7 +26067,7 @@ fn persist_irc_warning_preference(paths: &AppPaths, checked: bool) -> io::Result
         "Startup",
         &[(
             "HideMsgIRCDangerous",
-            clonk_app::NativeConfigValue::RawAscii(if checked { "1" } else { "0" }),
+            clonk_app_netplay::NativeConfigValue::RawAscii(if checked { "1" } else { "0" }),
         )],
     )
 }
@@ -26081,7 +26079,7 @@ fn persist_startup_portrait_location(paths: &AppPaths, index: usize) -> io::Resu
         "Startup",
         &[(
             "LastPortraitFolderIdx",
-            clonk_app::NativeConfigValue::RawAscii(&index),
+            clonk_app_netplay::NativeConfigValue::RawAscii(&index),
         )],
     )
 }
@@ -26089,7 +26087,7 @@ fn persist_startup_portrait_location(paths: &AppPaths, index: usize) -> io::Resu
 fn persist_native_config_values(
     paths: &AppPaths,
     section: &str,
-    updates: &[(&str, clonk_app::NativeConfigValue<'_>)],
+    updates: &[(&str, clonk_app_netplay::NativeConfigValue<'_>)],
 ) -> io::Result<()> {
     let path = paths.config_file();
     let config = match fs::read(&path) {
@@ -26097,7 +26095,7 @@ fn persist_native_config_values(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error),
     };
-    let updated = clonk_app::update_configured_native_values(&config, section, updates)?;
+    let updated = clonk_app_netplay::update_configured_native_values(&config, section, updates)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -26110,7 +26108,7 @@ fn persist_league_account_preference(paths: &AppPaths, account: &LegacyCString) 
         "Network",
         &[(
             "LeagueNick",
-            clonk_app::NativeConfigValue::CppEscapedString(account.as_bytes()),
+            clonk_app_netplay::NativeConfigValue::CppEscapedString(account.as_bytes()),
         )],
     )
 }
@@ -67644,7 +67642,7 @@ impl GameApp {
                 "General",
                 &[(
                     "NoCrew",
-                    clonk_app::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
+                    clonk_app_netplay::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
                 )],
             )?;
         }
@@ -78274,7 +78272,7 @@ impl GameApp {
             section,
             &[(
                 key,
-                clonk_app::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
+                clonk_app_netplay::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
             )],
         ) {
             tracing::error!(%error, section, key, "failed to persist game option");

@@ -3032,13 +3032,13 @@ VendorNestedField=discard me\n";
         persist_league_account_preference(&paths, &account).expect("persist native league account");
         let config = fs::read(paths.config_file()).expect("read native league configuration");
         assert_eq!(
-            clonk_app::configured_native_value(&config, "Network", "LeagueNick")
+            clonk_app_netplay::configured_native_value(&config, "Network", "LeagueNick")
                 .expect("persisted LeagueNick")
                 .as_bytes(),
             b"Andr\xe9"
         );
         assert!(
-            clonk_app::configured_native_value(&config, "Network", "LeaguePassword").is_none(),
+            clonk_app_netplay::configured_native_value(&config, "Network", "LeaguePassword").is_none(),
             "C++ keeps the entered password in process memory only"
         );
 
@@ -3050,9 +3050,9 @@ VendorNestedField=discard me\n";
             &[
                 (
                     "LeaguePassword",
-                    clonk_app::NativeConfigValue::CppEscapedString(b"secret"),
+                    clonk_app_netplay::NativeConfigValue::CppEscapedString(b"secret"),
                 ),
-                ("LeagueAutoLogin", clonk_app::NativeConfigValue::RawAscii("1")),
+                ("LeagueAutoLogin", clonk_app_netplay::NativeConfigValue::RawAscii("1")),
             ],
         )
         .expect("seed ignored disk password");
@@ -3069,7 +3069,7 @@ VendorNestedField=discard me\n";
         persist_native_config_values(
             &paths,
             "Network",
-            &[("LeagueAutoLogin", clonk_app::NativeConfigValue::RawAscii("0"))],
+            &[("LeagueAutoLogin", clonk_app_netplay::NativeConfigValue::RawAscii("0"))],
         )
         .expect("disable league auto-login");
         assert!(app.league_login_prompt_required());

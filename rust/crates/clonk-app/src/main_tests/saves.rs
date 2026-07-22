@@ -4737,7 +4737,7 @@
         persist_native_config_values(
             &paths,
             "General",
-            &[("DebugMode", clonk_app::NativeConfigValue::RawAscii("true"))],
+            &[("DebugMode", clonk_app_netplay::NativeConfigValue::RawAscii("true"))],
         )
         .expect("enable native AlwaysDebug");
 
@@ -4745,7 +4745,7 @@
             .expect("save unrelated config value");
         let saved = fs::read(paths.config_file()).expect("read unrelated config save");
         assert_eq!(
-            clonk_app::configured_native_boolean(&saved, "General", "DebugMode"),
+            clonk_app_netplay::configured_native_boolean(&saved, "General", "DebugMode"),
             Some(true)
         );
         let mut next_round = Engine::new();

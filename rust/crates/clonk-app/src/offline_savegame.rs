@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use clonk_app::ConfiguredClientPlayers;
+use clonk_app_netplay::ConfiguredClientPlayers;
 use clonk_engine::{
     ControlPlayerInfoEntry, ControlPlayerInfoRegistry, InitialNetworkGameData,
     RuntimeJoinPlayerSource,

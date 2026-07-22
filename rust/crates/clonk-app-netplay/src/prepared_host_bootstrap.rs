@@ -596,7 +596,7 @@ impl PreparedHostBootstrap {
         &self.initial_host_player_info_control
     }
 
-    pub(crate) fn local_player_alternate_colors_by_resource(&self) -> &HashMap<i32, u32> {
+    pub fn local_player_alternate_colors_by_resource(&self) -> &HashMap<i32, u32> {
         &self.local_player_alternate_colors_by_resource
     }
 
@@ -876,7 +876,7 @@ extern "C" {
 
 /// Serializes every main-thread-style transaction over C's process-global
 /// `rand()` stream. Loader, audio, and team assignment all share this owner.
-pub(crate) static CLASSIC_SAFE_RANDOM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub static CLASSIC_SAFE_RANDOM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[allow(dead_code)] // The lightweight clonk-app library test harness omits network.rs.
 pub(crate) fn league_checksum_start() -> u32 {
@@ -914,13 +914,13 @@ fn format_generated_team_name(template: &LegacyCString, id: i32) -> LegacyCStrin
 ///
 /// This deliberately does not derive from `Parameters.RandomSeed`: C++ seeds
 /// that separate deterministic simulation stream only after the lobby.
-pub(crate) struct ProcessInitialHostTeamAssignmentOracle {
+pub struct ProcessInitialHostTeamAssignmentOracle {
     team_name_template: LegacyCString,
     _guard: Option<std::sync::MutexGuard<'static, ()>>,
 }
 
 impl ProcessInitialHostTeamAssignmentOracle {
-    pub(crate) fn new(team_name_template: LegacyCString) -> Self {
+    pub fn new(team_name_template: LegacyCString) -> Self {
         Self {
             team_name_template,
             _guard: None,
@@ -2259,7 +2259,7 @@ fn load_restore_player_infos(
 /// `SavePlayerInfos.txt` entry. Any present entry owns the result, including
 /// an empty, unreadable or malformed one. Only a genuinely absent entry in a
 /// savegame permits the historical `Game.txt` `[PlayerFiles]` fallback.
-pub(crate) fn load_offline_savegame_restore_player_infos(
+pub fn load_offline_savegame_restore_player_infos(
     group: &Group,
     scenario_path: &Path,
     languages: &[String],
@@ -2284,7 +2284,7 @@ pub(crate) fn load_offline_savegame_restore_player_infos(
 /// Unlike `C4GameParameters::Load`, this path has no old-style `Game.txt`
 /// fallback: `C4GameSaveNetwork(false)` always writes `SavePlayerInfos.txt`,
 /// and a missing/empty/malformed component leaves the temporary list empty.
-pub(crate) fn load_runtime_join_restore_player_infos(
+pub fn load_runtime_join_restore_player_infos(
     group: &Group,
     languages: &[String],
     language_packs: &LanguagePacks,

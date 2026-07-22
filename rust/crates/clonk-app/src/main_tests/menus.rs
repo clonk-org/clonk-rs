@@ -1209,7 +1209,7 @@
         persist_native_config_values(
             &paths,
             "General",
-            &[("NoCrew", clonk_app::NativeConfigValue::RawAscii("true"))],
+            &[("NoCrew", clonk_app_netplay::NativeConfigValue::RawAscii("true"))],
         )
         .expect("seed C++ NoCrew Boolean");
         assert!(

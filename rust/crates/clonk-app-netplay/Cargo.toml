@@ -1,0 +1,40 @@
+[package]
+name = "clonk-app-netplay"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Exposes the NetworkManager test stubs and command probes that clonk-app's
+# test suite drives. The app's dev-dependencies enable it so the app test
+# graph sees the same hook surface `#[cfg(test)]` provided before the split;
+# production builds never request it.
+test-hooks = []
+
+[dependencies]
+anyhow = "1.0"
+clonk-core = { path = "../clonk-core" }
+clonk-engine = { path = "../clonk-engine" }
+clonk-network = { path = "../clonk-network" }
+clonk-platform = { path = "../clonk-platform" }
+clonk-resources = { path = "../clonk-resources" }
+clonk-script = { path = "../clonk-script" }
+parking_lot = "0.12"
+thiserror = "1"
+# Mirror clonk-app's production Tokio request so focused netplay builds share
+# one Tokio fingerprint with the app's normal graph.
+tokio = { version = "1.32", features = ["rt-multi-thread", "sync", "time", "net"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# Keep clonk-engine's property-test dependencies in this test graph so focused
+# netplay-crate runs share one clonk-engine fingerprint with the workspace gate.
+clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
+flate2 = "1"
+# Match clonk-app's image feature request so both test graphs resolve one
+# image fingerprint.
+image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
+tempfile = "3.8"
+# Request the workspace test graph's full Tokio feature union so focused
+# netplay-crate runs share one Tokio fingerprint with the app and workspace
+# gates.
+tokio = { version = "1.32", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time", "test-util"] }

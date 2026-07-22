@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 /// is shared by every sender. Mute state is client-local and starts from the
 /// same configured default for each client.
 #[derive(Debug)]
-pub(crate) struct ControlMessageState {
+pub struct ControlMessageState {
     sound_cooldown: Duration,
     last_sound_command: Option<Instant>,
     default_muted: bool,
@@ -16,7 +16,7 @@ pub(crate) struct ControlMessageState {
 }
 
 impl ControlMessageState {
-    pub(crate) fn new(sound_cooldown: Duration, default_muted: bool) -> Self {
+    pub fn new(sound_cooldown: Duration, default_muted: bool) -> Self {
         Self {
             sound_cooldown,
             last_sound_command: None,
@@ -28,7 +28,7 @@ impl ControlMessageState {
 
     /// `C4Cooldown::TryReset`: the first call succeeds, and a successful call
     /// consumes the one global cooldown before callers inspect mute state.
-    pub(crate) fn try_allow_sound_at(&mut self, now: Instant) -> bool {
+    pub fn try_allow_sound_at(&mut self, now: Instant) -> bool {
         let elapsed = self.last_sound_command.is_none_or(|last| {
             now.checked_duration_since(last)
                 .is_some_and(|elapsed| elapsed >= self.sound_cooldown)
@@ -39,30 +39,30 @@ impl ControlMessageState {
         elapsed
     }
 
-    pub(crate) fn is_muted(&self, client_id: i32) -> bool {
+    pub fn is_muted(&self, client_id: i32) -> bool {
         self.muted_clients
             .get(&client_id)
             .copied()
             .unwrap_or(self.default_muted)
     }
 
-    pub(crate) fn set_muted(&mut self, client_id: i32, muted: bool) {
+    pub fn set_muted(&mut self, client_id: i32, muted: bool) {
         self.muted_clients.insert(client_id, muted);
     }
 
-    pub(crate) fn remove_client(&mut self, client_id: i32) {
+    pub fn remove_client(&mut self, client_id: i32) {
         self.muted_clients.remove(&client_id);
     }
 
-    pub(crate) fn clear_clients(&mut self) {
+    pub fn clear_clients(&mut self) {
         self.muted_clients.clear();
     }
 
-    pub(crate) fn request_user_attention(&mut self) {
+    pub fn request_user_attention(&mut self) {
         self.user_attention_pending = true;
     }
 
-    pub(crate) fn take_user_attention_request(&mut self) -> bool {
+    pub fn take_user_attention_request(&mut self) -> bool {
         std::mem::take(&mut self.user_attention_pending)
     }
 }
@@ -84,7 +84,7 @@ fn identifier(byte: u8) -> bool {
 /// The first-match, case-insensitive nick check used by
 /// `C4ControlMessage::Execute`. Identifier characters on either side prevent
 /// an alert; native does not continue searching after such a rejected match.
-pub(crate) fn mentions_nick(message: &[u8], nick: &[u8]) -> bool {
+pub fn mentions_nick(message: &[u8], nick: &[u8]) -> bool {
     if nick.is_empty() || nick.len() > message.len() {
         return false;
     }

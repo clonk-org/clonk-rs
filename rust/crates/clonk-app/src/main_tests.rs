@@ -1935,7 +1935,7 @@
             player.to_string_lossy().into_owned(),
         )
         .expect("configure exact test participant");
-        let configured = clonk_app::load_configured_client_players(paths)
+        let configured = clonk_app_netplay::load_configured_client_players(paths)
             .expect("reload configured test participant");
         assert_eq!(
             configured.players().len(),

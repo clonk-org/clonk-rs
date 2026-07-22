@@ -50,6 +50,13 @@ extraction is the standing "next lever". Do not re-try rejected experiments
    `ScriptTextSpecResources`), plus the interim `clonk_app_menus::menu_images`
    leaves which can sink to app-core (or clonk-graphics) once that pipeline
    moves; finish by moving `object_menu.rs` into clonk-app-menus.
+   Step-3 residue for this step: the generic native-config helpers
+   (`configured_native_*`, `NativeConfigValue`,
+   `update_configured_native_values`) ride along in
+   `clonk_app_netplay::configured_client_players` but serve dozens of pure
+   local-config call sites in clonk-app (language, gamepad, graphics, toasts);
+   re-house them here. clonk-app's old lib target dissolved into
+   clonk-app-netplay, so this crate starts from main.rs alone.
 5. **main_tests.rs decomposition**: split by area into `tests/` submodule files
    mounted from the same `#[path]` root (keeps ids); move tests that only
    exercise an extracted crate INTO that crate.
@@ -100,3 +107,6 @@ extraction is the standing "next lever". Do not re-try rejected experiments
   ≈ 2.0-2.3s (parity with step 1); menu-crate edits now re-typecheck only
   clonk-app-menus (≈18s full lib+lib-test worst case) instead of the
   212k-line bin+bin-test pair.
+- Step 3 landed (clonk-app-netplay): netplay package suite 238/238; clonk-app
+  join/lobby/network consumer sweep 257/257; warm incremental
+  `cargo check -p clonk-app --tests` after a touch of main.rs ≈ 2.0s.

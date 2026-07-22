@@ -6,10 +6,8 @@ use clonk_resources::{Group, LanguagePacks, MutableGroup};
 
 use crate::host_game_resource_sources::freeze_host_definition_resource_sources;
 
-#[path = "../src/prepared_host_bootstrap.rs"]
-pub mod prepared_host_bootstrap;
-
-use prepared_host_bootstrap::{
+use crate::prepared_host_bootstrap;
+use crate::prepared_host_bootstrap::{
     prepare_host_bootstrap, prepare_host_bootstrap_with_team_assignment_oracle,
     PrepareHostBootstrapError, PreparedHostBootstrapConfig, PreparedHostBootstrapSpec,
     PreparedHostPlayerIdentity, PreparedHostPlayerSource, PreparedHostUseError,

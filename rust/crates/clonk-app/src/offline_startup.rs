@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use clonk_app::{
+use clonk_app_netplay::{
     build_teamless_offline_initial_player_info, ConfiguredClientPlayers, SelectedClientPlayer,
 };
 

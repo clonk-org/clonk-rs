@@ -4440,14 +4440,14 @@
             .windows(b"[Vendor]\r\nOpaque=\"\xfe\"\r\n".len())
             .any(|window| window == b"[Vendor]\r\nOpaque=\"\xfe\"\r\n"));
         let native = |section, key| {
-            clonk_app::configured_native_value(&updated, section, key)
+            clonk_app_netplay::configured_native_value(&updated, section, key)
                 .unwrap_or_else(|| panic!("missing {section}.{key}"))
         };
         assert_eq!(native("IRC", "Server2").as_bytes(), b"irc.native.test");
         assert_eq!(native("IRC", "Nick").as_bytes(), b"NativeNick");
         assert_eq!(native("IRC", "RealName").as_bytes(), b"Gr\xfc1");
         assert_eq!(native("IRC", "Channel").as_bytes(), b"#native");
-        assert!(clonk_app::configured_native_value(&updated, "IRC", "Password").is_none());
+        assert!(clonk_app_netplay::configured_native_value(&updated, "IRC", "Password").is_none());
         assert_eq!(
             native("Startup", "HideMsgIRCDangerous").as_bytes(),
             b"1"
@@ -9733,25 +9733,25 @@
 
         assert!(updated.windows(2).any(|bytes| bytes == b"\x80\xff"));
         assert_eq!(
-            clonk_app::configured_native_value(&updated, "Gamepad2", "VendorKey")
+            clonk_app_netplay::configured_native_value(&updated, "Gamepad2", "VendorKey")
                 .expect("unrelated gamepad value survives")
                 .as_bytes(),
             b"keep"
         );
         assert_eq!(
-            clonk_app::configured_native_value(&updated, "Gamepad2", "Axis4Min")
+            clonk_app_netplay::configured_native_value(&updated, "Gamepad2", "Axis4Min")
                 .expect("minimum persisted")
                 .as_bytes(),
             b"12"
         );
         assert_eq!(
-            clonk_app::configured_native_value(&updated, "Gamepad2", "Axis4Max")
+            clonk_app_netplay::configured_native_value(&updated, "Gamepad2", "Axis4Max")
                 .expect("full u32 maximum persisted")
                 .as_bytes(),
             b"4294967295"
         );
         assert_eq!(
-            clonk_app::configured_native_boolean(&updated, "Gamepad2", "Axis4Calibrated"),
+            clonk_app_netplay::configured_native_boolean(&updated, "Gamepad2", "Axis4Calibrated"),
             Some(true)
         );
     }

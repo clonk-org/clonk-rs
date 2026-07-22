@@ -4252,7 +4252,7 @@
             "General",
             &[(
                 "GamepadEnabled",
-                clonk_app::NativeConfigValue::RawAscii("false"),
+                clonk_app_netplay::NativeConfigValue::RawAscii("false"),
             )],
         )
         .expect("disable native gamepad input");
@@ -4772,7 +4772,7 @@
             "General",
             &[(
                 "GamepadEnabled",
-                clonk_app::NativeConfigValue::RawAscii("false"),
+                clonk_app_netplay::NativeConfigValue::RawAscii("false"),
             )],
         )
         .expect("disable gamepads in native config");

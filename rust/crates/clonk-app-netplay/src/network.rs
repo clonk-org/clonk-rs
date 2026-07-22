@@ -191,7 +191,7 @@ impl From<String> for NetworkStartError {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct NetworkStartupCancellation {
+pub struct NetworkStartupCancellation {
     inner: Arc<NetworkStartupCancellationInner>,
 }
 
@@ -202,7 +202,7 @@ struct NetworkStartupCancellationInner {
 }
 
 impl NetworkStartupCancellation {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Arc::new(NetworkStartupCancellationInner {
                 cancelled: AtomicBool::new(false),
@@ -211,7 +211,7 @@ impl NetworkStartupCancellation {
         }
     }
 
-    pub(crate) fn cancel(&self) -> bool {
+    pub fn cancel(&self) -> bool {
         if self.inner.cancelled.swap(true, Ordering::AcqRel) {
             return false;
         }
@@ -221,7 +221,7 @@ impl NetworkStartupCancellation {
         true
     }
 
-    pub(crate) fn is_cancelled(&self) -> bool {
+    pub fn is_cancelled(&self) -> bool {
         self.inner.cancelled.load(Ordering::Acquire)
     }
 
@@ -250,14 +250,14 @@ const MAX_CONTROL_PRESEND: i32 = 15;
 const DEFAULT_CONTROL_TARGET_FPS: i32 = 38;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ControlPreSendChange {
-    pub(crate) control_presend: i32,
-    pub(crate) target_fps: i32,
+pub struct ControlPreSendChange {
+    pub control_presend: i32,
+    pub target_fps: i32,
 }
 
 /// C4GameControl's frame-to-ControlTick cadence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NetworkControlClock {
+pub struct NetworkControlClock {
     control_tick: i32,
     control_rate: u64,
     control_sent: i32,
@@ -270,7 +270,7 @@ pub(crate) struct NetworkControlClock {
 }
 
 impl NetworkControlClock {
-    pub(crate) fn new(start_tick: i32, control_rate: i32) -> Self {
+    pub fn new(start_tick: i32, control_rate: i32) -> Self {
         Self {
             control_tick: start_tick,
             control_rate: control_rate.clamp(1, MAX_CONTROL_RATE) as u64,
@@ -288,7 +288,7 @@ impl NetworkControlClock {
     /// inside the current PreSend horizon. The cursor is advanced when the
     /// app queues `FinalizeTick`, matching `DoInput`'s synchronous increment
     /// of C++ `iControlSent`.
-    pub(crate) fn take_due_ticks(&mut self, frame: u64, activated: bool) -> Vec<i32> {
+    pub fn take_due_ticks(&mut self, frame: u64, activated: bool) -> Vec<i32> {
         match self.local_activated.replace(activated) {
             Some(false) if activated => {
                 // C4GameControlNetwork::SetActivated starts at the next
@@ -332,32 +332,32 @@ impl NetworkControlClock {
         due
     }
 
-    pub(crate) fn next_unsent_tick(self) -> i32 {
+    pub fn next_unsent_tick(self) -> i32 {
         self.control_sent.saturating_add(1)
     }
 
-    pub(crate) fn set_target_tick(&mut self, target_tick: Option<i32>) {
+    pub fn set_target_tick(&mut self, target_tick: Option<i32>) {
         self.target_tick = target_tick;
     }
 
     /// Store the latest host message-connection Ping/Pong RTT. C++ samples
     /// that same latest value once per successfully consumed control tick.
-    pub(crate) fn observe_round_trip_ms(&mut self, round_trip_ms: i32) {
+    pub fn observe_round_trip_ms(&mut self, round_trip_ms: i32) {
         self.host_round_trip_ms = Some(round_trip_ms);
     }
 
-    pub(crate) fn control_presend(self) -> i32 {
+    pub fn control_presend(self) -> i32 {
         self.control_presend
     }
 
-    pub(crate) fn target_fps(self) -> i32 {
+    pub fn target_fps(self) -> i32 {
         self.target_fps
     }
 
     /// `C4GameControlNetwork::setTargetFPS` changes only the target. The
     /// rolling-average calculation updates PreSend after a later consumed
     /// control, so do not recalculate or reset the average here.
-    pub(crate) fn set_target_fps(&mut self, target_fps: i32) {
+    pub fn set_target_fps(&mut self, target_fps: i32) {
         debug_assert!(target_fps > 0);
         self.target_fps = target_fps;
     }
@@ -365,7 +365,7 @@ impl NetworkControlClock {
     /// Smoothed control-send time in microseconds, matching
     /// `C4GameControlNetwork::getAvgControlSendTime()` and the `ACT` field in
     /// the runtime network client-list dialog.
-    pub(crate) fn avg_control_send_time(self) -> i64 {
+    pub fn avg_control_send_time(self) -> i64 {
         i64::from(self.avg_control_send_time_us)
     }
 
@@ -400,7 +400,7 @@ impl NetworkControlClock {
     /// Current control tick on frames where C4GameControl executes control.
     /// This is a non-consuming probe because a network stall retries the same
     /// frame and tick until `CtrlReady` succeeds.
-    pub(crate) fn tick_for_frame(self, frame: u64) -> Option<i32> {
+    pub fn tick_for_frame(self, frame: u64) -> Option<i32> {
         if frame % self.control_rate != 0 {
             return None;
         }
@@ -410,20 +410,20 @@ impl NetworkControlClock {
     /// C4GameControlNetwork::GetControl runs this before decoded controls.
     /// Keeping it separate from tick advancement ensures a SetPreSend in the
     /// current control cannot affect the sample that was already consumed.
-    pub(crate) fn calculate_performance(&mut self) -> Option<ControlPreSendChange> {
+    pub fn calculate_performance(&mut self) -> Option<ControlPreSendChange> {
         self.update_control_presend()
     }
 
     /// Consume the tick whose control frame was admitted by `tick_for_frame`.
     /// Keep this independent of the current rate: a CID_Set in that frame may
     /// already have changed the cadence before execution completes.
-    pub(crate) fn complete_control_frame(&mut self) {
+    pub fn complete_control_frame(&mut self) {
         self.control_tick = self.control_tick.wrapping_add(1);
     }
 
     /// `C4CVT_ControlRate`: preserve the absolute FrameCounter phase while
     /// changing the divisor used by all subsequent frame probes.
-    pub(crate) fn adjust_control_rate(&mut self, delta: i32) -> i32 {
+    pub fn adjust_control_rate(&mut self, delta: i32) -> i32 {
         let control_rate = (self.control_rate as i32)
             .saturating_add(delta)
             .clamp(1, MAX_CONTROL_RATE);
@@ -431,24 +431,24 @@ impl NetworkControlClock {
         control_rate
     }
 
-    pub(crate) fn set_control_rate(&mut self, control_rate: i32) -> i32 {
+    pub fn set_control_rate(&mut self, control_rate: i32) -> i32 {
         let control_rate = control_rate.clamp(1, MAX_CONTROL_RATE);
         self.control_rate = control_rate as u64;
         control_rate
     }
 
-    pub(crate) fn control_rate(self) -> i32 {
+    pub fn control_rate(self) -> i32 {
         self.control_rate as i32
     }
 
-    pub(crate) fn current_tick(self) -> i32 {
+    pub fn current_tick(self) -> i32 {
         self.control_tick
     }
 
     /// `C4GameControl::ControlTick` for a presented frame. Rust advances its
     /// next-tick cursor as soon as the cadence frame completes; native keeps
     /// displaying the executed tick until the next cadence boundary.
-    pub(crate) fn display_control_tick_for_frame(self, frame: u64) -> i32 {
+    pub fn display_control_tick_for_frame(self, frame: u64) -> i32 {
         if frame % self.control_rate == 0 {
             self.control_tick
         } else {
@@ -456,7 +456,7 @@ impl NetworkControlClock {
         }
     }
 
-    pub(crate) fn engine_timing(
+    pub fn engine_timing(
         self,
     ) -> Result<clonk_engine::NetworkControlTiming, clonk_engine::InvalidNetworkControlRate> {
         clonk_engine::NetworkControlTiming::new(self.control_tick, self.control_rate as i32)
@@ -507,13 +507,13 @@ enum LeagueRuntimeCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LeagueEndFailurePhase {
+pub enum LeagueEndFailurePhase {
     Start,
     Send,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LeagueEndAttempt {
+pub enum LeagueEndAttempt {
     Finished(Option<clonk_network::LeagueRoundResultsPacket>),
     Rejected(clonk_network::LeagueRoundResultsPacket),
     Retryable {
@@ -523,7 +523,7 @@ pub(crate) enum LeagueEndAttempt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LeaguePlayerCheck {
+pub enum LeaguePlayerCheck {
     Accepted,
     Rejected(clonk_engine::LegacyCString),
     Unavailable,
@@ -627,7 +627,7 @@ struct LeagueRecordRuntimeHandle {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct LeagueRecordStreamStatus {
+pub struct LeagueRecordStreamStatus {
     is_streaming: bool,
     /// Bytes still waiting in C4Record's uncompressed StreamingBuf.
     waiting_raw_bytes: usize,
@@ -641,23 +641,23 @@ pub(crate) struct LeagueRecordStreamStatus {
 }
 
 impl LeagueRecordStreamStatus {
-    pub(crate) fn is_streaming(self) -> bool {
+    pub fn is_streaming(self) -> bool {
         self.is_streaming
     }
 
-    pub(crate) fn pending_compressed_bytes(self) -> usize {
+    pub fn pending_compressed_bytes(self) -> usize {
         self.pending_compressed_bytes
     }
 
-    pub(crate) fn waiting_raw_bytes(self) -> usize {
+    pub fn waiting_raw_bytes(self) -> usize {
         self.waiting_raw_bytes
     }
 
-    pub(crate) fn input_position(self) -> u64 {
+    pub fn input_position(self) -> u64 {
         self.input_position
     }
 
-    pub(crate) fn sent_position(self) -> u32 {
+    pub fn sent_position(self) -> u32 {
         self.sent_position
     }
 }
@@ -1126,9 +1126,9 @@ pub struct NetworkManager {
     league_runtime_available: AtomicBool,
     league_record_runtime: Option<LeagueRecordRuntimeHandle>,
     network_io_statistics: clonk_network::NetworkIoStatistics,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     test_runtime_client_states: Arc<Mutex<Vec<RuntimeNetworkClientState>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     test_lobby_client_telemetry: Arc<Mutex<Option<RuntimeLobbyClientTelemetry>>>,
 }
 
@@ -1137,7 +1137,7 @@ const MASTERSERVER_SIGNUP_CANCELLED: u8 = 1;
 const MASTERSERVER_SIGNUP_FINISHED: u8 = 2;
 
 #[derive(Debug)]
-pub(crate) struct PendingMasterserverSignup {
+pub struct PendingMasterserverSignup {
     enabled: bool,
     previous_enabled: bool,
     completion:
@@ -1147,12 +1147,12 @@ pub(crate) struct PendingMasterserverSignup {
 }
 
 #[derive(Debug)]
-pub(crate) struct PendingLeaguePlayerAuth {
+pub struct PendingLeaguePlayerAuth {
     completion: Receiver<std::result::Result<clonk_network::LeagueAuthResponse, String>>,
 }
 
 impl PendingLeaguePlayerAuth {
-    pub(crate) fn try_complete(&self) -> Option<Result<clonk_network::LeagueAuthResponse>> {
+    pub fn try_complete(&self) -> Option<Result<clonk_network::LeagueAuthResponse>> {
         match self.completion.try_recv() {
             Ok(result) => Some(result.map_err(|message| anyhow!(message))),
             Err(TryRecvError::Empty) => None,
@@ -1171,18 +1171,18 @@ impl PendingLeaguePlayerAuth {
 }
 
 impl PendingMasterserverSignup {
-    pub(crate) fn enabled(&self) -> bool {
+    pub fn enabled(&self) -> bool {
         self.enabled
     }
 
-    pub(crate) fn previous_enabled(&self) -> bool {
+    pub fn previous_enabled(&self) -> bool {
         self.previous_enabled
     }
 
     /// Returns false when the worker already committed a terminal result. In
     /// that race the caller must consume completion instead of painting an
     /// off state over a live registration.
-    pub(crate) fn cancel(&mut self) -> bool {
+    pub fn cancel(&mut self) -> bool {
         if self
             .transition
             .compare_exchange(
@@ -1223,32 +1223,32 @@ struct NetworkNetpuncherState {
     game_ids: clonk_network::NetpuncherGameIds,
 }
 
-#[cfg(test)]
-pub(crate) struct TestNetworkCommands {
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct TestNetworkCommands {
     command_rx: tokio_mpsc::Receiver<NetworkCommand>,
 }
 
-#[cfg(test)]
-pub(crate) struct TestMasterserverSignupCommand {
-    pub(crate) enabled: bool,
-    pub(crate) config: PreparedLeagueHostConfig,
-    pub(crate) reference: clonk_network::HostGameReference,
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct TestMasterserverSignupCommand {
+    pub enabled: bool,
+    pub config: PreparedLeagueHostConfig,
+    pub reference: clonk_network::HostGameReference,
     completion:
         Sender<std::result::Result<Option<clonk_network::LeagueStartResponse>, String>>,
     cancellation: tokio::sync::oneshot::Receiver<()>,
     transition: Arc<std::sync::atomic::AtomicU8>,
 }
 
-#[cfg(test)]
-pub(crate) struct TestLeaguePlayerAuthCommand {
-    pub(crate) auth: clonk_network::LeagueAuthRequestHead,
-    pub(crate) player: clonk_engine::ControlPlayerInfoEntry,
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct TestLeaguePlayerAuthCommand {
+    pub auth: clonk_network::LeagueAuthRequestHead,
+    pub player: clonk_engine::ControlPlayerInfoEntry,
     completion: Sender<std::result::Result<clonk_network::LeagueAuthResponse, String>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl TestLeaguePlayerAuthCommand {
-    pub(crate) fn complete(
+    pub fn complete(
         self,
         result: std::result::Result<clonk_network::LeagueAuthResponse, String>,
     ) -> bool {
@@ -1256,9 +1256,9 @@ impl TestLeaguePlayerAuthCommand {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl TestMasterserverSignupCommand {
-    pub(crate) fn complete(
+    pub fn complete(
         self,
         result: std::result::Result<Option<clonk_network::LeagueStartResponse>, String>,
     ) {
@@ -1273,7 +1273,7 @@ impl TestMasterserverSignupCommand {
         self.completion.send(result).expect("return signup result");
     }
 
-    pub(crate) fn wait_for_cancellation(self) {
+    pub fn wait_for_cancellation(self) {
         self.cancellation
             .blocking_recv()
             .expect("pending signup must signal cancellation");
@@ -1284,9 +1284,9 @@ impl TestMasterserverSignupCommand {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TestLobbyStartCommand {
+pub enum TestLobbyStartCommand {
     Countdown(clonk_network::LobbyCountdownPacket),
     BeginGo {
         status: NetworkStatus,
@@ -1294,16 +1294,16 @@ pub(crate) enum TestLobbyStartCommand {
     },
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TestLobbyPlayerUpdateCommand {
+pub enum TestLobbyPlayerUpdateCommand {
     Countdown(clonk_network::LobbyCountdownPacket),
     PlayerInfo(clonk_network::PlayerInfoUpdateRequest),
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TestRuntimeStatusCommand {
+pub enum TestRuntimeStatusCommand {
     Change(NetworkStatus),
     Reached {
         status: NetworkStatus,
@@ -1311,15 +1311,15 @@ pub(crate) enum TestRuntimeStatusCommand {
     },
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[derive(Debug, Default)]
-pub(crate) struct TestLeagueEndFlowResult {
-    pub(crate) attempts: usize,
-    pub(crate) finalizations: Vec<Vec<u8>>,
-    pub(crate) broadcasts: Vec<clonk_network::LeagueRoundResultsPacket>,
+pub struct TestLeagueEndFlowResult {
+    pub attempts: usize,
+    pub finalizations: Vec<Vec<u8>>,
+    pub broadcasts: Vec<clonk_network::LeagueRoundResultsPacket>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 type RuntimeHostJoinResult = (
     Vec<&'static str>,
     Vec<ClientPlayerResourceRequest>,
@@ -1327,9 +1327,9 @@ type RuntimeHostJoinResult = (
     Vec<(Tick, JoinPlayerControlData)>,
 );
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl TestNetworkCommands {
-    pub(crate) fn receive_league_player_auth(&mut self) -> TestLeaguePlayerAuthCommand {
+    pub fn receive_league_player_auth(&mut self) -> TestLeaguePlayerAuthCommand {
         match self.command_rx.blocking_recv() {
             Some(NetworkCommand::LeagueAuthenticatePlayer {
                 auth,
@@ -1345,7 +1345,7 @@ impl TestNetworkCommands {
         }
     }
 
-    pub(crate) fn complete_league_end_flow(
+    pub fn complete_league_end_flow(
         mut self,
         outcomes: Vec<LeagueEndAttempt>,
     ) -> TestLeagueEndFlowResult {
@@ -1385,7 +1385,7 @@ impl TestNetworkCommands {
         observed
     }
 
-    pub(crate) fn take_finalized_ticks(&mut self) -> Vec<Tick> {
+    pub fn take_finalized_ticks(&mut self) -> Vec<Tick> {
         let mut ticks = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::FinalizeTick { tick } = command {
@@ -1395,7 +1395,7 @@ impl TestNetworkCommands {
         ticks
     }
 
-    pub(crate) fn take_lobby_start_commands(&mut self) -> Vec<TestLobbyStartCommand> {
+    pub fn take_lobby_start_commands(&mut self) -> Vec<TestLobbyStartCommand> {
         let mut observed = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             match command {
@@ -1408,7 +1408,7 @@ impl TestNetworkCommands {
         observed
     }
 
-    pub(crate) fn complete_lobby_start(
+    pub fn complete_lobby_start(
         &mut self,
         result: std::result::Result<(), String>,
     ) -> Vec<TestLobbyStartCommand> {
@@ -1438,9 +1438,7 @@ impl TestNetworkCommands {
         }
     }
 
-    pub(crate) fn take_lobby_player_update_commands(
-        &mut self,
-    ) -> Vec<TestLobbyPlayerUpdateCommand> {
+    pub fn take_lobby_player_update_commands(&mut self) -> Vec<TestLobbyPlayerUpdateCommand> {
         let mut observed = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             match command {
@@ -1456,7 +1454,7 @@ impl TestNetworkCommands {
         observed
     }
 
-    pub(crate) fn complete_runtime_host_join(
+    pub fn complete_runtime_host_join(
         mut self,
         published_core: clonk_engine::NetworkResourceCore,
         event_tx: Sender<NetworkEvent>,
@@ -1514,7 +1512,7 @@ impl TestNetworkCommands {
         (order, publications, player_infos, joins)
     }
 
-    pub(crate) fn complete_initial_client_join(
+    pub fn complete_initial_client_join(
         mut self,
         published_cores: Vec<clonk_engine::NetworkResourceCore>,
     ) -> (
@@ -1567,7 +1565,7 @@ impl TestNetworkCommands {
         (order, publications, player_infos, acknowledgements)
     }
 
-    pub(crate) fn complete_initial_league_client_join(
+    pub fn complete_initial_league_client_join(
         mut self,
         published_cores: Vec<clonk_engine::NetworkResourceCore>,
         auth_responses: Vec<clonk_network::LeagueAuthResponse>,
@@ -1630,7 +1628,7 @@ impl TestNetworkCommands {
         (order, auth_heads, auth_players, player_infos)
     }
 
-    pub(crate) fn complete_league_player_auths(
+    pub fn complete_league_player_auths(
         mut self,
         auth_responses: Vec<clonk_network::LeagueAuthResponse>,
     ) -> (
@@ -1670,7 +1668,7 @@ impl TestNetworkCommands {
         (auth_heads, auth_players)
     }
 
-    pub(crate) fn complete_host_league_player_checks(
+    pub fn complete_host_league_player_checks(
         mut self,
         responses: Vec<clonk_network::LeagueJoinResponse>,
         expected_broadcasts: usize,
@@ -1712,7 +1710,7 @@ impl TestNetworkCommands {
         (checked, broadcasts)
     }
 
-    pub(crate) fn take_submitted_local(&mut self) -> Vec<(i32, ControlEvent, Tick)> {
+    pub fn take_submitted_local(&mut self) -> Vec<(i32, ControlEvent, Tick)> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitLocal { owner, event, tick } = command {
@@ -1722,7 +1720,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_player_inputs(
+    pub fn take_submitted_player_inputs(
         &mut self,
     ) -> (
         Vec<(i32, ControlEvent, Tick)>,
@@ -1749,9 +1747,7 @@ impl TestNetworkCommands {
         (controls, commands, selections)
     }
 
-    pub(crate) fn take_submitted_player_commands(
-        &mut self,
-    ) -> Vec<(Tick, PlayerCommandControlData)> {
+    pub fn take_submitted_player_commands(&mut self) -> Vec<(Tick, PlayerCommandControlData)> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitPlayerCommand { tick, command } = command {
@@ -1761,7 +1757,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_player_selects(&mut self) -> Vec<(Tick, PlayerSelectControlData)> {
+    pub fn take_submitted_player_selects(&mut self) -> Vec<(Tick, PlayerSelectControlData)> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitPlayerSelect { tick, selection } = command {
@@ -1771,7 +1767,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_mouse_controls(
+    pub fn take_submitted_mouse_controls(
         &mut self,
     ) -> (
         Vec<(i32, ControlEvent, Tick)>,
@@ -1798,7 +1794,7 @@ impl TestNetworkCommands {
         (local, commands, selections)
     }
 
-    pub(crate) fn take_submitted_scripts(&mut self) -> Vec<(Tick, ScriptControlData)> {
+    pub fn take_submitted_scripts(&mut self) -> Vec<(Tick, ScriptControlData)> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitScript { tick, script } = command {
@@ -1808,7 +1804,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_message_board_answers(
+    pub fn take_submitted_message_board_answers(
         &mut self,
     ) -> Vec<(Tick, MessageBoardAnswerControlData)> {
         let mut submitted = Vec::new();
@@ -1820,7 +1816,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_messages(&mut self) -> Vec<MessageControlData> {
+    pub fn take_submitted_messages(&mut self) -> Vec<MessageControlData> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitMessage(message) = command {
@@ -1830,7 +1826,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_decided_controls_and_messages(
+    pub fn take_submitted_decided_controls_and_messages(
         &mut self,
     ) -> (
         Vec<(Tick, clonk_engine::ControlPacket, bool)>,
@@ -1852,7 +1848,7 @@ impl TestNetworkCommands {
         (controls, messages)
     }
 
-    pub(crate) fn take_player_info_updates(&mut self) -> Vec<clonk_network::PlayerInfoUpdateRequest> {
+    pub fn take_player_info_updates(&mut self) -> Vec<clonk_network::PlayerInfoUpdateRequest> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitPlayerInfoUpdate(request) = command {
@@ -1862,7 +1858,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_broadcast_player_infos(&mut self) -> Vec<PlayerInfoControlData> {
+    pub fn take_broadcast_player_infos(&mut self) -> Vec<PlayerInfoControlData> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             match command {
@@ -1876,7 +1872,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_preexecuted_player_infos(
+    pub fn take_preexecuted_player_infos(
         &mut self,
     ) -> Vec<(
         PlayerInfoControlData,
@@ -1895,7 +1891,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_league_update_effects(&mut self) -> (Vec<PlayerInfoControlData>, usize) {
+    pub fn take_league_update_effects(&mut self) -> (Vec<PlayerInfoControlData>, usize) {
         let mut player_infos = Vec::new();
         let mut invalidations = 0;
         while let Ok(command) = self.command_rx.try_recv() {
@@ -1908,7 +1904,7 @@ impl TestNetworkCommands {
         (player_infos, invalidations)
     }
 
-    pub(crate) fn complete_league_disconnect_report(
+    pub fn complete_league_disconnect_report(
         mut self,
     ) -> Option<(
         clonk_network::LeagueDisconnectReason,
@@ -1937,7 +1933,7 @@ impl TestNetworkCommands {
         None
     }
 
-    pub(crate) fn take_published_join_snapshots(&mut self) -> Vec<HostJoinSnapshot> {
+    pub fn take_published_join_snapshots(&mut self) -> Vec<HostJoinSnapshot> {
         let mut snapshots = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::PublishJoinSnapshot { snapshot } = command {
@@ -1947,7 +1943,7 @@ impl TestNetworkCommands {
         snapshots
     }
 
-    pub(crate) fn take_team_control_updates(
+    pub fn take_team_control_updates(
         &mut self,
     ) -> (Vec<PlayerInfoControlData>, Vec<HostJoinSnapshot>) {
         let mut player_infos = Vec::new();
@@ -1965,7 +1961,7 @@ impl TestNetworkCommands {
         (player_infos, snapshots)
     }
 
-    pub(crate) fn take_submitted_join_players(&mut self) -> Vec<(Tick, JoinPlayerControlData)> {
+    pub fn take_submitted_join_players(&mut self) -> Vec<(Tick, JoinPlayerControlData)> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitJoinPlayer { tick, join } = command {
@@ -1975,7 +1971,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_remove_players(
+    pub fn take_submitted_remove_players(
         &mut self,
     ) -> Vec<(Tick, clonk_engine::RemovePlayerControlData)> {
         let mut submitted = Vec::new();
@@ -1987,9 +1983,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_client_updates(
-        &mut self,
-    ) -> Vec<clonk_engine::ClientUpdateControlData> {
+    pub fn take_submitted_client_updates(&mut self) -> Vec<clonk_engine::ClientUpdateControlData> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitClientUpdate(update) = command {
@@ -1999,7 +1993,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_control_sets(&mut self) -> Vec<LegacyControlSet> {
+    pub fn take_submitted_control_sets(&mut self) -> Vec<LegacyControlSet> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitControlSet(set) = command {
@@ -2009,7 +2003,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_decided_controls(
+    pub fn take_submitted_decided_controls(
         &mut self,
     ) -> Vec<(Tick, clonk_engine::ControlPacket, bool)> {
         let mut submitted = Vec::new();
@@ -2026,9 +2020,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_client_removes(
-        &mut self,
-    ) -> Vec<clonk_engine::ClientRemoveControlData> {
+    pub fn take_submitted_client_removes(&mut self) -> Vec<clonk_engine::ClientRemoveControlData> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitClientRemove(remove) = command {
@@ -2038,7 +2030,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_init_scenario_players(
+    pub fn take_submitted_init_scenario_players(
         &mut self,
     ) -> Vec<(Tick, clonk_engine::InitScenarioPlayerControlData)> {
         let mut submitted = Vec::new();
@@ -2050,7 +2042,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_surrender_players(
+    pub fn take_submitted_surrender_players(
         &mut self,
     ) -> Vec<(Tick, clonk_engine::SurrenderPlayerControlData)> {
         let mut submitted = Vec::new();
@@ -2062,7 +2054,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_internal_player_scripts(
+    pub fn take_submitted_internal_player_scripts(
         &mut self,
     ) -> Vec<(Tick, clonk_engine::ControlPacket)> {
         let mut submitted = Vec::new();
@@ -2074,7 +2066,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_votes(&mut self) -> Vec<clonk_engine::VoteControlData> {
+    pub fn take_submitted_votes(&mut self) -> Vec<clonk_engine::VoteControlData> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitVote(vote) = command {
@@ -2084,7 +2076,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_vote_ends(&mut self) -> Vec<clonk_engine::VoteControlData> {
+    pub fn take_submitted_vote_ends(&mut self) -> Vec<clonk_engine::VoteControlData> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitVoteEnd(result) = command {
@@ -2094,7 +2086,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_ready_checks(&mut self) -> Vec<clonk_network::ReadyCheckPacket> {
+    pub fn take_submitted_ready_checks(&mut self) -> Vec<clonk_network::ReadyCheckPacket> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitReadyCheck(packet) = command {
@@ -2104,9 +2096,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_lobby_countdowns(
-        &mut self,
-    ) -> Vec<clonk_network::LobbyCountdownPacket> {
+    pub fn take_submitted_lobby_countdowns(&mut self) -> Vec<clonk_network::LobbyCountdownPacket> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitLobbyCountdown(packet) = command {
@@ -2116,9 +2106,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn receive_join_allowed(
-        &mut self,
-    ) -> (bool, Sender<std::result::Result<(), String>>) {
+    pub fn receive_join_allowed(&mut self) -> (bool, Sender<std::result::Result<(), String>>) {
         match self.command_rx.blocking_recv() {
             Some(NetworkCommand::SetJoinAllowed {
                 allowed,
@@ -2129,7 +2117,7 @@ impl TestNetworkCommands {
         }
     }
 
-    pub(crate) fn receive_host_password(
+    pub fn receive_host_password(
         &mut self,
     ) -> (
         clonk_engine::LegacyCString,
@@ -2145,7 +2133,7 @@ impl TestNetworkCommands {
         }
     }
 
-    pub(crate) fn receive_masterserver_signup(&mut self) -> TestMasterserverSignupCommand {
+    pub fn receive_masterserver_signup(&mut self) -> TestMasterserverSignupCommand {
         match self.command_rx.blocking_recv() {
             Some(NetworkCommand::SetMasterserverSignup {
                 enabled,
@@ -2167,9 +2155,7 @@ impl TestNetworkCommands {
         }
     }
 
-    pub(crate) fn receive_resource_removal(
-        &mut self,
-    ) -> (i32, Sender<std::result::Result<(), String>>) {
+    pub fn receive_resource_removal(&mut self) -> (i32, Sender<std::result::Result<(), String>>) {
         match self.command_rx.blocking_recv() {
             Some(NetworkCommand::RemoveResource {
                 resource_id,
@@ -2180,7 +2166,7 @@ impl TestNetworkCommands {
         }
     }
 
-    pub(crate) fn receive_graceful_part(&mut self) -> Sender<std::result::Result<(), String>> {
+    pub fn receive_graceful_part(&mut self) -> Sender<std::result::Result<(), String>> {
         match self.command_rx.blocking_recv() {
             Some(NetworkCommand::GracefulPart { completion }) => completion,
             Some(command) => panic!("expected graceful-part command, got {command:?}"),
@@ -2188,7 +2174,7 @@ impl TestNetworkCommands {
         }
     }
 
-    pub(crate) fn complete_graceful_part(mut self) -> bool {
+    pub fn complete_graceful_part(mut self) -> bool {
         match self.command_rx.blocking_recv() {
             Some(NetworkCommand::GracefulPart { completion }) => {
                 let _ = completion.send(Ok(()));
@@ -2199,7 +2185,7 @@ impl TestNetworkCommands {
         }
     }
 
-    pub(crate) fn take_status_changes(&mut self) -> Vec<NetworkStatus> {
+    pub fn take_status_changes(&mut self) -> Vec<NetworkStatus> {
         let mut changes = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::ChangeStatus(status) = command {
@@ -2209,7 +2195,7 @@ impl TestNetworkCommands {
         changes
     }
 
-    pub(crate) fn take_status_reached(&mut self) -> usize {
+    pub fn take_status_reached(&mut self) -> usize {
         let mut count = 0;
         while let Ok(command) = self.command_rx.try_recv() {
             if matches!(
@@ -2222,7 +2208,7 @@ impl TestNetworkCommands {
         count
     }
 
-    pub(crate) fn take_runtime_status_commands(&mut self) -> Vec<TestRuntimeStatusCommand> {
+    pub fn take_runtime_status_commands(&mut self) -> Vec<TestRuntimeStatusCommand> {
         let mut observed = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             match command {
@@ -2244,7 +2230,7 @@ impl TestNetworkCommands {
         observed
     }
 
-    pub(crate) fn take_status_acknowledgements(&mut self) -> Vec<NetworkStatus> {
+    pub fn take_status_acknowledgements(&mut self) -> Vec<NetworkStatus> {
         let mut acknowledgements = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::AcknowledgeRequestedStatus {
@@ -2260,7 +2246,7 @@ impl TestNetworkCommands {
         acknowledgements
     }
 
-    pub(crate) fn take_framed_status_acknowledgements(&mut self) -> Vec<(NetworkStatus, i32)> {
+    pub fn take_framed_status_acknowledgements(&mut self) -> Vec<(NetworkStatus, i32)> {
         let mut acknowledgements = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::AcknowledgeRequestedStatus {
@@ -2276,9 +2262,7 @@ impl TestNetworkCommands {
         acknowledgements
     }
 
-    pub(crate) fn take_executed_client_updates(
-        &mut self,
-    ) -> Vec<clonk_engine::ClientUpdateControlData> {
+    pub fn take_executed_client_updates(&mut self) -> Vec<clonk_engine::ClientUpdateControlData> {
         let mut updates = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::ClientUpdateExecuted(update) = command {
@@ -2410,7 +2394,7 @@ impl NetworkControl {
     /// value. CtrlRec stores the packet/list compiler payload rather than the
     /// reduced execution enum, so recording must make this conversion before
     /// executing a batch.
-    pub(crate) fn into_packet(self) -> Option<clonk_engine::ControlPacket> {
+    pub fn into_packet(self) -> Option<clonk_engine::ControlPacket> {
         Some(match self {
             Self::ClientJoin(value) => clonk_engine::ControlPacket::ClientJoin(value),
             Self::ClientUpdate(value) => clonk_engine::ControlPacket::ClientUpdate(value),
@@ -2755,7 +2739,7 @@ impl NetworkManager {
         Self::spawn(worker_mode)
     }
 
-    pub(crate) fn for_client_cancellable(
+    pub fn for_client_cancellable(
         settings: ClientSettings,
         local_owner: i32,
         startup_cancellation: NetworkStartupCancellation,
@@ -2847,9 +2831,9 @@ impl NetworkManager {
             league_runtime_available,
             league_record_runtime: ready.league_record_runtime,
             network_io_statistics: ready.network_io_statistics,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-hooks"))]
             test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-hooks"))]
             test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
         })
     }
@@ -2905,7 +2889,7 @@ impl NetworkManager {
         &self,
         client_ids: Vec<ClientId>,
     ) -> Result<RuntimeLobbyClientTelemetry> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-hooks"))]
         if self.worker.is_none() {
             if let Some(mut telemetry) = self.test_lobby_client_telemetry.lock().clone() {
                 let requested = client_ids.into_iter().collect::<std::collections::HashSet<_>>();
@@ -2936,13 +2920,13 @@ impl NetworkManager {
             .map_err(|message| anyhow!(message))
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_test_lobby_client_telemetry(&self, telemetry: RuntimeLobbyClientTelemetry) {
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_test_lobby_client_telemetry(&self, telemetry: RuntimeLobbyClientTelemetry) {
         *self.test_lobby_client_telemetry.lock() = Some(telemetry);
     }
 
     pub fn runtime_client_states(&self, tick: Tick) -> Result<Vec<RuntimeNetworkClientState>> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-hooks"))]
         if self.worker.is_none() {
             return Ok(self.test_runtime_client_states.lock().clone());
         }
@@ -2971,8 +2955,8 @@ impl NetworkManager {
             .map_err(|message| anyhow!(message))
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_test_runtime_client_states(
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_test_runtime_client_states(
         &self,
         states: impl IntoIterator<Item = RuntimeNetworkClientState>,
     ) {
@@ -3645,7 +3629,7 @@ impl NetworkManager {
         pending.wait()
     }
 
-    pub(crate) fn begin_authenticate_league_player(
+    pub fn begin_authenticate_league_player(
         &self,
         auth: clonk_network::LeagueAuthRequestHead,
         player: &clonk_engine::ControlPlayerInfoEntry,
@@ -3825,7 +3809,7 @@ impl NetworkManager {
         self.role == NetworkRole::Host && self.league_record_runtime.is_some()
     }
 
-    pub(crate) fn league_record_stream_status(&self) -> Option<LeagueRecordStreamStatus> {
+    pub fn league_record_stream_status(&self) -> Option<LeagueRecordStreamStatus> {
         self.league_record_runtime
             .as_ref()
             .map(LeagueRecordRuntimeHandle::status)
@@ -3922,7 +3906,7 @@ impl NetworkManager {
     }
 
     pub fn control_tick_consumed(&self, tick: Tick, client_ids: Vec<ClientId>) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-hooks"))]
         if self.worker.is_none() {
             return;
         }
@@ -3936,7 +3920,7 @@ impl NetworkManager {
     }
 
     pub fn reset_client_performance(&self) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-hooks"))]
         if self.worker.is_none() {
             return;
         }
@@ -4040,7 +4024,7 @@ impl NetworkManager {
             .map_err(|message| anyhow!(message))
     }
 
-    pub(crate) fn begin_masterserver_signup(
+    pub fn begin_masterserver_signup(
         &self,
         enabled: bool,
         config: PreparedLeagueHostConfig,
@@ -4082,7 +4066,7 @@ impl NetworkManager {
         })
     }
 
-    pub(crate) fn poll_masterserver_signup(
+    pub fn poll_masterserver_signup(
         &self,
         pending: &mut PendingMasterserverSignup,
     ) -> Option<Result<Option<clonk_network::LeagueStartResponse>>> {
@@ -4282,8 +4266,8 @@ impl NetworkManager {
         (state.game_ids, state.local_addresses.clone())
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_stub() -> (Self, Sender<NetworkEvent>) {
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn test_stub() -> (Self, Sender<NetworkEvent>) {
         let (command_tx, _command_rx) = tokio_mpsc::channel(8);
         let (event_tx, event_rx) = mpsc::channel();
         let (_telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
@@ -4311,10 +4295,8 @@ impl NetworkManager {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_stub_for_client_id(
-        local_client_id: ClientId,
-    ) -> (Self, Sender<NetworkEvent>) {
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn test_stub_for_client_id(local_client_id: ClientId) -> (Self, Sender<NetworkEvent>) {
         let (command_tx, _command_rx) = tokio_mpsc::channel(8);
         let (event_tx, event_rx) = mpsc::channel();
         let (_telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
@@ -4342,10 +4324,8 @@ impl NetworkManager {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_stub_with_league_record_stream(
-        endpoint: String,
-    ) -> (Self, Sender<NetworkEvent>) {
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn test_stub_with_league_record_stream(endpoint: String) -> (Self, Sender<NetworkEvent>) {
         let (mut manager, event_tx) = Self::test_stub();
         manager.league_record_runtime = Some(
             spawn_league_record_runtime(endpoint, clonk_network::LeagueHttpTransportConfig::default())
@@ -4354,13 +4334,13 @@ impl NetworkManager {
         (manager, event_tx)
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_stub_with_commands() -> (Self, Sender<NetworkEvent>, TestNetworkCommands) {
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn test_stub_with_commands() -> (Self, Sender<NetworkEvent>, TestNetworkCommands) {
         Self::test_stub_with_commands_for_client_id(HOST_CLIENT_ID)
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_stub_with_commands_for_client_id(
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn test_stub_with_commands_for_client_id(
         local_client_id: ClientId,
     ) -> (Self, Sender<NetworkEvent>, TestNetworkCommands) {
         let (command_tx, command_rx) = tokio_mpsc::channel(8);
@@ -4395,8 +4375,8 @@ impl NetworkManager {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_stub_with_league_commands_for_client_id(
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn test_stub_with_league_commands_for_client_id(
         local_client_id: ClientId,
     ) -> (Self, Sender<NetworkEvent>, TestNetworkCommands) {
         let (manager, events, commands) =
@@ -4420,7 +4400,7 @@ impl Drop for NetworkManager {
     }
 }
 
-pub(crate) fn apply_league_start_response_to_parameters(
+pub fn apply_league_start_response_to_parameters(
     parameters: &mut clonk_network::JoinGameParametersEnvelope,
     response: &clonk_network::LeagueStartResponse,
 ) -> std::result::Result<Option<usize>, String> {
@@ -7659,9 +7639,7 @@ fn emit_scheduled_sync_controls(
     Ok(())
 }
 
-pub(crate) fn network_control_for_packet(
-    control: clonk_engine::ControlPacket,
-) -> Option<NetworkControl> {
+pub fn network_control_for_packet(control: clonk_engine::ControlPacket) -> Option<NetworkControl> {
     match control {
         clonk_engine::ControlPacket::ClientJoin(join) => Some(NetworkControl::ClientJoin(join)),
         clonk_engine::ControlPacket::ClientUpdate(update) => {

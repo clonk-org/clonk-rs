@@ -34,11 +34,7 @@ pub(crate) fn open_group_path(path: &Path) -> Result<Group, GroupError> {
 /// Reproduces the filename retained by C4Group after opening `lookup_name`.
 /// The caller's lexical prefix stays intact, while child-group wildcard/case
 /// matches and Win32's final-component correction use the physical spelling.
-pub(crate) fn opened_group_name(
-    path: &Path,
-    lookup_name: &[u8],
-    executable_root: &Path,
-) -> Vec<u8> {
+pub fn opened_group_name(path: &Path, lookup_name: &[u8], executable_root: &Path) -> Vec<u8> {
     let separator = std::path::MAIN_SEPARATOR as u8;
     let mut opened_name = lookup_name
         .iter()
@@ -220,10 +216,10 @@ fn legacy_byte_capital(byte: u8) -> u8 {
     }
 }
 
-pub(crate) fn path_wire_bytes(path: &Path) -> Vec<u8> {
+pub fn path_wire_bytes(path: &Path) -> Vec<u8> {
     clonk_resources::path_to_legacy_bytes(path)
 }
 
-pub(crate) fn path_from_wire_bytes(bytes: &[u8]) -> PathBuf {
+pub fn path_from_wire_bytes(bytes: &[u8]) -> PathBuf {
     clonk_resources::path_from_legacy_bytes(bytes)
 }

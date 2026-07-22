@@ -1,10 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[path = "../src/host_game_resource_sources.rs"]
-pub mod host_game_resource_sources;
-
-use host_game_resource_sources::{
+use crate::host_game_resource_sources::{
     freeze_host_definition_resource_sources, resolve_host_game_resource_sources,
     validate_host_group_resource_source, HostGameResourceSourceError, HostGameResourceSourceKind,
 };

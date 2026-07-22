@@ -445,7 +445,7 @@ impl GamepadBindings {
                     .unwrap_or_default();
                 let max = configured_native_u32(config, &section, &format!("Axis{axis}Max"))
                     .unwrap_or_default();
-                let calibrated = clonk_app::configured_native_boolean(
+                let calibrated = clonk_app_netplay::configured_native_boolean(
                     config,
                     &section,
                     &format!("Axis{axis}Calibrated"),
@@ -938,7 +938,7 @@ fn parse_u32_config_value(raw: &str) -> Option<u32> {
 }
 
 fn configured_native_u32(config: &[u8], section: &str, key: &str) -> Option<u32> {
-    let value = clonk_app::configured_native_value(config, section, key)?;
+    let value = clonk_app_netplay::configured_native_value(config, section, key)?;
     parse_u32_config_value(std::str::from_utf8(value.as_bytes()).ok()?)
 }
 
