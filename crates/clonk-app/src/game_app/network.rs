@@ -4254,39 +4254,6 @@ impl GameApp {
         &mut self,
         reference: clonk_network::NetworkGameReference,
     ) -> Result<(), EngineError> {
-        let version_matches = reference.version == clonk_network::CURRENT_GAME_VERSION
-            && reference.build == clonk_network::CURRENT_GAME_BUILD;
-        if !version_matches {
-            let remote =
-                network_game_version_string(&reference.game, reference.version, reference.build);
-            let local = network_game_version_string(
-                "LegacyClonk",
-                clonk_network::CURRENT_GAME_VERSION,
-                clonk_network::CURRENT_GAME_BUILD,
-            );
-            let message = format_resource_string(
-                startup_resource_string(
-                    self.app_paths.as_ref(),
-                    "IDS_NET_NOJOIN_BADVER",
-                    "Engine version mismatch: the game runs with %s - you have %s.",
-                ),
-                &[&remote, &local],
-            );
-            let caption = startup_resource_string(
-                self.app_paths.as_ref(),
-                "IDS_NET_NOJOIN",
-                "Cannot join game",
-            );
-            self.push_message_dialog(
-                clonk_frontend::message_dialog::MessageDialogState::regular_ok(
-                    message,
-                    caption,
-                    clonk_frontend::message_dialog::MessageDialogIcon::ERROR,
-                ),
-                MessageDialogContinuation::None,
-            )?;
-            return Ok(());
-        }
         if !reference.join_allowed {
             let message = startup_resource_string(
                 self.app_paths.as_ref(),
@@ -4552,6 +4519,7 @@ impl GameApp {
             settings.group_maker = selection.group_maker().clone();
         }
         let settings = settings
+            .with_compatibility_build(reference.build)
             .with_join_attempts(attempts)
             .with_netpuncher(netpuncher_address, netpuncher_game_ids);
         self.startup_game_search = None;

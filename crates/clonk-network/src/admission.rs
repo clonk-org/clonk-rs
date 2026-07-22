@@ -48,9 +48,26 @@ pub struct ClientAdmission;
 
 impl ClientAdmission {
     pub fn admit_host(request: &ConnectionRequest) -> AdmissionDecision {
-        if request.build != 362 {
+        Self::admit_host_for_build(request, crate::CURRENT_GAME_BUILD)
+    }
+
+    /// Applies initial-host admission using the build selected for this
+    /// client session.
+    ///
+    /// Reference-backed joins use the host's advertised build for their
+    /// outbound `PID_Conn`; the reciprocal host request must be checked
+    /// against that same value rather than this executable's native build.
+    pub fn admit_host_for_build(
+        request: &ConnectionRequest,
+        compatibility_build: i32,
+    ) -> AdmissionDecision {
+        if request.build != compatibility_build {
             return rejection(
-                format!("wrong engine ({}, I have 362)", request.build).into_bytes(),
+                format!(
+                    "wrong engine ({}, I have {compatibility_build})",
+                    request.build
+                )
+                .into_bytes(),
                 false,
             );
         }
@@ -77,9 +94,30 @@ impl KnownPeerAdmission {
         canonical_core: &ClientCoreControlData,
         already_connected: bool,
     ) -> AdmissionDecision {
-        if request.build != 362 {
+        Self::admit_for_build(
+            request,
+            canonical_core,
+            already_connected,
+            crate::CURRENT_GAME_BUILD,
+        )
+    }
+
+    /// Applies existing-peer admission using the build selected for this
+    /// client session. Rust hosts continue to call [`Self::admit`], retaining
+    /// their native build requirement.
+    pub fn admit_for_build(
+        request: &ConnectionRequest,
+        canonical_core: &ClientCoreControlData,
+        already_connected: bool,
+        compatibility_build: i32,
+    ) -> AdmissionDecision {
+        if request.build != compatibility_build {
             return rejection(
-                format!("wrong engine ({}, I have 362)", request.build).into_bytes(),
+                format!(
+                    "wrong engine ({}, I have {compatibility_build})",
+                    request.build
+                )
+                .into_bytes(),
                 false,
             );
         }
@@ -407,6 +445,8 @@ mod tests {
     use super::*;
     use clonk_engine::{ClientCoreControlData, LegacyCString};
 
+    const CPP_COMPATIBILITY_BUILD: i32 = crate::CURRENT_GAME_BUILD + 2;
+
     fn request(client_id: i32, connection_id: u32) -> ConnectionRequest {
         ConnectionRequest {
             core: ClientCoreControlData {
@@ -667,6 +707,32 @@ mod tests {
     }
 
     #[test]
+    fn client_admission_uses_the_selected_compatibility_build() {
+        // A reciprocal C++ PID_Conn carries C4XVERBUILD and is checked by the
+        // same exact-build branch (oracle-src-pinned
+        // src/C4Network2IO.cpp:1611-1618; src/C4Network2.cpp:1291-1299).
+        let mut matching_host = request(0, 7);
+        matching_host.build = CPP_COMPATIBILITY_BUILD;
+        assert!(matches!(
+            ClientAdmission::admit_host_for_build(&matching_host, CPP_COMPATIBILITY_BUILD),
+            AdmissionDecision::Accept { .. }
+        ));
+
+        let mut stale_host = matching_host;
+        stale_host.build = CPP_COMPATIBILITY_BUILD - 1;
+        let expected = format!(
+            "wrong engine ({}, I have {CPP_COMPATIBILITY_BUILD})",
+            CPP_COMPATIBILITY_BUILD - 1
+        );
+        assert_reply(
+            &ClientAdmission::admit_host_for_build(&stale_host, CPP_COMPATIBILITY_BUILD),
+            false,
+            expected.as_bytes(),
+            false,
+        );
+    }
+
+    #[test]
     fn composed_host_admission_associates_assigned_core_and_confirms_sends() {
         // Join replaces the unknown core with its assigned core before
         // HandleConnRe associates the socket. ConnSent and HalfAccepted are
@@ -773,6 +839,42 @@ mod tests {
             panic!("already-associated socket is accepted before core comparison");
         };
         assert_eq!(message.as_bytes(), b"already connected");
+    }
+
+    #[test]
+    fn known_peer_admission_uses_the_selected_compatibility_build() {
+        // CheckConn applies the version branch before existing-client identity
+        // checks (oracle-src-pinned src/C4Network2.cpp:1286-1303).
+        let canonical = request(3, 11).core;
+        let mut matching_peer = request(3, 12);
+        matching_peer.build = CPP_COMPATIBILITY_BUILD;
+        assert!(matches!(
+            KnownPeerAdmission::admit_for_build(
+                &matching_peer,
+                &canonical,
+                false,
+                CPP_COMPATIBILITY_BUILD,
+            ),
+            AdmissionDecision::Accept { .. }
+        ));
+
+        let mut stale_peer = matching_peer;
+        stale_peer.build = CPP_COMPATIBILITY_BUILD - 1;
+        let expected = format!(
+            "wrong engine ({}, I have {CPP_COMPATIBILITY_BUILD})",
+            CPP_COMPATIBILITY_BUILD - 1
+        );
+        assert_reply(
+            &KnownPeerAdmission::admit_for_build(
+                &stale_peer,
+                &canonical,
+                false,
+                CPP_COMPATIBILITY_BUILD,
+            ),
+            false,
+            expected.as_bytes(),
+            false,
+        );
     }
 
     #[test]

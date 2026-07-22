@@ -60,6 +60,10 @@ pub struct HostSettings {
 #[derive(Debug, Clone)]
 pub struct ClientSettings {
     pub server_addresses: Vec<NetworkAddress>,
+    /// C++ `C4XVERBUILD` value this client presents for the selected game.
+    /// Reference-backed joins use the host's advertised build so Rust release
+    /// versioning does not prevent an otherwise compatible connection.
+    pub compatibility_build: i32,
     pub player_name: String,
     pub observer: bool,
     pub group_maker: clonk_engine::LegacyCString,
@@ -93,6 +97,7 @@ impl ClientSettings {
                 NetworkAddress::new(NetworkProtocol::Tcp, server_addr),
                 NetworkAddress::new(NetworkProtocol::Udp, server_addr),
             ],
+            compatibility_build: clonk_network::CURRENT_GAME_BUILD,
             player_name,
             observer: false,
             group_maker,
@@ -115,6 +120,11 @@ impl ClientSettings {
         addresses: impl IntoIterator<Item = NetworkAddress>,
     ) -> Self {
         self.server_addresses = addresses.into_iter().collect();
+        self
+    }
+
+    pub fn with_compatibility_build(mut self, compatibility_build: i32) -> Self {
+        self.compatibility_build = compatibility_build;
         self
     }
 
@@ -6480,6 +6490,7 @@ async fn run_client_worker(
         ParticipantKind::Player
     };
     let mut client_config = ClientConfig::new(player_name.clone(), participant_kind)
+        .with_compatibility_build(settings.compatibility_build)
         .with_group_maker(settings.group_maker)
         .with_password(settings.password)
         .with_resource_directory(settings.resource_directory)
@@ -7793,6 +7804,26 @@ mod tests {
 
     fn test_netpuncher_state() -> Arc<Mutex<NetworkNetpuncherState>> {
         Arc::new(Mutex::new(NetworkNetpuncherState::default()))
+    }
+
+    #[test]
+    fn client_settings_default_and_override_compatibility_build() {
+        // C++ publishes C4XVERBUILD in its reference and requires that exact
+        // PID_Conn build (oracle-src-pinned src/C4Network2Reference.cpp:79,100-102;
+        // src/C4Network2.cpp:1291-1299).
+        let address = SocketAddr::from(([127, 0, 0, 1], 11_112));
+        let settings = ClientSettings::new(address, "Alice");
+        assert_eq!(
+            settings.compatibility_build,
+            clonk_network::CURRENT_GAME_BUILD
+        );
+
+        assert_eq!(
+            settings
+                .with_compatibility_build(clonk_network::CURRENT_GAME_BUILD + 2)
+                .compatibility_build,
+            clonk_network::CURRENT_GAME_BUILD + 2
+        );
     }
 
     #[tokio::test]

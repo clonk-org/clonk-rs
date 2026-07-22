@@ -413,6 +413,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let local_connection_id = local_request.connection_id;
+    let compatibility_build = local_request.build;
     let mut connection =
         LegacyConnection::with_known_peer(local_request, canonical_peer_core.clone());
     let mut liveness = ConnectionLivenessState::new_system();
@@ -430,8 +431,14 @@ where
                 record_admitted_pong(&connection, &mut liveness, packet);
             }
             ControlMessage::ConnectionRequest(request) => {
-                handle_known_peer_request(transport, &mut connection, canonical_peer_core, request)
-                    .await?;
+                handle_known_peer_request(
+                    transport,
+                    &mut connection,
+                    canonical_peer_core,
+                    compatibility_build,
+                    request,
+                )
+                .await?;
                 authenticated_peer_request = true;
                 if connection.status() == ConnectionStatus::HalfAccepted {
                     liveness.mark_half_accepted();
@@ -490,6 +497,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let local_connection_id = local_request.connection_id;
+    let compatibility_build = local_request.build;
     let mut connection = LegacyConnection::new(local_request);
     let mut liveness = ConnectionLivenessState::new_system();
     send_initial_request(transport, &mut connection).await?;
@@ -511,6 +519,7 @@ where
                         transport,
                         &mut connection,
                         canonical_peer_cores,
+                        compatibility_build,
                         request,
                     )
                     .await?,
@@ -562,6 +571,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let local_connection_id = local_request.connection_id;
+    let compatibility_build = local_request.build;
     let mut connection = LegacyConnection::new(local_request);
     send_initial_request(transport, &mut connection).await?;
 
@@ -576,8 +586,14 @@ where
                 record_admitted_pong(&connection, &mut liveness, packet);
             }
             ControlMessage::ConnectionRequest(request) => {
-                handle_peer_request(transport, &mut connection, &mut registered_host, request)
-                    .await?;
+                handle_peer_request(
+                    transport,
+                    &mut connection,
+                    &mut registered_host,
+                    compatibility_build,
+                    request,
+                )
+                .await?;
                 if connection.status() == ConnectionStatus::HalfAccepted {
                     liveness.mark_half_accepted();
                 }
@@ -656,8 +672,14 @@ where
                 liveness.record_pong(packet);
             }
             ControlMessage::ConnectionRequest(request) => {
-                handle_peer_request(transport, &mut connection, &mut registered_host, request)
-                    .await?;
+                handle_peer_request(
+                    transport,
+                    &mut connection,
+                    &mut registered_host,
+                    compatibility_build,
+                    request,
+                )
+                .await?;
             }
             ControlMessage::ConnectionReply(reply) => {
                 let duplicate_peer = handle_peer_reply(&mut connection, reply)?;
@@ -980,12 +1002,15 @@ async fn handle_peer_request<S>(
     transport: &mut ControlTransport<S>,
     connection: &mut LegacyConnection,
     registered_host: &mut Option<ClientCoreControlData>,
+    compatibility_build: i32,
     request: ConnectionRequest,
 ) -> Result<(), ConnectionHandshakeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let actions = connection.accept_peer_request(request, ClientAdmission::admit_host);
+    let actions = connection.accept_peer_request(request, |request| {
+        ClientAdmission::admit_host_for_build(request, compatibility_build)
+    });
     for action in actions {
         match action {
             ConnectionAction::RegisterHost(core) => {
@@ -1042,12 +1067,18 @@ async fn handle_known_peer_request<S>(
     transport: &mut ControlTransport<S>,
     connection: &mut LegacyConnection,
     canonical_peer_core: &ClientCoreControlData,
+    compatibility_build: i32,
     request: ConnectionRequest,
 ) -> Result<(), ConnectionHandshakeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let decision = KnownPeerAdmission::admit(&request, canonical_peer_core, false);
+    let decision = KnownPeerAdmission::admit_for_build(
+        &request,
+        canonical_peer_core,
+        false,
+        compatibility_build,
+    );
     handle_known_peer_decision(transport, connection, request, decision).await
 }
 
@@ -1055,6 +1086,7 @@ async fn handle_registered_peer_request<S>(
     transport: &mut ControlTransport<S>,
     connection: &mut LegacyConnection,
     canonical_peer_cores: &BTreeMap<i32, ClientCoreControlData>,
+    compatibility_build: i32,
     request: ConnectionRequest,
 ) -> Result<ClientCoreControlData, ConnectionHandshakeError>
 where
@@ -1062,9 +1094,12 @@ where
 {
     let canonical_peer_core = canonical_peer_cores.get(&request.core.client_id).cloned();
     let decision = match canonical_peer_core.as_ref() {
-        Some(canonical_peer_core) => {
-            KnownPeerAdmission::admit(&request, canonical_peer_core, false)
-        }
+        Some(canonical_peer_core) => KnownPeerAdmission::admit_for_build(
+            &request,
+            canonical_peer_core,
+            false,
+            compatibility_build,
+        ),
         None => AdmissionDecision::Reject {
             message: LegacyCString::from_bytes(b"connection denied".to_vec()).unwrap_or_default(),
             wrong_password: false,
@@ -1223,6 +1258,8 @@ mod tests {
         ResourcePacket, NETWORK_STATE_LOBBY,
     };
 
+    const CPP_COMPATIBILITY_BUILD: i32 = crate::CURRENT_GAME_BUILD + 2;
+
     fn wire_string(value: &[u8]) -> LegacyCString {
         LegacyCString::from_bytes(value.to_vec()).unwrap()
     }
@@ -1306,6 +1343,97 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn client_handshake_accepts_the_selected_noncurrent_build() {
+        // The game reference publishes C4XVERBUILD, and C++ accepts PID_Conn
+        // only at that exact value (oracle-src-pinned
+        // src/C4Network2Reference.cpp:79,100-102;
+        // src/C4Network2.cpp:1291-1299).
+        let expected_join_data = join_data();
+        let (host_stream, client_stream) = duplex(4096);
+        let (admission_tx, mut admission_rx) = mpsc::channel(1);
+        let host_task = tokio::spawn(async move {
+            let mut host_request = request(0, b"Host", 7);
+            host_request.build = CPP_COMPATIBILITY_BUILD;
+            let mut transport = ControlTransport::new(host_stream);
+            run_host_connection_handshake(&mut transport, host_request, &admission_tx)
+                .await
+                .unwrap();
+            transport
+                .send_message(ControlMessage::JoinData(Box::new(expected_join_data)))
+                .await
+                .unwrap();
+        });
+        let client_task = tokio::spawn(async move {
+            let mut client_request = request(-1, b"Alice", 11);
+            client_request.build = CPP_COMPATIBILITY_BUILD;
+            let mut transport = ControlTransport::new(client_stream);
+            run_client_connection_handshake(&mut transport, client_request).await
+        });
+
+        let admission = admission_rx.recv().await.unwrap();
+        assert_eq!(admission.request.build, CPP_COMPATIBILITY_BUILD);
+        admission
+            .decision_tx
+            .send(AdmissionDecision::Accept {
+                peer_core: admission.request.core,
+                before_reply: Vec::new(),
+                message: wire_string(b"join accepted"),
+            })
+            .unwrap();
+
+        host_task.await.unwrap();
+        let client = client_task.await.unwrap().unwrap();
+        assert_eq!(client.local_connection_id, 11);
+        assert_eq!(client.remote_connection_id, 7);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_handshake_rejects_a_host_outside_the_selected_build() {
+        // Reciprocal C++ PID_Conn also carries C4XVERBUILD
+        // (oracle-src-pinned src/C4Network2IO.cpp:1611-1618).
+        let (client_stream, host_stream) = duplex(2048);
+        let client_task = tokio::spawn(async move {
+            let mut local_request = request(-1, b"Alice", 11);
+            local_request.build = CPP_COMPATIBILITY_BUILD;
+            let mut transport = ControlTransport::new(client_stream);
+            run_client_connection_handshake(&mut transport, local_request).await
+        });
+        let mut host = ControlTransport::new(host_stream);
+
+        let ControlMessage::ConnectionRequest(client_request) = host.read_message().await.unwrap()
+        else {
+            panic!("expected client PID_Conn");
+        };
+        assert_eq!(client_request.build, CPP_COMPATIBILITY_BUILD);
+
+        let mut host_request = request(0, b"Host", 7);
+        host_request.build = CPP_COMPATIBILITY_BUILD - 1;
+        let expected = format!(
+            "wrong engine ({}, I have {CPP_COMPATIBILITY_BUILD})",
+            CPP_COMPATIBILITY_BUILD - 1
+        );
+        host.send_message(ControlMessage::ConnectionRequest(host_request))
+            .await
+            .unwrap();
+        assert!(matches!(
+            host.read_message().await.unwrap(),
+            ControlMessage::ConnectionReply(ConnectionReply {
+                ok: false,
+                ref message,
+                wrong_password: false,
+            }) if message.as_bytes() == expected.as_bytes()
+        ));
+
+        assert!(matches!(
+            client_task.await.unwrap().unwrap_err(),
+            ConnectionHandshakeError::LocalRejection {
+                wrong_password: false,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn known_peer_mesh_handshake_accepts_status_only_core_differences_without_join_data() {
         // CheckConn compares the synchronized ID/name/nick identity and keeps
         // the registry-owned core. Runtime status flags in the Conn payload do
@@ -1314,8 +1442,10 @@ mod tests {
         let alice_core = request(3, b"Alice", 0).core;
         let bob_core = request(4, b"Bob", 0).core;
         let mut alice_request = request(3, b"Alice", 7);
+        alice_request.build = CPP_COMPATIBILITY_BUILD;
         alice_request.core.activated = true;
         let mut bob_request = request(4, b"Bob", 11);
+        bob_request.build = CPP_COMPATIBILITY_BUILD;
         bob_request.core.observer = true;
 
         let (alice_stream, bob_stream) = duplex(4096);
@@ -1358,12 +1488,10 @@ mod tests {
             let (local_stream, peer_stream) = duplex(2048);
             let task = tokio::spawn(async move {
                 let mut transport = ControlTransport::new(local_stream);
-                run_known_peer_connection_handshake(
-                    &mut transport,
-                    request(3, b"Alice", 7),
-                    &canonical_peer,
-                )
-                .await
+                let mut local_request = request(3, b"Alice", 7);
+                local_request.build = CPP_COMPATIBILITY_BUILD;
+                run_known_peer_connection_handshake(&mut transport, local_request, &canonical_peer)
+                    .await
             });
             let mut peer = ControlTransport::new(peer_stream);
             assert!(matches!(
@@ -1385,6 +1513,7 @@ mod tests {
         }
 
         let mut changed_identity = request(4, b"Bob", 11);
+        changed_identity.build = CPP_COMPATIBILITY_BUILD;
         changed_identity.core.nick = wire_string(b"Impostor");
         assert!(matches!(
             assert_rejected(changed_identity, b"wrong client core").await,
@@ -1395,9 +1524,13 @@ mod tests {
         ));
 
         let mut wrong_build = request(4, b"Bob", 12);
-        wrong_build.build = 361;
+        wrong_build.build = CPP_COMPATIBILITY_BUILD - 1;
+        let expected = format!(
+            "wrong engine ({}, I have {CPP_COMPATIBILITY_BUILD})",
+            CPP_COMPATIBILITY_BUILD - 1
+        );
         assert!(matches!(
-            assert_rejected(wrong_build, b"wrong engine (361, I have 362)").await,
+            assert_rejected(wrong_build, expected.as_bytes()).await,
             ConnectionHandshakeError::LocalRejection {
                 wrong_password: false,
                 ..
@@ -1412,14 +1545,17 @@ mod tests {
         let mut inbound_registry = BTreeMap::new();
         inbound_registry.insert(bob_core.client_id, bob_core.clone());
         let mut bob_request = request(4, b"Bob", 11);
+        bob_request.build = CPP_COMPATIBILITY_BUILD;
         bob_request.core.activated = true;
 
         let (inbound_stream, outbound_stream) = duplex(4096);
         let inbound_task = tokio::spawn(async move {
             let mut transport = ControlTransport::new(inbound_stream);
+            let mut alice_request = request(3, b"Alice", 7);
+            alice_request.build = CPP_COMPATIBILITY_BUILD;
             run_registered_peer_connection_handshake(
                 &mut transport,
-                request(3, b"Alice", 7),
+                alice_request,
                 &inbound_registry,
             )
             .await

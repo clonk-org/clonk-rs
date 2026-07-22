@@ -139,10 +139,11 @@ impl Default for NetworkGameReference {
 }
 
 impl NetworkGameReference {
+    /// Reference-backed Rust clients present the selected host's advertised
+    /// build during admission, so build/version display differences do not
+    /// make an otherwise open game unjoinable.
     pub fn is_joinable(&self) -> bool {
         self.join_allowed
-            && self.version == CURRENT_GAME_VERSION
-            && self.build == CURRENT_GAME_BUILD
     }
 
     pub fn is_lobby_active(&self) -> bool {

@@ -7371,6 +7371,7 @@ fn classic_client_settings_for_reference(
     classic: &ClassicCommandLine,
 ) -> Result<ClientSettings> {
     let mut settings = client_settings_for_paths(reference.source_address, player_name, paths)
+        .with_compatibility_build(reference.build)
         .with_join_attempts(reference.join_attempts_for_local_host())
         .with_netpuncher(
             reference.netpuncher_address.clone(),

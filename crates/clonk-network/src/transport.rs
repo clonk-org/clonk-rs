@@ -2205,7 +2205,9 @@ mod tests {
     async fn sends_cpp_connection_request_frame() {
         // C4Network2IO::SendConnPackets sends a packed PID_Conn over the
         // normal C4NetIOTCP frame (src/C4Network2IO.cpp:1223-1252;
-        // src/C4NetIO.cpp:1287-1323).
+        // src/C4NetIO.cpp:1287-1323). The packed Version remains the selected
+        // C4XVERBUILD even when it differs from this Rust build
+        // (oracle-src-pinned src/C4Network2.cpp:1291-1299).
         let request = ConnectionRequest {
             core: ClientCoreControlData {
                 client_id: -1,
@@ -2215,7 +2217,7 @@ mod tests {
                 nick: LegacyCString::from_bytes(b"Ali".to_vec()).unwrap(),
                 lobby_ready: false,
             },
-            build: 362,
+            build: crate::CURRENT_GAME_BUILD + 2,
             password: LegacyCString::from_bytes(b"s3cret".to_vec()).unwrap(),
             connection_id: 0x0102_0304,
         };
@@ -2234,7 +2236,7 @@ mod tests {
             bytes,
             expect_frame(&[
                 0x02, 0xff, 0xff, 0xff, 0xff, 0x00, 0x01, b'A', b'l', b'i', b'c', b'e', 0x00, b'A',
-                b'l', b'i', 0x00, 0x00, 0x6a, 0x02, b's', b'3', b'c', b'r', b'e', b't', 0x00, 0x84,
+                b'l', b'i', 0x00, 0x00, 0x6c, 0x02, b's', b'3', b'c', b'r', b'e', b't', 0x00, 0x84,
                 0x86, 0x88, 0x08,
             ])
         );

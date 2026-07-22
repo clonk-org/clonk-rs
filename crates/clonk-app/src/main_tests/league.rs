@@ -3,6 +3,9 @@
 
     #[test]
     fn classic_command_line_join_urls_and_update_stub_are_disjoint() {
+        // C++ initializes and serializes the host C4XVERBUILD in every game
+        // reference (oracle-src-pinned src/C4Network2Reference.cpp:79,100-102;
+        // src/C4GameVersion.h:35-37).
         let join = parse_classic_command_line(&[OsString::from("ClOnK:///host:11112///")]);
         assert_eq!(join.direct_join.as_deref(), Some("host:11112"));
         assert_eq!(join.network_active, Some(true));
@@ -60,6 +63,7 @@
         );
         let game_address = SocketAddr::from(([127, 0, 0, 1], 41_234));
         let reference = clonk_network::NetworkGameReference {
+            build: clonk_network::CURRENT_GAME_BUILD + 2,
             source_address: SocketAddr::from((
                 [127, 0, 0, 1],
                 clonk_network::DEFAULT_REFERENCE_PORT,
@@ -78,6 +82,10 @@
             &direct,
         )
         .expect("classic direct client settings");
+        assert_eq!(
+            settings.compatibility_build,
+            clonk_network::CURRENT_GAME_BUILD + 2
+        );
         assert_eq!(settings.server_addresses[0].endpoint, game_address);
         assert!(settings.observer);
         assert_eq!(

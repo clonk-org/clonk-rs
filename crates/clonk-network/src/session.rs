@@ -428,6 +428,10 @@ pub struct ClientConfig {
     pub name: String,
     pub group_maker: clonk_engine::LegacyCString,
     pub kind: ParticipantKind,
+    /// Build advertised during `PID_Conn` and expected from every peer in the
+    /// target game. Reference-backed joins set this from the host reference;
+    /// unresolved direct joins retain [`CURRENT_GAME_BUILD`].
+    pub compatibility_build: i32,
     pub password: clonk_engine::LegacyCString,
     pub resource_directory: Option<PathBuf>,
     pub bootstrap_local_candidates: crate::ClientBootstrapLocalCandidates,
@@ -452,6 +456,7 @@ impl ClientConfig {
             name,
             group_maker,
             kind,
+            compatibility_build: CURRENT_GAME_BUILD,
             password: clonk_engine::LegacyCString::default(),
             resource_directory: Some(default_client_resource_directory()),
             bootstrap_local_candidates: crate::ClientBootstrapLocalCandidates::default(),
@@ -465,6 +470,11 @@ impl ClientConfig {
 
     pub fn with_password(mut self, password: clonk_engine::LegacyCString) -> Self {
         self.password = password;
+        self
+    }
+
+    pub fn with_compatibility_build(mut self, build: i32) -> Self {
+        self.compatibility_build = build;
         self
     }
 
@@ -2091,6 +2101,7 @@ where
         name,
         group_maker,
         kind,
+        compatibility_build,
         password,
         resource_directory,
         mut bootstrap_local_candidates,
@@ -2114,7 +2125,7 @@ where
     let primary_connection_id = 0;
     let request = crate::ConnectionRequest {
         core: local_core.clone(),
-        build: CURRENT_GAME_BUILD,
+        build: compatibility_build,
         password: password.clone(),
         connection_id: primary_connection_id,
     };
@@ -2485,21 +2496,24 @@ where
     let mesh_udp_handle = mesh_udp_hub
         .as_ref()
         .map(crate::ReliableUdpSessionHub::handle);
+    let host_request_template = ClientHandshakeRequestTemplate::new(
+        assigned_local_core.clone(),
+        compatibility_build,
+        password,
+    );
     let mut udp_reconnect = udp_reconnect_addr
         .zip(mesh_udp_handle)
         .map(|(addr, handle)| ClientUdpReconnect {
             addr,
             handle,
-            local_core: assigned_local_core.clone(),
+            request_template: host_request_template.clone(),
             expected_host_core: host_core.clone(),
-            password: password.clone(),
             connection_ids: connection_ids.clone(),
         });
     let mut tcp_reconnect = tcp_reconnect_addr.map(|addr| ClientTcpReconnect {
         addr,
-        local_core: assigned_local_core.clone(),
+        request_template: host_request_template,
         expected_host_core: host_core.clone(),
-        password: password.clone(),
         connection_ids: connection_ids.clone(),
         io_statistics: io_statistics.clone(),
     });
@@ -2527,7 +2541,11 @@ where
         client_addresses,
         client_cores,
         mesh_peers,
-        assigned_local_core,
+        ClientHandshakeRequestTemplate::new(
+            assigned_local_core,
+            compatibility_build,
+            clonk_engine::LegacyCString::default(),
+        ),
         connection_ids,
         mesh_interface_ids,
         mesh_tcp_listener,
@@ -2566,6 +2584,36 @@ type PendingClientRoute = tokio::task::JoinHandle<
 type PendingTcpClientRoute =
     tokio::task::JoinHandle<Result<ConnectedClientRoute<TcpStream>, ClientError>>;
 
+#[derive(Clone)]
+struct ClientHandshakeRequestTemplate {
+    local_core: clonk_engine::ClientCoreControlData,
+    compatibility_build: i32,
+    password: clonk_engine::LegacyCString,
+}
+
+impl ClientHandshakeRequestTemplate {
+    fn new(
+        local_core: clonk_engine::ClientCoreControlData,
+        compatibility_build: i32,
+        password: clonk_engine::LegacyCString,
+    ) -> Self {
+        Self {
+            local_core,
+            compatibility_build,
+            password,
+        }
+    }
+
+    fn connection_request(&self, connection_id: u32) -> crate::ConnectionRequest {
+        crate::ConnectionRequest {
+            core: self.local_core.clone(),
+            build: self.compatibility_build,
+            password: self.password.clone(),
+            connection_id,
+        }
+    }
+}
+
 enum ConnectedMeshRoute {
     Tcp {
         peer_id: ClientId,
@@ -2591,13 +2639,13 @@ struct MeshRouteCompletion {
 async fn connect_mesh_tcp_route(
     peer_id: ClientId,
     addr: SocketAddr,
-    local_core: clonk_engine::ClientCoreControlData,
+    request_template: ClientHandshakeRequestTemplate,
     expected_peer_core: clonk_engine::ClientCoreControlData,
-    password: clonk_engine::LegacyCString,
     connection_id: u32,
     io_statistics: crate::NetworkIoStatistics,
 ) -> Result<ConnectedMeshRoute, ClientError> {
-    let initiator_id = ClientId::try_from(local_core.client_id).unwrap_or(ClientId::MAX);
+    let initiator_id =
+        ClientId::try_from(request_template.local_core.client_id).unwrap_or(ClientId::MAX);
     let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(addr))
         .await
         .map_err(|_| {
@@ -2615,12 +2663,7 @@ async fn connect_mesh_tcp_route(
     );
     let handshake = crate::connection_handshake::run_known_peer_connection_handshake(
         &mut transport,
-        crate::ConnectionRequest {
-            core: local_core,
-            build: CURRENT_GAME_BUILD,
-            password,
-            connection_id,
-        },
+        request_template.connection_request(connection_id),
         &expected_peer_core,
     )
     .await
@@ -2643,12 +2686,12 @@ async fn connect_mesh_udp_route(
     handle: crate::ReliableUdpSessionHandle,
     peer_id: ClientId,
     addr: SocketAddr,
-    local_core: clonk_engine::ClientCoreControlData,
+    request_template: ClientHandshakeRequestTemplate,
     expected_peer_core: clonk_engine::ClientCoreControlData,
-    password: clonk_engine::LegacyCString,
     connection_id: u32,
 ) -> Result<ConnectedMeshRoute, ClientError> {
-    let initiator_id = ClientId::try_from(local_core.client_id).unwrap_or(ClientId::MAX);
+    let initiator_id =
+        ClientId::try_from(request_template.local_core.client_id).unwrap_or(ClientId::MAX);
     let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, handle.connect(addr))
         .await
         .map_err(|_| {
@@ -2666,12 +2709,7 @@ async fn connect_mesh_udp_route(
     let mut transport = crate::ControlTransport::new(stream);
     let handshake = crate::connection_handshake::run_known_peer_connection_handshake(
         &mut transport,
-        crate::ConnectionRequest {
-            core: local_core,
-            build: CURRENT_GAME_BUILD,
-            password,
-            connection_id,
-        },
+        request_template.connection_request(connection_id),
         &expected_peer_core,
     )
     .await
@@ -2695,9 +2733,8 @@ async fn connect_mesh_tcp_socket_route(
     initiator_id: ClientId,
     socket: tokio::net::TcpSocket,
     addr: SocketAddr,
-    local_core: clonk_engine::ClientCoreControlData,
+    request_template: ClientHandshakeRequestTemplate,
     expected_peer_core: clonk_engine::ClientCoreControlData,
-    password: clonk_engine::LegacyCString,
     connection_id: u32,
     delay: Duration,
     io_statistics: crate::NetworkIoStatistics,
@@ -2722,12 +2759,7 @@ async fn connect_mesh_tcp_socket_route(
     );
     let handshake = crate::connection_handshake::run_known_peer_connection_handshake(
         &mut transport,
-        crate::ConnectionRequest {
-            core: local_core,
-            build: CURRENT_GAME_BUILD,
-            password,
-            connection_id,
-        },
+        request_template.connection_request(connection_id),
         &expected_peer_core,
     )
     .await
@@ -2766,9 +2798,8 @@ fn bind_tcp_sim_open_socket(
 async fn accept_mesh_tcp_route(
     stream: TcpStream,
     peer_addr: SocketAddr,
-    local_core: clonk_engine::ClientCoreControlData,
+    request_template: ClientHandshakeRequestTemplate,
     canonical_peer_cores: BTreeMap<i32, clonk_engine::ClientCoreControlData>,
-    password: clonk_engine::LegacyCString,
     connection_id: u32,
     io_statistics: crate::NetworkIoStatistics,
 ) -> Result<ConnectedMeshRoute, ClientError> {
@@ -2779,12 +2810,7 @@ async fn accept_mesh_tcp_route(
     );
     let handshake = crate::connection_handshake::run_registered_peer_connection_handshake(
         &mut transport,
-        crate::ConnectionRequest {
-            core: local_core,
-            build: CURRENT_GAME_BUILD,
-            password,
-            connection_id,
-        },
+        request_template.connection_request(connection_id),
         &canonical_peer_cores,
     )
     .await
@@ -2808,9 +2834,8 @@ async fn accept_mesh_tcp_route(
 
 async fn accept_mesh_udp_route(
     stream: crate::ReliableUdpPeerStream,
-    local_core: clonk_engine::ClientCoreControlData,
+    request_template: ClientHandshakeRequestTemplate,
     canonical_peer_cores: BTreeMap<i32, clonk_engine::ClientCoreControlData>,
-    password: clonk_engine::LegacyCString,
     connection_id: u32,
 ) -> Result<ConnectedMeshRoute, ClientError> {
     stream
@@ -2821,12 +2846,7 @@ async fn accept_mesh_udp_route(
     let mut transport = crate::ControlTransport::new(stream);
     let handshake = crate::connection_handshake::run_registered_peer_connection_handshake(
         &mut transport,
-        crate::ConnectionRequest {
-            core: local_core,
-            build: CURRENT_GAME_BUILD,
-            password,
-            connection_id,
-        },
+        request_template.connection_request(connection_id),
         &canonical_peer_cores,
     )
     .await
@@ -2881,7 +2901,7 @@ fn spawn_mesh_dial(
     peer_id: i32,
     attempt: crate::ClientMeshDialAttempt,
     client_cores: &BTreeMap<i32, clonk_engine::ClientCoreControlData>,
-    local_core: &clonk_engine::ClientCoreControlData,
+    request_template: &ClientHandshakeRequestTemplate,
     connection_ids: &Arc<AtomicU32>,
     interface_ids: &[u32],
     udp_handle: Option<&crate::ReliableUdpSessionHandle>,
@@ -2919,7 +2939,7 @@ fn spawn_mesh_dial(
             if !active_dials.insert(dial_key) {
                 return;
             }
-            let local_core = local_core.clone();
+            let request_template = request_template.clone();
             let connection_ids = connection_ids.clone();
             let io_statistics = io_statistics.clone();
             pending.spawn(async move {
@@ -2930,9 +2950,8 @@ fn spawn_mesh_dial(
                     match connect_mesh_tcp_route(
                         peer_id_wire,
                         endpoint,
-                        local_core.clone(),
+                        request_template.clone(),
                         peer_core.clone(),
-                        clonk_engine::LegacyCString::default(),
                         connection_id,
                         io_statistics.clone(),
                     )
@@ -2968,7 +2987,7 @@ fn spawn_mesh_dial(
             if !active_dials.insert(dial_key) {
                 return;
             }
-            let local_core = local_core.clone();
+            let request_template = request_template.clone();
             let connection_ids = connection_ids.clone();
             pending.spawn(async move {
                 let mut last_error = None;
@@ -2979,9 +2998,8 @@ fn spawn_mesh_dial(
                         handle.clone(),
                         peer_id_wire,
                         endpoint,
-                        local_core.clone(),
+                        request_template.clone(),
                         peer_core.clone(),
-                        clonk_engine::LegacyCString::default(),
                         connection_id,
                     )
                     .await
@@ -3117,9 +3135,8 @@ fn connected_mesh_route_matches_registry(
 struct ClientUdpReconnect {
     addr: SocketAddr,
     handle: crate::ReliableUdpSessionHandle,
-    local_core: clonk_engine::ClientCoreControlData,
+    request_template: ClientHandshakeRequestTemplate,
     expected_host_core: clonk_engine::ClientCoreControlData,
-    password: clonk_engine::LegacyCString,
     connection_ids: Arc<AtomicU32>,
 }
 
@@ -3129,9 +3146,8 @@ impl ClientUdpReconnect {
         tokio::spawn(connect_secondary_udp_route(
             self.handle.clone(),
             self.addr,
-            self.local_core.clone(),
+            self.request_template.clone(),
             self.expected_host_core.clone(),
-            self.password.clone(),
             connection_id,
         ))
     }
@@ -3139,9 +3155,8 @@ impl ClientUdpReconnect {
 
 struct ClientTcpReconnect {
     addr: SocketAddr,
-    local_core: clonk_engine::ClientCoreControlData,
+    request_template: ClientHandshakeRequestTemplate,
     expected_host_core: clonk_engine::ClientCoreControlData,
-    password: clonk_engine::LegacyCString,
     connection_ids: Arc<AtomicU32>,
     io_statistics: crate::NetworkIoStatistics,
 }
@@ -3151,9 +3166,8 @@ impl ClientTcpReconnect {
         let connection_id = self.connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
         tokio::spawn(connect_secondary_tcp_route(
             self.addr,
-            self.local_core.clone(),
+            self.request_template.clone(),
             self.expected_host_core.clone(),
-            self.password.clone(),
             connection_id,
             self.io_statistics.clone(),
         ))
@@ -3186,9 +3200,8 @@ async fn await_pending_tcp_client_route(
 
 async fn connect_secondary_tcp_route(
     addr: SocketAddr,
-    local_core: clonk_engine::ClientCoreControlData,
+    request_template: ClientHandshakeRequestTemplate,
     expected_host_core: clonk_engine::ClientCoreControlData,
-    password: clonk_engine::LegacyCString,
     connection_id: u32,
     io_statistics: crate::NetworkIoStatistics,
 ) -> Result<ConnectedClientRoute<TcpStream>, ClientError> {
@@ -3209,12 +3222,7 @@ async fn connect_secondary_tcp_route(
     );
     let handshake = crate::connection_handshake::run_client_route_handshake(
         &mut transport,
-        crate::ConnectionRequest {
-            core: local_core,
-            build: CURRENT_GAME_BUILD,
-            password,
-            connection_id,
-        },
+        request_template.connection_request(connection_id),
         &expected_host_core,
     )
     .await
@@ -3233,9 +3241,8 @@ async fn connect_secondary_tcp_route(
 async fn connect_secondary_udp_route(
     handle: crate::ReliableUdpSessionHandle,
     addr: SocketAddr,
-    local_core: clonk_engine::ClientCoreControlData,
+    request_template: ClientHandshakeRequestTemplate,
     expected_host_core: clonk_engine::ClientCoreControlData,
-    password: clonk_engine::LegacyCString,
     connection_id: u32,
 ) -> Result<ConnectedClientRoute<crate::ReliableUdpPeerStream>, ClientError> {
     let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, handle.connect(addr))
@@ -3255,12 +3262,7 @@ async fn connect_secondary_udp_route(
     let mut transport = crate::ControlTransport::new(stream);
     let handshake = crate::connection_handshake::run_client_route_handshake(
         &mut transport,
-        crate::ConnectionRequest {
-            core: local_core,
-            build: CURRENT_GAME_BUILD,
-            password,
-            connection_id,
-        },
+        request_template.connection_request(connection_id),
         &expected_host_core,
     )
     .await
@@ -9903,7 +9905,11 @@ async fn run_client_loop_with_addresses<S>(
         client_addresses,
         BTreeMap::new(),
         BTreeMap::new(),
-        clonk_engine::ClientCoreControlData::default(),
+        ClientHandshakeRequestTemplate::new(
+            clonk_engine::ClientCoreControlData::default(),
+            CURRENT_GAME_BUILD,
+            clonk_engine::LegacyCString::default(),
+        ),
         Arc::new(AtomicU32::new(1)),
         Vec::new(),
         None,
@@ -9930,7 +9936,7 @@ async fn run_client_loop_with_routes(
     mut client_addresses: BTreeMap<i32, Vec<crate::NetworkAddress>>,
     mut client_cores: BTreeMap<i32, clonk_engine::ClientCoreControlData>,
     mut mesh_peers: BTreeMap<i32, crate::ClientMeshPeerState>,
-    local_core: clonk_engine::ClientCoreControlData,
+    mesh_request_template: ClientHandshakeRequestTemplate,
     connection_ids: Arc<AtomicU32>,
     mesh_interface_ids: Vec<u32>,
     mut mesh_tcp_listener: Option<TcpListener>,
@@ -9944,6 +9950,7 @@ async fn run_client_loop_with_routes(
     mut tcp_reconnect: Option<ClientTcpReconnect>,
     mut pending_tcp: Option<PendingTcpClientRoute>,
 ) {
+    let local_core = mesh_request_template.local_core.clone();
     let mut backlog = ControlBacklog::new(CLIENT_BACKLOG_LIMIT);
     let mut client_performance = ClientPerformanceStats::new(CLIENT_BACKLOG_LIMIT);
     let mut next_control_request_at = resource_state.next_control_request_at;
@@ -10193,15 +10200,14 @@ async fn run_client_loop_with_routes(
                     let connection_id = connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
                     let mut known_peers = client_cores.clone();
                     known_peers.remove(&local_core.client_id);
-                    let local_core = local_core.clone();
+                    let request_template = mesh_request_template.clone();
                     let io_statistics = io_statistics.clone();
                     pending_mesh_routes.spawn(async move {
                         let result = accept_mesh_tcp_route(
                             stream,
                             peer_addr,
-                            local_core,
+                            request_template,
                             known_peers,
-                            clonk_engine::LegacyCString::default(),
                             connection_id,
                             io_statistics,
                         )
@@ -10219,13 +10225,12 @@ async fn run_client_loop_with_routes(
                         let connection_id = connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
                         let mut known_peers = client_cores.clone();
                         known_peers.remove(&local_core.client_id);
-                        let local_core = local_core.clone();
+                        let request_template = mesh_request_template.clone();
                         pending_mesh_routes.spawn(async move {
                             let result = accept_mesh_udp_route(
                                 stream,
-                                local_core,
+                                request_template,
                                 known_peers,
-                                clonk_engine::LegacyCString::default(),
                                 connection_id,
                             )
                             .await;
@@ -10641,7 +10646,7 @@ async fn run_client_loop_with_routes(
                                     peer_id,
                                     attempt,
                                     &client_cores,
-                                    &local_core,
+                                    &mesh_request_template,
                                     &connection_ids,
                                     &mesh_interface_ids,
                                     mesh_udp_handle.as_ref(),
@@ -10702,7 +10707,7 @@ async fn run_client_loop_with_routes(
                             peer_id,
                             attempt,
                             &client_cores,
-                            &local_core,
+                            &mesh_request_template,
                             &connection_ids,
                             &mesh_interface_ids,
                             mesh_udp_handle.as_ref(),
@@ -11019,7 +11024,7 @@ async fn run_client_loop_with_routes(
                                 packet.client_id,
                                 attempt,
                                 &client_cores,
-                                &local_core,
+                                &mesh_request_template,
                                 &connection_ids,
                                 &mesh_interface_ids,
                                 mesh_udp_handle.as_ref(),
@@ -11124,7 +11129,7 @@ async fn run_client_loop_with_routes(
                         let connection_id =
                             connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
                         let endpoint = packet.address.endpoint;
-                        let local_core = local_core.clone();
+                        let request_template = mesh_request_template.clone();
                         let io_statistics = io_statistics.clone();
                         pending_mesh_routes.spawn(async move {
                             let result = connect_mesh_tcp_socket_route(
@@ -11132,9 +11137,8 @@ async fn run_client_loop_with_routes(
                                 initiator_id,
                                 socket,
                                 endpoint,
-                                local_core,
+                                request_template,
                                 peer_core,
-                                clonk_engine::LegacyCString::default(),
                                 connection_id,
                                 delay,
                                 io_statistics,
@@ -11866,6 +11870,34 @@ mod tests {
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
     use tokio::net::UdpSocket;
     use tokio::time::{timeout, timeout_at};
+
+    const CPP_COMPATIBILITY_BUILD: i32 = CURRENT_GAME_BUILD + 2;
+
+    fn compatibility_test_core(
+        client_id: i32,
+        name: &[u8],
+    ) -> clonk_engine::ClientCoreControlData {
+        let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).unwrap();
+        clonk_engine::ClientCoreControlData {
+            client_id,
+            activated: true,
+            observer: false,
+            name: name.clone(),
+            nick: name,
+            lobby_ready: false,
+        }
+    }
+
+    async fn read_compatibility_request<S>(stream: S) -> crate::ConnectionRequest
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let mut transport = crate::ControlTransport::new(stream);
+        match transport.read_message().await.unwrap() {
+            ControlMessage::ConnectionRequest(request) => request,
+            other => panic!("expected client connection request, got {other:?}"),
+        }
+    }
 
     #[test]
     fn async_control_wait_deadline_uses_the_reached_target_fps() {
@@ -18960,6 +18992,266 @@ mod tests {
             }
             other => panic!("expected bounded connection timeout, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn client_connection_request_uses_target_compatibility_build() {
+        // The C++ host accepts PID_Conn only when its packed Version equals
+        // C4XVERBUILD. C4Network2Reference initializes and publishes that
+        // exact value, so a Rust client must echo the target build rather than
+        // its own (oracle-src-pinned src/C4Network2.cpp:1291-1299;
+        // src/C4Network2Reference.cpp:79,100-102;
+        // src/C4GameVersion.h:35-37).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut transport = crate::ControlTransport::new(stream);
+            match transport.read_message().await.unwrap() {
+                ControlMessage::ConnectionRequest(request) => request.build,
+                other => panic!("expected client connection request, got {other:?}"),
+            }
+        });
+
+        let result = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_compatibility_build(CPP_COMPATIBILITY_BUILD),
+        )
+        .await;
+
+        assert!(result.is_err(), "the probe server deliberately stops early");
+        assert_eq!(server.await.unwrap(), CPP_COMPATIBILITY_BUILD);
+    }
+
+    #[tokio::test]
+    async fn secondary_routes_use_target_compatibility_build_on_tcp_and_udp() {
+        // Every C++ route is admitted by the same exact C4XVERBUILD check
+        // (oracle-src-pinned src/C4Network2.cpp:1291-1299), including the
+        // additional/reconnect PID_Conn sent by C4Network2IO.cpp:1611-1618.
+        let local_core = compatibility_test_core(1, b"Alice");
+        let host_core = compatibility_test_core(0, b"Host");
+        let request_template = ClientHandshakeRequestTemplate::new(
+            local_core.clone(),
+            CPP_COMPATIBILITY_BUILD,
+            clonk_engine::LegacyCString::default(),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let tcp_peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            read_compatibility_request(stream).await
+        });
+        let tcp_result = connect_secondary_tcp_route(
+            address,
+            request_template.clone(),
+            host_core.clone(),
+            41,
+            crate::NetworkIoStatistics::default(),
+        )
+        .await;
+        assert!(
+            tcp_result.is_err(),
+            "the probe peer deliberately stops early"
+        );
+        let tcp_request = tcp_peer.await.unwrap();
+        assert_eq!(tcp_request.build, CPP_COMPATIBILITY_BUILD);
+        assert_eq!(tcp_request.connection_id, 41);
+
+        let local_hub =
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let mut peer_hub =
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let udp_task = tokio::spawn(connect_secondary_udp_route(
+            local_hub.handle(),
+            peer_hub.local_addr(),
+            request_template,
+            host_core,
+            42,
+        ));
+        let udp_stream = timeout(EVENT_WAIT, peer_hub.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let udp_request = read_compatibility_request(udp_stream).await;
+        assert_eq!(udp_request.build, CPP_COMPATIBILITY_BUILD);
+        assert_eq!(udp_request.connection_id, 42);
+        assert!(timeout(EVENT_WAIT, udp_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        local_hub.shutdown().await.unwrap();
+        peer_hub.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn outbound_mesh_routes_use_target_compatibility_build_on_tcp_and_udp() {
+        // C++ sends the same C4XVERBUILD in every reciprocal PID_Conn
+        // (oracle-src-pinned src/C4Network2IO.cpp:1611-1618); Rust peers in a
+        // C++ game therefore keep the selected game build on mesh routes too.
+        let alice = compatibility_test_core(1, b"Alice");
+        let bob = compatibility_test_core(2, b"Bob");
+        let request_template = ClientHandshakeRequestTemplate::new(
+            alice,
+            CPP_COMPATIBILITY_BUILD,
+            clonk_engine::LegacyCString::default(),
+        );
+        let bob_id = ClientId::try_from(bob.client_id).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let tcp_peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            read_compatibility_request(stream).await
+        });
+        let tcp_result = connect_mesh_tcp_route(
+            bob_id,
+            address,
+            request_template.clone(),
+            bob.clone(),
+            51,
+            crate::NetworkIoStatistics::default(),
+        )
+        .await;
+        assert!(
+            tcp_result.is_err(),
+            "the probe peer deliberately stops early"
+        );
+        let tcp_request = tcp_peer.await.unwrap();
+        assert_eq!(tcp_request.build, CPP_COMPATIBILITY_BUILD);
+        assert_eq!(tcp_request.connection_id, 51);
+
+        let local_hub =
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let mut peer_hub =
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let udp_task = tokio::spawn(connect_mesh_udp_route(
+            local_hub.handle(),
+            bob_id,
+            peer_hub.local_addr(),
+            request_template,
+            bob,
+            52,
+        ));
+        let udp_stream = timeout(EVENT_WAIT, peer_hub.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let udp_request = read_compatibility_request(udp_stream).await;
+        assert_eq!(udp_request.build, CPP_COMPATIBILITY_BUILD);
+        assert_eq!(udp_request.connection_id, 52);
+        assert!(timeout(EVENT_WAIT, udp_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        local_hub.shutdown().await.unwrap();
+        peer_hub.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inbound_mesh_routes_use_target_compatibility_build_on_tcp_and_udp() {
+        // C++ applies its exact build check to existing clients as well as new
+        // ones (oracle-src-pinned src/C4Network2.cpp:1286-1307), so accepted
+        // mesh sockets must answer with the selected game's build.
+        let alice = compatibility_test_core(1, b"Alice");
+        let bob = compatibility_test_core(2, b"Bob");
+        let request_template = ClientHandshakeRequestTemplate::new(
+            alice,
+            CPP_COMPATIBILITY_BUILD,
+            clonk_engine::LegacyCString::default(),
+        );
+        let known_peers = BTreeMap::from([(bob.client_id, bob)]);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (peer_stream, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+        let peer_stream = peer_stream.unwrap();
+        let (accepted_stream, peer_addr) = accepted.unwrap();
+        let tcp_task = tokio::spawn(accept_mesh_tcp_route(
+            accepted_stream,
+            peer_addr,
+            request_template.clone(),
+            known_peers.clone(),
+            61,
+            crate::NetworkIoStatistics::default(),
+        ));
+        let tcp_request = read_compatibility_request(peer_stream).await;
+        assert_eq!(tcp_request.build, CPP_COMPATIBILITY_BUILD);
+        assert_eq!(tcp_request.connection_id, 61);
+        assert!(timeout(EVENT_WAIT, tcp_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+
+        let mut local_hub =
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let peer_hub =
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let peer_handle = peer_hub.handle();
+        let (peer_stream, accepted_stream) = tokio::join!(
+            peer_handle.connect(local_hub.local_addr()),
+            local_hub.accept()
+        );
+        let peer_stream = peer_stream.unwrap();
+        let accepted_stream = accepted_stream.unwrap();
+        let udp_task = tokio::spawn(accept_mesh_udp_route(
+            accepted_stream,
+            request_template,
+            known_peers,
+            62,
+        ));
+        let udp_request = read_compatibility_request(peer_stream).await;
+        assert_eq!(udp_request.build, CPP_COMPATIBILITY_BUILD);
+        assert_eq!(udp_request.connection_id, 62);
+        assert!(timeout(EVENT_WAIT, udp_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        local_hub.shutdown().await.unwrap();
+        peer_hub.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn simultaneous_open_mesh_route_uses_target_compatibility_build() {
+        // Simultaneous-open still emits the ordinary C++ PID_Conn governed by
+        // the exact build check (oracle-src-pinned src/C4Network2.cpp:1291-1299).
+        let alice = compatibility_test_core(1, b"Alice");
+        let bob = compatibility_test_core(2, b"Bob");
+        let alice_id = ClientId::try_from(alice.client_id).unwrap();
+        let request_template = ClientHandshakeRequestTemplate::new(
+            alice,
+            CPP_COMPATIBILITY_BUILD,
+            clonk_engine::LegacyCString::default(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            read_compatibility_request(stream).await
+        });
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let result = connect_mesh_tcp_socket_route(
+            ClientId::try_from(bob.client_id).unwrap(),
+            alice_id,
+            socket,
+            address,
+            request_template,
+            bob,
+            71,
+            Duration::ZERO,
+            crate::NetworkIoStatistics::default(),
+        )
+        .await;
+        assert!(result.is_err(), "the probe peer deliberately stops early");
+        let request = peer.await.unwrap();
+        assert_eq!(request.build, CPP_COMPATIBILITY_BUILD);
+        assert_eq!(request.connection_id, 71);
     }
 
     #[test]

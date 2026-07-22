@@ -8,7 +8,7 @@ use clonk_network::{
     MasterserverVersion, NetworkAddress, NetworkGameReference, NetworkGameSearch,
     NetworkGameSearchConfig, NetworkProtocol, ReferenceEndpoint, ReferenceQueryConfig,
     ReferenceQuerySource, SearchCommand, StartupGameSearch, StartupGameSearchEvent,
-    DEFAULT_MASTER_SERVER_URL,
+    CURRENT_GAME_BUILD, DEFAULT_MASTER_SERVER_URL,
 };
 
 #[test]
@@ -35,6 +35,27 @@ fn refresh_matches_cpp_lan_and_masterserver_fanout() {
             },
         ]
     );
+}
+
+#[test]
+fn rust_client_joinability_ignores_cpp_game_version_and_build() {
+    // C++ host admission checks PID_Conn's packed build only; the Rust client
+    // can present the build published by the selected reference
+    // (oracle-src-pinned src/C4Network2.cpp:1291-1299;
+    // src/C4Network2Reference.cpp:79,100-102).
+    let reference = NetworkGameReference {
+        join_allowed: true,
+        version: [4, 9, 99, 7],
+        build: CURRENT_GAME_BUILD + 2,
+        ..NetworkGameReference::default()
+    };
+
+    assert!(reference.is_joinable());
+    assert!(!NetworkGameReference {
+        join_allowed: false,
+        ..reference
+    }
+    .is_joinable());
 }
 
 #[test]
@@ -265,7 +286,9 @@ fn cpp_thirty_second_search_keeps_rows_while_reissuing_lan_and_master_queries() 
 }
 
 #[test]
-fn parses_cpp_reference_ini_and_keeps_incompatible_games_visible() {
+fn parses_cpp_reference_ini_and_keeps_other_cpp_builds_joinable() {
+    // Build is a separately serialized reference field backed by C4XVERBUILD
+    // (oracle-src-pinned src/C4Network2Reference.cpp:79,100-102).
     let mut response = br#"
 [LegacyClonk]
 Version=4,9,11,0,362
@@ -320,7 +343,7 @@ Title="Second Game"
     assert_eq!(references[0].max_players, 13);
     assert_eq!(references[0].version, [4, 9, 11, 0]);
     assert_eq!(references[0].build, 363);
-    assert!(!references[0].is_joinable());
+    assert!(references[0].is_joinable());
     // C4Network2Reference compiles the complete ordered UDP/TCP Address
     // container; consumers compare and attempt every entry (pristine 9ffa0a5d
     // src/C4Network2Reference.cpp:88-105;

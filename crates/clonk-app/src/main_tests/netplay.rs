@@ -9241,12 +9241,15 @@
     }
 
     #[test]
-    fn network_version_mismatch_modal_precedes_runtime_policy_and_never_starts_join() {
+    fn network_version_mismatch_defers_to_runtime_join_policy() {
+        // C++ host admission compares only PID_Conn's build to C4XVERBUILD,
+        // not the four-part display version (oracle-src-pinned
+        // src/C4Network2.cpp:1291-1299).
         let mut app = new_classic_menu_app(800, 600);
         let reference = clonk_network::NetworkGameReference {
             title: "Newer build".to_string(),
             game: "LegacyClonk".to_string(),
-            version: clonk_network::CURRENT_GAME_VERSION,
+            version: [4, 9, 12, 0],
             build: clonk_network::CURRENT_GAME_BUILD + 1,
             join_allowed: false,
             ..Default::default()
@@ -9274,18 +9277,18 @@
         app.startup_game_references = vec![reference];
 
         app.process_network_dialog_actions(actions)
-            .expect("version mismatch is a nonfatal modal");
+            .expect("the remote version does not block the runtime-join policy");
 
         assert_eq!(app.message_dialogs.len(), 1);
         let modal = &app.message_dialogs[0].state;
         assert_eq!(modal.caption(), "Cannot join game");
         assert_eq!(
             modal.message(),
-            "Engine version mismatch: the game runs with LegacyClonk 4.9.11.0 [363] - you have LegacyClonk 4.9.11.0 [362]."
+            "The game has started already and runtime join is not allowed! Try joining anyway?"
         );
         assert_eq!(
             modal.buttons(),
-            clonk_frontend::message_dialog::MessageDialogButtons::OK
+            clonk_frontend::message_dialog::MessageDialogButtons::YES_NO
         );
         assert_eq!(
             modal.icon(),
@@ -9387,13 +9390,17 @@
     }
 
     #[test]
-    fn network_row_double_click_runs_the_same_version_preflight_once() {
+    fn network_row_double_click_joins_another_cpp_build() {
+        // The reference provides the exact build required by C++ admission
+        // (oracle-src-pinned src/C4Network2Reference.cpp:79,100-102;
+        // src/C4Network2.cpp:1291-1299).
         let mut app = new_classic_menu_app(640, 480);
         let reference = clonk_network::NetworkGameReference {
             title: "Wrong version".to_string(),
             game: "LegacyClonk".to_string(),
-            version: clonk_network::CURRENT_GAME_VERSION,
+            version: [4, 9, 12, 0],
             build: clonk_network::CURRENT_GAME_BUILD + 1,
+            password_needed: true,
             ..Default::default()
         };
         let metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics {
@@ -9433,18 +9440,24 @@
             .expect("second row press");
         app.handle_mouse_button(ElementState::Released)
             .expect("second row release activates double click");
-        assert_eq!(app.message_dialogs.len(), 1);
-        assert!(app.message_dialogs[0]
-            .state
-            .message()
-            .starts_with("Engine version mismatch:"));
+        assert!(app.message_dialogs.is_empty());
         assert!(app.netdlg_last_click.is_none());
-        assert!(app.pending_network_join.is_none());
+        assert_eq!(
+            app.pending_network_join
+                .as_ref()
+                .expect("double-click prepares the reference join")
+                .compatibility_build,
+            clonk_network::CURRENT_GAME_BUILD + 1
+        );
+        assert!(app.game_option_input_dialog.is_some());
         assert!(app.startup_network_connection.is_none());
     }
 
     #[test]
-    fn client_join_flow_password_prompt_retains_the_complete_prepared_reference() {
+    fn client_join_flow_uses_cpp_reference_build_regardless_of_rust_version() {
+        // C4GameVersion defaults the reference build to C4XVERBUILD, which the
+        // host then requires in PID_Conn (oracle-src-pinned
+        // src/C4GameVersion.h:35-37; src/C4Network2.cpp:1291-1299).
         let mut app = new_classic_menu_app(800, 600);
         let global_tcp = clonk_network::NetworkAddress::new(
             clonk_network::NetworkProtocol::Tcp,
@@ -9462,8 +9475,8 @@
             netpuncher_ipv4: 0x1122_3344,
             netpuncher_ipv6: 0x5566_7788,
             netpuncher_address: "puncher.invalid:11115".to_string(),
-            version: clonk_network::CURRENT_GAME_VERSION,
-            build: clonk_network::CURRENT_GAME_BUILD,
+            version: [4, 9, 12, 0],
+            build: clonk_network::CURRENT_GAME_BUILD + 2,
             ..Default::default()
         };
         let metrics = clonk_frontend::startup_netdlg::NetDlgFontMetrics {
@@ -9511,6 +9524,7 @@
         app.process_network_dialog_actions(actions)
             .expect("selected complete reference opens the exact password prompt");
 
+        assert!(app.message_dialogs.is_empty());
         assert!(app.active_scenario.is_none());
         match app.active_definition_load.as_ref() {
             Some(ScenarioDefinitionLoad::Seed { modules, .. }) => {
@@ -9522,6 +9536,10 @@
             .pending_network_join
             .as_ref()
             .expect("prepared join is retained while prompting");
+        assert_eq!(
+            settings.compatibility_build,
+            clonk_network::CURRENT_GAME_BUILD + 2
+        );
         assert_eq!(settings.server_addresses, [global_tcp, private_udp]);
         assert_eq!(
             settings.netpuncher_address.as_deref(),
