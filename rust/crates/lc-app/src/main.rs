@@ -18591,17 +18591,6 @@ enum LobbyPointerRegion {
     Panel,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LobbyButton {
-    Exit,
-    Ready,
-    Start,
-    Preload,
-    Sheet(LobbySheet),
-    ResourceSave(i32),
-    ExternalChat,
-}
-
 #[derive(Clone, Debug)]
 struct NetworkLobbyLayout {
     exit_button: GuiRect,
@@ -18722,8 +18711,6 @@ struct NetworkLobbyState {
     is_host: bool,
     selected_identifier: Option<String>,
     selected_title: Option<String>,
-    hover_button: Option<LobbyButton>,
-    pressed_button: Option<LobbyButton>,
     /// Raw C++ countdown timer. `None` is the distinguished abort packet;
     /// `Some(0)` is the final start transition.
     countdown: Option<i32>,
@@ -19020,8 +19007,6 @@ impl NetworkLobbyState {
             is_host,
             selected_identifier: None,
             selected_title: None,
-            hover_button: None,
-            pressed_button: None,
             countdown: None,
             layout: None,
             pointer: None,
@@ -19112,37 +19097,9 @@ impl NetworkLobbyState {
 
     fn handle_panel_pointer_move(&mut self, point: GuiPoint) {
         self.pointer = Some(point);
-        self.hover_button = self.hit_test_button(point);
-    }
-
-    fn handle_panel_pointer_down(&mut self, point: GuiPoint) {
-        self.pressed_button = self.hit_test_button(point);
-    }
-
-    fn handle_panel_pointer_up(&mut self, point: GuiPoint) -> Option<LobbyAction> {
-        let pressed = self.pressed_button.take();
-        let hit = self.hit_test_button(point);
-        if pressed.is_some() && hit == pressed {
-            match hit {
-                Some(LobbyButton::Exit) => Some(LobbyAction::ExitRequested),
-                Some(LobbyButton::Ready) => Some(LobbyAction::ToggleReady),
-                Some(LobbyButton::Start) => Some(LobbyAction::StartGame),
-                Some(LobbyButton::Preload) => Some(LobbyAction::Preload),
-                Some(LobbyButton::Sheet(sheet)) => Some(LobbyAction::SelectSheet(sheet)),
-                Some(LobbyButton::ResourceSave(resource_id)) => {
-                    Some(LobbyAction::SaveResource(resource_id))
-                }
-                Some(LobbyButton::ExternalChat) => Some(LobbyAction::OpenExternalIrcChat),
-                None => None,
-            }
-        } else {
-            None
-        }
     }
 
     fn pointer_left(&mut self) {
-        self.hover_button = None;
-        self.pressed_button = None;
         self.pointer = None;
         self.last_roster_click = None;
         self.controller.pointer_left();
@@ -19822,65 +19779,6 @@ impl NetworkLobbyState {
     fn pointer_position(&self) -> Option<GuiPoint> {
         self.pointer
     }
-
-    fn hit_test_button(&self, point: GuiPoint) -> Option<LobbyButton> {
-        let layout = self.layout.as_ref()?;
-        if point_in_rect(point, &layout.exit_button) {
-            return Some(LobbyButton::Exit);
-        }
-        if point_in_rect(point, &layout.roster_client) {
-            if let Some((resource_id, _)) = layout
-                .resource_save_buttons
-                .iter()
-                .find(|(_, rect)| point_in_rect(point, rect))
-            {
-                return Some(LobbyButton::ResourceSave(*resource_id));
-            }
-        }
-        let ready_square = GuiRect::new(
-            layout.ready_button.origin.x,
-            layout.ready_button.origin.y,
-            layout.ready_button.size.height,
-            layout.ready_button.size.height,
-        );
-        // C4GUI::CheckBox toggles only over its left square, not the caption
-        // (C4GuiCheckBox.cpp:82-97).
-        if point_in_rect(point, &ready_square) {
-            return Some(LobbyButton::Ready);
-        }
-        if let Some(rect) = layout.start_button.as_ref() {
-            if point_in_rect(point, rect) {
-                return Some(LobbyButton::Start);
-            }
-        }
-        if let Some(rect) = layout.preload_button.as_ref() {
-            if point_in_rect(point, rect) {
-                return Some(LobbyButton::Preload);
-            }
-        }
-        if let Some((sheet, _)) = layout
-            .sheet_buttons
-            .iter()
-            .find(|(_, rect)| point_in_rect(point, rect))
-        {
-            return Some(LobbyButton::Sheet(*sheet));
-        }
-        if layout
-            .external_chat_button
-            .as_ref()
-            .is_some_and(|rect| point_in_rect(point, rect))
-        {
-            return Some(LobbyButton::ExternalChat);
-        }
-        None
-    }
-}
-
-fn point_in_rect(point: GuiPoint, rect: &GuiRect) -> bool {
-    point.x >= rect.origin.x
-        && point.x <= rect.origin.x + rect.size.width
-        && point.y >= rect.origin.y
-        && point.y <= rect.origin.y + rect.size.height
 }
 
 impl IngameMouseState {
@@ -68651,8 +68549,9 @@ impl GameApp {
             return Ok(true);
         }
         // The chat mnemonic plus the option-strip mnemonics the controller
-        // dispatches as GameOptions hotkeys; Players/Options/Start/Ready
-        // stay with the reduced adapter's own controls.
+        // dispatches as GameOptions hotkeys; the Players/Options/Start/Ready
+        // mnemonics of Dialog::KeyHotkey are not routed on the joined path
+        // yet (their focused confirm-key activation is).
         if hotkey != 'T' && !matches!(hotkey, 'I' | 'L' | 'M' | 'F' | 'R') {
             return Ok(false);
         }
@@ -68668,9 +68567,14 @@ impl GameApp {
     }
 
     /// Dialog-level keys of the reconstructed joined lobby: Tab traverses the
-    /// controller focus order, and every mapped key reaches a focused
-    /// option-strip button (`Dialog::KeyFocusDefault` reroutes unhandled
-    /// ones). Escape stays with the adapter's direct Exit route.
+    /// controller focus order, Escape aborts from any non-chat focus, and
+    /// every mapped key reaches the focused controller-owned stop — an
+    /// option-strip button, a chrome button or the Ready checkbox, whose
+    /// Space/Return bindings live at control priority
+    /// (src/C4GuiButton.cpp:33-47, src/C4GuiCheckBox.cpp:43-52) — with
+    /// `Dialog::KeyFocusDefault` rerouting unhandled ones. Chat-focused
+    /// Escape stays with the adapter's direct Exit route, and chat and the
+    /// roster family keep their dedicated handlers.
     fn handle_joined_lobby_controller_key(
         &mut self,
         key: VirtualKeyCode,
@@ -68688,13 +68592,41 @@ impl GameApp {
             return Ok(false);
         };
         if gui_key == KeyCode::Escape {
-            return Ok(false);
+            // Dialog::KeyEscape aborts from any focus at PRIO_Dlg
+            // (src/C4GuiDialogs.cpp:371-378); the chat-focused default keeps
+            // the adapter's own silent Exit route below.
+            let non_chat_focus = self.network_lobby.as_mut().is_some_and(|lobby| {
+                lobby.sync_classic_controller();
+                lobby.controller.focus() != LobbyControl::ChatInput
+            });
+            if !non_chat_focus {
+                return Ok(false);
+            }
+            if state == ElementState::Pressed {
+                self.process_joined_lobby_controller_actions(vec![
+                    ClassicLobbyAction::ExitRequested,
+                ])?;
+            }
+            return Ok(true);
         }
-        let option_focused = self.network_lobby.as_mut().is_some_and(|lobby| {
+        let controller_focused = self.network_lobby.as_mut().is_some_and(|lobby| {
             lobby.sync_classic_controller();
-            matches!(lobby.controller.focus(), LobbyControl::GameOption(_))
+            matches!(
+                lobby.controller.focus(),
+                LobbyControl::GameOption(_)
+                    | LobbyControl::TeamsTab
+                    | LobbyControl::PlayersTab
+                    | LobbyControl::ResourcesTab
+                    | LobbyControl::OptionsTab
+                    | LobbyControl::ScenarioTab
+                    | LobbyControl::ChatDialog
+                    | LobbyControl::Exit
+                    | LobbyControl::Run
+                    | LobbyControl::Preload
+                    | LobbyControl::Ready
+            )
         });
-        if gui_key != KeyCode::Tab && !option_focused {
+        if gui_key != KeyCode::Tab && !controller_focused {
             return Ok(false);
         }
         let shift = self.keyboard_modifiers.shift();
@@ -68847,33 +68779,7 @@ impl GameApp {
                             .then(|| (client_id, lobby.toggle_local_ready()))
                     })
                 {
-                    let data = if ready {
-                        lc_network::ReadyCheckData::Ready
-                    } else {
-                        lc_network::ReadyCheckData::NotReady
-                    };
-                    if i32::try_from(changed_client_id)
-                        .ok()
-                        .is_some_and(|client_id| {
-                            self.control_clients.set_lobby_ready(client_id, ready)
-                        })
-                    {
-                        self.publish_updated_host_join_snapshot();
-                    }
-                    self.sync_classic_lobby_roster();
-                    if let Some(Err(error)) = self
-                        .network
-                        .as_ref()
-                        .map(|network| network.submit_ready_check(data))
-                    {
-                        tracing::error!(%error, "failed to submit lobby ready state");
-                    }
-                    self.status_text = if ready {
-                        "You are ready".to_string()
-                    } else {
-                        "You are not ready".to_string()
-                    };
-                    self.on_lobby_client_ready_state_change(changed_client_id)?;
+                    self.submit_joined_lobby_ready_state(changed_client_id, ready)?;
                 }
             }
             LobbyAction::SelectSheet(sheet) => {
@@ -68960,6 +68866,41 @@ impl GameApp {
             LobbyAction::ChatEdited => {}
         }
         Ok(())
+    }
+
+    /// Publishes an already-applied local ready value the way
+    /// `MainDlg::OnReadyCheck` broadcasts `PID_ReadyCheck` and updates the
+    /// local client (src/C4GameLobby.cpp:329-344).
+    fn submit_joined_lobby_ready_state(
+        &mut self,
+        changed_client_id: ClientId,
+        ready: bool,
+    ) -> Result<(), EngineError> {
+        let data = if ready {
+            lc_network::ReadyCheckData::Ready
+        } else {
+            lc_network::ReadyCheckData::NotReady
+        };
+        if i32::try_from(changed_client_id)
+            .ok()
+            .is_some_and(|client_id| self.control_clients.set_lobby_ready(client_id, ready))
+        {
+            self.publish_updated_host_join_snapshot();
+        }
+        self.sync_classic_lobby_roster();
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_ready_check(data))
+        {
+            tracing::error!(%error, "failed to submit lobby ready state");
+        }
+        self.status_text = if ready {
+            "You are ready".to_string()
+        } else {
+            "You are not ready".to_string()
+        };
+        self.on_lobby_client_ready_state_change(changed_client_id)
     }
 
     fn classic_host_lobby_layouts(
@@ -69085,8 +69026,6 @@ impl GameApp {
         } else if let Some(lobby) = self.network_lobby.as_mut() {
             lobby.pointer = None;
             lobby.last_roster_click = None;
-            lobby.hover_button = None;
-            lobby.pressed_button = None;
             lobby.sync_classic_controller();
             lobby.controller.cancel_interaction();
         } else {
@@ -71679,11 +71618,60 @@ impl GameApp {
                 | ClassicLobbyAction::MoveLocalPlayersIntoTeamRequested { .. }) => {
                     self.process_classic_lobby_actions(vec![action])?;
                 }
-                // The reduced joined-lobby adapter still owns the remaining
-                // commands (sheets, ready, start, Exit) through its legacy
-                // panel actions; the retained controller supplies their
-                // native sounds, and the retained option strip routes above.
-                _ => {}
+                ClassicLobbyAction::SheetRequested(sheet) => {
+                    self.process_lobby_action(LobbyAction::SelectSheet(sheet))?;
+                }
+                ClassicLobbyAction::SaveResourceRequested { resource_id } => {
+                    self.request_lobby_resource_save(resource_id, false)?;
+                }
+                ClassicLobbyAction::PreloadRequested => self.request_lobby_preload(),
+                ClassicLobbyAction::ReadyChanged(ready) => {
+                    // The retained controller is the C4GUI::CheckBox: it owns
+                    // the loading lock and the ready-button cooldown and only
+                    // emits accepted toggles (MainDlg::OnReadyCheck,
+                    // src/C4GameLobby.cpp:329-344). Mirror the accepted value
+                    // onto the adapter's authoritative participant row before
+                    // publishing it.
+                    let changed = self.network_lobby.as_mut().and_then(|lobby| {
+                        let client_id = lobby.local_client_id;
+                        lobby.participants.get_mut(&client_id).map(|participant| {
+                            participant.ready = ready;
+                            client_id
+                        })
+                    });
+                    if let Some(client_id) = changed {
+                        self.submit_joined_lobby_ready_state(client_id, ready)?;
+                    }
+                }
+                ClassicLobbyAction::ExitRequested => {
+                    // C4GUI::Button raises its click sound before invoking
+                    // MainDlg::OnExitBtn. Drain the controller queue while
+                    // the lobby still exists; dialog-level Escape arrives
+                    // with an empty queue and the adapter's chat-focused
+                    // Escape and Alt+mnemonic exits bypass this arm, so all
+                    // three stay silent.
+                    self.play_classic_lobby_sounds();
+                    self.exit_startup_lobby_to_main();
+                    return Ok(());
+                }
+                ClassicLobbyAction::StartRequested { .. } => {
+                    // The generic lobby keeps its own countdown entry point;
+                    // the classic league/savegame start gates stay with the
+                    // exact host controller.
+                    self.play_classic_lobby_sounds();
+                    self.start_network_lobby_countdown()?;
+                }
+                ClassicLobbyAction::AbortCountdownRequested => {
+                    self.abort_network_lobby_countdown();
+                }
+                // Joined countdown, attention and log state flow in through
+                // network packets rather than controller input, and the
+                // joined Options sheet is a typed ClassicGameLobbyChild
+                // boundary, so routed input cannot produce these here.
+                ClassicLobbyAction::OptionSelectionRequested { .. }
+                | ClassicLobbyAction::CountdownChanged(_)
+                | ClassicLobbyAction::NotifyUserIfInactive
+                | ClassicLobbyAction::AppendLog(_) => {}
             }
         }
         self.play_classic_lobby_sounds();
@@ -71731,7 +71719,7 @@ impl GameApp {
             return Ok(());
         };
         let assets = Arc::clone(&self.assets);
-        let (actions, reduced_action) = {
+        let actions = {
             let lobby = self
                 .network_lobby
                 .as_mut()
@@ -71740,21 +71728,16 @@ impl GameApp {
                 ElementState::Pressed => {
                     if double_click {
                         lobby.last_roster_click = None;
-                    } else {
-                        lobby.handle_panel_pointer_down(point);
                     }
-                    (
-                        lobby
-                            .classic_pointer_down(
-                                point,
-                                double_click,
-                                self.graphics.surface(),
-                                assets.as_ref(),
-                                &self.scenario_game_options,
-                            )
-                            .map_err(Self::joined_lobby_input_error)?,
-                        None,
-                    )
+                    lobby
+                        .classic_pointer_down(
+                            point,
+                            double_click,
+                            self.graphics.surface(),
+                            assets.as_ref(),
+                            &self.scenario_game_options,
+                        )
+                        .map_err(Self::joined_lobby_input_error)?
                 }
                 ElementState::Released => {
                     // Discrete-click platforms never deliver LeftDouble, so
@@ -71790,15 +71773,11 @@ impl GameApp {
                     if let Some(clicked) = clicked.as_ref().filter(|_| synthesized_double) {
                         actions.extend(lobby.controller.roster_double_click(clicked));
                     }
-                    (actions, lobby.handle_panel_pointer_up(point))
+                    actions
                 }
             }
         };
-        self.process_joined_lobby_controller_actions(actions)?;
-        if let Some(action) = reduced_action {
-            self.process_lobby_action(action)?;
-        }
-        Ok(())
+        self.process_joined_lobby_controller_actions(actions)
     }
 
     fn handle_network_lobby_touch(
@@ -71808,7 +71787,7 @@ impl GameApp {
         double_click: bool,
     ) -> Result<(), EngineError> {
         let assets = Arc::clone(&self.assets);
-        let (actions, reduced_action) = {
+        let actions = {
             let lobby = self
                 .network_lobby
                 .as_mut()
@@ -71823,34 +71802,13 @@ impl GameApp {
                     &self.scenario_game_options,
                 )
                 .map_err(Self::joined_lobby_input_error)?;
-            let reduced_action = match phase {
-                TouchPhase::Started if double_click => None,
-                TouchPhase::Started => {
-                    lobby.handle_panel_pointer_move(point);
-                    lobby.handle_panel_pointer_down(point);
-                    None
-                }
-                TouchPhase::Moved => {
-                    lobby.handle_panel_pointer_move(point);
-                    None
-                }
-                TouchPhase::Ended => {
-                    lobby.handle_panel_pointer_move(point);
-                    lobby.handle_panel_pointer_up(point)
-                }
-                TouchPhase::Cancelled => {
-                    lobby.pressed_button = None;
-                    lobby.last_roster_click = None;
-                    None
-                }
-            };
-            (actions, reduced_action)
+            if phase == TouchPhase::Cancelled {
+                lobby.last_roster_click = None;
+            }
+            actions
         };
         self.menu_state.set_pointer_position(None);
         self.process_joined_lobby_controller_actions(actions)?;
-        if let Some(action) = reduced_action {
-            self.process_lobby_action(action)?;
-        }
         if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
             self.pointer_left_unchecked();
         }
@@ -124684,12 +124642,34 @@ public func Grant(password) { return GainMissionAccess(password); }
             rect.origin.x + rect.size.width / 2.0,
             rect.origin.y + rect.size.height / 2.0,
         );
-        lobby.handle_panel_pointer_move(point);
-        lobby.handle_panel_pointer_down(point);
+        let _ = lobby.controller.take_sounds();
+        let down = lobby
+            .classic_pointer_down(
+                point,
+                false,
+                app.graphics.surface(),
+                app.assets.as_ref(),
+                &app.scenario_game_options,
+            )
+            .expect("press the retained external chat tab button");
+        assert_eq!(down, Vec::new());
+        assert_eq!(lobby.controller.take_sounds(), [LobbySound::ArrowHit]);
+        let up = lobby
+            .with_classic_controller_input(
+                app.graphics.surface(),
+                app.assets.as_ref(),
+                &app.scenario_game_options,
+                |controller, layout, roster| {
+                    controller.pointer_up(point, layout, roster, Instant::now())
+                },
+            )
+            .expect("release the retained external chat tab button");
         assert_eq!(
-            lobby.handle_panel_pointer_up(point),
-            Some(LobbyAction::OpenExternalIrcChat)
+            up,
+            [ClassicLobbyAction::Chat(LobbyChatRequest::OpenExternalDialog)],
+            "the single controller emission reaches the routed Chat arm"
         );
+        assert_eq!(lobby.controller.take_sounds(), [LobbySound::Click]);
 
         let mut inactive = NetworkLobbyState::new(7, "Client".to_string(), false);
         assert!(inactive
@@ -125517,7 +125497,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(app.network_lobby.as_ref().unwrap().active_sheet, LobbySheet::Players);
         assert_eq!(app.network_lobby.as_ref().unwrap().resource_rows[&9].present_percent, 37);
 
-        let action = {
+        {
             let lobby = app.network_lobby.as_mut().unwrap();
             let layout = lobby.update_layout(640.0, 480.0).clone();
             let rect = layout
@@ -125526,17 +125506,19 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .find(|(sheet, _)| *sheet == LobbySheet::Resources)
                 .unwrap()
                 .1;
-            let point = GuiPoint::new(
+            lobby.handle_panel_pointer_move(GuiPoint::new(
                 rect.origin.x + rect.size.width / 2.0,
                 rect.origin.y + rect.size.height / 2.0,
-            );
-            lobby.handle_panel_pointer_move(point);
-            lobby.handle_panel_pointer_down(point);
-            lobby.handle_panel_pointer_up(point)
-        };
-        assert_eq!(action, Some(LobbyAction::SelectSheet(LobbySheet::Resources)));
-        app.process_lobby_action(action.unwrap())
-            .expect("client Resources tab switches sheets");
+            ));
+        }
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press the client Resources tab");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release the client Resources tab through the retained controller");
+        assert_eq!(
+            app.network_lobby.as_ref().unwrap().active_sheet,
+            LobbySheet::Resources
+        );
         let (controller, _) = {
             let surface = app.graphics.surface();
             app.network_lobby.as_mut().unwrap().classic_render_state(
@@ -125779,28 +125761,67 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn generic_client_resource_save_hit_target_emits_the_resource_id() {
-        let mut lobby = NetworkLobbyState::new(7, "Client".to_string(), false);
-        lobby.active_sheet = LobbySheet::Resources;
-        lobby.resource_rows.insert(
-            23,
-            LobbyResourceRow {
-                id: 23,
-                filename: "Network/Downloaded.c4s".to_string(),
-                present_percent: 100,
-                save_possible: true,
-            },
+        let root = tempdir().expect("resource save root");
+        let work = root.path().join("Network");
+        fs::create_dir(&work).expect("network work directory");
+        let source = work.join("Downloaded.c4s");
+        fs::write(&source, b"payload").expect("downloaded resource");
+
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        let mut settings = ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
         );
-        let layout = lobby.update_layout(640.0, 480.0).clone();
-        let rect = layout.resource_save_buttons[0].1;
-        let point = GuiPoint::new(
-            rect.origin.x + rect.size.width / 2.0,
-            rect.origin.y + rect.size.height / 2.0,
-        );
-        lobby.handle_panel_pointer_move(point);
-        lobby.handle_panel_pointer_down(point);
+        settings.resource_directory = work.clone();
+        app.network_mode = Some(NetworkMode::Client(settings));
+        let (network, _events) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(network);
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Scenario as u8,
+            id: 23,
+            loadable: true,
+            filename: LegacyCString::from_bytes(b"Remote/Downloaded.c4s".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        app.admission_resources.register_lobby_resource(&core);
+        app.admission_resources
+            .mark_complete_with_locality(core.id, source.clone(), false);
+        app.register_classic_lobby_resource(&core, 100);
+        app.process_lobby_action(LobbyAction::SelectSheet(LobbySheet::Resources))
+            .expect("open the client Resources sheet");
+        assert!(app.network_lobby.as_ref().unwrap().resource_rows[&core.id].save_possible);
+
+        {
+            let lobby = app.network_lobby.as_mut().unwrap();
+            let rect = lobby
+                .update_layout(640.0, 480.0)
+                .resource_save_buttons
+                .first()
+                .expect("save rect for the saveable resource")
+                .1;
+            lobby.handle_panel_pointer_move(GuiPoint::new(
+                rect.origin.x + rect.size.width / 2.0,
+                rect.origin.y + rect.size.height / 2.0,
+            ));
+        }
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press the resource save icon");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release the resource save icon through the retained controller");
         assert_eq!(
-            lobby.handle_panel_pointer_up(point),
-            Some(LobbyAction::SaveResource(23))
+            fs::read(root.path().join("Downloaded.c4s")).expect("saved copy"),
+            b"payload",
+            "the routed SaveResourceRequested reaches request_lobby_resource_save"
+        );
+        assert_eq!(
+            app.message_dialogs
+                .last()
+                .expect("save feedback dialog")
+                .state
+                .caption(),
+            "Resource saved"
         );
     }
 
@@ -126816,6 +126837,250 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(hotkey.network.is_none());
         assert!(hotkey.network_mode.is_none());
         assert!(hotkey.ui_sound_log.is_empty(), "the Exit hotkey is silent");
+    }
+
+    #[test]
+    fn joined_chrome_focused_button_activates_on_confirm_keys() {
+        fn joined_app() -> GameApp {
+            let mut app = new_menu_app(640, 480);
+            app.startup_view = StartupView::NetworkLobby;
+            app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+            let (network, _events) = NetworkManager::test_stub_for_client_id(7);
+            app.network = Some(network);
+            app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+                SocketAddr::from(([127, 0, 0, 1], 11_112)),
+                "Client",
+            )));
+            app.sync_network_lobby_game_option_state();
+            app
+        }
+
+        fn tab(app: &mut GameApp) {
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("Tab down");
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("Tab up");
+        }
+
+        fn controller_focus(app: &mut GameApp) -> LobbyControl {
+            let lobby = app.network_lobby.as_mut().expect("joined lobby");
+            lobby.sync_classic_controller();
+            lobby.controller.focus()
+        }
+
+        fn tab_to(app: &mut GameApp, control: LobbyControl) {
+            let mut guard = 0;
+            while controller_focus(app) != control {
+                tab(app);
+                guard += 1;
+                assert!(guard < 16, "the dialog focus cycle reaches {control:?}");
+            }
+        }
+
+        // Return on the focused Exit button mirrors Button::KeyButtonDown/Up
+        // (src/C4GuiButton.cpp:112-128): the press downs the button with
+        // ArrowHit, the release clicks and runs MainDlg::OnExitBtn.
+        let mut app = joined_app();
+        tab_to(&mut app, LobbyControl::Exit);
+
+        // An unhandled mapped key on the focused chrome button reroutes to
+        // the chat default first (Dialog::KeyFocusDefault), like the strip.
+        app.handle_key(VirtualKeyCode::Up, ElementState::Pressed)
+            .expect("Up on Exit reroutes to the chat default");
+        assert_eq!(controller_focus(&mut app), LobbyControl::ChatInput);
+        app.handle_key(VirtualKeyCode::Up, ElementState::Released)
+            .expect("Up release after the reroute");
+
+        tab_to(&mut app, LobbyControl::Exit);
+        app.ui_sound_log.clear();
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("Return downs the focused Exit button");
+        assert_eq!(app.ui_sound_log, ["ArrowHit".to_string()]);
+        assert_eq!(
+            app.startup_view,
+            StartupView::NetworkLobby,
+            "KeyButtonDown only downs the button"
+        );
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("Return release presses the focused Exit button");
+        assert_eq!(
+            app.ui_sound_log,
+            ["ArrowHit".to_string(), "Click".to_string()]
+        );
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert!(app.network_lobby.is_none());
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+
+        // Dialog::KeyEscape aborts silently from any focus, not only from
+        // the chat default the adapter already handles
+        // (src/C4GuiDialogs.cpp:371-378).
+        for stop in [LobbyControl::Exit, LobbyControl::Roster] {
+            let mut app = joined_app();
+            tab_to(&mut app, stop);
+            app.ui_sound_log.clear();
+            app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+                .expect("Escape aborts from a non-chat focus");
+            assert_eq!(app.startup_view, StartupView::MainMenu, "{stop:?}");
+            assert!(app.network_lobby.is_none());
+            assert!(app.ui_sound_log.is_empty(), "Escape stays silent");
+        }
+
+        // Space presses any other focusable chrome stop the same way; the
+        // Resources tab runs MainDlg::OnTabRes through the shared sheet
+        // switch.
+        let mut app = joined_app();
+        tab_to(&mut app, LobbyControl::ResourcesTab);
+        app.ui_sound_log.clear();
+        app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("Space downs the focused Resources tab");
+        app.handle_key(VirtualKeyCode::Space, ElementState::Released)
+            .expect("Space release presses the focused Resources tab");
+        assert_eq!(
+            app.ui_sound_log,
+            [
+                "ArrowHit".to_string(),
+                "Click".to_string(),
+                "Command".to_string()
+            ]
+        );
+        assert_eq!(
+            app.network_lobby.as_ref().expect("joined lobby").active_sheet,
+            LobbySheet::Resources
+        );
+
+        // The Ready checkbox binds Space only (GUICheckboxToggle,
+        // src/C4GuiCheckBox.cpp:43-52) and toggles on the key-down with the
+        // single CheckBox ArrowHit; Return is not a checkbox binding and
+        // reroutes to the chat default.
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.sync_network_lobby_game_option_state();
+        app.network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .resources_loaded = true;
+
+        tab_to(&mut app, LobbyControl::Ready);
+        app.ui_sound_log.clear();
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("Return on Ready reroutes to the chat default");
+        assert_eq!(controller_focus(&mut app), LobbyControl::ChatInput);
+        assert!(app.ui_sound_log.is_empty());
+        assert!(!app.network_lobby.as_ref().expect("joined lobby").local_ready());
+        assert!(commands.take_submitted_ready_checks().is_empty());
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("Return release after the Ready reroute");
+
+        tab_to(&mut app, LobbyControl::Ready);
+        app.ui_sound_log.clear();
+        app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("Space toggles the focused Ready checkbox");
+        assert_eq!(app.ui_sound_log, ["ArrowHit".to_string()]);
+        assert!(app.network_lobby.as_ref().expect("joined lobby").local_ready());
+        assert_eq!(app.status_text, "You are ready");
+        let checks = commands.take_submitted_ready_checks();
+        assert_eq!(checks.len(), 1, "the accepted toggle submits exactly once");
+        assert!(checks[0].data.is_ready());
+        app.handle_key(VirtualKeyCode::Space, ElementState::Released)
+            .expect("Space release adds no checkbox interaction");
+        assert_eq!(app.ui_sound_log, ["ArrowHit".to_string()]);
+        assert!(commands.take_submitted_ready_checks().is_empty());
+
+        // MainDlg::OnReadyCheck's cooldown replays the native click sound
+        // but rejects the toggle (src/C4GameLobby.cpp:334-338).
+        app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("Space inside the ready-button cooldown");
+        assert_eq!(
+            app.ui_sound_log,
+            ["ArrowHit".to_string(), "ArrowHit".to_string()]
+        );
+        assert!(
+            app.network_lobby.as_ref().expect("joined lobby").local_ready(),
+            "the cooldown keeps the accepted value"
+        );
+        assert!(commands.take_submitted_ready_checks().is_empty());
+        app.handle_key(VirtualKeyCode::Space, ElementState::Released)
+            .expect("Space release inside the cooldown");
+
+        // Roster focus keeps L167's confirm-key eating (a different arm).
+        let mut app = joined_app();
+        tab_to(&mut app, LobbyControl::Roster);
+        app.ui_sound_log.clear();
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("roster-focus Return stays eaten");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("roster-focus Return release stays eaten");
+        assert_eq!(controller_focus(&mut app), LobbyControl::Roster);
+        assert!(app.ui_sound_log.is_empty());
+        assert_eq!(app.startup_view, StartupView::NetworkLobby);
+
+        // While resources load, the disabled checkbox is no focus stop
+        // (UpdatePreloadingGUIState disables it, and focus traversal skips
+        // disabled controls), so keyboard activation cannot reach it.
+        let mut app = joined_app();
+        let mut cycle = Vec::new();
+        loop {
+            tab(&mut app);
+            let control = controller_focus(&mut app);
+            if control == LobbyControl::ChatInput {
+                break;
+            }
+            cycle.push(control);
+            assert!(cycle.len() < 16, "the focus cycle terminates");
+        }
+        assert!(cycle.contains(&LobbyControl::Exit));
+        assert!(
+            !cycle.contains(&LobbyControl::Ready),
+            "the still-loading Ready checkbox is skipped"
+        );
+
+        // Pointer activation of the Ready square flows through the same
+        // single controller emission: one CheckBox ArrowHit, one submission.
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .resources_loaded = true;
+        {
+            let lobby = app.network_lobby.as_mut().expect("joined lobby");
+            let rect = lobby.update_layout(640.0, 480.0).ready_button;
+            // C4GUI::CheckBox toggles only over its left square, not the
+            // caption (C4GuiCheckBox.cpp:82-97).
+            lobby.handle_panel_pointer_move(GuiPoint::new(
+                rect.origin.x + rect.size.height / 2.0,
+                rect.origin.y + rect.size.height / 2.0,
+            ));
+        }
+        app.ui_sound_log.clear();
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press the Ready square");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release the Ready square");
+        assert_eq!(app.ui_sound_log, ["ArrowHit".to_string()]);
+        assert!(app.network_lobby.as_ref().expect("joined lobby").local_ready());
+        assert_eq!(
+            commands.take_submitted_ready_checks().len(),
+            1,
+            "pointer Ready emits through the routed controller exactly once"
+        );
     }
 
     #[test]
