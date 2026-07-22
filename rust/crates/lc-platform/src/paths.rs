@@ -19,8 +19,8 @@ const CONFIG_FILE_NAME: &str = "config";
 pub enum PathsError {
     #[error("LegacyClonk install root could not be located (set LC_INSTALL_ROOT to override)")]
     InstallRootNotFound,
-    #[error("LegacyClonk system group not found at {path}")]
-    SystemGroupMissing { path: PathBuf },
+    #[error("LegacyClonk system group not found at {path} ({probe})")]
+    SystemGroupMissing { path: PathBuf, probe: String },
 }
 
 #[derive(Debug, Clone)]
@@ -172,8 +172,13 @@ fn build_paths(
 ) -> Result<AppPaths, PathsError> {
     let planet_dir = install_root.join("planet");
     let system_group = planet_dir.join("System.c4g");
-    if !system_group.exists() {
-        return Err(PathsError::SystemGroupMissing { path: system_group });
+    // Keep the concrete io::Error instead of an exists() collapse: a transient
+    // EMFILE/EACCES/ENOTDIR here reads completely differently from ENOENT.
+    if let Err(error) = fs::metadata(&system_group) {
+        return Err(PathsError::SystemGroupMissing {
+            path: system_group,
+            probe: format!("{:?}: {error}", error.kind()),
+        });
     }
     let content_dir = discover_content_dir(&install_root);
     Ok(AppPaths {
@@ -445,7 +450,35 @@ mod tests {
         let install_dir = TempDir::new().unwrap();
         let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(install_dir.path()))]);
         let result = AppPaths::discover();
-        assert!(matches!(result, Err(PathsError::SystemGroupMissing { .. })));
+        match result {
+            Err(PathsError::SystemGroupMissing { probe, .. }) => {
+                assert!(
+                    probe.contains("NotFound"),
+                    "probe must carry the concrete io error, got {probe:?}"
+                );
+            }
+            other => panic!("expected SystemGroupMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn discover_reports_concrete_system_group_probe_error() {
+        let install_dir = TempDir::new().unwrap();
+        // A regular file where the planet directory is expected turns the
+        // System.c4g stat into ENOTDIR rather than ENOENT; the error must
+        // surface which one actually happened.
+        fs::write(install_dir.path().join("planet"), b"not a directory").unwrap();
+        let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(install_dir.path()))]);
+        let result = AppPaths::discover();
+        match result {
+            Err(PathsError::SystemGroupMissing { probe, .. }) => {
+                assert!(
+                    probe.contains("os error 20"),
+                    "probe must carry the concrete ENOTDIR io error, got {probe:?}"
+                );
+            }
+            other => panic!("expected SystemGroupMissing, got {other:?}"),
+        }
     }
 
     #[test]

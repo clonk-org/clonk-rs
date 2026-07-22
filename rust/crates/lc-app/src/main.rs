@@ -28760,6 +28760,14 @@ impl GameApp {
         }
 
         let configured = path_from_group_name_bytes(info.filename.as_bytes());
+        if configured.as_os_str().is_empty() {
+            // A filename-less info has no profile to synchronize. Native
+            // C4Player::Save fails on its empty Filename at EraseItem/
+            // C4Group_MoveItem (C4Player.cpp:454-456) without ever touching
+            // the installation; resolving "" against the install root would
+            // name the install root itself as the profile to rewrite.
+            return None;
+        }
         if configured.exists() {
             return Some(configured);
         }
@@ -94366,28 +94374,48 @@ fn open_install_objects_group(paths: &AppPaths) -> Option<Group> {
     bases.sort();
     bases.dedup();
 
-    for base in bases {
-        if let Ok(group) = Group::open(&base) {
-            for name in OBJECT_GROUP_NAMES {
-                match open_child_flexible(&group, Path::new(name)) {
-                    Ok(Some(child)) => return Some(child),
-                    Ok(None) => {}
-                    Err(err) => {
-                        tracing::debug!(
-                            base = %base.display(),
-                            candidate = *name,
-                            error = %err,
-                            "error while probing install object group"
-                        );
+    for base in &bases {
+        match Group::open(base) {
+            Ok(group) => {
+                for name in OBJECT_GROUP_NAMES {
+                    match open_child_flexible(&group, Path::new(name)) {
+                        Ok(Some(child)) => return Some(child),
+                        Ok(None) => {}
+                        Err(err) => {
+                            tracing::debug!(
+                                base = %base.display(),
+                                candidate = *name,
+                                error = %err,
+                                "error while probing install object group"
+                            );
+                        }
                     }
                 }
+            }
+            Err(err) => {
+                // The bases were just discovered to exist; anything but a
+                // Missing race here is a real io failure worth surfacing
+                // before the caller silently falls back to no definitions.
+                tracing::warn!(
+                    base = %base.display(),
+                    error = %err,
+                    "failed to open existing install definition base"
+                );
             }
         }
 
         for name in OBJECT_GROUP_NAMES {
             let candidate = base.join(name);
-            if let Ok(group) = Group::open(&candidate) {
-                return Some(group);
+            match Group::open(&candidate) {
+                Ok(group) => return Some(group),
+                Err(lc_resources::GroupError::Missing(_)) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        candidate = %candidate.display(),
+                        error = %err,
+                        "failed to open install object group candidate"
+                    );
+                }
             }
         }
     }
@@ -159719,6 +159747,82 @@ VendorNestedField=discard me\n";
         app.engine.set_max_players(0);
         assert!(!app.persist_synchronized_local_player_files());
         assert_eq!(fs::read(&profile_path).unwrap(), sentinel);
+    }
+
+    #[test]
+    fn synchronized_player_file_with_empty_filename_never_resolves_the_install_root() {
+        // C4Player::Save on a filename-less player fails at its EraseItem/
+        // C4Group_MoveItem calls without ever renaming the installation
+        // (C4Player.cpp:406-462). The Rust fallback used to resolve the empty
+        // filename to `install_root.join("")` — the install root itself — and
+        // then swap the whole installation aside for the staged commit.
+        let install = tempdir().expect("throwaway install root");
+        let planet = install.path().join("planet");
+        fs::create_dir_all(planet.join("System.c4g")).expect("create system group");
+        fs::write(install.path().join("Sentinel.txt"), b"install root survives")
+            .expect("write install sentinel");
+        let user_data = tempdir().expect("player sync user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_CONTENT_DIR", None),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover throwaway paths");
+
+        let mut app = new_state_only_synthetic_crew_running_sandbox_app();
+        app.app_paths = Some(paths);
+        let player_number = app.local_owner;
+        let info_id = 603;
+        let mut state = app.engine.capture_state();
+        let player = state
+            .players
+            .iter_mut()
+            .find(|player| player.id == player_number)
+            .expect("sandbox player state");
+        player.player_info_id = info_id;
+        player.status = lc_engine::PlayerStatus::Active;
+        player.script_player = false;
+        app.engine
+            .restore_state(&state)
+            .expect("install filename-less player state");
+        app.control_player_infos.replace_snapshot(
+            info_id,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: info_id,
+                    game_number: player_number,
+                    ..lc_engine::ControlPlayerInfoEntry::default()
+                }],
+                by_client: 0,
+                ..lc_engine::PlayerInfoControlData::default()
+            }],
+        );
+
+        let info = app
+            .control_player_infos
+            .get(info_id)
+            .cloned()
+            .expect("filename-less player info");
+        assert_eq!(info.filename.as_bytes(), b"");
+        assert_eq!(app.synchronized_player_profile_path(&info), None);
+
+        assert!(!app.persist_synchronized_local_player_files());
+        assert_eq!(
+            fs::read(install.path().join("Sentinel.txt")).expect("install root intact"),
+            b"install root survives"
+        );
+        let residue = fs::read_dir(install.path().parent().expect("install parent"))
+            .expect("scan install siblings")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("lc-rewrite")
+            })
+            .count();
+        assert_eq!(residue, 0, "no staged/backup rewrite residue may appear");
     }
 
     #[test]

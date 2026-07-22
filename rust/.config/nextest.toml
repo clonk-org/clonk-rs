@@ -12,22 +12,18 @@ final-status-level = "fail"
 path = "junit.xml"
 store-success-output = false
 
-# Known-flaky lc-app path-case probe with an env-lock/process race.
-# Retry it instead of failing whole gate batteries on one-offs.
+# Known-flaky lc-app path-case probe with an env-lock/process race predating
+# INFRA-001; its schedule window does not overlap the fixed perpetrator, so
+# the retry stays until it is separately root-caused.
 [[profile.default.overrides]]
 filter = 'package(lc-app) and test(install_definition_resolver_handles_case_insensitive_paths)'
 retries = 2
 
-# The same race intermittently hits other lc-app tests that stage real
-# planet/content fixtures (observed 2026-07-21: savegame_slot_probe /
-# slot_path / saved_game restores "unknown definition", font-bundle probes
-# "Missing", and one spawn ENOENT — one or two victims per ~8500-test gate,
-# different each run; see lc-parity-queue INFRA-001 for the evidence trail).
-# Retries absorb the nondeterminism; deterministic regressions still fail
-# all three attempts.
-[[profile.default.overrides]]
-filter = 'package(lc-app)'
-retries = 2
+# The 2026-07-21 package-wide retries=2 that absorbed random fixture-shaped
+# lc-app failures was removed after INFRA-001 root-caused them: a filename-
+# less player profile resolved to the install root itself, and each slot save
+# renamed the whole worktree aside for ~1.4ms, blinding every concurrent
+# fixture read (fix + regression test in synchronized_player_profile_path).
 
 # Host preparation uses a real background runtime and can exhaust its bounded
 # poll window when several worker gates saturate the machine simultaneously.

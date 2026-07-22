@@ -90,10 +90,22 @@ enum PackedEntryNamePolicy {
 impl Group {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, GroupError> {
         let path = path.as_ref();
-        if !path.exists() {
-            return Err(GroupError::Missing(path.to_path_buf()));
-        }
-        if path.is_dir() {
+        // ENOENT and ENOTDIR mean the entity is absent, exactly as the
+        // previous exists() probe classified them. Any other stat failure
+        // (EMFILE, EACCES, EIO, ...) keeps its concrete io::Error.
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Err(GroupError::Missing(path.to_path_buf()));
+            }
+            Err(error) => return Err(GroupError::Io(error)),
+        };
+        if metadata.is_dir() {
             if path.file_name().is_some_and(|name| {
                 ignored_group_entry_bytes(&crate::path_to_legacy_bytes(Path::new(name)))
             }) {
@@ -1299,6 +1311,42 @@ mod tests {
     use std::path::Path;
     fn tempdir() -> std::io::Result<tempfile::TempDir> {
         tempfile::Builder::new().prefix("lc-test-").tempdir()
+    }
+
+    #[test]
+    fn open_reports_missing_only_for_absent_paths() {
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            Group::open(dir.path().join("absent.c4g")),
+            Err(GroupError::Missing(_))
+        ));
+
+        // Traversal through a plain file (ENOTDIR) is "absent" in the
+        // c4group model, exactly as the previous exists() probe reported it.
+        fs::write(dir.path().join("plain.txt"), b"not a dir").unwrap();
+        assert!(matches!(
+            Group::open(dir.path().join("plain.txt/child.c4g")),
+            Err(GroupError::Missing(_))
+        ));
+
+        // Any other stat failure (here EACCES through an unsearchable
+        // directory) must keep its concrete io::Error instead of being
+        // collapsed into Missing.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let sealed = dir.path().join("sealed");
+            fs::create_dir(&sealed).unwrap();
+            fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
+            let result = Group::open(sealed.join("child.c4g"));
+            fs::set_permissions(&sealed, fs::Permissions::from_mode(0o755)).unwrap();
+            match result {
+                Err(GroupError::Io(error)) => {
+                    assert_eq!(error.raw_os_error(), Some(13), "expected EACCES: {error}");
+                }
+                other => panic!("expected GroupError::Io(EACCES), got {other:?}"),
+            }
+        }
     }
 
     #[test]
