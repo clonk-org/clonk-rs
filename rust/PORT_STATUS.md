@@ -1,6 +1,6 @@
 # Rust Port Status
 
-C++ (`../src/`) and `content/` are read-only parity oracles; commits are the
+The C++ oracle checkout (`~/Documents/code/vendor/legacyclonk-oracle`, tag `oracle-src-pinned`) and `content/` are read-only parity oracles; commits are the
 record of completed slices.
 
 ## Focus

@@ -6,9 +6,11 @@ for the current GAP LIST and the two foundational determinism breaks.
 ## Prime directive: parity before features
 
 LegacyClonk is a **lockstep-deterministic** engine. The Rust port is worthless
-unless it matches the C++ engine in `../src/` **bit-for-bit on simulation state**.
+unless it matches the C++ engine **bit-for-bit on simulation state**. The C++
+source lives in the pinned oracle checkout at
+`~/Documents/code/vendor/legacyclonk-oracle` (tag `oracle-src-pinned`).
 
-- The C++ engine in `../src/` is the **golden oracle**. When Rust and C++ differ,
+- The C++ engine in the oracle checkout is the **golden oracle**. When Rust and C++ differ,
   C++ is right — unless you can *prove* a C++ bug that does not affect determinism.
 - **Never** make a parity failure go away by editing a test to match Rust, by
   making Rust stricter/looser than C++, or by stubbing a determinism-critical path.
@@ -49,7 +51,6 @@ commit message states whether it is structural or behavioral.
 - Model the domain so invalid states are unrepresentable: newtypes over raw ints
   (e.g. a real `C4Fixed` type, `ObjectId`, owner/material newtypes), enums + traits
   over inheritance/RTTI, `#[non_exhaustive]` where the C++ enum can grow.
-- Use `cfg`/features over C++ `#ifdef`. Keep FFI (`#[cfg(feature = "ffi")]`) thin.
 - No `unwrap`/`expect`/`panic!` on paths reachable from script or network input —
   return `Result`. Reserve panics for genuine invariant violations.
 - Match the surrounding code's naming, comment density, and idioms.
@@ -65,8 +66,9 @@ cargo xtask engine-snapshots verify
 Today none of these fully hold (see `PORT_STATUS.md`): the suite has 2 failing
 app-integration tests, clippy emits ~78 issues, and the snapshot harness only
 checks Rust-vs-Rust self-consistency (a real C++↔Rust differential harness must be
-built — `USE_RUST_ENGINE_VALIDATION` + `LC_RUST_ENGINE_*` env vars in
-`../src/rust/RustEngineBridge.cpp` are the starting point).
+built — the retired C++-embedding bridge (`RustEngineBridge.cpp`, see the
+oracle checkout's history) was the old starting point; a future harness
+should drive both engines side-by-side from the oracle clone instead).
 
 ## Architecture notes / gotchas
 
@@ -93,7 +95,6 @@ cargo test -p <crate>                       # focused
 cargo test --workspace
 cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
 cargo xtask engine-snapshots record|verify  # Rust self-consistency snapshots
-cargo xtask ffi [--release] [-p <crate>]    # build staticlib/cdylib for C++
 ```
 
 C++ oracle build (for differential work) lives in `../` (CMake); the bridge is

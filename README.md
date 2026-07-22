@@ -1,11 +1,40 @@
-# Pre-built dependencies for LegacyClonk
+# clonk-rs
 
-[Download binaries here](https://github.com/legacyclonk/deps/releases/latest)
+A Rust port of the [LegacyClonk](https://github.com/legacyclonk/LegacyClonk)
+engine, developed for bit-for-bit lockstep parity with the original C++
+implementation.
 
-----------
+The engine, frontend, and tooling live in [`rust/`](rust/) as a Cargo
+workspace of `clonk-*` packages; `clonk-app` is the game binary. Game data
+lives in [`planet/`](planet/) and the [`content/`](content/) submodule.
 
-Build scripts for statically linked dependencies of [LegacyClonk](https://github.com/legacyclonk/LegacyClonk).
+## Building
 
+```
+cd rust
+cargo build --workspace
+cargo nextest run --workspace
+```
 
-After extracting (or moving the folder) execute [fix_paths.sh](fix_paths.sh) ([fix_paths.sh](output/fix_paths.sh) from the repo) for adjusting absolute paths.
-On Windows, use Git Bash for running the script.
+See [`rust/CLAUDE.md`](rust/CLAUDE.md) for engineering constraints,
+[`rust/PORT_STATUS.md`](rust/PORT_STATUS.md) for parity status, and
+[`rust/REFACTOR_PLAN.md`](rust/REFACTOR_PLAN.md) for the ongoing
+decomposition campaign.
+
+## The C++ oracle
+
+The original C++ engine is no longer vendored in this repository. Parity
+work reads and runs it from a separate pinned checkout:
+
+- Clone: `~/Documents/code/vendor/legacyclonk-oracle`
+  (upstream `legacyclonk/LegacyClonk`; tag `oracle-src-pinned` marks the
+  exact source state this repository's parity citations refer to)
+- The arm64 capture harness (`build-arm64-native/`, including the
+  runnable `clonk.app`) lives in that checkout.
+
+## Licensing
+
+This port is a derived work of LegacyClonk and Clonk. The original license
+and trademark terms in [`COPYING`](COPYING), [`TRADEMARK`](TRADEMARK),
+[`licenses/`](licenses/), and [`lc_licenses/`](lc_licenses/) continue to
+apply; see [`credits.txt`](credits.txt) for attribution.
