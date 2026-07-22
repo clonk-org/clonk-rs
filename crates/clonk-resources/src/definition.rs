@@ -2837,13 +2837,32 @@ fn cross_map_act_map(actions: &mut [(String, ActionDefinition)]) {
     }
 }
 
+/// `C4Rect::Scaled` (src/C4Rect.cpp:37-44) under the definition's
+/// `C4Def::Scale` (`C4DefCore::Scale / 100.0f`, src/C4Def.cpp:745). The Picture
+/// rect is authored in game units; `C4Def::Picture2Facet` (src/C4Def.cpp:1341)
+/// scales it into bitmap space before the facet is set, truncating toward zero
+/// exactly as `static_cast<int32_t>(static_cast<float>(val) * scale)` does.
+fn scaled_picture_rect(rect: PictureRect, graphics_scale: u32) -> PictureRect {
+    let scale = graphics_scale as f32 / 100.0;
+    let scaled = |value: i32| (value as f32 * scale) as i32;
+    PictureRect {
+        x: scaled(rect.x),
+        y: scaled(rect.y),
+        width: scaled(rect.width),
+        height: scaled(rect.height),
+    }
+}
+
 fn crop_definition_picture(
     core: &DefCore,
     graphics: Option<&GraphicsImage>,
 ) -> Option<GraphicsImage> {
     let graphics = graphics?;
-    let (crop_x, crop_y, crop_w, crop_h) =
-        normalize_crop(core.picture?, graphics.width(), graphics.height())?;
+    let (crop_x, crop_y, crop_w, crop_h) = normalize_crop(
+        scaled_picture_rect(core.picture?, core.graphics_scale),
+        graphics.width(),
+        graphics.height(),
+    )?;
     let pixels = extract_rgba_bytes(
         graphics.pixels(),
         graphics.width(),
@@ -2863,8 +2882,14 @@ fn crop_definition_picture_mask(
     let picture = picture?;
     let mask = mask?;
     let (crop_x, crop_y, crop_w, crop_h) = match core.picture {
-        Some(rect) => normalize_crop(rect, mask.width, mask.height)
-            .unwrap_or((0, 0, mask.width, mask.height)),
+        // Overlay.png shares Graphics.png's dimensions (C4Surface.cpp:329), so
+        // the owner-color mask takes the same scaled Picture rect as the base.
+        Some(rect) => normalize_crop(
+            scaled_picture_rect(rect, core.graphics_scale),
+            mask.width,
+            mask.height,
+        )
+        .unwrap_or((0, 0, mask.width, mask.height)),
         None => (0, 0, mask.width, mask.height),
     };
     if (crop_w, crop_h) != (picture.width(), picture.height()) {
@@ -4401,6 +4426,45 @@ Entrance=1,2,,4
             .expect("picture must retain owner-color mask");
         assert_eq!((mask.width, mask.height), (1, 1));
         assert_eq!(mask.pixels, vec![136, 136, 136, 255]);
+    }
+
+    #[test]
+    fn scaled_definition_picture_crops_the_scaled_source_rect() {
+        // C4Def::Picture2Facet composes the phase offset in game units and then
+        // scales the whole rect into bitmap space:
+        // `C4Rect{PictureRect.x + xPhase * PictureRect.Wdt, ...}.Scaled(Scale)`
+        // (src/C4Def.cpp:1341), where C4Rect::Scaled truncates each component as
+        // `int32_t(float(val) * scale)` (src/C4Rect.cpp:37-44). C4Def::Draw
+        // reaches the identical source region by passing Scale down to the blit:
+        // `float(X + Wdt * iPhaseX) * scale, ..., float(Wdt) * scale`
+        // (src/C4Facet.cpp:137). A Scale=200 definition therefore takes
+        // Picture=0,0,1,1 from the bitmap rect (0,0,2,2), not the raw 1x1 rect.
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Scaled.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=SCAL\nScale=200\nPicture=0,0,1,1\n",
+        )
+        .expect("DefCore");
+
+        let mut graphics = image::RgbaImage::new(2, 2);
+        graphics.put_pixel(0, 0, image::Rgba([1, 0, 0, 255]));
+        graphics.put_pixel(1, 0, image::Rgba([2, 0, 0, 255]));
+        graphics.put_pixel(0, 1, image::Rgba([3, 0, 0, 255]));
+        graphics.put_pixel(1, 1, image::Rgba([4, 0, 0, 255]));
+        graphics
+            .save(def_dir.join("Graphics.png"))
+            .expect("scaled graphics");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let definition = Definition::load(&group).expect("load scaled definition");
+        let picture = definition.picture_image.expect("scaled picture crop");
+        assert_eq!((picture.width(), picture.height()), (2, 2));
+        assert_eq!(
+            picture.pixels(),
+            &[1, 0, 0, 255, 2, 0, 0, 255, 3, 0, 0, 255, 4, 0, 0, 255],
+        );
     }
 
     #[test]
