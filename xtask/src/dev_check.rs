@@ -139,10 +139,8 @@ impl WorkspacePaths {
             .parent()
             .context("xtask manifest has no workspace parent")?
             .to_path_buf();
-        let repo_root = workspace_dir
-            .parent()
-            .context("Rust workspace has no repository parent")?
-            .to_path_buf();
+        // The workspace was hoisted to the repository root, so the two coincide.
+        let repo_root = workspace_dir.clone();
         Ok(Self {
             repo_root,
             workspace_dir,
@@ -462,8 +460,8 @@ fn plan_checks(changes: &ChangeSet, options: &Options) -> CheckPlan {
     let workspace = changes.paths.iter().any(|path| {
         matches!(
             path.as_str(),
-            "rust/Cargo.toml" | "rust/Cargo.lock" | "rust/.cargo/config.toml"
-        ) || path.starts_with("rust/.cargo/")
+            "Cargo.toml" | "Cargo.lock" | ".cargo/config.toml"
+        ) || path.starts_with(".cargo/")
     });
     if workspace {
         add_workspace(&mut plan, "Rust workspace configuration changed");
@@ -471,12 +469,12 @@ fn plan_checks(changes: &ChangeSet, options: &Options) -> CheckPlan {
 
     for path in &changes.paths {
         let reason = format!("changed {path}");
-        if path.starts_with("rust/snapshots/engine/")
-            || path == "rust/crates/clonk-engine/src/fixtures.rs"
+        if path.starts_with("snapshots/engine/")
+            || path == "crates/clonk-engine/src/fixtures.rs"
         {
             add_snapshots(&mut plan, &reason);
         }
-        if path.starts_with("parity/") || path == "rust/crates/clonk-engine/src/parity_differential.rs"
+        if path.starts_with("parity/") || path == "crates/clonk-engine/src/parity_differential.rs"
         {
             add_parity(&mut plan, &reason);
         }
@@ -484,13 +482,13 @@ fn plan_checks(changes: &ChangeSet, options: &Options) -> CheckPlan {
         if workspace || plan_test_path(&mut plan, path, &reason) {
             continue;
         }
-        if path.starts_with("rust/xtask/") {
+        if path.starts_with("xtask/") {
             add_package(&mut plan, "xtask", &reason);
-        } else if path.starts_with("rust/crates/clonk-engine/src/") {
+        } else if path.starts_with("crates/clonk-engine/src/") {
             add_engine_checks(&mut plan, path, &reason);
-        } else if path.starts_with("rust/crates/clonk-script/src/") {
+        } else if path.starts_with("crates/clonk-script/src/") {
             add_script_checks(&mut plan, &reason);
-        } else if path.starts_with("rust/crates/clonk-resources/src/") {
+        } else if path.starts_with("crates/clonk-resources/src/") {
             add_package(&mut plan, "clonk-resources", &reason);
             add_engine_filter(
                 &mut plan,
@@ -514,15 +512,15 @@ fn plan_checks(changes: &ChangeSet, options: &Options) -> CheckPlan {
 }
 
 fn gameplay_path(path: &str) -> bool {
-    path.starts_with("rust/crates/clonk-engine/src/")
-        || path.starts_with("rust/crates/clonk-script/src/")
-        || path.starts_with("rust/crates/clonk-resources/src/")
-        || path.starts_with("rust/crates/clonk-frontend/src/")
-        || path.starts_with("rust/crates/clonk-app/src/")
+    path.starts_with("crates/clonk-engine/src/")
+        || path.starts_with("crates/clonk-script/src/")
+        || path.starts_with("crates/clonk-resources/src/")
+        || path.starts_with("crates/clonk-frontend/src/")
+        || path.starts_with("crates/clonk-app/src/")
         || path == "content"
         || path.starts_with("content/")
         || path.starts_with("planet/System.c4g/")
-        || path.starts_with("rust/dev-replays/")
+        || path.starts_with("dev-replays/")
 }
 
 fn add_replay_and_render(plan: &mut CheckPlan, reason: &str) {
@@ -961,7 +959,7 @@ fn is_shared_content(path: &str) -> bool {
 
 fn crate_package(path: &str) -> Option<String> {
     let mut parts = path.split('/');
-    (parts.next()? == "rust" && parts.next()? == "crates")
+    (parts.next()? == "crates")
         .then(|| parts.next().map(str::to_string))
         .flatten()
 }
@@ -1331,7 +1329,7 @@ fn write_manifest(
             json_string(check.kind.label()),
             json_string(match check.cwd {
                 CheckCwd::Repo => "repo",
-                CheckCwd::Workspace => "rust",
+                CheckCwd::Workspace => "workspace",
             }),
             json_string(&check.program)
         ));
@@ -1551,12 +1549,33 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
+    fn detect_resolves_the_hoisted_repository_root() {
+        // The Cargo workspace was hoisted to the repository root (c8f4153d0), so
+        // xtask's manifest parent IS the repo root — there is no longer a `rust/`
+        // level between them. `main.rs`'s WorkspacePaths::detect already models
+        // this (repo_root = workspace_dir.clone()); this one must agree, or every
+        // git invocation runs one directory above the repository.
+        let paths = WorkspacePaths::detect().unwrap();
+        assert_eq!(paths.repo_root, paths.workspace_dir);
+        assert!(
+            paths.repo_root.join("Cargo.toml").is_file(),
+            "repo root {} has no Cargo.toml",
+            paths.repo_root.display()
+        );
+        assert!(
+            paths.repo_root.join("crates").is_dir(),
+            "repo root {} has no crates/",
+            paths.repo_root.display()
+        );
+    }
+
+    #[test]
     fn cli_parses_all_required_options() {
         let options = Options::parse(&strings(&[
             "--base",
             "origin/main",
             "--changed",
-            "rust/crates/clonk-engine/src/compat.rs",
+            "crates/clonk-engine/src/compat.rs",
             "--changed=content/Foo.c4s/Script.c",
             "--plan",
             "--full",
@@ -1595,7 +1614,7 @@ mod tests {
     #[test]
     fn git_collection_unions_staged_unstaged_untracked_and_rename_ends() {
         let root = test_dir("git-union");
-        fs::create_dir_all(root.join("rust")).unwrap();
+        fs::create_dir_all(&root).unwrap();
         init_test_git_repository(&root);
         fs::write(root.join("unstaged.txt"), "one\n").unwrap();
         fs::write(root.join("rename-me.txt"), "rename\n").unwrap();
@@ -1609,7 +1628,7 @@ mod tests {
 
         let roots = WorkspacePaths {
             repo_root: root.clone(),
-            workspace_dir: root.join("rust"),
+            workspace_dir: root.clone(),
         };
         let changes = collect_changes(&Options::default(), &roots).unwrap();
         for expected in [
@@ -1631,7 +1650,7 @@ mod tests {
     #[test]
     fn base_collection_includes_committed_and_worktree_changes() {
         let root = test_dir("git-base");
-        fs::create_dir_all(root.join("rust")).unwrap();
+        fs::create_dir_all(&root).unwrap();
         init_test_git_repository(&root);
         fs::write(root.join("tracked.txt"), "base\n").unwrap();
         git(&root, &["add", "."]);
@@ -1646,7 +1665,7 @@ mod tests {
 
         let roots = WorkspacePaths {
             repo_root: root.clone(),
-            workspace_dir: root.join("rust"),
+            workspace_dir: root.clone(),
         };
         let changes = collect_changes(
             &Options {
@@ -1671,10 +1690,10 @@ mod tests {
     #[test]
     fn explicit_changes_are_normalized_sorted_and_deduped_without_git() {
         let root = test_dir("explicit");
-        fs::create_dir_all(root.join("rust")).unwrap();
+        fs::create_dir_all(&root).unwrap();
         let roots = WorkspacePaths {
             repo_root: root.clone(),
-            workspace_dir: root.join("rust"),
+            workspace_dir: root.clone(),
         };
         let changes = collect_changes(
             &Options {
@@ -1694,7 +1713,7 @@ mod tests {
 
     #[test]
     fn gameplay_plan_starts_with_replay_and_render_then_engine_checks() {
-        let plan = plan_for_paths(&["rust/crates/clonk-engine/src/compat.rs"], false);
+        let plan = plan_for_paths(&["crates/clonk-engine/src/compat.rs"], false);
         assert_eq!(plan.commands[0].kind, CheckKind::Replay);
         assert_eq!(plan.commands[1].kind, CheckKind::RenderProbe);
         assert_eq!(plan.commands[2].kind, CheckKind::Hygiene);
@@ -1728,14 +1747,14 @@ mod tests {
     #[test]
     fn frontend_and_app_sources_start_with_replay_and_render() {
         for path in [
-            "rust/crates/clonk-frontend/src/renderer.rs",
-            "rust/crates/clonk-app/src/input.rs",
+            "crates/clonk-frontend/src/renderer.rs",
+            "crates/clonk-app/src/input.rs",
         ] {
             let plan = plan_for_paths(&[path], false);
             assert_eq!(plan.commands[0].kind, CheckKind::Replay, "{path}");
             assert_eq!(plan.commands[1].kind, CheckKind::RenderProbe, "{path}");
             assert_eq!(plan.commands[2].kind, CheckKind::Hygiene, "{path}");
-            if path.starts_with("rust/crates/clonk-frontend/") {
+            if path.starts_with("crates/clonk-frontend/") {
                 assert!(plan.has_args(&[
                     "nextest",
                     "run",
@@ -1767,7 +1786,7 @@ mod tests {
 
     #[test]
     fn landscape_maps_to_movement_and_balloon_families() {
-        let plan = plan_for_paths(&["rust/crates/clonk-engine/src/landscape.rs"], false);
+        let plan = plan_for_paths(&["crates/clonk-engine/src/landscape.rs"], false);
         for filter in [
             "walk_movement::",
             "flight_movement::",
@@ -1789,7 +1808,7 @@ mod tests {
     #[test]
     fn direct_module_maps_to_only_its_coalesced_test_target() {
         let plan = plan_for_paths(
-            &["rust/crates/clonk-engine/tests/it/real_alchemy_revision.rs"],
+            &["crates/clonk-engine/tests/it/real_alchemy_revision.rs"],
             false,
         );
         assert!(plan.has_args(&[
@@ -1823,8 +1842,8 @@ mod tests {
     fn snapshots_parity_and_workspace_files_escalate() {
         let plan = plan_for_paths(
             &[
-                "rust/Cargo.lock",
-                "rust/snapshots/engine/v1/basic.json",
+                "Cargo.lock",
+                "snapshots/engine/v1/basic.json",
                 "parity/golden/parity_golden.json",
             ],
             false,
@@ -1838,8 +1857,8 @@ mod tests {
     fn plan_dedupes_commands_and_accumulates_stable_reasons() {
         let plan = plan_for_paths(
             &[
-                "rust/crates/clonk-engine/src/compat.rs",
-                "rust/crates/clonk-engine/src/effect.rs",
+                "crates/clonk-engine/src/compat.rs",
+                "crates/clonk-engine/src/effect.rs",
             ],
             false,
         );
@@ -1867,7 +1886,7 @@ mod tests {
     #[test]
     fn budget_waits_for_render_probe_then_skips_ordinary_checks() {
         let changes = fake_changes();
-        let plan = plan_for_paths(&["rust/crates/clonk-engine/src/compat.rs"], false);
+        let plan = plan_for_paths(&["crates/clonk-engine/src/compat.rs"], false);
         let root = test_dir("budget");
         fs::create_dir_all(&root).unwrap();
         let roots = fake_roots(&root);
@@ -1906,7 +1925,7 @@ mod tests {
     #[test]
     fn replay_failure_runs_render_diagnostic_when_snapshot_exists() {
         let changes = fake_changes();
-        let plan = plan_for_paths(&["rust/crates/clonk-engine/src/compat.rs"], false);
+        let plan = plan_for_paths(&["crates/clonk-engine/src/compat.rs"], false);
         let root = test_dir("replay-failure");
         fs::create_dir_all(&root).unwrap();
         let roots = fake_roots(&root);
@@ -2106,7 +2125,7 @@ mod tests {
 
     fn fake_changes() -> ChangeSet {
         ChangeSet {
-            paths: vec!["rust/crates/clonk-engine/src/compat.rs".to_string()],
+            paths: vec!["crates/clonk-engine/src/compat.rs".to_string()],
             diff_base: "HEAD".to_string(),
             resolved_base: None,
         }
