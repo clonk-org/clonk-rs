@@ -66,3 +66,18 @@ extraction is the standing "next lever". Do not re-try rejected experiments
   `cargo check -p clonk-app --tests` after a touch of main.rs ≈ 2.2s
   (the 23.5s baseline above was a first-build, not incremental — treat the
   pair as cache-state bounds, not a strict before/after).
+- Step 5 landed (main_tests.rs decomposition): spliced into 15 area part files
+  under `crates/clonk-app/src/main_tests/` via `include!` — bare item
+  sequences into the same `mod tests`, NOT child modules, so every test id
+  stays `tests::<fn>` and nextest overrides / evidence citations are
+  unaffected. Root keeps the prelude, shared helpers (144 units), and 9 items
+  pinned by file-relative `include_bytes!`/`include_str!` paths (4,326 lines);
+  parts run 2,069 (chat_messages) to 18,660 (netplay) lines, all under the
+  20,000-line rustfmt-stdin limit. Id-stability proof:
+  `cargo nextest list -E 'package(clonk-app)'` byte-identical pre/post
+  (1,858 ids); full clonk-app battery 1858 run / 1858 passed / 3 ignored-skips
+  on both sides; the original 114,489-line file byte-reconstructs exactly from
+  the emitted files. Warm body-edit loop unchanged (≈2.3s; a part-file touch
+  costs the same — this step buys navigability, not build time). Moving
+  render-only tests into clonk-app-render was skipped: no test exercises that
+  crate alone (both candidates also drive GameApp).
