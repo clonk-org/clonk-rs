@@ -880,6 +880,71 @@ impl Default for NeededMaterialStrings {
     }
 }
 
+/// `0xff000000 | Pal.GetClr(FColors[FRed])`: the C4.PAL red used by every
+/// ConstructionCheck feedback message (C4GameMessage.cpp:280-282;
+/// C4Surface.cpp:1304; StdColors.h:32).
+pub(crate) const CONSTRUCTION_CHECK_MESSAGE_COLOR: u32 = 0xfff4_0000;
+
+/// Active process-global `LoadResStr` entries used by ConstructionCheck's
+/// red failure feedback (C4Landscape.cpp:2131-2163). Headless engines
+/// default to the shipped US text; the app overwrites these from its frozen
+/// installed language table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConstructionCheckStrings {
+    /// IDS_OBJ_UNDEF — takes the requested C4ID text.
+    pub(crate) undefined: String,
+    /// IDS_OBJ_NOCON — takes the definition name.
+    pub(crate) no_construction: String,
+    /// IDS_OBJ_NOROOM.
+    pub(crate) no_room: String,
+    /// IDS_OBJ_NOLEVEL.
+    pub(crate) no_level: String,
+    /// IDS_OBJ_NOOTHER — takes the blocking object's name.
+    pub(crate) no_other: String,
+}
+
+impl ConstructionCheckStrings {
+    fn new(
+        undefined: impl Into<String>,
+        no_construction: impl Into<String>,
+        no_room: impl Into<String>,
+        no_level: impl Into<String>,
+        no_other: impl Into<String>,
+    ) -> Self {
+        Self {
+            undefined: undefined.into(),
+            no_construction: no_construction.into(),
+            no_room: no_room.into(),
+            no_level: no_level.into(),
+            no_other: no_other.into(),
+        }
+    }
+
+    pub(crate) fn format_undefined(&self, id_text: &str) -> String {
+        self.undefined.replacen("%s", id_text, 1)
+    }
+
+    pub(crate) fn format_not_constructable(&self, definition_name: &str) -> String {
+        self.no_construction.replacen("%s", definition_name, 1)
+    }
+
+    pub(crate) fn format_blocked(&self, blocker_name: &str) -> String {
+        self.no_other.replacen("%s", blocker_name, 1)
+    }
+}
+
+impl Default for ConstructionCheckStrings {
+    fn default() -> Self {
+        Self::new(
+            "Structure %s undefined.",
+            "%s cannot|be built.",
+            "Not enough room!",
+            "No level ground!",
+            "%s is in the way.",
+        )
+    }
+}
+
 fn us_default_rank_names() -> Vec<String> {
     [
         "Clonk",
@@ -18416,6 +18481,9 @@ pub struct Engine {
     /// The app refreshes it with the active language and reinstalls it on
     /// fresh engines; headless engines retain the shipped US fallback.
     object_no_dig_resource_string: Rc<String>,
+    /// Process-local ConstructionCheck feedback templates from
+    /// Application.ResStrTable (C4Landscape.cpp:2131-2163).
+    construction_check_strings: Rc<ConstructionCheckStrings>,
     /// Process-local `Game.Rank` names frozen from IDS_GAME_DEFRANKS during
     /// game initialization. Rank numbers and experience remain synchronized;
     /// this localized presentation table deliberately stays out of snapshots.
@@ -20605,6 +20673,7 @@ impl Engine {
             team_home_base_rule: false,
             needed_material_strings: Rc::new(NeededMaterialStrings::default()),
             object_no_dig_resource_string: Rc::new("%s cannot dig.".to_string()),
+            construction_check_strings: Rc::new(ConstructionCheckStrings::default()),
             default_rank_names: Rc::new(us_default_rank_names()),
             construction_needs_material: false,
             structures_need_energy: false,
@@ -22357,34 +22426,50 @@ impl Engine {
         hgt: i32,
         category: i32,
     ) -> bool {
-        objects.iter().any(|object| {
-            if !object.state.status.is_active()
-                || object.destroyed
-                || object.state.container.is_some()
-            {
-                return false;
-            }
-            if object.state.category & category & CATEGORY_SORT_LIMIT == 0 {
-                return false;
-            }
-            let position = object.state.position;
-            let rect = object
-                .current_shape_rect()
-                .map(|rect| {
-                    DefinitionRect::new(
-                        position.x.saturating_add(rect.x),
-                        position.y.saturating_add(rect.y),
-                        rect.width,
-                        rect.height,
-                    )
-                })
-                .or_else(|| vertex_bounds_rect(position, &object.state.vertices))
-                .unwrap_or_else(|| DefinitionRect::new(position.x, position.y, 1, 1));
-            x < rect.x + rect.width
-                && rect.x < x + wdt
-                && y < rect.y + rect.height
-                && rect.y < y + hgt
-        })
+        Self::placement_overlapping_object(objects, x, y, wdt, hgt, category).is_some()
+    }
+
+    /// `Game.OverlapObject`'s returned blocker; ConstructionCheck names it
+    /// in the IDS_OBJ_NOOTHER feedback (C4Landscape.cpp:2159-2163).
+    fn placement_overlapping_object(
+        objects: &[Object],
+        x: i32,
+        y: i32,
+        wdt: i32,
+        hgt: i32,
+        category: i32,
+    ) -> Option<ObjectId> {
+        objects
+            .iter()
+            .find(|object| {
+                if !object.state.status.is_active()
+                    || object.destroyed
+                    || object.state.container.is_some()
+                {
+                    return false;
+                }
+                if object.state.category & category & CATEGORY_SORT_LIMIT == 0 {
+                    return false;
+                }
+                let position = object.state.position;
+                let rect = object
+                    .current_shape_rect()
+                    .map(|rect| {
+                        DefinitionRect::new(
+                            position.x.saturating_add(rect.x),
+                            position.y.saturating_add(rect.y),
+                            rect.width,
+                            rect.height,
+                        )
+                    })
+                    .or_else(|| vertex_bounds_rect(position, &object.state.vertices))
+                    .unwrap_or_else(|| DefinitionRect::new(position.x, position.y, 1, 1));
+                x < rect.x + rect.width
+                    && rect.x < x + wdt
+                    && y < rect.y + rect.height
+                    && rect.y < y + hgt
+            })
+            .map(|object| object.id)
     }
 
     /// `FindConSiteSpot` with the engine-side object-overlap veto
@@ -24386,6 +24471,24 @@ impl Engine {
     #[doc(hidden)]
     pub fn set_object_no_dig_resource_string(&mut self, template: impl Into<String>) {
         self.object_no_dig_resource_string = Rc::new(template.into());
+    }
+
+    #[doc(hidden)]
+    pub fn set_construction_check_resource_strings(
+        &mut self,
+        undefined: impl Into<String>,
+        no_construction: impl Into<String>,
+        no_room: impl Into<String>,
+        no_level: impl Into<String>,
+        no_other: impl Into<String>,
+    ) {
+        self.construction_check_strings = Rc::new(ConstructionCheckStrings::new(
+            undefined,
+            no_construction,
+            no_room,
+            no_level,
+            no_other,
+        ));
     }
 
     #[doc(hidden)]
@@ -27000,6 +27103,7 @@ impl Engine {
         )
         .with_needed_material_strings(Rc::clone(&self.needed_material_strings))
         .with_object_no_dig_resource_string(Rc::clone(&self.object_no_dig_resource_string))
+        .with_construction_check_strings(Rc::clone(&self.construction_check_strings))
         .with_control_key_names(Rc::clone(&self.control_key_names))
         .with_solid_mask_metadata(solid_mask_metadata)
         .with_solid_mask_bakes(
@@ -49793,7 +49897,9 @@ impl Engine {
     }
 
     /// Read-only `ConstructionCheck` for local drag feedback. Synchronized
-    /// Construct execution invokes the same core predicate again.
+    /// Construct execution invokes the same core predicate again. The C++
+    /// preview passes no `pByObj`, so the failure branch is discarded
+    /// without feedback (C4MouseControl.cpp:1098).
     pub fn construction_site_valid(&self, definition_id: &str, site: Vector2) -> bool {
         let Some(definition) = self.definitions.get(definition_id) else {
             return false;
@@ -49806,9 +49912,17 @@ impl Engine {
             site,
             self.landscape.as_ref(),
             |left, top, width, height, category| {
-                Self::placement_overlaps_object(&self.objects, left, top, width, height, category)
+                Self::placement_overlapping_object(
+                    &self.objects,
+                    left,
+                    top,
+                    width,
+                    height,
+                    category,
+                )
             },
         )
+        .is_none()
     }
 
     /// `C4MouseControl::UpdateFogOfWar` plus `C4Player::FoWIsVisible` for a
@@ -54619,6 +54733,13 @@ impl Engine {
                         self.resume_construct_after_script(caller, command_instance_id, result)?;
                 }
             }
+            CommandEvent::ConstructionCheckRejected {
+                actor_id,
+                definition_id,
+                failure,
+            } => {
+                self.register_construction_check_failure_message(actor_id, &definition_id, failure);
+            }
             CommandEvent::SpawnConstruction {
                 actor_id,
                 definition_id,
@@ -54983,6 +55104,51 @@ impl Engine {
             self.objects[index].commands.clear_finished_fronts();
         }
         Ok(())
+    }
+
+    /// `ConstructionCheck`'s `GameMsgObject(..., pByObj, FRed)` feedback for
+    /// the Construct command's site rejection (C4Landscape.cpp:2131-2163;
+    /// C4Command.cpp:1797-1801). FRed resolves through the C4.PAL entry
+    /// FColors[FRed]=47 (C4GameMessage.cpp:280-282; C4Surface.cpp:1304).
+    fn register_construction_check_failure_message(
+        &mut self,
+        actor_id: ObjectId,
+        definition_id: &str,
+        failure: command::ConstructionCheckFailure,
+    ) {
+        if self.find_object_index(actor_id).is_none() {
+            return;
+        }
+        let strings = Rc::clone(&self.construction_check_strings);
+        let text = match failure {
+            command::ConstructionCheckFailure::NotConstructable => {
+                let definition_name = self
+                    .definitions
+                    .get(definition_id)
+                    .map(|definition| definition.name().to_string())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| definition_id.to_string());
+                strings.format_not_constructable(&definition_name)
+            }
+            command::ConstructionCheckFailure::NoRoom => strings.no_room.clone(),
+            command::ConstructionCheckFailure::NoLevel => strings.no_level.clone(),
+            command::ConstructionCheckFailure::Blocked(blocker) => {
+                strings.format_blocked(&self.object_message_name(blocker))
+            }
+        };
+        self.messages.add_message(crate::message::MessageSpec {
+            kind: crate::message::MessageKind::Target,
+            text,
+            target: Some(actor_id),
+            player: None,
+            offset: Vector2::ZERO,
+            color: CONSTRUCTION_CHECK_MESSAGE_COLOR,
+            flags: 0,
+            width: None,
+            decoration: None,
+            frame_decoration: None,
+            portrait: None,
+        });
     }
 
     /// C4Command::Fail's mode-gated ExecFail tail. CommandStack decides the

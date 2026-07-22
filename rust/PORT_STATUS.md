@@ -76,6 +76,11 @@ creation/Enter/removal order synchronously, including custom recipes, live
 same-call inventory, component RNG, controller transfer, and real anvil/fish paths.
 Far Worlds construction now honors the terrain flag: footprints clear, nearby
 ground rises, and granite basements exist before `Construction` runs.
+`ConstructionCheck` rejections leave the C++ red feedback on the calling
+object for every branch (undefined id, unbuildable definition, no room, no
+level ground, blocker name) through both script `CreateConstruction` and the
+Construct command; Deep Sea's underwater conkit loop is pinned end to end
+against the native binary, including a byte-identical 267-column site survey.
 `GetDefCoreVal` reflects raw DefCore `CollectionLimit`/`GrabPutGet` with C++
 section/index rules. Legacy loading retains vehicle/base/component flags and
 `Exclusive`/`Edible`/`Prey`/`AttractLightning`/`NoFight`. Arctic's occupied

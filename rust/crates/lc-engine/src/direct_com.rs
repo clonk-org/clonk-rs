@@ -6145,7 +6145,7 @@ impl Engine {
         });
     }
 
-    fn object_message_name(&self, object_id: ObjectId) -> String {
+    pub(crate) fn object_message_name(&self, object_id: ObjectId) -> String {
         self.find_object_index(object_id)
             .map(|index| &self.objects[index])
             .and_then(|object| {

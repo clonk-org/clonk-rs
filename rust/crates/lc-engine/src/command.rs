@@ -8920,7 +8920,26 @@ mod tests {
         continue_construct_script(&mut blocked_state);
         let blocked = blocked_state.step(&blocked_ctx);
         assert_eq!(blocked.status, CommandStatus::Failed);
-        assert!(blocked.events.is_empty(), "failed checks retain the conkit");
+        assert!(
+            !blocked
+                .events
+                .iter()
+                .any(|event| matches!(event, CommandEvent::SpawnConstruction { .. })),
+            "failed checks retain the conkit"
+        );
+        // The rejected site check reports the C++ IDS_OBJ_NOOTHER feedback
+        // naming the overlap blocker (C4Landscape.cpp:2159-2163).
+        assert!(
+            blocked.events.iter().any(|event| matches!(
+                event,
+                CommandEvent::ConstructionCheckRejected {
+                    failure: ConstructionCheckFailure::Blocked(blocked_by),
+                    ..
+                } if *blocked_by == blocker_id
+            )),
+            "unexpected events: {:?}",
+            blocked.events
+        );
     }
 
     #[test]
@@ -17878,6 +17897,15 @@ pub enum CommandEvent {
         #[serde(skip)]
         command_instance_id: u64,
     },
+    /// ConstructionCheck rejected Construct's site: emit the localized
+    /// `GameMsgObject(..., cObj, FRed)` feedback before the appended
+    /// FailureFeedback event (C4Command.cpp:1797-1801;
+    /// C4Landscape.cpp:2131-2163).
+    ConstructionCheckRejected {
+        actor_id: ObjectId,
+        definition_id: DefinitionId,
+        failure: ConstructionCheckFailure,
+    },
     /// Construct's validated native creation tail: create the Con=1
     /// object, consume the conkit, then resume this exact command to
     /// Finish(true) and add Build in the same Execute.
@@ -23972,12 +24000,30 @@ struct ConstructState {
     execute_move_to_range: Option<i32>,
 }
 
+/// A `ConstructionCheck` reject with the branch C++ reports through
+/// `GameMsgObject(..., pByObj, FRed)` when a caller object is present
+/// (C4Landscape.cpp:2131-2163). `Blocked` retains the overlapping object so
+/// message emission can resolve its live display name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConstructionCheckFailure {
+    /// `!ndef->Constructable` -> IDS_OBJ_NOCON.
+    NotConstructable,
+    /// Too much solid inside the body rect -> IDS_OBJ_NOROOM.
+    NoRoom,
+    /// Missing solid support strip below -> IDS_OBJ_NOLEVEL.
+    NoLevel,
+    /// `Game.OverlapObject` hit -> IDS_OBJ_NOOTHER with the blocker's name.
+    Blocked(ObjectId),
+}
+
 /// Side-effect-free core of `ConstructionCheck` (C4Landscape.cpp:2125-2169).
 ///
 /// Command execution and local construction-drag previews must use the same
 /// terrain/support/object-overlap predicate. The caller supplies the overlap
 /// lookup because command execution reads its frozen command snapshots while
-/// the public preview API reads the live object list.
+/// the public preview API reads the live object list. `None` means the site
+/// is legal; callers with a C++ `pByObj` turn the failure into the localized
+/// red feedback message.
 pub(crate) fn construction_check<F>(
     constructable: bool,
     shape: Option<DefinitionRect>,
@@ -23986,12 +24032,12 @@ pub(crate) fn construction_check<F>(
     site: Vector2,
     landscape: Option<&crate::Landscape>,
     overlaps: F,
-) -> bool
+) -> Option<ConstructionCheckFailure>
 where
-    F: FnOnce(i32, i32, i32, i32, i32) -> bool,
+    F: FnOnce(i32, i32, i32, i32, i32) -> Option<ObjectId>,
 {
     if !constructable {
-        return false;
+        return Some(ConstructionCheckFailure::NotConstructable);
     }
 
     let (width, height) = shape
@@ -24002,7 +24048,7 @@ where
     let top = site.y - effective_height;
 
     let Some(landscape) = landscape else {
-        return true;
+        return None;
     };
 
     let solid_count = (top..site.y)
@@ -24010,16 +24056,19 @@ where
         .filter(|&(x, y)| landscape.is_solid_at(x, y))
         .count()
         .min(i32::MAX as usize) as i32;
+    if solid_count > width * effective_height / 20 {
+        return Some(ConstructionCheckFailure::NoRoom);
+    }
     let support_count = (site.y..site.y + 5)
         .flat_map(|y| (left..left + width).map(move |x| (x, y)))
         .filter(|&(x, y)| landscape.is_solid_at(x, y))
         .count()
         .min(i32::MAX as usize) as i32;
-    if solid_count > width * effective_height / 20 || support_count < width * 2 {
-        return false;
+    if support_count < width * 2 {
+        return Some(ConstructionCheckFailure::NoLevel);
     }
 
-    !overlaps(left, top, width, effective_height, category)
+    overlaps(left, top, width, effective_height, category).map(ConstructionCheckFailure::Blocked)
 }
 
 impl ConstructState {
@@ -24086,16 +24135,33 @@ impl ConstructState {
         height: i32,
         category: i32,
     ) -> bool {
-        ctx.objects.values().any(|object| {
-            let shape = object.raw_shape_rect();
-            object.is_status_active()
-                && object.container.is_none()
-                && object.category & category & CATEGORY_SORT_LIMIT != 0
-                && x < shape.x + shape.width
-                && shape.x < x + width
-                && y < shape.y + shape.height
-                && shape.y < y + height
-        })
+        Self::overlapping_construction_object(ctx, x, y, width, height, category).is_some()
+    }
+
+    fn overlapping_construction_object(
+        ctx: &CommandRuntimeContext<'_>,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        category: i32,
+    ) -> Option<ObjectId> {
+        ctx.objects
+            .values()
+            .filter(|object| {
+                let shape = object.raw_shape_rect();
+                object.is_status_active()
+                    && object.container.is_none()
+                    && object.category & category & CATEGORY_SORT_LIMIT != 0
+                    && x < shape.x + shape.width
+                    && shape.x < x + width
+                    && y < shape.y + shape.height
+                    && shape.y < y + height
+            })
+            // Game.OverlapObject walks the sector object lists in master
+            // order; the frozen snapshots preserve that order key.
+            .min_by_key(|object| (object.master_list_order, object.id))
+            .map(|object| object.id)
     }
 
     fn find_construction_site(
@@ -24127,7 +24193,7 @@ impl ConstructState {
         ctx: &CommandRuntimeContext<'_>,
         definition: &CommandDefinitionSnapshot,
         site: Vector2,
-    ) -> bool {
+    ) -> Option<ConstructionCheckFailure> {
         construction_check(
             definition.constructable,
             definition.shape,
@@ -24136,7 +24202,7 @@ impl ConstructState {
             site,
             ctx.landscape,
             |left, top, width, height, category| {
-                Self::overlaps_construction_rect(ctx, left, top, width, height, category)
+                Self::overlapping_construction_object(ctx, left, top, width, height, category)
             },
         )
     }
@@ -24411,8 +24477,16 @@ impl ConstructState {
                     .with_operations(vec![CommandOperation::PushFront(request)]);
             }
 
-            if !self.construction_check(ctx, definition, site) {
-                return CommandStepResult::failed(None);
+            if let Some(failure) = self.construction_check(ctx, definition, site) {
+                // ConstructionCheck's red feedback precedes C4Command::Fail
+                // (C4Command.cpp:1797-1801; C4Landscape.cpp:2131-2163).
+                return CommandStepResult::failed(None).with_events(vec![
+                    CommandEvent::ConstructionCheckRejected {
+                        actor_id: ctx.object.id,
+                        definition_id: definition_id.clone(),
+                        failure,
+                    },
+                ]);
             }
 
             self.spawn_requested = true;

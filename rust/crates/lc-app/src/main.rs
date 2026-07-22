@@ -4709,6 +4709,36 @@ fn object_no_dig_resource_string(table: &RuntimeLanguageTable) -> String {
         .unwrap_or_else(|| "[Undefined: IDS_OBJ_NODIG]".to_string())
 }
 
+/// `LoadResStr` bundle behind ConstructionCheck's red failure feedback:
+/// IDS_OBJ_UNDEF, IDS_OBJ_NOCON, IDS_OBJ_NOROOM, IDS_OBJ_NOLEVEL,
+/// IDS_OBJ_NOOTHER (C4Landscape.cpp:2131-2163).
+fn construction_check_resource_strings(table: &RuntimeLanguageTable) -> [String; 5] {
+    let get = |key: &str| {
+        table
+            .entries
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| format!("[Undefined: {key}]"))
+    };
+    [
+        get("IDS_OBJ_UNDEF"),
+        get("IDS_OBJ_NOCON"),
+        get("IDS_OBJ_NOROOM"),
+        get("IDS_OBJ_NOLEVEL"),
+        get("IDS_OBJ_NOOTHER"),
+    ]
+}
+
+fn default_construction_check_feedback() -> [String; 5] {
+    [
+        "Structure %s undefined.".to_owned(),
+        "%s cannot|be built.".to_owned(),
+        "Not enough room!".to_owned(),
+        "No level ground!".to_owned(),
+        "%s is in the way.".to_owned(),
+    ]
+}
+
 fn default_rank_resource_names(table: &RuntimeLanguageTable) -> Vec<String> {
     table
         .entries
@@ -15186,6 +15216,9 @@ struct GameApp {
     /// Process-global localized `IDS_OBJ_NODIG`, reinstalled on every fresh
     /// engine and refreshed immediately after an Options language change.
     object_no_dig: String,
+    /// Localized ConstructionCheck feedback bundle, managed exactly like
+    /// `object_no_dig`.
+    construction_check_feedback: [String; 5],
     /// Game.Rank names frozen by the latest C4Game::PreInit analogue. Startup
     /// Options may reload the process language table afterward, but a game
     /// started from that same startup session retains these names.
@@ -28135,6 +28168,10 @@ impl GameApp {
             .as_ref()
             .map(|table| object_no_dig_resource_string(table))
             .unwrap_or_else(|_| "%s cannot dig.".to_owned());
+        let construction_check_feedback = runtime_language_table
+            .as_ref()
+            .map(|table| construction_check_resource_strings(table))
+            .unwrap_or_else(|_| default_construction_check_feedback());
         let default_rank_names = runtime_language_table
             .as_ref()
             .ok()
@@ -28153,6 +28190,17 @@ impl GameApp {
             needed_material_none.clone(),
         );
         engine.set_object_no_dig_resource_string(object_no_dig.clone());
+        {
+            let [undefined, no_construction, no_room, no_level, no_other] =
+                construction_check_feedback.clone();
+            engine.set_construction_check_resource_strings(
+                undefined,
+                no_construction,
+                no_room,
+                no_level,
+                no_other,
+            );
+        }
         if let Some(names) = default_rank_names.as_ref() {
             engine.set_default_rank_names(names.clone());
         }
@@ -28180,6 +28228,7 @@ impl GameApp {
             needed_material_need,
             needed_material_none,
             object_no_dig,
+            construction_check_feedback,
             default_rank_names,
             loaded_default_rank_names,
             startup_tooltip_resources,
@@ -32034,6 +32083,17 @@ impl GameApp {
         );
         self.engine
             .set_object_no_dig_resource_string(self.object_no_dig.clone());
+        {
+            let [undefined, no_construction, no_room, no_level, no_other] =
+                self.construction_check_feedback.clone();
+            self.engine.set_construction_check_resource_strings(
+                undefined,
+                no_construction,
+                no_room,
+                no_level,
+                no_other,
+            );
+        }
         if let Some(names) = self.default_rank_names.as_ref() {
             self.engine.set_default_rank_names(names.clone());
         }
@@ -32055,6 +32115,17 @@ impl GameApp {
             self.needed_material_none.clone(),
         );
         engine.set_object_no_dig_resource_string(self.object_no_dig.clone());
+        {
+            let [undefined, no_construction, no_room, no_level, no_other] =
+                self.construction_check_feedback.clone();
+            engine.set_construction_check_resource_strings(
+                undefined,
+                no_construction,
+                no_room,
+                no_level,
+                no_other,
+            );
+        }
         if let Some(names) = self.default_rank_names.as_ref() {
             engine.set_default_rank_names(names.clone());
         }
@@ -73550,6 +73621,19 @@ impl GameApp {
             .set_needed_material_resource_strings(needed_material_need, needed_material_none);
         self.engine
             .set_object_no_dig_resource_string(object_no_dig);
+        let construction_check_feedback = construction_check_resource_strings(&table);
+        self.construction_check_feedback = construction_check_feedback.clone();
+        {
+            let [undefined, no_construction, no_room, no_level, no_other] =
+                construction_check_feedback;
+            self.engine.set_construction_check_resource_strings(
+                undefined,
+                no_construction,
+                no_room,
+                no_level,
+                no_other,
+            );
+        }
 
         self.runtime_help_text_cache = OnceLock::new();
         let _ = self

@@ -1998,6 +1998,9 @@ pub struct HostWorldContext {
     next_object_id: u64,
     team_home_base_rule: bool,
     needed_material_strings: Rc<crate::NeededMaterialStrings>,
+    /// Process-local ConstructionCheck feedback templates
+    /// (C4Landscape.cpp:2131-2163).
+    construction_check_strings: Rc<crate::ConstructionCheckStrings>,
     /// Process-local `IDS_OBJ_NODIG` template used by synchronous queued-Dig
     /// execution inside a script callback.
     object_no_dig_resource_string: Rc<String>,
@@ -2218,6 +2221,7 @@ impl Default for HostWorldContext {
             crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
             team_home_base_rule: false,
             needed_material_strings: Rc::new(crate::NeededMaterialStrings::default()),
+            construction_check_strings: Rc::new(crate::ConstructionCheckStrings::default()),
             object_no_dig_resource_string: Rc::new("%s cannot dig.".to_string()),
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
@@ -2349,6 +2353,14 @@ impl HostWorldContext {
         strings: Rc<crate::NeededMaterialStrings>,
     ) -> Self {
         self.needed_material_strings = strings;
+        self
+    }
+
+    pub(crate) fn with_construction_check_strings(
+        mut self,
+        strings: Rc<crate::ConstructionCheckStrings>,
+    ) -> Self {
+        self.construction_check_strings = strings;
         self
     }
 
@@ -2553,6 +2565,7 @@ impl HostWorldContext {
             next_object_id,
             team_home_base_rule,
             needed_material_strings: Rc::new(crate::NeededMaterialStrings::default()),
+            construction_check_strings: Rc::new(crate::ConstructionCheckStrings::default()),
             object_no_dig_resource_string: Rc::new("%s cannot dig.".to_string()),
             league_game: false,
             game_tick_delay_ms: Rc::new(Cell::new(crate::DEFAULT_GAME_TICK_DELAY_MS)),
@@ -39445,8 +39458,19 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             RuntimeError::new("CreateConstruction requires an active engine context")
         })?;
 
-        // C4Id2Def failure: no site, silent nullptr (C4Game.cpp:1183).
+        // ConstructionCheck resolves the definition first and reports
+        // IDS_OBJ_UNDEF through the calling object when a site check was
+        // requested (C4Landscape.cpp:2131-2138); the later
+        // CreateObjectConstruction C4Id2Def failure stays a silent nullptr
+        // (C4Game.cpp:1183).
         if context.world.definition_known(&definition) == Some(false) {
+            if check_site {
+                let text = context
+                    .world
+                    .construction_check_strings
+                    .format_undefined(&definition);
+                register_construction_check_feedback(context, text);
+            }
             return Ok(None);
         }
 
@@ -39528,8 +39552,39 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         let construction_value =
             ((i64::from(completion_percent) * i64::from(FULL_CON)) / 100) as i32;
 
-        if check_site && !construction_check(context, &definition, &metadata, position)? {
-            return Ok(None);
+        if check_site {
+            if let Some(failure) = construction_check(context, &definition, &metadata, position)? {
+                // GameMsgObject(..., cthr->Obj, FRed) feedback per failed
+                // branch (C4Landscape.cpp:2139-2163).
+                let text = match failure {
+                    crate::command::ConstructionCheckFailure::NotConstructable => {
+                        let name = if metadata.name.is_empty() {
+                            definition.clone()
+                        } else {
+                            metadata.name.clone()
+                        };
+                        context
+                            .world
+                            .construction_check_strings
+                            .format_not_constructable(&name)
+                    }
+                    crate::command::ConstructionCheckFailure::NoRoom => {
+                        context.world.construction_check_strings.no_room.clone()
+                    }
+                    crate::command::ConstructionCheckFailure::NoLevel => {
+                        context.world.construction_check_strings.no_level.clone()
+                    }
+                    crate::command::ConstructionCheckFailure::Blocked(blocker) => {
+                        let name = context
+                            .object_effective_name(blocker)
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or_default();
+                        context.world.construction_check_strings.format_blocked(&name)
+                    }
+                };
+                register_construction_check_feedback(context, text);
+                return Ok(None);
+            }
         }
 
         if terrain_flag {
@@ -39804,14 +39859,39 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// `GameMsgObject(szMsg, pByObj, FRed)` for a failed ConstructionCheck: the
+/// red feedback lands on the calling object and only when one exists
+/// (C4Landscape.cpp:2131-2163). Global calls stay silent like C++'s null
+/// `pByObj`.
+fn register_construction_check_feedback(context: &mut EffectHostContext, text: String) {
+    let Some(target) = context.object_context().map(ObjectScopeContext::id) else {
+        return;
+    };
+    context.register_message(MessageCommand::Add(MessageSpec {
+        kind: MessageKind::Target,
+        text,
+        target: Some(target),
+        player: None,
+        offset: Vector2::ZERO,
+        color: crate::CONSTRUCTION_CHECK_MESSAGE_COLOR,
+        flags: 0,
+        width: None,
+        decoration: None,
+        frame_decoration: None,
+        portrait: None,
+    }));
+}
+
 fn construction_check(
     context: &EffectHostContext,
     _definition_id: &str,
     metadata: &DefinitionMetadata,
     position: Vector2,
-) -> Result<bool, RuntimeError> {
+) -> Result<Option<crate::command::ConstructionCheckFailure>, RuntimeError> {
+    use crate::command::ConstructionCheckFailure;
+
     if !metadata.constructable {
-        return Ok(false);
+        return Ok(Some(ConstructionCheckFailure::NotConstructable));
     }
 
     let (raw_width, raw_height) = metadata
@@ -39828,7 +39908,7 @@ fn construction_check(
     let rect_bottom = position.y;
 
     let Some(landscape) = context.landscape_ref() else {
-        return Ok(true);
+        return Ok(None);
     };
 
     // ConstructionCheck uses AreaSolidCount over the actual pixel plane;
@@ -39848,16 +39928,16 @@ fn construction_check(
     let area_threshold = ((i64::from(width) * i64::from(effective_height)) / 20)
         .clamp(0, i64::from(i32::MAX)) as i32;
     if solid_count > area_threshold {
-        return Ok(false);
+        return Ok(Some(ConstructionCheckFailure::NoRoom));
     }
 
     if support_count < width.saturating_mul(2) {
-        return Ok(false);
+        return Ok(Some(ConstructionCheckFailure::NoLevel));
     }
 
     let overlap_mask = metadata.category & CATEGORY_SORT_LIMIT;
     if overlap_mask == 0 {
-        return Ok(true);
+        return Ok(None);
     }
 
     let current_object_id = context.object_context().map(|object| object.id());
@@ -39885,11 +39965,11 @@ fn construction_check(
             rect_bottom.wrapping_sub(rect_top),
         );
         if rects_overlap_cpp(requested, candidate) {
-            return Ok(false);
+            return Ok(Some(ConstructionCheckFailure::Blocked(other.id)));
         }
     }
 
-    Ok(true)
+    Ok(None)
 }
 
 /// `C4AUL_MAX_Par` (C4Aul.h:54): the NumVars/Par slot count that bounds
@@ -39981,8 +40061,9 @@ fn find_construction_site(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Nil);
         };
         // Construction check at the starting position (:1970-1971): the
-        // caller's vars stay untouched on an immediate hit.
-        if construction_check(context, &definition, metadata, Vector2::new(v1, v2))? {
+        // caller's vars stay untouched on an immediate hit. C++ passes no
+        // pByObj here, so a failure produces no feedback (:1964).
+        if construction_check(context, &definition, metadata, Vector2::new(v1, v2))?.is_none() {
             return Ok(Value::Bool(true));
         }
         // Search for real (:1973-1977) with pDef->Shape.Wdt/Hgt and
