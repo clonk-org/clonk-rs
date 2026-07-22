@@ -1,0 +1,2364 @@
+//! `impl GameApp` — options & configuration methods.
+//!
+//! Moved verbatim from the root `impl GameApp` block in `main.rs`
+//! (step 6a of the decomposition campaign, see rust/REFACTOR_PLAN.md).
+//! Structural only: same crate, same type, same method bodies.
+
+use super::*;
+
+impl GameApp {
+    pub(crate) fn apply_classic_game_option_overrides(&mut self) {
+        self.scenario_game_options.set_server_signup(
+            self.classic_command_line.master_server_signup,
+            self.classic_command_line.league_server_signup,
+        );
+        if let Some(fair_crew) = self.classic_command_line.fair_crew {
+            self.startup_view_flags.fair_crew = fair_crew;
+            self.scenario_game_options
+                .set_lobby_fair_crew(fair_crew, false);
+        }
+        if let Some(password) = self.classic_command_line.password.as_ref() {
+            self.scenario_game_options.set_password(password.clone());
+        }
+        if let Some(comment) = self.classic_command_line.comment.as_ref() {
+            self.scenario_game_options.set_comment(comment.clone());
+        }
+        if let Some(runtime_join) = self.classic_command_line.runtime_join {
+            self.runtime_network_join_allowed = Some(runtime_join);
+        }
+    }
+
+    pub(crate) fn sync_scenario_game_option_bounds(&mut self) {
+        let Some(fonts) = self.assets.clonk_fonts.as_deref() else {
+            return;
+        };
+        let surface = self.graphics.surface();
+        let bounds = if let Some(lobby) = self.classic_host_lobby.as_ref() {
+            lobby
+                .controller
+                .layout(surface.width() as i32, surface.height() as i32, fonts)
+                .game_option_strip
+        } else if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.sync_classic_controller();
+            lobby
+                .controller
+                .layout(surface.width() as i32, surface.height() as i32, fonts)
+                .game_option_strip
+        } else {
+            startup_scensel_game_option_bounds(
+                surface.width() as i32,
+                surface.height() as i32,
+                fonts,
+            )
+        };
+        self.scenario_game_options.set_bounds(bounds);
+    }
+
+
+    pub(crate) fn sync_scenario_game_option_constraint(&mut self) {
+        let constraint = scenario_fair_crew_constraint(self.menu_state.selected_scenario());
+        self.scenario_game_options
+            .set_selector_fair_crew_constraint(constraint);
+    }
+
+    pub(crate) fn league_player_auth_settings(&self) -> clonk_network::LeagueAuthRequestHead {
+        if let Some(auth) = self.league_auth_session.as_ref() {
+            return auth.clone();
+        }
+        match self.network_mode.as_ref() {
+            Some(NetworkMode::Client(settings)) => settings.league_auth.clone(),
+            Some(NetworkMode::Host(_)) | None => {
+                load_league_auth_settings(self.app_paths.as_ref())
+            }
+        }
+    }
+
+    pub(crate) fn set_league_player_auth_settings(&mut self, auth: clonk_network::LeagueAuthRequestHead) {
+        if let Some(NetworkMode::Client(settings)) = self.network_mode.as_mut() {
+            settings.league_auth = auth.clone();
+        }
+        if let Some(paths) = self.app_paths.as_ref() {
+            if let Err(error) = persist_league_account_preference(paths, &auth.account) {
+                tracing::warn!(%error, "failed to persist league account preference");
+            }
+        }
+        self.league_auth_session = Some(auth);
+    }
+
+    pub(crate) fn current_options_graphic(&self) -> Option<ImageData> {
+        self.active_game_graphics
+            .as_ref()
+            .and_then(|resources| resources.options.as_deref().cloned())
+            .or_else(|| self.assets.dialog_image("Options.png"))
+    }
+
+    pub(crate) fn handle_options_tab_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::Options
+            || key != VirtualKeyCode::Tab
+        {
+            return Ok(false);
+        }
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let route = if modifiers.is_empty() {
+            Some((false, false))
+        } else if modifiers == ModifiersState::SHIFT {
+            Some((false, true))
+        } else if modifiers == ModifiersState::CTRL {
+            Some((true, false))
+        } else if modifiers == (ModifiersState::CTRL | ModifiersState::SHIFT) {
+            Some((true, true))
+        } else {
+            None
+        };
+        let Some((cycle_sheet, backwards)) = route else {
+            // No other exact Alt/Ctrl/Shift mask owns GUIAdvanceFocus or the
+            // tabular's Ctrl+Tab bindings. Consume it before the legacy
+            // modifier-blind KeyCode mapping can invent a plain Tab.
+            return Ok(true);
+        };
+        let actions = if state == ElementState::Pressed {
+            self.startup_options_dialog
+                .as_mut()
+                .map(|dialog| {
+                    if cycle_sheet {
+                        dialog.handle_ctrl_tab(backwards)
+                    } else {
+                        dialog.handle_tab(backwards)
+                    }
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.process_options_dialog_actions(actions)?;
+        Ok(true)
+    }
+
+    pub(crate) fn options_modified_gui_key_is_inert(&self, key: VirtualKeyCode) -> bool {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::Options
+            || key == VirtualKeyCode::Tab
+            || map_key_code(key).is_none()
+        {
+            return false;
+        }
+        // C4KeyCodeEx matches the exact Alt/Ctrl/Shift mask for the Options
+        // dialog bindings. Logo is not part of that mask, so Logo-only input
+        // intentionally remains equivalent to the bare key.
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if modifiers == ModifiersState::ALT
+            && matches!(key, VirtualKeyCode::Down | VirtualKeyCode::Space)
+            && self
+                .startup_options_dialog
+                .as_ref()
+                .is_some_and(|dialog| {
+                    matches!(
+                        dialog.focused_program_control(),
+                        Some(
+                            clonk_frontend::startup_options_dlg::OptionsProgramFocusTarget::LanguageCombo
+                                | clonk_frontend::startup_options_dlg::OptionsProgramFocusTarget::FontFaceCombo
+                                | clonk_frontend::startup_options_dlg::OptionsProgramFocusTarget::FontSizeCombo
+                        )
+                    )
+                })
+        {
+            return false;
+        }
+        !modifiers.is_empty()
+    }
+
+    pub(crate) fn handle_game_option_input_dialog_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.game_option_input_dialog.is_none() {
+            return Ok(false);
+        }
+        if self.running_chat_controller().is_some() && !self.running_chat_keyboard_active() {
+            return Ok(false);
+        }
+        if self.context_menu.is_some() {
+            return Ok(true);
+        }
+        let Some(layout) = self.game_option_input_layout() else {
+            return Ok(true);
+        };
+        let Some(fonts) = self.assets.clonk_fonts.clone() else {
+            tracing::error!("classic input dialog lost its required GUI fonts");
+            return Ok(true);
+        };
+        let modifiers = InputDialogKeyModifiers {
+            shift: self.keyboard_modifiers.shift(),
+            control: self.keyboard_modifiers.ctrl(),
+        };
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let hotkey_modifiers = c4_modifiers == ModifiersState::ALT
+            || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
+        let dialog_hotkey = hotkey_modifiers
+            .then(|| context_menu_hotkey(key))
+            .flatten();
+        if hotkey_modifiers && dialog_hotkey.is_none() {
+            return Ok(false);
+        }
+        if let Some(hotkey) = dialog_hotkey {
+            if state == ElementState::Released {
+                return Ok(false);
+            }
+            if !self
+                .game_option_input_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.controller.has_hotkey(hotkey))
+            {
+                return Ok(false);
+            }
+        }
+        let clipboard_text = || {
+            arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.get_text())
+                .ok()
+        };
+        let mut capture_release = false;
+        let actions = if state == ElementState::Pressed
+            && key == VirtualKeyCode::Apps
+            && c4_modifiers.is_empty()
+        {
+            self.game_option_input_dialog
+                .as_mut()
+                .map(|dialog| {
+                    dialog.controller.request_context_menu_from_key(
+                        &layout,
+                        clipboard_text_available(),
+                        &InputDialogContextLabels::default(),
+                    )
+                })
+                .map(|outcome| {
+                    capture_release = outcome.capture_release;
+                    outcome.actions
+                })
+                .unwrap_or_default()
+        } else if state == ElementState::Pressed
+            && c4_modifiers == ModifiersState::CTRL
+            && matches!(
+                key,
+                VirtualKeyCode::A
+                    | VirtualKeyCode::C
+                    | VirtualKeyCode::V
+                    | VirtualKeyCode::X
+            )
+        {
+            let shortcut = match key {
+                VirtualKeyCode::C => Some(InputDialogClipboardShortcut::Copy),
+                VirtualKeyCode::X => Some(InputDialogClipboardShortcut::Cut),
+                VirtualKeyCode::V => Some(InputDialogClipboardShortcut::Paste),
+                VirtualKeyCode::A => Some(InputDialogClipboardShortcut::SelectAll),
+                _ => None,
+            };
+            let shortcut = shortcut.expect("guarded classic edit shortcut");
+            let clipboard = matches!(shortcut, InputDialogClipboardShortcut::Paste)
+                .then(clipboard_text)
+                .flatten();
+            self.game_option_input_dialog
+                .as_mut()
+                .map(|dialog| {
+                    dialog.controller.handle_clipboard_shortcut(
+                        shortcut,
+                        clipboard.as_deref(),
+                        &layout,
+                        &fonts.text,
+                    )
+                })
+                .map(|outcome| {
+                    capture_release = outcome.capture_release;
+                    outcome.actions
+                })
+                .unwrap_or_default()
+        } else if state == ElementState::Pressed {
+            if !c4_modifiers.is_empty()
+                && matches!(
+                    key,
+                    VirtualKeyCode::Return
+                        | VirtualKeyCode::NumpadEnter
+                        | VirtualKeyCode::Escape
+                )
+            {
+                Vec::new()
+            } else {
+                let edit_key = match key {
+                    VirtualKeyCode::Back => Some(InputDialogEditKey::Backspace),
+                    VirtualKeyCode::Delete => Some(InputDialogEditKey::Delete),
+                    VirtualKeyCode::Home => Some(InputDialogEditKey::Home),
+                    VirtualKeyCode::End => Some(InputDialogEditKey::End),
+                    VirtualKeyCode::Left => Some(InputDialogEditKey::Left),
+                    VirtualKeyCode::Right => Some(InputDialogEditKey::Right),
+                    _ => None,
+                };
+                if edit_key.is_some() && c4_modifiers.alt() {
+                    Vec::new()
+                } else if let Some(edit_key) = edit_key {
+                    self.game_option_input_dialog
+                        .as_mut()
+                        .map(|dialog| {
+                            dialog.controller.handle_edit_key_down(
+                                edit_key,
+                                modifiers,
+                                &layout,
+                                &fonts.text,
+                            )
+                        })
+                        .unwrap_or_default()
+                } else if hotkey_modifiers {
+                    dialog_hotkey
+                        .and_then(|hotkey| {
+                            self.game_option_input_dialog
+                                .as_mut()
+                                .map(|dialog| dialog.controller.handle_hotkey(hotkey))
+                        })
+                        .unwrap_or_default()
+                } else if let Some(gui_key) = map_key_code(key) {
+                    self.game_option_input_dialog
+                        .as_mut()
+                        .map(|dialog| {
+                            dialog.controller.route_key_down(
+                                gui_key,
+                                modifiers.shift,
+                                &layout,
+                                &fonts.text,
+                            )
+                        })
+                        .map(|outcome| {
+                            capture_release = outcome.capture_release;
+                            outcome.actions
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            }
+        } else if let Some(gui_key) = map_key_code(key) {
+            self.game_option_input_dialog
+                .as_mut()
+                .map(|dialog| dialog.controller.route_key_up(gui_key))
+                .map(|outcome| outcome.actions)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if state == ElementState::Pressed && capture_release {
+            self.game_option_input_consumed_keys.insert(key);
+        }
+        self.finish_game_option_input_dialog_actions(actions)?;
+        // C4GUI::Screen routes every key exclusively to the top modal. Some
+        // edit/controller bindings intentionally report pass-through, but it
+        // is pass-through within the modal dialog, never to ScenarioBrowser.
+        Ok(true)
+    }
+
+    pub(crate) fn handle_scenario_game_option_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::ScenarioBrowser
+            || self.game_option_input_dialog.is_some()
+            || self.context_menu.is_some()
+        {
+            return Ok(false);
+        }
+        let release_latched =
+            state == ElementState::Released && self.game_option_consumed_keys.remove(&key);
+        let hotkey = context_menu_hotkey(key);
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if c4_modifiers.alt()
+            && !c4_modifiers.ctrl()
+            && hotkey.is_some_and(|hotkey| {
+                self.scenario_game_options
+                    .context()
+                    .buttons()
+                    .iter()
+                    .any(|button| button.hotkey() == hotkey)
+            })
+        {
+            if state == ElementState::Pressed {
+                let actions = self
+                    .scenario_game_options
+                    .handle_hotkey(hotkey.expect("checked above"));
+                self.finish_game_option_input(actions)?;
+                self.game_option_consumed_keys.insert(key);
+            }
+            return Ok(true);
+        }
+        let Some(gui_key) = map_key_code(key) else {
+            return Ok(release_latched);
+        };
+        let options_focused = self.scenario_game_options.focused_button().is_some();
+        if gui_key == KeyCode::Tab && state == ElementState::Pressed {
+            if options_focused {
+                self.menu_state
+                    .set_dialog_focus(ScenselDialogFocus::Options);
+                let outcome = self
+                    .scenario_game_options
+                    .handle_key_down_with_tab_direction(
+                        KeyCode::Tab,
+                        self.keyboard_modifiers.shift(),
+                    );
+                self.finish_game_option_input(outcome.actions)?;
+                self.game_option_consumed_keys.insert(key);
+                return Ok(true);
+            }
+            self.advance_scensel_dialog_focus(self.keyboard_modifiers.shift());
+            self.game_option_consumed_keys.insert(key);
+            return Ok(true);
+        }
+        if !options_focused {
+            return Ok(release_latched);
+        }
+        self.menu_state
+            .set_dialog_focus(ScenselDialogFocus::Options);
+        let outcome = match state {
+            ElementState::Pressed => self.scenario_game_options.handle_key_down(gui_key),
+            ElementState::Released => self.scenario_game_options.handle_key_up(gui_key),
+        };
+        if state == ElementState::Pressed && outcome.captured {
+            self.game_option_consumed_keys.insert(key);
+        }
+        self.finish_game_option_input(outcome.actions)?;
+        Ok(outcome.captured || release_latched)
+    }
+
+    pub(crate) fn runtime_key_config(&self) -> Result<&RuntimeKeyConfig> {
+        self.runtime_key_config_cache
+            .get_or_init(|| {
+                load_runtime_global_key_config(self.app_paths.as_ref())
+                    .map_err(|error| format!("{error:#}"))
+            })
+            .as_ref()
+            .map_err(|detail| anyhow!(detail.clone()))
+    }
+
+    pub(crate) fn handle_options_control_capture_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        use clonk_frontend::startup_options_controls::ControlDevice;
+        let target = self
+            .message_dialogs
+            .last()
+            .and_then(|pending| match pending.continuation {
+                MessageDialogContinuation::OptionsControlCapture(target)
+                    if target.device == ControlDevice::Keyboard =>
+                {
+                    Some(target)
+                }
+                _ => None,
+            });
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        match state {
+            ElementState::Released => {
+                self.message_dialog_consumed_keys.remove(&key);
+                return Ok(true);
+            }
+            ElementState::Pressed => {
+                self.message_dialog_consumed_keys.insert(key);
+            }
+        }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if !c4_modifiers.is_empty() {
+            return Ok(true);
+        }
+        if !KeyboardBindings::is_supported_key(key) {
+            tracing::warn!(?key, "ignoring control capture for an unpersistable key");
+            return Ok(true);
+        }
+        let Some(id) = ControlBindingId::ALL.get(target.control).copied() else {
+            return Ok(true);
+        };
+        if !self.bindings.rebind_for_set(target.set, id, key) {
+            return Ok(true);
+        }
+        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+            dialog
+                .controls_mut()
+                .set_label(target, format_key_label(key));
+        }
+        self.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)?;
+        Ok(true)
+    }
+
+    pub(crate) fn options_keyboard_control_capture_active(&self) -> bool {
+        use clonk_frontend::startup_options_controls::ControlDevice;
+        self.message_dialogs.last().is_some_and(|pending| {
+            matches!(
+                pending.continuation,
+                MessageDialogContinuation::OptionsControlCapture(target)
+                    if target.device == ControlDevice::Keyboard
+            )
+        })
+    }
+
+    pub(crate) fn option_flags(&self, player: i32) -> OptionFlags {
+        let player_mouse = self
+            .engine
+            .player(player)
+            .map(|player| player.mouse_control() != 0);
+        // C4PlayerList::MouseControlTaken scans raw MouseControl flags on
+        // local players. This is deliberately not mouse_owner(): restored
+        // data may retain a raw flag after the process-global controller has
+        // been cleared.
+        let mouse_taken = self.local_controls.assignments().any(|assignment| {
+            self.engine
+                .player(assignment.owner)
+                .is_some_and(|player| player.mouse_control() != 0)
+        });
+        let mouse = player_mouse.unwrap_or(false);
+        OptionFlags {
+            sound: self
+                .audio
+                .as_ref()
+                .map(|audio| audio.options.sound_enabled)
+                .unwrap_or(false),
+            music: self
+                .audio
+                .as_ref()
+                .map(|audio| audio.options.music_enabled)
+                .unwrap_or(false),
+            mouse_shown: self.mouse_control_allowed
+                && player_mouse.is_some()
+                && (mouse || !mouse_taken),
+            mouse,
+        }
+    }
+
+    pub(crate) fn handle_game_option_input_dialog_gamepad_event(
+        &mut self,
+        event: GamepadEvent,
+    ) -> Result<(), EngineError> {
+        let layout = self.game_option_input_layout();
+        let fonts = self.assets.clonk_fonts.clone();
+        let actions = self
+            .game_option_input_dialog
+            .as_mut()
+            .map(|dialog| match event {
+                GamepadEvent::Direction {
+                    button: ControlButton::Left,
+                    state: ElementState::Pressed,
+                    ..
+                } => dialog.controller.handle_gamepad_direction(false),
+                GamepadEvent::Direction {
+                    button: ControlButton::Right,
+                    state: ElementState::Pressed,
+                    ..
+                } => dialog.controller.handle_gamepad_direction(true),
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Pressed,
+                    ..
+                } => layout
+                    .as_ref()
+                    .zip(fonts.as_deref())
+                    .map(|(layout, fonts)| {
+                        dialog
+                            .controller
+                            .handle_gamepad_low_down(layout, &fonts.text)
+                    })
+                    .unwrap_or_default(),
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Released,
+                    ..
+                } => dialog.controller.handle_gamepad_low_up(),
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                    ..
+                } => dialog.controller.handle_gamepad_high_down(),
+                GamepadEvent::Clear { .. } => {
+                    dialog.controller.cancel_interaction();
+                    Vec::new()
+                }
+                GamepadEvent::Axis { .. }
+                | GamepadEvent::Direction { .. }
+                | GamepadEvent::Button { .. }
+                | GamepadEvent::Action { .. }
+                | GamepadEvent::GuiButton { .. } => Vec::new(),
+            })
+            .unwrap_or_default();
+        self.finish_game_option_input_dialog_actions(actions)
+    }
+
+    pub(crate) fn publish_game_over_host_reference_with_config(
+        &mut self,
+        config: clonk_network::NetworkGameAdvertiserConfig,
+    ) {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return;
+        }
+        let Some(template) = self.advertised_game_reference.clone() else {
+            return;
+        };
+        let parameters = self
+            .host_join_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.parameters.clone())
+            .unwrap_or_else(|| template.parameters().clone());
+        let max_players = self
+            .engine
+            .max_players()
+            .unwrap_or_else(|| i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
+        let updated = match game_over_host_reference(
+            &template,
+            parameters,
+            &self.control_clients,
+            &self.control_player_infos,
+            self.engine.teams(),
+            max_players,
+            &self.snapshot,
+        ) {
+            Ok(reference) => reference,
+            Err(error) => {
+                tracing::error!(%error, "failed to rebuild game-over host reference");
+                return;
+            }
+        };
+
+        // The final reference is authoritative even if an optional listener
+        // update or one-shot rebind fails.
+        self.advertised_game_reference = Some(updated.clone());
+
+        if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+            if let Err(error) = advertiser.update_exact(&updated) {
+                tracing::error!(%error, "failed to update game-over host reference");
+            }
+        } else {
+            match clonk_network::NetworkGameAdvertiser::start_exact(config, updated.clone()) {
+                Ok(advertiser) => self.network_game_advertiser = Some(advertiser),
+                Err(error) => {
+                    tracing::warn!(%error, "game-over network advertising unavailable");
+                }
+            }
+        }
+    }
+
+    fn open_options_language_combo(&mut self) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::Options
+            || !self.message_dialogs.is_empty()
+            || self.game_over_dialog.is_some()
+            || self.context_menu.is_some()
+        {
+            return Ok(false);
+        }
+        let Some((anchor, entries)) = self.startup_options_dialog.as_ref().and_then(|dialog| {
+            let anchor = dialog.language_combo_anchor()?;
+            let entries = dialog
+                .program()
+                .language_infos
+                .iter()
+                .map(|info| {
+                    ContextMenuEntry::new(format!("{} - {}", info.code, info.name))
+                        .with_icon(ContextMenuIcon::Empty)
+                        .with_action(AppContextMenuCommand::OptionsLanguage(info.code.clone()))
+                })
+                .collect();
+            Some((anchor, entries))
+        }) else {
+            return Ok(false);
+        };
+        self.open_context_menu_at(entries, anchor)
+    }
+
+    fn open_options_font_face_combo(&mut self) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::Options
+            || !self.message_dialogs.is_empty()
+            || self.game_over_dialog.is_some()
+            || self.context_menu.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(anchor) = self
+            .startup_options_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.font_face_combo_anchor())
+        else {
+            return Ok(false);
+        };
+        let entries = clonk_frontend::startup_options_dlg::PROGRAM_FONT_FACES
+            .into_iter()
+            .map(|face| {
+                ContextMenuEntry::new(face)
+                    .with_icon(ContextMenuIcon::Empty)
+                    .with_action(AppContextMenuCommand::OptionsFontFace(face.to_string()))
+            })
+            .collect();
+        self.open_context_menu_at(entries, anchor)
+    }
+
+    fn open_options_font_size_combo(&mut self) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::Options
+            || !self.message_dialogs.is_empty()
+            || self.game_over_dialog.is_some()
+            || self.context_menu.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(anchor) = self
+            .startup_options_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.font_size_combo_anchor())
+        else {
+            return Ok(false);
+        };
+        let entries = clonk_frontend::startup_options_dlg::PROGRAM_FONT_SIZES
+            .into_iter()
+            .map(|size| {
+                ContextMenuEntry::new(size.to_string())
+                    .with_icon(ContextMenuIcon::Empty)
+                    .with_action(AppContextMenuCommand::OptionsFontSize(size))
+            })
+            .collect();
+        self.open_context_menu_at(entries, anchor)
+    }
+
+    fn open_options_display_mode_combo(&mut self) -> Result<bool, EngineError> {
+        use clonk_frontend::startup_options_graphics::GraphicsDisplayMode;
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::Options
+            || !self.message_dialogs.is_empty()
+            || self.context_menu.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(anchor) = self
+            .startup_options_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.graphics_display_combo_anchor())
+        else {
+            return Ok(false);
+        };
+        let entries = GraphicsDisplayMode::ALL
+            .into_iter()
+            .map(|mode| {
+                ContextMenuEntry::new(mode.label())
+                    .with_icon(ContextMenuIcon::Empty)
+                    .with_action(AppContextMenuCommand::OptionsDisplayMode(mode))
+            })
+            .collect();
+        self.open_context_menu_at(entries, anchor)
+    }
+
+    pub(crate) fn open_runtime_client_list_option_combo(
+        &mut self,
+        option: LobbyOptionKind,
+        anchor: GuiPoint,
+        minimum_width: i32,
+    ) -> Result<bool, EngineError> {
+        if self.context_menu_pointer_dismissed_lobby_option.take() == Some(option) {
+            return Ok(false);
+        }
+        if self.mode != AppMode::Running || self.context_menu.is_some() {
+            return Ok(false);
+        }
+        let Some(choices) = self.runtime_client_list.as_ref().and_then(|dialog| {
+            (!dialog.is_info_only()).then(|| {
+                dialog
+                    .option_rows()
+                    .iter()
+                    .find(|row| row.kind == option && row.editable && !row.choices.is_empty())
+                    .map(|row| row.choices.clone())
+            })?
+        }) else {
+            return Ok(false);
+        };
+        let entries = choices
+            .into_iter()
+            .map(|choice| {
+                ContextMenuEntry::new(choice.label)
+                    .with_tooltip(choice.tooltip)
+                    .with_icon(ContextMenuIcon::Empty)
+                    .with_action(AppContextMenuCommand::RuntimeClientOption {
+                        option,
+                        value: choice.id,
+                    })
+            })
+            .collect();
+        let opened =
+            self.open_context_menu_at_with_minimum_width(entries, anchor, minimum_width, None)?;
+        if opened {
+            self.set_context_menu_lobby_option(Some(option));
+        }
+        Ok(opened)
+    }
+
+    pub(crate) fn apply_runtime_client_list_option(
+        &mut self,
+        option: LobbyOptionKind,
+        value: i32,
+    ) -> Result<(), EngineError> {
+        let valid_choice = self.runtime_client_list.as_ref().is_some_and(|dialog| {
+            dialog.option_rows().iter().any(|row| {
+                row.kind == option
+                    && row.editable
+                    && row.choices.iter().any(|choice| choice.id == value)
+            })
+        });
+        if !valid_choice {
+            return Ok(());
+        }
+        match option {
+            LobbyOptionKind::ControlMode => {
+                if self.engine.is_control_host()
+                    && matches!(value, 0 | 1 | 2)
+                    && (!self.network_is_league || value != 2)
+                {
+                    self.change_running_network_control_mode(value);
+                }
+            }
+            LobbyOptionKind::ControlRate => {
+                if self.engine.is_control_host()
+                    && (1..=9).contains(&value)
+                {
+                    let current = self
+                        .network_control_clock
+                        .map(NetworkControlClock::control_rate)
+                        .unwrap_or_else(|| self.engine.control_rate());
+                    if value != current {
+                        self.submit_or_execute_running_control_set(0, value - current)?;
+                    }
+                }
+            }
+            LobbyOptionKind::RuntimeJoin => {
+                if matches!(self.runtime_network_role(), RuntimeNetworkRole::Host) {
+                    let allowed = value != 0;
+                    let result = self
+                        .network
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("runtime network is unavailable"))
+                        .and_then(|network| network.set_join_allowed(allowed));
+                    if let Err(error) = result {
+                        tracing::error!(%error, allowed, "failed to change runtime join admission");
+                        return Ok(());
+                    }
+                    self.runtime_network_join_allowed = Some(allowed);
+                    if let Some(NetworkMode::Host(HostSettings {
+                        prepared: Some(prepared),
+                        ..
+                    })) = self.network_mode.as_mut()
+                    {
+                        prepared.set_runtime_join_allowed(allowed);
+                    }
+                    self.persist_game_option_value(
+                        "Network",
+                        "NoRuntimeJoin",
+                        if allowed { "0" } else { "1" }.to_string(),
+                    );
+                    self.publish_running_host_reference();
+                    let labels = self.classic_lobby_option_labels();
+                    let message = if allowed {
+                        labels.runtime_join_free
+                    } else {
+                        labels.runtime_join_barred
+                    };
+                    let charset = load_runtime_language_table(self.app_paths.as_ref())
+                        .map(|table| table.charset)
+                        .unwrap_or(RuntimeHelpCharset::Windows1252);
+                    match self.prepare_runtime_flash_message(&message, charset) {
+                        Ok(message) => self.runtime_flash_message = message,
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to prepare runtime-join flash message")
+                        }
+                    }
+                }
+            }
+            LobbyOptionKind::TeamDistribution
+            | LobbyOptionKind::TeamColors
+            | LobbyOptionKind::RandomTeamCount => {}
+        }
+        self.refresh_runtime_client_list();
+        Ok(())
+    }
+
+    fn sync_options_gamepad_device(&mut self) {
+        use clonk_frontend::startup_options_controls::ControlDevice;
+        use clonk_frontend::startup_options_dlg::OptionsSheet;
+
+        let selected = self.startup_options_dialog.as_ref().and_then(|dialog| {
+            (self.mode == AppMode::Menu
+                && self.startup_view == StartupView::Options
+                && dialog.active_sheet() == OptionsSheet::Gamepad)
+                .then(|| dialog.controls().selected_set(ControlDevice::Gamepad))
+        });
+        self.gamepads
+            .set_options_open_slot(selected.and_then(GamepadSlot::from_index));
+    }
+
+    pub(crate) fn process_options_dialog_actions(
+        &mut self,
+        actions: Vec<clonk_frontend::startup_options_dlg::OptionsDlgAction>,
+    ) -> Result<(), EngineError> {
+        use clonk_frontend::startup_options_dlg::{
+            OptionsDlgAction, OptionsSheet, SoundCheckboxId, SoundSheetAction, SoundVolumeId,
+        };
+        use clonk_frontend::startup_options_graphics::GraphicsSheetAction;
+        use clonk_frontend::startup_options_network::{NetworkCheckboxId, NetworkValidationError};
+
+        for action in actions {
+            match action {
+                OptionsDlgAction::Back => {
+                    let validation = self
+                        .startup_options_dialog
+                        .as_ref()
+                        .map(|dialog| dialog.network().validate_ports())
+                        .unwrap_or(Ok(()));
+                    match validation {
+                        Ok(()) => self.close_options_menu()?,
+                        Err(NetworkValidationError::TcpReferenceConflict) => {
+                            let message = self.runtime_resource_text(
+                                "IDS_NET_ERR_PORT_TCPREF",
+                                "TCP port and reference port must be set to different values between 1 and 65535!",
+                            );
+                            self.show_options_network_validation_error(&message)?;
+                        }
+                        Err(NetworkValidationError::UdpDiscoveryConflict) => {
+                            let message = self.runtime_resource_text(
+                                "IDS_NET_ERR_PORT_UDPDISC",
+                                "UDP port and discovery port must be set to different values between 1 and 65535!",
+                            );
+                            self.show_options_network_validation_error(&message)?;
+                        }
+                    }
+                }
+                OptionsDlgAction::SheetChanged(sheet) => {
+                    self.sync_options_gamepad_device();
+                    if sheet == OptionsSheet::Sound && self.audio.is_none() {
+                        return Err(classic_parity_engine_error(report_classic_parity_boundary(
+                            ClassicParityBoundary::RuntimeAudioSystem {
+                                action: "the startup Options Sound sheet",
+                            },
+                        )));
+                    }
+                    self.play_ui_sound("Command");
+                }
+                OptionsDlgAction::ShowLogTimestampsChanged(enabled) => {
+                    self.show_log_timestamps = enabled;
+                    self.play_ui_sound("ArrowHit");
+                }
+                OptionsDlgAction::OpenLanguageCombo => {
+                    self.open_options_language_combo()?;
+                }
+                OptionsDlgAction::OpenFontFaceCombo => {
+                    self.open_options_font_face_combo()?;
+                }
+                OptionsDlgAction::OpenFontSizeCombo => {
+                    self.open_options_font_size_combo()?;
+                }
+                OptionsDlgAction::WhiteChatIngameChanged(enabled) => {
+                    self.display_flags.white_chat = enabled;
+                    self.play_ui_sound("ArrowHit");
+                }
+                OptionsDlgAction::WhiteChatLobbyChanged(enabled) => {
+                    self.white_lobby_chat = enabled;
+                    self.play_ui_sound("ArrowHit");
+                }
+                OptionsDlgAction::PreloadingChanged(_) => {
+                    self.play_ui_sound("ArrowHit");
+                }
+                OptionsDlgAction::ProgramGuiSound(sound) => {
+                    self.play_options_sound(sound);
+                }
+                OptionsDlgAction::FairCrewStrengthChanged(_) => {}
+                OptionsDlgAction::ResetConfiguration => {
+                    self.play_ui_sound("Command");
+                    self.show_options_reset_configuration()?;
+                }
+                OptionsDlgAction::OpenAdvancedSettings => {
+                    self.play_ui_sound("Command");
+                    self.show_options_advanced_warning()?;
+                }
+                OptionsDlgAction::Sound(action) => match action {
+                    SoundSheetAction::GuiSound(sound) => self.play_options_sound(sound),
+                    SoundSheetAction::TestSound(sound) => self.play_options_test_sound(sound),
+                    SoundSheetAction::CheckboxChanged { id, checked } => match id {
+                        SoundCheckboxId::FrontendMusic => {
+                            self.set_frontend_music_option(checked)?;
+                        }
+                        SoundCheckboxId::FrontendSoundEffects => {
+                            self.set_frontend_sound_option(checked)?;
+                        }
+                        SoundCheckboxId::GameMusic => {
+                            self.set_startup_game_music_option(checked)?;
+                        }
+                        SoundCheckboxId::GameSoundEffects => {
+                            self.set_startup_game_sound_option(checked)?;
+                        }
+                    },
+                    SoundSheetAction::VolumeChanged { id, value } => match id {
+                        SoundVolumeId::Music => {
+                            self.set_startup_music_volume(i32::from(value))?;
+                        }
+                        SoundVolumeId::SoundEffects => {
+                            self.set_startup_sound_volume(i32::from(value))?;
+                        }
+                    },
+                },
+                OptionsDlgAction::Graphics(action) => match action {
+                    GraphicsSheetAction::OpenDisplayModeCombo => {
+                        self.open_options_display_mode_combo()?;
+                    }
+                    GraphicsSheetAction::DisplayModeChanged(mode) => {
+                        self.queue_options_display_request(OptionsDisplayRequest::SetMode(mode));
+                    }
+                    GraphicsSheetAction::CheckboxChanged { .. }
+                    | GraphicsSheetAction::ScaleProposalChanged(_) => {
+                        self.play_ui_sound("ArrowHit");
+                    }
+                    GraphicsSheetAction::SmokeLevelChanged(value) => {
+                        self.graphics_smoke_level = value;
+                        self.engine.set_smoke_level(value);
+                        self.play_ui_sound("ArrowHit");
+                    }
+                    GraphicsSheetAction::TestScale {
+                        old_percent,
+                        new_percent,
+                    } => {
+                        self.begin_options_scale_test(old_percent, new_percent)?;
+                    }
+                },
+                OptionsDlgAction::OpenGraphicsScaleText => {
+                    self.open_options_graphics_scale_input()?;
+                }
+                OptionsDlgAction::BeginControlCapture(target) => {
+                    self.open_options_control_capture(target)?;
+                }
+                OptionsDlgAction::ResetControlBindings(device) => {
+                    self.reset_options_control_bindings(device);
+                    self.play_ui_sound("Command");
+                }
+                OptionsDlgAction::GamepadDeviceSelected(set) => {
+                    let valid_selection = self.mode == AppMode::Menu
+                        && self.startup_view == StartupView::Options
+                        && self.startup_options_dialog.as_ref().is_some_and(|dialog| {
+                            dialog.active_sheet() == OptionsSheet::Gamepad
+                                && dialog.controls().selected_set(
+                                    clonk_frontend::startup_options_controls::ControlDevice::Gamepad,
+                                ) == set
+                                && set < dialog.controls().visible_sets(
+                                    clonk_frontend::startup_options_controls::ControlDevice::Gamepad,
+                                )
+                        });
+                    if valid_selection {
+                        self.gamepads
+                            .set_options_open_slot(GamepadSlot::from_index(set));
+                    }
+                }
+                OptionsDlgAction::GamepadGuiControlChanged(enabled) => {
+                    self.gamepad_gui_control = enabled;
+                    self.play_ui_sound("ArrowHit");
+                    self.begin_startup_dialog_fade(StartupDialog::Options);
+                }
+                OptionsDlgAction::OpenNetworkText(field) => {
+                    self.open_options_network_input(field)?;
+                }
+                OptionsDlgAction::NetworkPortEnabledChanged { .. } => {
+                    self.play_ui_sound("ArrowHit");
+                }
+                OptionsDlgAction::NetworkCheckboxChanged { id, checked } => {
+                    self.play_ui_sound("ArrowHit");
+                    if id == NetworkCheckboxId::UseAlternateServer && checked {
+                        let hidden = self
+                            .startup_options_dialog
+                            .as_ref()
+                            .is_some_and(|dialog| dialog.network().hide_no_official_league_notice);
+                        if !hidden {
+                            self.show_options_alternate_server_notice()?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn apply_options_font_selection(
+        &mut self,
+        selected_face: Option<String>,
+        selected_size: Option<i32>,
+    ) -> Result<(), EngineError> {
+        self.apply_options_font_selection_with_system_fonts(
+            selected_face,
+            selected_size,
+            system_fonts::installed_system_fonts(),
+        )
+    }
+
+    pub(crate) fn apply_options_font_selection_with_system_fonts(
+        &mut self,
+        selected_face: Option<String>,
+        selected_size: Option<i32>,
+        system_fonts: &dyn system_fonts::SystemFontProvider,
+    ) -> Result<(), EngineError> {
+        let Some((current_face, current_size)) =
+            self.startup_options_dialog.as_ref().map(|dialog| {
+                (
+                    dialog.program().font_face.clone(),
+                    dialog
+                        .program()
+                        .font_size
+                        .trim()
+                        .parse::<i32>()
+                        .unwrap_or(14),
+                )
+            })
+        else {
+            return Ok(());
+        };
+        let face = selected_face.unwrap_or_else(|| current_face.clone());
+        let size = selected_size.unwrap_or(current_size);
+        let Some(paths) = self.app_paths.as_ref() else {
+            return self.show_options_font_error();
+        };
+        let resources = (|| -> Result<_> {
+            let registrations = startup_loader_registrations(paths)?;
+            let gui = resolve_classic_font_bundle_for_request_with_system_fonts(
+                paths,
+                &face,
+                size,
+                &registrations,
+                &registrations,
+                system_fonts,
+            )?;
+            let startup = resolve_classic_startup_font_bundle_for_request_with_system_fonts(
+                paths,
+                &face,
+                size,
+                &registrations,
+                &registrations,
+                system_fonts,
+            )?;
+            Ok((gui, startup))
+        })();
+        let (gui, startup) = match resources {
+            Ok(resources) => resources,
+            Err(error) => {
+                tracing::warn!(%error, %face, size, "failed to apply selected options font");
+                return self.show_options_font_error();
+            }
+        };
+
+        if let Some(dialog) = self.startup_options_dialog.as_mut() {
+            dialog.program_mut().set_font(face.clone(), size);
+        }
+        match self.persist_open_options_config() {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                tracing::warn!(%error, "failed to save selected options font");
+                if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                    dialog.program_mut().set_font(current_face, current_size);
+                }
+                return self.show_options_font_error();
+            }
+            None => {
+                if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                    dialog.program_mut().set_font(current_face, current_size);
+                }
+                return self.show_options_font_error();
+            }
+        }
+
+        self.begin_startup_dialog_fade(StartupDialog::Options);
+        let ClassicFontBundle {
+            fonts,
+            tooltip,
+            native_source,
+        } = gui;
+        let native_fonts = self.native_font_cache_for_source(native_source.as_ref());
+        let player_selection_fonts = startup.player_selection.clone();
+        {
+            let assets = Arc::make_mut(&mut self.assets);
+            assets.clonk_fonts = Some(fonts.clone());
+            assets.startup_clonk_fonts = Some(fonts.clone());
+            assets.global_tooltip_font = Some(tooltip.clone());
+            assets.startup_global_tooltip_font = Some(tooltip);
+            assets.startup_native_font_source = native_source;
+            assets.book_fonts = Some(startup.book);
+            assets.options_book_fonts = Some(startup.options);
+            assets.plrsel_book_fonts = Some(startup.player_selection);
+        }
+        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+            dialog.set_layout_fonts(fonts.as_ref(), player_selection_fonts.as_ref());
+        }
+        self.graphics.set_clonk_fonts(Some(fonts.clone()));
+        self.main_menu_state.menu.set_clonk_fonts(Some(fonts));
+        self.native_startup_fonts = native_fonts;
+        self.open_options_menu();
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn show_options_font_error(&mut self) -> Result<(), EngineError> {
+        let message = self.runtime_resource_text("IDS_ERR_INITFONTS", "Error initializing fonts");
+        let caption = self.runtime_resource_text("IDS_DLG_ERROR", "Error");
+        self.push_message_dialog(
+            clonk_frontend::message_dialog::MessageDialogState::regular_ok(
+                message,
+                caption,
+                clonk_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        )
+    }
+
+    fn show_options_reset_configuration(&mut self) -> Result<(), EngineError> {
+        let prompt = self.runtime_resource_text(
+            "IDS_MSG_PROMPTRESETCONFIG",
+            "Are you sure you want to reset all configuration values?",
+        );
+        let restart = self.runtime_resource_text(
+            "IDS_MSG_RESTARTCHANGECFG",
+            "For changes to take effect the program has to be restarted.",
+        );
+        let caption = self.runtime_resource_text("IDS_BTN_RESETCONFIG", "Reset configuration");
+        self.push_message_dialog(
+            clonk_frontend::message_dialog::MessageDialogState::new(
+                format!("{prompt}|{restart}"),
+                caption,
+                clonk_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                clonk_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            ),
+            MessageDialogContinuation::OptionsResetConfiguration,
+        )
+    }
+
+    fn show_options_advanced_warning(&mut self) -> Result<(), EngineError> {
+        let message = self.runtime_resource_text(
+            "IDS_MSG_ADVANCED_SETTINGS_WARNING",
+            "Some settings only apply after a restart.|Modifications may cause Clonk to stop working correctly. Proceed at your own risk!",
+        );
+        let caption = self.runtime_resource_text("IDS_DLG_WARNING", "Warning");
+        self.push_message_dialog(
+            clonk_frontend::message_dialog::MessageDialogState::new(
+                message,
+                caption,
+                clonk_frontend::message_dialog::MessageDialogButtons::OK_CANCEL,
+                clonk_frontend::message_dialog::MessageDialogIcon::None,
+                clonk_frontend::message_dialog::MessageDialogSize::Regular,
+                true,
+            ),
+            MessageDialogContinuation::OptionsAdvancedWarning,
+        )
+    }
+
+    fn show_options_advanced_error(
+        &mut self,
+        detail: impl std::fmt::Display,
+    ) -> Result<(), EngineError> {
+        let caption = self.runtime_resource_text("IDS_DLG_ERROR", "Error");
+        self.push_message_dialog(
+            clonk_frontend::message_dialog::MessageDialogState::regular_ok(
+                format!("Unable to access advanced settings: {detail}"),
+                caption,
+                clonk_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        )
+    }
+
+    pub(crate) fn open_options_advanced_dialog(&mut self) -> Result<(), EngineError> {
+        let Some(config_path) = self
+            .app_paths
+            .as_ref()
+            .map(|paths| paths.config_file())
+        else {
+            self.show_options_advanced_error("application configuration is unavailable")?;
+            return Ok(());
+        };
+        let mut config = match Config::load(&config_path) {
+            Ok(config) => config,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+            Err(error) => {
+                tracing::warn!(%error, "failed to load advanced configuration");
+                self.show_options_advanced_error(error)?;
+                return Ok(());
+            }
+        };
+        if self.apply_open_options_config(&mut config).is_none() {
+            self.show_options_advanced_error("the Options dialog is unavailable")?;
+            return Ok(());
+        }
+        let return_sheet = self
+            .startup_options_dialog
+            .as_ref()
+            .map(|dialog| dialog.active_sheet())
+            .unwrap_or_default();
+        let mut controller =
+            clonk_frontend::startup_options_advanced::AdvancedConfigController::new(
+                advanced_config::sections(&config),
+            );
+        controller.set_labels(
+            clonk_frontend::startup_options_advanced::AdvancedConfigLabels {
+                caption: self
+                    .runtime_resource_text("IDS_DLG_ADVANCED_SETTINGS", "Advanced settings"),
+                save: self.runtime_resource_text("IDS_BTN_SAVE", "&Save"),
+                cancel: self.runtime_resource_text("IDS_BTN_CANCEL", "Cancel"),
+            },
+        );
+        controller.resize(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+        );
+        self.startup_options_advanced_dialog = Some(PendingOptionsAdvancedDialog {
+            controller,
+            return_sheet,
+        });
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    pub(crate) fn synchronize_advanced_options_runtime(&mut self) {
+        let paths = self.app_paths.as_ref();
+        let is_fullscreen = self.display_flags.is_fullscreen;
+        self.display_flags = load_display_flags(paths);
+        self.display_flags.is_fullscreen = is_fullscreen;
+        self.white_lobby_chat = load_white_lobby_chat(paths);
+        self.show_log_timestamps = load_show_log_timestamps(paths);
+        self.show_folder_maps = load_show_folder_maps(paths);
+        self.ready_check_toasts_enabled = load_ready_check_toasts_enabled(paths);
+        let native_config = load_native_config_bytes(paths);
+        self.allow_scripting_in_replays = configured_allow_scripting_in_replays(&native_config);
+        self.max_refresh_delay_ms = configured_max_refresh_delay_ms(&native_config);
+        let record = load_recording_flag(paths);
+        self.startup_view_flags.record = record;
+        self.recording_enabled = record && self.recordings_dir.is_some();
+        self.startup_view_flags.fair_crew = load_fair_crew_flag(paths);
+        self.graphics_smoke_level = load_graphics_smoke_level(paths);
+        self.engine.set_smoke_level(self.graphics_smoke_level);
+        self.mission_access = paths
+            .and_then(|paths| match load_configured_mission_access(paths) {
+                Ok(access) => Some(MissionAccessStore::new(access)),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to reload General.MissionAccess");
+                    None
+                }
+            })
+            .unwrap_or_default();
+        self.engine
+            .set_mission_access_store(self.mission_access.clone());
+        self.bindings = KeyboardBindings::load(paths);
+        self.gamepad_bindings = GamepadBindings::load(paths);
+        self.gamepads
+            .set_axis_calibrations(self.gamepad_bindings.axis_calibrations());
+        self.gamepads_enabled = load_gamepads_enabled(paths);
+        self.gamepad_gui_control = load_gamepad_gui_control(paths);
+        self.engine
+            .set_control_key_names(configured_control_key_names(&self.bindings));
+
+        let reloaded_audio = AudioOptions::load(paths);
+        if let Some(audio) = self.audio.as_mut() {
+            let music_volume = reloaded_audio.music_volume_percent();
+            let sound_volume = reloaded_audio.sound_volume_percent();
+            audio.options = reloaded_audio;
+            audio.set_music_volume_percent(music_volume);
+            audio.set_sound_volume_percent(sound_volume);
+        }
+        let point_filtering = DisplayOptions::load(paths).point_filtering;
+        self.graphics.set_point_filtering(point_filtering);
+        let advanced_renderer_config = load_advanced_renderer_config(&native_config);
+        self.graphics
+            .set_advanced_renderer_config(advanced_renderer_config);
+        self.loader_gamma = load_classic_loader_gamma_from_native(&native_config);
+        let main_menu_gamma = self.graphics.fragment_gamma_enabled().then(|| {
+            Arc::new(
+                self.loader_gamma
+                    .clone()
+                    .unwrap_or_else(clonk_graphics::GammaRamp::standard),
+            )
+        });
+        self.main_menu_state.menu.set_gamma_ramp(main_menu_gamma);
+        if let Some(config) = self.loader_render_config {
+            self.configure_native_startup_fonts(config.application_scale(), point_filtering);
+        }
+        self.menu_frame_cache = None;
+        self.menu_backdrop_cache = StartupBackdropCache::default();
+        self.startup_dialog_fade = None;
+        self.mark_menu_dirty();
+    }
+
+    pub(crate) fn process_options_advanced_actions(
+        &mut self,
+        actions: Vec<clonk_frontend::startup_options_advanced::AdvancedConfigAction>,
+    ) -> Result<(), EngineError> {
+        use clonk_frontend::startup_options_advanced::AdvancedConfigAction;
+
+        let sounds = self
+            .startup_options_advanced_dialog
+            .as_mut()
+            .map(|pending| pending.controller.take_sound_events())
+            .unwrap_or_default();
+        for sound in sounds {
+            use clonk_frontend::startup_options_advanced::AdvancedConfigSound;
+            self.play_ui_sound(match sound {
+                AdvancedConfigSound::ArrowHit => "ArrowHit",
+                AdvancedConfigSound::Click => "Click",
+                AdvancedConfigSound::Command => "Command",
+            });
+        }
+
+        for action in actions {
+            match action {
+                AdvancedConfigAction::Cancel => {
+                    self.startup_tooltip.pointer_left();
+                    self.startup_options_advanced_dialog = None;
+                }
+                AdvancedConfigAction::Save => {
+                    let Some((changes, return_sheet)) =
+                        self.startup_options_advanced_dialog.as_ref().map(|pending| {
+                            (pending.controller.changes(), pending.return_sheet)
+                        })
+                    else {
+                        continue;
+                    };
+                    let saved = self.save_options_advanced_changes(&changes);
+                    match saved {
+                        Ok(()) => {
+                            self.startup_tooltip.pointer_left();
+                            self.startup_options_advanced_dialog = None;
+                            self.synchronize_advanced_options_runtime();
+                            self.open_options_menu();
+                            if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                                dialog.restore_sheet(return_sheet);
+                            }
+                            self.sync_options_gamepad_device();
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to save advanced configuration");
+                            self.show_options_advanced_error(error)?;
+                        }
+                    }
+                }
+            }
+        }
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn show_options_network_validation_error(&mut self, message: &str) -> Result<(), EngineError> {
+        let caption = self.runtime_resource_text("IDS_ERR_CONFIG", "Configuration error");
+        self.push_message_dialog(
+            clonk_frontend::message_dialog::MessageDialogState::regular_ok(
+                message,
+                caption,
+                clonk_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        )
+    }
+
+    fn begin_options_scale_test(
+        &mut self,
+        old_percent: i32,
+        new_percent: i32,
+    ) -> Result<(), EngineError> {
+        let dialog = clonk_frontend::message_dialog::MessageDialogState::new(
+            "Keep this display scale?|12 seconds remaining.",
+            "Test graphics scale",
+            clonk_frontend::message_dialog::MessageDialogButtons::YES_NO,
+            clonk_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+            clonk_frontend::message_dialog::MessageDialogSize::Regular,
+            true,
+        );
+        self.push_message_dialog(
+            dialog,
+            MessageDialogContinuation::OptionsScaleTest {
+                old_percent,
+                new_percent,
+                remaining_seconds: 12,
+            },
+        )?;
+        self.queue_options_display_request(OptionsDisplayRequest::SetScale {
+            percent: new_percent,
+            persist: false,
+        });
+        Ok(())
+    }
+
+    fn open_options_control_capture(
+        &mut self,
+        target: clonk_frontend::startup_options_controls::ControlCaptureTarget,
+    ) -> Result<(), EngineError> {
+        let control = ControlBindingId::ALL
+            .get(target.control)
+            .copied()
+            .map(binding_display_name)
+            .unwrap_or("Unknown control");
+        let (message, icon) = match target.device {
+            clonk_frontend::startup_options_controls::ControlDevice::Keyboard => (
+                format!(
+                    "Press the key for \"{control}\" on keyboard block {}.",
+                    target.set + 1
+                ),
+                clonk_frontend::message_dialog::MessageDialogIcon::Standard(24),
+            ),
+            clonk_frontend::startup_options_controls::ControlDevice::Gamepad => (
+                format!(
+                    "Press the button for \"{control}\" on gamepad {}.",
+                    target.set + 1
+                ),
+                clonk_frontend::message_dialog::MessageDialogIcon::Standard(25),
+            ),
+        };
+        self.push_message_dialog(
+            clonk_frontend::message_dialog::MessageDialogState::new(
+                message,
+                "Assign key",
+                clonk_frontend::message_dialog::MessageDialogButtons::CANCEL,
+                icon,
+                clonk_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            ),
+            MessageDialogContinuation::OptionsControlCapture(target),
+        )
+    }
+
+    fn reset_options_control_bindings(
+        &mut self,
+        device: clonk_frontend::startup_options_controls::ControlDevice,
+    ) {
+        match device {
+            clonk_frontend::startup_options_controls::ControlDevice::Keyboard => {
+                self.bindings.reset_all();
+            }
+            clonk_frontend::startup_options_controls::ControlDevice::Gamepad => {
+                self.gamepad_bindings.reset_all();
+                self.gamepads
+                    .set_axis_calibrations(self.gamepad_bindings.axis_calibrations());
+            }
+        }
+        self.refresh_options_control_labels(device);
+    }
+
+    fn refresh_options_control_labels(
+        &mut self,
+        device: clonk_frontend::startup_options_controls::ControlDevice,
+    ) {
+        use clonk_frontend::startup_options_controls::{
+            ControlCaptureTarget, CONTROL_KEY_COUNT, CONTROL_SET_COUNT,
+        };
+        let Some(dialog) = self.startup_options_dialog.as_mut() else {
+            return;
+        };
+        for set in 0..CONTROL_SET_COUNT {
+            for control in 0..CONTROL_KEY_COUNT {
+                let Some(id) = ControlBindingId::ALL.get(control).copied() else {
+                    continue;
+                };
+                let label = match device {
+                    clonk_frontend::startup_options_controls::ControlDevice::Keyboard => self
+                        .bindings
+                        .key_for_set(set, id)
+                        .map(format_key_label)
+                        .unwrap_or_else(|| "Undefined".to_string()),
+                    clonk_frontend::startup_options_controls::ControlDevice::Gamepad => {
+                        self.gamepad_bindings.key_label_for_set(set, id)
+                    }
+                };
+                dialog.controls_mut().set_label(
+                    ControlCaptureTarget {
+                        device,
+                        set,
+                        control,
+                    },
+                    label,
+                );
+            }
+        }
+        self.mark_menu_dirty();
+    }
+
+    fn show_options_alternate_server_notice(&mut self) -> Result<(), EngineError> {
+        self.push_message_dialog(
+            clonk_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Games using an alternate server are not part of the official league.",
+                "Master server",
+                clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            )
+            .with_us_dont_show_again(false),
+            MessageDialogContinuation::OptionsAlternateServerNotice,
+        )
+    }
+
+    fn open_options_network_input(
+        &mut self,
+        field: clonk_frontend::startup_options_network::NetworkTextField,
+    ) -> Result<(), EngineError> {
+        use clonk_frontend::startup_options_network::NetworkTextField;
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "Options network input",
+            self.assets.input_dialog_resources().map(|_| ()),
+        )?;
+        let Some(network) = self
+            .startup_options_dialog
+            .as_ref()
+            .map(|dialog| dialog.network())
+        else {
+            return Ok(());
+        };
+        let (message, caption, initial, max_text) = match field {
+            NetworkTextField::Port(id) => (
+                "Enter network port:",
+                "Network port",
+                network.port(id).port.to_string(),
+                6,
+            ),
+            NetworkTextField::AlternateServerAddress => (
+                "Enter alternate server address:",
+                "Master server",
+                network.alternate_server_address.clone(),
+                256,
+            ),
+            NetworkTextField::LocalName => (
+                "Enter computer name:",
+                "Computer name",
+                network.local_name.clone(),
+                26,
+            ),
+            NetworkTextField::Nick => ("Enter user name:", "User name", network.nick.clone(), 26),
+        };
+        let controller = InputDialogController::new(message, caption, InputDialogIcon::None)
+            .with_max_text(max_text)
+            .with_input_text(&initial);
+        self.startup_tooltip.pointer_left();
+        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            purpose: PendingInputDialogPurpose::OptionsNetwork(field),
+            controller,
+        });
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn open_options_graphics_scale_input(&mut self) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "Options graphics scale input",
+            self.assets.input_dialog_resources().map(|_| ()),
+        )?;
+        let Some(scale) = self
+            .startup_options_dialog
+            .as_ref()
+            .map(|dialog| dialog.graphics().proposed_scale_percent)
+        else {
+            return Ok(());
+        };
+        let controller = InputDialogController::new(
+            "Enter display scale (100-300):",
+            "Graphics scale",
+            InputDialogIcon::None,
+        )
+        .with_max_text(4)
+        .with_input_text(&scale.to_string());
+        self.startup_tooltip.pointer_left();
+        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            purpose: PendingInputDialogPurpose::OptionsGraphicsScale,
+            controller,
+        });
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    pub(crate) fn open_options_menu(&mut self) {
+        self.close_context_menu_silently();
+        self.startup_options_advanced_dialog = None;
+        // Recreating the dialog destroys its ControlConfigArea before the
+        // replacement starts on the Program sheet.
+        self.gamepads.set_options_open_slot(None);
+        let mut dialog = clonk_frontend::startup_options_dlg::OptionsDlgState::with_all(
+            load_options_program_state(self.app_paths.as_ref()),
+            load_options_sound_state(self.audio.as_ref()),
+            load_options_graphics_state(self.app_paths.as_ref()),
+            load_options_control_state(
+                &self.bindings,
+                &self.gamepad_bindings,
+                self.gamepads.connected_count(),
+                self.gamepad_gui_control,
+            ),
+            load_options_network_state(self.app_paths.as_ref()),
+        );
+        if let (Some(fonts), Some(book)) = (
+            self.assets.clonk_fonts.as_deref(),
+            self.assets.options_book_fonts.as_deref(),
+        ) {
+            dialog.resize(
+                self.graphics.surface().width() as i32,
+                self.graphics.surface().height() as i32,
+                fonts,
+                book,
+            );
+        }
+        self.startup_options_dialog = Some(dialog);
+        self.replace_startup_dialog(StartupView::Options, StartupDialog::Options);
+        self.status_text.clear();
+    }
+
+    pub(crate) fn persist_open_options_config(&self) -> Option<io::Result<()>> {
+        let paths = self.app_paths.as_ref()?;
+        let dialog = self.startup_options_dialog.as_ref()?;
+        Some(persist_startup_options_config(
+            paths,
+            dialog.program(),
+            self.audio.as_ref().map(|audio| &audio.options),
+            dialog.graphics(),
+            dialog.network(),
+            &self.bindings,
+            &self.gamepad_bindings,
+            self.gamepad_gui_control,
+        ))
+    }
+
+    pub(crate) fn apply_open_options_config(&self, config: &mut Config) -> Option<()> {
+        let dialog = self.startup_options_dialog.as_ref()?;
+        apply_startup_options_config(
+            config,
+            dialog.program(),
+            self.audio.as_ref().map(|audio| &audio.options),
+            dialog.graphics(),
+            dialog.network(),
+            &self.bindings,
+            &self.gamepad_bindings,
+            self.gamepad_gui_control,
+        );
+        Some(())
+    }
+
+    fn close_options_menu(&mut self) -> Result<(), EngineError> {
+        let save_result = self.persist_open_options_config();
+        self.close_options_menu_with_persist_result(save_result)
+    }
+
+    pub(crate) fn close_options_menu_with_persist_result(
+        &mut self,
+        save_result: Option<io::Result<()>>,
+    ) -> Result<(), EngineError> {
+        let feedback_result = if let Some(Err(error)) = save_result {
+            tracing::warn!(error = %error, "failed to save options dialog settings");
+            let error = error.to_string();
+            let message = format_resource_string(
+                self.runtime_resource_text(
+                    "IDS_ERR_CONFSAVE",
+                    "Could not save configuration: %s",
+                ),
+                &[&error],
+            );
+            let caption = self.runtime_resource_text("IDS_ERR_CONFIG", "Configuration error");
+            let dialog = clonk_frontend::message_dialog::MessageDialogState::regular_ok(
+                message,
+                caption,
+                clonk_frontend::message_dialog::MessageDialogIcon::ERROR,
+            );
+            self.push_message_dialog(dialog, MessageDialogContinuation::None)
+        } else {
+            Ok(())
+        };
+        self.begin_startup_dialog_fade(StartupDialog::MainMenu);
+        self.show_main_menu();
+        feedback_result
+    }
+
+    pub(crate) fn queue_options_display_request(&mut self, request: OptionsDisplayRequest) {
+        self.pending_options_display_requests.push_back(request);
+        self.mark_menu_dirty();
+    }
+
+    pub(crate) fn tick_options_scale_test_prompt(&mut self) -> bool {
+        let Some(prompt_index) = self.message_dialogs.iter().position(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::OptionsScaleTest { .. }
+            )
+        }) else {
+            return false;
+        };
+        let expires = self
+            .message_dialogs
+            .get_mut(prompt_index)
+            .is_some_and(|dialog| {
+                let MessageDialogContinuation::OptionsScaleTest {
+                    remaining_seconds, ..
+                } = &mut dialog.continuation
+                else {
+                    return false;
+                };
+                if *remaining_seconds <= 1 {
+                    return true;
+                }
+                *remaining_seconds -= 1;
+                dialog.state.set_message(format!(
+                    "Keep this display scale?|{} seconds remaining.",
+                    *remaining_seconds
+                ));
+                false
+            });
+        if expires {
+            if prompt_index + 1 == self.message_dialogs.len() {
+                if let Err(error) = self.finish_message_dialog(
+                    clonk_frontend::message_dialog::MessageDialogResult::Dismissed,
+                ) {
+                    tracing::error!(%error, "failed to expire graphics scale test");
+                }
+            } else if let Some((PendingMessageDialog {
+                continuation: MessageDialogContinuation::OptionsScaleTest { old_percent, .. },
+                ..
+            }, _)) = self.remove_message_dialog_at(prompt_index)
+            {
+                if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                    dialog.graphics_mut().revert_scale_test();
+                }
+                self.queue_options_display_request(OptionsDisplayRequest::SetScale {
+                    percent: old_percent,
+                    persist: false,
+                });
+            }
+        }
+        self.mark_menu_dirty();
+        true
+    }
+
+    pub(crate) fn finish_game_option_input(
+        &mut self,
+        actions: Vec<GameOptionAction>,
+    ) -> Result<(), EngineError> {
+        if self.scenario_game_options.context().is_lobby() {
+            for action in actions {
+                self.process_lobby_game_option_action(action)?;
+            }
+            let sounds = self.scenario_game_options.take_sound_events();
+            self.play_game_option_sound_events(sounds);
+            Ok(())
+        } else {
+            let sounds = self.scenario_game_options.take_sound_events();
+            self.play_game_option_sound_events(sounds);
+            self.process_game_option_actions(actions)
+        }
+    }
+
+    pub(crate) fn persist_game_option_value(&mut self, section: &str, key: &str, value: String) {
+        let Some(paths) = self.app_paths.as_ref() else {
+            return;
+        };
+        if let Err(error) = persist_config_value(paths, section, key, value) {
+            tracing::error!(%error, section, key, "failed to persist game option");
+            self.status_text = format!("Unable to save game option: {error}");
+        }
+    }
+
+    pub(crate) fn process_game_option_actions(
+        &mut self,
+        actions: Vec<GameOptionAction>,
+    ) -> Result<(), EngineError> {
+        for action in actions {
+            self.mark_menu_dirty();
+            match action {
+                GameOptionAction::FocusTraversalRequested { backwards } => {
+                    self.advance_scensel_dialog_focus(backwards);
+                }
+                GameOptionAction::InternetSignupChanged { enabled, .. } => {
+                    self.persist_game_option_value(
+                        "Network",
+                        "MasterServerSignUp",
+                        i32::from(enabled).to_string(),
+                    );
+                }
+                GameOptionAction::LeagueSignupChanged(enabled) => {
+                    self.persist_game_option_value(
+                        "Network",
+                        "LeagueServerSignUp",
+                        i32::from(enabled).to_string(),
+                    );
+                }
+                GameOptionAction::ShowInputDialog(request) => {
+                    self.open_game_option_input_dialog(request)?;
+                }
+                GameOptionAction::PasswordChanged {
+                    remember_for_next_round,
+                    ..
+                } => {
+                    if let Some(password) = remember_for_next_round {
+                        self.persist_game_option_value("Network", "LastPassword", password);
+                    }
+                }
+                GameOptionAction::CommentChanged(comment) => {
+                    self.persist_game_option_value("Network", "Comment", comment);
+                    tracing::info!("{}", clonk_frontend::game_option_buttons::COMMENT_CHANGED_LOG);
+                }
+                GameOptionAction::FairCrewPreferenceChanged(enabled) => {
+                    self.startup_view_flags.fair_crew = enabled;
+                    self.persist_fair_crew_preference(enabled);
+                }
+                GameOptionAction::RecordPreferenceChanged(enabled) => {
+                    self.startup_view_flags.record = enabled;
+                    self.recording_enabled = enabled && self.recordings_dir.is_some();
+                    self.persist_game_option_value(
+                        "General",
+                        "Record",
+                        i32::from(enabled).to_string(),
+                    );
+                }
+                GameOptionAction::SendLobbyFairCrewControl { .. } => {
+                    tracing::error!(
+                        "selector game-option controller emitted a lobby-only fair-crew action"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn open_game_option_input_dialog(
+        &mut self,
+        request: GameOptionInputDialogRequest,
+    ) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "Password/Comment input dialog",
+            self.assets.input_dialog_resources().map(|_| ()),
+        )?;
+        self.close_context_menu_silently();
+        self.scenario_game_options.cancel_interaction();
+        let icon = match request.kind {
+            GameOptionInputKind::Password => InputDialogIcon::LOCKED_FRONTAL,
+            GameOptionInputKind::Comment => InputDialogIcon::COMMENT,
+        };
+        let controller = InputDialogController::new(request.message, request.caption, icon)
+            .with_max_text(request.max_text)
+            .with_input_text(&request.initial_text);
+        self.startup_tooltip.pointer_left();
+        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            purpose: PendingInputDialogPurpose::GameOption(request.kind),
+            controller,
+        });
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    pub(crate) fn game_option_input_layout(&self) -> Option<clonk_frontend::input_dialog::InputDialogLayout> {
+        let dialog = self.game_option_input_dialog.as_ref()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        Some(
+            dialog
+                .controller
+                .layout(surface.width() as i32, surface.height() as i32, &fonts.text),
+        )
+    }
+
+    pub(crate) fn game_option_input_owns_running_pointer_event(&self) -> bool {
+        self.running_chat_controller().is_none()
+            || self.running_shared_gui_has_keyboard_focus()
+            || self.game_option_input_pointer_capture.is_some()
+            || self
+                .running_pointer_position
+                .zip(self.game_option_input_layout().as_ref())
+                .is_some_and(|(point, layout)| Self::point_in_input_dialog_bounds(point, layout))
+    }
+
+    pub(crate) fn release_game_option_input_pointer_elements(&mut self) {
+        let sounds = self
+            .game_option_input_dialog
+            .as_mut()
+            .map(|dialog| {
+                dialog.controller.release_pointer_elements();
+                dialog.controller.take_sound_events()
+            })
+            .unwrap_or_default();
+        self.game_option_input_pointer_capture = None;
+        self.play_input_dialog_sound_events(sounds);
+    }
+
+    pub(crate) fn stop_game_option_input_pointer_drag_at_current_position(&mut self) {
+        let point = self.running_pointer_position;
+        let layout = self.game_option_input_layout();
+        let fonts = self.assets.clonk_fonts.clone();
+        if let Some(((point, layout), fonts)) = point.zip(layout).zip(fonts.as_deref()) {
+            if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+                dialog
+                    .controller
+                    .stop_pointer_drag_at(point, &layout, &fonts.text);
+            }
+        }
+    }
+
+    pub(crate) fn handle_game_option_input_primary_pointer(
+        &mut self,
+        button_state: ElementState,
+    ) -> Result<(), EngineError> {
+        let point = self.game_option_input_pointer_position;
+        let layout = self.game_option_input_layout();
+        let fonts = self.assets.clonk_fonts.clone();
+        let clicked_edit = point.zip(layout.as_ref()).is_some_and(|(point, layout)| {
+            let edit = layout.edit;
+            point.x >= edit.x as f32
+                && point.x < (edit.x + edit.w) as f32
+                && point.y >= edit.y as f32
+                && point.y < (edit.y + edit.h) as f32
+        });
+        let actions = point
+            .zip(layout.as_ref())
+            .zip(fonts.as_deref())
+            .and_then(|((point, layout), fonts)| {
+                self.game_option_input_dialog
+                    .as_mut()
+                    .map(|dialog| match button_state {
+                        ElementState::Pressed => {
+                            dialog
+                                .controller
+                                .handle_pointer_down(point, layout, &fonts.text)
+                        }
+                        ElementState::Released => {
+                            dialog
+                                .controller
+                                .handle_pointer_up(point, layout, &fonts.text)
+                        }
+                    })
+            })
+            .unwrap_or_default();
+        self.finish_game_option_input_dialog_actions(actions)?;
+        if button_state == ElementState::Released
+            && clicked_edit
+            && self.game_option_input_dialog.is_some()
+        {
+            let now = Instant::now();
+            let is_double = self
+                .game_option_input_last_click
+                .is_some_and(|last| now.duration_since(last) < Duration::from_millis(500));
+            self.game_option_input_last_click = (!is_double).then_some(now);
+            if is_double {
+                let actions = point
+                    .zip(layout.as_ref())
+                    .zip(fonts.as_deref())
+                    .and_then(|((point, layout), fonts)| {
+                        self.game_option_input_dialog.as_mut().map(|dialog| {
+                            dialog.controller.handle_pointer_double_click(
+                                point,
+                                layout,
+                                &fonts.text,
+                            )
+                        })
+                    })
+                    .unwrap_or_default();
+                self.finish_game_option_input_dialog_actions(actions)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish_game_option_input_dialog_actions(
+        &mut self,
+        actions: Vec<InputDialogAction>,
+    ) -> Result<(), EngineError> {
+        let sounds = self
+            .game_option_input_dialog
+            .as_mut()
+            .map(|dialog| dialog.controller.take_sound_events())
+            .unwrap_or_default();
+        self.play_input_dialog_sound_events(sounds);
+        self.process_game_option_input_dialog_actions(actions)
+    }
+
+    pub(crate) fn process_game_option_input_dialog_actions(
+        &mut self,
+        actions: Vec<InputDialogAction>,
+    ) -> Result<(), EngineError> {
+        for action in actions {
+            self.mark_menu_dirty();
+            match action {
+                InputDialogAction::FocusChanged(_) | InputDialogAction::TextChanged(_) => {}
+                InputDialogAction::SubmittedLine(text) => {
+                    if self.game_option_input_dialog.as_ref().is_some_and(|pending| {
+                        pending.purpose == PendingInputDialogPurpose::RunningChat
+                    }) {
+                        if self.running_chat.as_ref().is_some_and(|chat| {
+                            matches!(&chat.kind, RunningChatKind::MessageBoardInput(_))
+                        }) {
+                            self.submit_running_chat_text(text)?;
+                            break;
+                        }
+                        self.process_running_chat_text(&text);
+                    } else {
+                        tracing::error!(
+                            "multiline continuation escaped a compact running-chat dialog"
+                        );
+                    }
+                }
+                InputDialogAction::ClipboardWrite(text) => {
+                    if let Err(error) =
+                        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text))
+                    {
+                        tracing::warn!(%error, "failed to copy classic input-dialog text");
+                    }
+                }
+                InputDialogAction::OpenContextMenu(request) => {
+                    let entries = request
+                        .items
+                        .into_iter()
+                        .map(|item| {
+                            ContextMenuEntry::new(item.label)
+                                .with_tooltip(item.tooltip)
+                                .with_icon(ContextMenuIcon::None)
+                                .with_action(AppContextMenuCommand::InputDialog(item.command))
+                        })
+                        .collect();
+                    self.open_context_menu_at(entries, request.anchor)?;
+                }
+                InputDialogAction::Accepted(text) => {
+                    let Some(pending) = self.game_option_input_dialog.take() else {
+                        continue;
+                    };
+                    self.startup_tooltip.pointer_left();
+                    self.close_context_menu_silently();
+                    self.game_option_input_last_click = None;
+                    match pending.purpose {
+                        PendingInputDialogPurpose::RunningChat => {
+                            self.submit_running_chat_text(text)?;
+                        }
+                        PendingInputDialogPurpose::NetworkJoinPassword => {
+                            if text.is_empty() {
+                                self.pending_network_join = None;
+                                self.status_text.clear();
+                                self.resume_startup_music_after_failed_open_game();
+                                break;
+                            }
+                            let Some(password) =
+                                clonk_engine::LegacyCString::from_bytes(text.into_bytes())
+                            else {
+                                self.pending_network_join = None;
+                                self.status_text =
+                                    "Network password contains an unsupported NUL byte".to_string();
+                                self.resume_startup_music_after_failed_open_game();
+                                break;
+                            };
+                            let Some(settings) = self.pending_network_join.as_mut() else {
+                                self.status_text =
+                                    "Network join settings are unavailable".to_string();
+                                break;
+                            };
+                            settings.password = password;
+                            self.launch_pending_network_join()?;
+                        }
+                        PendingInputDialogPurpose::GameOption(kind) => {
+                            let actions = self.scenario_game_options.resolve_input_dialog(
+                                kind,
+                                GameOptionInputDialogResult::Submitted(text),
+                            );
+                            self.finish_game_option_input(actions)?;
+                        }
+                        PendingInputDialogPurpose::OptionsGraphicsScale => {
+                            if let Ok(value) = text.trim().parse::<i32>() {
+                                let test_action = self
+                                    .startup_options_dialog
+                                    .as_mut()
+                                    .and_then(|dialog| {
+                                        let graphics = dialog.graphics_mut();
+                                        let _ = graphics.set_scale_spinbox_value(value);
+                                        graphics.request_scale_test()
+                                    });
+                                if let Some(action) = test_action {
+                                    self.process_options_dialog_actions(vec![
+                                        clonk_frontend::startup_options_dlg::OptionsDlgAction::Graphics(
+                                            action,
+                                        ),
+                                    ])?;
+                                }
+                            }
+                        }
+                        PendingInputDialogPurpose::OptionsNetwork(field) => {
+                            if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                                dialog.network_mut().set_text(field, text);
+                            }
+                        }
+                        PendingInputDialogPurpose::ScenarioMissionAccess => {
+                            self.apply_scenario_mission_access(&text)?;
+                        }
+                        PendingInputDialogPurpose::StartupCrew(action) => {
+                            self.complete_startup_crew_input(action, text)?;
+                        }
+                    }
+                    break;
+                }
+                InputDialogAction::Cancelled => {
+                    let Some(pending) = self.game_option_input_dialog.take() else {
+                        continue;
+                    };
+                    self.startup_tooltip.pointer_left();
+                    self.close_context_menu_silently();
+                    self.game_option_input_last_click = None;
+                    match pending.purpose {
+                        PendingInputDialogPurpose::RunningChat => {
+                            self.close_running_chat()?;
+                        }
+                        PendingInputDialogPurpose::NetworkJoinPassword => {
+                            self.pending_network_join = None;
+                            self.status_text.clear();
+                            self.resume_startup_music_after_failed_open_game();
+                        }
+                        PendingInputDialogPurpose::GameOption(kind) => {
+                            let actions = self.scenario_game_options.resolve_input_dialog(
+                                kind,
+                                GameOptionInputDialogResult::Cancelled,
+                            );
+                            self.finish_game_option_input(actions)?;
+                        }
+                        PendingInputDialogPurpose::OptionsGraphicsScale
+                        | PendingInputDialogPurpose::OptionsNetwork(_) => {}
+                        PendingInputDialogPurpose::ScenarioMissionAccess => {}
+                        PendingInputDialogPurpose::StartupCrew(_) => {}
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn game_option_input_activity(&self) -> (bool, bool) {
+        let keyboard_active = self.context_menu.is_none()
+            && !self.network_chart_elevated
+            && (self.running_chat_active() || self.message_dialogs.is_empty());
+        let mouse_active = self.context_menu.is_none()
+            && (matches!(self.mode, AppMode::Running) || keyboard_active);
+        (keyboard_active, mouse_active)
+    }
+
+    pub(crate) fn render_game_option_input_dialog(
+        &mut self,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) -> Result<()> {
+        if self.game_option_input_dialog.is_none() {
+            return Ok(());
+        }
+        let assets = Arc::clone(&self.assets);
+        let resources = assets
+            .input_dialog_resources()
+            .with_context(|| "classic C4GUI::InputDialog resources are unavailable")?;
+        let (keyboard_active, _) = self.game_option_input_activity();
+        self.game_option_input_dialog
+            .as_ref()
+            .expect("checked above")
+            .controller
+            .render(
+                self.graphics.surface_mut(),
+                &resources,
+                keyboard_active,
+                gamma,
+            )?;
+        let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
+        if ordered_native {
+            self.next_pending_native_overlay();
+        }
+        if ordered_native {
+            self.render_ordered_context_menu(gamma)?;
+            if self.context_menu.is_some() {
+                self.next_pending_native_overlay();
+            }
+        } else {
+            self.render_context_menu_panels(gamma)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn render_game_option_input_dialog_tooltip(
+        &mut self,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) -> Result<bool> {
+        let (_, mouse_active) = self.game_option_input_activity();
+        let Some(dialog) = self.game_option_input_dialog.as_ref() else {
+            return Ok(false);
+        };
+        let assets = Arc::clone(&self.assets);
+        let resources = assets
+            .input_dialog_resources()
+            .with_context(|| "classic C4GUI::InputDialog resources are unavailable")?;
+        let now = Instant::now();
+        let tooltip_visible = dialog
+            .controller
+            .tooltip_state_at(
+                now,
+                &dialog.controller.layout(
+                    self.graphics.surface().width() as i32,
+                    self.graphics.surface().height() as i32,
+                    &resources.fonts().text,
+                ),
+                mouse_active,
+            )
+            .is_some();
+        dialog.controller.render_tooltip_at(
+            self.graphics.surface_mut(),
+            &resources,
+            mouse_active,
+            gamma,
+            now,
+        )?;
+        Ok(tooltip_visible)
+    }
+
+    pub(crate) fn options_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+        let dialog = self.startup_options_dialog.as_ref()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let book = self.assets.options_book_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        let layout = clonk_frontend::startup_options_dlg::options_dlg_layout(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+            book,
+        );
+        let default_target = dialog.tooltip_at(point, book);
+        if matches!(default_target, Some(StartupTooltip::Resource { .. })) {
+            return default_target;
+        }
+        let in_tabular = point.x >= layout.tabular.x as f32
+            && point.x < (layout.tabular.x + layout.tabular.w) as f32
+            && point.y >= layout.tabular.y as f32
+            && point.y < (layout.tabular.y + layout.tabular.h) as f32;
+        if in_tabular {
+            return None;
+        }
+        let title = self.startup_tooltip_resource_no_amp("IDS_DLG_OPTIONS");
+        if let Some(tooltip) = clonk_frontend::centered_label_tooltip_at(
+            point,
+            layout.title_center,
+            fonts.title.measure(&title, true),
+            StartupTooltip::text(title),
+        ) {
+            return Some(tooltip);
+        }
+        None
+    }
+}

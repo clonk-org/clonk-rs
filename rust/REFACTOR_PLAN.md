@@ -160,3 +160,44 @@ extraction is the standing "next lever". Do not re-try rejected experiments
   their pre-extraction deviations (many sit inside test modules).
   Focused suites after the pass: core 8, render 27, menus 115,
   netplay 230 — identical counts, all green.
+- Step 6a landed (impl GameApp split into per-area files): the single
+  62,789-line / 1,389-method `impl GameApp` block became 14 `#[path]`-mounted
+  area files under `crates/clonk-app/src/game_app/` (each `use super::*;`
+  plus its own `impl GameApp`), methods moved byte-verbatim in original
+  order: input 12,569 / network 7,683 / lobby 7,535 / startup 5,721 /
+  menu 4,697 / render 4,635 / config 2,364 / console_record 2,102 /
+  scenario 1,892 / player 1,710 / scensel 1,657 / saves 1,426 / chat 1,353 /
+  sound 1,169 lines; 170 methods (6.4k lines, incl. the constructors) stay
+  in the root impl; main.rs 96,243 → 39,889 lines. 893 of 1,219 moved
+  methods needed private → pub(crate) (compiler-enumerated cross-module
+  callers, incl. the `mod tests` splice). Byte-partition proof: the original
+  impl body reconstructs exactly from the root + area chunks (each byte
+  once, order preserved per file) plus the enumerated pub(crate) insertions.
+  nextest id list byte-identical pre/post (1,496 ids); battery 1,496/1,496
+  both sides; menus+netplay sweep 345/345. Warm incremental
+  `cargo check -p clonk-app --tests`: area-file touch ≈ 1.9s, main.rs touch
+  ≈ 2.0s (parity with steps 1-4 — same crate, so this step buys
+  navigability and the 6b seam, not check time). Area files inherit
+  main.rs's legacy formatting verbatim; rustfmt normalization of
+  `src/game_app/` is a deliberate follow-up, kept out of the move commit.
+
+## Step 6b design
+
+After 6a, GameApp methods live in per-area files but all state still sits on
+the one struct. 6b extracts per-area sub-state into the area crates so area
+logic leaves the app crate entirely; `GameApp` becomes a composition of area
+states (`render: RenderState`, `sound: SoundState`, ...). One area per
+landing, render first (clonk-app-render already exists):
+
+1. Introduce `<Area>State` in the area crate by moving the GameApp fields
+   only that area touches; `GameApp` holds it as a field and call sites
+   become `self.<area>.<field>`.
+2. Move that 6a file's methods onto `impl <Area>State`, verbatim modulo the
+   receiver; tests that only exercise the area state move with them.
+3. Cross-area methods take explicit multi-state signatures
+   (`fn x(render: &mut RenderState, net: &NetworkState)`) — never
+   `&mut GameApp` inside an area crate; shared leaf types sink to
+   clonk-app-core first.
+4. Direction rule: area crates never depend on clonk-app, nor on each other
+   except through clonk-app-core. Order after render: sound, saves, chat
+   (smallest coupling surface), then lobby/network last (widest overlap).
