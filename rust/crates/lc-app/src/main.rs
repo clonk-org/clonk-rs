@@ -3262,6 +3262,234 @@ fn validate_loader_graphics_font_sources(registrations: &[LoaderGroupRegistratio
     loader_graphics_registrations(registrations).map(drop)
 }
 
+/// The registered group set of a joining network client at
+/// `C4GraphicsResource::Init` time. `Extra.Init` runs before the join with
+/// the pre-join DefinitionFilenames (C4Game.cpp:368-381), so only the Extra
+/// root is registered and no per-definition Extra children exist; the
+/// combined scenario and its Origin parents follow through OpenScenario
+/// (C4Game.cpp:161-178), and the synchronized definition resources register
+/// last at C4GSPrio_Definitions during InitGame (C4Game.cpp:2432-2441).
+/// Returns (font-catalog, graphics) registrations: definition roots carry
+/// C4GSCnt_DefinitionRoot content, which includes Graphics but not FontDefs
+/// (C4GroupSet.h:37-51), so they extend only the graphics set.
+fn client_network_gui_registrations(
+    scenario: &FrontendScenario,
+    scenario_group: &Group,
+    head: &ScenarioLoaderHead,
+    definition_groups: &[Group],
+    paths: &AppPaths,
+) -> Result<(Vec<LoaderGroupRegistration>, Vec<LoaderGroupRegistration>)> {
+    let catalog = classic_loader_registrations(
+        scenario,
+        scenario_group,
+        head,
+        &ScenarioDefinitionLoad::Fixed {
+            modules: Vec::new(),
+            definition_root: None,
+        },
+        paths,
+    )?;
+    let first_definition_order = catalog
+        .iter()
+        .map(|registration| registration.registration_order)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut graphics_registrations = catalog.clone();
+    graphics_registrations.extend(definition_groups.iter().enumerate().map(|(index, group)| {
+        LoaderGroupRegistration {
+            priority: 1,
+            registration_order: first_definition_order.saturating_add(index),
+            group: group.clone(),
+        }
+    }));
+    Ok((catalog, graphics_registrations))
+}
+
+/// One re-callable `C4GraphicsResource::Init` pass over an active network
+/// group set (C4GraphicsResource.cpp:278-292): the GUI sheet winners plus
+/// the font bundle, with font failures latched typed per global GUI font
+/// exactly like `loaded_game_global_gui_resolution`.
+struct ActiveNetworkGuiResolution {
+    overrides: Vec<ClassicGuiSheetOverride>,
+    failures: HashMap<&'static str, String>,
+    font_bundle: Option<ClassicFontBundle>,
+}
+
+fn resolve_active_network_gui_resolution(
+    paths: &AppPaths,
+    scenario_font: Option<&str>,
+    catalog_registrations: &[LoaderGroupRegistration],
+    graphics_registrations: &[LoaderGroupRegistration],
+) -> Result<ActiveNetworkGuiResolution> {
+    let graphics = main_graphics_group(paths)?;
+    let mut font_failure =
+        validate_classic_loader_font(paths, scenario_font, catalog_registrations)
+            .and_then(|()| validate_loader_graphics_font_sources(catalog_registrations))
+            .err()
+            .map(|error| error.to_string());
+    let font_bundle = match resolve_classic_font_bundle(
+        paths,
+        scenario_font,
+        catalog_registrations,
+        graphics_registrations,
+    )
+    .and_then(|bundle| {
+        validate_loader_graphics_font_sources(graphics_registrations)?;
+        Ok(bundle)
+    }) {
+        Ok(bundle) => Some(bundle),
+        Err(error) => {
+            font_failure = Some(error.to_string());
+            None
+        }
+    };
+    let mut resolution =
+        resolve_classic_global_gui_sheet_overrides(graphics_registrations, &graphics);
+    if let Some(detail) = font_failure {
+        for name in CLASSIC_GLOBAL_GUI_FONTS {
+            resolution.failures.insert(name, detail.clone());
+        }
+    }
+    Ok(ActiveNetworkGuiResolution {
+        overrides: resolution.overrides,
+        failures: resolution.failures,
+        font_bundle,
+    })
+}
+
+/// The staged loading-refresh payload for a network client GO: the same
+/// resolve→pending→apply flow local loading uses, so
+/// `apply_pending_loading_resource_refresh` runs the identical typed
+/// failure gate before any pixels.
+struct ClientNetworkLoadingRefresh {
+    resources: Option<LoaderResources>,
+    tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
+    native_font_source: Option<ClassicNativeFontSource>,
+    failures: HashMap<&'static str, String>,
+    overrides: Vec<ClassicGuiSheetOverride>,
+}
+
+fn resolve_client_network_loading_refresh(
+    assets: &FrontendAssets,
+    paths: &AppPaths,
+    scenario: &FrontendScenario,
+    scenario_group: &Group,
+    definition_groups: &[Group],
+) -> Result<ClientNetworkLoadingRefresh> {
+    let head = load_classic_scenario_loader_head(scenario_group, paths)?;
+    let (catalog, graphics_registrations) = client_network_gui_registrations(
+        scenario,
+        scenario_group,
+        &head,
+        definition_groups,
+        paths,
+    )?;
+    let resolution = resolve_active_network_gui_resolution(
+        paths,
+        Some(head.font()),
+        &catalog,
+        &graphics_registrations,
+    )?;
+    let resources = match resolution.font_bundle.as_ref() {
+        Some(bundle) => {
+            // The client's loader was initialized before the join from the
+            // startup groups (C4Game.cpp:370-381); without an active winner
+            // the progress bar keeps that startup sheet, mirroring
+            // build_scenario_loader's refreshed arm.
+            let refreshed_gui_progress = match resolution
+                .overrides
+                .iter()
+                .find(|sheet| sheet.stem == "GUIProgress")
+            {
+                Some(sheet) => LoaderGuiProgress::GuiValid {
+                    progress_bar: Some(sheet.image.clone()),
+                },
+                None => {
+                    let graphics = main_graphics_group(paths)?;
+                    let startup_registrations = startup_loader_registrations(paths)?;
+                    classic_loader_resources(assets, &startup_registrations, &graphics)?
+                        .gui_progress()
+                        .clone()
+                }
+            };
+            Some(LoaderResources::from_gui_state(
+                bundle.fonts.clone(),
+                refreshed_gui_progress,
+            )?)
+        }
+        None => None,
+    };
+    let native_font_source = resolution
+        .font_bundle
+        .as_ref()
+        .and_then(|bundle| bundle.native_source.clone());
+    let tooltip_font = resolution.font_bundle.map(|bundle| bundle.tooltip);
+    Ok(ClientNetworkLoadingRefresh {
+        resources,
+        tooltip_font,
+        native_font_source,
+        failures: resolution.failures,
+        overrides: resolution.overrides,
+    })
+}
+
+/// The registered group set of a local/host round rebuilt from its retained
+/// activation inputs: OpenScenario's parents/scenario/origin/Extra chain
+/// plus the effective definition roots at C4GSPrio_Definitions
+/// (C4Game.cpp:124-213,2432-2441). Returns the loader head plus
+/// (font-catalog, graphics) registrations.
+fn loaded_game_gui_registrations(
+    frontend: &FrontendScenario,
+    definition_load: Option<&ScenarioDefinitionLoad>,
+    paths: &AppPaths,
+) -> Result<(
+    ScenarioLoaderHead,
+    Vec<LoaderGroupRegistration>,
+    Vec<LoaderGroupRegistration>,
+)> {
+    let path = frontend
+        .path
+        .as_deref()
+        .context("active scenario has no path for GUI resolution")?;
+    let scenario_group = open_group_path_for_folder_map(path)
+        .with_context(|| format!("failed to open active scenario at {}", path.display()))?;
+    let head = load_classic_scenario_loader_head(&scenario_group, paths)?;
+    let fallback_definition_load;
+    let definition_load = match definition_load {
+        Some(definition_load) => definition_load,
+        None => {
+            fallback_definition_load = ScenarioDefinitionLoad::Seed {
+                modules: Vec::new(),
+                definition_root: None,
+            };
+            &fallback_definition_load
+        }
+    };
+    let catalog = classic_loader_registrations(
+        frontend,
+        &scenario_group,
+        &head,
+        definition_load,
+        paths,
+    )?;
+    let first_definition_order = catalog
+        .iter()
+        .map(|registration| registration.registration_order)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut graphics_registrations = catalog.clone();
+    graphics_registrations.extend(definition_graphics_source_registrations(
+        &head,
+        &scenario_group,
+        definition_load,
+        paths,
+        first_definition_order,
+    )?);
+    Ok((head, catalog, graphics_registrations))
+}
+
 fn main_graphics_group(paths: &AppPaths) -> Result<Group> {
     let path = paths.planet_dir().join("Graphics.c4g");
     Group::open(&path).with_context(|| {
@@ -44689,27 +44917,10 @@ impl GameApp {
             .client_combined_scenario_path
             .clone()
             .expect("combined path was installed above");
-        let preloaded_scenario = self
-            .lobby_preload_artifact
-            .as_mut()
-            .filter(|artifact| artifact.scenario_path == combined_path)
-            .and_then(|artifact| artifact.client.as_mut())
-            .filter(|client| {
-                client.client_id == join_data.client_id
-                    && client.dynamic_resource_id == join_data.dynamic.id
-                    && client.random_seed
-                        == u64::from(join_data.parameters.random_seed as u32)
-            })
-            .and_then(|client| client.scenario.take());
-        if let Some(scenario_data) = preloaded_scenario {
-            return self.install_prepared_client_network_scenario(
-                status,
-                join_data,
-                combined_path,
-                scenario_data,
-                None,
-            );
-        }
+        // C4Game::InitGameFirstPart blocks on Parameters.GameRes.RetrieveFiles
+        // before any InitGame work proceeds (C4Game.cpp:2576-2580); the
+        // GraphicsResource refresh below registers exactly these synchronized
+        // definition roots, so a preloaded scenario waits here as well.
         let game_resources = match resolve_client_game_resources(&join_data, |core| {
             self.admission_resources
                 .complete_path(core.id)
@@ -44740,6 +44951,28 @@ impl GameApp {
                     resource.path.display()
                 )
             })?);
+        }
+        let preloaded_scenario = self
+            .lobby_preload_artifact
+            .as_mut()
+            .filter(|artifact| artifact.scenario_path == combined_path)
+            .and_then(|artifact| artifact.client.as_mut())
+            .filter(|client| {
+                client.client_id == join_data.client_id
+                    && client.dynamic_resource_id == join_data.dynamic.id
+                    && client.random_seed
+                        == u64::from(join_data.parameters.random_seed as u32)
+            })
+            .and_then(|client| client.scenario.take());
+        if let Some(scenario_data) = preloaded_scenario {
+            return self.install_prepared_client_network_scenario(
+                status,
+                join_data,
+                combined_path,
+                scenario_data,
+                None,
+                definition_groups,
+            );
         }
         let resolver_paths = cached_app_paths().ok();
         let scenario_group = Group::open(&combined_path).map_err(|error| {
@@ -44773,6 +45006,7 @@ impl GameApp {
             combined_path,
             scenario_data,
             Some(material_groups),
+            definition_groups,
         )
     }
 
@@ -44783,6 +45017,7 @@ impl GameApp {
         combined_path: PathBuf,
         scenario_data: Scenario,
         material_groups: Option<Vec<Group>>,
+        definition_groups: Vec<Group>,
     ) -> Result<(), String> {
         validate_client_network_scenario(&scenario_data)?;
         let scenario_group = Group::open(&combined_path).map_err(|error| {
@@ -44891,6 +45126,28 @@ impl GameApp {
             allow_user_change: None,
             definition_modules: Vec::new(),
         };
+        // A joining client runs the same InitGame → GraphicsResource::Init
+        // pass over the join-synchronized group set (C4Game.cpp:2432-2450;
+        // C4GraphicsResource.cpp:278-292). Stage that resolution so the
+        // loading refresh applies it through the identical typed failure
+        // gate local loading uses. The classic resource environment exists
+        // only with discovered application paths; path-less state-only
+        // fixtures keep their startup resources.
+        let refresh = match self.app_paths.as_ref() {
+            Some(refresh_paths) => Some(
+                resolve_client_network_loading_refresh(
+                    &self.assets,
+                    refresh_paths,
+                    &scenario,
+                    &scenario_group,
+                    &definition_groups,
+                )
+                .map_err(|error| {
+                    format!("failed to resolve the client GraphicsResource refresh: {error:#}")
+                })?,
+            ),
+            None => None,
+        };
         let team_registry = runtime_teams_from_join_snapshot(&join_data.parameters.teams);
         let mut loading_state = ScenarioLoadingState::from_loaded(
             scenario,
@@ -44915,6 +45172,14 @@ impl GameApp {
             .as_mut()
             .expect("from_loaded always stages the Go boundary")
             .runtime_join_players = runtime_join_players;
+        if let Some(refresh) = refresh {
+            loading_state.refreshed_resources = refresh.resources;
+            loading_state.refreshed_tooltip_font = refresh.tooltip_font;
+            loading_state.refreshed_native_font_source = refresh.native_font_source;
+            loading_state.refreshed_global_gui_failures = Some(refresh.failures);
+            loading_state.refreshed_gui_sheet_overrides = Some(refresh.overrides);
+            loading_state.refresh_requested = true;
+        }
         self.loading_state = Some(loading_state);
         retain_client_league_server_name(
             self.network_mode.as_mut(),
@@ -48411,6 +48676,10 @@ impl GameApp {
                             "network resource received"
                         );
                         self.finish_blocking_resource_wait(resource_id);
+                        // A Graphics-bearing group arriving mid-round is the
+                        // network overloading C4GraphicsResource::Init stays
+                        // re-callable for (C4GraphicsResource.cpp:285-291).
+                        self.refresh_network_overloaded_gui_resources(&core)?;
                         self.prepare_client_network_scenario_if_ready();
                         if self.network.is_none() {
                             break;
@@ -89168,69 +89437,18 @@ impl GameApp {
             .app_paths
             .as_ref()
             .context("application paths are unavailable for saved-game GUI resolution")?;
-        let path = frontend
-            .path
-            .as_deref()
-            .context("saved scenario has no path for GUI resolution")?;
-        let scenario_group = open_group_path_for_folder_map(path)
-            .with_context(|| format!("failed to open saved scenario at {}", path.display()))?;
-        let head = load_classic_scenario_loader_head(&scenario_group, paths)?;
-        let graphics = main_graphics_group(paths)?;
-        let fallback_definition_load;
-        let definition_load = match definition_load {
-            Some(definition_load) => definition_load,
-            None => {
-                fallback_definition_load = ScenarioDefinitionLoad::Seed {
-                    modules: Vec::new(),
-                    definition_root: None,
-                };
-                &fallback_definition_load
-            }
-        };
-        let mut registrations = classic_loader_registrations(
-            frontend,
-            &scenario_group,
-            &head,
-            definition_load,
-            paths,
-        )?;
-        let font_catalog_registrations = registrations.clone();
-        let mut font_failure =
-            validate_classic_loader_font(paths, Some(head.font()), &registrations)
-                .and_then(|()| validate_loader_graphics_font_sources(&registrations))
-                .err()
-                .map(|error| error.to_string());
-        let first_definition_order = registrations
-            .iter()
-            .map(|registration| registration.registration_order)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
-        registrations.extend(definition_graphics_source_registrations(
-            &head,
-            &scenario_group,
-            definition_load,
-            paths,
-            first_definition_order,
-        )?);
-        if let Err(error) = resolve_classic_font_bundle(
+        let (head, catalog, graphics_registrations) =
+            loaded_game_gui_registrations(frontend, definition_load, paths)?;
+        let resolution = resolve_active_network_gui_resolution(
             paths,
             Some(head.font()),
-            &font_catalog_registrations,
-            &registrations,
-        )
-        .map(drop)
-        .and_then(|()| validate_loader_graphics_font_sources(&registrations))
-        {
-            font_failure = Some(error.to_string());
-        }
-        let mut resolution = resolve_classic_global_gui_sheet_overrides(&registrations, &graphics);
-        if let Some(detail) = font_failure {
-            for name in CLASSIC_GLOBAL_GUI_FONTS {
-                resolution.failures.insert(name, detail.clone());
-            }
-        }
-        Ok(resolution)
+            &catalog,
+            &graphics_registrations,
+        )?;
+        Ok(ClassicGuiSheetResolution {
+            overrides: resolution.overrides,
+            failures: resolution.failures,
+        })
     }
 
     fn loaded_game_classic_font_bundle(
@@ -89242,51 +89460,184 @@ impl GameApp {
             .app_paths
             .as_ref()
             .context("application paths are unavailable for saved-game font resolution")?;
-        let path = frontend
-            .path
-            .as_deref()
-            .context("saved scenario has no path for font resolution")?;
-        let scenario_group = open_group_path_for_folder_map(path)
-            .with_context(|| format!("failed to open saved scenario at {}", path.display()))?;
-        let head = load_classic_scenario_loader_head(&scenario_group, paths)?;
-        let fallback_definition_load;
-        let definition_load = match definition_load {
-            Some(definition_load) => definition_load,
-            None => {
-                fallback_definition_load = ScenarioDefinitionLoad::Seed {
-                    modules: Vec::new(),
-                    definition_root: None,
-                };
-                &fallback_definition_load
+        let (head, catalog, graphics_registrations) =
+            loaded_game_gui_registrations(frontend, definition_load, paths)?;
+        resolve_classic_font_bundle(
+            paths,
+            Some(head.font()),
+            &catalog,
+            &graphics_registrations,
+        )
+    }
+
+    /// `C4GraphicsResource::Init` remains re-callable while a network round
+    /// runs so newly arrived Graphics-bearing groups can overload the
+    /// registered set (C4GraphicsResource.cpp:278-292): RegisterMainGroups
+    /// appends only groups newer than idRegisteredMainGroupSetFiles
+    /// (:376-382) and LoadFile reloads a sheet only when its winning group
+    /// id changed (:418-470). Mirror that pass when a Definitions resource
+    /// completes mid-round: rebuild the active registered set, append every
+    /// completed network definition root that is not registered yet, and
+    /// rebind through the id-cached apply path under the same typed gate.
+    fn refresh_network_overloaded_gui_resources(
+        &mut self,
+        core: &lc_engine::NetworkResourceCore,
+    ) -> Result<(), EngineError> {
+        if core.resource_type != lc_network::HostResourceType::Definitions as u8
+            || self.loading_state.is_some()
+        {
+            return Ok(());
+        }
+        let Some(frontend) = self.active_scenario.clone() else {
+            return Ok(());
+        };
+        let resolution = match self.resolve_network_overloaded_gui_resolution(&frontend) {
+            Ok(Some(resolution)) => resolution,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                // C++ registers nothing mid-round on its own; when the active
+                // set cannot even be rebuilt the running round keeps its
+                // current resources instead of aborting.
+                tracing::error!(
+                    resource_id = core.id,
+                    error = format!("{error:#}"),
+                    "cannot rebuild the active GUI group set for a network overloading"
+                );
+                return Ok(());
             }
         };
-        let catalog_registrations = classic_loader_registrations(
-            frontend,
-            &scenario_group,
-            &head,
-            definition_load,
-            paths,
-        )?;
-        let mut graphics_registrations = catalog_registrations.clone();
-        let first_definition_order = graphics_registrations
+        self.assets
+            .require_classic_global_gui_bootstrap_resources(&resolution.failures)
+            .map_err(report_classic_parity_boundary)
+            .map_err(classic_parity_engine_error)?;
+        self.install_active_gui_sheet_overrides(&resolution.overrides);
+        self.active_global_gui_failures = resolution.failures;
+        if let Some(bundle) = resolution.font_bundle {
+            self.install_active_classic_fonts(
+                bundle.fonts,
+                Some(bundle.tooltip),
+                bundle.native_source,
+            );
+        }
+        Ok(())
+    }
+
+    /// Rebuilds the running round's registered group set from its retained
+    /// activation inputs and appends the completed network definition roots
+    /// that are not part of it yet. Returns `None` when every completed
+    /// root is already registered (the idRegisteredMainGroupSetFiles skip:
+    /// a re-run of Init would reload nothing).
+    fn resolve_network_overloaded_gui_resolution(
+        &self,
+        frontend: &FrontendScenario,
+    ) -> Result<Option<ActiveNetworkGuiResolution>> {
+        let paths = self
+            .app_paths
+            .as_ref()
+            .context("application paths are unavailable for the network GUI overloading")?;
+        let definition_load = self.active_definition_load.as_ref();
+        let (head, catalog, mut graphics_registrations) =
+            if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                // A client's Extra.Init ran before the join with the pre-join
+                // DefinitionFilenames (C4Game.cpp:368-381), so its set keeps
+                // no per-definition Extra children; the synchronized
+                // definition roots were retained as the activation's exact
+                // ordered module paths.
+                let path = frontend
+                    .path
+                    .as_deref()
+                    .context("active scenario has no path for GUI resolution")?;
+                let scenario_group = open_group_path_for_folder_map(path).with_context(|| {
+                    format!("failed to open active scenario at {}", path.display())
+                })?;
+                let head = load_classic_scenario_loader_head(&scenario_group, paths)?;
+                let modules = match definition_load {
+                    Some(
+                        ScenarioDefinitionLoad::Fixed { modules, .. }
+                        | ScenarioDefinitionLoad::Seed { modules, .. },
+                    ) => modules.as_slice(),
+                    None => &[],
+                };
+                let resolver =
+                    InstallDefinitionResolver::new(Some(Arc::new(paths.clone())));
+                let mut definition_groups = Vec::new();
+                for module in modules {
+                    definition_groups.extend(
+                        resolver
+                            .resolve_definition_groups(&scenario_group, module)
+                            .map_err(anyhow::Error::from)?,
+                    );
+                }
+                let (catalog, graphics_registrations) = client_network_gui_registrations(
+                    frontend,
+                    &scenario_group,
+                    &head,
+                    &definition_groups,
+                    paths,
+                )?;
+                (head, catalog, graphics_registrations)
+            } else {
+                loaded_game_gui_registrations(frontend, definition_load, paths)?
+            };
+        let mut registered_roots = graphics_registrations
+            .iter()
+            .map(|registration| registration.group.root().to_path_buf())
+            .collect::<HashSet<_>>();
+        let mut next_registration_order = graphics_registrations
             .iter()
             .map(|registration| registration.registration_order)
             .max()
             .unwrap_or(0)
             .saturating_add(1);
-        graphics_registrations.extend(definition_graphics_source_registrations(
-            &head,
-            &scenario_group,
-            definition_load,
-            paths,
-            first_definition_order,
-        )?);
-        resolve_classic_font_bundle(
+        let mut appended = false;
+        for (resource_id, state) in &self.admission_resources.resources {
+            let AdmissionResourceState::Complete { path, .. } = state else {
+                continue;
+            };
+            let arrived_definitions = self
+                .admission_resources
+                .resource_cores
+                .get(resource_id)
+                .is_some_and(|core| {
+                    core.resource_type == lc_network::HostResourceType::Definitions as u8
+                });
+            if !arrived_definitions || registered_roots.contains(path.as_path()) {
+                continue;
+            }
+            let group = match Group::open(path) {
+                Ok(group) => group,
+                Err(error) => {
+                    // An unopenable arrival is not a Graphics-bearing group;
+                    // C++ would never register it mid-round either.
+                    tracing::warn!(
+                        resource_id,
+                        path = %path.display(),
+                        %error,
+                        "ignoring an unopenable mid-round definitions resource"
+                    );
+                    continue;
+                }
+            };
+            if registered_roots.insert(group.root().to_path_buf()) {
+                graphics_registrations.push(LoaderGroupRegistration {
+                    priority: 1,
+                    registration_order: next_registration_order,
+                    group,
+                });
+                next_registration_order = next_registration_order.saturating_add(1);
+                appended = true;
+            }
+        }
+        if !appended {
+            return Ok(None);
+        }
+        resolve_active_network_gui_resolution(
             paths,
             Some(head.font()),
-            &catalog_registrations,
+            &catalog,
             &graphics_registrations,
         )
+        .map(Some)
     }
 
     fn loaded_game_graphics_resources(
@@ -143373,6 +143724,442 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .expect("push stacked message dialog");
         }
         assert_guard(&mut messages, "stacked message dialogs");
+    }
+
+    #[test]
+    fn network_join_applies_active_scenario_gui_overrides() {
+        // A joining client runs the same InitGame → GraphicsResource::Init
+        // pass over the join-synchronized group set (C4Game.cpp:2432-2450;
+        // C4GraphicsResource.cpp:278-292): the synchronized definition roots
+        // overload the GUI sheets, and a malformed winner fails typed before
+        // pixels through the same loading-refresh gate local starts use.
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("client join user data");
+        let content = tempdir().expect("client join content");
+        let content_root = content.path();
+        fs::create_dir_all(content_root.join("Material.c4g")).expect("global material group");
+        let pack = install_network_definition_pack(content_root, "GuiPack.c4d", "GUIP");
+        let pack_graphics = pack.join("Graphics.c4g");
+        fs::create_dir_all(&pack_graphics).expect("pack Graphics.c4g");
+        image::RgbaImage::from_pixel(8, 4, image::Rgba([0x21, 0x42, 0x63, 0xff]))
+            .save(pack_graphics.join("GUICaption.png"))
+            .expect("write pack GUICaption");
+        let scenario_path = content_root.join("JoinGui.c4s");
+        fs::create_dir_all(&scenario_path).expect("join scenario group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Join GUI\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nLocalOnly=1\n",
+        )
+        .expect("join scenario core");
+
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content_root));
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let staged = app
+            .prepare_network_host_scenario(
+                FrontendScenario {
+                    identifier: "JoinGui.c4s".to_string(),
+                    title: "Join GUI".to_string(),
+                    path: Some(scenario_path.clone()),
+                    ..FrontendScenario::fallback()
+                },
+                ScenarioDefinitionLoad::Seed {
+                    modules: vec!["GuiPack.c4d".to_string()],
+                    definition_root: None,
+                },
+            )
+            .expect("stage the GUI-override host");
+        let prepared = prepare_staged_network_host(&app, &staged);
+        let host = prepared.host_config();
+        let snapshot = host
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .clone();
+        let host_files = host.resource_files.clone();
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 2,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let complete_path = |core: &lc_engine::NetworkResourceCore| {
+            host_files
+                .iter()
+                .find(|resource| resource.core.id == core.id)
+                .map(|resource| resource.path.clone())
+        };
+        let scenario_resources = resolve_client_scenario_resources(&join_data, complete_path)
+            .expect("client scenario resources");
+        let game_resources = resolve_client_game_resources(&join_data, complete_path)
+            .expect("client game resources");
+        let published_pack = game_resources
+            .iter()
+            .find(|resource| {
+                resource.core.resource_type == lc_network::HostResourceType::Definitions as u8
+            })
+            .expect("published definition pack")
+            .path
+            .clone();
+        let client_directory = tempdir().expect("client resource directory");
+        let combined_path = client_directory.path().join("Combined2.c4s");
+        let preload_job = |app: &GameApp,
+                           join_data: lc_network::JoinDataEnvelope,
+                           game_resources: Vec<ResolvedClientStartResource>| {
+            GameApp::run_lobby_preload_job(LobbyPreloadJob {
+                graphics: LobbyPreloadGraphicsContext {
+                    app_paths: app.app_paths.clone(),
+                    fallback: app.startup_game_graphics_resources(),
+                    liquid_animation_enabled: app.assets.liquid_animation_enabled(),
+                },
+                source: LobbyPreloadJobSource::Client {
+                    join_data,
+                    scenario_resources: Some(scenario_resources.clone()),
+                    game_resources,
+                    resource_directory: client_directory.path().to_path_buf(),
+                    maker: "Exact Host".to_string(),
+                    scenario_path: combined_path.clone(),
+                    staging_path: None,
+                },
+            })
+            .expect("preload the combined client scenario")
+        };
+        let artifact = preload_job(&app, join_data.clone(), game_resources.clone());
+
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.pending_network_join_data = Some(join_data.clone());
+        app.pending_client_start_status = Some(lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: host.initial_status.control_mode,
+            target_tick: 0,
+        });
+        for resource in &host_files {
+            app.admission_resources.ensure_by_core(&resource.core);
+            app.admission_resources
+                .mark_complete(resource.core.id, resource.path.clone());
+        }
+        app.client_combined_scenario_path = Some(combined_path.clone());
+        app.lobby_preload_artifact = Some(artifact);
+        app.try_prepare_client_network_scenario()
+            .expect("install the prepared client network scenario");
+
+        let loading = app.loading_state.as_ref().expect("client loading state");
+        assert!(
+            loading.refresh_requested,
+            "the client GO must stage a GraphicsResource refresh"
+        );
+        let staged_overrides = loading
+            .refreshed_gui_sheet_overrides
+            .as_ref()
+            .expect("staged client GUI sheet overrides");
+        let staged_caption = staged_overrides
+            .iter()
+            .find(|sheet| sheet.stem == "GUICaption")
+            .expect("the synchronized definition pack wins GUICaption");
+        assert!(
+            staged_caption
+                .source
+                .contains(&published_pack.display().to_string()),
+            "the winning source must be the synchronized resource: {}",
+            staged_caption.source
+        );
+        assert_eq!(
+            loading
+                .refreshed_global_gui_failures
+                .as_ref()
+                .map(HashMap::len),
+            Some(0)
+        );
+        assert!(
+            loading.refreshed_resources.is_some(),
+            "the client refresh reinitializes the loader fonts"
+        );
+        let pristine_ptr = app
+            .assets
+            .startup_dialog_images
+            .get("GUICaption.png")
+            .expect("startup caption sheet")
+            .pixels()
+            .as_ptr();
+        app.apply_pending_loading_resource_refresh()
+            .expect("apply the staged client refresh");
+        let applied = app
+            .assets
+            .startup_dialog_images
+            .get("GUICaption.png")
+            .expect("applied caption sheet");
+        assert_eq!(applied.pixels()[..4], [0x21, 0x42, 0x63, 0xff]);
+        assert_ne!(applied.pixels().as_ptr(), pristine_ptr);
+        assert!(app.active_global_gui_failures.is_empty());
+        let applied_ptr = app
+            .assets
+            .startup_dialog_images
+            .get("GUICaption.png")
+            .expect("applied caption sheet")
+            .pixels()
+            .as_ptr();
+
+        // A malformed winner in a synchronized pack must fail typed through
+        // the identical gate, before any pixel changes.
+        let corrupt_pack = install_network_definition_pack(content_root, "CorruptPack.c4d", "CORR");
+        let corrupt_graphics = corrupt_pack.join("Graphics.c4g");
+        fs::create_dir_all(&corrupt_graphics).expect("corrupt pack Graphics.c4g");
+        fs::write(corrupt_graphics.join("GUIScroll.png"), b"not a png")
+            .expect("write corrupt GUIScroll");
+        let corrupt_core = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Definitions as u8,
+            id: 990,
+            loadable: true,
+            filename: lc_engine::LegacyCString::from_bytes(b"CorruptPack.c4d".to_vec())
+                .expect("valid corrupt pack name"),
+            ..Default::default()
+        };
+        let mut corrupt_join_data = join_data;
+        corrupt_join_data
+            .parameters
+            .game_resources
+            .push(corrupt_core.clone());
+        let mut corrupt_game_resources = game_resources;
+        corrupt_game_resources.push(ResolvedClientStartResource {
+            core: corrupt_core.clone(),
+            path: corrupt_pack.clone(),
+        });
+        let corrupt_artifact = preload_job(&app, corrupt_join_data.clone(), corrupt_game_resources);
+        app.admission_resources.ensure_by_core(&corrupt_core);
+        app.admission_resources
+            .mark_complete(corrupt_core.id, corrupt_pack.clone());
+        app.loading_state = None;
+        app.pending_network_join_data = Some(corrupt_join_data);
+        app.lobby_preload_artifact = Some(corrupt_artifact);
+        app.try_prepare_client_network_scenario()
+            .expect("a malformed override stages a typed failure, not an install error");
+        let failures = app
+            .loading_state
+            .as_ref()
+            .expect("corrupt client loading state")
+            .refreshed_global_gui_failures
+            .as_ref()
+            .expect("staged typed failures");
+        assert!(failures.contains_key("GUIScroll"));
+        let error = app
+            .apply_pending_loading_resource_refresh()
+            .expect_err("the malformed winner fails typed before pixels");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::GlobalGuiBootstrapResources {
+                issues: vec![ClassicGuiBootstrapIssue::malformed(
+                    "GUIScroll",
+                    "a readable selected bmp/jpeg/jpg/png RGBA surface",
+                    format!(
+                        "{root}:GUIScroll.png: failed to decode exact classic image entry `GUIScroll.png` from {root}",
+                        root = corrupt_graphics.display()
+                    ),
+                )],
+            },
+        );
+        assert_eq!(
+            app.assets
+                .startup_dialog_images
+                .get("GUICaption.png")
+                .expect("gated caption sheet")
+                .pixels()
+                .as_ptr(),
+            applied_ptr,
+            "the failed gate must not touch any applied sheet"
+        );
+    }
+
+    #[test]
+    fn mid_round_graphics_group_arrival_rebinds_changed_sheets_only() {
+        // C4GraphicsResource::Init stays re-callable for network overloadings
+        // (C4GraphicsResource.cpp:278-292): a Graphics-bearing group arriving
+        // mid-round re-registers (RegisterMainGroups, :376-382) and LoadFile
+        // reloads only sheets whose winning group id changed (:418-470).
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("mid-round user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let packs = tempdir().expect("mid-round packs");
+        let pack_sheet = |module: &str, sheets: &[(&str, [u8; 4])]| {
+            let pack = install_network_definition_pack(packs.path(), module, "MIDR");
+            let graphics = pack.join("Graphics.c4g");
+            fs::create_dir_all(&graphics).expect("pack Graphics.c4g");
+            for (name, pixel) in sheets {
+                image::RgbaImage::from_pixel(8, 4, image::Rgba(*pixel))
+                    .save(graphics.join(name))
+                    .expect("write pack sheet");
+            }
+            pack
+        };
+        let pack_a = pack_sheet(
+            "PackA.c4d",
+            &[
+                ("GUICaption.png", [0x31, 0x11, 0x11, 0xff]),
+                ("GUIScroll.png", [0x32, 0x22, 0x22, 0xff]),
+            ],
+        );
+        let pack_b = pack_sheet("PackB.c4d", &[("GUIIcons.png", [0x33, 0x33, 0x33, 0xff])]);
+        let pack_c = install_network_definition_pack(packs.path(), "PackC.c4d", "MIDC");
+        let corrupt_graphics = pack_c.join("Graphics.c4g");
+        fs::create_dir_all(&corrupt_graphics).expect("corrupt pack Graphics.c4g");
+        fs::write(corrupt_graphics.join("GUISubmenu.png"), b"not a png")
+            .expect("write corrupt GUISubmenu");
+        let round = tempdir().expect("active round scenario");
+        let combined = round.path().join("Combined2.c4s");
+        fs::create_dir_all(&combined).expect("combined scenario group");
+        fs::write(combined.join("Scenario.txt"), "[Head]\nTitle=Mid Round\n")
+            .expect("combined scenario core");
+
+        let arrival = |id: i32, path: &Path| NetworkEvent::ResourceComplete {
+            resource_id: id,
+            core: lc_engine::NetworkResourceCore {
+                resource_type: lc_network::HostResourceType::Definitions as u8,
+                id,
+                loadable: true,
+                filename: lc_engine::LegacyCString::from_bytes(b"MidRound.c4d".to_vec())
+                    .expect("valid mid-round pack name"),
+                ..Default::default()
+            },
+            path: path.to_path_buf(),
+            local: true,
+        };
+        let sheet_ptr = |app: &GameApp, name: &str| {
+            app.assets
+                .startup_dialog_images
+                .get(name)
+                .expect("global GUI sheet")
+                .pixels()
+                .as_ptr()
+        };
+
+        let mut app = new_menu_app_with_paths(320, 200, &paths);
+        let mut frontend = FrontendScenario::fallback();
+        frontend.identifier = "Combined2.c4s".to_string();
+        frontend.path = Some(combined.clone());
+        app.active_scenario = Some(frontend.clone());
+        app.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
+            modules: Vec::new(),
+            definition_root: None,
+        });
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        let (manager, events) = NetworkManager::test_stub();
+        app.network = Some(manager);
+
+        events
+            .send(arrival(31, &pack_a))
+            .expect("queue first mid-round arrival");
+        app.process_network_events()
+            .expect("first arrival re-registers and rebinds");
+        assert_eq!(
+            app.assets
+                .startup_dialog_images
+                .get("GUICaption.png")
+                .expect("overloaded caption")
+                .pixels()[..4],
+            [0x31, 0x11, 0x11, 0xff]
+        );
+        assert_eq!(
+            app.assets
+                .startup_dialog_images
+                .get("GUIScroll.png")
+                .expect("overloaded scroll")
+                .pixels()[..4],
+            [0x32, 0x22, 0x22, 0xff]
+        );
+        assert!(app.active_global_gui_failures.is_empty());
+        let caption_ptr = sheet_ptr(&app, "GUICaption.png");
+        let scroll_ptr = sheet_ptr(&app, "GUIScroll.png");
+
+        // A second Graphics-bearing arrival rebinds only its own new winner:
+        // unchanged winners keep their loaded surfaces (the group-id cache).
+        events
+            .send(arrival(32, &pack_b))
+            .expect("queue second mid-round arrival");
+        app.process_network_events()
+            .expect("second arrival rebinds only changed sheets");
+        assert_eq!(sheet_ptr(&app, "GUICaption.png"), caption_ptr);
+        assert_eq!(sheet_ptr(&app, "GUIScroll.png"), scroll_ptr);
+        assert_eq!(
+            app.assets
+                .startup_dialog_images
+                .get("GUIIcons.png")
+                .expect("overloaded icons")
+                .pixels()[..4],
+            [0x33, 0x33, 0x33, 0xff]
+        );
+        let icons_ptr = sheet_ptr(&app, "GUIIcons.png");
+
+        // A re-arrival of an already registered root is the
+        // idRegisteredMainGroupSetFiles skip: every winner stays loaded.
+        events
+            .send(arrival(33, &pack_a))
+            .expect("queue duplicate mid-round arrival");
+        app.process_network_events()
+            .expect("duplicate arrival reloads nothing");
+        assert_eq!(sheet_ptr(&app, "GUICaption.png"), caption_ptr);
+        assert_eq!(sheet_ptr(&app, "GUIScroll.png"), scroll_ptr);
+        assert_eq!(sheet_ptr(&app, "GUIIcons.png"), icons_ptr);
+
+        // A malformed winner in an arriving group fails typed before pixels.
+        events
+            .send(arrival(34, &pack_c))
+            .expect("queue corrupt mid-round arrival");
+        let error = app
+            .process_network_events()
+            .expect_err("a malformed mid-round winner fails typed");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::GlobalGuiBootstrapResources {
+                issues: vec![ClassicGuiBootstrapIssue::malformed(
+                    "GUISubmenu",
+                    "a readable selected bmp/jpeg/jpg/png RGBA surface",
+                    format!(
+                        "{root}:GUISubmenu.png: failed to decode exact classic image entry `GUISubmenu.png` from {root}",
+                        root = corrupt_graphics.display()
+                    ),
+                )],
+            },
+        );
+        assert_eq!(sheet_ptr(&app, "GUICaption.png"), caption_ptr);
+        assert_eq!(sheet_ptr(&app, "GUIScroll.png"), scroll_ptr);
+        assert_eq!(sheet_ptr(&app, "GUIIcons.png"), icons_ptr);
+
+        // A host rebuilds its set from the retained activation inputs
+        // (OpenScenario chain + effective definition roots) and overloads
+        // identically.
+        let mut host_app = new_menu_app_with_paths(320, 200, &paths);
+        host_app.active_scenario = Some(frontend);
+        host_app.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
+            modules: Vec::new(),
+            definition_root: None,
+        });
+        host_app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11_113)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let (host_manager, host_events) = NetworkManager::test_stub();
+        host_app.network = Some(host_manager);
+        host_events
+            .send(arrival(41, &pack_a))
+            .expect("queue host mid-round arrival");
+        host_app
+            .process_network_events()
+            .expect("host arrival re-registers and rebinds");
+        assert_eq!(
+            host_app
+                .assets
+                .startup_dialog_images
+                .get("GUICaption.png")
+                .expect("host overloaded caption")
+                .pixels()[..4],
+            [0x31, 0x11, 0x11, 0xff]
+        );
     }
 
     #[test]
