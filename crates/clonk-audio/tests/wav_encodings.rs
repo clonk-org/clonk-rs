@@ -361,6 +361,34 @@ fn decodes_cpp_supported_wav_encodings() {
 }
 
 #[test]
+fn terminal_odd_data_chunk_does_not_require_padding() {
+    // C4AudioSystemSdl.cpp:284-286 delegates legacy sound bytes to
+    // Mix_LoadWAV_RW; shipped odd data chunks omit the terminal alignment pad.
+    let mut wav = riff_wav(&pcm_fmt(8), None, &[128]);
+    assert_eq!(wav.pop(), Some(0), "fixture ends with RIFF padding");
+    let riff_len = u32::try_from(wav.len() - 8).unwrap();
+    wav[4..8].copy_from_slice(&riff_len.to_le_bytes());
+
+    assert_mono_samples(&wav, &[0], 128.0);
+}
+
+#[test]
+fn terminal_unpadded_data_still_requires_the_declared_payload() {
+    // C4AudioSystemSdl.cpp:284-286 accepts the shipped alignment quirk, not a
+    // truncated audio payload.
+    let mut wav = riff_wav(&pcm_fmt(8), None, &[0, 128, 255]);
+    assert_eq!(wav.pop(), Some(0), "fixture ends with RIFF padding");
+    assert_eq!(wav.pop(), Some(255), "remove one declared payload byte");
+    let riff_len = u32::try_from(wav.len() - 8).unwrap();
+    wav[4..8].copy_from_slice(&riff_len.to_le_bytes());
+
+    assert!(matches!(
+        decode_audio(&wav),
+        Err(AudioDecodeError::InvalidData("truncated WAV chunk"))
+    ));
+}
+
+#[test]
 fn malformed_or_unsupported_wav_encodings_remain_typed_errors() {
     fn assert_invalid(wav: &[u8]) {
         assert!(matches!(

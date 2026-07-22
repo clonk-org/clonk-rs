@@ -421,10 +421,6 @@ fn parse_wave(data: &[u8]) -> Result<ParsedWave, AudioDecodeError> {
             .checked_add(chunk_len)
             .filter(|end| *end <= riff_end)
             .ok_or(AudioDecodeError::InvalidData("truncated WAV chunk"))?;
-        let padded_end = payload_end
-            .checked_add(chunk_len & 1)
-            .filter(|next| *next <= riff_end)
-            .ok_or(AudioDecodeError::InvalidData("truncated WAV chunk padding"))?;
         if chunk_id == b"fmt " && fmt_range.is_none() {
             if data_range.is_some() {
                 return Err(AudioDecodeError::InvalidData("WAV fmt follows data"));
@@ -437,6 +433,13 @@ fn parse_wave(data: &[u8]) -> Result<ParsedWave, AudioDecodeError> {
             data_range = Some((payload_start, payload_end));
             break;
         }
+        // Padding only separates chunks. Legacy Clonk WAVs commonly omit a
+        // final odd-sized data chunk's pad, which is irrelevant once its
+        // payload has been found.
+        let padded_end = payload_end
+            .checked_add(chunk_len & 1)
+            .filter(|next| *next <= riff_end)
+            .ok_or(AudioDecodeError::InvalidData("truncated WAV chunk padding"))?;
         position = padded_end;
     }
 
