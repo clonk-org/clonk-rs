@@ -34,6 +34,7 @@ work reads and runs it from a separate pinned checkout:
 ## Licensing
 
 This port is a derived work of LegacyClonk and Clonk. The original license
-and trademark terms in [`COPYING`](COPYING), [`TRADEMARK`](TRADEMARK),
-[`licenses/`](licenses/), and [`lc_licenses/`](lc_licenses/) continue to
-apply; see [`credits.txt`](credits.txt) for attribution.
+and trademark terms in [`COPYING`](COPYING), [`TRADEMARK`](TRADEMARK), and
+[`licenses/`](licenses/) continue to apply; see [`credits.txt`](credits.txt)
+for attribution. Rust dependency licenses are declared in each crate's
+metadata (`cargo license`/`cargo about` can enumerate them).
