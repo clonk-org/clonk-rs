@@ -13252,6 +13252,10 @@ enum AppContextMenuCommand {
         savegame_player_id: i32,
         player_id: i32,
     },
+    /// Deferred Take Over submenu request: children are computed when the
+    /// submenu opens, mirroring `PlayerListItem::OnContextTakeOver`
+    /// (src/C4PlayerInfoListBox.cpp:535-556) running at submenu-open time.
+    LobbyPlayerTakeOverSubmenu { savegame_player_id: i32 },
     LobbyPlayerRemove { client_id: i32, player_id: i32 },
     LobbyPlayerNewColor { client_id: i32, player_id: i32 },
     LobbyClientToggleMute(i32),
@@ -13339,7 +13343,10 @@ fn lobby_rgba(color: u32) -> [u8; 4] {
 /// Native prefers a positive message-connection lag. It consults the data
 /// connection only when the message connection is absent or reports `<= 0`;
 /// this is deliberately not a minimum of both routes. `-1` removes the ping
-/// label, while zero remains a visible `0 ms` value.
+/// label, while zero remains a visible `0 ms` value. Each route reports
+/// `getLag()` (`lag_ms`), not the cached round trip: an unanswered ping shows
+/// its growing wait once it exceeds the last measurement
+/// (src/C4PlayerInfoListBox.cpp:894-905; src/C4Network2IO.cpp:1283-1295).
 fn classic_lobby_client_ping_ms_by_id(
     connections: &[lc_network::RuntimeNetworkConnection],
     local_client_id: ClientId,
@@ -13358,11 +13365,11 @@ fn classic_lobby_client_ping_ms_by_id(
         let client = by_client.entry(connection.client_id).or_default();
         match connection.usage.as_str() {
             "Data/Msg" => {
-                client.message = Some(connection.ping_ms);
-                client.data = Some(connection.ping_ms);
+                client.message = Some(connection.lag_ms);
+                client.data = Some(connection.lag_ms);
             }
-            "Msg" => client.message = Some(connection.ping_ms),
-            "Data" => client.data = Some(connection.ping_ms),
+            "Msg" => client.message = Some(connection.lag_ms),
+            "Data" => client.data = Some(connection.lag_ms),
             _ => {}
         }
     }
@@ -35931,9 +35938,11 @@ impl GameApp {
         {
             for connection in connections {
                 if matches!(connection.usage.as_str(), "Msg" | "Data/Msg") {
+                    // C4Network2Stats samples getMsgConn()->getLag()
+                    // (src/C4Network2Stats.cpp:336-343).
                     message_pings
                         .entry(connection.client_id)
-                        .or_insert(connection.ping_ms);
+                        .or_insert(connection.lag_ms);
                 }
             }
         }
@@ -38242,6 +38251,8 @@ impl GameApp {
                             .peer_address
                             .map(|address| address.to_string())
                             .unwrap_or_else(|| "???".to_string());
+                        // DrawStatus prints getPingTime(), not getLag()
+                        // (src/C4Network2.cpp:1207-1219).
                         format!(
                             "{usage}: {} ({peer} p{} l{})",
                             protocol_name(connection.protocol),
@@ -38371,6 +38382,7 @@ impl GameApp {
                                 .unwrap_or_else(|| "???".to_string()),
                             packet_loss: connection.packet_loss,
                             ping_ms: connection.ping_ms,
+                            lag_ms: connection.lag_ms,
                             can_disconnect: !self.network_is_league,
                         },
                     )
@@ -63271,6 +63283,11 @@ impl GameApp {
             }
             return Some((
                 client_id,
+                // C++ attaches a CBContextHandler here and fills the children
+                // in OnContextTakeOver only when the submenu opens
+                // (src/C4PlayerInfoListBox.cpp:503-505,535-556), so the
+                // candidate set reflects PlayerInfo updates that arrive while
+                // the root menu is open.
                 vec![ContextMenuEntry::new(
                     self.runtime_resource_text("IDS_MSG_TAKEOVERPLR", "&Take over"),
                 )
@@ -63279,7 +63296,9 @@ impl GameApp {
                     "Control the player in the game",
                 ))
                 .with_icon(ContextMenuIcon::Phase(9))
-                .with_submenu(self.classic_lobby_takeover_entries(player_id))],
+                .with_deferred_submenu(AppContextMenuCommand::LobbyPlayerTakeOverSubmenu {
+                    savegame_player_id: player_id,
+                })],
             ));
         }
 
@@ -64942,6 +64961,10 @@ impl GameApp {
                             player_id,
                         );
                     }
+                    AppContextMenuCommand::LobbyPlayerTakeOverSubmenu { .. } => {
+                        // The deferred parent entry carries no menu handler;
+                        // this request only arrives via SubmenuRequested.
+                    }
                     AppContextMenuCommand::LobbyPlayerRemove {
                         client_id,
                         player_id,
@@ -64998,6 +65021,30 @@ impl GameApp {
                         self.apply_input_dialog_context_command(command)?;
                     }
                 },
+                // C4GUI fills a submenu when it opens: CheckOpenSubmenu runs
+                // the entry's OnSubcontext callback and opens the returned
+                // menu in the same dispatch (src/C4GuiMenu.cpp:469-506).
+                ContextMenuEvent::SubmenuRequested(command) => {
+                    let entries = match command {
+                        AppContextMenuCommand::LobbyPlayerTakeOverSubmenu {
+                            savegame_player_id,
+                        } => self.classic_lobby_takeover_entries(savegame_player_id),
+                        other => {
+                            tracing::error!(
+                                ?other,
+                                "context submenu request without a live provider"
+                            );
+                            Vec::new()
+                        }
+                    };
+                    if let Some(outcome) = self
+                        .context_menu
+                        .as_mut()
+                        .map(|menu| menu.fill_requested_submenu(entries))
+                    {
+                        self.process_context_menu_outcome(outcome)?;
+                    }
+                }
             }
         }
         Ok(())
@@ -126630,6 +126677,126 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn takeover_submenu_fills_live_at_open() {
+        let mut app = new_menu_app(640, 480);
+        install_test_free_savegame_player_row(&mut app, 50);
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+
+        let first = lc_engine::ControlPlayerInfoEntry {
+            id: 11,
+            name: LegacyCString::from_bytes(b"First".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let second = lc_engine::ControlPlayerInfoEntry {
+            id: 12,
+            name: LegacyCString::from_bytes(b"Second".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let packet_flags = lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL;
+        let local_packet = |players: Vec<lc_engine::ControlPlayerInfoEntry>| {
+            lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                flags: packet_flags,
+                players,
+                by_client: 7,
+            }
+        };
+        app.control_player_infos
+            .replace_snapshot(99, [local_packet(vec![first.clone()])]);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::RosterContextRequested {
+            row: LobbyRosterId::Player(50),
+            position: GuiPoint::new(200.0, 150.0),
+        }])
+        .expect("free savegame player context opens");
+        assert_eq!(
+            app.context_menu.as_ref().unwrap().layout().panels.len(),
+            1,
+            "the Take Over child panel does not exist at root-menu open"
+        );
+
+        // A player-info update arrives while the root menu is open. C++
+        // fills the children in OnContextTakeOver only at submenu-open
+        // (src/C4PlayerInfoListBox.cpp:503-505,535-556), so the submenu must
+        // reflect this update rather than a root-open snapshot.
+        app.control_player_infos
+            .replace_snapshot(100, [local_packet(vec![first.clone(), second.clone()])]);
+
+        let root = app.context_menu.as_ref().unwrap().layout().panels[0].rows[0].rect;
+        app.handle_context_menu_pointer_move(GuiPoint::new(
+            (root.x + 1) as f32,
+            (root.y + 1) as f32,
+        ))
+        .expect("open takeover submenu");
+        let layout = app.context_menu.as_ref().unwrap().layout();
+        assert_eq!(layout.panels.len(), 2);
+        assert_eq!(
+            layout.panels[1].rows.len(),
+            2,
+            "children are computed from the live packet at submenu-open"
+        );
+
+        // Closing the child and re-selecting the parent re-runs the fill
+        // callback, so a candidate that issued its join meanwhile drops out.
+        app.handle_context_menu_key(VirtualKeyCode::Left, ElementState::Pressed)
+            .expect("close the takeover child panel");
+        assert_eq!(app.context_menu.as_ref().unwrap().layout().panels.len(), 1);
+        let mut issued_first = first.clone();
+        issued_first.flags |= lc_engine::PLAYER_INFO_FLAG_JOIN_ISSUED;
+        app.control_player_infos
+            .replace_snapshot(101, [local_packet(vec![issued_first, second.clone()])]);
+        app.handle_context_menu_key(VirtualKeyCode::Right, ElementState::Pressed)
+            .expect("reopen the takeover child panel");
+        let layout = app.context_menu.as_ref().unwrap().layout();
+        assert_eq!(layout.panels.len(), 2);
+        assert_eq!(
+            layout.panels[1].rows.len(),
+            1,
+            "a re-open refills from the live packet like C++"
+        );
+
+        // The surviving child is the live-eligible player and activates the
+        // exact live association.
+        let child = app.context_menu.as_ref().unwrap().layout().panels[1].rows[0].rect;
+        app.handle_context_menu_pointer_move(GuiPoint::new(
+            (child.x + 1) as f32,
+            (child.y + 1) as f32,
+        ))
+        .expect("select live takeover child");
+        assert!(
+            app.handle_context_menu_pointer_button(
+                ElementState::Pressed,
+                ContextMenuPointerButton::Left,
+            )
+            .expect("activate live takeover child")
+        );
+        let updates = commands.take_player_info_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            updates[0]
+                .players
+                .iter()
+                .map(|player| (player.id, player.savegame_player))
+                .collect::<Vec<_>>(),
+            vec![(11, 0), (12, 50)],
+            "the activation grabs the live-eligible player only"
+        );
+        assert!(
+            app.handle_context_menu_pointer_button(
+                ElementState::Released,
+                ContextMenuPointerButton::Left,
+            )
+            .expect("consume takeover activation release")
+        );
+    }
+
+    #[test]
     fn l081_player_context_root_matches_cpp_entry_gates() {
         let mut app = new_menu_app(640, 480);
         let (mut chooser, _) = install_test_classic_host_team_lobby(&mut app);
@@ -128414,6 +128581,179 @@ public func Grant(password) { return GainMissionAccess(password); }
     }
 
     #[test]
+    fn joined_roster_double_click_is_roster_scoped() {
+        let mut app = new_menu_app(640, 480);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let (network, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(network);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_max_players = 8;
+
+        let chooser = set_control_test_player(31, 1, 0);
+        let companion =
+            set_control_test_player(32, 3, lc_engine::PLAYER_INFO_FLAG_JOIN_ISSUED);
+        let packet_flags = lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL;
+        let clients = vec![message_client(0, b"Host"), message_client(7, b"Client")];
+        app.control_player_infos.replace_snapshot(
+            40,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                flags: packet_flags,
+                players: vec![chooser.clone(), companion.clone()],
+                by_client: 7,
+            }],
+        );
+        app.control_clients.replace_snapshot(clients.clone());
+
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host JoinData");
+        snapshot.parameters.max_players = 8;
+        snapshot.parameters.clients = lc_network::JoinClientRegistrySnapshot {
+            clients,
+            local_client_id: Some(7),
+        };
+        snapshot.parameters.player_infos = lc_network::PlayerInfoListSnapshot {
+            last_player_id: 32,
+            clients: vec![lc_network::ClientPlayerInfosSnapshot {
+                client_id: 7,
+                flags: packet_flags,
+                players: vec![chooser.clone(), companion.clone()],
+            }],
+        };
+        snapshot.parameters.teams = lc_network::join_team_list_snapshot(
+            set_control_test_metadata(
+                false,
+                vec![
+                    set_control_test_team(1, vec![31], 0),
+                    set_control_test_team(2, vec![], 0),
+                    set_control_test_team(3, vec![32], 0),
+                ],
+            ),
+        );
+        app.pending_network_join_data = Some(lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 0,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        });
+        app.sync_classic_lobby_roster();
+
+        let teams_tab = {
+            let layout = app
+                .network_lobby
+                .as_mut()
+                .expect("joined lobby")
+                .update_layout(640.0, 480.0)
+                .clone();
+            let rect = layout
+                .sheet_buttons
+                .iter()
+                .find(|(sheet, _)| *sheet == LobbySheet::Teams)
+                .expect("joined Teams tab")
+                .1;
+            GuiPoint::new(
+                rect.origin.x + rect.size.width / 2.0,
+                rect.origin.y + rect.size.height / 2.0,
+            )
+        };
+        app.handle_network_lobby_pointer_move(teams_tab)
+            .expect("hover Teams tab");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press Teams tab");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("activate Teams tab");
+        assert_eq!(
+            app.network_lobby.as_ref().unwrap().active_sheet,
+            LobbySheet::Teams
+        );
+
+        let header_point = |app: &mut GameApp, team_id: i32| {
+            let (_, roster) = app.joined_lobby_layouts().expect("joined roster layout");
+            let lobby = app.network_lobby.as_ref().expect("joined lobby");
+            let row = roster
+                .rows
+                .iter()
+                .find(|layout_row| {
+                    matches!(
+                        lobby.controller.rows().get(layout_row.index),
+                        Some(LobbyRosterRow::Header(LobbyHeaderRow {
+                            kind: LobbyRosterHeader::Team(id),
+                            ..
+                        })) if *id == team_id
+                    )
+                })
+                .expect("joined team header row");
+            GuiPoint::new((row.rect.x + 2) as f32, (row.rect.y + 2) as f32)
+        };
+
+        // Two completed clicks on DIFFERENT team headers inside the 400 ms
+        // window stay single clicks: the synthesized LeftDouble is scoped to
+        // the retained semantic row, exactly like the persistent host path.
+        let other_point = header_point(&mut app, 3);
+        app.handle_network_lobby_pointer_move(other_point)
+            .expect("hover other team header");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press other team header");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("release other team header");
+        let target_point = header_point(&mut app, 2);
+        app.handle_network_lobby_pointer_move(target_point)
+            .expect("hover target team header");
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press target team header");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("release target team header");
+        assert!(
+            commands.take_player_info_updates().is_empty(),
+            "fast clicks across two roster rows never classify as a double click"
+        );
+
+        // A second completed click on the same header fires one bulk move.
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, false)
+            .expect("press target team header again");
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("release target team header again");
+        let mut moved_chooser = chooser.clone();
+        moved_chooser.team = 2;
+        let mut moved_companion = companion.clone();
+        moved_companion.team = 2;
+        assert_eq!(
+            commands.take_player_info_updates(),
+            vec![lc_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: packet_flags,
+                players: vec![moved_chooser, moved_companion],
+            }],
+            "the roster-scoped double click clones one full local packet"
+        );
+
+        // A press-classified LeftDouble (the SDL/X11 global press clock;
+        // C4FullScreen.cpp:327-350) reaches the hovered team header directly,
+        // and its release never double-fires.
+        app.handle_network_lobby_pointer_button(ElementState::Pressed, true)
+            .expect("press-classified LeftDouble on target team header");
+        assert_eq!(
+            commands.take_player_info_updates().len(),
+            1,
+            "LeftDouble runs the hovered header action exactly once"
+        );
+        app.handle_network_lobby_pointer_button(ElementState::Released, false)
+            .expect("release after the press-classified LeftDouble");
+        assert!(
+            commands.take_player_info_updates().is_empty(),
+            "the release after a LeftDouble neither activates nor re-fires"
+        );
+    }
+
+    #[test]
     fn unstaged_host_retained_roster_routes_script_player_add() {
         let mut app = new_menu_app(640, 480);
         app.startup_view = StartupView::NetworkLobby;
@@ -130152,23 +130492,34 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
     }
 
+    fn test_ping_connection(
+        connection_id: u32,
+        client_id: ClientId,
+        usage: &str,
+        ping_ms: i32,
+        lag_ms: i32,
+    ) -> lc_network::RuntimeNetworkConnection {
+        lc_network::RuntimeNetworkConnection {
+            connection_id,
+            client_id,
+            usage: usage.to_string(),
+            protocol: lc_network::NetworkProtocol::Tcp,
+            peer_address: None,
+            packet_loss: 0,
+            ping_ms,
+            lag_ms,
+        }
+    }
+
     #[test]
     fn classic_lobby_ping_prefers_positive_message_connection_over_data() {
-        let connection = |connection_id, client_id, usage: &str, ping_ms| {
-            lc_network::RuntimeNetworkConnection {
-                connection_id,
-                client_id,
-                usage: usage.to_string(),
-                protocol: lc_network::NetworkProtocol::Tcp,
-                peer_address: None,
-                packet_loss: 0,
-                ping_ms,
-            }
-        };
+        // The message route has an unanswered ping: its getLag value (70)
+        // outgrew the measured round trip (33). UpdatePing reads getLag
+        // (src/C4PlayerInfoListBox.cpp:894-905), so the roster shows 70.
         let pings = classic_lobby_client_ping_ms_by_id(
             &[
-                connection(1, 7, "Msg", 70),
-                connection(2, 7, "Data", 20),
+                test_ping_connection(1, 7, "Msg", 33, 70),
+                test_ping_connection(2, 7, "Data", 20, 20),
             ],
             0,
         );
@@ -130178,16 +130529,8 @@ public func Grant(password) { return GainMissionAccess(password); }
 
     #[test]
     fn classic_lobby_ping_uses_data_fallback_and_hides_only_minus_one_or_local() {
-        let connection = |connection_id, client_id, usage: &str, ping_ms| {
-            lc_network::RuntimeNetworkConnection {
-                connection_id,
-                client_id,
-                usage: usage.to_string(),
-                protocol: lc_network::NetworkProtocol::Tcp,
-                peer_address: None,
-                packet_loss: 0,
-                ping_ms,
-            }
+        let connection = |connection_id, client_id, usage: &str, lag_ms| {
+            test_ping_connection(connection_id, client_id, usage, lag_ms, lag_ms)
         };
         let pings = classic_lobby_client_ping_ms_by_id(
             &[
@@ -130242,6 +130585,9 @@ public func Grant(password) { return GainMissionAccess(password); }
         let (network, _events, _commands) = NetworkManager::test_stub_with_commands();
         network.set_test_lobby_client_telemetry(lc_network::RuntimeLobbyClientTelemetry {
             connections: vec![
+                // An unanswered message-route ping whose getLag wait (70)
+                // outgrew the cached round trip (33): the roster label shows
+                // the live 70 (src/C4PlayerInfoListBox.cpp:894-905).
                 lc_network::RuntimeNetworkConnection {
                     connection_id: 1,
                     client_id: 7,
@@ -130249,7 +130595,8 @@ public func Grant(password) { return GainMissionAccess(password); }
                     protocol: lc_network::NetworkProtocol::Udp,
                     peer_address: None,
                     packet_loss: 0,
-                    ping_ms: 70,
+                    ping_ms: 33,
+                    lag_ms: 70,
                 },
                 lc_network::RuntimeNetworkConnection {
                     connection_id: 2,
@@ -130259,6 +130606,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                     peer_address: None,
                     packet_loss: 0,
                     ping_ms: 20,
+                    lag_ms: 20,
                 },
             ],
             resource_progress: vec![(7, 30), (8, 25)],
@@ -130299,6 +130647,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                     peer_address: None,
                     packet_loss: 0,
                     ping_ms: 15,
+                    lag_ms: 15,
                 }],
                 resource_progress: vec![(7, 100)],
             });

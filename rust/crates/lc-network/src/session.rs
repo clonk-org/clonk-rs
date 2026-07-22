@@ -84,7 +84,17 @@ pub struct RuntimeNetworkConnection {
     pub protocol: crate::NetworkProtocol,
     pub peer_address: Option<SocketAddr>,
     pub packet_loss: u32,
+    /// `C4Network2IOConnection::getPingTime()`: the last measured round trip,
+    /// `-1` until a pong arrived. The debug status text shows this value
+    /// (src/C4Network2.cpp:1212-1218).
     pub ping_ms: i32,
+    /// `C4Network2IOConnection::getLag()` at snapshot time: while a ping is
+    /// unanswered, the elapsed wait once it exceeds the measurement
+    /// (src/C4Network2IO.cpp:1283-1295). The lobby roster ping column
+    /// (src/C4PlayerInfoListBox.cpp:885-908), the runtime client list
+    /// (src/C4Network2Dialogs.cpp:357-369) and the stats graphs
+    /// (src/C4Network2Stats.cpp:336-343) show this value.
+    pub lag_ms: i32,
 }
 
 /// One atomic lobby snapshot of selected transport routes and each requested
@@ -3859,6 +3869,74 @@ struct ClientConnection {
     join_data_needed_emitted: bool,
 }
 
+/// Route-side mirror of the C++ per-connection ping counters.
+///
+/// `measured_ms` is `C4Network2IOConnection::iPingTime` (`-1` until the first
+/// pong, `SetPingTime` on each pong; src/C4Network2IO.cpp:1335-1341) and feeds
+/// `getPingTime()` consumers such as the debug status text
+/// (src/C4Network2.cpp:1212-1218) and activation requests. `outstanding_since`
+/// mirrors `iLastPing`/`iLastPong`: `OnPing` keeps the FIRST unanswered ping
+/// timestamp (src/C4Network2IO.cpp:1326-1333) and a pong clears it, so
+/// [`Self::lag_ms`] can reproduce `getLag()`
+/// (src/C4Network2IO.cpp:1283-1295) at snapshot time.
+#[derive(Debug, Clone, Copy, Default)]
+struct RoutePingLag {
+    measured_ms: Option<i32>,
+    outstanding_since: Option<Instant>,
+}
+
+impl RoutePingLag {
+    /// `OnPing` after a dispatched probe: only the first unanswered ping
+    /// stamps the outstanding timestamp.
+    fn record_ping_dispatched(&mut self, now: Instant) {
+        self.outstanding_since.get_or_insert(now);
+    }
+
+    /// `SetPingTime`: a pong stores the travel time and answers the
+    /// outstanding ping.
+    fn record_pong(&mut self, round_trip_ms: i32) {
+        self.measured_ms = Some(round_trip_ms);
+        self.outstanding_since = None;
+    }
+
+    /// `getPingTime()`.
+    fn ping_ms(self) -> i32 {
+        self.measured_ms.unwrap_or(-1)
+    }
+
+    /// `getLag()`: while a ping is unanswered and an RTT was ever measured,
+    /// the elapsed wait replaces the measurement once it grows past it.
+    fn lag_ms(self, now: Instant) -> i32 {
+        match (self.measured_ms, self.outstanding_since) {
+            (Some(measured), Some(since)) => {
+                let unanswered_ms = i32::try_from(
+                    now.saturating_duration_since(since).as_millis(),
+                )
+                .unwrap_or(i32::MAX);
+                unanswered_ms.max(measured)
+            }
+            _ => self.ping_ms(),
+        }
+    }
+
+    fn apply(&mut self, update: RoutePingUpdate, now: Instant) {
+        match update {
+            RoutePingUpdate::Dispatched => self.record_ping_dispatched(now),
+            RoutePingUpdate::Measured(round_trip_ms) => self.record_pong(round_trip_ms),
+        }
+    }
+}
+
+/// One transport-task ping transition, forwarded to the owning route registry.
+#[derive(Debug, Clone, Copy)]
+enum RoutePingUpdate {
+    /// A ping probe went out (`OnPing`; src/C4Network2IO.cpp:1326-1333).
+    Dispatched,
+    /// A pong measured this round trip (`SetPingTime`;
+    /// src/C4Network2IO.cpp:1335-1341).
+    Measured(i32),
+}
+
 /// One accepted transport route, separate from its logical network client.
 /// C++ keeps every route in `C4Network2IO::pConnList` and assigns message/data
 /// ownership on `C4Network2Client` (`src/C4Network2IO.h:69-74,228-264`;
@@ -3869,7 +3947,7 @@ struct AcceptedConnectionRoute {
     remote_connection_id: u32,
     peer_addr: SocketAddr,
     protocol: crate::NetworkProtocol,
-    ping_ms: i32,
+    ping: RoutePingLag,
     outbound: HostOutboundSender,
 }
 
@@ -4631,6 +4709,13 @@ enum HostLoopMessage {
         message: ControlMessage,
         ping_ms: i32,
     },
+    /// Transport-task ping bookkeeping so the route mirrors the C++
+    /// connection counters read by `getPingTime`/`getLag`.
+    ConnectionPing {
+        connection_id: u32,
+        client_id: ClientId,
+        update: RoutePingUpdate,
+    },
     ClientDisconnected {
         connection_id: u32,
         client_id: ClientId,
@@ -4810,6 +4895,7 @@ fn preferred_host_outbound(
 }
 
 fn host_runtime_connections(state: &HostState) -> Vec<RuntimeNetworkConnection> {
+    let now = Instant::now();
     state
         .accepted_routes
         .iter()
@@ -4828,7 +4914,8 @@ fn host_runtime_connections(state: &HostState) -> Vec<RuntimeNetworkConnection> 
                 protocol: route.protocol,
                 peer_address: Some(route.peer_addr),
                 packet_loss: 0,
-                ping_ms: route.ping_ms,
+                ping_ms: route.ping.ping_ms(),
+                lag_ms: route.ping.lag_ms(now),
             })
         })
         .collect()
@@ -5841,6 +5928,19 @@ async fn run_host(
                             .await;
                         }
                     }
+                    HostLoopMessage::ConnectionPing {
+                        connection_id,
+                        client_id,
+                        update,
+                    } => {
+                        if let Some(route) = state
+                            .accepted_routes
+                            .get_mut(&connection_id)
+                            .filter(|route| route.client_id == client_id)
+                        {
+                            route.ping.apply(update, Instant::now());
+                        }
+                    }
                     HostLoopMessage::ClientDisconnected {
                         connection_id,
                         client_id,
@@ -6482,7 +6582,7 @@ async fn handle_client_accepted(
             remote_connection_id,
             peer_addr,
             protocol,
-            ping_ms: -1,
+            ping: RoutePingLag::default(),
             outbound: outbound.clone(),
         },
     );
@@ -6843,11 +6943,10 @@ async fn handle_client_message(
     ping_ms: i32,
     state: &mut HostState,
 ) {
-    if ping_ms >= 0 {
-        if let Some(route) = state.accepted_routes.get_mut(&connection_id) {
-            route.ping_ms = ping_ms;
-        }
-    }
+    // The per-message `ping_ms` mirrors `getPingTime()` at receive time and
+    // stays with the message for activation requests
+    // (src/C4Network2.cpp:1564); route ping state is maintained by the
+    // transport task's `ConnectionPing` messages instead.
     match message {
         ControlMessage::Ping(packet) => {
             if let Some(route) = state.accepted_routes.get(&connection_id) {
@@ -7421,7 +7520,7 @@ async fn handle_client_disconnected(
         peer_addr: _peer_addr,
         protocol: _protocol,
         outbound: _outbound,
-        ping_ms: _,
+        ping: _,
     }) = disconnected_route
     {
         debug_assert_eq!(route_client_id, client_id);
@@ -8623,7 +8722,15 @@ where
                             }
                         }
                         Ok(ControlMessage::Pong(packet)) => {
-                            self.liveness.record_pong(packet);
+                            let round_trip_ms = self.liveness.record_pong(packet);
+                            let _ = self
+                                .host_tx
+                                .send(HostLoopMessage::ConnectionPing {
+                                    connection_id: self.local_connection_id,
+                                    client_id: self.client_id,
+                                    update: RoutePingUpdate::Measured(round_trip_ms),
+                                })
+                                .await;
                         }
                         Ok(ControlMessage::ConnectionReply(reply)) if !reply.ok => {
                             self.notify_disconnected(Some(
@@ -8671,9 +8778,22 @@ where
                         self.notify_disconnected(None).await;
                         break;
                     };
-                    if let Err(reason) = result {
-                        self.notify_disconnected(Some(reason)).await;
-                        break;
+                    match result {
+                        Ok(true) => {
+                            let _ = self
+                                .host_tx
+                                .send(HostLoopMessage::ConnectionPing {
+                                    connection_id: self.local_connection_id,
+                                    client_id: self.client_id,
+                                    update: RoutePingUpdate::Dispatched,
+                                })
+                                .await;
+                        }
+                        Ok(false) => {}
+                        Err(reason) => {
+                            self.notify_disconnected(Some(reason)).await;
+                            break;
+                        }
                     }
                 }
             }
@@ -8681,24 +8801,27 @@ where
     }
 }
 
+/// Returns whether this edge dispatched a ping probe, so the caller can
+/// mirror the outstanding-ping timestamp onto its route registry.
 async fn drive_session_liveness_timer<S>(
     transport: &mut crate::ControlTransport<S>,
     liveness: &mut ConnectionLivenessState,
-) -> Result<(), String>
+) -> Result<bool, String>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let ping = liveness
         .timer_tick()
         .map_err(|timeout| format!("connection {timeout:?} timeout"))?;
-    if let Some(ping) = ping {
-        let result = transport.send_message(ControlMessage::Ping(ping)).await;
-        // C4Network2IO calls OnPing after the send attempt even on failure
-        // (src/C4Network2IO.cpp:1141-1151).
-        liveness.record_ping_dispatched();
-        result.map_err(|error| format!("ping send failed: {error}"))?;
-    }
-    Ok(())
+    let Some(ping) = ping else {
+        return Ok(false);
+    };
+    let result = transport.send_message(ControlMessage::Ping(ping)).await;
+    // C4Network2IO calls OnPing after the send attempt even on failure
+    // (src/C4Network2IO.cpp:1141-1151).
+    liveness.record_ping_dispatched();
+    result.map_err(|error| format!("ping send failed: {error}"))?;
+    Ok(true)
 }
 
 enum ClientRouteCommand {
@@ -8728,7 +8851,7 @@ struct ClientRouteEntry {
     remote_connection_id: u32,
     protocol: crate::NetworkProtocol,
     peer_addr: Option<SocketAddr>,
-    ping_ms: i32,
+    ping: RoutePingLag,
     outbound: ClientRouteSender,
 }
 
@@ -8741,6 +8864,12 @@ enum ClientRouteEvent {
     PingMeasured {
         route_id: u32,
         round_trip_ms: i32,
+    },
+    /// The route's transport task dispatched a ping probe; the manager
+    /// stamps the outstanding timestamp `getLag` grows from
+    /// (src/C4Network2IO.cpp:1283-1295).
+    PingDispatched {
+        route_id: u32,
     },
     Disconnected {
         route_id: u32,
@@ -8873,7 +9002,7 @@ impl ClientRouteManager {
                 remote_connection_id,
                 protocol,
                 peer_addr,
-                ping_ms: -1,
+                ping: RoutePingLag::default(),
                 outbound: ClientRouteSender { sender, retire },
             },
         );
@@ -9114,6 +9243,7 @@ impl ClientRouteManager {
     }
 
     fn runtime_connections(&self) -> Vec<RuntimeNetworkConnection> {
+        let now = Instant::now();
         self.routes
             .iter()
             .filter(|(_, route)| !route.outbound.is_closed())
@@ -9130,7 +9260,8 @@ impl ClientRouteManager {
                     protocol: route.protocol,
                     peer_address: route.peer_addr,
                     packet_loss: 0,
-                    ping_ms: route.ping_ms,
+                    ping_ms: route.ping.ping_ms(),
+                    lag_ms: route.ping.lag_ms(now),
                 })
             })
             .collect()
@@ -9363,7 +9494,8 @@ impl ClientRouteManager {
                     self.routes
                         .get_mut(&route_id)
                         .expect("checked route still exists")
-                        .ping_ms = round_trip_ms;
+                        .ping
+                        .record_pong(round_trip_ms);
                     if self.preferred_route_id(peer_id, ConnectionTrafficClass::Message)
                         != Some(route_id)
                     {
@@ -9376,6 +9508,11 @@ impl ClientRouteManager {
                     });
                 }
                 ClientRouteEvent::PingMeasured { .. } => {}
+                ClientRouteEvent::PingDispatched { route_id } => {
+                    if let Some(route) = self.routes.get_mut(&route_id) {
+                        route.ping.record_ping_dispatched(Instant::now());
+                    }
+                }
                 ClientRouteEvent::Disconnected {
                     route_id,
                     next_inbound_packet,
@@ -9611,8 +9748,20 @@ async fn run_client_route<S>(
                 let Some(result) = result else {
                     break None;
                 };
-                if let Err(reason) = result {
-                    break Some(reason);
+                match result {
+                    Ok(true) => {
+                        if event_tx
+                            .send(ClientRouteEvent::PingDispatched {
+                                route_id: local_connection_id,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(reason) => break Some(reason),
                 }
             }
         }
@@ -12185,7 +12334,7 @@ mod tests {
                     remote_connection_id: route_id.wrapping_add(1_000),
                     protocol,
                     peer_addr: None,
-                    ping_ms: -1,
+                    ping: RoutePingLag::default(),
                     outbound: ClientRouteSender { sender, retire },
                 },
             )
@@ -15307,6 +15456,47 @@ mod tests {
         task.await.unwrap();
     }
 
+    #[test]
+    fn route_ping_lag_mirrors_cpp_get_lag_branches() {
+        let start = Instant::now();
+        let mut lag = RoutePingLag::default();
+        assert_eq!(lag.ping_ms(), -1);
+        assert_eq!(lag.lag_ms(start), -1);
+
+        // A dispatched ping without any measured RTT stays -1: getLag only
+        // grows once iPingTime != -1 (src/C4Network2IO.cpp:1286).
+        lag.record_ping_dispatched(start);
+        assert_eq!(lag.lag_ms(start + Duration::from_secs(9)), -1);
+
+        lag.record_pong(140);
+        assert_eq!(lag.ping_ms(), 140);
+        assert_eq!(
+            lag.lag_ms(start + Duration::from_secs(60)),
+            140,
+            "an answered connection reports the last measurement"
+        );
+
+        // While a ping is unanswered the elapsed wait replaces the RTT only
+        // once it grows past it (src/C4Network2IO.cpp:1287-1291).
+        let sent = start + Duration::from_secs(120);
+        lag.record_ping_dispatched(sent);
+        assert_eq!(lag.lag_ms(sent + Duration::from_millis(40)), 140);
+        assert_eq!(lag.lag_ms(sent + Duration::from_millis(141)), 141);
+        assert_eq!(lag.lag_ms(sent + Duration::from_secs(5)), 5_000);
+
+        // OnPing keeps the FIRST unanswered timestamp
+        // (src/C4Network2IO.cpp:1326-1333).
+        lag.record_ping_dispatched(sent + Duration::from_secs(1));
+        assert_eq!(lag.lag_ms(sent + Duration::from_secs(5)), 5_000);
+
+        lag.record_pong(90);
+        assert_eq!(
+            lag.lag_ms(sent + Duration::from_secs(10)),
+            90,
+            "the next pong answers the wait"
+        );
+    }
+
     #[tokio::test]
     async fn client_runtime_connections_follow_route_ownership_ping_and_retirement() {
         let (tcp_client, _tcp_peer) = duplex(1_024);
@@ -15357,6 +15547,7 @@ mod tests {
                     peer_address: Some(tcp_peer_address),
                     packet_loss: 0,
                     ping_ms: -1,
+                    lag_ms: -1,
                 },
                 RuntimeNetworkConnection {
                     connection_id: 2,
@@ -15366,8 +15557,45 @@ mod tests {
                     peer_address: Some(udp_peer_address),
                     packet_loss: 0,
                     ping_ms: 37,
+                    lag_ms: 37,
                 },
             ]
+        );
+
+        // Outstanding pings feed getLag at snapshot time: route 2 reports at
+        // least its measured RTT while unanswered, and route 1 stays hidden
+        // because C++ getLag requires a measured iPingTime before growing
+        // (src/C4Network2IO.cpp:1283-1295).
+        for route_id in [1, 2] {
+            routes
+                .event_tx
+                .send(ClientRouteEvent::PingDispatched { route_id })
+                .await
+                .unwrap();
+        }
+        routes
+            .event_tx
+            .send(ClientRouteEvent::Packet {
+                route_id: 2,
+                peer_addr: Some(udp_peer_address),
+                packet: crate::transport::InboundPacket::Empty,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            routes.read_event().await.unwrap(),
+            ClientRouteRead::Packet { .. }
+        ));
+        let connections = routes.runtime_connections();
+        assert_eq!(connections[0].ping_ms, -1);
+        assert_eq!(
+            connections[0].lag_ms, -1,
+            "an unanswered ping without any measurement stays hidden"
+        );
+        assert_eq!(connections[1].ping_ms, 37);
+        assert!(
+            connections[1].lag_ms >= 37,
+            "an unanswered ping reports max(elapsed, measured)"
         );
 
         assert!(routes.disconnect_runtime_connection(2));
@@ -21006,6 +21234,25 @@ mod tests {
             .send_message(ControlMessage::Pong(ping))
             .await
             .unwrap();
+        // The task mirrors its ping bookkeeping to the host loop so the
+        // route can reproduce getPingTime/getLag: the dispatched probe, then
+        // the measured pong. Neither is a ClientMessage.
+        assert!(matches!(
+            timeout(EVENT_WAIT, host_rx.recv()).await.unwrap(),
+            Some(HostLoopMessage::ConnectionPing {
+                connection_id: 3,
+                client_id: 1,
+                update: RoutePingUpdate::Dispatched,
+            })
+        ));
+        assert!(matches!(
+            timeout(EVENT_WAIT, host_rx.recv()).await.unwrap(),
+            Some(HostLoopMessage::ConnectionPing {
+                connection_id: 3,
+                client_id: 1,
+                update: RoutePingUpdate::Measured(_),
+            })
+        ));
         tokio::task::yield_now().await;
         assert!(host_rx.try_recv().is_err());
 

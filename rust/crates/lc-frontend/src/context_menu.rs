@@ -178,6 +178,12 @@ type LazySubmenu<A> = Arc<dyn Fn() -> Vec<ContextMenuEntry<A>> + Send + Sync>;
 enum ContextSubmenu<A: Clone> {
     Entries(Vec<ContextMenuEntry<A>>),
     Lazy(LazySubmenu<A>),
+    /// Child entries the widget cannot compute itself. Opening emits
+    /// `ContextMenuEvent::SubmenuRequested` with this request so the host
+    /// answers with live state via [`ClassicContextMenu::fill_requested_submenu`],
+    /// mirroring the C4GUI submenu-open `ContextHandler::OnSubcontext`
+    /// callback (src/C4GuiMenu.cpp:469-506).
+    Deferred(A),
 }
 
 impl<A: Clone> Clone for ContextSubmenu<A> {
@@ -185,6 +191,7 @@ impl<A: Clone> Clone for ContextSubmenu<A> {
         match self {
             Self::Entries(entries) => Self::Entries(entries.clone()),
             Self::Lazy(provider) => Self::Lazy(Arc::clone(provider)),
+            Self::Deferred(request) => Self::Deferred(request.clone()),
         }
     }
 }
@@ -273,6 +280,14 @@ impl<A: Clone> ContextMenuEntry<A> {
         self
     }
 
+    /// Marks a submenu whose children only the host can compute. Opening
+    /// emits [`ContextMenuEvent::SubmenuRequested`] carrying `request`; the
+    /// host must answer with [`ClassicContextMenu::fill_requested_submenu`].
+    pub fn with_deferred_submenu(mut self, request: A) -> Self {
+        self.submenu = Some(ContextSubmenu::Deferred(request));
+        self
+    }
+
     pub const fn has_submenu(&self) -> bool {
         self.submenu.is_some()
     }
@@ -281,6 +296,14 @@ impl<A: Clone> ContextMenuEntry<A> {
         match self.submenu.as_ref()? {
             ContextSubmenu::Entries(entries) => Some(entries.clone()),
             ContextSubmenu::Lazy(provider) => Some(provider()),
+            ContextSubmenu::Deferred(_) => None,
+        }
+    }
+
+    fn deferred_submenu_request(&self) -> Option<A> {
+        match self.submenu.as_ref()? {
+            ContextSubmenu::Deferred(request) => Some(request.clone()),
+            ContextSubmenu::Entries(_) | ContextSubmenu::Lazy(_) => None,
         }
     }
 }
@@ -363,6 +386,11 @@ pub enum ContextMenuEvent<A> {
     Sound(ContextMenuSound),
     Closed,
     Activated(A),
+    /// A deferred submenu wants its children. C4GUI fills a submenu at open
+    /// time through the entry's `ContextHandler::OnSubcontext` callback
+    /// (src/C4GuiMenu.cpp:478-482); the host answers this event in the same
+    /// dispatch via [`ClassicContextMenu::fill_requested_submenu`].
+    SubmenuRequested(A),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -863,6 +891,43 @@ impl<A: Clone> ClassicContextMenu<A> {
         outcome
     }
 
+    /// Answers [`ContextMenuEvent::SubmenuRequested`]: opens the deferred
+    /// child panel for the deepest panel's selected entry with host-computed
+    /// entries. C4GUI opens the callback-filled submenu immediately after
+    /// `OnSubcontext` returns, playing the door sound on that open
+    /// (src/C4GuiMenu.cpp:480-505); an empty child menu still opens as the
+    /// minimum-size box. Ignored when the selection moved off a deferred
+    /// entry or its panel already opened.
+    pub fn fill_requested_submenu(
+        &mut self,
+        entries: Vec<ContextMenuEntry<A>>,
+    ) -> ContextMenuOutcome<A> {
+        if !self.open {
+            return ContextMenuOutcome::passed(false);
+        }
+        let mut outcome = ContextMenuOutcome::captured(true);
+        let screen = self.screen;
+        let resources = self.resources.clone();
+        let panel = self.root.deepest_mut();
+        let deferred_index = panel.selected.filter(|index| {
+            panel
+                .entries
+                .get(*index)
+                .is_some_and(|entry| entry.deferred_submenu_request().is_some())
+        });
+        if let Some(index) = deferred_index.filter(|_| panel.submenu.is_none()) {
+            open_child_panel(
+                panel,
+                index,
+                entries,
+                screen,
+                &resources,
+                &mut outcome.events,
+            );
+        }
+        outcome
+    }
+
     /// Number of currently visible panels, ordered from root to deepest
     /// submenu. Each panel is a distinct C++ ownership layer.
     pub fn panel_count(&self) -> usize {
@@ -1207,13 +1272,31 @@ fn open_selected_submenu<A: Clone>(
     let Some(index) = panel.selected else {
         return false;
     };
-    let Some(entries) = panel
-        .entries
-        .get(index)
-        .and_then(ContextMenuEntry::submenu_entries)
-    else {
+    let Some(entry) = panel.entries.get(index) else {
         return false;
     };
+    // C4GUI::ContextMenu::CheckOpenSubmenu resolves the child menu through
+    // the entry's OnSubcontext callback at open time (src/C4GuiMenu.cpp:
+    // 469-506). A deferred entry hands that callback to the host, which
+    // answers within the same dispatch via `fill_requested_submenu`.
+    if let Some(request) = entry.deferred_submenu_request() {
+        events.push(ContextMenuEvent::SubmenuRequested(request));
+        return false;
+    }
+    let Some(entries) = entry.submenu_entries() else {
+        return false;
+    };
+    open_child_panel(panel, index, entries, screen, resources, events)
+}
+
+fn open_child_panel<A: Clone>(
+    panel: &mut ContextPanel<A>,
+    index: usize,
+    entries: Vec<ContextMenuEntry<A>>,
+    screen: IntRect,
+    resources: &ContextMenuResources,
+    events: &mut Vec<ContextMenuEvent<A>>,
+) -> bool {
     let Some(row) = panel.layout.rows.get(index).map(|row| row.rect) else {
         return false;
     };
@@ -1712,6 +1795,78 @@ mod tests {
         assert!(result
             .events
             .contains(&ContextMenuEvent::Activated(Action::Two)));
+    }
+
+    #[test]
+    fn deferred_submenu_requests_fill_at_open_and_refills_on_reopen() {
+        let entries = vec![
+            ContextMenuEntry::new("Take over").with_deferred_submenu(Action::One),
+            ContextMenuEntry::new("Other").with_action(Action::Two),
+        ];
+        let (mut menu, _) =
+            ClassicContextMenu::open(entries, GuiPoint::new(20.0, 30.0), screen(), resources());
+        let first = menu.layout().panels[0].rows[0].rect;
+        let outcome =
+            menu.handle_pointer_move(GuiPoint::new((first.x + 1) as f32, (first.y + 1) as f32));
+        assert_eq!(
+            outcome.events,
+            vec![
+                ContextMenuEvent::Sound(ContextMenuSound::Command),
+                ContextMenuEvent::SubmenuRequested(Action::One),
+            ],
+            "selecting a deferred entry runs the C4GUI OnSubcontext request"
+        );
+        assert_eq!(
+            menu.layout().panels.len(),
+            1,
+            "the child panel waits for the host answer"
+        );
+
+        let outcome = menu.fill_requested_submenu(vec![
+            ContextMenuEntry::new("Using A").with_action(Action::Child)
+        ]);
+        assert_eq!(
+            outcome.events,
+            vec![ContextMenuEvent::Sound(ContextMenuSound::DoorOpen)]
+        );
+        assert_eq!(menu.layout().panels.len(), 2);
+        assert_eq!(menu.layout().panels[1].rows.len(), 1);
+
+        let outcome =
+            menu.handle_pointer_move(GuiPoint::new((first.x + 2) as f32, (first.y + 2) as f32));
+        assert!(
+            outcome.events.is_empty(),
+            "hovering the already-open parent neither re-requests nor re-opens"
+        );
+
+        let second = menu.layout().panels[0].rows[1].rect;
+        menu.handle_pointer_move(GuiPoint::new((second.x + 1) as f32, (second.y + 1) as f32));
+        let outcome =
+            menu.handle_pointer_move(GuiPoint::new((first.x + 1) as f32, (first.y + 1) as f32));
+        assert_eq!(
+            outcome.events,
+            vec![
+                ContextMenuEvent::Sound(ContextMenuSound::Command),
+                ContextMenuEvent::SubmenuRequested(Action::One),
+            ],
+            "re-selecting the parent re-runs the fill callback like C4GUI"
+        );
+        let outcome = menu.fill_requested_submenu(Vec::new());
+        assert_eq!(
+            outcome.events,
+            vec![ContextMenuEvent::Sound(ContextMenuSound::DoorOpen)],
+            "an empty live answer still opens the minimum-size C4GUI box"
+        );
+        assert_eq!(menu.layout().panels.len(), 2);
+        assert!(menu.layout().panels[1].rows.is_empty());
+
+        menu.handle_pointer_move(GuiPoint::new((second.x + 1) as f32, (second.y + 1) as f32));
+        let outcome = menu.fill_requested_submenu(vec![ContextMenuEntry::new("Stale")]);
+        assert!(
+            outcome.events.is_empty(),
+            "an answer after the selection moved away is dropped"
+        );
+        assert_eq!(menu.layout().panels.len(), 1);
     }
 
     #[test]

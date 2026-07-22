@@ -138,7 +138,12 @@ pub struct RuntimeConnectionRow {
     pub protocol: String,
     pub peer_address: String,
     pub packet_loss: u32,
+    /// `getPingTime()`: the raw measured round trip shown by the per-client
+    /// info text (src/C4Network2Dialogs.cpp:92-102).
     pub ping_ms: i32,
+    /// `getLag()`: the live value shown by the connection list rows
+    /// (src/C4Network2Dialogs.cpp:357-369).
+    pub lag_ms: i32,
     pub can_disconnect: bool,
 }
 
@@ -2293,10 +2298,12 @@ impl RuntimeClientListDialog {
                         );
                         connection_right -= 2;
                     }
-                    let ping = if connection.ping_ms < 0 {
+                    // ConnectionListItem::Update shows getLag()
+                    // (src/C4Network2Dialogs.cpp:357-369).
+                    let ping = if connection.lag_ms < 0 {
                         "???".to_string()
                     } else {
-                        format!("{} ms", connection.ping_ms)
+                        format!("{} ms", connection.lag_ms)
                     };
                     connection_right -= 54;
                     draw_clipped_text(
@@ -2806,6 +2813,8 @@ fn client_info_lines(row: &RuntimeClientRow) -> Vec<String> {
         lines.push("No connection details available".to_string());
     } else {
         lines.extend(row.connections.iter().map(|connection| {
+            // The info text shows getPingTime(), unlike the list rows
+            // (src/C4Network2Dialogs.cpp:92-102).
             format!(
                 "{} {} {} ({} ms)",
                 connection.usage, connection.protocol, connection.peer_address, connection.ping_ms
@@ -3599,6 +3608,7 @@ mod tests {
                 peer_address: format!("192.0.2.{index}:222{index}"),
                 packet_loss: index,
                 ping_ms: 10 + index as i32,
+                lag_ms: 10 + index as i32,
                 can_disconnect: false,
             })
             .collect();
@@ -3878,6 +3888,7 @@ mod tests {
             peer_address: "127.0.0.1:1111".to_string(),
             packet_loss: 0,
             ping_ms: 12,
+            lag_ms: 12,
             can_disconnect: true,
         });
         let mut second = row();
