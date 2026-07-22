@@ -185,9 +185,7 @@ impl GameApp {
             self.handle_menu_input(|menu| menu.select_list_character(character))?;
             return Ok(());
         }
-        if self.startup_view == StartupView::PlayerSelection
-            && self.startup_crew_rename.is_some()
-        {
+        if self.startup_view == StartupView::PlayerSelection && self.startup_crew_rename.is_some() {
             let mut encoded = [0_u8; 4];
             if let Some(rename) = self.startup_crew_rename.as_mut() {
                 rename.edit.insert_text(character.encode_utf8(&mut encoded));
@@ -199,7 +197,9 @@ impl GameApp {
             let actions = match self.startup_player_dialog.as_mut() {
                 Some(dialog) if dialog.is_crew_mode() => dialog.handle_character(
                     character,
-                    self.startup_crew_models.iter().map(|crew| crew.name.as_str()),
+                    self.startup_crew_models
+                        .iter()
+                        .map(|crew| crew.name.as_str()),
                 ),
                 Some(dialog) => dialog.handle_character(
                     character,
@@ -255,8 +255,7 @@ impl GameApp {
         {
             return Ok(());
         }
-        let message_dialog_fallback_blocks_world =
-            self.runtime_pointer_fallback_is_exclusive();
+        let message_dialog_fallback_blocks_world = self.runtime_pointer_fallback_is_exclusive();
         let context_routed_before_running_dialogs = self.mode == AppMode::Running
             && self.context_menu.is_some()
             && !self.running_dialog_stack.is_empty();
@@ -295,8 +294,10 @@ impl GameApp {
                 .map(|point| self.top_scoreboard_message_pointer_target(point, false))
                 .transpose()?
                 .flatten();
-            if let Some(entry @ (RunningDialogStackEntry::Scoreboard
-            | RunningDialogStackEntry::RuntimeClientList)) = shared_target
+            if let Some(
+                entry @ (RunningDialogStackEntry::Scoreboard
+                | RunningDialogStackEntry::RuntimeClientList),
+            ) = shared_target
             {
                 let split = self
                     .running_dialog_stack
@@ -310,9 +311,7 @@ impl GameApp {
                     .is_some_and(|position| position >= split);
                 let shared_default = match entry {
                     RunningDialogStackEntry::Scoreboard => RuntimeDefaultDialog::Scoreboard,
-                    RunningDialogStackEntry::RuntimeClientList => {
-                        RuntimeDefaultDialog::ClientList
-                    }
+                    RunningDialogStackEntry::RuntimeClientList => RuntimeDefaultDialog::ClientList,
                     RunningDialogStackEntry::Message(_) | RunningDialogStackEntry::Chat => {
                         unreachable!("only default-z shared dialogs reach this branch")
                     }
@@ -426,10 +425,8 @@ impl GameApp {
                 }
             };
             let scrolled = self.network_start_wait.as_mut().is_some_and(|wait| {
-                wait.pointer.is_some_and(|point| {
-                    wait.controller
-                        .handle_wheel(point, native_delta, &layout)
-                })
+                wait.pointer
+                    .is_some_and(|point| wait.controller.handle_wheel(point, native_delta, &layout))
             });
             if scrolled {
                 self.mark_menu_dirty();
@@ -561,8 +558,7 @@ impl GameApp {
                                 }
                             }
                         }
-                        RuntimeDefaultDialog::NetworkChart
-                        | RuntimeDefaultDialog::Scoreboard => {}
+                        RuntimeDefaultDialog::NetworkChart | RuntimeDefaultDialog::Scoreboard => {}
                     }
                     self.mark_menu_dirty();
                     return Ok(());
@@ -599,21 +595,20 @@ impl GameApp {
             }
             self.scenario_game_options.note_pointer_wheel();
             let (changed, scroll_window_captured) = match self.network_lobby.as_mut() {
-                Some(lobby) => lobby.wheel_right_sheet(
-                    amount,
-                    self.graphics.surface(),
-                    self.assets.as_ref(),
-                    &self.scenario_game_options,
-                )
-                .map_err(|error| {
-                    classic_parity_engine_error(report_classic_parity_boundary(
-                        ClassicParityBoundary::GameLobby(
-                            ClassicGameLobbyBoundary::Resources {
+                Some(lobby) => lobby
+                    .wheel_right_sheet(
+                        amount,
+                        self.graphics.surface(),
+                        self.assets.as_ref(),
+                        &self.scenario_game_options,
+                    )
+                    .map_err(|error| {
+                        classic_parity_engine_error(report_classic_parity_boundary(
+                            ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Resources {
                                 detail: error.to_string(),
-                            },
-                        ),
-                    ))
-                })?,
+                            }),
+                        ))
+                    })?,
                 None => (false, false),
             };
             if scroll_window_captured {
@@ -808,7 +803,8 @@ impl GameApp {
         }
         if contains(layout.list) {
             self.startup_tooltip.pointer_left();
-            let item_height = clonk_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+            let item_height =
+                clonk_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
             let viewport_height = layout.list.h - 6;
             if self
                 .menu_state
@@ -824,7 +820,9 @@ impl GameApp {
         self.startup_tooltip.pointer_left();
         let metrics = {
             let info = scensel_selection_info(&self.menu_state);
-            clonk_frontend::startup_scensel::selection_info_scroll_metrics(&layout, book_fonts, &info)
+            clonk_frontend::startup_scensel::selection_info_scroll_metrics(
+                &layout, book_fonts, &info,
+            )
         };
         if self.menu_state.scroll_selection_info_by(amount, metrics) {
             self.mark_menu_dirty();
@@ -1085,9 +1083,7 @@ impl GameApp {
                             _ => dialog.controller.handle_edit_key(edit_key, modifiers),
                         })
                         .unwrap_or_default()
-                } else if let Some(gui_key) =
-                    league_signup_dialog_key_code(key, c4_modifiers)
-                {
+                } else if let Some(gui_key) = league_signup_dialog_key_code(key, c4_modifiers) {
                     self.league_signup_dialog
                         .as_mut()
                         .map(|dialog| dialog.controller.handle_key_down(gui_key, modifiers.shift))
@@ -1217,33 +1213,23 @@ impl GameApp {
                 }
             }
             VirtualKeyCode::C if c4_modifiers == ModifiersState::CTRL => {
-                let result = self
-                    .menu_state
-                    .rename_edit
-                    .as_mut()
-                    .map(|rename| {
-                        transfer_edit_selection(&mut rename.edit, false, |selected| {
-                            arboard::Clipboard::new().and_then(|mut clipboard| {
-                                clipboard.set_text(selected.to_string())
-                            })
-                        })
-                    });
+                let result = self.menu_state.rename_edit.as_mut().map(|rename| {
+                    transfer_edit_selection(&mut rename.edit, false, |selected| {
+                        arboard::Clipboard::new()
+                            .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
+                    })
+                });
                 if let Some(Err(error)) = result {
                     tracing::warn!(%error, "failed to copy scenario rename text");
                 }
             }
             VirtualKeyCode::X if c4_modifiers == ModifiersState::CTRL => {
-                let result = self
-                    .menu_state
-                    .rename_edit
-                    .as_mut()
-                    .map(|rename| {
-                        transfer_edit_selection(&mut rename.edit, true, |selected| {
-                            arboard::Clipboard::new().and_then(|mut clipboard| {
-                                clipboard.set_text(selected.to_string())
-                            })
-                        })
-                    });
+                let result = self.menu_state.rename_edit.as_mut().map(|rename| {
+                    transfer_edit_selection(&mut rename.edit, true, |selected| {
+                        arboard::Clipboard::new()
+                            .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
+                    })
+                });
                 if let Some(Err(error)) = result {
                     tracing::warn!(%error, "failed to cut scenario rename text");
                 }
@@ -1268,9 +1254,7 @@ impl GameApp {
         if self.network_chart_elevated {
             return false;
         }
-        if self.running_chat_controller().is_some()
-            || self.top_message_dialog_is_exclusive()
-        {
+        if self.running_chat_controller().is_some() || self.top_message_dialog_is_exclusive() {
             return true;
         }
         self.message_dialogs.is_empty() && self.runtime_top_default_dialog_is_exclusive()
@@ -1292,11 +1276,7 @@ impl GameApp {
         button: LegacyGamepadButton,
     ) -> bool {
         self.gamepad_bindings
-            .control_candidates_for_button(
-                slot.index(),
-                button.index(),
-                ElementState::Pressed,
-            )
+            .control_candidates_for_button(slot.index(), button.index(), ElementState::Pressed)
             .any(|(control_set, _)| {
                 i32::try_from(control_set)
                     .ok()
@@ -1306,11 +1286,7 @@ impl GameApp {
             })
     }
 
-    fn gamepad_player_axis_in_scope(
-        &self,
-        slot: GamepadSlot,
-        axis: LegacyGamepadAxis,
-    ) -> bool {
+    fn gamepad_player_axis_in_scope(&self, slot: GamepadSlot, axis: LegacyGamepadAxis) -> bool {
         self.gamepad_bindings
             .control_candidates_for_axis(
                 slot.index(),
@@ -1349,9 +1325,7 @@ impl GameApp {
         let action = self
             .network_chart_dialog
             .as_mut()
-            .map(|dialog| {
-                dialog.handle_key(KeyCode::Escape, state == ElementState::Pressed)
-            })
+            .map(|dialog| dialog.handle_key(KeyCode::Escape, state == ElementState::Pressed))
             .unwrap_or(clonk_frontend::network_chart::NetworkChartDialogAction::Ignored);
         match action {
             clonk_frontend::network_chart::NetworkChartDialogAction::Ignored => false,
@@ -1449,9 +1423,7 @@ impl GameApp {
     ) -> bool {
         self.runtime_key_config()
             .ok()
-            .and_then(|config| {
-                config.keyboard_override_matches(name, key, self.keyboard_modifiers)
-            })
+            .and_then(|config| config.keyboard_override_matches(name, key, self.keyboard_modifiers))
             .unwrap_or(default_matches)
     }
 
@@ -1500,7 +1472,9 @@ impl GameApp {
             for (control_index, id) in ControlBindingId::ALL.into_iter().enumerate() {
                 let name = format!("Kbd{}Key{}", control_set + 1, control_index + 1);
                 let matches = config.override_for(&name).is_some_and(|codes| {
-                    codes.iter().any(|code| code.matches_gamepad_button(slot, button))
+                    codes
+                        .iter()
+                        .any(|code| code.matches_gamepad_button(slot, button))
                 });
                 if matches {
                     if let Some(candidate) =
@@ -1528,7 +1502,9 @@ impl GameApp {
             for (control_index, id) in ControlBindingId::ALL.into_iter().enumerate() {
                 let name = format!("Kbd{}Key{}", control_set + 1, control_index + 1);
                 let matches = config.override_for(&name).is_some_and(|codes| {
-                    codes.iter().any(|code| code.matches_gamepad_direction(slot, direction))
+                    codes
+                        .iter()
+                        .any(|code| code.matches_gamepad_direction(slot, direction))
                 });
                 if matches {
                     if let Some(candidate) =
@@ -1542,17 +1518,14 @@ impl GameApp {
         candidates
     }
 
-    fn runtime_gamepad_button_override_matches(
-        &self,
-        name: &str,
-        slot: u8,
-        button: u8,
-    ) -> bool {
+    fn runtime_gamepad_button_override_matches(&self, name: &str, slot: u8, button: u8) -> bool {
         self.runtime_key_config()
             .ok()
             .and_then(|config| config.override_for(name))
             .is_some_and(|codes| {
-                codes.iter().any(|code| code.matches_gamepad_button(slot, button))
+                codes
+                    .iter()
+                    .any(|code| code.matches_gamepad_button(slot, button))
             })
     }
 
@@ -1566,7 +1539,9 @@ impl GameApp {
             .ok()
             .and_then(|config| config.override_for(name))
             .is_some_and(|codes| {
-                codes.iter().any(|code| code.matches_gamepad_direction(slot, direction))
+                codes
+                    .iter()
+                    .any(|code| code.matches_gamepad_direction(slot, direction))
             })
     }
 
@@ -1579,10 +1554,7 @@ impl GameApp {
         if c4_modifiers == ModifiersState::CTRL
             && matches!(
                 key,
-                VirtualKeyCode::F5
-                    | VirtualKeyCode::F6
-                    | VirtualKeyCode::F7
-                    | VirtualKeyCode::F8
+                VirtualKeyCode::F5 | VirtualKeyCode::F6 | VirtualKeyCode::F7 | VirtualKeyCode::F8
             )
         {
             // Native retains these registered defaults when no custom list
@@ -1630,7 +1602,10 @@ impl GameApp {
         self.local_player_key_binding_owner_in_scope(key).is_some()
     }
 
-    pub(crate) fn scoreboard_pointer_target_cached(&self, point: GuiPoint) -> Option<ScoreboardPointerTarget> {
+    pub(crate) fn scoreboard_pointer_target_cached(
+        &self,
+        point: GuiPoint,
+    ) -> Option<ScoreboardPointerTarget> {
         let layout = self.scoreboard_runtime.presentation.as_ref()?.layout();
         let contains = |rect: clonk_frontend::classic_gui::IntRect| {
             point.x >= rect.x as f32
@@ -1868,9 +1843,7 @@ impl GameApp {
         };
         let shared_default = match entry {
             RunningDialogStackEntry::Scoreboard => Some(RuntimeDefaultDialog::Scoreboard),
-            RunningDialogStackEntry::RuntimeClientList => {
-                Some(RuntimeDefaultDialog::ClientList)
-            }
+            RunningDialogStackEntry::RuntimeClientList => Some(RuntimeDefaultDialog::ClientList),
             RunningDialogStackEntry::Message(_) | RunningDialogStackEntry::Chat => None,
         };
         let Some(shared_default) = shared_default else {
@@ -2192,8 +2165,7 @@ impl GameApp {
         if !c4_modifiers.is_empty() && !custom_binding {
             if self.game_over_dialog.is_some()
                 || self.context_menu.is_some()
-                || (self.runtime_client_list.is_some()
-                    && c4_modifiers == ModifiersState::SHIFT)
+                || (self.runtime_client_list.is_some() && c4_modifiers == ModifiersState::SHIFT)
             {
                 return Ok(false);
             }
@@ -2361,13 +2333,9 @@ impl GameApp {
                 })
                 .zip(self.runtime_client_list_input_geometry())
                 .and_then(|(gui_key, (preferred, line_height))| {
-                    self.runtime_client_list
-                        .as_mut()
-                        .and_then(|dialog| {
-                            dialog
-                                .handle_key(gui_key, false, preferred, line_height)
-                                .1
-                        })
+                    self.runtime_client_list.as_mut().and_then(|dialog| {
+                        dialog.handle_key(gui_key, false, preferred, line_height).1
+                    })
                 });
             if let Some(action) = action {
                 self.handle_runtime_client_list_action(action)?;
@@ -2431,11 +2399,9 @@ impl GameApp {
         let Some((preferred, line_height)) = self.runtime_client_list_input_geometry() else {
             return false;
         };
-        self.runtime_client_list
-            .as_mut()
-            .is_some_and(|dialog| {
-                dialog.handle_pointer_move(point, preferred, line_height) || dialog.is_info_only()
-            })
+        self.runtime_client_list.as_mut().is_some_and(|dialog| {
+            dialog.handle_pointer_move(point, preferred, line_height) || dialog.is_info_only()
+        })
     }
 
     pub(crate) fn handle_runtime_client_list_pointer_button(
@@ -2733,8 +2699,7 @@ impl GameApp {
             let active_context_key = c4_modifiers.is_empty()
                 && self.context_menu.as_ref().is_some_and(|menu| {
                     context_menu_key_code(key).is_some_and(|key| menu.owns_key(key))
-                        || context_menu_hotkey(key)
-                            .is_some_and(|hotkey| menu.owns_hotkey(hotkey))
+                        || context_menu_hotkey(key).is_some_and(|hotkey| menu.owns_hotkey(hotkey))
                 });
             if active_context_key {
                 return Ok(RuntimeGlobalKeyOutcome::Unhandled);
@@ -2860,26 +2825,23 @@ impl GameApp {
             });
         let active_game_over_hotkey = dialog_callbacks_active
             && self
-            .runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver)
-            .then(|| startup_dialog_hotkey(key))
-            .flatten()
-            .and_then(|hotkey| {
-                self.game_over_dialog
-                    .as_ref()
-                    .and_then(|dialog| dialog.hotkey_action(hotkey))
-            })
-            .is_some()
+                .runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver)
+                .then(|| startup_dialog_hotkey(key))
+                .flatten()
+                .and_then(|hotkey| {
+                    self.game_over_dialog
+                        .as_ref()
+                        .and_then(|dialog| dialog.hotkey_action(hotkey))
+                })
+                .is_some()
             && alt_hotkey_modifiers;
         let active_game_over_list_key = dialog_callbacks_active
             && unmodified_arrow
             && matches!(key, VirtualKeyCode::Up | VirtualKeyCode::Down)
             && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::GameOver)
-            && self
-                .game_over_dialog
-                .as_ref()
-                .is_some_and(|dialog| {
-                    matches!(dialog.focused(), Some(GameOverFocus::PlayerList(_)))
-                });
+            && self.game_over_dialog.as_ref().is_some_and(|dialog| {
+                matches!(dialog.focused(), Some(GameOverFocus::PlayerList(_)))
+            });
         let active_vote_hotkey = dialog_callbacks_active
             && alt_hotkey_modifiers
             && self.top_message_dialog_is_exclusive()
@@ -2889,8 +2851,7 @@ impl GameApp {
                     .is_some_and(|dialog| dialog.state.has_hotkey(hotkey))
             });
         let external_irc_control_key = dialog_callbacks_active
-            && self
-            .runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
+            && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ExternalIrc)
             && self.external_irc_dialog.as_ref().is_some_and(|dialog| {
                 let edit_shortcut = c4_modifiers == ModifiersState::CTRL
                     && matches!(
@@ -2900,20 +2861,19 @@ impl GameApp {
                             | VirtualKeyCode::V
                             | VirtualKeyCode::X
                     );
-                let chat_page = dialog.chat_page()
-                    == clonk_frontend::startup_netdlg::NetDlgChatPage::Chats;
+                let chat_page =
+                    dialog.chat_page() == clonk_frontend::startup_netdlg::NetDlgChatPage::Chats;
                 (dialog.chat_edit_is_focused() && (edit_cursor_key || edit_shortcut))
                     || (chat_page
                         && ((c4_modifiers.is_empty()
                             && matches!(key, VirtualKeyCode::Up | VirtualKeyCode::Down))
-                            || (c4_modifiers == ModifiersState::CTRL
-                                && key == VirtualKeyCode::F4)))
+                            || (c4_modifiers == ModifiersState::CTRL && key == VirtualKeyCode::F4)))
                     || (alt_hotkey_modifiers
                         && context_menu_hotkey(key)
                             .is_some_and(|hotkey| dialog.chat_dialog_has_hotkey(hotkey)))
             });
-        let chat_open_binding = !self.running_chat_active()
-            && self.runtime_running_chat_open_mode(key).is_some();
+        let chat_open_binding =
+            !self.running_chat_active() && self.runtime_running_chat_open_mode(key).is_some();
         let toggle_chat_binding = self.runtime_keyboard_binding_matches(
             "ToggleChat",
             key,
@@ -2995,9 +2955,7 @@ impl GameApp {
                     || (c4_modifiers.is_empty()
                         && matches!(
                             key,
-                            VirtualKeyCode::F2
-                                | VirtualKeyCode::Up
-                                | VirtualKeyCode::Down
+                            VirtualKeyCode::F2 | VirtualKeyCode::Up | VirtualKeyCode::Down
                         ))))
             || active_context_key
             || active_game_over_hotkey
@@ -3037,19 +2995,37 @@ impl GameApp {
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         if self.ingame_menu_belongs_to(OWNER_NONE) {
             let command = [
-                ("FullscreenMenuLeft", ControlCommand::MenuLeft,
-                    key == VirtualKeyCode::Left && modifiers.is_empty()),
-                ("FullscreenMenuRight", ControlCommand::MenuRight,
-                    key == VirtualKeyCode::Right && modifiers.is_empty()),
-                ("FullscreenMenuUp", ControlCommand::MenuUp,
-                    key == VirtualKeyCode::Up && modifiers.is_empty()),
-                ("FullscreenMenuDown", ControlCommand::MenuDown,
-                    key == VirtualKeyCode::Down && modifiers.is_empty()),
-                ("FullscreenMenuOK", ControlCommand::MenuEnter,
+                (
+                    "FullscreenMenuLeft",
+                    ControlCommand::MenuLeft,
+                    key == VirtualKeyCode::Left && modifiers.is_empty(),
+                ),
+                (
+                    "FullscreenMenuRight",
+                    ControlCommand::MenuRight,
+                    key == VirtualKeyCode::Right && modifiers.is_empty(),
+                ),
+                (
+                    "FullscreenMenuUp",
+                    ControlCommand::MenuUp,
+                    key == VirtualKeyCode::Up && modifiers.is_empty(),
+                ),
+                (
+                    "FullscreenMenuDown",
+                    ControlCommand::MenuDown,
+                    key == VirtualKeyCode::Down && modifiers.is_empty(),
+                ),
+                (
+                    "FullscreenMenuOK",
+                    ControlCommand::MenuEnter,
                     matches!(key, VirtualKeyCode::Space | VirtualKeyCode::Return)
-                        && modifiers.is_empty()),
-                ("FullscreenMenuCancel", ControlCommand::MenuClose,
-                    key == VirtualKeyCode::Escape && modifiers.is_empty()),
+                        && modifiers.is_empty(),
+                ),
+                (
+                    "FullscreenMenuCancel",
+                    ControlCommand::MenuClose,
+                    key == VirtualKeyCode::Escape && modifiers.is_empty(),
+                ),
             ]
             .into_iter()
             .find_map(|(name, command, default_matches)| {
@@ -3058,11 +3034,7 @@ impl GameApp {
             });
             if let Some(command) = command {
                 if state == ElementState::Pressed {
-                    self.handle_menu_command_failsafe(
-                        OWNER_NONE,
-                        command,
-                        CommandKind::Press,
-                    )?;
+                    self.handle_menu_command_failsafe(OWNER_NONE, command, CommandKind::Press)?;
                 }
                 return Ok(true);
             }
@@ -3136,9 +3108,7 @@ impl GameApp {
                     return Some(RuntimeCustomGamepadAction::Menu(command));
                 }
             }
-        } else if self.primary_physical_viewport_is_no_owner()
-            && matches("FullscreenMenuOpen")
-        {
+        } else if self.primary_physical_viewport_is_no_owner() && matches("FullscreenMenuOpen") {
             return Some(RuntimeCustomGamepadAction::MenuOpen);
         }
         for (name, mode) in [
@@ -3197,11 +3167,7 @@ impl GameApp {
             RuntimeCustomGamepadAction::SpeedUp => self.step_runtime_speed(true)?,
             RuntimeCustomGamepadAction::SpeedDown => self.step_runtime_speed(false)?,
             RuntimeCustomGamepadAction::Menu(command) => {
-                self.handle_menu_command_failsafe(
-                    OWNER_NONE,
-                    command,
-                    CommandKind::Press,
-                )?;
+                self.handle_menu_command_failsafe(OWNER_NONE, command, CommandKind::Press)?;
             }
             RuntimeCustomGamepadAction::MenuOpen => {
                 self.ingame_menu.replace(
@@ -3213,7 +3179,11 @@ impl GameApp {
         Ok(())
     }
 
-    pub(crate) fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
+    pub(crate) fn handle_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.startup_tooltip.note_non_pointer_input();
         self.note_classic_lobby_non_pointer_input();
@@ -3260,10 +3230,7 @@ impl GameApp {
             let edit_priority_key = (modifiers == ModifiersState::CTRL
                 && matches!(
                     key,
-                    VirtualKeyCode::A
-                        | VirtualKeyCode::C
-                        | VirtualKeyCode::V
-                        | VirtualKeyCode::X
+                    VirtualKeyCode::A | VirtualKeyCode::C | VirtualKeyCode::V | VirtualKeyCode::X
                 ))
                 || (modifiers.ctrl()
                     && !modifiers.alt()
@@ -3283,8 +3250,8 @@ impl GameApp {
                 self.handle_engine_key(key, state)?;
                 return Ok(());
             }
-            let empty_backspace = key == VirtualKeyCode::Back
-                && self.running_chat_text().is_none_or(str::is_empty);
+            let empty_backspace =
+                key == VirtualKeyCode::Back && self.running_chat_text().is_none_or(str::is_empty);
             if modifiers.is_empty()
                 && (matches!(
                     key,
@@ -3468,8 +3435,7 @@ impl GameApp {
             let modifiers = self.keyboard_modifiers;
             let ctrl = modifiers.ctrl();
             let shift = modifiers.shift();
-            let edit_modifiers = !modifiers
-                .intersects(ModifiersState::ALT | ModifiersState::LOGO);
+            let edit_modifiers = !modifiers.intersects(ModifiersState::ALT | ModifiersState::LOGO);
             let control_only = modifiers == ModifiersState::CTRL;
             let unmodified = modifiers.is_empty();
             let hotkey_modifiers = modifiers == ModifiersState::ALT
@@ -3493,11 +3459,14 @@ impl GameApp {
                     }
                 }
                 Vec::new()
-            } else if unmodified
-                && matches!(key, VirtualKeyCode::PageUp | VirtualKeyCode::PageDown)
+            } else if unmodified && matches!(key, VirtualKeyCode::PageUp | VirtualKeyCode::PageDown)
             {
                 if state == ElementState::Pressed {
-                    let delta = if key == VirtualKeyCode::PageUp { 10 } else { -10 };
+                    let delta = if key == VirtualKeyCode::PageUp {
+                        10
+                    } else {
+                        -10
+                    };
                     if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
                         pending.controller.handle_integer_page_step(delta);
                     }
@@ -3543,10 +3512,7 @@ impl GameApp {
                     pending.controller.move_edit_cursor(operation, ctrl, shift);
                 }
                 Vec::new()
-            } else if state == ElementState::Pressed
-                && control_only
-                && key == VirtualKeyCode::A
-            {
+            } else if state == ElementState::Pressed && control_only && key == VirtualKeyCode::A {
                 if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
                     pending.controller.select_all_edit_text();
                 }
@@ -3576,10 +3542,7 @@ impl GameApp {
                     }
                 }
                 Vec::new()
-            } else if state == ElementState::Pressed
-                && control_only
-                && key == VirtualKeyCode::V
-            {
+            } else if state == ElementState::Pressed && control_only && key == VirtualKeyCode::V {
                 match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
                     Ok(text) => {
                         if let Some(pending) = self.startup_options_advanced_dialog.as_mut() {
@@ -4188,9 +4151,9 @@ impl GameApp {
                             ElementState::Released => {
                                 if self.menu_state.current_map().is_none()
                                     && !matches!(
-                                    gui_key,
-                                    KeyCode::Escape | KeyCode::Left | KeyCode::Right
-                                )
+                                        gui_key,
+                                        KeyCode::Escape | KeyCode::Left | KeyCode::Right
+                                    )
                                 {
                                     self.handle_menu_input(|menu| {
                                         menu.menu().handle_key_up(gui_key)
@@ -4281,18 +4244,17 @@ impl GameApp {
                 }
                 let viewport_scope_excludes_player_control =
                     self.viewport_scope_excludes_player_control();
-                let unsupported_running_shortcut = if state == ElementState::Pressed
-                    && c4_modifiers.is_empty()
-                {
-                    match key {
-                        VirtualKeyCode::F5 => Some("F5"),
-                        VirtualKeyCode::F6 => Some("F6"),
-                        VirtualKeyCode::F7 => Some("F7"),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
+                let unsupported_running_shortcut =
+                    if state == ElementState::Pressed && c4_modifiers.is_empty() {
+                        match key {
+                            VirtualKeyCode::F5 => Some("F5"),
+                            VirtualKeyCode::F6 => Some("F6"),
+                            VirtualKeyCode::F7 => Some("F7"),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                 if self.handle_viewport_player_cycle_key(key, state) {
                     return Ok(());
                 }
@@ -4332,16 +4294,13 @@ impl GameApp {
         repeated: bool,
     ) -> Result<bool, EngineError> {
         let candidates = self.runtime_control_candidates_for_keyboard(key, state);
-        let routing = self.local_controls.route_keyboard_candidates(
-            candidates,
-            state,
-            repeated,
-            |owner| {
-                self.engine
-                    .player(owner)
-                    .map(|player| player.control_style())
-            },
-        );
+        let routing =
+            self.local_controls
+                .route_keyboard_candidates(candidates, state, repeated, |owner| {
+                    self.engine
+                        .player(owner)
+                        .map(|player| player.control_style())
+                });
         if let KeyboardRoutingOutcome::Consumed {
             owner: Some(owner),
             event: Some(event),
@@ -4382,10 +4341,26 @@ impl GameApp {
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         let requested = [
-            ("FreeViewScrollLeft", Vector2::new(-5, 0), key == VirtualKeyCode::Left && c4_modifiers.is_empty()),
-            ("FreeViewScrollRight", Vector2::new(5, 0), key == VirtualKeyCode::Right && c4_modifiers.is_empty()),
-            ("FreeViewScrollUp", Vector2::new(0, -5), key == VirtualKeyCode::Up && c4_modifiers.is_empty()),
-            ("FreeViewScrollDown", Vector2::new(0, 5), key == VirtualKeyCode::Down && c4_modifiers.is_empty()),
+            (
+                "FreeViewScrollLeft",
+                Vector2::new(-5, 0),
+                key == VirtualKeyCode::Left && c4_modifiers.is_empty(),
+            ),
+            (
+                "FreeViewScrollRight",
+                Vector2::new(5, 0),
+                key == VirtualKeyCode::Right && c4_modifiers.is_empty(),
+            ),
+            (
+                "FreeViewScrollUp",
+                Vector2::new(0, -5),
+                key == VirtualKeyCode::Up && c4_modifiers.is_empty(),
+            ),
+            (
+                "FreeViewScrollDown",
+                Vector2::new(0, 5),
+                key == VirtualKeyCode::Down && c4_modifiers.is_empty(),
+            ),
         ]
         .into_iter()
         .find_map(|(name, requested, default_matches)| {
@@ -4440,9 +4415,8 @@ impl GameApp {
                     return Ok(false);
                 }
                 let enabled = !enabled;
-                let flash = self.prepare_runtime_debug_flash(|resources| {
-                    resources.debug_mode_on_off(enabled)
-                });
+                let flash = self
+                    .prepare_runtime_debug_flash(|resources| resources.debug_mode_on_off(enabled));
                 self.engine.set_debug_mode(enabled);
                 if !enabled {
                     self.graphics
@@ -4510,7 +4484,11 @@ impl GameApp {
         }
         self.message_input_history.push_front(text.to_string());
         self.message_input_history.truncate(20);
-        let history = self.message_input_history.iter().cloned().collect::<Vec<_>>();
+        let history = self
+            .message_input_history
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
             dialog.set_chat_history(history.clone());
         }
@@ -4634,7 +4612,10 @@ impl GameApp {
         }
         match (key, modifiers) {
             (VirtualKeyCode::Tab, modifiers)
-                if modifiers.is_empty() || modifiers == ModifiersState::SHIFT => true,
+                if modifiers.is_empty() || modifiers == ModifiersState::SHIFT =>
+            {
+                true
+            }
             (VirtualKeyCode::Return, modifiers) if modifiers.is_empty() => true,
             (VirtualKeyCode::Space, modifiers) if modifiers.is_empty() => matches!(
                 dialog.focused(),
@@ -4768,8 +4749,8 @@ impl GameApp {
             let options_gamepad_open =
                 options_input_scope && self.gamepads.options_open_slot() == Some(source_slot);
             let eligible_gamepad_gui = screen_gamepad_open;
-            let network_chart_gamepad_open = eligible_gamepad_gui
-                && self.network_chart_is_active_dialog();
+            let network_chart_gamepad_open =
+                eligible_gamepad_gui && self.network_chart_is_active_dialog();
             let chart_player_control_owns_cluster = network_chart_gamepad_open
                 && cluster_events.iter().any(|event| match event {
                     GamepadEvent::Button { slot, button, .. } => {
@@ -4864,8 +4845,8 @@ impl GameApp {
             let mut previous_was_axis = false;
 
             for event in cluster_events {
-                let axis_alias = previous_was_axis
-                    && matches!(event, GamepadEvent::Direction { .. });
+                let axis_alias =
+                    previous_was_axis && matches!(event, GamepadEvent::Direction { .. });
                 previous_was_axis = matches!(event, GamepadEvent::Axis { .. });
                 let mut pending = Some(event);
                 while let Some(event) = pending.take() {
@@ -5237,8 +5218,9 @@ impl GameApp {
                                     self.process_options_dialog_actions(actions)?;
                                     suppress_base_cancel_alias = true;
                                 }
-                                event => self
-                                    .handle_gamepad_event_with_axis_alias(event, axis_alias)?,
+                                event => {
+                                    self.handle_gamepad_event_with_axis_alias(event, axis_alias)?
+                                }
                             }
                         }
                     }
@@ -5260,11 +5242,14 @@ impl GameApp {
                 button: button @ (ControlButton::Left | ControlButton::Right),
                 state: ElementState::Pressed,
                 ..
-            } => self.message_dialogs.get_mut(active_index).and_then(|dialog| {
-                dialog
-                    .state
-                    .handle_key_down(KeyCode::Tab, button == ControlButton::Left)
-            }),
+            } => self
+                .message_dialogs
+                .get_mut(active_index)
+                .and_then(|dialog| {
+                    dialog
+                        .state
+                        .handle_key_down(KeyCode::Tab, button == ControlButton::Left)
+                }),
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::Low,
                 state,
@@ -5373,7 +5358,10 @@ impl GameApp {
         self.process_league_signup_actions(actions)
     }
 
-    pub(crate) fn handle_game_over_gamepad_event(&mut self, event: GamepadEvent) -> Result<(), EngineError> {
+    pub(crate) fn handle_game_over_gamepad_event(
+        &mut self,
+        event: GamepadEvent,
+    ) -> Result<(), EngineError> {
         match event {
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::Low,
@@ -5718,16 +5706,13 @@ impl GameApp {
                     .control_candidates_for_raw_key(raw_key, state),
             );
         }
-        let routing = self.local_controls.route_keyboard_candidates(
-            candidates,
-            state,
-            false,
-            |owner| {
-                self.engine
-                    .player(owner)
-                    .map(|player| player.control_style())
-            },
-        );
+        let routing =
+            self.local_controls
+                .route_keyboard_candidates(candidates, state, false, |owner| {
+                    self.engine
+                        .player(owner)
+                        .map(|player| player.control_style())
+                });
         if let KeyboardRoutingOutcome::Consumed {
             owner: Some(owner),
             event: Some(event),
@@ -5738,8 +5723,7 @@ impl GameApp {
         if !matches!(routing, KeyboardRoutingOutcome::Unhandled) {
             return Ok(());
         }
-        if let Some(action) =
-            self.runtime_custom_gamepad_direction_action(slot.index(), direction)
+        if let Some(action) = self.runtime_custom_gamepad_direction_action(slot.index(), direction)
         {
             self.execute_runtime_custom_gamepad_action(action, state)?;
         }
@@ -5810,26 +5794,20 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) {
             return Ok(());
         }
-        let mut candidates = self.runtime_control_candidates_for_gamepad_button(
-            slot.index(),
-            button.index(),
-            state,
-        );
+        let mut candidates =
+            self.runtime_control_candidates_for_gamepad_button(slot.index(), button.index(), state);
         candidates.extend(self.gamepad_bindings.control_candidates_for_button(
             slot.index(),
             button.index(),
             state,
         ));
-        let routing = self.local_controls.route_keyboard_candidates(
-            candidates,
-            state,
-            false,
-            |owner| {
-                self.engine
-                    .player(owner)
-                    .map(|player| player.control_style())
-            },
-        );
+        let routing =
+            self.local_controls
+                .route_keyboard_candidates(candidates, state, false, |owner| {
+                    self.engine
+                        .player(owner)
+                        .map(|player| player.control_style())
+                });
         if let KeyboardRoutingOutcome::Consumed {
             owner: Some(owner),
             event: Some(event),
@@ -6343,10 +6321,7 @@ impl GameApp {
                             let option_focused = self.joined_network_lobby_active()
                                 && self.network_lobby.as_mut().is_some_and(|lobby| {
                                     lobby.sync_classic_controller();
-                                    matches!(
-                                        lobby.controller.focus(),
-                                        LobbyControl::GameOption(_)
-                                    )
+                                    matches!(lobby.controller.focus(), LobbyControl::GameOption(_))
                                 });
                             if option_focused {
                                 let assets = Arc::clone(&self.assets);
@@ -6370,9 +6345,7 @@ impl GameApp {
                                                 },
                                             )
                                             .map_err(Self::joined_lobby_input_error)?,
-                                        ElementState::Released => {
-                                            lobby.controller.gamepad_low_up()
-                                        }
+                                        ElementState::Released => lobby.controller.gamepad_low_up(),
                                     }
                                 };
                                 self.process_joined_lobby_controller_actions(actions)?;
@@ -6486,11 +6459,9 @@ impl GameApp {
             .map(|dialog| match state {
                 ElementState::Pressed => fonts.as_deref().map_or_else(Vec::new, |fonts| {
                     if left_double_click {
-                        dialog.controller.handle_pointer_double_click(
-                            point,
-                            &layout,
-                            &fonts.text,
-                        )
+                        dialog
+                            .controller
+                            .handle_pointer_double_click(point, &layout, &fonts.text)
                     } else {
                         dialog
                             .controller
@@ -6508,7 +6479,10 @@ impl GameApp {
         Ok(true)
     }
 
-    pub(crate) fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
+    pub(crate) fn handle_cursor_moved(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
         self.mark_menu_dirty();
@@ -6653,10 +6627,10 @@ impl GameApp {
                 return Ok(());
             }
             let layout = self.game_option_input_layout();
-            let chat_hit = layout.as_ref().is_some_and(|layout| {
-                Self::point_in_input_dialog_bounds(point, layout)
-            }) || self.game_option_input_pointer_capture
-                == Some(ContextMenuPointerButton::Left)
+            let chat_hit = layout
+                .as_ref()
+                .is_some_and(|layout| Self::point_in_input_dialog_bounds(point, layout))
+                || self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left)
                 || (self.running_chat_active() && lower_capture.is_some());
             let mut shared_pointer_consumed = chat_hit;
             self.game_option_input_pointer_position = Some(point);
@@ -6687,9 +6661,9 @@ impl GameApp {
                 self.finish_game_option_input_dialog_actions(Vec::new())?;
                 let active_message = self.active_message_dialog_index();
                 let message_target = (0..self.message_dialogs.len()).rev().find(|index| {
-                    self.message_dialog_layout_at(*index).is_some_and(|layout| {
-                        Self::point_in_message_dialog_bounds(point, &layout)
-                    }) || (lower_capture.is_some() && active_message == Some(*index))
+                    self.message_dialog_layout_at(*index)
+                        .is_some_and(|layout| Self::point_in_message_dialog_bounds(point, &layout))
+                        || (lower_capture.is_some() && active_message == Some(*index))
                 });
                 shared_pointer_consumed = message_target.is_some();
                 if self.primary_pointer_left_down {
@@ -6722,8 +6696,7 @@ impl GameApp {
             };
             if shared_pointer_consumed
                 || lower_default_hit
-                || (!self.network_chart_elevated
-                    && self.running_shared_gui_has_keyboard_focus())
+                || (!self.network_chart_elevated && self.running_shared_gui_has_keyboard_focus())
             {
                 self.suspend_ingame_pointer_for_gui();
                 return Ok(());
@@ -7166,7 +7139,10 @@ impl GameApp {
         ))
     }
 
-    pub(crate) fn draw_classic_gui_cursor(&mut self, gamma: Option<&clonk_graphics::GammaRamp>) -> bool {
+    pub(crate) fn draw_classic_gui_cursor(
+        &mut self,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) -> bool {
         let Some((position, help)) = self.classic_gui_cursor_request() else {
             return false;
         };
@@ -7246,12 +7222,16 @@ impl GameApp {
             return Ok(false);
         };
         let center = GuiPoint::new(
-            viewport.rect.x.saturating_add(
-                i32::try_from(viewport.rect.width / 2).unwrap_or(i32::MAX),
-            ) as f32,
-            viewport.rect.y.saturating_add(
-                i32::try_from(viewport.rect.height / 2).unwrap_or(i32::MAX),
-            ) as f32,
+            viewport
+                .rect
+                .x
+                .saturating_add(i32::try_from(viewport.rect.width / 2).unwrap_or(i32::MAX))
+                as f32,
+            viewport
+                .rect
+                .y
+                .saturating_add(i32::try_from(viewport.rect.height / 2).unwrap_or(i32::MAX))
+                as f32,
         );
         self.update_ingame_pointer(center)?;
         Ok(self.ingame_mouse_init_centered)
@@ -7288,22 +7268,23 @@ impl GameApp {
         let mouse_owner = self.local_controls.mouse_owner();
         let viewport = self.active_ingame_mouse_viewport();
         let pointer = viewport.and_then(|viewport| {
-            let point = if self.ingame_mouse_init_centered {
-                point
-            } else {
-                // C4MouseControl::Move replaces the first coordinates after
-                // Init with ViewWdt/2, ViewHgt/2 before target/edge handling
-                // (C4MouseControl.cpp:216-239). SDL does not warp the OS
-                // cursor; only the retained gameplay point is centered.
-                GuiPoint::new(
-                    viewport.rect.x.saturating_add(
-                        i32::try_from(viewport.rect.width / 2).unwrap_or(i32::MAX),
-                    ) as f32,
-                    viewport.rect.y.saturating_add(
-                        i32::try_from(viewport.rect.height / 2).unwrap_or(i32::MAX),
-                    ) as f32,
-                )
-            };
+            let point =
+                if self.ingame_mouse_init_centered {
+                    point
+                } else {
+                    // C4MouseControl::Move replaces the first coordinates after
+                    // Init with ViewWdt/2, ViewHgt/2 before target/edge handling
+                    // (C4MouseControl.cpp:216-239). SDL does not warp the OS
+                    // cursor; only the retained gameplay point is centered.
+                    GuiPoint::new(
+                        viewport.rect.x.saturating_add(
+                            i32::try_from(viewport.rect.width / 2).unwrap_or(i32::MAX),
+                        ) as f32,
+                        viewport.rect.y.saturating_add(
+                            i32::try_from(viewport.rect.height / 2).unwrap_or(i32::MAX),
+                        ) as f32,
+                    )
+                };
             self.graphics
                 .viewport_output_point_for_index(viewport.index, point)
         });
@@ -7326,13 +7307,11 @@ impl GameApp {
             let cancel_left_selection = over_region
                 && self
                     .mouse_state
-                    .is_some_and(|state| {
-                        state.motion.moved && state.motion.selection_frame
-                    });
+                    .is_some_and(|state| state.motion.moved && state.motion.selection_frame);
             let cancel_right_selection = over_region
-                && self.ingame_right_mouse_state.is_some_and(|state| {
-                    state.motion.moved && state.motion.selection_frame
-                });
+                && self
+                    .ingame_right_mouse_state
+                    .is_some_and(|state| state.motion.moved && state.motion.selection_frame);
             let refresh_left_region_drag = self
                 .mouse_state
                 .is_some_and(|state| state.motion.region_drag_started);
@@ -7363,12 +7342,11 @@ impl GameApp {
             let mut right_world_drag = None;
             if let Some(state) = self.ingame_right_mouse_state.as_mut() {
                 if state.update_with_fog(pointer, fog_blocked) {
-                    right_region_drag =
-                        state.motion.down_region.and_then(|region| match region {
-                            IngameViewportRegion::Inventory(target) => Some(target),
-                            IngameViewportRegion::Command(_)
-                            | IngameViewportRegion::ViewportButton(_) => None,
-                        });
+                    right_region_drag = state.motion.down_region.and_then(|region| match region {
+                        IngameViewportRegion::Inventory(target) => Some(target),
+                        IngameViewportRegion::Command(_)
+                        | IngameViewportRegion::ViewportButton(_) => None,
+                    });
                     if !state.down_region && !state.motion.selection_frame {
                         right_world_drag = state.down_target.map(|target| {
                             (
@@ -7602,10 +7580,9 @@ impl GameApp {
         }
         let player = match self.local_controls.mouse_owner() {
             Some(player) if self.mouse_control => player,
-            None
-                if self
-                    .active_ingame_mouse_viewport()
-                    .is_some_and(|viewport| viewport.is_no_owner_viewport) =>
+            None if self
+                .active_ingame_mouse_viewport()
+                .is_some_and(|viewport| viewport.is_no_owner_viewport) =>
             {
                 OWNER_NONE
             }
@@ -7735,13 +7712,11 @@ impl GameApp {
                 // C4GUI::IconButton invokes Dialog::OnUserClose on left
                 // button-up; right-button input is consumed without closing
                 // (C4GuiDialogs.cpp:386-425; C4Gui.cpp:2029-2037).
-                IngameMenuPointerTarget::Close
-                    if !enter_all && close_capture == Some(player) => self
-                    .ingame_menu
-                    .get_mut(player)
-                    .and_then(|menu| {
+                IngameMenuPointerTarget::Close if !enter_all && close_capture == Some(player) => {
+                    self.ingame_menu.get_mut(player).and_then(|menu| {
                         menu.handle_command(ControlCommand::MenuClose, CommandKind::Press)
-                    }),
+                    })
+                }
                 IngameMenuPointerTarget::Close
                 | IngameMenuPointerTarget::Title
                 | IngameMenuPointerTarget::Background => None,
@@ -7784,12 +7759,15 @@ impl GameApp {
             .iter()
             .find(|player| player.id == pointer.owner)
             .is_some_and(|player| {
-                player.fog_of_war
-                    && !fow_point_is_visible(&self.snapshot, pointer.owner, point)
+                player.fog_of_war && !fow_point_is_visible(&self.snapshot, pointer.owner, point)
             })
     }
 
-    pub(crate) fn ingame_primary_mouse_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
+    pub(crate) fn ingame_primary_mouse_target(
+        &self,
+        owner: i32,
+        point: GuiPoint,
+    ) -> Option<ObjectId> {
         let primary_ocf = clonk_engine::ocf::GRAB
             | clonk_engine::ocf::CHOP
             | clonk_engine::ocf::CONTAINER
@@ -7797,12 +7775,9 @@ impl GameApp {
             | clonk_engine::ocf::LIVING
             | clonk_engine::ocf::CARRYABLE
             | clonk_engine::ocf::EXCLUSIVE;
-        let target = self.graphics.object_at_point_with_ocf(
-            &self.snapshot,
-            owner,
-            point,
-            primary_ocf,
-        )?;
+        let target =
+            self.graphics
+                .object_at_point_with_ocf(&self.snapshot, owner, point, primary_ocf)?;
         let blocked = self
             .graphics
             .viewport_point_at(point)
@@ -7865,7 +7840,11 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn ingame_mouse_select_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
+    pub(crate) fn ingame_mouse_select_target(
+        &self,
+        owner: i32,
+        point: GuiPoint,
+    ) -> Option<ObjectId> {
         self.ingame_primary_mouse_target(owner, point)
             .filter(|object| self.ingame_mouse_selectable_object(owner, *object))
     }
@@ -7919,23 +7898,17 @@ impl GameApp {
         cursor: MouseWorldCursor,
         point: Vector2,
     ) -> Option<String> {
-        let target_caption =
-            |key: &str, fallback: &str, target: ObjectId, double_click: bool| {
-                let name = self.ingame_object_caption_name(target)?;
-                Some(self.localized_ingame_mouse_caption(
-                    key,
-                    fallback,
-                    &[name.as_str()],
-                    double_click,
-                ))
-            };
+        let target_caption = |key: &str, fallback: &str, target: ObjectId, double_click: bool| {
+            let name = self.ingame_object_caption_name(target)?;
+            Some(self.localized_ingame_mouse_caption(key, fallback, &[name.as_str()], double_click))
+        };
         match cursor {
             MouseWorldCursor::Select(target) => {
                 target_caption("IDS_CON_SELECT", "Select %s.", target, false)
             }
-            MouseWorldCursor::JumpLeft | MouseWorldCursor::JumpRight => Some(
-                self.localized_ingame_mouse_caption("IDS_CON_JUMP", "Jump.", &[], false),
-            ),
+            MouseWorldCursor::JumpLeft | MouseWorldCursor::JumpRight => {
+                Some(self.localized_ingame_mouse_caption("IDS_CON_JUMP", "Jump.", &[], false))
+            }
             MouseWorldCursor::Grab(target) => {
                 target_caption("IDS_CON_GRAB", "Grab %s.", target, true)
             }
@@ -8022,10 +7995,7 @@ impl GameApp {
                     .rev()
                     .find(|viewport| {
                         viewport.owner == pointer.owner
-                            && viewport.contains_output_point((
-                                pointer.screen.x,
-                                pointer.screen.y,
-                            ))
+                            && viewport.contains_output_point((pointer.screen.x, pointer.screen.y))
                     });
                 if let Some(viewport) = viewport {
                     let (key, fallback) = match button {
@@ -8035,8 +8005,7 @@ impl GameApp {
                         }
                         clonk_frontend::hud::ViewportButton::Chat => ("IDS_DLG_CHAT", "Chat"),
                     };
-                    let caption =
-                        self.localized_ingame_mouse_caption(key, fallback, &[], false);
+                    let caption = self.localized_ingame_mouse_caption(key, fallback, &[], false);
                     let rect = clonk_frontend::hud::viewport_button_rect(viewport.rect, button);
                     self.set_ingame_mouse_caption(caption, Some(rect.y));
                 }
@@ -8091,8 +8060,7 @@ impl GameApp {
         }
 
         if let Some(scroll) = self.ingame_edge_scroll {
-            self.ingame_mouse_caption.cursor =
-                IngameMouseCursorKind::Scrolling(scroll.edge.cursor);
+            self.ingame_mouse_caption.cursor = IngameMouseCursorKind::Scrolling(scroll.edge.cursor);
             return;
         }
 
@@ -8101,15 +8069,10 @@ impl GameApp {
         }
 
         if self.ingame_mouse_help {
-            let show_caption =
-                self.advance_ingame_time_on_target(IngameMouseCursorKind::Help);
+            let show_caption = self.advance_ingame_time_on_target(IngameMouseCursorKind::Help);
             if show_caption && self.ingame_mouse_help_caption.is_none() {
-                let caption = self.localized_ingame_mouse_caption(
-                    "IDS_CON_HELP",
-                    "Help",
-                    &[],
-                    false,
-                );
+                let caption =
+                    self.localized_ingame_mouse_caption("IDS_CON_HELP", "Help", &[], false);
                 self.set_ingame_mouse_caption(caption, None);
             }
             return;
@@ -8196,8 +8159,7 @@ impl GameApp {
             match button_state {
                 ElementState::Pressed => match target {
                     EngineScriptMenuPointerTarget::Item(index) => {
-                        let owner = script_menu_owner
-                            .expect("script-menu target has an owner");
+                        let owner = script_menu_owner.expect("script-menu target has an owner");
                         self.select_script_menu_pointer_item(owner, index)?;
                         if let (Some(owner), Some(gui_point)) =
                             (script_menu_owner, self.ingame_gui_pointer)
@@ -8242,8 +8204,7 @@ impl GameApp {
                             )?;
                         }
                     } else if let EngineScriptMenuPointerTarget::Item(index) = target {
-                        let owner = script_menu_owner
-                            .expect("script-menu target has an owner");
+                        let owner = script_menu_owner.expect("script-menu target has an owner");
                         if self.select_script_menu_pointer_item(owner, index)? {
                             let data = i32::try_from(index).unwrap_or(i32::MAX);
                             self.dispatch_control_event_for_local_player(
@@ -8492,7 +8453,10 @@ impl GameApp {
         Ok(false)
     }
 
-    pub(crate) fn handle_right_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
+    pub(crate) fn handle_right_mouse_button(
+        &mut self,
+        button_state: ElementState,
+    ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
         self.mark_menu_dirty();
@@ -8522,8 +8486,7 @@ impl GameApp {
         {
             return Ok(());
         }
-        let message_dialog_fallback_blocks_world =
-            self.runtime_pointer_fallback_is_exclusive();
+        let message_dialog_fallback_blocks_world = self.runtime_pointer_fallback_is_exclusive();
         let context_routed_before_running_dialogs = self.mode == AppMode::Running
             && self.context_menu.is_some()
             && !self.running_dialog_stack.is_empty();
@@ -8664,10 +8627,8 @@ impl GameApp {
                                 .external_irc_dialog
                                 .as_mut()
                                 .map(|dialog| {
-                                    dialog.request_context_menu_at(
-                                        point,
-                                        clipboard_text_available(),
-                                    )
+                                    dialog
+                                        .request_context_menu_at(point, clipboard_text_available())
                                 })
                                 .unwrap_or_default();
                             self.process_network_dialog_actions(outcome.actions)?;
@@ -8765,7 +8726,10 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn handle_other_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
+    pub(crate) fn handle_other_mouse_button(
+        &mut self,
+        button_state: ElementState,
+    ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
         self.mark_menu_dirty();
@@ -8813,8 +8777,7 @@ impl GameApp {
         {
             return Ok(());
         }
-        let message_dialog_fallback_blocks_world =
-            self.runtime_pointer_fallback_is_exclusive();
+        let message_dialog_fallback_blocks_world = self.runtime_pointer_fallback_is_exclusive();
         let context_routed_before_running_dialogs = self.mode == AppMode::Running
             && self.context_menu.is_some()
             && !self.running_dialog_stack.is_empty();
@@ -9043,10 +9006,7 @@ impl GameApp {
                     .and_then(|dialog| dialog.pointer_position());
                 if let Some(point) = point {
                     let primary = primary_clipboard_text();
-                    self.handle_startup_crew_rename_middle_down(
-                        point,
-                        primary.as_deref(),
-                    );
+                    self.handle_startup_crew_rename_middle_down(point, primary.as_deref());
                 }
             }
             return Ok(());
@@ -9097,11 +9057,9 @@ impl GameApp {
         }
         let moving_drag = self.ingame_moving_drag_active();
         let captured_release = button_state == ElementState::Released
-            && self
-                .ingame_right_mouse_state
-                .is_some_and(|state| {
-                    state.motion.region_drag_started || state.motion.world_drag_started
-                });
+            && self.ingame_right_mouse_state.is_some_and(|state| {
+                state.motion.region_drag_started || state.motion.world_drag_started
+            });
         let script_menu_owner = self.local_controls.mouse_owner();
         let script_menu_target = if moving_drag {
             None
@@ -9118,8 +9076,7 @@ impl GameApp {
                 self.cancel_ingame_mouse_gestures();
                 if button_state == ElementState::Released {
                     if let EngineScriptMenuPointerTarget::Item(index) = target {
-                        let owner = script_menu_owner
-                            .expect("script-menu target has an owner");
+                        let owner = script_menu_owner.expect("script-menu target has an owner");
                         if self.select_script_menu_pointer_item(owner, index)? {
                             let data = i32::try_from(index).unwrap_or(i32::MAX);
                             self.dispatch_control_event_for_local_player(
@@ -9156,8 +9113,7 @@ impl GameApp {
             let region = self.ingame_viewport_region(self.local_owner, pointer.screen);
             let region_target = region.and_then(|region| match region {
                 IngameViewportRegion::Inventory(target) => Some(target),
-                IngameViewportRegion::Command(_)
-                | IngameViewportRegion::ViewportButton(_) => None,
+                IngameViewportRegion::Command(_) | IngameViewportRegion::ViewportButton(_) => None,
             });
             let down_target = region_target.or_else(|| {
                 if region.is_some() {
@@ -9169,11 +9125,7 @@ impl GameApp {
                     self.ingame_primary_mouse_target(self.local_owner, pointer.screen)
                 }
             });
-            let mut state = IngameButtonMouseState::new(
-                pointer,
-                down_target,
-                region.is_some(),
-            );
+            let mut state = IngameButtonMouseState::new(pointer, down_target, region.is_some());
             state.motion.down_region = region;
             state.down_cursor_help = self.ingame_mouse_help;
             if state.down_cursor_help {
@@ -9201,9 +9153,9 @@ impl GameApp {
                 if drag.motion.region_drag_started {
                     let mut selected = std::mem::take(&mut self.ingame_dragged_objects);
                     selected.retain(|object| {
-                        self.engine
-                            .object_snapshot(*object)
-                            .is_some_and(|object| object.status != clonk_engine::ObjectStatus::Deleted)
+                        self.engine.object_snapshot(*object).is_some_and(|object| {
+                            object.status != clonk_engine::ObjectStatus::Deleted
+                        })
                     });
                     if self
                         .ingame_viewport_region(drag.motion.last.owner, drag.motion.last.screen)
@@ -9248,8 +9200,7 @@ impl GameApp {
                 },
             );
         }
-        let primary_target =
-            self.ingame_primary_mouse_target(self.local_owner, pointer.screen);
+        let primary_target = self.ingame_primary_mouse_target(self.local_owner, pointer.screen);
         let context_target = primary_target.or_else(|| {
             self.graphics
                 .object_at_point(&self.snapshot, self.local_owner, pointer.screen)
@@ -9265,13 +9216,12 @@ impl GameApp {
                     .is_some_and(|object| object.definition_id == "WWNG") =>
             {
                 // C++ does not re-run its fog gate after the excluded pick.
-                self.graphics
-                    .object_at_point_excluding(
-                        &self.snapshot,
-                        self.local_owner,
-                        pointer.screen,
-                        target,
-                    )
+                self.graphics.object_at_point_excluding(
+                    &self.snapshot,
+                    self.local_owner,
+                    pointer.screen,
+                    target,
+                )
             }
             target => target,
         };
@@ -9288,7 +9238,11 @@ impl GameApp {
         }
         if let Some(target) = context_target {
             self.show_startup_hint = false;
-            let add_mode = 2 | if self.keyboard_modifiers.shift() { 4 } else { 0 };
+            let add_mode = 2 | if self.keyboard_modifiers.shift() {
+                4
+            } else {
+                0
+            };
             let (x, y) = self
                 .graphics
                 .active_viewport_projections()
@@ -9355,13 +9309,10 @@ impl GameApp {
             self.assets.clonk_fonts.as_deref(),
             fallback.as_ref(),
         );
-        let area = self
-            .graphics
-            .viewport_rect(owner)
-            .unwrap_or_else(|| {
-                let surface = self.graphics.surface();
-                Rect::new(0, 0, surface.width(), surface.height())
-            });
+        let area = self.graphics.viewport_rect(owner).unwrap_or_else(|| {
+            let surface = self.graphics.surface();
+            Rect::new(0, 0, surface.width(), surface.height())
+        });
         let resources = self.script_text_spec_resources();
         let font_images =
             resolve_script_menu_font_images(&self.engine, menu, resources).map_err(|error| {
@@ -9432,8 +9383,7 @@ impl GameApp {
             .script_menu_presentations
             .get(&owner)
             .is_none_or(|state| state.selection_needs_adjustment);
-        let Some((target, layout)) = self
-            .script_menu_layout_for_owner(owner, adjust_selection)?
+        let Some((target, layout)) = self.script_menu_layout_for_owner(owner, adjust_selection)?
         else {
             // Dialog-style menus have no normal C4Menu ScrollWindow client,
             // but their external dialog still consumes the wheel event.
@@ -9480,10 +9430,8 @@ impl GameApp {
         owner: i32,
         index: usize,
     ) -> Result<bool, EngineError> {
-        let Some((selection, selectable)) = self
-            .engine
-            .cursor_object_menu(owner)
-            .and_then(|(_, menu)| {
+        let Some((selection, selectable)) =
+            self.engine.cursor_object_menu(owner).and_then(|(_, menu)| {
                 menu.items
                     .get(index)
                     .map(|item| (menu.selection, item.selectable))
@@ -9495,7 +9443,8 @@ impl GameApp {
             return Ok(false);
         }
         if selection != index as i32 {
-            let data = i32::try_from(index).unwrap_or(i32::MAX) | clonk_engine::C4MN_ADJUST_POSITION;
+            let data =
+                i32::try_from(index).unwrap_or(i32::MAX) | clonk_engine::C4MN_ADJUST_POSITION;
             self.dispatch_control_event_for_local_player(
                 owner,
                 ControlEvent::RawPlayerControl {
@@ -9537,8 +9486,7 @@ impl GameApp {
         }
         let region_target = region.and_then(|region| match region {
             IngameViewportRegion::Inventory(target) => Some(target),
-            IngameViewportRegion::Command(_)
-            | IngameViewportRegion::ViewportButton(_) => None,
+            IngameViewportRegion::Command(_) | IngameViewportRegion::ViewportButton(_) => None,
         });
         let down_target = region_target.or_else(|| {
             region
@@ -9552,11 +9500,7 @@ impl GameApp {
                 })
                 .flatten()
         });
-        let mut state = IngameButtonMouseState::new(
-            pointer,
-            down_target,
-            region.is_some(),
-        );
+        let mut state = IngameButtonMouseState::new(pointer, down_target, region.is_some());
         state.motion.down_region = region;
         state.down_cursor_help = self.ingame_mouse_help;
         if state.down_cursor_help {
@@ -9576,7 +9520,9 @@ impl GameApp {
                     .engine
                     .player(pointer.owner)
                     .is_some_and(|player| player.control_style());
-                if control_style && command & (clonk_engine::COM_SINGLE | clonk_engine::COM_DOUBLE) == 0 {
+                if control_style
+                    && command & (clonk_engine::COM_SINGLE | clonk_engine::COM_DOUBLE) == 0
+                {
                     self.dispatch_ingame_region_control(pointer.owner, region, false)?;
                 }
             }
@@ -9647,20 +9593,13 @@ impl GameApp {
                 .engine
                 .player(motion.start.owner)
                 .is_some_and(|player| player.control_style());
-            if control_style && command & (clonk_engine::COM_SINGLE | clonk_engine::COM_DOUBLE) == 0 {
-                return self.dispatch_ingame_region_control(
-                    motion.start.owner,
-                    down_region,
-                    true,
-                );
+            if control_style && command & (clonk_engine::COM_SINGLE | clonk_engine::COM_DOUBLE) == 0
+            {
+                return self.dispatch_ingame_region_control(motion.start.owner, down_region, true);
             }
             if current_is_region {
                 self.ingame_dragged_objects.clear();
-                return self.dispatch_ingame_region_control(
-                    motion.start.owner,
-                    down_region,
-                    false,
-                );
+                return self.dispatch_ingame_region_control(motion.start.owner, down_region, false);
             }
             // Classic control evaluates the current cursor on button-up. A
             // stored region payload released outside can therefore fall
@@ -9710,7 +9649,10 @@ impl GameApp {
         Ok(())
     }
 
-    pub(crate) fn handle_ingame_mouse_click(&mut self, pointer: ViewportPointer) -> Result<(), EngineError> {
+    pub(crate) fn handle_ingame_mouse_click(
+        &mut self,
+        pointer: ViewportPointer,
+    ) -> Result<(), EngineError> {
         if !matches!(self.mode, AppMode::Running)
             || !self.mouse_control
             || self.local_controls.mouse_owner() != Some(pointer.owner)
@@ -9749,9 +9691,7 @@ impl GameApp {
         }
         // C4MC_Cursor_Select queues CID_PlrSelect on LeftUp for both crew and
         // C4D_MouseSelect objects (C4MouseControl.cpp:1106-1129).
-        if let Some(target) =
-            self.ingame_mouse_select_target(pointer.owner, pointer.screen)
-        {
+        if let Some(target) = self.ingame_mouse_select_target(pointer.owner, pointer.screen) {
             self.submit_or_execute_player_select(PlayerSelectControlData {
                 player: pointer.owner,
                 objects: vec![target.as_u64() as i32],
@@ -9820,12 +9760,12 @@ impl GameApp {
         Ok(())
     }
 
-    pub(crate) fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
+    pub(crate) fn handle_mouse_button(
+        &mut self,
+        button_state: ElementState,
+    ) -> Result<(), EngineError> {
         let left_double_click = button_state == ElementState::Pressed
-            && classic_press_is_double_click(
-                &mut self.last_application_left_press,
-                Instant::now(),
-            );
+            && classic_press_is_double_click(&mut self.last_application_left_press, Instant::now());
         self.handle_mouse_button_classified(button_state, left_double_click)
     }
 
@@ -9897,8 +9837,8 @@ impl GameApp {
             && std::mem::take(&mut self.league_signup_pointer_capture);
         let input_dialog_release_latched = button_state == ElementState::Released
             && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left);
-        let network_chart_release_latched = button_state == ElementState::Released
-            && self.network_chart_pointer_capture;
+        let network_chart_release_latched =
+            button_state == ElementState::Released && self.network_chart_pointer_capture;
         if input_dialog_release_latched {
             self.game_option_input_pointer_capture = None;
             self.stop_game_option_input_pointer_drag_at_current_position();
@@ -9980,9 +9920,7 @@ impl GameApp {
             let point = self.running_pointer_position;
             let chat_hit = point
                 .zip(self.game_option_input_layout().as_ref())
-                .is_some_and(|(point, layout)| {
-                    Self::point_in_input_dialog_bounds(point, layout)
-                });
+                .is_some_and(|(point, layout)| Self::point_in_input_dialog_bounds(point, layout));
             if chat_hit {
                 if button_state == ElementState::Released {
                     if let Some(captured) = lower_capture {
@@ -10019,8 +9957,7 @@ impl GameApp {
             let lower_default_hit =
                 self.handle_runtime_default_dialog_primary_button(button_state)?;
             if lower_default_hit
-                || (!self.network_chart_elevated
-                    && self.running_shared_gui_has_keyboard_focus())
+                || (!self.network_chart_elevated && self.running_shared_gui_has_keyboard_focus())
             {
                 if lower_default_hit && button_state == ElementState::Released {
                     self.release_occluded_running_pointer_captures(None);
@@ -10055,10 +9992,9 @@ impl GameApp {
             return Ok(());
         }
         if self.external_irc_dialog_visible {
-            if self.handle_context_menu_pointer_button(
-                button_state,
-                ContextMenuPointerButton::Left,
-            )? {
+            if self
+                .handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Left)?
+            {
                 return Ok(());
             }
             if self.context_menu.is_some() {
@@ -10112,9 +10048,7 @@ impl GameApp {
                         ElementState::Pressed => {
                             wait.controller.handle_pointer_down(point, &layout)
                         }
-                        ElementState::Released => {
-                            wait.controller.handle_pointer_up(point, &layout)
-                        }
+                        ElementState::Released => wait.controller.handle_pointer_up(point, &layout),
                     })
                 })
                 .unwrap_or_default();
@@ -10135,9 +10069,9 @@ impl GameApp {
                             (ElementState::Pressed, Some(font)) => pending
                                 .controller
                                 .handle_pointer_down_with_font(point, font),
-                            (ElementState::Released, Some(font)) => pending
-                                .controller
-                                .handle_pointer_up_with_font(point, font),
+                            (ElementState::Released, Some(font)) => {
+                                pending.controller.handle_pointer_up_with_font(point, font)
+                            }
                             (ElementState::Pressed, None) => {
                                 pending.controller.handle_pointer_down(point)
                             }
@@ -10684,12 +10618,13 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
+    pub(crate) fn handle_touch(
+        &mut self,
+        phase: TouchPhase,
+        position: GuiPoint,
+    ) -> Result<(), EngineError> {
         let left_double_click = phase == TouchPhase::Started
-            && classic_press_is_double_click(
-                &mut self.last_application_left_press,
-                Instant::now(),
-            );
+            && classic_press_is_double_click(&mut self.last_application_left_press, Instant::now());
         self.guard_classic_global_gui_bootstrap()?;
         self.sync_scoreboard_before_running_pointer_input();
         match phase {
@@ -10882,9 +10817,7 @@ impl GameApp {
         } else {
             None
         };
-        if self.mode == AppMode::Running
-            && phase == TouchPhase::Ended
-        {
+        if self.mode == AppMode::Running && phase == TouchPhase::Ended {
             self.release_occluded_running_pointer_captures(running_message_shared_target);
         }
         if self.running_chat_controller().is_none()
@@ -10988,32 +10921,32 @@ impl GameApp {
                     self.league_signup_dialog
                         .as_mut()
                         .map(|dialog| match phase {
-                            TouchPhase::Started => fonts.as_deref().map_or_else(Vec::new, |fonts| {
-                                if left_double_click {
-                                    dialog.controller.handle_pointer_double_click(
-                                        position,
-                                        layout,
-                                        &fonts.text,
-                                    )
-                                } else {
-                                    dialog.controller.handle_pointer_down(
-                                        position,
-                                        layout,
-                                        &fonts.text,
-                                    )
-                                }
-                            }),
+                            TouchPhase::Started => {
+                                fonts.as_deref().map_or_else(Vec::new, |fonts| {
+                                    if left_double_click {
+                                        dialog.controller.handle_pointer_double_click(
+                                            position,
+                                            layout,
+                                            &fonts.text,
+                                        )
+                                    } else {
+                                        dialog.controller.handle_pointer_down(
+                                            position,
+                                            layout,
+                                            &fonts.text,
+                                        )
+                                    }
+                                })
+                            }
                             TouchPhase::Moved => fonts.as_deref().map_or_else(Vec::new, |fonts| {
                                 dialog
                                     .controller
                                     .handle_pointer_move(position, layout, &fonts.text)
                             }),
                             TouchPhase::Ended => fonts.as_deref().map_or_else(Vec::new, |fonts| {
-                                dialog.controller.handle_pointer_up(
-                                    position,
-                                    layout,
-                                    &fonts.text,
-                                )
+                                dialog
+                                    .controller
+                                    .handle_pointer_up(position, layout, &fonts.text)
                             }),
                             TouchPhase::Cancelled => unreachable!("handled above"),
                         })
@@ -11040,9 +10973,7 @@ impl GameApp {
                             wait.controller.handle_pointer_move(position, &layout);
                             Vec::new()
                         }
-                        TouchPhase::Ended => {
-                            wait.controller.handle_pointer_up(position, &layout)
-                        }
+                        TouchPhase::Ended => wait.controller.handle_pointer_up(position, &layout),
                         TouchPhase::Cancelled => {
                             wait.controller.cancel_pointer_capture();
                             Vec::new()
@@ -11292,12 +11223,8 @@ impl GameApp {
                             };
                             if !matches!(phase, TouchPhase::Cancelled) {
                                 if let Some(dialog) = self.game_over_dialog.as_mut() {
-                                    dialog.handle_pointer_move(
-                                        position.x,
-                                        position.y,
-                                        width,
-                                        height,
-                                    );
+                                    dialog
+                                        .handle_pointer_move(position.x, position.y, width, height);
                                 }
                             }
                             let action = match phase {
@@ -11492,8 +11419,7 @@ impl GameApp {
                             if self.menu_state.rename_edit.is_some() {
                                 return Ok(());
                             }
-                            self.scensel_rename_pointer_focus =
-                                Some(self.scensel_focus_snapshot());
+                            self.scensel_rename_pointer_focus = Some(self.scensel_focus_snapshot());
                         }
                         TouchPhase::Moved if self.handle_scensel_rename_pointer_move(position) => {
                             return Ok(());
@@ -11623,13 +11549,11 @@ impl GameApp {
                                 state.set_pointer_position(Some(position));
                                 state.menu().handle_pointer_down(position)
                             }),
-                            LobbyPointerRegion::Panel => {
-                                self.handle_network_lobby_touch(
-                                    TouchPhase::Started,
-                                    position,
-                                    left_double_click,
-                                )
-                            }
+                            LobbyPointerRegion::Panel => self.handle_network_lobby_touch(
+                                TouchPhase::Started,
+                                position,
+                                left_double_click,
+                            ),
                         },
                         TouchPhase::Moved => match region {
                             LobbyPointerRegion::Menu => self.handle_menu_input(|state| {
@@ -11637,11 +11561,7 @@ impl GameApp {
                                 state.menu().handle_pointer_move(position)
                             }),
                             LobbyPointerRegion::Panel => {
-                                self.handle_network_lobby_touch(
-                                    TouchPhase::Moved,
-                                    position,
-                                    false,
-                                )
+                                self.handle_network_lobby_touch(TouchPhase::Moved, position, false)
                             }
                         },
                         TouchPhase::Ended => match region {
@@ -11654,19 +11574,11 @@ impl GameApp {
                                 result
                             }
                             LobbyPointerRegion::Panel => {
-                                self.handle_network_lobby_touch(
-                                    TouchPhase::Ended,
-                                    position,
-                                    false,
-                                )
+                                self.handle_network_lobby_touch(TouchPhase::Ended, position, false)
                             }
                         },
                         TouchPhase::Cancelled => {
-                            self.handle_network_lobby_touch(
-                                TouchPhase::Cancelled,
-                                position,
-                                false,
-                            )
+                            self.handle_network_lobby_touch(TouchPhase::Cancelled, position, false)
                         }
                     }
                 } else {
@@ -11926,7 +11838,10 @@ impl GameApp {
         self.handle_menu_actions(actions)
     }
 
-    pub(crate) fn handle_context_menu_pointer_move(&mut self, point: GuiPoint) -> Result<bool, EngineError> {
+    pub(crate) fn handle_context_menu_pointer_move(
+        &mut self,
+        point: GuiPoint,
+    ) -> Result<bool, EngineError> {
         let Some(menu) = self.context_menu.as_mut() else {
             return Ok(false);
         };
@@ -12125,7 +12040,9 @@ impl GameApp {
         })
     }
 
-    pub(crate) fn new_network_dialog_controller(&self) -> clonk_frontend::startup_netdlg::NetDlgController {
+    pub(crate) fn new_network_dialog_controller(
+        &self,
+    ) -> clonk_frontend::startup_netdlg::NetDlgController {
         let (masterserver_signup, _) = load_network_startup_settings(self.app_paths.as_ref());
         let metrics = self
             .assets
@@ -12244,12 +12161,12 @@ impl GameApp {
                     (key, c4_modifiers),
                     (VirtualKeyCode::Return, modifiers) if modifiers.is_empty()
                 )
-            || !chat_already_open
-                && !gui_scope
-                && matches!(
-                    (key, c4_modifiers),
-                    (VirtualKeyCode::Return, ModifiersState::ALT)
-                ));
+                || !chat_already_open
+                    && !gui_scope
+                    && matches!(
+                        (key, c4_modifiers),
+                        (VirtualKeyCode::Return, ModifiersState::ALT)
+                    ));
         if chat_open_fallthrough {
             return Ok(false);
         }
@@ -12281,11 +12198,7 @@ impl GameApp {
                     let result = owns_hotkey
                         .then(|| dialog.state.handle_hotkey(character))
                         .flatten();
-                    (
-                        owns_hotkey,
-                        result,
-                        dialog.state.take_sound_events(),
-                    )
+                    (owns_hotkey, result, dialog.state.take_sound_events())
                 })
                 .unwrap_or_default();
             if !owns_hotkey {
@@ -12411,20 +12324,18 @@ impl GameApp {
         let target_index = if self.mode != AppMode::Running {
             Some(top_index)
         } else {
-            (0..self.message_dialogs.len())
-                .rev()
-                .find(|index| {
-                    self.message_dialog_layout_at(*index).is_some_and(|layout| {
-                        Self::point_in_message_dialog_bounds(point, &layout)
-                    }) || (capture_open && active_index == Some(*index))
-                })
+            (0..self.message_dialogs.len()).rev().find(|index| {
+                self.message_dialog_layout_at(*index)
+                    .is_some_and(|layout| Self::point_in_message_dialog_bounds(point, &layout))
+                    || (capture_open && active_index == Some(*index))
+            })
         };
 
         if self.primary_pointer_left_down {
             if let Some(target) = target_index {
-                let target_is_hit = self.message_dialog_layout_at(target).is_some_and(|layout| {
-                    Self::point_in_message_dialog_bounds(point, &layout)
-                });
+                let target_is_hit = self
+                    .message_dialog_layout_at(target)
+                    .is_some_and(|layout| Self::point_in_message_dialog_bounds(point, &layout));
                 if target_is_hit {
                     self.message_dialog_active_index = Some(target);
                     let stack_id = self.message_dialogs[target].running_stack_id;
@@ -12547,8 +12458,7 @@ impl GameApp {
                 .as_ref()
                 .is_some_and(|dialog| dialog.is_info_only())
                 && self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList)
-                && self.running_active_dialog
-                    == Some(RunningDialogStackEntry::RuntimeClientList)
+                && self.running_active_dialog == Some(RunningDialogStackEntry::RuntimeClientList)
                 && (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
                 && self.context_menu.is_none()
         } else {

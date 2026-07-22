@@ -110,7 +110,7 @@ impl GameApp {
             .position(|byte| *byte == b' ')
             .map_or((command, &[][..]), |space| {
                 (&command[..space], &command[space + 1..])
-        });
+            });
         let name = &name[..name.len().min(30)];
         let network_host = matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
         let game_running = self.mode == AppMode::Running;
@@ -158,10 +158,8 @@ impl GameApp {
                         .find(|client| client.name.as_bytes() == parameter);
                     let Some(target) = target else {
                         let target_name = legacy_presentation_text(parameter);
-                        let template = self.runtime_resource_text(
-                            "IDS_MSG_CMD_NOCLIENT",
-                            "Client %s not found!",
-                        );
+                        let template = self
+                            .runtime_resource_text("IDS_MSG_CMD_NOCLIENT", "Client %s not found!");
                         self.append_control_message_log(
                             format_resource_string(template, &[&target_name]),
                             CONTROL_LOG_COLOR,
@@ -169,9 +167,7 @@ impl GameApp {
                         );
                         return Ok(true);
                     };
-                    if self.network_is_league
-                        && self.runtime_client_has_players(target.client_id)
-                    {
+                    if self.network_is_league && self.runtime_client_has_players(target.client_id) {
                         self.submit_own_league_vote(
                             LeagueVoteSubject {
                                 vote_type: clonk_engine::VOTE_TYPE_KICK,
@@ -217,10 +213,8 @@ impl GameApp {
                     .find(|client| client.name.as_bytes() == parameter);
                 let Some(target) = target else {
                     let target_name = legacy_presentation_text(parameter);
-                    let template = self.runtime_resource_text(
-                        "IDS_MSG_CMD_NOCLIENT",
-                        "Client %s not found!",
-                    );
+                    let template =
+                        self.runtime_resource_text("IDS_MSG_CMD_NOCLIENT", "Client %s not found!");
                     self.append_control_message_log(
                         format_resource_string(template, &[&target_name]),
                         CONTROL_LOG_COLOR,
@@ -321,12 +315,11 @@ impl GameApp {
                 if !game_running {
                     return Ok(false);
                 }
-                if !self.engine.debug_mode()
-                    || (self.network.is_some() && !network_host)
-                {
+                if !self.engine.debug_mode() || (self.network.is_some() && !network_host) {
                     return Ok(true);
                 }
-                let Some(script) = clonk_engine::LegacyCString::from_bytes(parameter.to_vec()) else {
+                let Some(script) = clonk_engine::LegacyCString::from_bytes(parameter.to_vec())
+                else {
                     return Ok(true);
                 };
                 self.submit_or_execute_running_script(clonk_engine::ScriptControlData {
@@ -350,16 +343,19 @@ impl GameApp {
                 if !game_running {
                     return Ok(false);
                 }
-                let registered = self.engine.message_board_commands().iter().any(|command| {
-                    clonk_script::c4_string_bytes(&command.name) == name
-                });
+                let registered = self
+                    .engine
+                    .message_board_commands()
+                    .iter()
+                    .any(|command| clonk_script::c4_string_bytes(&command.name) == name);
                 if !registered {
                     return Ok(false);
                 }
                 let Some(command) = clonk_engine::LegacyCString::from_bytes(name.to_vec()) else {
                     return Ok(true);
                 };
-                let Some(argument) = clonk_engine::LegacyCString::from_bytes(parameter.to_vec()) else {
+                let Some(argument) = clonk_engine::LegacyCString::from_bytes(parameter.to_vec())
+                else {
                     return Ok(true);
                 };
                 let player = self
@@ -453,10 +449,13 @@ impl GameApp {
 
     pub(crate) fn reconcile_message_board_input_dialog(&mut self) -> Result<(), EngineError> {
         let mut active = self.engine.active_message_board_input().cloned();
-        let visible_query = self.running_chat.as_ref().and_then(|chat| match &chat.kind {
-            RunningChatKind::Ordinary => None,
-            RunningChatKind::MessageBoardInput(input) => Some(input.clone()),
-        });
+        let visible_query = self
+            .running_chat
+            .as_ref()
+            .and_then(|chat| match &chat.kind {
+                RunningChatKind::Ordinary => None,
+                RunningChatKind::MessageBoardInput(input) => Some(input.clone()),
+            });
         if let Some(visible_query) = visible_query {
             if active.as_ref() == Some(&visible_query) {
                 return Ok(());
@@ -488,8 +487,7 @@ impl GameApp {
 
     pub(crate) fn running_chat_controller(&self) -> Option<&InputDialogController> {
         self.game_option_input_dialog.as_ref().and_then(|dialog| {
-            (dialog.purpose == PendingInputDialogPurpose::RunningChat)
-                .then_some(&dialog.controller)
+            (dialog.purpose == PendingInputDialogPurpose::RunningChat).then_some(&dialog.controller)
         })
     }
 
@@ -502,9 +500,10 @@ impl GameApp {
 
     fn running_chat_contains_point(&self, point: GuiPoint) -> bool {
         self.running_chat_controller().is_some()
-            && self.game_option_input_layout().as_ref().is_some_and(|layout| {
-                Self::point_in_input_dialog_bounds(point, layout)
-            })
+            && self
+                .game_option_input_layout()
+                .as_ref()
+                .is_some_and(|layout| Self::point_in_input_dialog_bounds(point, layout))
     }
 
     fn running_chat_contains_current_pointer(&self) -> bool {
@@ -513,7 +512,8 @@ impl GameApp {
     }
 
     pub(crate) fn running_chat_text(&self) -> Option<&str> {
-        self.running_chat_controller().map(InputDialogController::text)
+        self.running_chat_controller()
+            .map(InputDialogController::text)
     }
 
     pub(crate) fn running_chat_active(&self) -> bool {
@@ -537,10 +537,13 @@ impl GameApp {
     }
 
     pub(crate) fn close_running_chat(&mut self) -> Result<(), EngineError> {
-        let input = self.running_chat.as_ref().and_then(|chat| match &chat.kind {
-            RunningChatKind::Ordinary => None,
-            RunningChatKind::MessageBoardInput(input) => Some(input.clone()),
-        });
+        let input = self
+            .running_chat
+            .as_ref()
+            .and_then(|chat| match &chat.kind {
+                RunningChatKind::Ordinary => None,
+                RunningChatKind::MessageBoardInput(input) => Some(input.clone()),
+            });
         let answer_result = match input {
             Some(input) => self.submit_message_board_answer(&input, ""),
             None => Ok(()),
@@ -636,9 +639,7 @@ impl GameApp {
             .char_indices()
             .rev()
             .find(|(_, character)| {
-                character.is_ascii()
-                    && !character.is_ascii_alphanumeric()
-                    && *character != '_'
+                character.is_ascii() && !character.is_ascii_alphanumeric() && *character != '_'
             })
             .map_or(0, |(index, character)| index + character.len_utf8());
         let incomplete = clonk_script::c4_string_bytes(&before_cursor[start..]);
@@ -677,12 +678,11 @@ impl GameApp {
         if self.engine.active_message_board_input() != Some(expected) {
             return Ok(());
         }
-        let answer = LegacyCString::from_bytes(clonk_script::c4_string_bytes(text)).unwrap_or_else(
-            || {
+        let answer =
+            LegacyCString::from_bytes(clonk_script::c4_string_bytes(text)).unwrap_or_else(|| {
                 tracing::warn!("message-board input contained an embedded NUL; cancelling query");
                 LegacyCString::default()
-            },
-        );
+            });
         let by_client = self
             .network
             .as_ref()
@@ -742,15 +742,17 @@ impl GameApp {
         self.submit_running_chat_text(text)
     }
 
-    pub(crate) fn runtime_running_chat_open_mode(&self, key: VirtualKeyCode) -> Option<RunningChatMode> {
+    pub(crate) fn runtime_running_chat_open_mode(
+        &self,
+        key: VirtualKeyCode,
+    ) -> Option<RunningChatMode> {
         let modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         [
             (
                 "ChatOpen",
                 RunningChatMode::All,
-                modifiers.is_empty()
-                    && matches!(key, VirtualKeyCode::Return | VirtualKeyCode::F2),
+                modifiers.is_empty() && matches!(key, VirtualKeyCode::Return | VirtualKeyCode::F2),
             ),
             (
                 "ChatOpen2Allies",
@@ -802,8 +804,7 @@ impl GameApp {
             return false;
         }
         if edit_key {
-            return edit_focused
-                || (key == VirtualKeyCode::Back && controller.text().is_empty());
+            return edit_focused || (key == VirtualKeyCode::Back && controller.text().is_empty());
         }
         if key == VirtualKeyCode::Space {
             return !edit_focused;
@@ -844,7 +845,10 @@ impl GameApp {
         if let Some(mode) = mode {
             if state == ElementState::Pressed {
                 if self.running_chat.is_some() {
-                    if self.running_chat_text().is_some_and(|text| !text.is_empty()) {
+                    if self
+                        .running_chat_text()
+                        .is_some_and(|text| !text.is_empty())
+                    {
                         return true;
                     }
                     if let Err(error) = self.close_running_chat() {
@@ -883,9 +887,7 @@ impl GameApp {
         }
         match key {
             VirtualKeyCode::Escape | VirtualKeyCode::F2 => self.close_running_chat()?,
-            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => {
-                self.submit_running_chat()?
-            }
+            VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => self.submit_running_chat()?,
             VirtualKeyCode::Tab => self.complete_running_chat_nick(),
             VirtualKeyCode::Up => self.browse_running_chat_history(true),
             VirtualKeyCode::Down => self.browse_running_chat_history(false),
@@ -930,12 +932,7 @@ impl GameApp {
                         control: self.keyboard_modifiers.ctrl(),
                     };
                     if let Some(controller) = self.running_chat_controller_mut() {
-                        controller.handle_edit_key_down(
-                            operation,
-                            modifiers,
-                            &layout,
-                            &fonts.text,
-                        );
+                        controller.handle_edit_key_down(operation, modifiers, &layout, &fonts.text);
                     }
                 }
             }
@@ -1136,7 +1133,9 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn localized_irc_chat_strings(&self) -> clonk_frontend::startup_netdlg::NetDlgChatStrings {
+    pub(crate) fn localized_irc_chat_strings(
+        &self,
+    ) -> clonk_frontend::startup_netdlg::NetDlgChatStrings {
         let command_template = |key: &str, fallback: &str| {
             self.runtime_resource_text(key, fallback)
                 .replace("%s", "{command}")
@@ -1168,7 +1167,10 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn render_external_irc_dialog(&mut self, gamma: Option<&clonk_graphics::GammaRamp>) -> Result<()> {
+    pub(crate) fn render_external_irc_dialog(
+        &mut self,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) -> Result<()> {
         if !self.external_irc_dialog_visible {
             return Ok(());
         }

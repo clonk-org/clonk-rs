@@ -390,9 +390,7 @@ impl GameApp {
         {
             return Ok(false);
         }
-        if self.startup_view == StartupView::PlayerSelection
-            && self.startup_crew_rename.is_some()
-        {
+        if self.startup_view == StartupView::PlayerSelection && self.startup_crew_rename.is_some() {
             // RenameEdit owns Tab as a focus-loss commit. Its FinishRename
             // restores the saved control and cancels this traversal.
             return Ok(false);
@@ -563,22 +561,15 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if self.startup_view != StartupView::PlayerSelection
-            || self.startup_crew_rename.is_none()
-        {
+        if self.startup_view != StartupView::PlayerSelection || self.startup_crew_rename.is_none() {
             return Ok(false);
         }
         let modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
-        if state == ElementState::Pressed
-            && key == VirtualKeyCode::Apps
-            && modifiers.is_empty()
-        {
+        if state == ElementState::Pressed && key == VirtualKeyCode::Apps && modifiers.is_empty() {
             if let Some(rect) = self.startup_crew_rename_rect() {
-                let anchor = GuiPoint::new(
-                    (rect.x + rect.w / 2) as f32,
-                    (rect.y + rect.h / 2) as f32,
-                );
+                let anchor =
+                    GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32);
                 self.open_startup_crew_rename_context_menu(anchor)?;
             }
             return Ok(true);
@@ -714,7 +705,10 @@ impl GameApp {
     /// Mouse-region `COM_PlayerMenu` calls `C4Player::ActivateMenuMain`
     /// directly: an existing menu is reinitialized to its main page instead
     /// of following the keyboard command's open/close toggle.
-    pub(crate) fn activate_ingame_main_menu_for_player(&mut self, player: i32) -> Result<(), EngineError> {
+    pub(crate) fn activate_ingame_main_menu_for_player(
+        &mut self,
+        player: i32,
+    ) -> Result<(), EngineError> {
         if !matches!(self.mode, AppMode::Running) {
             return Ok(());
         }
@@ -749,7 +743,10 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn set_startup_game_music_option(&mut self, enabled: bool) -> Result<(), EngineError> {
+    pub(crate) fn set_startup_game_music_option(
+        &mut self,
+        enabled: bool,
+    ) -> Result<(), EngineError> {
         let audio = self.audio.as_mut().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
@@ -763,7 +760,10 @@ impl GameApp {
         Ok(())
     }
 
-    pub(crate) fn set_startup_game_sound_option(&mut self, enabled: bool) -> Result<(), EngineError> {
+    pub(crate) fn set_startup_game_sound_option(
+        &mut self,
+        enabled: bool,
+    ) -> Result<(), EngineError> {
         let audio = self.audio.as_mut().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
@@ -857,9 +857,7 @@ impl GameApp {
         use_alternate_server: bool,
         reference: &clonk_network::NetworkGameReference,
     ) -> clonk_frontend::startup_netdlg::NetDlgGameEntry {
-        use clonk_frontend::startup_netdlg::{
-            NetDlgGameEntry, NetDlgRowIcon, NetDlgStatusIcon,
-        };
+        use clonk_frontend::startup_netdlg::{NetDlgGameEntry, NetDlgRowIcon, NetDlgStatusIcon};
 
         let host = if reference.host_name.is_empty() {
             "unknown"
@@ -886,17 +884,11 @@ impl GameApp {
                 "IDS_DESC_WAITFORHOST",
                 "Waiting for host connection",
             ),
-            "lobby" => startup_resource_string(
-                paths,
-                "IDS_DESC_EXPECTING",
-                "Awaiting participants.",
-            ),
-            "paused" => {
-                startup_resource_string(paths, "IDS_DESC_GAMEPAUSED", "Game is paused")
+            "lobby" => {
+                startup_resource_string(paths, "IDS_DESC_EXPECTING", "Awaiting participants.")
             }
-            "running" => {
-                startup_resource_string(paths, "IDS_DESC_GAMERUNNING", "Game is running")
-            }
+            "paused" => startup_resource_string(paths, "IDS_DESC_GAMEPAUSED", "Game is paused"),
+            "running" => startup_resource_string(paths, "IDS_DESC_GAMERUNNING", "Game is running"),
             _ => startup_resource_string(
                 paths,
                 "IDS_DESC_UNKNOWNGAMESTATE",
@@ -906,11 +898,7 @@ impl GameApp {
         let player_count = reference.player_names.len().to_string();
         let max_players = reference.max_players.to_string();
         let mut details = format_resource_string(
-            startup_resource_string(
-                paths,
-                "IDS_NET_INFOPLRSGOALDESC",
-                "%d/%d players - %s - %s",
-            ),
+            startup_resource_string(paths, "IDS_NET_INFOPLRSGOALDESC", "%d/%d players - %s - %s"),
             &[&player_count, &max_players, &goals, &state],
         );
         if reference.time > 0 {
@@ -923,11 +911,8 @@ impl GameApp {
             details.push_str(" - ");
             details.push_str(&duration);
         }
-        let version = network_game_version_string(
-            &reference.game,
-            reference.version,
-            reference.build,
-        );
+        let version =
+            network_game_version_string(&reference.game, reference.version, reference.build);
         let version_line = format_resource_string(
             startup_resource_string(paths, "IDS_DESC_VERSION", "Engine version: %s"),
             &[&version],
@@ -1012,16 +997,10 @@ impl GameApp {
         query_resource: &str,
         query_fallback: &str,
     ) -> clonk_frontend::startup_netdlg::NetDlgGameEntry {
-        let query_name = startup_resource_string(
-            self.app_paths.as_ref(),
-            query_resource,
-            query_fallback,
-        );
-        let title_template = startup_resource_string(
-            self.app_paths.as_ref(),
-            "IDS_NET_CLIENTONNET",
-            "%s on %s",
-        );
+        let query_name =
+            startup_resource_string(self.app_paths.as_ref(), query_resource, query_fallback);
+        let title_template =
+            startup_resource_string(self.app_paths.as_ref(), "IDS_NET_CLIENTONNET", "%s on %s");
         let title = format_resource_string(title_template, &[&query_name, address.trim()]);
         let details = match state {
             StartupDirectReferenceQueryState::Pending => startup_resource_string(
@@ -1076,9 +1055,7 @@ impl GameApp {
         }
         authority
             .rsplit_once(':')
-            .filter(|(_, port)| {
-                !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())
-            })
+            .filter(|(_, port)| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
             .map_or(authority, |(host, _)| host)
             .to_string()
     }
@@ -1087,22 +1064,15 @@ impl GameApp {
         paths: Option<&AppPaths>,
         address: &str,
     ) -> clonk_frontend::startup_netdlg::NetDlgMasterserverEntry {
-        let query_name = startup_resource_string(
-            paths,
-            "IDS_NET_QUERY_MASTERSRV",
-            "Internet server",
-        );
+        let query_name =
+            startup_resource_string(paths, "IDS_NET_QUERY_MASTERSRV", "Internet server");
         let server_name = Self::startup_masterserver_display_name(address);
         clonk_frontend::startup_netdlg::NetDlgMasterserverEntry {
             title: format_resource_string(
                 startup_resource_string(paths, "IDS_NET_CLIENTONNET", "%s on %s"),
                 &[&query_name, &server_name],
             ),
-            details: startup_resource_string(
-                paths,
-                "IDS_NET_INFOQUERY",
-                "Querying game infos...",
-            ),
+            details: startup_resource_string(paths, "IDS_NET_INFOQUERY", "Querying game infos..."),
             extra_lines: Vec::new(),
             row_icon: clonk_frontend::startup_netdlg::NetDlgRowIcon::Query,
         }
@@ -1128,16 +1098,12 @@ impl GameApp {
         };
         entry.extra_lines.clear();
         if !reply.motd.is_empty() {
-            entry.extra_lines.push(NetDlgTextLine::Plain(
-                format_resource_string(
-                    startup_resource_string(
-                        paths,
-                        "IDS_NET_MOTD",
-                        "Message of the day: %s",
-                    ),
+            entry
+                .extra_lines
+                .push(NetDlgTextLine::Plain(format_resource_string(
+                    startup_resource_string(paths, "IDS_NET_MOTD", "Message of the day: %s"),
                     &[&reply.motd],
-                ),
-            ));
+                )));
         }
         if !reply.motd_url.is_empty() {
             entry.extra_lines.push(NetDlgTextLine::Hyperlink {
@@ -1383,9 +1349,10 @@ impl GameApp {
                 expires_at: None,
             });
         let default_port = load_network_reference_port(self.app_paths.as_ref());
-        let submitted = self.startup_game_search.as_ref().is_some_and(|search| {
-            search.query_direct(id, address, default_port).is_ok()
-        });
+        let submitted = self
+            .startup_game_search
+            .as_ref()
+            .is_some_and(|search| search.query_direct(id, address, default_port).is_ok());
         if !submitted {
             if let Some(query) = self
                 .startup_direct_reference_queries
@@ -1395,8 +1362,7 @@ impl GameApp {
                 query.state = StartupDirectReferenceQueryState::Failed(
                     "Unable to start direct reference query".to_string(),
                 );
-                query.expires_at = Instant::now()
-                    .checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
+                query.expires_at = Instant::now().checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
             }
         }
         self.sync_startup_network_game_rows();
@@ -1404,7 +1370,10 @@ impl GameApp {
         self.mark_menu_dirty();
     }
 
-    pub(crate) fn startup_network_join_target(&self, index: usize) -> Option<StartupNetworkJoinTarget> {
+    pub(crate) fn startup_network_join_target(
+        &self,
+        index: usize,
+    ) -> Option<StartupNetworkJoinTarget> {
         if let Some(reference) = self.startup_game_references.get(index) {
             return Some(StartupNetworkJoinTarget::Reference(reference.clone()));
         }
@@ -1427,8 +1396,7 @@ impl GameApp {
             StartupDirectReferenceQueryState::Failed(error) => {
                 StartupNetworkJoinTarget::QueryError(error.clone())
             }
-            StartupDirectReferenceQueryState::Pending
-            | StartupDirectReferenceQueryState::Empty => {
+            StartupDirectReferenceQueryState::Pending | StartupDirectReferenceQueryState::Empty => {
                 StartupNetworkJoinTarget::DirectAddress(query.address.clone())
             }
         })
@@ -1471,13 +1439,13 @@ impl GameApp {
         let selected_reference = self.selected_startup_game_reference();
         let selected_direct_query = self.selected_startup_direct_reference_query_id();
         let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
-        let Some(query_index) = self
-            .startup_discovery_reference_queries
-            .iter()
-            .rposition(|query| {
-                query.address == address
-                    && !matches!(query.state, StartupDirectReferenceQueryState::Failed(_))
-            })
+        let Some(query_index) =
+            self.startup_discovery_reference_queries
+                .iter()
+                .rposition(|query| {
+                    query.address == address
+                        && !matches!(query.state, StartupDirectReferenceQueryState::Failed(_))
+                })
         else {
             return;
         };
@@ -1488,8 +1456,8 @@ impl GameApp {
         } else {
             self.startup_discovery_reference_queries[query_index].state =
                 StartupDirectReferenceQueryState::Empty;
-            self.startup_discovery_reference_queries[query_index].expires_at = Instant::now()
-                .checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
+            self.startup_discovery_reference_queries[query_index].expires_at =
+                Instant::now().checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
         }
         // Unlike NRQT_DirectJoin, NRQT_GameDiscovery never explicitly selects
         // a returned reference; preserve the controller's existing selection.
@@ -1565,8 +1533,8 @@ impl GameApp {
         } else {
             self.startup_direct_reference_queries[query_index].state =
                 StartupDirectReferenceQueryState::Empty;
-            self.startup_direct_reference_queries[query_index].expires_at = Instant::now()
-                .checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
+            self.startup_direct_reference_queries[query_index].expires_at =
+                Instant::now().checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
             self.sync_startup_network_game_rows();
             if let Some(id) = selected_query {
                 self.focus_startup_direct_reference_query(id);
@@ -1591,8 +1559,7 @@ impl GameApp {
             return;
         };
         query.state = StartupDirectReferenceQueryState::Failed(message);
-        query.expires_at =
-            Instant::now().checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
+        query.expires_at = Instant::now().checked_add(STARTUP_NETWORK_QUERY_ERROR_LIFETIME);
         self.sync_startup_network_game_rows();
         if let Some(id) = selected_query {
             self.focus_startup_direct_reference_query(id);
@@ -1604,16 +1571,10 @@ impl GameApp {
         let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
         let query_count = self.startup_discovery_reference_queries.len()
             + self.startup_direct_reference_queries.len();
-        self.startup_discovery_reference_queries.retain(|query| {
-            query
-                .expires_at
-                .map_or(true, |expires_at| now < expires_at)
-        });
-        self.startup_direct_reference_queries.retain(|query| {
-            query
-                .expires_at
-                .map_or(true, |expires_at| now < expires_at)
-        });
+        self.startup_discovery_reference_queries
+            .retain(|query| query.expires_at.map_or(true, |expires_at| now < expires_at));
+        self.startup_direct_reference_queries
+            .retain(|query| query.expires_at.map_or(true, |expires_at| now < expires_at));
         if self.startup_discovery_reference_queries.len()
             + self.startup_direct_reference_queries.len()
             != query_count
@@ -1789,7 +1750,9 @@ impl GameApp {
         self.show_startup_irc_error(format_resource_string(template, &[error]))
     }
 
-    pub(crate) fn request_startup_irc_disconnect_confirmation(&mut self) -> Result<(), EngineError> {
+    pub(crate) fn request_startup_irc_disconnect_confirmation(
+        &mut self,
+    ) -> Result<(), EngineError> {
         self.push_message_dialog(
             clonk_frontend::message_dialog::MessageDialogState::new(
                 self.runtime_resource_text(
@@ -1844,10 +1807,7 @@ impl GameApp {
             ),
             &[&login.server],
         );
-        let caption = self.runtime_resource_text(
-            "IDS_MSG_CHATDISCLAIMER",
-            "Chat - Disclaimer",
-        );
+        let caption = self.runtime_resource_text("IDS_MSG_CHATDISCLAIMER", "Chat - Disclaimer");
         let checkbox = self.runtime_resource_text(
             "IDS_MSG_DONTSHOW",
             "&Don't display this message in the future.",
@@ -1960,8 +1920,7 @@ impl GameApp {
                 } else {
                     client.snapshot()
                 };
-                let mut snapshot =
-                    project_startup_irc_snapshot(&self.startup_irc_server, snapshot);
+                let mut snapshot = project_startup_irc_snapshot(&self.startup_irc_server, snapshot);
                 snapshot.last_error = Some(error.to_string());
                 self.sync_startup_irc_projection(snapshot);
             }
@@ -2306,8 +2265,7 @@ impl GameApp {
             .startup_network_connection
             .take()
             .expect("completed startup network connection remains installed");
-        let mut authenticated_league_players =
-            connection.authenticated_league_players.take();
+        let mut authenticated_league_players = connection.authenticated_league_players.take();
         connection.finish_attempt();
         if purpose == StartupNetworkPurpose::Join {
             // Resolution owns silent dismissal. Finishing the dialog would
@@ -2371,8 +2329,7 @@ impl GameApp {
                         LeaguePlayerAuthStatus::Completed(false) => {
                             return self.finish_startup_network_failure(
                                 purpose,
-                                "Unable to finalize initial host player authentication"
-                                    .to_string(),
+                                "Unable to finalize initial host player authentication".to_string(),
                             );
                         }
                     }
@@ -2414,9 +2371,7 @@ impl GameApp {
                             ) {
                                 return self.finish_startup_network_failure(
                                     purpose,
-                                    format!(
-                                        "Unable to finalize initial host players: {error}"
-                                    ),
+                                    format!("Unable to finalize initial host players: {error}"),
                                 );
                             }
                             if let Some(snapshot) =
@@ -2425,9 +2380,7 @@ impl GameApp {
                                 if let Err(error) = manager.publish_join_snapshot(snapshot) {
                                     return self.finish_startup_network_failure(
                                         purpose,
-                                        format!(
-                                            "Unable to publish initial host players: {error}"
-                                        ),
+                                        format!("Unable to publish initial host players: {error}"),
                                     );
                                 }
                             }
@@ -2559,11 +2512,10 @@ impl GameApp {
                                 &self.network_league_name,
                                 &self.control_player_infos,
                             );
-                            self.network_team_assignment =
-                                initial_network_team_assignment(
-                                    Some(&mode),
-                                    &self.generated_team_name_template,
-                                );
+                            self.network_team_assignment = initial_network_team_assignment(
+                                Some(&mode),
+                                &self.generated_team_name_template,
+                            );
                             self.network_mode = Some(mode);
                             self.network = Some(manager);
                             self.network_control_running = false;
@@ -2609,11 +2561,10 @@ impl GameApp {
                                 &self.network_league_name,
                                 &self.control_player_infos,
                             );
-                            self.network_team_assignment =
-                                initial_network_team_assignment(
-                                    Some(&mode),
-                                    &self.generated_team_name_template,
-                                );
+                            self.network_team_assignment = initial_network_team_assignment(
+                                Some(&mode),
+                                &self.generated_team_name_template,
+                            );
                             self.network_mode = Some(mode);
                             self.network = Some(manager);
                             self.network_control_running = false;
@@ -2743,11 +2694,7 @@ impl GameApp {
         else {
             return Ok(false);
         };
-        if let Some(rename_index) = self
-            .startup_crew_rename
-            .as_ref()
-            .map(|rename| rename.index)
-        {
+        if let Some(rename_index) = self.startup_crew_rename.as_ref().map(|rename| rename.index) {
             if keyboard_trigger {
                 return Ok(false);
             }
@@ -2931,8 +2878,7 @@ impl GameApp {
         match event {
             clonk_network::StartupGameSearchEvent::Cleared => {
                 let selected_query = self.selected_startup_direct_reference_query_id();
-                let selected_discovery_query =
-                    self.selected_startup_discovery_reference_query_id();
+                let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
                 self.startup_game_references.clear();
                 self.sync_startup_network_game_rows();
                 self.reset_startup_masterserver_entry();
@@ -2954,8 +2900,7 @@ impl GameApp {
             clonk_network::StartupGameSearchEvent::ReferencesUpdated(references) => {
                 let selected_reference = self.selected_startup_game_reference();
                 let selected_query = self.selected_startup_direct_reference_query_id();
-                let selected_discovery_query =
-                    self.selected_startup_discovery_reference_query_id();
+                let selected_discovery_query = self.selected_startup_discovery_reference_query_id();
                 self.startup_game_references = references;
                 self.sync_startup_network_game_rows();
                 if let Some(reference) = selected_reference.as_ref() {
@@ -2991,11 +2936,7 @@ impl GameApp {
                 references,
                 selected_index,
             } => {
-                self.finish_startup_direct_reference_query(
-                    request_id,
-                    references,
-                    selected_index,
-                );
+                self.finish_startup_direct_reference_query(request_id, references, selected_index);
             }
             clonk_network::StartupGameSearchEvent::DirectQueryFailed {
                 request_id,
@@ -3102,7 +3043,7 @@ impl GameApp {
         color_index: usize,
         portrait_index: usize,
     ) -> clonk_frontend::startup_plrproperties::PlayerPropertiesController {
-        use clonk_frontend::startup_plrproperties::{PLAYER_COLORS, PlayerPropertiesController};
+        use clonk_frontend::startup_plrproperties::{PlayerPropertiesController, PLAYER_COLORS};
 
         let color_index = color_index % 8;
         let mut player = PlayerFile::default();
@@ -3119,10 +3060,7 @@ impl GameApp {
             .assets
             .dialog_image(&format!("Portrait{}.png", portrait_index % 5 + 1))
             .or_else(|| {
-                (1..=5).find_map(|index| {
-                    self.assets
-                        .dialog_image(&format!("Portrait{index}.png"))
-                })
+                (1..=5).find_map(|index| self.assets.dialog_image(&format!("Portrait{index}.png")))
             });
         let big_icon = portrait
             .as_ref()
@@ -3154,19 +3092,15 @@ impl GameApp {
             classic_safe_random(8),
             classic_safe_random(5),
         );
-        self.startup_player_properties_dialog = Some(PendingStartupPlayerProperties {
-            origin,
-            controller,
-        });
+        self.startup_player_properties_dialog =
+            Some(PendingStartupPlayerProperties { origin, controller });
         self.status_text.clear();
         self.mark_menu_dirty();
     }
 
     pub(crate) fn open_existing_startup_player_properties(&mut self, index: usize) {
-        let Some((path, was_activated, player, comment, portrait, big_icon)) = self
-            .startup_player_files
-            .get(index)
-            .map(|entry| {
+        let Some((path, was_activated, player, comment, portrait, big_icon)) =
+            self.startup_player_files.get(index).map(|entry| {
                 (
                     entry.path.clone(),
                     entry.render_model.activated,
@@ -3275,9 +3209,7 @@ impl GameApp {
                     let image = match load_startup_portrait_image(&path) {
                         Ok(image) => image,
                         Err(error) => {
-                            if let Some(pending) =
-                                self.startup_player_properties_dialog.as_mut()
-                            {
+                            if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
                                 pending.controller.set_portrait_selector_error(error);
                             }
                             self.mark_menu_dirty();
@@ -3350,11 +3282,7 @@ impl GameApp {
         let Some(paths) = self.app_paths.as_ref() else {
             let error = "application paths are unavailable".to_string();
             tracing::error!(%error, "failed to save startup player properties");
-            self.finish_startup_player_properties_save_failure(
-                error,
-                &origin,
-                &player.name,
-            );
+            self.finish_startup_player_properties_save_failure(error, &origin, &player.name);
             return;
         };
         let result = save_player_properties(
@@ -3368,8 +3296,10 @@ impl GameApp {
         );
         match result {
             Ok(saved) => self.finish_startup_player_properties_save(saved, origin),
-            Err(error @ (PlayerPropertiesSaveError::EmptyName
-            | PlayerPropertiesSaveError::NameTaken { .. })) => {
+            Err(
+                error @ (PlayerPropertiesSaveError::EmptyName
+                | PlayerPropertiesSaveError::NameTaken { .. }),
+            ) => {
                 tracing::error!(%error, "startup player name validation failed");
                 let message = match &error {
                     PlayerPropertiesSaveError::EmptyName => self.runtime_resource_text(
@@ -3377,10 +3307,7 @@ impl GameApp {
                         "You must specify a player name!",
                     ),
                     PlayerPropertiesSaveError::NameTaken { name, .. } => format_resource_string(
-                        self.runtime_resource_text(
-                            "IDS_ERR_PLRNAME_TAKEN",
-                            "%s is already taken",
-                        ),
+                        self.runtime_resource_text("IDS_ERR_PLRNAME_TAKEN", "%s is already taken"),
                         &[name],
                     ),
                     _ => unreachable!("guarded player-name validation error"),
@@ -3404,11 +3331,7 @@ impl GameApp {
             Err(error) => {
                 tracing::error!(%error, "failed to save startup player properties");
                 let message = self.startup_player_properties_save_failure_text(&error);
-                self.finish_startup_player_properties_save_failure(
-                    message,
-                    &origin,
-                    &player.name,
-                );
+                self.finish_startup_player_properties_save_failure(message, &origin, &player.name);
             }
         }
     }
@@ -3437,10 +3360,7 @@ impl GameApp {
             }
             PlayerPropertiesSaveError::Open { path, detail } => {
                 format_resource_string_with_opaque_arguments(
-                    self.runtime_resource_text(
-                        "IDS_ERR_OPENFILE",
-                        "Error opening file \"%s\": %s",
-                    ),
+                    self.runtime_resource_text("IDS_ERR_OPENFILE", "Error opening file \"%s\": %s"),
                     &[&path.display().to_string(), detail],
                 )
             }
@@ -3524,10 +3444,9 @@ impl GameApp {
             .map(|player| (player.path.clone(), player.file_name.clone()));
         let submitted_filename = player_group_filename(submitted_name).ok();
         let edit_paths = match (origin, submitted_filename.as_deref()) {
-            (
-                StartupPlayerPropertiesOrigin::SelectionEdit { path, .. },
-                Some(filename),
-            ) => Some((path.clone(), path.with_file_name(filename))),
+            (StartupPlayerPropertiesOrigin::SelectionEdit { path, .. }, Some(filename)) => {
+                Some((path.clone(), path.with_file_name(filename)))
+            }
             _ => None,
         };
 
@@ -3549,7 +3468,11 @@ impl GameApp {
             (Some((old_path, target_path)), _) => players
                 .iter()
                 .position(|player| player.path == *old_path)
-                .or_else(|| players.iter().position(|player| player.path == *target_path)),
+                .or_else(|| {
+                    players
+                        .iter()
+                        .position(|player| player.path == *target_path)
+                }),
             (None, Some(filename)) => players.iter().position(|player| {
                 player
                     .path
@@ -3672,18 +3595,10 @@ impl GameApp {
             self.mark_menu_dirty();
             return;
         };
-        let forced_participant_persistence = matches!(
-            &origin,
-            StartupPlayerPropertiesOrigin::MainMenuFirstPlayer
-        )
-        .then(|| {
-            persist_config_value(
-                paths,
-                "General",
-                "Participants",
-                saved.file_name.clone(),
-            )
-        });
+        let forced_participant_persistence =
+            matches!(&origin, StartupPlayerPropertiesOrigin::MainMenuFirstPlayer).then(|| {
+                persist_config_value(paths, "General", "Participants", saved.file_name.clone())
+            });
         let mut players = match discover_player_files(paths) {
             Ok(players) => players,
             Err(error) => {
@@ -3707,8 +3622,7 @@ impl GameApp {
             }
         };
         let is_saved = |player: &StartupPlayerFile| {
-            player.path == saved.path
-                || player.file_name.eq_ignore_ascii_case(&saved.file_name)
+            player.path == saved.path || player.file_name.eq_ignore_ascii_case(&saved.file_name)
         };
         let saved_index = players.iter().position(|player| is_saved(player));
         for player in &mut players {
@@ -3773,9 +3687,7 @@ impl GameApp {
         } else {
             self.status_text.clear();
         }
-        if let Err(error) =
-            self.show_startup_player_activation_refusals(&activation_refusals)
-        {
+        if let Err(error) = self.show_startup_player_activation_refusals(&activation_refusals) {
             tracing::error!(%error, "failed to show participant overflow after player save");
         }
         self.mark_menu_dirty();
@@ -3806,7 +3718,10 @@ impl GameApp {
         Ok(())
     }
 
-    pub(crate) fn open_startup_player_delete_dialog(&mut self, index: usize) -> Result<(), EngineError> {
+    pub(crate) fn open_startup_player_delete_dialog(
+        &mut self,
+        index: usize,
+    ) -> Result<(), EngineError> {
         let delete = self
             .startup_player_files
             .get(index)
@@ -3834,7 +3749,10 @@ impl GameApp {
         )
     }
 
-    pub(crate) fn enter_startup_crew_mode(&mut self, player_index: usize) -> Result<(), EngineError> {
+    pub(crate) fn enter_startup_crew_mode(
+        &mut self,
+        player_index: usize,
+    ) -> Result<(), EngineError> {
         self.abort_startup_crew_rename();
         let Some(player) = self.startup_player_files.get(player_index) else {
             tracing::error!(player_index, "crew action references a stale player row");
@@ -3865,12 +3783,9 @@ impl GameApp {
             .iter()
             .map(|entry| entry.render_model.participating)
             .collect();
-        let entered = self
-            .startup_player_dialog
-            .as_mut()
-            .is_some_and(|dialog| {
-                dialog.enter_crew_mode(player_index, player_name, participations)
-            });
+        let entered = self.startup_player_dialog.as_mut().is_some_and(|dialog| {
+            dialog.enter_crew_mode(player_index, player_name, participations)
+        });
         if !entered {
             tracing::error!(player_index, "startup crew mode transition was rejected");
             return Ok(());
@@ -3914,7 +3829,10 @@ impl GameApp {
 
     fn reload_startup_crew_list(&mut self, select_file: Option<&str>) -> io::Result<()> {
         let player_index = self.startup_crew_player_index.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "startup crew player is unavailable")
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "startup crew player is unavailable",
+            )
         })?;
         let player = self.startup_player_files.get(player_index).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "startup crew player row is stale")
@@ -4009,7 +3927,10 @@ impl GameApp {
         Ok(())
     }
 
-    pub(crate) fn open_startup_crew_delete_dialog(&mut self, index: usize) -> Result<(), EngineError> {
+    pub(crate) fn open_startup_crew_delete_dialog(
+        &mut self,
+        index: usize,
+    ) -> Result<(), EngineError> {
         let delete = self.startup_crew_files.get(index).map(|entry| {
             (
                 entry.player_path.clone(),
@@ -4043,11 +3964,7 @@ impl GameApp {
     ) -> Vec<ContextMenuEntry<AppContextMenuCommand>> {
         use clonk_frontend::startup_netdlg::NetDlgEditContextCommand as Command;
 
-        let Some(edit) = self
-            .startup_crew_rename
-            .as_ref()
-            .map(|rename| &rename.edit)
-        else {
+        let Some(edit) = self.startup_crew_rename.as_ref().map(|rename| &rename.edit) else {
             return Vec::new();
         };
         let item = |command, label_key, label, tooltip_key, tooltip| {
@@ -4114,8 +4031,7 @@ impl GameApp {
         if self.startup_crew_rename.is_none() {
             return Ok(false);
         }
-        let entries =
-            self.startup_crew_rename_context_entries(clipboard_text_available());
+        let entries = self.startup_crew_rename_context_entries(clipboard_text_available());
         self.open_context_menu_at(entries, anchor)
     }
 
@@ -4132,12 +4048,10 @@ impl GameApp {
         match command {
             Command::Cut | Command::Copy => {
                 let cut = command == Command::Cut;
-                if let Err(error) =
-                    transfer_edit_selection(&mut rename.edit, cut, |selected| {
-                        arboard::Clipboard::new()
-                            .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
-                    })
-                {
+                if let Err(error) = transfer_edit_selection(&mut rename.edit, cut, |selected| {
+                    arboard::Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
+                }) {
                     tracing::warn!(%error, "failed to copy startup crew rename text");
                 }
             }
@@ -4236,11 +4150,12 @@ impl GameApp {
         true
     }
 
-    pub(crate) fn commit_startup_crew_rename(&mut self, focus_lost: bool) -> Result<bool, EngineError> {
-        let Some((index, player_path, old_file_name, original_name, action)) = self
-            .startup_crew_rename
-            .as_mut()
-            .map(|rename| {
+    pub(crate) fn commit_startup_crew_rename(
+        &mut self,
+        focus_lost: bool,
+    ) -> Result<bool, EngineError> {
+        let Some((index, player_path, old_file_name, original_name, action)) =
+            self.startup_crew_rename.as_mut().map(|rename| {
                 (
                     rename.index,
                     rename.player_path.clone(),
@@ -4288,10 +4203,8 @@ impl GameApp {
                 );
                 if let Some(error) = reload_error {
                     tracing::error!(%error, "failed to reload renamed startup crew");
-                    let message = self.runtime_resource_text(
-                        "IDS_FAIL_MODIFY",
-                        "File modification failure.",
-                    );
+                    let message =
+                        self.runtime_resource_text("IDS_FAIL_MODIFY", "File modification failure.");
                     self.show_startup_crew_error(message, "")?;
                 }
                 self.mark_menu_dirty();
@@ -4303,8 +4216,7 @@ impl GameApp {
                     "IDS_ERR_CLONKCOLLISION",
                     "A Clonk with the file name \"%s\" exists already.",
                 );
-                let caption =
-                    self.runtime_resource_text("IDS_FAIL_RENAME", "Rename failure.");
+                let caption = self.runtime_resource_text("IDS_FAIL_RENAME", "Rename failure.");
                 self.show_startup_crew_error(
                     format_resource_string(template, &[&file_name]),
                     caption,
@@ -4339,8 +4251,7 @@ impl GameApp {
                     "IDS_ERR_RENAMEFILE",
                     "Error renaming file \"%s\" to \"%s\".",
                 );
-                let caption =
-                    self.runtime_resource_text("IDS_FAIL_RENAME", "Rename failure.");
+                let caption = self.runtime_resource_text("IDS_FAIL_RENAME", "Rename failure.");
                 self.show_startup_crew_error(
                     format_resource_string(template, &[&old_file_name, &new_file_name]),
                     caption,
@@ -4395,9 +4306,7 @@ impl GameApp {
             .iter()
             .position(|entry| {
                 entry.player_path == player_path
-                    && entry
-                        .file_name
-                        .eq_ignore_ascii_case(persisted_file_name)
+                    && entry.file_name.eq_ignore_ascii_case(persisted_file_name)
             })
             .or_else(|| {
                 self.startup_crew_files.iter().position(|entry| {
@@ -4519,32 +4428,35 @@ impl GameApp {
         let rank_names = self.default_rank_names.as_deref().unwrap_or_default();
         let rank_sheet = self.assets.hud_graphics.rank.as_ref();
         for entry in crew {
-            let next_rank = entry.crew_info.core.next_rank_info(
-                entry.crew_info.rank,
-                rank_names,
-                1_000,
-            );
+            let next_rank =
+                entry
+                    .crew_info
+                    .core
+                    .next_rank_info(entry.crew_info.rank, rank_names, 1_000);
             entry.render_model.next_rank = (next_rank.promotion_possible())
                 .then(|| {
-                    next_rank.name.map(|name| {
-                        clonk_frontend::startup_plrsel::PlrSelCrewPromotion {
+                    next_rank
+                        .name
+                        .map(|name| clonk_frontend::startup_plrsel::PlrSelCrewPromotion {
                             rank_name: clonk_resources::decode_legacy_script_text(
                                 &clonk_script::c4_string_bytes(name),
                             ),
                             experience: next_rank.experience,
-                        }
-                    })
+                        })
                 })
                 .flatten();
             entry.render_model.birthday = format_startup_crew_birthday(entry.crew_info.birthday);
             if entry.render_model.rank_icon.is_none() {
-                entry.render_model.rank_icon = rank_sheet
-                    .and_then(|sheet| startup_rank_icon(sheet, entry.crew_info.rank));
+                entry.render_model.rank_icon =
+                    rank_sheet.and_then(|sheet| startup_rank_icon(sheet, entry.crew_info.rank));
             }
         }
     }
 
-    pub(crate) fn handle_main_menu_activation(&mut self, item: MainMenuItem) -> Result<(), EngineError> {
+    pub(crate) fn handle_main_menu_activation(
+        &mut self,
+        item: MainMenuItem,
+    ) -> Result<(), EngineError> {
         match item {
             MainMenuItem::LocalGame => {
                 self.begin_startup_dialog_fade(StartupDialog::ScenarioBrowser(
@@ -4582,9 +4494,9 @@ impl GameApp {
     pub(crate) fn visible_startup_dialog(&self) -> Option<StartupDialog> {
         match self.startup_view {
             StartupView::MainMenu => Some(StartupDialog::MainMenu),
-            StartupView::ScenarioBrowser => Some(StartupDialog::ScenarioBrowser(
-                self.scenario_selector_mode,
-            )),
+            StartupView::ScenarioBrowser => {
+                Some(StartupDialog::ScenarioBrowser(self.scenario_selector_mode))
+            }
             StartupView::NetworkGame => Some(StartupDialog::NetworkGame),
             StartupView::Options => Some(StartupDialog::Options),
             StartupView::About => Some(StartupDialog::About),
@@ -4957,10 +4869,9 @@ impl GameApp {
             dialog.pointer_left();
         }
         match self.app_paths.as_ref().map(startup_player_file_exists) {
-            Some(Ok(false)) => self
-                .open_new_startup_player_properties_from(
-                    StartupPlayerPropertiesOrigin::MainMenuFirstPlayer,
-                ),
+            Some(Ok(false)) => self.open_new_startup_player_properties_from(
+                StartupPlayerPropertiesOrigin::MainMenuFirstPlayer,
+            ),
             Some(Err(error)) => {
                 tracing::warn!(%error, "failed to scan startup player files");
                 self.open_new_startup_player_properties_from(
@@ -5045,8 +4956,7 @@ impl GameApp {
                     return;
                 }
                 if failed
-                    || (self.startup_network_connection.is_none()
-                        && self.loading_state.is_none())
+                    || (self.startup_network_connection.is_none() && self.loading_state.is_none())
                 {
                     self.mode = AppMode::Menu;
                     self.show_main_menu();
@@ -5095,7 +5005,10 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn delete_startup_player_and_refresh(&mut self, path: &Path) -> Result<(), EngineError> {
+    pub(crate) fn delete_startup_player_and_refresh(
+        &mut self,
+        path: &Path,
+    ) -> Result<(), EngineError> {
         let deletion = delete_player_file(path);
         if let Err(error) = deletion.as_ref() {
             tracing::error!(path = %path.display(), %error, "failed to delete player file");
@@ -5119,11 +5032,8 @@ impl GameApp {
         player_path: &Path,
         file_name: &str,
     ) -> Result<(), EngineError> {
-        let deletion = delete_crew_file(
-            player_path,
-            file_name,
-            self.process_group_maker.as_bytes(),
-        );
+        let deletion =
+            delete_crew_file(player_path, file_name, self.process_group_maker.as_bytes());
         if let Err(error) = deletion.as_ref() {
             tracing::error!(path = %player_path.display(), %file_name, %error, "failed to delete crew file");
         }
@@ -5178,9 +5088,7 @@ impl GameApp {
         self.plrsel_last_click = None;
         self.refresh_participants_label();
         self.status_text.clear();
-        if let Err(error) =
-            self.show_startup_player_activation_refusals(&activation_refusals)
-        {
+        if let Err(error) = self.show_startup_player_activation_refusals(&activation_refusals) {
             tracing::error!(%error, "failed to show participant overflow after player deletion");
         }
         self.mark_menu_dirty();
@@ -5193,7 +5101,10 @@ impl GameApp {
         context_menu.filter(|_| !game_option_input_open)
     }
 
-    pub(crate) fn startup_element_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+    pub(crate) fn startup_element_tooltip_target_at(
+        &self,
+        point: GuiPoint,
+    ) -> Option<StartupTooltip> {
         if self.mode != AppMode::Menu
             || self.startup_network_transition_active()
             || self.context_menu.is_some()
@@ -5711,11 +5622,7 @@ impl GameApp {
         self.app_paths
             .as_ref()
             .and_then(|paths| Config::load(paths.config_file()).ok())
-            .and_then(|config| {
-                config
-                    .get_in(Some("Startup"), key)
-                    .map(parse_config_bool)
-            })
+            .and_then(|config| config.get_in(Some("Startup"), key).map(parse_config_bool))
             .unwrap_or(false)
     }
 }

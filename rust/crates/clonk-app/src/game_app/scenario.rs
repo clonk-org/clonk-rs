@@ -133,14 +133,9 @@ impl GameApp {
             .first()
             .map(|layer| layer.entries.clone())
             .unwrap_or_default();
-        let alphabetical_sorting =
-            load_startup_alphabetical_sorting(self.app_paths.as_ref());
-        if !override_frontend_scenario_title(
-            &mut entries,
-            identifier,
-            title,
-            alphabetical_sorting,
-        ) {
+        let alphabetical_sorting = load_startup_alphabetical_sorting(self.app_paths.as_ref());
+        if !override_frontend_scenario_title(&mut entries, identifier, title, alphabetical_sorting)
+        {
             return Ok(());
         }
         self.scenario_catalog = build_scenario_catalog(&entries);
@@ -200,11 +195,8 @@ impl GameApp {
     }
 
     pub(crate) fn commit_scenario_rename(&mut self, focus_lost: bool) -> Result<(), EngineError> {
-        let Some((identifier, original_title, action)) = self
-            .menu_state
-            .rename_edit
-            .as_mut()
-            .map(|rename| {
+        let Some((identifier, original_title, action)) =
+            self.menu_state.rename_edit.as_mut().map(|rename| {
                 (
                     rename.identifier.clone(),
                     rename.edit.label_text().to_string(),
@@ -229,17 +221,13 @@ impl GameApp {
             self.mark_menu_dirty();
             return Ok(());
         }
-        let scenario = self
-            .scenario_catalog
-            .get(&identifier)
-            .cloned()
-            .or_else(|| {
-                self.menu_state
-                    .visible_entries()
-                    .iter()
-                    .find(|entry| entry.identifier == identifier)
-                    .cloned()
-            });
+        let scenario = self.scenario_catalog.get(&identifier).cloned().or_else(|| {
+            self.menu_state
+                .visible_entries()
+                .iter()
+                .find(|entry| entry.identifier == identifier)
+                .cloned()
+        });
         let result = (|| -> Result<String> {
             let scenario = scenario.ok_or_else(|| anyhow!("selected scenario is stale"))?;
             let path = scenario
@@ -256,14 +244,16 @@ impl GameApp {
                 "merged scenario entries cannot be renamed safely"
             );
             let language = scenario_title_language(self.app_paths.as_ref());
-            let destination =
-                rename_scenario_storage(path, scenario.kind, &title, &language)?;
+            let destination = rename_scenario_storage(path, scenario.kind, &title, &language)?;
             let filename = destination
                 .file_name()
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| anyhow!("renamed scenario has no UTF-8 filename"))?;
             let parent = identifier.rsplit_once('/').map(|(parent, _)| parent);
-            Ok(parent.map_or_else(|| filename.to_string(), |parent| format!("{parent}/{filename}")))
+            Ok(parent.map_or_else(
+                || filename.to_string(),
+                |parent| format!("{parent}/{filename}"),
+            ))
         })();
         match result {
             Ok(identifier) => {
@@ -470,16 +460,16 @@ impl GameApp {
         Ok(())
     }
 
-    pub(crate) fn scenario_browser_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+    pub(crate) fn scenario_browser_tooltip_target_at(
+        &self,
+        point: GuiPoint,
+    ) -> Option<StartupTooltip> {
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let book = self.assets.book_fonts.as_deref()?;
         let surface = self.graphics.surface();
         let (width, height) = (surface.width(), surface.height());
-        let layout = clonk_frontend::startup_scensel::scen_sel_layout(
-            width as i32,
-            height as i32,
-            fonts,
-        );
+        let layout =
+            clonk_frontend::startup_scensel::scen_sel_layout(width as i32, height as i32, fonts);
         let title_key = if self.scenario_selector_mode == ScenarioSelectorMode::NetworkHost {
             "IDS_DLG_NETSTART"
         } else {
@@ -756,7 +746,7 @@ impl GameApp {
                             let (startup, savegame) = prepare_offline_savegame_startup(
                                 &path,
                                 configured,
-                            preflight.max_players,
+                                preflight.max_players,
                                 &languages,
                                 &language_packs,
                             )?;
@@ -764,7 +754,7 @@ impl GameApp {
                         } else {
                             Ok(Some((
                                 OfflineStartupPlayers::new(configured, preflight.max_players),
-                        preflight.random_seed,
+                                preflight.random_seed,
                                 None,
                             )))
                         }
@@ -812,9 +802,7 @@ impl GameApp {
             .lobby_preload_artifact
             .as_mut()
             .and_then(|artifact| artifact.catalog_host.as_mut())
-            .and_then(|catalog_host| {
-                catalog_host.take_matching_scenario(&catalog_preload_key)
-            });
+            .and_then(|catalog_host| catalog_host.take_matching_scenario(&catalog_preload_key));
 
         thread::spawn(move || {
             let mut reporter = ScenarioLoadingReporter::new(sender);
@@ -914,16 +902,17 @@ impl GameApp {
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .and_then(|prepared| prepared.definition_modules.clone());
-        let retained_definition_save_paths = self.network_mode.as_ref().and_then(|mode| match mode {
-            NetworkMode::Host(HostSettings {
-                prepared: Some(prepared),
-                ..
-            }) => {
-                let (executable, definitions) = prepared.definition_save_paths();
-                Some((executable.to_owned(), definitions.to_owned()))
-            }
-            NetworkMode::Host(_) | NetworkMode::Client(_) => None,
-        });
+        let retained_definition_save_paths =
+            self.network_mode.as_ref().and_then(|mode| match mode {
+                NetworkMode::Host(HostSettings {
+                    prepared: Some(prepared),
+                    ..
+                }) => {
+                    let (executable, definitions) = prepared.definition_save_paths();
+                    Some((executable.to_owned(), definitions.to_owned()))
+                }
+                NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+            });
         let path = scenario
             .path
             .clone()
@@ -944,7 +933,8 @@ impl GameApp {
             definition_root: None,
         };
         let matching_preload = self.lobby_preload_artifact.take().filter(|artifact| {
-            artifact.scenario_path == path && artifact.definition_paths == effective_definition_paths
+            artifact.scenario_path == path
+                && artifact.definition_paths == effective_definition_paths
         });
         let (active_game_graphics, preloaded_materials) = match matching_preload {
             Some(artifact) => (
@@ -1039,11 +1029,13 @@ impl GameApp {
         let replay = scenario_data
             .lobby_metadata()
             .is_some_and(|metadata| metadata.head().is_replay());
-        let replay_parameters = replay.then(|| {
-            scenario_data
-                .lobby_metadata()
-                .and_then(ScenarioLobbyMetadata::embedded_game_parameter_values)
-        }).flatten();
+        let replay_parameters = replay
+            .then(|| {
+                scenario_data
+                    .lobby_metadata()
+                    .and_then(ScenarioLobbyMetadata::embedded_game_parameter_values)
+            })
+            .flatten();
         let serialized_startup_player_count = scenario_data.lobby_metadata().map(|metadata| {
             metadata.embedded_game_parameter_values().map_or_else(
                 || metadata.game_parameter_defaults().startup_player_count(),
@@ -1068,10 +1060,14 @@ impl GameApp {
                         client_id: client.id(),
                         activated: client.is_activated(),
                         observer: client.is_observer(),
-                        name: LegacyCString::from_bytes(clonk_script::c4_string_bytes(client.name()))
-                            .unwrap_or_default(),
-                        nick: LegacyCString::from_bytes(clonk_script::c4_string_bytes(client.nick()))
-                            .unwrap_or_default(),
+                        name: LegacyCString::from_bytes(clonk_script::c4_string_bytes(
+                            client.name(),
+                        ))
+                        .unwrap_or_default(),
+                        nick: LegacyCString::from_bytes(clonk_script::c4_string_bytes(
+                            client.nick(),
+                        ))
+                        .unwrap_or_default(),
                         lobby_ready: client.is_lobby_ready(),
                     })
                     .collect::<Vec<_>>()
@@ -1097,10 +1093,7 @@ impl GameApp {
                     .map(|startup| startup.startup_player_count)
             };
             let chunks = replay_control_record_chunks(&group).map_err(|error| {
-                ScenarioActivationError::Recoverable(format!(
-                    "Replay {} {error}",
-                    scenario.title
-                ))
+                ScenarioActivationError::Recoverable(format!("Replay {} {error}", scenario.title))
             })?;
             if let Some(destination) = self
                 .classic_command_line
@@ -1125,12 +1118,14 @@ impl GameApp {
                         scenario.title
                     ))
                 })?;
-                Some(clonk_network::decode_player_info_list_ini(&bytes).map_err(|error| {
-                    ScenarioActivationError::Recoverable(format!(
-                        "Replay {} has invalid PlayerInfos.txt: {error}",
-                        scenario.title
-                    ))
-                })?)
+                Some(
+                    clonk_network::decode_player_info_list_ini(&bytes).map_err(|error| {
+                        ScenarioActivationError::Recoverable(format!(
+                            "Replay {} has invalid PlayerInfos.txt: {error}",
+                            scenario.title
+                        ))
+                    })?,
+                )
             } else {
                 None
             };
@@ -1696,15 +1691,14 @@ impl GameApp {
             self.control_clients.replace_snapshot(clients);
             self.control_player_infos.replace_snapshot(
                 player_infos.last_player_id,
-                player_infos
-                    .clients
-                    .into_iter()
-                    .map(|client| clonk_engine::PlayerInfoControlData {
+                player_infos.clients.into_iter().map(|client| {
+                    clonk_engine::PlayerInfoControlData {
                         client_id: client.client_id,
                         flags: client.flags,
                         players: client.players,
                         by_client: 0,
-                    }),
+                    }
+                }),
             );
             seed_engine_player_info_parameters(
                 &mut self.engine,
@@ -1766,7 +1760,10 @@ impl GameApp {
         Ok(())
     }
 
-    pub(crate) fn start_sandbox_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
+    pub(crate) fn start_sandbox_scenario(
+        &mut self,
+        scenario: FrontendScenario,
+    ) -> Result<(), EngineError> {
         let catalog_paths = self.app_paths.clone();
         let crew_paths = self.sandbox_crew_definition_paths.clone();
         let definition_load = match (catalog_paths.as_ref(), crew_paths.as_ref()) {
@@ -1812,8 +1809,7 @@ impl GameApp {
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
-        self.engine
-            .set_network_control_mode(self.network.is_some());
+        self.engine.set_network_control_mode(self.network.is_some());
         self.engine.set_league_game(self.network_is_league);
         seed_engine_player_info_parameters(
             &mut self.engine,

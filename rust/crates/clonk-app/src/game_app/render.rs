@@ -87,18 +87,19 @@ impl GameApp {
         let Some(current) = self.primary_viewport_player() else {
             return false;
         };
-        let players = self.engine.players().map(|player| player.id()).collect::<Vec<_>>();
+        let players = self
+            .engine
+            .players()
+            .map(|player| player.id())
+            .collect::<Vec<_>>();
         let target = if let Some(index) = players.iter().position(|player| *player == current) {
-            players
-                .get(index + 1)
-                .copied()
-                .or_else(|| {
-                    if wrap {
-                        players.first().copied()
-                    } else {
-                        Some(OWNER_NONE)
-                    }
-                })
+            players.get(index + 1).copied().or_else(|| {
+                if wrap {
+                    players.first().copied()
+                } else {
+                    Some(OWNER_NONE)
+                }
+            })
         } else {
             players.first().copied()
         };
@@ -220,8 +221,7 @@ impl GameApp {
             .into_iter()
             .rev()
             .find(|viewport| {
-                viewport.owner == owner
-                    && viewport.contains_output_point((point.x, point.y))
+                viewport.owner == owner && viewport.contains_output_point((point.x, point.y))
             })?;
         let mouse_viewport = self
             .active_ingame_mouse_viewport()
@@ -392,11 +392,9 @@ impl GameApp {
             .collect::<Vec<_>>();
         let engine = &self.engine;
         owners.sort_by_key(|owner| {
-            engine
-                .player(*owner)
-                .map_or(i32::MAX, |player| {
-                    classic_viewport_layout_order(player.control_set())
-                })
+            engine.player(*owner).map_or(i32::MAX, |player| {
+                classic_viewport_layout_order(player.control_set())
+            })
         });
         let already_current = if owners.is_empty() {
             matches!(
@@ -653,7 +651,10 @@ impl GameApp {
         Ok(())
     }
 
-    pub(crate) fn render_message_dialogs(&mut self, gamma: Option<&clonk_graphics::GammaRamp>) -> Result<()> {
+    pub(crate) fn render_message_dialogs(
+        &mut self,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) -> Result<()> {
         if self.message_dialogs.is_empty() {
             return Ok(());
         }
@@ -674,8 +675,7 @@ impl GameApp {
         let ordered_native = self.graphics.surface().is_clonk_text_capture_active();
         let now = Instant::now();
         for index in 0..=last {
-            let keyboard_active =
-                Some(index) == active_index && self.context_menu.is_none();
+            let keyboard_active = Some(index) == active_index && self.context_menu.is_none();
             let mouse_active = self.mode == AppMode::Running || Some(index) == active_index;
             self.message_dialogs[index].state.render_at(
                 self.graphics.surface_mut(),
@@ -772,7 +772,10 @@ impl GameApp {
         Ok(true)
     }
 
-    pub(crate) fn render_game_over_tooltip(&mut self, gamma: Option<&clonk_graphics::GammaRamp>) -> Result<bool> {
+    pub(crate) fn render_game_over_tooltip(
+        &mut self,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) -> Result<bool> {
         if !self.game_over_dialog_is_active() {
             return Ok(false);
         }
@@ -786,14 +789,7 @@ impl GameApp {
         let text = self
             .game_over_dialog
             .as_ref()
-            .map(|dialog| {
-                dialog.tooltip_at(
-                    pointer.x,
-                    pointer.y,
-                    surface_width,
-                    surface_height,
-                )
-            })
+            .map(|dialog| dialog.tooltip_at(pointer.x, pointer.y, surface_width, surface_height))
             .filter(|text| !text.is_empty())
             .map(str::to_owned);
         let Some(text) = text else {
@@ -852,7 +848,13 @@ impl GameApp {
             .global_tooltip_font
             .as_deref()
             .context("classic shadowless tooltip font is unavailable")?;
-        clonk_frontend::context_menu::draw_classic_tooltip(surface, font, pointer, &text, Some(gamma));
+        clonk_frontend::context_menu::draw_classic_tooltip(
+            surface,
+            font,
+            pointer,
+            &text,
+            Some(gamma),
+        );
         Ok(true)
     }
 
@@ -918,11 +920,7 @@ impl GameApp {
         } else {
             (0..self.message_dialogs.len()).rev().find(|index| {
                 let dialog = &self.message_dialogs[*index].state;
-                let layout = dialog.layout(
-                    surface_width,
-                    surface_height,
-                    &resources.fonts.text,
-                );
+                let layout = dialog.layout(surface_width, surface_height, &resources.fonts.text);
                 dialog
                     .tooltip_state(Some(tooltip_pointer), &layout)
                     .is_some()
@@ -970,10 +968,7 @@ impl GameApp {
         Ok(())
     }
 
-    fn render_context_menu_tooltip(
-        &mut self,
-        gamma: Option<&clonk_graphics::GammaRamp>,
-    ) -> bool {
+    fn render_context_menu_tooltip(&mut self, gamma: Option<&clonk_graphics::GammaRamp>) -> bool {
         let Some(context_menu) = self.context_menu.as_ref() else {
             return false;
         };
@@ -1085,8 +1080,7 @@ impl GameApp {
     pub(crate) fn runtime_client_list_draw_active(&self) -> bool {
         if self.mode == AppMode::Running {
             self.runtime_default_dialog_is_top(RuntimeDefaultDialog::ClientList)
-                && self.running_active_dialog
-                    == Some(RunningDialogStackEntry::RuntimeClientList)
+                && self.running_active_dialog == Some(RunningDialogStackEntry::RuntimeClientList)
                 && (self.game_over_dialog.is_none() || self.runtime_client_list_above_game_over)
                 && self.context_menu.is_none()
         } else {
@@ -1425,9 +1419,7 @@ impl GameApp {
                     if self.render_context_menu_tooltip(gamma.as_ref()) && ordered_native {
                         self.next_pending_native_overlay();
                     }
-                    if !ordered_native
-                        && !self.graphics.surface().is_gpu_scene_capture_active()
-                    {
+                    if !ordered_native && !self.graphics.surface().is_gpu_scene_capture_active() {
                         let surface = self.graphics.surface();
                         if surface.pixels().len() == frame.len() {
                             frame.copy_from_slice(surface.pixels());
@@ -1471,18 +1463,14 @@ impl GameApp {
                                 .is_none_or(|outgoing| outgoing.len() == expected_len))
                         && (!retained_fade
                             || (fade.underlay_gpu_recorder.is_some()
-                                && (fade.outgoing.is_none()
-                                    || fade.outgoing_gpu_plan.is_some())))
+                                && (fade.outgoing.is_none() || fade.outgoing_gpu_plan.is_some())))
                 });
                 if self.startup_dialog_fade.is_some() && !fade_compatible {
                     self.startup_dialog_fade = None;
                 }
                 let fade_was_active = fade_compatible;
                 if let Some(fade) = self.startup_dialog_fade.as_mut() {
-                    fade.step = fade
-                        .step
-                        .saturating_add(1)
-                        .min(STARTUP_DIALOG_FADE_STEPS);
+                    fade.step = fade.step.saturating_add(1).min(STARTUP_DIALOG_FADE_STEPS);
                 }
                 let fade_draw_inactive = self
                     .startup_dialog_fade
@@ -1617,10 +1605,7 @@ impl GameApp {
                             if outgoing_opacity != 0 {
                                 if let Some(outgoing) = fade.outgoing_gpu_plan.as_ref() {
                                     for mut batch in outgoing.batches.clone() {
-                                        apply_startup_fade_to_batch(
-                                            &mut batch,
-                                            outgoing_opacity,
-                                        )?;
+                                        apply_startup_fade_to_batch(&mut batch, outgoing_opacity)?;
                                         plan.batches.push(batch);
                                     }
                                 }
@@ -2264,7 +2249,10 @@ impl GameApp {
             })
     }
 
-    pub(crate) fn physical_viewport_is_unsuppressed(&self, viewport: PhysicalViewportState) -> bool {
+    pub(crate) fn physical_viewport_is_unsuppressed(
+        &self,
+        viewport: PhysicalViewportState,
+    ) -> bool {
         viewport.displayed_player == OWNER_NONE
             || self.snapshot.players.iter().any(|player| {
                 player.id == viewport.displayed_player
@@ -2297,8 +2285,8 @@ impl GameApp {
         if !self.viewport_player_is_eliminated(owner) {
             return None;
         }
-        let surrendered = player.surrendered
-            || player.status == clonk_engine::PlayerStatus::Surrendered;
+        let surrendered =
+            player.surrendered || player.status == clonk_engine::PlayerStatus::Surrendered;
         let (key, fallback) = if surrendered {
             ("IDS_PLR_SURRENDERED", "Player %s|has surrendered.")
         } else {
@@ -2369,12 +2357,8 @@ impl GameApp {
             .ok_or_else(|| anyhow!("GPU scene capture ended before presentation"))?;
         scene.gamma_mode = gamma_mode;
         if let Some(plan) = self.pending_native_presentation.take() {
-            let mut frame = self.retained_gpu_frame_from_native_plan(
-                plan,
-                presentation,
-                &gamma,
-                gamma_mode,
-            )?;
+            let mut frame =
+                self.retained_gpu_frame_from_native_plan(plan, presentation, &gamma, gamma_mode)?;
             if !scene.commands.is_empty() {
                 frame.layers.push(RetainedGpuFrameLayer {
                     scene,
@@ -2410,7 +2394,9 @@ impl GameApp {
             .filter(|surface| {
                 surface.width() == physical_width && surface.height() == physical_height
             })
-            .unwrap_or_else(|| Surface::new(physical_width, physical_height, PixelFormat::Rgba8888));
+            .unwrap_or_else(|| {
+                Surface::new(physical_width, physical_height, PixelFormat::Rgba8888)
+            });
         let mut layers = Vec::new();
         let result = (|| -> Result<()> {
             for batch in plan.batches {
@@ -2419,11 +2405,8 @@ impl GameApp {
                     "ordered retained GPU capture produced a CPU logical layer"
                 );
                 if let Some(recorder) = batch.gpu_recorder {
-                    let mut scene = recorder.into_scene(
-                        logical_extent,
-                        Color::opaque(8, 12, 24),
-                        gamma,
-                    );
+                    let mut scene =
+                        recorder.into_scene(logical_extent, Color::opaque(8, 12, 24), gamma);
                     scene.gamma_mode = gamma_mode;
                     layers.push(RetainedGpuFrameLayer {
                         scene,
@@ -2485,7 +2468,10 @@ impl GameApp {
                     presentation: GpuPresentation::identity(physical_width, physical_height),
                 });
             }
-            anyhow::ensure!(!layers.is_empty(), "retained GPU frame has no ordered layers");
+            anyhow::ensure!(
+                !layers.is_empty(),
+                "retained GPU frame has no ordered layers"
+            );
             Ok(())
         })();
         if physical_surface.is_gpu_scene_capture_active() {
@@ -2496,7 +2482,11 @@ impl GameApp {
         Ok(RetainedGpuFrame { layers })
     }
 
-    pub(crate) fn render_running(&mut self, frame: &mut [u8], defer_native_game_messages: bool) -> Result<()> {
+    pub(crate) fn render_running(
+        &mut self,
+        frame: &mut [u8],
+        defer_native_game_messages: bool,
+    ) -> Result<()> {
         self.render_running_for_presentation(frame, defer_native_game_messages, false)
     }
 
@@ -2530,8 +2520,7 @@ impl GameApp {
                 )
                 .map_err(report_classic_parity_boundary)?;
         }
-        if viewport_overlays_visible
-            && self.menu_owner_has_unsuppressed_viewport(self.local_owner)
+        if viewport_overlays_visible && self.menu_owner_has_unsuppressed_viewport(self.local_owner)
         {
             if let Some(browser) = self.save_browser.as_ref() {
                 let boundary = report_classic_parity_boundary(ClassicParityBoundary::SaveBrowser(
@@ -2541,8 +2530,7 @@ impl GameApp {
                 return Err(anyhow::Error::new(boundary));
             }
         }
-        if viewport_overlays_visible
-            && self.menu_owner_has_unsuppressed_viewport(self.local_owner)
+        if viewport_overlays_visible && self.menu_owner_has_unsuppressed_viewport(self.local_owner)
         {
             if let Some(menu) = self.object_menu.as_ref() {
                 let boundary = report_classic_parity_boundary(
@@ -2583,9 +2571,7 @@ impl GameApp {
         // Screen::IsActive therefore retains GUI mouse ownership even when
         // film/replay or viewport suppression omits the menu's pixels.
         let has_shown_external_menu = self.running_external_menu_is_shown();
-        if viewport_overlays_visible
-            && (has_visible_ingame_menu || has_visible_script_menu)
-        {
+        if viewport_overlays_visible && (has_visible_ingame_menu || has_visible_script_menu) {
             self.assets
                 .require_classic_ingame_menu_resources()
                 .map_err(report_classic_parity_boundary)?;
@@ -2619,11 +2605,7 @@ impl GameApp {
             if let Some(message) = runtime_flash_message.as_ref() {
                 texts.push(message.text.as_str());
             }
-            resolve_font_images_in_texts(
-                &self.engine,
-                texts,
-                self.script_text_spec_resources(),
-            )
+            resolve_font_images_in_texts(&self.engine, texts, self.script_text_spec_resources())
         };
         // Scoreboard reconciliation mutates presentation/refcount state. All
         // already-visible running layers must prove their exact resources or
@@ -2634,13 +2616,11 @@ impl GameApp {
         let scoreboard_font_images = self.preflight_visible_scoreboard()?;
         let message_board = self.advance_message_board_overlay();
         self.update_network_status_overlay();
-        let viewports = collect_viewport_inputs_from_physical_state(
-            &self.snapshot,
-            &self.physical_viewports,
-        )
-        .map_err(|reason| {
-            report_classic_parity_boundary(ClassicParityBoundary::RunningViewport(reason))
-        })?;
+        let viewports =
+            collect_viewport_inputs_from_physical_state(&self.snapshot, &self.physical_viewports)
+                .map_err(|reason| {
+                report_classic_parity_boundary(ClassicParityBoundary::RunningViewport(reason))
+            })?;
         // Capture CStdDDraw's installed ramp before render_frame latches any
         // runtime SetGamma controls for the next pass. C++ draws every GUI
         // overlay below with this same pre-latch ramp
@@ -2758,10 +2738,7 @@ impl GameApp {
                 .display_flags
                 .clock
                 .then(|| clonk_core::chrono_util::current_timestamp(false)),
-            frames_per_second: self
-                .display_flags
-                .fps
-                .then_some(self.frames_per_second),
+            frames_per_second: self.display_flags.fps.then_some(self.frames_per_second),
             upper_board_mode: frontend_upper_board_mode(self.display_flags.upper_board),
             // Config.Graphics.ShowPortraits/ShowCommands/ShowCommandKeys
             // from the Display menu (src/C4Config.cpp:448-450).
@@ -2882,9 +2859,7 @@ impl GameApp {
                                 .insert(script_menu_owner, state);
                             time
                         }
-                        Some(mut state)
-                            if same_script_menu_presentation(&state, *target, menu) =>
-                        {
+                        Some(mut state) if same_script_menu_presentation(&state, *target, menu) => {
                             state.key = key;
                             if state.location.is_none() {
                                 state.location = initial_script_menu_location;
@@ -2954,8 +2929,10 @@ impl GameApp {
                     .definition_picture_image(title_id)
                     .map(definition_menu_picture);
                 let item_definition_color = if !menu.user_menu
-                    && matches!(menu.title_symbol, clonk_engine::ObjectMenuSymbol::Buy { .. })
-                {
+                    && matches!(
+                        menu.title_symbol,
+                        clonk_engine::ObjectMenuSymbol::Buy { .. }
+                    ) {
                     object_menu_buying_player_color(&self.snapshot, menu.command_object)
                 } else {
                     0
@@ -3024,24 +3001,19 @@ impl GameApp {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                let (
-                    menu_location,
-                    retained_scroll_y,
-                    adjust_selection,
-                    initialize_location,
-                ) = self
-                    .script_menu_presentations
-                    .get(&script_menu_owner)
-                    .filter(|state| same_script_menu_presentation(state, *target, menu))
-                    .map(|state| {
-                        (
-                            state.location,
-                            state.scroll_y,
-                            state.selection_needs_adjustment,
-                            state.location_needs_initialization,
-                        )
-                    })
-                    .unwrap_or((None, 0, true, false));
+                let (menu_location, retained_scroll_y, adjust_selection, initialize_location) =
+                    self.script_menu_presentations
+                        .get(&script_menu_owner)
+                        .filter(|state| same_script_menu_presentation(state, *target, menu))
+                        .map(|state| {
+                            (
+                                state.location,
+                                state.scroll_y,
+                                state.selection_needs_adjustment,
+                                state.location_needs_initialization,
+                            )
+                        })
+                        .unwrap_or((None, 0, true, false));
                 let area = self
                     .graphics
                     .viewport_rect(script_menu_owner)
@@ -3049,10 +3021,8 @@ impl GameApp {
                         let surface = self.graphics.surface();
                         Rect::new(0, 0, surface.width(), surface.height())
                     });
-                let layout_font = clonk_frontend::hud::HudFont::from_set(
-                    fonts.as_deref(),
-                    fallback.as_ref(),
-                );
+                let layout_font =
+                    clonk_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
                 let (menu_location, menu_scroll_y) = if matches!(menu.style, 0..=2) {
                     let layout = if initialize_location {
                         engine_script_menu_layout_with_free_anchor(
@@ -3119,9 +3089,11 @@ impl GameApp {
                         .map(default_owner_definition_sprite)
                 });
                 if let Some(decoration) = menu.decoration.as_ref() {
-                    if let Err(error) =
-                        validate_menu_decoration_for_area(area, decoration, frame_decoration.as_ref())
-                    {
+                    if let Err(error) = validate_menu_decoration_for_area(
+                        area,
+                        decoration,
+                        frame_decoration.as_ref(),
+                    ) {
                         tracing::error!(
                             decoration = ?menu.decoration,
                             %error,
@@ -3157,14 +3129,13 @@ impl GameApp {
                 let script_menu_accepts_mouse = self.mouse_control
                     && self.local_controls.mouse_owner() == Some(script_menu_owner);
                 if let Some(gfx) = self.ingame_menu_gfx.as_ref() {
-                    let font = clonk_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
+                    let font =
+                        clonk_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
                     let tiny = fonts
                         .as_deref()
                         .map(|set| clonk_frontend::hud::HudFont::Clonk(&set.mini));
-                    let dim_for_construction_drag = self
-                        .construction_menu_drag
-                        .as_ref()
-                        .is_some_and(|drag| {
+                    let dim_for_construction_drag =
+                        self.construction_menu_drag.as_ref().is_some_and(|drag| {
                             matches!(
                                 drag,
                                 ConstructionMenuDrag::Active { owner, .. }
@@ -3414,8 +3385,8 @@ impl GameApp {
                     })
             })
             .flatten();
-        let construction_preview = construction_cursor.and_then(
-            |(definition_id, viewport_index, pointer, site_valid)| {
+        let construction_preview =
+            construction_cursor.and_then(|(definition_id, viewport_index, pointer, site_valid)| {
                 self.engine
                     .definition_construction_drag_image(definition_id)
                     .map(|image| {
@@ -3426,8 +3397,7 @@ impl GameApp {
                             site_valid,
                         )
                     })
-            },
-        );
+            });
         let construction_viewport_clip =
             construction_cursor.and_then(|(_, viewport_index, _, _)| {
                 self.graphics
@@ -3442,36 +3412,34 @@ impl GameApp {
                 GuiPoint::new((image.width() / 2) as f32, image.height() as f32)
             })
             .or_else(|| self.graphics.construction_cursor_primary_offset());
-        let construction_cursor_drawn = match (
-            construction_preview.as_ref(),
-            construction_viewport_clip,
-        ) {
-            (Some((image, _, pointer, valid)), Some(viewport_clip)) => {
-                self.graphics.draw_construction_drag_preview(
-                    image,
-                    viewport_clip,
-                    pointer.screen,
-                    *valid,
-                    Some(&frame_gamma),
-                )
-            }
-            (None, Some(viewport_clip)) =>
-                construction_cursor.is_some_and(|(_, _, pointer, _)| {
-                    self.graphics.draw_construction_cursor_fallback(
+        let construction_cursor_drawn =
+            match (construction_preview.as_ref(), construction_viewport_clip) {
+                (Some((image, _, pointer, valid)), Some(viewport_clip)) => {
+                    self.graphics.draw_construction_drag_preview(
+                        image,
                         viewport_clip,
                         pointer.screen,
+                        *valid,
                         Some(&frame_gamma),
                     )
-                }),
-            _ => false,
-        };
+                }
+                (None, Some(viewport_clip)) => {
+                    construction_cursor.is_some_and(|(_, _, pointer, _)| {
+                        self.graphics.draw_construction_cursor_fallback(
+                            viewport_clip,
+                            pointer.screen,
+                            Some(&frame_gamma),
+                        )
+                    })
+                }
+                _ => false,
+            };
         if construction_cursor_drawn && self.mouse_control && self.keyboard_modifiers.shift() {
             if let (Some((_, _, pointer, _)), Some(primary_offset), Some(viewport_clip)) = (
                 construction_cursor,
                 construction_primary_offset,
                 construction_viewport_clip,
-            )
-            {
+            ) {
                 self.graphics.draw_construction_add_marker(
                     viewport_clip,
                     pointer.screen,
@@ -3595,20 +3563,22 @@ impl GameApp {
             );
         } else if let Some((caption, viewport)) = running_world_cursor_drawable
             .then(|| {
-                self.ingame_mouse_caption.caption.clone().and_then(|caption| {
-                    self.graphics
-                        .active_viewport_projections()
-                        .into_iter()
-                        .find(|viewport| viewport.index == caption.viewport_index)
-                        .map(|viewport| (caption, viewport.rect))
-                })
+                self.ingame_mouse_caption
+                    .caption
+                    .clone()
+                    .and_then(|caption| {
+                        self.graphics
+                            .active_viewport_projections()
+                            .into_iter()
+                            .find(|viewport| viewport.index == caption.viewport_index)
+                            .map(|viewport| (caption, viewport.rect))
+                    })
             })
             .flatten()
         {
             let fonts = self.assets.clonk_fonts.clone();
             let fallback = self.assets.font_arc();
-            let font =
-                clonk_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
+            let font = clonk_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
             let pointer = GuiPoint::new(
                 viewport.x.saturating_add(caption.position.x) as f32,
                 viewport.y.saturating_add(caption.position.y) as f32,
@@ -3663,8 +3633,7 @@ impl GameApp {
                 .clonk_fonts
                 .clone()
                 .expect("global GUI preflight guarantees FontRegular");
-            let screen_height =
-                i32::try_from(self.graphics.surface().height()).unwrap_or(i32::MAX);
+            let screen_height = i32::try_from(self.graphics.surface().height()).unwrap_or(i32::MAX);
             let y = screen_height / 2 - fonts.text.line_height.saturating_mul(2);
             // DrawHoldMessages uses the same default message color, centered
             // FontRegular TextOut path as a flash message, but with a fixed
@@ -3719,16 +3688,16 @@ impl GameApp {
         let game_over_mouse_active = self.game_over_dialog_is_mouse_active();
         let game_over_active = self.game_over_dialog_is_active();
         for dialog_kind in self.runtime_default_dialog_order_snapshot() {
-            if render_network_chart_elevated
-                && dialog_kind == RuntimeDefaultDialog::NetworkChart
-            {
+            if render_network_chart_elevated && dialog_kind == RuntimeDefaultDialog::NetworkChart {
                 continue;
             }
             let represented_in_running_tail = match dialog_kind {
-                RuntimeDefaultDialog::Scoreboard => running_stack_tail
-                    .contains(&RunningDialogStackEntry::Scoreboard),
-                RuntimeDefaultDialog::ClientList => running_stack_tail
-                    .contains(&RunningDialogStackEntry::RuntimeClientList),
+                RuntimeDefaultDialog::Scoreboard => {
+                    running_stack_tail.contains(&RunningDialogStackEntry::Scoreboard)
+                }
+                RuntimeDefaultDialog::ClientList => {
+                    running_stack_tail.contains(&RunningDialogStackEntry::RuntimeClientList)
+                }
                 RuntimeDefaultDialog::NetworkChart
                 | RuntimeDefaultDialog::GameOver
                 | RuntimeDefaultDialog::ExternalIrc => false,
@@ -3739,11 +3708,7 @@ impl GameApp {
             match dialog_kind {
                 RuntimeDefaultDialog::Scoreboard => {
                     if let Some(font_images) = scoreboard_font_images.as_ref() {
-                        self.render_scoreboard_layer(
-                            font_images,
-                            &frame_gamma,
-                            ordered_native,
-                        )?;
+                        self.render_scoreboard_layer(font_images, &frame_gamma, ordered_native)?;
                     }
                 }
                 RuntimeDefaultDialog::NetworkChart => {
@@ -3809,9 +3774,7 @@ impl GameApp {
             self.render_network_chart_layer(&frame_gamma, ordered_native)?;
         }
         if self.context_menu.is_some()
-            && (!running_chat_input_open
-                || use_running_dialog_stack
-                || self.network_chart_elevated)
+            && (!running_chat_input_open || use_running_dialog_stack || self.network_chart_elevated)
         {
             // C4GUI::Screen draws its recursively owned context chain after
             // every dialog, so it stays above viewport menus, F1 help,
@@ -3885,7 +3848,10 @@ impl GameApp {
         message: &clonk_engine::MessageSnapshot,
         viewport: ActiveViewportProjection,
     ) -> Option<Vector2> {
-        if !matches!(message.kind, MessageKind::Target | MessageKind::TargetPlayer) {
+        if !matches!(
+            message.kind,
+            MessageKind::Target | MessageKind::TargetPlayer
+        ) {
             return None;
         }
         if message.kind == MessageKind::TargetPlayer
@@ -3900,8 +3866,7 @@ impl GameApp {
             .definition_shape_rect(&target.definition_id)
             .map(|shape| shape.height)
             .unwrap_or(0);
-        let position =
-            c4_message_target_position(target, message.offset, shape_height, viewport);
+        let position = c4_message_target_position(target, message.offset, shape_height, viewport);
         if !viewport.contains_logical_point(position) {
             return None;
         }
@@ -4537,8 +4502,7 @@ impl GameApp {
                     ) => modules.as_slice(),
                     None => &[],
                 };
-                let resolver =
-                    InstallDefinitionResolver::new(Some(Arc::new(paths.clone())));
+                let resolver = InstallDefinitionResolver::new(Some(Arc::new(paths.clone())));
                 let mut definition_groups = Vec::new();
                 for module in modules {
                     definition_groups.extend(

@@ -169,10 +169,8 @@ impl GameApp {
         }) else {
             return;
         };
-        let network_input_title =
-            self.runtime_resource_text("IDS_NET_INPUT", "Network Input");
-        let network_output_title =
-            self.runtime_resource_text("IDS_NET_OUTPUT", "Network Output");
+        let network_input_title = self.runtime_resource_text("IDS_NET_INPUT", "Network Input");
+        let network_output_title = self.runtime_resource_text("IDS_NET_OUTPUT", "Network Output");
         let Some(stats) = self.network_stats.as_mut() else {
             return;
         };
@@ -180,18 +178,16 @@ impl GameApp {
         let snapshots = aliases
             .iter()
             .filter_map(|alias| {
-                stats
-                    .graph_by_name(alias)
-                    .map(|graph| {
-                        (
-                            alias.clone(),
-                            Self::network_chart_graph_snapshot(
-                                graph,
-                                &network_input_title,
-                                &network_output_title,
-                            ),
-                        )
-                    })
+                stats.graph_by_name(alias).map(|graph| {
+                    (
+                        alias.clone(),
+                        Self::network_chart_graph_snapshot(
+                            graph,
+                            &network_input_title,
+                            &network_output_title,
+                        ),
+                    )
+                })
             })
             .collect::<Vec<_>>();
         if let Some(dialog) = self.network_chart_dialog.as_mut() {
@@ -254,8 +250,9 @@ impl GameApp {
         let game_over = order
             .iter()
             .position(|dialog| *dialog == RuntimeDefaultDialog::GameOver);
-        self.runtime_client_list_above_game_over =
-            client.zip(game_over).is_some_and(|(client, game_over)| client > game_over);
+        self.runtime_client_list_above_game_over = client
+            .zip(game_over)
+            .is_some_and(|(client, game_over)| client > game_over);
     }
 
     pub(crate) fn show_or_raise_runtime_default_dialog(&mut self, dialog: RuntimeDefaultDialog) {
@@ -279,9 +276,7 @@ impl GameApp {
                 self.activate_running_dialog_stack_only(RunningDialogStackEntry::Scoreboard);
             }
             RuntimeDefaultDialog::ClientList => {
-                self.activate_running_dialog_stack_only(
-                    RunningDialogStackEntry::RuntimeClientList,
-                );
+                self.activate_running_dialog_stack_only(RunningDialogStackEntry::RuntimeClientList);
             }
             RuntimeDefaultDialog::NetworkChart
             | RuntimeDefaultDialog::GameOver
@@ -289,8 +284,8 @@ impl GameApp {
         }
         self.show_or_raise_runtime_default_dialog(dialog);
         if dialog == RuntimeDefaultDialog::NetworkChart {
-            self.network_chart_elevated = !self.message_dialogs.is_empty()
-                || self.running_chat_controller().is_some();
+            self.network_chart_elevated =
+                !self.message_dialogs.is_empty() || self.running_chat_controller().is_some();
             if self.network_chart_elevated {
                 self.message_dialog_active_index = None;
                 self.set_running_chat_active(false);
@@ -308,8 +303,8 @@ impl GameApp {
     }
 
     pub(crate) fn hide_runtime_default_dialog(&mut self, dialog: RuntimeDefaultDialog) {
-        let chart_was_elevated = dialog == RuntimeDefaultDialog::NetworkChart
-            && self.network_chart_elevated;
+        let chart_was_elevated =
+            dialog == RuntimeDefaultDialog::NetworkChart && self.network_chart_elevated;
         let chart_owned_input = chart_was_elevated && self.network_chart_elevated_owns_input();
         let mut order = self.runtime_default_dialog_order_snapshot();
         order.retain(|candidate| *candidate != dialog);
@@ -360,9 +355,11 @@ impl GameApp {
         lower: RuntimeDefaultDialog,
     ) -> bool {
         let order = self.runtime_default_dialog_order_snapshot();
-        order.iter().position(|dialog| *dialog == upper).zip(
-            order.iter().position(|dialog| *dialog == lower),
-        ).is_some_and(|(upper, lower)| upper > lower)
+        order
+            .iter()
+            .position(|dialog| *dialog == upper)
+            .zip(order.iter().position(|dialog| *dialog == lower))
+            .is_some_and(|(upper, lower)| upper > lower)
     }
 
     pub(crate) fn network_chart_is_active_dialog(&self) -> bool {
@@ -372,8 +369,7 @@ impl GameApp {
             && self.context_menu.is_none()
             && !self.runtime_modal_above_network_chart()
             && (self.network_chart_elevated_owns_input()
-                || (self.message_dialogs.is_empty()
-                    && self.game_option_input_dialog.is_none()))
+                || (self.message_dialogs.is_empty() && self.game_option_input_dialog.is_none()))
     }
 
     fn set_running_active_dialog(&mut self, entry: Option<RunningDialogStackEntry>) {
@@ -538,9 +534,7 @@ impl GameApp {
         point: GuiPoint,
     ) -> Result<bool, EngineError> {
         Ok(match dialog {
-            RuntimeDefaultDialog::Scoreboard => {
-                self.scoreboard_pointer_target(point)?.is_some()
-            }
+            RuntimeDefaultDialog::Scoreboard => self.scoreboard_pointer_target(point)?.is_some(),
             RuntimeDefaultDialog::NetworkChart => self.network_chart_contains_point(point),
             RuntimeDefaultDialog::ClientList => self.runtime_client_list_contains_point(point),
             RuntimeDefaultDialog::GameOver => self.game_over_dialog_contains_point(point),
@@ -625,12 +619,12 @@ impl GameApp {
     pub(crate) fn show_abort_dialog(&mut self, _player: i32) -> bool {
         if !matches!(self.mode, AppMode::Running)
             || self.game_over_dialog.is_some()
-            || self
-                .message_dialogs
-                .iter()
-                .any(|dialog| {
-                    matches!(dialog.continuation, MessageDialogContinuation::AbortGame { .. })
-                })
+            || self.message_dialogs.iter().any(|dialog| {
+                matches!(
+                    dialog.continuation,
+                    MessageDialogContinuation::AbortGame { .. }
+                )
+            })
         {
             return false;
         }
@@ -1031,7 +1025,10 @@ impl GameApp {
     /// Applies a menu outcome: `C4Menu::Enter` closes non-permanent menus
     /// before the command runs (C4Menu.cpp:512-518); `C4Menu::TryClose`
     /// executes the close command after closing (C4Menu.cpp:317-334).
-    pub(crate) fn execute_ingame_menu_outcome(&mut self, outcome: MenuOutcome) -> Result<(), EngineError> {
+    pub(crate) fn execute_ingame_menu_outcome(
+        &mut self,
+        outcome: MenuOutcome,
+    ) -> Result<(), EngineError> {
         self.execute_ingame_menu_outcome_for_player(self.local_owner, outcome)
     }
 
@@ -1058,7 +1055,10 @@ impl GameApp {
     }
 
     /// `C4MainMenu::MenuCommand` (C4MainMenu.cpp:734-948).
-    pub(crate) fn apply_ingame_menu_action(&mut self, action: MenuAction) -> Result<(), EngineError> {
+    pub(crate) fn apply_ingame_menu_action(
+        &mut self,
+        action: MenuAction,
+    ) -> Result<(), EngineError> {
         self.apply_ingame_menu_action_for_player(self.local_owner, action)
     }
 
@@ -1066,11 +1066,7 @@ impl GameApp {
     /// Host ID zero and disabled networking are no-ops. League clients with
     /// a live player are voted out without closing the permanent page; all
     /// other nonzero IDs take the direct remove path and close it.
-    fn kick_ingame_menu_client(
-        &mut self,
-        player: i32,
-        client_id: i32,
-    ) -> Result<(), EngineError> {
+    fn kick_ingame_menu_client(&mut self, player: i32, client_id: i32) -> Result<(), EngineError> {
         if client_id == 0 || self.network.is_none() {
             return Ok(());
         }
@@ -1136,7 +1132,8 @@ impl GameApp {
                         .player(player)
                         .map(|player| player.at_client().get())
                         .unwrap_or(-1);
-                    let control = clonk_engine::ActivateGameGoalMenuControlData { player, by_client };
+                    let control =
+                        clonk_engine::ActivateGameGoalMenuControlData { player, by_client };
                     self.record_control_batch(std::slice::from_ref(
                         &clonk_engine::ControlPacket::ActivateGameGoalMenu(control),
                     ));
@@ -1163,10 +1160,7 @@ impl GameApp {
             MenuAction::ActivateOptions => {
                 self.ingame_menu.replace(
                     player,
-                    Some(IngameMenuState::options_menu(
-                        &self.option_flags(player),
-                        0,
-                    )),
+                    Some(IngameMenuState::options_menu(&self.option_flags(player), 0)),
                 );
             }
             MenuAction::ActivateDisplay => {
@@ -1203,9 +1197,11 @@ impl GameApp {
                 }
                 if self.network.is_some() {
                     let tick = self.local_control_submission_tick();
-                    if let Some(Err(error)) = self.network.as_ref().map(|network| {
-                        network.submit_toggle_hostility(tick, player, opponent)
-                    }) {
+                    if let Some(Err(error)) = self
+                        .network
+                        .as_ref()
+                        .map(|network| network.submit_toggle_hostility(tick, player, opponent))
+                    {
                         tracing::warn!(player, opponent, %error, "failed to queue hostility toggle");
                     }
                 } else {
@@ -1336,9 +1332,8 @@ impl GameApp {
                                 true,
                             );
                         } else {
-                            let result_message = self.runtime_resource_bytes(
-                                "IDS_ERR_GAMELEFTVIAPLAYERMENU",
-                            );
+                            let result_message =
+                                self.runtime_resource_bytes("IDS_ERR_GAMELEFTVIAPLAYERMENU");
                             self.engine.evaluate_network_round_results(
                                 clonk_engine::RoundResultsNetworkResult::NetworkError,
                                 Some(result_message),
@@ -1559,10 +1554,8 @@ impl GameApp {
                 })
                 .collect::<Vec<_>>();
             self.cache_definition_icons(&entries)?;
-            self.ingame_menu.replace(
-                request.player,
-                Some(IngameMenuState::goals_menu(&entries)),
-            );
+            self.ingame_menu
+                .replace(request.player, Some(IngameMenuState::goals_menu(&entries)));
         }
         Ok(())
     }
@@ -1607,7 +1600,10 @@ impl GameApp {
         self.mark_menu_dirty();
     }
 
-    pub(crate) fn handle_menu_cancel_action(&mut self, state: ElementState) -> Result<(), EngineError> {
+    pub(crate) fn handle_menu_cancel_action(
+        &mut self,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
         if self.game_over_dialog.is_some() {
             if state == ElementState::Pressed {
                 self.handle_game_over_action(GameOverAction::End)?;
@@ -1732,7 +1728,12 @@ impl GameApp {
         self.construction_menu_drag.is_some()
     }
 
-    pub(crate) fn arm_construction_menu_drag(&mut self, owner: i32, item_index: usize, down: GuiPoint) {
+    pub(crate) fn arm_construction_menu_drag(
+        &mut self,
+        owner: i32,
+        item_index: usize,
+        down: GuiPoint,
+    ) {
         let Some(drag) = self.engine.object_menu_construction_drag(owner, item_index) else {
             self.construction_menu_drag = None;
             return;
@@ -1750,7 +1751,10 @@ impl GameApp {
     /// Advance C4Menu's GUI-space drag element before normal GUI hit-testing.
     /// `true` means the gesture is now C4MouseControl-owned and this move must
     /// not be delivered to a menu or another modal overlay.
-    pub(crate) fn update_construction_menu_drag(&mut self, point: GuiPoint) -> Result<bool, EngineError> {
+    pub(crate) fn update_construction_menu_drag(
+        &mut self,
+        point: GuiPoint,
+    ) -> Result<bool, EngineError> {
         let Some(drag) = self.construction_menu_drag.clone() else {
             return Ok(false);
         };
@@ -1852,7 +1856,8 @@ impl GameApp {
             ..
         }) = self.construction_menu_drag.as_mut()
         {
-            *stored_viewport_index = pointer.and(retained_viewport.map(|mouse| mouse.viewport_index));
+            *stored_viewport_index =
+                pointer.and(retained_viewport.map(|mouse| mouse.viewport_index));
             *stored_pointer = pointer;
             *stored_valid = site_valid;
         }
@@ -1981,18 +1986,18 @@ impl GameApp {
                             let surface = self.graphics.surface();
                             (surface.width(), surface.height())
                         };
-                        let action = self
-                            .game_over_dialog
-                            .as_mut()
-                            .and_then(|dialog| match button_state {
-                                ElementState::Pressed => {
-                                    dialog.handle_pointer_down(width, height);
-                                    None
-                                }
-                                ElementState::Released => {
-                                    dialog.handle_pointer_up(width, height)
-                                }
-                            });
+                        let action =
+                            self.game_over_dialog
+                                .as_mut()
+                                .and_then(|dialog| match button_state {
+                                    ElementState::Pressed => {
+                                        dialog.handle_pointer_down(width, height);
+                                        None
+                                    }
+                                    ElementState::Released => {
+                                        dialog.handle_pointer_up(width, height)
+                                    }
+                                });
                         let sounds = self
                             .game_over_dialog
                             .as_mut()
@@ -2057,8 +2062,7 @@ impl GameApp {
                     state.location_needs_initialization = initial_location.is_some();
                     state.free_aligned = initial_location.is_some();
                 }
-                state.selection_needs_adjustment |=
-                    state.scroll_selection != menu.selection;
+                state.selection_needs_adjustment |= state.scroll_selection != menu.selection;
                 state
             }
             _ => ScriptMenuPresentationState {
@@ -2102,18 +2106,15 @@ impl GameApp {
             let surface = self.graphics.surface();
             Rect::new(0, 0, surface.width(), surface.height())
         });
-        let font_images = resolve_script_menu_font_images(
-            &self.engine,
-            menu,
-            self.script_text_spec_resources(),
-        )
-        .map_err(|error| {
-            classic_parity_engine_error(report_classic_parity_boundary(
-                ClassicParityBoundary::ScriptMenuPointerResources {
-                    detail: error.to_string(),
-                },
-            ))
-        })?;
+        let font_images =
+            resolve_script_menu_font_images(&self.engine, menu, self.script_text_spec_resources())
+                .map_err(|error| {
+                    classic_parity_engine_error(report_classic_parity_boundary(
+                        ClassicParityBoundary::ScriptMenuPointerResources {
+                            detail: error.to_string(),
+                        },
+                    ))
+                })?;
         let presentation = self
             .script_menu_presentations
             .get(&owner)
@@ -2122,8 +2123,8 @@ impl GameApp {
             .and_then(|state| state.location)
             .or_else(|| self.script_menu_free_location(owner, menu));
         let scroll_y = presentation.map_or(0, |state| state.scroll_y);
-        let selection_changed = presentation
-            .is_none_or(|state| state.scroll_selection != menu.selection);
+        let selection_changed =
+            presentation.is_none_or(|state| state.scroll_selection != menu.selection);
         let adjust_selection = adjust_selection || selection_changed;
         let use_free_anchor = presentation.map_or(location.is_some(), |state| {
             state.location_needs_initialization
@@ -2176,18 +2177,15 @@ impl GameApp {
             let surface = self.graphics.surface();
             Rect::new(0, 0, surface.width(), surface.height())
         });
-        let font_images = resolve_script_menu_font_images(
-            &self.engine,
-            menu,
-            self.script_text_spec_resources(),
-        )
-        .map_err(|error| {
-            classic_parity_engine_error(report_classic_parity_boundary(
-                ClassicParityBoundary::ScriptMenuPointerResources {
-                    detail: error.to_string(),
-                },
-            ))
-        })?;
+        let font_images =
+            resolve_script_menu_font_images(&self.engine, menu, self.script_text_spec_resources())
+                .map_err(|error| {
+                    classic_parity_engine_error(report_classic_parity_boundary(
+                        ClassicParityBoundary::ScriptMenuPointerResources {
+                            detail: error.to_string(),
+                        },
+                    ))
+                })?;
         let presentation = self
             .script_menu_presentations
             .get(&owner)
@@ -2308,8 +2306,7 @@ impl GameApp {
                         .scenario_selector_open_error(&scenario, self.scenario_selector_mode)
                         .map_err(classic_parity_engine_error)?
                     {
-                        let caption = self
-                            .runtime_resource_string("IDS_MSG_CANNOTSTARTSCENARIO");
+                        let caption = self.runtime_resource_string("IDS_MSG_CANNOTSTARTSCENARIO");
                         self.status_text.clear();
                         self.push_message_dialog(
                             clonk_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -2414,10 +2411,7 @@ impl GameApp {
                     }
                     self.play_ui_sound("Click");
                     if matches!(self.startup_view, StartupView::NetworkLobby) {
-                        if self.select_network_lobby_scenario(
-                            &summary.identifier,
-                            &summary.title,
-                        ) {
+                        if self.select_network_lobby_scenario(&summary.identifier, &summary.title) {
                             self.status_text = format!("Selected {}", summary.title);
                         }
                     } else {
@@ -2639,8 +2633,8 @@ impl GameApp {
                         .startup_network_dialog
                         .as_ref()
                         .and_then(|dialog| dialog.selected_game());
-                    let target = selected_index
-                        .and_then(|index| self.startup_network_join_target(index));
+                    let target =
+                        selected_index.and_then(|index| self.startup_network_join_target(index));
                     let Some(target) = target else {
                         self.status_text.clear();
                         let message = startup_resource_string(
@@ -2906,15 +2900,15 @@ impl GameApp {
                         // ContextMenu already emitted the activation Click.
                         self.open_startup_player_delete_dialog(index)?;
                     }
-                    AppContextMenuCommand::StartupCrew(
-                        PlrSelCrewContextCommand::RenameCrew(index),
-                    ) => {
+                    AppContextMenuCommand::StartupCrew(PlrSelCrewContextCommand::RenameCrew(
+                        index,
+                    )) => {
                         self.abort_startup_crew_rename();
                         self.start_startup_crew_rename(index)?;
                     }
-                    AppContextMenuCommand::StartupCrew(
-                        PlrSelCrewContextCommand::DeleteCrew(index),
-                    ) => {
+                    AppContextMenuCommand::StartupCrew(PlrSelCrewContextCommand::DeleteCrew(
+                        index,
+                    )) => {
                         self.abort_startup_crew_rename();
                         self.open_startup_crew_delete_dialog(index)?;
                     }
@@ -3024,10 +3018,7 @@ impl GameApp {
                         savegame_player_id,
                         player_id,
                     } => {
-                        self.take_over_classic_lobby_savegame_player(
-                            savegame_player_id,
-                            player_id,
-                        );
+                        self.take_over_classic_lobby_savegame_player(savegame_player_id, player_id);
                     }
                     AppContextMenuCommand::LobbyPlayerTakeOverSubmenu { .. } => {
                         // The deferred parent entry carries no menu handler;
@@ -3075,9 +3066,9 @@ impl GameApp {
                         self.apply_league_signup_edit_context_command(field, command)?;
                     }
                     AppContextMenuCommand::LobbyChat(command) => {
-                        self.process_classic_lobby_chat_request(
-                            LobbyChatRequest::ContextCommand(command),
-                        )?;
+                        self.process_classic_lobby_chat_request(LobbyChatRequest::ContextCommand(
+                            command,
+                        ))?;
                     }
                     AppContextMenuCommand::ScenarioSearch(command) => {
                         self.execute_scenario_search_context_command(command)?;
@@ -3198,7 +3189,7 @@ impl GameApp {
                                 &mut self.startup_player_files,
                             )
                             .map_err(|error| error.to_string())
-                    });
+                        });
                     match persisted {
                         Ok(refusals) => {
                             for refusal in &refusals {
@@ -3326,21 +3317,22 @@ impl GameApp {
             &search_config.master_server_url,
         ));
         let reference_config = load_reference_query_settings(self.app_paths.as_ref());
-        self.startup_game_search = match clonk_network::StartupGameSearch::start_with_reference_config(
-            search_config,
-            reference_config,
-        ) {
-            Ok(search) => {
-                if search.initial_refresh().is_err() {
-                    self.status_text = "Unable to start network game search".to_string();
+        self.startup_game_search =
+            match clonk_network::StartupGameSearch::start_with_reference_config(
+                search_config,
+                reference_config,
+            ) {
+                Ok(search) => {
+                    if search.initial_refresh().is_err() {
+                        self.status_text = "Unable to start network game search".to_string();
+                    }
+                    Some(search)
                 }
-                Some(search)
-            }
-            Err(error) => {
-                self.status_text = format!("Unable to start network game search: {error}");
-                None
-            }
-        };
+                Err(error) => {
+                    self.status_text = format!("Unable to start network game search: {error}");
+                    None
+                }
+            };
         self.startup_network_dialog = Some(dialog);
         self.replace_startup_dialog(StartupView::NetworkGame, StartupDialog::NetworkGame);
         self.sync_startup_irc_snapshot();
@@ -3389,9 +3381,7 @@ impl GameApp {
             .app_paths
             .as_ref()
             .map(AppPaths::config_file)
-            .map(|config_path| {
-                persist_activations(&config_path, &mut self.startup_player_files)
-            })
+            .map(|config_path| persist_activations(&config_path, &mut self.startup_player_files))
             .transpose();
         let activation_refusals = match activation_refusals {
             Ok(Some(refusals)) => refusals,
@@ -3433,14 +3423,9 @@ impl GameApp {
         }
         self.startup_player_dialog = Some(dialog);
         self.plrsel_last_click = None;
-        self.replace_startup_dialog(
-            StartupView::PlayerSelection,
-            StartupDialog::PlayerSelection,
-        );
+        self.replace_startup_dialog(StartupView::PlayerSelection, StartupDialog::PlayerSelection);
         self.status_text.clear();
-        if let Err(error) =
-            self.show_startup_player_activation_refusals(&activation_refusals)
-        {
+        if let Err(error) = self.show_startup_player_activation_refusals(&activation_refusals) {
             tracing::error!(%error, "failed to show participant overflow while opening player selection");
         }
     }
@@ -3619,15 +3604,9 @@ impl GameApp {
         server_name: &str,
     ) -> Result<(), EngineError> {
         let message = self
-            .runtime_resource_text(
-                "IDS_NET_LEAGUE_REGGAME",
-                "Registering game at %s...",
-            )
+            .runtime_resource_text("IDS_NET_LEAGUE_REGGAME", "Registering game at %s...")
             .replacen("%s", server_name, 1);
-        let caption = self.runtime_resource_text(
-            "IDS_NET_LEAGUE_STARTGAME",
-            "Starting game...",
-        );
+        let caption = self.runtime_resource_text("IDS_NET_LEAGUE_STARTGAME", "Starting game...");
         self.push_message_dialog(
             clonk_frontend::message_dialog::MessageDialogState::new(
                 message,
@@ -3720,9 +3699,9 @@ impl GameApp {
             && !chart_stays_above
             && self.mode != AppMode::Running
         {
-                // Release the underlying screen's hover/drag capture before
-                // the C4GUI input-z dialog takes over. Chat has z=+2, so a
-                // newly inserted default-z message remains underneath it.
+            // Release the underlying screen's hover/drag capture before
+            // the C4GUI input-z dialog takes over. Chat has z=+2, so a
+            // newly inserted default-z message remains underneath it.
             self.cancel_underlying_interaction();
         }
         if !chat_above && !chart_stays_above && self.mode != AppMode::Running {
@@ -3751,8 +3730,8 @@ impl GameApp {
     }
 
     pub(crate) fn persist_message_dialog_checkbox_changes(&mut self, index: usize) {
-        let Some((key, description, native_irc_preference, changes)) = self.message_dialogs.get_mut(index).and_then(
-            |dialog| {
+        let Some((key, description, native_irc_preference, changes)) =
+            self.message_dialogs.get_mut(index).and_then(|dialog| {
                 let (key, description, native_irc_preference) = match &dialog.continuation {
                     MessageDialogContinuation::ClassicLobbyStart { .. } => (
                         "HideMsgPlrNoTakeOver",
@@ -3764,11 +3743,9 @@ impl GameApp {
                         "scenario-start warning preference",
                         false,
                     ),
-                    MessageDialogContinuation::StartupIrcConnectWarning { .. } => (
-                        "HideMsgIRCDangerous",
-                        "IRC disclaimer preference",
-                        true,
-                    ),
+                    MessageDialogContinuation::StartupIrcConnectWarning { .. } => {
+                        ("HideMsgIRCDangerous", "IRC disclaimer preference", true)
+                    }
                     _ => return None,
                 };
                 Some((
@@ -3777,8 +3754,8 @@ impl GameApp {
                     native_irc_preference,
                     dialog.state.take_checkbox_changes(),
                 ))
-            },
-        ) else {
+            })
+        else {
             return;
         };
         let Some(paths) = self.app_paths.as_ref() else {
@@ -3842,11 +3819,11 @@ impl GameApp {
             Some(active) if active == index => None,
             active => active,
         };
-        self.message_dialog_pointer_capture_index =
-            match self.message_dialog_pointer_capture_index {
-                Some(captured) if captured > index => Some(captured - 1),
-                Some(captured) if captured == index => None,
-                captured => captured,
+        self.message_dialog_pointer_capture_index = match self.message_dialog_pointer_capture_index
+        {
+            Some(captured) if captured > index => Some(captured - 1),
+            Some(captured) if captured == index => None,
+            captured => captured,
         };
         if was_active {
             if self.mode == AppMode::Running {
@@ -3996,8 +3973,7 @@ impl GameApp {
                     }
                     Err(error) => {
                         tracing::warn!(%error, "failed to persist masterserver redirect");
-                        self.status_text =
-                            format!("Unable to save server redirection: {error}");
+                        self.status_text = format!("Unable to save server redirection: {error}");
                     }
                 }
             }
@@ -4052,24 +4028,18 @@ impl GameApp {
             }
             MessageDialogContinuation::LeaguePlayerAuthWait => {
                 if let Some(mut pending) = self.pending_league_player_auth.take() {
-                    Self::reject_league_auth_continuation_player(
-                        &mut pending.continuation,
-                    );
+                    Self::reject_league_auth_continuation_player(&mut pending.continuation);
                     let _ = self.continue_league_player_auth(pending.continuation)?;
                 }
             }
             MessageDialogContinuation::LeaguePlayerAuthWelcome => {
                 if result == clonk_frontend::message_dialog::MessageDialogResult::Ok {
                     if let Some(mut pending) = self.pending_league_player_auth.take() {
-                        Self::advance_league_auth_continuation(
-                            &mut pending.continuation,
-                        );
+                        Self::advance_league_auth_continuation(&mut pending.continuation);
                         let _ = self.continue_league_player_auth(pending.continuation)?;
                     }
                 } else if let Some(pending) = self.pending_league_player_auth.as_ref() {
-                    let player = Self::league_auth_continuation_player_name(
-                        &pending.continuation,
-                    );
+                    let player = Self::league_auth_continuation_player_name(&pending.continuation);
                     let message = format_resource_string(
                         self.runtime_resource_text(
                             "IDS_MSG_LEAGUESIGNUPCANCELLED",
@@ -4080,10 +4050,7 @@ impl GameApp {
                     self.push_message_dialog(
                         clonk_frontend::message_dialog::MessageDialogState::regular_ok(
                             message,
-                            self.runtime_resource_text(
-                                "IDS_DLG_LEAGUESIGNUP",
-                                "League Login",
-                            ),
+                            self.runtime_resource_text("IDS_DLG_LEAGUESIGNUP", "League Login"),
                             clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY,
                         ),
                         MessageDialogContinuation::LeaguePlayerAuthCancelled,
@@ -4101,8 +4068,7 @@ impl GameApp {
                 }
             }
             MessageDialogContinuation::LeagueEndRetry => {
-                let retry = result
-                    == clonk_frontend::message_dialog::MessageDialogResult::Retry
+                let retry = result == clonk_frontend::message_dialog::MessageDialogResult::Retry
                     && self
                         .pending_league_end
                         .as_ref()
@@ -4280,12 +4246,11 @@ impl GameApp {
     }
 
     pub(crate) fn captured_message_dialog_index(&self) -> Option<usize> {
-        self.message_dialog_pointer_capture_index
-            .filter(|index| {
-                self.message_dialogs
-                    .get(*index)
-                    .is_some_and(|dialog| dialog.state.has_pointer_capture())
-            })
+        self.message_dialog_pointer_capture_index.filter(|index| {
+            self.message_dialogs
+                .get(*index)
+                .is_some_and(|dialog| dialog.state.has_pointer_capture())
+        })
     }
 
     pub(crate) fn point_in_message_dialog_bounds(
@@ -4324,13 +4289,9 @@ impl GameApp {
                     self.scoreboard_pointer_target_cached(point).is_some()
                 }
                 RuntimeDefaultDialog::NetworkChart => self.network_chart_contains_point(point),
-                RuntimeDefaultDialog::ClientList => {
-                    self.runtime_client_list_contains_point(point)
-                }
+                RuntimeDefaultDialog::ClientList => self.runtime_client_list_contains_point(point),
                 RuntimeDefaultDialog::GameOver => self.game_over_dialog_contains_point(point),
-                RuntimeDefaultDialog::ExternalIrc => {
-                    self.external_irc_dialog_contains_point(point)
-                }
+                RuntimeDefaultDialog::ExternalIrc => self.external_irc_dialog_contains_point(point),
             });
         if matches!(
             top_default_target,
@@ -4660,8 +4621,7 @@ impl GameApp {
         self.graphics = graphics;
         self.graphics
             .set_clonk_fonts(self.assets.clonk_fonts.clone());
-        self.graphics
-            .set_game_palette(self.assets.game_palette());
+        self.graphics.set_game_palette(self.assets.game_palette());
         self.graphics
             .set_liquid_animation(self.assets.liquid_animation());
         self.graphics.surface_mut().fill(Color::opaque(16, 28, 52));

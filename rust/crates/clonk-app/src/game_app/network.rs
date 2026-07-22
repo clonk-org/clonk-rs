@@ -48,8 +48,7 @@ impl GameApp {
                                 "invalid reference-server address: {error:#}"
                             ))
                         })?;
-                    let reference =
-                        query_first_classic_reference(endpoint, &reference_config)?;
+                    let reference = query_first_classic_reference(endpoint, &reference_config)?;
                     let settings = classic_client_settings_for_reference(
                         &reference,
                         player_name,
@@ -145,7 +144,9 @@ impl GameApp {
             || !load_league_auto_login(self.app_paths.as_ref())
     }
 
-    pub(crate) fn league_signup_strings(&self) -> clonk_frontend::league_signup::LeagueSignupStrings {
+    pub(crate) fn league_signup_strings(
+        &self,
+    ) -> clonk_frontend::league_signup::LeagueSignupStrings {
         clonk_frontend::league_signup::LeagueSignupStrings {
             caption_on_server: self.runtime_resource_text(
                 "IDS_DLG_LEAGUESIGNUPON",
@@ -352,11 +353,8 @@ impl GameApp {
                             );
                         }
                     }
-                    let _ = self.begin_league_player_auth_exchange(
-                        pending.continuation,
-                        auth,
-                        mode,
-                    )?;
+                    let _ =
+                        self.begin_league_player_auth_exchange(pending.continuation, auth, mode)?;
                     break;
                 }
                 LeagueSignupAction::Aborted { caption, message } => {
@@ -380,9 +378,7 @@ impl GameApp {
         Ok(())
     }
 
-    fn league_auth_continuation_has_current(
-        continuation: &LeaguePlayerAuthContinuation,
-    ) -> bool {
+    fn league_auth_continuation_has_current(continuation: &LeaguePlayerAuthContinuation) -> bool {
         match continuation {
             LeaguePlayerAuthContinuation::InitialClient { request, index, .. }
             | LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
@@ -417,7 +413,9 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn advance_league_auth_continuation(continuation: &mut LeaguePlayerAuthContinuation) {
+    pub(crate) fn advance_league_auth_continuation(
+        continuation: &mut LeaguePlayerAuthContinuation,
+    ) {
         match continuation {
             LeaguePlayerAuthContinuation::InitialClient { index, .. }
             | LeaguePlayerAuthContinuation::RuntimePlayer { index, .. }
@@ -541,10 +539,8 @@ impl GameApp {
             LeaguePlayerAuthContinuation::InitialClient { request, index, .. }
             | LeaguePlayerAuthContinuation::RuntimePlayer { request, index, .. } => {
                 match self.network.as_ref() {
-                    Some(network) => network.begin_authenticate_league_player(
-                        auth.clone(),
-                        &request.players[*index],
-                    ),
+                    Some(network) => network
+                        .begin_authenticate_league_player(auth.clone(), &request.players[*index]),
                     None => Ok(None),
                 }
             }
@@ -671,11 +667,7 @@ impl GameApp {
         if pending.mode == clonk_frontend::league_signup::LeagueSignupMode::Login {
             pending.auth.password = LegacyCString::default();
         }
-        self.open_league_signup_dialog(
-            pending.mode,
-            pending.auth,
-            pending.continuation,
-        )
+        self.open_league_signup_dialog(pending.mode, pending.auth, pending.continuation)
     }
 
     fn push_league_player_check_error(&mut self, message: String) -> Result<(), EngineError> {
@@ -707,8 +699,7 @@ impl GameApp {
         match result {
             Ok(response)
                 if response.is_register()
-                    && pending.mode
-                        == clonk_frontend::league_signup::LeagueSignupMode::Login =>
+                    && pending.mode == clonk_frontend::league_signup::LeagueSignupMode::Login =>
             {
                 if !response.account.is_empty() {
                     pending.auth.account = response.account;
@@ -722,13 +713,9 @@ impl GameApp {
                 )?;
             }
             Ok(response)
-                if Self::apply_league_auth_response(
-                    &mut pending.continuation,
-                    &response,
-                ) =>
+                if Self::apply_league_auth_response(&mut pending.continuation, &response) =>
             {
-                if pending.mode
-                    == clonk_frontend::league_signup::LeagueSignupMode::Registration
+                if pending.mode == clonk_frontend::league_signup::LeagueSignupMode::Registration
                     && !response.account.is_empty()
                 {
                     pending.auth.account.clone_from(&response.account);
@@ -781,8 +768,7 @@ impl GameApp {
                 self.pending_league_player_auth = Some(pending);
             }
             Ok(response) => {
-                if pending.mode
-                    == clonk_frontend::league_signup::LeagueSignupMode::Registration
+                if pending.mode == clonk_frontend::league_signup::LeagueSignupMode::Registration
                     && !response.account.is_empty()
                 {
                     pending.auth.account.clone_from(&response.account);
@@ -880,9 +866,8 @@ impl GameApp {
                 }
             });
         }
-        let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
-            self.generated_team_name_template.clone(),
-        );
+        let mut oracle =
+            ProcessInitialHostTeamAssignmentOracle::new(self.generated_team_name_template.clone());
         let refusal_template = self.runtime_resource_text(
             "IDS_MSG_LEAGUEJOINREFUSED",
             "League server has refused the join of player %s: %s",
@@ -1072,12 +1057,9 @@ impl GameApp {
             .snapshot()
             .into_iter()
             .filter_map(|client| {
-                ClientId::try_from(client.client_id).ok().map(|client_id| {
-                    (
-                        client_id,
-                        legacy_presentation_text(client.name.as_bytes()),
-                    )
-                })
+                ClientId::try_from(client.client_id)
+                    .ok()
+                    .map(|client_id| (client_id, legacy_presentation_text(client.name.as_bytes())))
             })
             .collect::<Vec<_>>();
         let client_ids = clients
@@ -1089,9 +1071,7 @@ impl GameApp {
             .players()
             .map(|player| {
                 let color = player.color().map_or(0x00ff_ffff, |color| {
-                    (u32::from(color.r) << 16)
-                        | (u32::from(color.g) << 8)
-                        | u32::from(color.b)
+                    (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
                 });
                 (player.id(), player.name().to_string(), color)
             })
@@ -1414,13 +1394,15 @@ impl GameApp {
         let displayed_status = barrier
             .map(|barrier| barrier.status)
             .or(self.runtime_network_committed_status);
-        let status_state = displayed_status.map(|status| status.state).unwrap_or_else(|| {
-            if self.network_control_running {
-                clonk_network::NETWORK_STATE_GO
-            } else {
-                clonk_network::NETWORK_STATE_PAUSE
-            }
-        });
+        let status_state = displayed_status
+            .map(|status| status.state)
+            .unwrap_or_else(|| {
+                if self.network_control_running {
+                    clonk_network::NETWORK_STATE_GO
+                } else {
+                    clonk_network::NETWORK_STATE_PAUSE
+                }
+            });
         let status_name = match status_state {
             clonk_network::NETWORK_STATE_NONE => "none",
             clonk_network::NETWORK_STATE_INIT => "init",
@@ -1691,9 +1673,7 @@ impl GameApp {
                                 | clonk_engine::PLAYER_INFO_FLAG_INVISIBLE)
                             == 0
                     })
-                    .map(|player| {
-                        legacy_presentation_text(control_player_effective_name(&player))
-                    })
+                    .map(|player| legacy_presentation_text(control_player_effective_name(&player)))
                     .collect::<Vec<_>>();
                 (client_id, names)
             })
@@ -1754,11 +1734,10 @@ impl GameApp {
                 }));
                 addresses.sort();
                 addresses.dedup();
-                let client_state = runtime_client_states.iter().find(|state| {
-                    i32::try_from(state.client_id).ok() == Some(client.client_id)
-                });
-                let (status, wait_ms) =
-                    Self::runtime_client_row_network_state(local, client_state);
+                let client_state = runtime_client_states
+                    .iter()
+                    .find(|state| i32::try_from(state.client_id).ok() == Some(client.client_id));
+                let (status, wait_ms) = Self::runtime_client_row_network_state(local, client_state);
                 clonk_frontend::runtime_client_list::RuntimeClientRow {
                     client_id: client.client_id,
                     name: legacy_presentation_text(client.name.as_bytes()),
@@ -2134,10 +2113,7 @@ impl GameApp {
             .collect();
     }
 
-    fn arm_runtime_network_status_barrier(
-        &mut self,
-        status: clonk_network::NetworkStatus,
-    ) -> bool {
+    fn arm_runtime_network_status_barrier(&mut self, status: clonk_network::NetworkStatus) -> bool {
         if self.mode != AppMode::Running
             || self.network.is_none()
             || status.target_tick < 0
@@ -2149,9 +2125,10 @@ impl GameApp {
             return false;
         }
         self.runtime_network_control_mode = Some(status.control_mode);
-        if self.runtime_network_status_barrier.is_some_and(|pending| {
-            same_runtime_network_status_barrier(pending.status, status)
-        }) {
+        if self
+            .runtime_network_status_barrier
+            .is_some_and(|pending| same_runtime_network_status_barrier(pending.status, status))
+        {
             return false;
         }
         self.runtime_network_status_barrier = Some(RuntimeNetworkStatusBarrier {
@@ -2245,9 +2222,7 @@ impl GameApp {
             RuntimeNetworkRole::Host => self
                 .network
                 .as_ref()
-                .map(|network| {
-                    network.status_reached(pending.status, current_control_tick)
-                }),
+                .map(|network| network.status_reached(pending.status, current_control_tick)),
             RuntimeNetworkRole::Client => self.network.as_mut().map(|network| {
                 network.acknowledge_expected_status_at_frame(
                     pending.status,
@@ -2355,10 +2330,7 @@ impl GameApp {
         }
     }
 
-    fn client_start_resource_display_name(
-        &self,
-        pending: &PendingClientStartResource,
-    ) -> String {
+    fn client_start_resource_display_name(&self, pending: &PendingClientStartResource) -> String {
         match pending.role {
             ClientStartResourceRole::Scenario => {
                 self.runtime_resource_text("IDS_NET_RES_SCENARIO", "Scenario")
@@ -2427,9 +2399,10 @@ impl GameApp {
             .copied()
             .unwrap_or_default()
             .min(100);
-        let same_wait = self.blocking_resource_wait.as_ref().is_some_and(|wait| {
-            wait.scope == scope && wait.resource_id == resource_id
-        });
+        let same_wait = self
+            .blocking_resource_wait
+            .as_ref()
+            .is_some_and(|wait| wait.scope == scope && wait.resource_id == resource_id);
         if !same_wait {
             if let Some(previous) = self.blocking_resource_wait.take() {
                 self.dismiss_blocking_resource_wait_dialog(previous.scope, previous.resource_id);
@@ -2486,9 +2459,10 @@ impl GameApp {
         scope: BlockingResourceScope,
         resource_id: i32,
     ) -> Result<(), EngineError> {
-        let Some(wait) = self.blocking_resource_wait.take_if(|wait| {
-            wait.scope == scope && wait.resource_id == resource_id
-        }) else {
+        let Some(wait) = self
+            .blocking_resource_wait
+            .take_if(|wait| wait.scope == scope && wait.resource_id == resource_id)
+        else {
             return Ok(());
         };
         match wait.scope {
@@ -2509,7 +2483,10 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn poll_blocking_resource_wait_at(&mut self, now: Instant) -> Result<(), EngineError> {
+    pub(crate) fn poll_blocking_resource_wait_at(
+        &mut self,
+        now: Instant,
+    ) -> Result<(), EngineError> {
         let Some((scope, resource_id, previous_percent)) = self
             .blocking_resource_wait
             .as_ref()
@@ -2537,10 +2514,8 @@ impl GameApp {
             return Ok(());
         };
         self.dismiss_blocking_resource_wait_dialog(wait.scope, wait.resource_id);
-        let template = self.runtime_resource_text(
-            "IDS_NET_ERR_RESTIMEOUT",
-            "Waiting for %s: Timeout!",
-        );
+        let template =
+            self.runtime_resource_text("IDS_NET_ERR_RESTIMEOUT", "Waiting for %s: Timeout!");
         let message = format_resource_string(template, &[&wait.display_name]);
         tracing::error!(
             resource_id = wait.resource_id,
@@ -2675,8 +2650,7 @@ impl GameApp {
             .filter(|client| {
                 client.client_id == join_data.client_id
                     && client.dynamic_resource_id == join_data.dynamic.id
-                    && client.random_seed
-                        == u64::from(join_data.parameters.random_seed as u32)
+                    && client.random_seed == u64::from(join_data.parameters.random_seed as u32)
             })
             .and_then(|client| client.scenario.take());
         if let Some(scenario_data) = preloaded_scenario {
@@ -2795,11 +2769,12 @@ impl GameApp {
                     .iter()
                     .flat_map(|client| {
                         client.players.iter().filter_map(move |info| {
-                            info.is_joined().then(|| clonk_engine::RuntimeJoinPlayerSource {
-                                client_id: client.client_id,
-                                info: info.clone(),
-                                load_unnamed_portraits: client.client_id == local_client_id,
-                            })
+                            info.is_joined()
+                                .then(|| clonk_engine::RuntimeJoinPlayerSource {
+                                    client_id: client.client_id,
+                                    info: info.clone(),
+                                    load_unnamed_portraits: client.client_id == local_client_id,
+                                })
                         })
                     })
                     .collect::<Vec<_>>()
@@ -2940,11 +2915,13 @@ impl GameApp {
                 publish_initial_configured_client_players(client_id, &configured, |publication| {
                     let source_path = publication.source_path.clone();
                     network
-                        .publish_client_player_resource(clonk_network::ClientPlayerResourceRequest {
-                            source_path: publication.source_path,
-                            wire_name: publication.wire_name,
-                            group_maker: publication.group_maker,
-                        })
+                        .publish_client_player_resource(
+                            clonk_network::ClientPlayerResourceRequest {
+                                source_path: publication.source_path,
+                                wire_name: publication.wire_name,
+                                group_maker: publication.group_maker,
+                            },
+                        )
                         .inspect(|core| {
                             completed_resources.push((core.clone(), source_path.clone()));
                         })
@@ -3132,7 +3109,7 @@ impl GameApp {
             .map_err(|error| format!("failed to load {}: {error}", source_path.display()))?;
         let wire_name =
             clonk_engine::LegacyCString::from_bytes(clonk_script::c4_string_bytes(wire_filename))
-            .ok_or_else(|| "player filename contains an interior NUL".to_string())?;
+                .ok_or_else(|| "player filename contains an interior NUL".to_string())?;
         let selected =
             SelectedClientPlayer::new(source_path.clone(), wire_name.clone(), player_file);
         let alternate_color = selected.alternate_color();
@@ -3320,8 +3297,7 @@ impl GameApp {
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             .unwrap_or(0);
-        let frozen = self.host_reference_paused
-            && self.runtime_network_status_barrier.is_none();
+        let frozen = self.host_reference_paused && self.runtime_network_status_barrier.is_none();
         frozen || !self.control_clients.is_activated(local_client_id)
     }
 
@@ -3435,16 +3411,10 @@ impl GameApp {
                         local_addresses,
                     } = &event
                     {
-                        self.update_host_netpuncher_reference(
-                            *game_ids,
-                            local_addresses.clone(),
-                        );
+                        self.update_host_netpuncher_reference(*game_ids, local_addresses.clone());
                         continue;
                     }
-                    if matches!(
-                        &event,
-                        NetworkEvent::PeerConnected { client_id: 0, .. }
-                    ) {
+                    if matches!(&event, NetworkEvent::PeerConnected { client_id: 0, .. }) {
                         continue;
                     }
                     let classic_lobby_state_event = matches!(
@@ -3871,7 +3841,9 @@ impl GameApp {
                                 else {
                                     continue;
                                 };
-                                if let Err(error) = self.commit_host_player_info_admission(admission) {
+                                if let Err(error) =
+                                    self.commit_host_player_info_admission(admission)
+                                {
                                     tracing::error!(%error, "failed to broadcast authoritative PlayerInfo");
                                 }
                             }
@@ -3928,9 +3900,7 @@ impl GameApp {
                             }
                             NetworkControl::ClientRemove(remove) => {
                                 if self.control_clients.apply_remove(&remove) {
-                                    self.remove_classic_lobby_resources_at_client(
-                                        remove.client_id,
-                                    );
+                                    self.remove_classic_lobby_resources_at_client(remove.client_id);
                                     self.network_client_activity.remove_client(remove.client_id);
                                     self.control_messages.remove_client(remove.client_id);
                                     self.control_player_infos.on_client_part(remove.client_id);
@@ -3945,9 +3915,7 @@ impl GameApp {
                                 let follow_ups = self.apply_direct_player_info_control(info, true);
                                 for follow_up in follow_ups {
                                     if let Err(error) = self.broadcast_and_preexecute_player_info(
-                                        follow_up,
-                                        true,
-                                        false,
+                                        follow_up, true, false,
                                     ) {
                                         tracing::error!(%error, "failed to broadcast updated PlayerInfo follow-up");
                                     }
@@ -4084,10 +4052,7 @@ impl GameApp {
                     } => {
                         self.admission_resources
                             .mark_progress(resource_id, present_percent);
-                        self.update_classic_lobby_resource_progress(
-                            resource_id,
-                            present_percent,
-                        );
+                        self.update_classic_lobby_resource_progress(resource_id, present_percent);
                         self.sync_classic_lobby_resource_ready();
                     }
                     NetworkEvent::ResourceComplete {
@@ -4102,22 +4067,20 @@ impl GameApp {
                         // resource's mutable getFile()-equivalent path and
                         // ownership instead of replacing them with the
                         // backend's serving standalone.
-                        let (path, local) = match self
-                            .admission_resources
-                            .status(resource_id)
-                        {
+                        let (path, local) = match self.admission_resources.status(resource_id) {
                             Some(AdmissionResourceState::Complete {
                                 path: mutable_path,
                                 local: mutable_local,
                                 ..
-                            }) if core.derived_id >= 0 => {
-                                (mutable_path.clone(), *mutable_local)
-                            }
+                            }) if core.derived_id >= 0 => (mutable_path.clone(), *mutable_local),
                             _ => (path, local),
                         };
                         self.admission_resources.register_lobby_resource(&core);
-                        self.admission_resources
-                            .mark_complete_with_locality(resource_id, path.clone(), local);
+                        self.admission_resources.mark_complete_with_locality(
+                            resource_id,
+                            path.clone(),
+                            local,
+                        );
                         self.register_classic_lobby_resource(&core, 100);
                         tracing::info!(
                             resource_id,
@@ -4185,14 +4148,17 @@ impl GameApp {
         self.engine.evaluate_league_round_results(
             packet.success,
             packet.result_string.as_bytes().to_vec(),
-            packet.players.iter().map(|result| clonk_engine::LeagueRoundResultUpdate {
-                player_info_id: result.player_info_id,
-                league_score_new: result.league_score_new,
-                league_score_gain: result.league_score_gain,
-                league_rank_new: result.league_rank_new,
-                league_rank_symbol_new: result.league_rank_symbol_new,
-                league_progress_data: result.league_progress_data.as_bytes().to_vec(),
-            }),
+            packet
+                .players
+                .iter()
+                .map(|result| clonk_engine::LeagueRoundResultUpdate {
+                    player_info_id: result.player_info_id,
+                    league_score_new: result.league_score_new,
+                    league_score_gain: result.league_score_gain,
+                    league_rank_new: result.league_rank_new,
+                    league_rank_symbol_new: result.league_rank_symbol_new,
+                    league_progress_data: result.league_progress_data.as_bytes().to_vec(),
+                }),
         );
         self.snapshot.round_results = self.engine.snapshot().round_results;
         tracing::info!(
@@ -4229,10 +4195,7 @@ impl GameApp {
         client_id: i32,
         reason: clonk_network::LeagueDisconnectReason,
     ) {
-        if !self.network_is_league
-            || self.mode != AppMode::Running
-            || self.snapshot.game_over
-        {
+        if !self.network_is_league || self.mode != AppMode::Running || self.snapshot.game_over {
             return;
         }
         let (_, clients) = self.control_player_infos.retained_rows_snapshot();
@@ -4274,7 +4237,9 @@ impl GameApp {
         self.handle_desync(local, remote);
     }
 
-    pub(crate) fn league_signup_layout(&self) -> Option<clonk_frontend::league_signup::LeagueSignupLayout> {
+    pub(crate) fn league_signup_layout(
+        &self,
+    ) -> Option<clonk_frontend::league_signup::LeagueSignupLayout> {
         let dialog = self.league_signup_dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let surface = self.graphics.surface();
@@ -4292,11 +4257,8 @@ impl GameApp {
         let version_matches = reference.version == clonk_network::CURRENT_GAME_VERSION
             && reference.build == clonk_network::CURRENT_GAME_BUILD;
         if !version_matches {
-            let remote = network_game_version_string(
-                &reference.game,
-                reference.version,
-                reference.build,
-            );
+            let remote =
+                network_game_version_string(&reference.game, reference.version, reference.build);
             let local = network_game_version_string(
                 "LegacyClonk",
                 clonk_network::CURRENT_GAME_VERSION,
@@ -4499,8 +4461,7 @@ impl GameApp {
                         self.status_text = "Preparing network game…".to_string();
                     }
                     Err(error) => {
-                        self.status_text =
-                            format!("Unable to start network preparation: {error}");
+                        self.status_text = format!("Unable to start network preparation: {error}");
                     }
                 }
             }
@@ -4530,29 +4491,22 @@ impl GameApp {
             .map(|selection| selection.group_maker().clone());
         let (_, default_port) = load_network_startup_settings(self.app_paths.as_ref());
         let connect_target = address.clone();
-        let spawn = spawn_startup_network_attempt(
-            "lc-startup-network",
-            move |cancellation| {
-                let server_addr = resolve_join_socket(&address, default_port).map_err(|error| {
-                    NetworkStartError::Other(format!("invalid network address: {error:#}"))
-                })?;
-                if cancellation.is_cancelled() {
-                    return Err(NetworkStartError::Cancelled);
-                }
-                let mut settings =
-                    client_settings_for_paths(server_addr, player_name, app_paths.as_ref());
-                if let Some(group_maker) = group_maker {
-                    settings.group_maker = group_maker;
-                }
-                let mode = NetworkMode::Client(settings.clone());
-                NetworkManager::for_client_cancellable(
-                    settings,
-                    local_owner,
-                    cancellation,
-                )
+        let spawn = spawn_startup_network_attempt("lc-startup-network", move |cancellation| {
+            let server_addr = resolve_join_socket(&address, default_port).map_err(|error| {
+                NetworkStartError::Other(format!("invalid network address: {error:#}"))
+            })?;
+            if cancellation.is_cancelled() {
+                return Err(NetworkStartError::Cancelled);
+            }
+            let mut settings =
+                client_settings_for_paths(server_addr, player_name, app_paths.as_ref());
+            if let Some(group_maker) = group_maker {
+                settings.group_maker = group_maker;
+            }
+            let mode = NetworkMode::Client(settings.clone());
+            NetworkManager::for_client_cancellable(settings, local_owner, cancellation)
                 .map(|manager| (mode, manager))
-            },
-        );
+        });
         match spawn {
             Ok((receiver, attempt)) => {
                 self.begin_cancellable_startup_network_connection(
@@ -4629,18 +4583,11 @@ impl GameApp {
         };
         let connect_targets = startup_network_connect_targets(&settings);
         let local_owner = self.local_owner;
-        let spawn = spawn_startup_network_attempt(
-            "lc-startup-network",
-            move |cancellation| {
-                let mode = NetworkMode::Client(settings.clone());
-                NetworkManager::for_client_cancellable(
-                    settings,
-                    local_owner,
-                    cancellation,
-                )
+        let spawn = spawn_startup_network_attempt("lc-startup-network", move |cancellation| {
+            let mode = NetworkMode::Client(settings.clone());
+            NetworkManager::for_client_cancellable(settings, local_owner, cancellation)
                 .map(|manager| (mode, manager))
-            },
-        );
+        });
         match spawn {
             Ok((receiver, attempt)) => {
                 if let Err(error) = self.begin_cancellable_startup_network_connection(
@@ -4679,8 +4626,7 @@ impl GameApp {
                 reference
                     .replacing_netpuncher_state(game_ids, addresses)
                     .map_err(|error| error.to_string())
-            })
-        {
+            }) {
             Ok(reference) => reference,
             Err(error) => {
                 tracing::warn!(%error, "exact network game reference unavailable");
@@ -4823,7 +4769,10 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn install_prepared_host_material_resources(&mut self, prepared: &PreparedHostBootstrap) {
+    pub(crate) fn install_prepared_host_material_resources(
+        &mut self,
+        prepared: &PreparedHostBootstrap,
+    ) {
         self.network_material_resource_groups = Some(prepared.material_resource_groups().to_vec());
     }
 
@@ -4911,10 +4860,9 @@ impl GameApp {
             // One host-loop command owns both the Go barrier and the policy
             // installed as the lobby closes. Separate FIFO commands leave an
             // admission branch able to accept a late join between them.
-            if let Err(error) = network.begin_go(
-                status,
-                prepared.admission().runtime_join_allowed(),
-            ) {
+            if let Err(error) =
+                network.begin_go(status, prepared.admission().runtime_join_allowed())
+            {
                 self.status_text = format!("Unable to start prepared host: {error}");
                 return Ok(());
             }
@@ -4957,10 +4905,8 @@ impl GameApp {
                 loading.refreshed_resources = Some(staged.loader_refreshed_resources);
                 loading.refreshed_tooltip_font = staged.loader_refreshed_tooltip_font;
                 loading.refreshed_native_font_source = staged.loader_refreshed_native_font_source;
-                loading.refreshed_global_gui_failures =
-                    Some(staged.pending_global_gui_failures);
-                loading.refreshed_gui_sheet_overrides =
-                    Some(staged.pending_gui_sheet_overrides);
+                loading.refreshed_global_gui_failures = Some(staged.pending_global_gui_failures);
+                loading.refreshed_gui_sheet_overrides = Some(staged.pending_gui_sheet_overrides);
                 loading.refresh_requested = true;
             }
             self.loading_state = Some(loading);
@@ -5017,23 +4963,28 @@ impl GameApp {
     }
 
     pub(crate) fn begin_network_start_wait(&mut self, status: clonk_network::NetworkStatus) {
-        let clients = self.control_clients.snapshot().into_iter().filter_map(|client| {
-            (client.client_id != 0).then(|| {
-                let name = client.name.to_string_lossy().into_owned();
-                clonk_frontend::network_start_wait::NetworkStartWaitClient::new(
-                    client.client_id,
-                    if name.is_empty() {
-                        format!("Client {}", client.client_id)
-                    } else {
-                        name
-                    },
-                    clonk_frontend::network_start_wait::NetworkStartWaitClientStatus::Loading,
-                )
-            })
-        });
+        let clients = self
+            .control_clients
+            .snapshot()
+            .into_iter()
+            .filter_map(|client| {
+                (client.client_id != 0).then(|| {
+                    let name = client.name.to_string_lossy().into_owned();
+                    clonk_frontend::network_start_wait::NetworkStartWaitClient::new(
+                        client.client_id,
+                        if name.is_empty() {
+                            format!("Client {}", client.client_id)
+                        } else {
+                            name
+                        },
+                        clonk_frontend::network_start_wait::NetworkStartWaitClientStatus::Loading,
+                    )
+                })
+            });
         self.network_start_wait = Some(NetworkStartWaitDialogState {
-            controller:
-                clonk_frontend::network_start_wait::NetworkStartWaitState::with_clients(clients),
+            controller: clonk_frontend::network_start_wait::NetworkStartWaitState::with_clients(
+                clients,
+            ),
             expected_status: status,
             visible: false,
             pointer: None,
@@ -5147,16 +5098,12 @@ impl GameApp {
         let Ok(client_id) = i32::try_from(client_id) else {
             return;
         };
-        if self
-            .network_start_wait
-            .as_mut()
-            .is_some_and(|wait| {
-                wait.controller.update_client_status(
-                    client_id,
-                    clonk_frontend::network_start_wait::NetworkStartWaitClientStatus::Kick,
-                )
-            })
-        {
+        if self.network_start_wait.as_mut().is_some_and(|wait| {
+            wait.controller.update_client_status(
+                client_id,
+                clonk_frontend::network_start_wait::NetworkStartWaitClientStatus::Kick,
+            )
+        }) {
             self.mark_menu_dirty();
         }
     }
@@ -5224,14 +5171,16 @@ impl GameApp {
     pub(crate) fn network_start_wait_layout(
         &self,
     ) -> Option<clonk_frontend::network_start_wait::NetworkStartWaitLayout> {
-        let wait = self.network_start_wait.as_ref().filter(|wait| wait.visible)?;
+        let wait = self
+            .network_start_wait
+            .as_ref()
+            .filter(|wait| wait.visible)?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let surface = self.graphics.surface();
-        Some(wait.controller.layout(
-            surface.width() as i32,
-            surface.height() as i32,
-            fonts,
-        ))
+        Some(
+            wait.controller
+                .layout(surface.width() as i32, surface.height() as i32, fonts),
+        )
     }
 
     pub(crate) fn play_network_start_wait_sounds(&mut self) {
@@ -5720,7 +5669,8 @@ impl GameApp {
 
     fn publish_updated_host_join_snapshot_with_network(&mut self, publish_to_network: bool) {
         let project_runtime_teams = matches!(self.mode, AppMode::Running);
-        let clients = clonk_network::JoinClientRegistrySnapshot::new(self.control_clients.snapshot());
+        let clients =
+            clonk_network::JoinClientRegistrySnapshot::new(self.control_clients.snapshot());
         let teams = project_runtime_teams.then(|| self.engine.teams().to_vec());
         if let Some(snapshot) = self.host_join_snapshot.as_mut() {
             // Game.Clients and Game.Teams are live aliases of their
@@ -5814,7 +5764,10 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn execute_league_vote(&mut self, vote: clonk_engine::VoteControlData) -> Result<(), EngineError> {
+    pub(crate) fn execute_league_vote(
+        &mut self,
+        vote: clonk_engine::VoteControlData,
+    ) -> Result<(), EngineError> {
         if !self.control_clients.contains(vote.by_client) {
             return Ok(());
         }
@@ -6117,8 +6070,8 @@ impl GameApp {
         let offline_local = self.network.is_none()
             && self.control_playback.is_none()
             && join.at_client == self.offline_local_client_id();
-        let locally_controlled = !info.is_script_player()
-            && (local_client_id == Some(join.at_client) || offline_local);
+        let locally_controlled =
+            !info.is_script_player() && (local_client_id == Some(join.at_client) || offline_local);
         let pending_player_big_icon = match &join.source {
             clonk_engine::JoinPlayerSource::Resource(core) => self
                 .admission_resources
@@ -6224,25 +6177,24 @@ impl GameApp {
             .as_ref()
             .map(PlayerFile::exact_info_core)
             .unwrap_or_default();
-        let observed_startup_player_count = i32::try_from(
-            self.control_player_infos.nonremoved_player_count(),
-        )
-        .unwrap_or(i32::MAX);
+        let observed_startup_player_count =
+            i32::try_from(self.control_player_infos.nonremoved_player_count()).unwrap_or(i32::MAX);
         let startup_player_count = self
             .engine
             .freeze_startup_player_count(observed_startup_player_count);
-        let config = match clonk_engine::prepare_join_player_config(clonk_engine::JoinPlayerPreparation {
-            join: &join,
-            info: &info,
-            player_file: player_file.as_ref(),
-            startup_player_count,
-        }) {
-            Ok(config) => config,
-            Err(error) => {
-                tracing::warn!(info_id = join.info_id, %error, "failed to prepare player join");
-                return Ok(());
-            }
-        };
+        let config =
+            match clonk_engine::prepare_join_player_config(clonk_engine::JoinPlayerPreparation {
+                join: &join,
+                info: &info,
+                player_file: player_file.as_ref(),
+                startup_player_count,
+            }) {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::warn!(info_id = join.info_id, %error, "failed to prepare player join");
+                    return Ok(());
+                }
+            };
         self.refresh_non_authoritative_physical_viewports();
         self.apply_direct_film_view_projection();
         let _ = self.apply_pending_viewport_presentation_requests();
@@ -6270,10 +6222,7 @@ impl GameApp {
             retained_player_info_core,
         ) {
             Ok(joined) if locally_controlled => {
-                self.cache_joined_player_big_icon(
-                    join.info_id,
-                    pending_player_big_icon.as_ref(),
-                );
+                self.cache_joined_player_big_icon(join.info_id, pending_player_big_icon.as_ref());
                 // InitializePlayer callbacks run before JoinPlayer creates
                 // the new local viewport. Apply their physical mutations to
                 // the pre-existing list before CreateViewport sorts it.
@@ -6303,19 +6252,11 @@ impl GameApp {
                     self.open_initial_team_selection(joined.number());
                 }
                 let game_running = matches!(self.mode, AppMode::Running);
-                let _ = self.create_physical_viewport(
-                    joined.number(),
-                    false,
-                    game_running,
-                    true,
-                );
+                let _ = self.create_physical_viewport(joined.number(), false, game_running, true);
                 self.check_fullscreen_physical_viewports(game_running);
             }
             Ok(joined) => {
-                self.cache_joined_player_big_icon(
-                    join.info_id,
-                    pending_player_big_icon.as_ref(),
-                );
+                self.cache_joined_player_big_icon(join.info_id, pending_player_big_icon.as_ref());
                 let _ = self.apply_pending_viewport_presentation_requests();
                 let player_info_changed = self.control_player_infos.mark_joined(
                     join.info_id,
@@ -6328,10 +6269,7 @@ impl GameApp {
                 // JoinPlayer calls ViewportCheck even for remote/script
                 // players. In replay film mode this silently retargets an
                 // existing ownerless viewport to the first live player.
-                self.check_fullscreen_physical_viewports(matches!(
-                    self.mode,
-                    AppMode::Running
-                ));
+                self.check_fullscreen_physical_viewports(matches!(self.mode, AppMode::Running));
             }
             Err(error) => {
                 if locally_controlled {
@@ -6389,9 +6327,10 @@ impl GameApp {
         {
             return;
         }
-        let (Some(network), Some(reference)) =
-            (self.network.as_ref(), self.advertised_game_reference.clone())
-        else {
+        let (Some(network), Some(reference)) = (
+            self.network.as_ref(),
+            self.advertised_game_reference.clone(),
+        ) else {
             return;
         };
         if let Err(error) = network.update_league_reference(now, reference) {
@@ -6505,10 +6444,9 @@ impl GameApp {
             error.to_string()
         };
         let (key, fallback) = match phase {
-            LeagueEndFailurePhase::Start => (
-                "IDS_NET_ERR_LEAGUE_FINISHGAME",
-                "Could not finish game: %s",
-            ),
+            LeagueEndFailurePhase::Start => {
+                ("IDS_NET_ERR_LEAGUE_FINISHGAME", "Could not finish game: %s")
+            }
             LeagueEndFailurePhase::Send => (
                 "IDS_NET_ERR_LEAGUE_SENDRESULT",
                 "Could not send game result: %s",
@@ -6533,13 +6471,15 @@ impl GameApp {
         let packet = self
             .network
             .as_ref()
-            .and_then(|network| match network.finalize_league_end_failure(fallback.clone()) {
-                Ok(packet) => packet,
-                Err(error) => {
-                    tracing::error!(%error, "failed to finalize league round-result failure");
-                    None
-                }
-            })
+            .and_then(
+                |network| match network.finalize_league_end_failure(fallback.clone()) {
+                    Ok(packet) => packet,
+                    Err(error) => {
+                        tracing::error!(%error, "failed to finalize league round-result failure");
+                        None
+                    }
+                },
+            )
             .unwrap_or(fallback);
         self.pending_league_end = None;
         self.apply_and_broadcast_league_result(packet);
@@ -6555,15 +6495,15 @@ impl GameApp {
             let packet = self
                 .network
                 .as_ref()
-                .and_then(|network| {
-                    match network.finalize_league_end_failure(fallback.clone()) {
+                .and_then(
+                    |network| match network.finalize_league_end_failure(fallback.clone()) {
                         Ok(packet) => packet,
                         Err(error) => {
                             tracing::error!(%error, "failed to finalize rejected league result");
                             None
                         }
-                    }
-                })
+                    },
+                )
                 .unwrap_or(fallback);
             self.apply_and_broadcast_league_result(packet);
         }
@@ -6575,9 +6515,9 @@ impl GameApp {
             return;
         };
         let fallback = pending.terminal_packet.unwrap_or_else(|| {
-            let message = pending.last_failure.unwrap_or_else(|| {
-                self.league_end_error_message(LeagueEndFailurePhase::Send, "")
-            });
+            let message = pending
+                .last_failure
+                .unwrap_or_else(|| self.league_end_error_message(LeagueEndFailurePhase::Send, ""));
             clonk_network::LeagueRoundResultsPacket {
                 success: false,
                 result_string: league_result_message(&message),
@@ -6587,15 +6527,15 @@ impl GameApp {
         let packet = self
             .network
             .as_ref()
-            .and_then(|network| {
-                match network.finalize_league_end_failure(fallback.clone()) {
+            .and_then(
+                |network| match network.finalize_league_end_failure(fallback.clone()) {
                     Ok(packet) => packet,
                     Err(error) => {
                         tracing::error!(%error, "failed to finalize league result during teardown");
                         None
                     }
-                }
-            })
+                },
+            )
             .unwrap_or(fallback);
         self.apply_and_broadcast_league_result(packet);
     }
@@ -6638,8 +6578,7 @@ impl GameApp {
             .as_ref()
             .map(|scenario| scenario.title.clone())
             .unwrap_or_else(|| "Scenario".to_string());
-        let host_or_cinematic_film =
-            self.engine.is_control_host() || self.engine.cinematic_film();
+        let host_or_cinematic_film = self.engine.is_control_host() || self.engine.cinematic_film();
         let next_mission = self.engine.next_mission();
         let mut dialog = build_game_over_dialog(
             &self.snapshot,
@@ -6672,10 +6611,7 @@ impl GameApp {
                 };
                 (
                     picture,
-                    format_resource_string_with_opaque_arguments(
-                        template,
-                        &[&name, &description],
-                    ),
+                    format_resource_string_with_opaque_arguments(template, &[&name, &description]),
                 )
             },
             |player_info_id| self.runtime_player_big_icons.get(&player_info_id).cloned(),
@@ -6787,11 +6723,9 @@ impl GameApp {
                     .map(|reference| reference.parameters().clone())
             })
             .ok_or_else(|| anyhow!("live host game parameters are unavailable"))?;
-        let max_players = network::apply_league_start_response_to_parameters(
-            &mut parameters,
-            response,
-        )
-        .map_err(|message| anyhow!(message))?;
+        let max_players =
+            network::apply_league_start_response_to_parameters(&mut parameters, response)
+                .map_err(|message| anyhow!(message))?;
 
         // Validate every local representation before mutating any of them.
         // The server-side registration is already live at this point, so a
@@ -6807,9 +6741,7 @@ impl GameApp {
                 let mut updated = prepared.clone();
                 updated
                     .apply_league_start_response(response)
-                    .map_err(|error| {
-                        anyhow!("cannot apply live league Start settings: {error}")
-                    })?;
+                    .map_err(|error| anyhow!("cannot apply live league Start settings: {error}"))?;
                 Ok::<_, anyhow::Error>(updated)
             })
             .transpose()?;
@@ -7009,10 +6941,7 @@ impl GameApp {
                     }
                 }
             }
-            Err(error) => (
-                if enabled { previous_enabled } else { false },
-                Some(error),
-            ),
+            Err(error) => (if enabled { previous_enabled } else { false }, Some(error)),
         };
         self.scenario_game_options
             .apply_lobby_internet_result(effective);
@@ -7053,14 +6982,22 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn complete_league_vote_response(&mut self, subject: LeagueVoteSubject, approve: bool) {
+    pub(crate) fn complete_league_vote_response(
+        &mut self,
+        subject: LeagueVoteSubject,
+        approve: bool,
+    ) {
         if !self.league_votes.subject_active(subject) {
             return;
         }
         self.submit_own_league_vote(subject, approve);
     }
 
-    pub(crate) fn submit_own_league_vote(&mut self, subject: LeagueVoteSubject, approve: bool) -> bool {
+    pub(crate) fn submit_own_league_vote(
+        &mut self,
+        subject: LeagueVoteSubject,
+        approve: bool,
+    ) -> bool {
         let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
         self.submit_own_league_vote_at(subject, approve, now)
     }
@@ -7086,8 +7023,7 @@ impl GameApp {
             return false;
         }
         if !self.league_votes.try_submit_own_vote_at(subject, now) {
-            let message =
-                self.runtime_resource_string("IDS_TEXT_YOUCANONLYSTARTONEVOTINGE");
+            let message = self.runtime_resource_string("IDS_TEXT_YOUCANONLYSTARTONEVOTINGE");
             self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
             let opens_surrender = subject.vote_type == clonk_engine::VOTE_TYPE_CANCEL
                 || subject.vote_type == clonk_engine::VOTE_TYPE_KICK
@@ -7113,7 +7049,11 @@ impl GameApp {
         true
     }
 
-    pub(crate) fn league_signup_tooltip(&self, width: i32, height: i32) -> Option<(GuiPoint, String)> {
+    pub(crate) fn league_signup_tooltip(
+        &self,
+        width: i32,
+        height: i32,
+    ) -> Option<(GuiPoint, String)> {
         if !self.message_dialogs.is_empty() || self.context_menu.is_some() {
             return None;
         }
@@ -7155,8 +7095,8 @@ impl GameApp {
         // C4Player::Strip loads crew with fLoadPortraits=false. An unnamed
         // embedded image must not turn into a persisted `PortraitFile=custom`
         // while the temporary stream copy is rebuilt.
-        let player = PlayerFile::load_with_portraits(source, false)
-            .map_err(|error| error.to_string())?;
+        let player =
+            PlayerFile::load_with_portraits(source, false).map_err(|error| error.to_string())?;
         if count_direct_stream_player_crew_files(source)? == 0 {
             return Err("player group contains no loadable direct crew info".to_string());
         }
@@ -7348,9 +7288,8 @@ impl GameApp {
         let native_config = load_native_config_bytes(Some(paths));
         let (definition_executable_path, definition_path) =
             game_save_definition_paths(Some(paths), &native_config);
-        let definition_executable_root = path_from_group_name_bytes(&clonk_script::c4_string_bytes(
-            &definition_executable_path,
-        ));
+        let definition_executable_root =
+            path_from_group_name_bytes(&clonk_script::c4_string_bytes(&definition_executable_path));
         let definition_resources =
             host_game_resource_sources::freeze_host_definition_resource_sources(
                 scenario.definition_resource_paths(),

@@ -24,7 +24,8 @@ impl GameApp {
     pub(crate) fn restore_scensel_focus(&mut self, snapshot: ScenselFocusSnapshot) {
         self.set_scensel_dialog_focus(snapshot.dialog);
         if snapshot.dialog == ScenselDialogFocus::Options {
-            self.scenario_game_options.set_focused_button(snapshot.option);
+            self.scenario_game_options
+                .set_focused_button(snapshot.option);
         }
     }
 
@@ -37,7 +38,9 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn activate_scensel_after_gamepad_low_rename_abort(&mut self) -> Result<(), EngineError> {
+    pub(crate) fn activate_scensel_after_gamepad_low_rename_abort(
+        &mut self,
+    ) -> Result<(), EngineError> {
         if !self.abort_scenario_rename() {
             return Ok(());
         }
@@ -117,7 +120,11 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn scensel_search_char_pos(&self, point: GuiPoint, require_inside: bool) -> Option<usize> {
+    pub(crate) fn scensel_search_char_pos(
+        &self,
+        point: GuiPoint,
+        require_inside: bool,
+    ) -> Option<usize> {
         if self.mode != AppMode::Menu
             || self.startup_view != StartupView::ScenarioBrowser
             || self.menu_state.current_map().is_some()
@@ -181,8 +188,7 @@ impl GameApp {
             edit.anchor = position;
             edit.caret = position;
             edit.drag_anchor = position;
-            let inserted = primary_selection
-                .is_some_and(|text| edit.insert_raw_text(text));
+            let inserted = primary_selection.is_some_and(|text| edit.insert_raw_text(text));
             (previous, edit.caret, inserted)
         };
         if inserted || previous != current {
@@ -267,8 +273,7 @@ impl GameApp {
         if require_inside && !inside {
             return None;
         }
-        let control_x =
-            point.x as i32 - (edit_x + 2) + rename.edit.horizontal_scroll();
+        let control_x = point.x as i32 - (edit_x + 2) + rename.edit.horizontal_scroll();
         let text = rename.edit.text();
         let mut last_width = 0;
         for (start, character) in text.char_indices() {
@@ -923,7 +928,10 @@ impl GameApp {
         self.finish_definition_selector_input(actions)
     }
 
-    pub(crate) fn open_definition_selector(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
+    pub(crate) fn open_definition_selector(
+        &mut self,
+        scenario: FrontendScenario,
+    ) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         Self::guard_gui_overlay_result(
             "C4DefinitionSelDlg",
@@ -974,11 +982,13 @@ impl GameApp {
         };
         let fixed_selection = scenario_fixed_definition_modules(&scenario);
         self.startup_tooltip.pointer_left();
-        self.definition_selector = Some(clonk_frontend::definition_sel::DefinitionSelController::new(
-            root.to_string_lossy().into_owned(),
-            fixed_selection,
-            entries,
-        ));
+        self.definition_selector = Some(
+            clonk_frontend::definition_sel::DefinitionSelController::new(
+                root.to_string_lossy().into_owned(),
+                fixed_selection,
+                entries,
+            ),
+        );
         self.pending_definition_selection = Some(PendingDefinitionSelection {
             scenario,
             selector_mode: self.scenario_selector_mode,
@@ -1075,9 +1085,9 @@ impl GameApp {
     pub(crate) fn open_startup_player_portrait_selector(&mut self) {
         let Some(paths) = self.app_paths.as_ref() else {
             if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
-                pending.controller.set_validation_error(Some(
-                    "Application paths are unavailable".to_string(),
-                ));
+                pending
+                    .controller
+                    .set_validation_error(Some("Application paths are unavailable".to_string()));
             }
             return;
         };
@@ -1104,7 +1114,10 @@ impl GameApp {
             Ok(entries) => (entries, None),
             Err(error) => (
                 Vec::new(),
-                Some(format!("failed to scan {}: {error}", current_path.display())),
+                Some(format!(
+                    "failed to scan {}: {error}",
+                    current_path.display()
+                )),
             ),
         };
         if let Some(pending) = self.startup_player_properties_dialog.as_mut() {
@@ -1301,12 +1314,8 @@ impl GameApp {
             surface.height() as i32,
             fonts,
         );
-        let transform = MapFolderTransform::for_map(
-            map,
-            &layout,
-            surface.width(),
-            surface.height(),
-        );
+        let transform =
+            MapFolderTransform::for_map(map, &layout, surface.width(), surface.height());
         if point_in_map_rect(point, &transform.rect(map.scenario_info_area)) {
             return true;
         }
@@ -1385,14 +1394,11 @@ impl GameApp {
                                 .map(|pending| pending.config.clone()),
                         );
                         let refreshed = refreshed
-                            .map(|(paths, config)| {
-                                discover_lobby_player_selector(&paths, &config)
-                            })
+                            .map(|(paths, config)| discover_lobby_player_selector(&paths, &config))
                             .transpose();
                         match refreshed {
                             Ok(Some((_root, entries, candidates))) => {
-                                if let Some(pending) =
-                                    self.pending_lobby_player_selection.as_mut()
+                                if let Some(pending) = self.pending_lobby_player_selection.as_mut()
                                 {
                                     pending.candidates = candidates;
                                 }
@@ -1410,8 +1416,7 @@ impl GameApp {
                             }
                             Err(error) => {
                                 tracing::error!(%error, "failed to refresh lobby player selector");
-                                if let Some(pending) =
-                                    self.pending_lobby_player_selection.as_mut()
+                                if let Some(pending) = self.pending_lobby_player_selection.as_mut()
                                 {
                                     pending.candidates.clear();
                                 }
@@ -1564,7 +1569,10 @@ impl GameApp {
         Ok(true)
     }
 
-    pub(crate) fn render_definition_selector(&mut self, gamma: Option<&clonk_graphics::GammaRamp>) -> Result<()> {
+    pub(crate) fn render_definition_selector(
+        &mut self,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) -> Result<()> {
         let Some(controller) = self.definition_selector.as_ref() else {
             return Ok(());
         };
@@ -1611,8 +1619,7 @@ impl GameApp {
         let Some(head) = self.scenario_loader_head_for_start(scenario)? else {
             return Ok(None);
         };
-        if !head.mission_access().is_empty()
-            && !self.mission_access.contains(head.mission_access())
+        if !head.mission_access().is_empty() && !self.mission_access.contains(head.mission_access())
         {
             return Ok(Some(
                 self.runtime_resource_string("IDS_PRC_NOMISSIONACCESS"),

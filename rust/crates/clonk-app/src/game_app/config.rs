@@ -54,7 +54,6 @@ impl GameApp {
         self.scenario_game_options.set_bounds(bounds);
     }
 
-
     pub(crate) fn sync_scenario_game_option_constraint(&mut self) {
         let constraint = scenario_fair_crew_constraint(self.menu_state.selected_scenario());
         self.scenario_game_options
@@ -67,13 +66,14 @@ impl GameApp {
         }
         match self.network_mode.as_ref() {
             Some(NetworkMode::Client(settings)) => settings.league_auth.clone(),
-            Some(NetworkMode::Host(_)) | None => {
-                load_league_auth_settings(self.app_paths.as_ref())
-            }
+            Some(NetworkMode::Host(_)) | None => load_league_auth_settings(self.app_paths.as_ref()),
         }
     }
 
-    pub(crate) fn set_league_player_auth_settings(&mut self, auth: clonk_network::LeagueAuthRequestHead) {
+    pub(crate) fn set_league_player_auth_settings(
+        &mut self,
+        auth: clonk_network::LeagueAuthRequestHead,
+    ) {
         if let Some(NetworkMode::Client(settings)) = self.network_mode.as_mut() {
             settings.league_auth = auth.clone();
         }
@@ -203,9 +203,7 @@ impl GameApp {
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         let hotkey_modifiers = c4_modifiers == ModifiersState::ALT
             || c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT);
-        let dialog_hotkey = hotkey_modifiers
-            .then(|| context_menu_hotkey(key))
-            .flatten();
+        let dialog_hotkey = hotkey_modifiers.then(|| context_menu_hotkey(key)).flatten();
         if hotkey_modifiers && dialog_hotkey.is_none() {
             return Ok(false);
         }
@@ -249,10 +247,7 @@ impl GameApp {
             && c4_modifiers == ModifiersState::CTRL
             && matches!(
                 key,
-                VirtualKeyCode::A
-                    | VirtualKeyCode::C
-                    | VirtualKeyCode::V
-                    | VirtualKeyCode::X
+                VirtualKeyCode::A | VirtualKeyCode::C | VirtualKeyCode::V | VirtualKeyCode::X
             )
         {
             let shortcut = match key {
@@ -285,9 +280,7 @@ impl GameApp {
             if !c4_modifiers.is_empty()
                 && matches!(
                     key,
-                    VirtualKeyCode::Return
-                        | VirtualKeyCode::NumpadEnter
-                        | VirtualKeyCode::Escape
+                    VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter | VirtualKeyCode::Escape
                 )
             {
                 Vec::new()
@@ -830,9 +823,7 @@ impl GameApp {
                 }
             }
             LobbyOptionKind::ControlRate => {
-                if self.engine.is_control_host()
-                    && (1..=9).contains(&value)
-                {
+                if self.engine.is_control_host() && (1..=9).contains(&value) {
                     let current = self
                         .network_control_clock
                         .map(NetworkControlClock::control_rate)
@@ -1281,11 +1272,7 @@ impl GameApp {
     }
 
     pub(crate) fn open_options_advanced_dialog(&mut self) -> Result<(), EngineError> {
-        let Some(config_path) = self
-            .app_paths
-            .as_ref()
-            .map(|paths| paths.config_file())
-        else {
+        let Some(config_path) = self.app_paths.as_ref().map(|paths| paths.config_file()) else {
             self.show_options_advanced_error("application configuration is unavailable")?;
             return Ok(());
         };
@@ -1427,10 +1414,10 @@ impl GameApp {
                     self.startup_options_advanced_dialog = None;
                 }
                 AdvancedConfigAction::Save => {
-                    let Some((changes, return_sheet)) =
-                        self.startup_options_advanced_dialog.as_ref().map(|pending| {
-                            (pending.controller.changes(), pending.return_sheet)
-                        })
+                    let Some((changes, return_sheet)) = self
+                        .startup_options_advanced_dialog
+                        .as_ref()
+                        .map(|pending| (pending.controller.changes(), pending.return_sheet))
                     else {
                         continue;
                     };
@@ -1767,10 +1754,7 @@ impl GameApp {
             tracing::warn!(error = %error, "failed to save options dialog settings");
             let error = error.to_string();
             let message = format_resource_string(
-                self.runtime_resource_text(
-                    "IDS_ERR_CONFSAVE",
-                    "Could not save configuration: %s",
-                ),
+                self.runtime_resource_text("IDS_ERR_CONFSAVE", "Could not save configuration: %s"),
                 &[&error],
             );
             let caption = self.runtime_resource_text("IDS_ERR_CONFIG", "Configuration error");
@@ -1829,10 +1813,13 @@ impl GameApp {
                 ) {
                     tracing::error!(%error, "failed to expire graphics scale test");
                 }
-            } else if let Some((PendingMessageDialog {
-                continuation: MessageDialogContinuation::OptionsScaleTest { old_percent, .. },
-                ..
-            }, _)) = self.remove_message_dialog_at(prompt_index)
+            } else if let Some((
+                PendingMessageDialog {
+                    continuation: MessageDialogContinuation::OptionsScaleTest { old_percent, .. },
+                    ..
+                },
+                _,
+            )) = self.remove_message_dialog_at(prompt_index)
             {
                 if let Some(dialog) = self.startup_options_dialog.as_mut() {
                     dialog.graphics_mut().revert_scale_test();
@@ -1912,7 +1899,10 @@ impl GameApp {
                 }
                 GameOptionAction::CommentChanged(comment) => {
                     self.persist_game_option_value("Network", "Comment", comment);
-                    tracing::info!("{}", clonk_frontend::game_option_buttons::COMMENT_CHANGED_LOG);
+                    tracing::info!(
+                        "{}",
+                        clonk_frontend::game_option_buttons::COMMENT_CHANGED_LOG
+                    );
                 }
                 GameOptionAction::FairCrewPreferenceChanged(enabled) => {
                     self.startup_view_flags.fair_crew = enabled;
@@ -1968,7 +1958,9 @@ impl GameApp {
         Ok(())
     }
 
-    pub(crate) fn game_option_input_layout(&self) -> Option<clonk_frontend::input_dialog::InputDialogLayout> {
+    pub(crate) fn game_option_input_layout(
+        &self,
+    ) -> Option<clonk_frontend::input_dialog::InputDialogLayout> {
         let dialog = self.game_option_input_dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let surface = self.graphics.surface();
@@ -2101,9 +2093,13 @@ impl GameApp {
             match action {
                 InputDialogAction::FocusChanged(_) | InputDialogAction::TextChanged(_) => {}
                 InputDialogAction::SubmittedLine(text) => {
-                    if self.game_option_input_dialog.as_ref().is_some_and(|pending| {
-                        pending.purpose == PendingInputDialogPurpose::RunningChat
-                    }) {
+                    if self
+                        .game_option_input_dialog
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            pending.purpose == PendingInputDialogPurpose::RunningChat
+                        })
+                    {
                         if self.running_chat.as_ref().is_some_and(|chat| {
                             matches!(&chat.kind, RunningChatKind::MessageBoardInput(_))
                         }) {
@@ -2181,10 +2177,8 @@ impl GameApp {
                         }
                         PendingInputDialogPurpose::OptionsGraphicsScale => {
                             if let Ok(value) = text.trim().parse::<i32>() {
-                                let test_action = self
-                                    .startup_options_dialog
-                                    .as_mut()
-                                    .and_then(|dialog| {
+                                let test_action =
+                                    self.startup_options_dialog.as_mut().and_then(|dialog| {
                                         let graphics = dialog.graphics_mut();
                                         let _ = graphics.set_scale_spinbox_value(value);
                                         graphics.request_scale_test()
@@ -2229,10 +2223,9 @@ impl GameApp {
                             self.resume_startup_music_after_failed_open_game();
                         }
                         PendingInputDialogPurpose::GameOption(kind) => {
-                            let actions = self.scenario_game_options.resolve_input_dialog(
-                                kind,
-                                GameOptionInputDialogResult::Cancelled,
-                            );
+                            let actions = self
+                                .scenario_game_options
+                                .resolve_input_dialog(kind, GameOptionInputDialogResult::Cancelled);
                             self.finish_game_option_input(actions)?;
                         }
                         PendingInputDialogPurpose::OptionsGraphicsScale

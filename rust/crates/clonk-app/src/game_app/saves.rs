@@ -81,14 +81,12 @@ impl GameApp {
         let title = clonk_script::c4_string_bytes(&title);
         let now = classic_calendar_time_now();
         let (date_key, date_fallback) = match kind {
-            ClassicSaveDescriptionKind::Record => (
-                "IDS_DESC_DATEREC",
-                "Recording from %i.%i.%i %02d:%02d.",
-            ),
-            ClassicSaveDescriptionKind::Savegame if self.network.is_some() => (
-                "IDS_DESC_DATENET",
-                "Network game from %i.%i.%i %02d:%02d.",
-            ),
+            ClassicSaveDescriptionKind::Record => {
+                ("IDS_DESC_DATEREC", "Recording from %i.%i.%i %02d:%02d.")
+            }
+            ClassicSaveDescriptionKind::Savegame if self.network.is_some() => {
+                ("IDS_DESC_DATENET", "Network game from %i.%i.%i %02d:%02d.")
+            }
             ClassicSaveDescriptionKind::Savegame => {
                 ("IDS_DESC_DATE", "Game saved %i.%i.%i %02d:%02d.")
             }
@@ -104,18 +102,11 @@ impl GameApp {
 
         let game_time = self.engine.game_time();
         if game_time != 0 {
-            let duration = resource_bytes(
-                "IDS_DESC_DURATION",
-                "Playing time: %02d:%02d:%02d.",
-            );
+            let duration = resource_bytes("IDS_DESC_DURATION", "Playing time: %02d:%02d:%02d.");
             lines.push((
                 developer_console_save::format_resource_integers(
                     &duration,
-                    &[
-                        game_time / 3_600,
-                        (game_time % 3_600) / 60,
-                        game_time % 60,
-                    ],
+                    &[game_time / 3_600, (game_time % 3_600) / 60, game_time % 60],
                 ),
                 true,
             ));
@@ -125,10 +116,7 @@ impl GameApp {
             let build = format!("{CLASSIC_ENGINE_BUILD:03}");
             let version = resource_bytes("IDS_DESC_VERSION", "Engine version: %s");
             lines.push((
-                developer_console_save::format_resource_strings(
-                    &version,
-                    &[build.as_bytes()],
-                ),
+                developer_console_save::format_resource_strings(&version, &[build.as_bytes()]),
                 true,
             ));
         }
@@ -139,10 +127,8 @@ impl GameApp {
                 if index != 0 {
                     definitions.extend_from_slice(b", ");
                 }
-                let relative = developer_console_definition_description_path(
-                    module,
-                    self.app_paths.as_ref(),
-                );
+                let relative =
+                    developer_console_definition_description_path(module, self.app_paths.as_ref());
                 for byte in relative {
                     if byte == b'\\' {
                         definitions.push(b'\\');
@@ -181,8 +167,7 @@ impl GameApp {
             .iter()
             .flat_map(|(_, _, players)| players)
             .filter(|player| {
-                player.is_joined()
-                    && player.flags & clonk_engine::PLAYER_INFO_FLAG_INVISIBLE == 0
+                player.is_joined() && player.flags & clonk_engine::PLAYER_INFO_FLAG_INVISIBLE == 0
             })
             .collect::<Vec<_>>();
         if has_retained_players {
@@ -228,11 +213,7 @@ impl GameApp {
         filename.extend_from_slice(b".rtf");
         (
             filename,
-            developer_console_save::serialize_savegame_description(
-                &title,
-                charset_code,
-                &lines,
-            ),
+            developer_console_save::serialize_savegame_description(&title, charset_code, &lines),
         )
     }
 
@@ -321,8 +302,7 @@ impl GameApp {
         }
 
         if requested_target.is_some() {
-            if !retarget_active_scenario
-                && cpp_loader_items_identical(&source_path, &destination)?
+            if !retarget_active_scenario && cpp_loader_items_identical(&source_path, &destination)?
             {
                 anyhow::bail!(
                     "cannot save the running scenario over itself: {}",
@@ -363,12 +343,10 @@ impl GameApp {
                 self.classic_command_line.scenario = Some(destination.clone());
             }
             let copy_result = (|| -> Result<()> {
-                let source = open_group_path_for_folder_map(&source_path).with_context(|| {
-                    format!("open source scenario {}", source_path.display())
-                })?;
-                let copy = MutableGroup::from_group(&source).with_context(|| {
-                    format!("copy source scenario {}", source_path.display())
-                })?;
+                let source = open_group_path_for_folder_map(&source_path)
+                    .with_context(|| format!("open source scenario {}", source_path.display()))?;
+                let copy = MutableGroup::from_group(&source)
+                    .with_context(|| format!("copy source scenario {}", source_path.display()))?;
                 persist_console_save_group(
                     &copy,
                     &destination,
@@ -454,9 +432,7 @@ impl GameApp {
         }
         let copied_material_group_is_file = matches!(
             group.entry_kind("Material.c4g"),
-            Some(
-                MutableGroupEntryKind::File | MutableGroupEntryKind::UnopenableChildGroup
-            )
+            Some(MutableGroupEntryKind::File | MutableGroupEntryKind::UnopenableChildGroup)
         );
 
         if kind == ConsoleSaveKind::Savegame {
@@ -485,21 +461,20 @@ impl GameApp {
             | Some(ScenarioDefinitionLoad::Fixed { modules, .. }) => modules.clone(),
             None => Vec::new(),
         };
-        let description_definition_modules = if self
-            .active_description_definition_modules
-            .is_empty()
-            && !definition_modules.is_empty()
-        {
-            // State-only embedders may seed the historical String vector
-            // directly. Its C4 byte projection remains the exact fallback
-            // whenever no filesystem-derived byte cache exists.
-            definition_modules
-                .iter()
-                .map(|module| clonk_script::c4_string_bytes(module))
-                .collect()
-        } else {
-            self.active_description_definition_modules.clone()
-        };
+        let description_definition_modules =
+            if self.active_description_definition_modules.is_empty()
+                && !definition_modules.is_empty()
+            {
+                // State-only embedders may seed the historical String vector
+                // directly. Its C4 byte projection remains the exact fallback
+                // whenever no filesystem-derived byte cache exists.
+                definition_modules
+                    .iter()
+                    .map(|module| clonk_script::c4_string_bytes(module))
+                    .collect()
+            } else {
+                self.active_description_definition_modules.clone()
+            };
         let native_config = load_native_config_bytes(self.app_paths.as_ref());
         let (definition_executable_path, definition_path) =
             game_save_definition_paths(self.app_paths.as_ref(), &native_config);
@@ -545,24 +520,21 @@ impl GameApp {
                 .add_file("Parameters.txt", parameters)
                 .context("write live save Parameters.txt")?;
         }
-        let save = match self
-            .engine
-            .serialize_live_c4_save_with_policy(
-                clonk_engine::LiveC4SaveSpec {
-                    title: &title,
-                    definition_modules: &definition_modules,
-                    definition_executable_path: &definition_executable_path,
-                    definition_path: &definition_path,
-                    origin: &origin,
-                    music_enabled: self.runtime_music_enabled,
-                    copied_material_group_is_file,
-                    title_component: clonk_engine::LiveC4ComponentHost::Unmodified,
-                    info_component: clonk_engine::LiveC4ComponentHost::Unmodified,
-                    script_component: clonk_engine::LiveC4ComponentHost::Unmodified,
-                },
-                policy,
-            )
-        {
+        let save = match self.engine.serialize_live_c4_save_with_policy(
+            clonk_engine::LiveC4SaveSpec {
+                title: &title,
+                definition_modules: &definition_modules,
+                definition_executable_path: &definition_executable_path,
+                definition_path: &definition_path,
+                origin: &origin,
+                music_enabled: self.runtime_music_enabled,
+                copied_material_group_is_file,
+                title_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                info_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                script_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+            },
+            policy,
+        ) {
             Ok(save) => save,
             Err(error) => {
                 if let Some(partial) = error.pre_landscape_components() {
@@ -675,11 +647,10 @@ impl GameApp {
             // C4PlayerList::Save ignores stale restore rows without a live
             // player, then SaveDesc runs after all player children.
             if kind == ConsoleSaveKind::Savegame {
-                let (description_name, description) = self
-                    .developer_console_savegame_description(
-                        &title,
-                        &description_definition_modules,
-                    );
+                let (description_name, description) = self.developer_console_savegame_description(
+                    &title,
+                    &description_definition_modules,
+                );
                 folder_save_journal.put_file(
                     &description_name,
                     &description,
@@ -716,7 +687,7 @@ impl GameApp {
                 &folder_save_journal,
                 self.process_group_maker.as_bytes(),
             )
-                .context("persist partially completed live save")?;
+            .context("persist partially completed live save")?;
             return Err(error);
         }
         if !self.process_group_maker.is_empty() {
@@ -882,10 +853,8 @@ impl GameApp {
             let status_label = clonk_resources::decode_legacy_script_text(&label);
             let root = configured_savegame_directory(self.app_paths.as_ref());
             let language = classic_save_folder_language(self.app_paths.as_ref());
-            let root_title = self.runtime_resource_bytes_with_fallback(
-                "IDS_GAME_SAVEGAMESTITLE",
-                "Savegames",
-            );
+            let root_title =
+                self.runtime_resource_bytes_with_fallback("IDS_GAME_SAVEGAMESTITLE", "Savegames");
             ensure_classic_save_folder(&root, &language, &root_title)?;
 
             let path = self.savegame_slot_path(slot);
@@ -1136,8 +1105,7 @@ impl GameApp {
     ) -> Option<ScreenshotSaveOutcome> {
         let request = self.pending_screenshots.pop_front()?;
         let kind = request.kind;
-        let (path, directory_result) =
-            prepare_numbered_screenshot_path(self.app_paths.as_ref());
+        let (path, directory_result) = prepare_numbered_screenshot_path(self.app_paths.as_ref());
         let result = (|| -> Result<()> {
             directory_result?;
             // C4Application::isFullScreen distinguishes the graphical client
@@ -1146,12 +1114,9 @@ impl GameApp {
             let presented_frame = presented_frame
                 .context("screenshot capture requires an initialized presentation back buffer")?;
             match kind {
-                ScreenshotKind::PresentedFrame => write_screenshot(
-                    &path,
-                    physical_width,
-                    physical_height,
-                    presented_frame,
-                ),
+                ScreenshotKind::PresentedFrame => {
+                    write_screenshot(&path, physical_width, physical_height, presented_frame)
+                }
                 ScreenshotKind::FullLandscape => {
                     let surface = self
                         .graphics
@@ -1303,7 +1268,11 @@ impl GameApp {
                 "General",
                 &[(
                     "NoCrew",
-                    clonk_app_netplay::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
+                    clonk_app_netplay::NativeConfigValue::RawAscii(if enabled {
+                        "true"
+                    } else {
+                        "false"
+                    }),
                 )],
             )?;
         }

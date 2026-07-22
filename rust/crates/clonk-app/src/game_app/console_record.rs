@@ -307,9 +307,7 @@ impl GameApp {
                             )
                         }
                     });
-                    if kind == ConsoleSaveKind::Scenario
-                        && attempted
-                        && self.script_created_objects
+                    if kind == ConsoleSaveKind::Scenario && attempted && self.script_created_objects
                     {
                         let warning = format!(
                             "{}{}",
@@ -414,9 +412,8 @@ impl GameApp {
 
         if self.console_startup_active() {
             if let Some(parameters) = line.strip_prefix("/open ") {
-                let classic = parse_classic_command_line(&parse_classic_console_parameters(
-                    parameters,
-                ));
+                let classic =
+                    parse_classic_command_line(&parse_classic_console_parameters(parameters));
                 self.apply_classic_command_line(&classic)?;
                 self.launch_classic_command_line_join()?;
                 self.launch_classic_command_line_scenario()?;
@@ -574,10 +571,7 @@ impl GameApp {
             .collect::<Vec<_>>();
         if let Some(stats) = self.network_stats.as_mut() {
             let (input, output) = self.network.as_ref().map_or(
-                (
-                    ProtocolRateSample::new(0, 0),
-                    ProtocolRateSample::new(0, 0),
-                ),
+                (ProtocolRateSample::new(0, 0), ProtocolRateSample::new(0, 0)),
                 NetworkManager::protocol_rate_samples,
             );
             stats.record_second(self.frames_per_second, input, output, pings);
@@ -645,7 +639,10 @@ impl GameApp {
     /// Dynamic Player-menu rows from `C4Console::UpdatePlayerMenu`. The
     /// player list itself is already retained in native C4PlayerList order;
     /// network captions use the player's join-time AtClientName snapshot.
-    pub(crate) fn developer_console_player_menu_entries(&self, editing: bool) -> Vec<ConsolePlayerRow> {
+    pub(crate) fn developer_console_player_menu_entries(
+        &self,
+        editing: bool,
+    ) -> Vec<ConsolePlayerRow> {
         let network_enabled = self.network.is_some();
         let enabled = editing
             && (!network_enabled || matches!(self.network_mode, Some(NetworkMode::Host(_))));
@@ -824,8 +821,10 @@ impl GameApp {
         network
             .submit_client_remove(clonk_engine::ClientRemoveControlData {
                 client_id,
-                reason: clonk_engine::LegacyCString::from_bytes(clonk_script::c4_string_bytes(&reason))
-                    .unwrap_or_default(),
+                reason: clonk_engine::LegacyCString::from_bytes(clonk_script::c4_string_bytes(
+                    &reason,
+                ))
+                .unwrap_or_default(),
                 by_client: 0,
             })
             .map_err(|error| error.to_string())?;
@@ -842,7 +841,9 @@ impl GameApp {
     /// `C4GameControl::RequestRuntimeRecord`: disable the item immediately,
     /// then let the next ordinary queued Synchronize start the recorder with
     /// that complete executing control list as its first chunk.
-    pub(crate) fn developer_console_request_runtime_record(&mut self) -> std::result::Result<bool, String> {
+    pub(crate) fn developer_console_request_runtime_record(
+        &mut self,
+    ) -> std::result::Result<bool, String> {
         if !self.developer_console_runtime_record_possible() {
             return Ok(false);
         }
@@ -889,10 +890,8 @@ impl GameApp {
             return Ok(true);
         }
         if !editing {
-            let message = self.runtime_resource_text(
-                "IDS_CNS_NONETEDIT",
-                "No editing while replaying.",
-            );
+            let message =
+                self.runtime_resource_text("IDS_CNS_NONETEDIT", "No editing while replaying.");
             tracing::warn!(%message, "developer console script rejected");
             self.status_text = message;
             return Ok(false);
@@ -1019,10 +1018,8 @@ impl GameApp {
             clients: Vec::new(),
         };
         let legacy_text = |text: &[u8]| {
-            LegacyCString::from_bytes(
-                text.iter().copied().take_while(|byte| *byte != 0).collect(),
-            )
-            .unwrap_or_default()
+            LegacyCString::from_bytes(text.iter().copied().take_while(|byte| *byte != 0).collect())
+                .unwrap_or_default()
         };
         let mut parameters = self
             .host_join_snapshot
@@ -1089,12 +1086,10 @@ impl GameApp {
         };
         let definition_modules =
             recording_definition_modules(scenario_data, retained_definition_modules);
-        let description_definition_modules = recording_description_definition_modules(
-            scenario_data,
-            retained_definition_modules,
-        );
-        let (definition_executable_path, definition_path) =
-            retained_definition_save_paths.map_or_else(
+        let description_definition_modules =
+            recording_description_definition_modules(scenario_data, retained_definition_modules);
+        let (definition_executable_path, definition_path) = retained_definition_save_paths
+            .map_or_else(
                 || {
                     let native_config = load_native_config_bytes(self.app_paths.as_ref());
                     game_save_definition_paths(self.app_paths.as_ref(), &native_config)
@@ -1141,8 +1136,7 @@ impl GameApp {
             "{index:03}-{}.c4s",
             sanitize_record_name(raw_base_name)
         ));
-        let synchronized_title =
-            native_bytes_as_legacy_text(recording_parameters.title.as_bytes());
+        let synchronized_title = native_bytes_as_legacy_text(recording_parameters.title.as_bytes());
         let mut record_title = clonk_script::c4_string_bytes(&format!(
             "{index:03} {synchronized_title} [{CLASSIC_ENGINE_BUILD}]"
         ));
@@ -1204,9 +1198,7 @@ impl GameApp {
         };
         let copied_material_group_is_file = matches!(
             group.entry_kind("Material.c4g"),
-            Some(
-                MutableGroupEntryKind::File | MutableGroupEntryKind::UnopenableChildGroup
-            )
+            Some(MutableGroupEntryKind::File | MutableGroupEntryKind::UnopenableChildGroup)
         );
         let reconstructed_save = if let InitialRecordingSource::Loaded { music_enabled, .. } =
             initial_source
@@ -1223,22 +1215,22 @@ impl GameApp {
                 .is_some_and(|landscape| landscape.mode() == clonk_engine::LANDSCAPE_MODE_STATIC);
             let reconstruction_target = output_path.to_string_lossy();
             let save = match self.engine.serialize_live_c4_save_with_policy(
-                    clonk_engine::LiveC4SaveSpec {
-                        title: &record_title,
-                        definition_modules: &definition_modules,
-                        definition_executable_path: &definition_executable_path,
-                        definition_path: &definition_path,
-                        origin: &scenario_origin,
-                        music_enabled,
-                        copied_material_group_is_file,
-                        title_component: clonk_engine::LiveC4ComponentHost::Unmodified,
-                        info_component: clonk_engine::LiveC4ComponentHost::Unmodified,
-                        script_component: clonk_engine::LiveC4ComponentHost::Unmodified,
-                    },
-                    clonk_engine::LiveC4SavePolicy::Savegame {
-                        target_group_name: &reconstruction_target,
-                    },
-                ) {
+                clonk_engine::LiveC4SaveSpec {
+                    title: &record_title,
+                    definition_modules: &definition_modules,
+                    definition_executable_path: &definition_executable_path,
+                    definition_path: &definition_path,
+                    origin: &scenario_origin,
+                    music_enabled,
+                    copied_material_group_is_file,
+                    title_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                    info_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                    script_component: clonk_engine::LiveC4ComponentHost::Unmodified,
+                },
+                clonk_engine::LiveC4SavePolicy::Savegame {
+                    target_group_name: &reconstruction_target,
+                },
+            ) {
                 Ok(save) => save,
                 Err(error) => {
                     let mut failure =
@@ -1249,9 +1241,7 @@ impl GameApp {
                         };
                         if let Err(apply_error) =
                             developer_console_save::apply_live_save_pre_landscape_to_group(
-                                &mut group,
-                                policy,
-                                partial,
+                                &mut group, policy, partial,
                             )
                         {
                             failure.push_str(&format!(
@@ -1366,20 +1356,18 @@ impl GameApp {
             InitialRecordingSource::Loaded { music_enabled, .. } => {
                 // InitControl creates fInitial only after the copied savegame
                 // source has run EnumStrings and pointer enumeration.
-                loaded_initial_game_data = match self
-                    .engine
-                    .capture_initial_record_game_data(music_enabled)
-                {
-                    Ok(game_data) => game_data,
-                    Err(error) => {
-                        return Err(partial_recording_failure(
-                            &group,
-                            &output_path,
-                            &record_maker,
-                            error.to_string(),
-                        ));
-                    }
-                };
+                loaded_initial_game_data =
+                    match self.engine.capture_initial_record_game_data(music_enabled) {
+                        Ok(game_data) => game_data,
+                        Err(error) => {
+                            return Err(partial_recording_failure(
+                                &group,
+                                &output_path,
+                                &record_maker,
+                                error.to_string(),
+                            ));
+                        }
+                    };
                 &loaded_initial_game_data
             }
         };
@@ -1388,18 +1376,18 @@ impl GameApp {
             .as_ref()
             .map(|(save, _)| save.game_txt.as_slice())
             .or(original_game.as_deref());
-        let game = match clonk_engine::serialize_initial_network_game(initial_game_data, original_game)
-        {
-            Ok(game) => game,
-            Err(error) => {
-                return Err(partial_recording_failure(
-                    &group,
-                    &output_path,
-                    &record_maker,
-                    error.to_string(),
-                ));
-            }
-        };
+        let game =
+            match clonk_engine::serialize_initial_network_game(initial_game_data, original_game) {
+                Ok(game) => game,
+                Err(error) => {
+                    return Err(partial_recording_failure(
+                        &group,
+                        &output_path,
+                        &record_maker,
+                        error.to_string(),
+                    ));
+                }
+            };
         if let Some(game) = game.as_ref() {
             if let Err(error) = group.add_file("Game.txt", game.clone()) {
                 return Err(partial_recording_failure(
@@ -1520,7 +1508,9 @@ impl GameApp {
 
     /// Build the non-initial `C4GameSaveRecord` image at the exact
     /// `C4Game::Synchronize` boundary that consumes `fRecordNeeded`.
-    pub(crate) fn prepare_runtime_recording_at_synchronize(&mut self) -> std::result::Result<(), String> {
+    pub(crate) fn prepare_runtime_recording_at_synchronize(
+        &mut self,
+    ) -> std::result::Result<(), String> {
         let Some(seed) = self.live_save_seed.clone().or_else(|| {
             self.recording_template
                 .as_ref()
@@ -1610,9 +1600,7 @@ impl GameApp {
             .is_some_and(|landscape| landscape.mode() == clonk_engine::LANDSCAPE_MODE_STATIC);
         let copied_material_group_is_file = matches!(
             group.entry_kind("Material.c4g"),
-            Some(
-                MutableGroupEntryKind::File | MutableGroupEntryKind::UnopenableChildGroup
-            )
+            Some(MutableGroupEntryKind::File | MutableGroupEntryKind::UnopenableChildGroup)
         );
         let save = match self.engine.serialize_live_c4_save_with_policy(
             clonk_engine::LiveC4SaveSpec {
@@ -1768,13 +1756,14 @@ impl GameApp {
                 .set_maker_bytes_recursively(self.process_group_maker.as_bytes());
         }
         let initial_group = template.group.pack().map_err(|error| error.to_string())?;
-        replace_file_from_same_directory(&template.output_path, &initial_group)
-            .map_err(|error| {
+        replace_file_from_same_directory(&template.output_path, &initial_group).map_err(
+            |error| {
                 format!(
                     "failed to create {}: {error}",
                     template.output_path.display()
                 )
-            })?;
+            },
+        )?;
         let packed = Group::open(&template.output_path).map_err(|error| error.to_string())?;
         unpack_recording_group(&packed, &template.output_path)
             .map_err(|error| format!("failed to unpack record group: {error}"))?;
@@ -1790,9 +1779,9 @@ impl GameApp {
         // false) remains a local record even during a league session.
         let league_streaming = !template.initial_stream_chunk.is_empty()
             && self
-            .network
-            .as_ref()
-            .is_some_and(NetworkManager::league_record_stream_available);
+                .network
+                .as_ref()
+                .is_some_and(NetworkManager::league_record_stream_available);
         if league_streaming {
             let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
             let network = self
@@ -1871,7 +1860,10 @@ impl GameApp {
         else {
             return;
         };
-        let Some(path) = self.admission_resources.complete_path(core.id).map(Path::to_path_buf)
+        let Some(path) = self
+            .admission_resources
+            .complete_path(core.id)
+            .map(Path::to_path_buf)
         else {
             return;
         };
@@ -1893,9 +1885,10 @@ impl GameApp {
                     } else {
                         local_file.clone()
                     };
-                    let stream_name = LegacyCString::from_bytes(target.clone()).ok_or_else(|| {
-                        "streamed player filename contains an interior NUL".to_string()
-                    })?;
+                    let stream_name =
+                        LegacyCString::from_bytes(target.clone()).ok_or_else(|| {
+                            "streamed player filename contains an interior NUL".to_string()
+                        })?;
                     Some(
                         clonk_network::encode_league_stream_file_chunk(&stream_name, &packed)
                             .map_err(|error| error.to_string())?,
@@ -1916,7 +1909,10 @@ impl GameApp {
         // add, while a later local-disk failure cannot retract streamed data.
         if let Some(stream_chunk) = stream_chunk {
             let Some(network) = self.network.as_ref() else {
-                tracing::warn!(resource_id = core.id, "league record stream disappeared before player resource append");
+                tracing::warn!(
+                    resource_id = core.id,
+                    "league record stream disappeared before player resource append"
+                );
                 return;
             };
             if let Err(error) = network.append_league_record_bytes(&stream_chunk) {
@@ -1942,7 +1938,8 @@ impl GameApp {
             .and_then(|scenario| scenario.path.as_deref())
             .ok_or_else(|| "active replay has no record-group path".to_string())?;
         let target = recorded_player_resource_name(core);
-        let record = open_group_path_for_folder_map(record_path).map_err(|error| error.to_string())?;
+        let record =
+            open_group_path_for_folder_map(record_path).map_err(|error| error.to_string())?;
         record
             .open_child(path_from_group_name_bytes(&target))
             .map_err(|error| error.to_string())
@@ -2010,9 +2007,7 @@ impl GameApp {
             disk_writer_pos,
             ..
         } = session;
-        if let Err(error) =
-            write_folder_save_entry(&output_path, &description_name, &description)
-        {
+        if let Err(error) = write_folder_save_entry(&output_path, &description_name, &description) {
             // C4Record::Stop deliberately ignores SaveDesc's return value.
             tracing::warn!(%error, "failed to install final record description");
         }

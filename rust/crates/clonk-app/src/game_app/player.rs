@@ -112,7 +112,11 @@ impl GameApp {
                 );
             }
             let Some(info) = self.control_player_infos.get(info_id).cloned() else {
-                tracing::warn!(player_number, info_id, "cannot save player without PlayerInfo");
+                tracing::warn!(
+                    player_number,
+                    info_id,
+                    "cannot save player without PlayerInfo"
+                );
                 success = false;
                 continue;
             };
@@ -280,7 +284,10 @@ impl GameApp {
     /// viewport clipping and the final player-color draw stay in the frontend,
     /// while the app resolves C4ObjectInfo/definition names and the
     /// process-local invisible-player flag.
-    pub(crate) fn crew_name_overlays(&self, viewports: &[ViewportInput<'_>]) -> Vec<CrewNameOverlay> {
+    pub(crate) fn crew_name_overlays(
+        &self,
+        viewports: &[ViewportInput<'_>],
+    ) -> Vec<CrewNameOverlay> {
         if (!self.display_flags.player_names && !self.display_flags.clonk_names)
             || self.engine.film_replay()
         {
@@ -307,9 +314,7 @@ impl GameApp {
                 let invisible = self
                     .control_player_infos
                     .get(owner.player_info_id())
-                    .is_some_and(|info| {
-                        info.flags & clonk_engine::PLAYER_INFO_FLAG_INVISIBLE != 0
-                    });
+                    .is_some_and(|info| info.flags & clonk_engine::PLAYER_INFO_FLAG_INVISIBLE != 0);
                 if invisible {
                     return None;
                 }
@@ -374,14 +379,14 @@ impl GameApp {
 
         for player in players.iter_mut() {
             for crew in player.crew.iter_mut() {
-                let current_portrait = self
-                    .engine
-                    .crew_object_info(crew.object_id)
-                    .and_then(|info| {
-                        crew.label = c4_presentation_text(&info.name);
-                        crew.rank = info.rank;
-                        info.portraits.current.clone()
-                    });
+                let current_portrait =
+                    self.engine
+                        .crew_object_info(crew.object_id)
+                        .and_then(|info| {
+                            crew.label = c4_presentation_text(&info.name);
+                            crew.rank = info.rank;
+                            info.portraits.current.clone()
+                        });
                 let Some(object) = self.snapshot.object(crew.object_id) else {
                     crew.portrait = None;
                     crew.portrait_owner_overlay = None;
@@ -410,8 +415,7 @@ impl GameApp {
                     None
                 };
                 crew.portrait = portrait.as_ref().map(|portrait| portrait.base.clone());
-                crew.portrait_owner_overlay =
-                    portrait.and_then(|portrait| portrait.owner_overlay);
+                crew.portrait_owner_overlay = portrait.and_then(|portrait| portrait.owner_overlay);
                 crew.portrait_owner_color = owner_color;
                 crew.rank_symbols = rank_cache
                     .entry(definition_id.clone())
@@ -423,9 +427,7 @@ impl GameApp {
                             })
                     })
                     .clone();
-                crew.rank_symbol_count = self
-                    .engine
-                    .definition_rank_symbol_count(&definition_id);
+                crew.rank_symbol_count = self.engine.definition_rank_symbol_count(&definition_id);
             }
         }
     }
@@ -453,9 +455,7 @@ impl GameApp {
         })
         .flatten();
         if let Some(text_progressing) = cursor_menu_text_progressing {
-            if let Some(mapped) =
-                map_async_cursor_menu_control_event(event, text_progressing)
-            {
+            if let Some(mapped) = map_async_cursor_menu_control_event(event, text_progressing) {
                 event = mapped;
             }
         }
@@ -934,9 +934,7 @@ impl GameApp {
                 !self
                     .control_player_infos
                     .get(player.player_info_id())
-                    .is_some_and(|info| {
-                        info.flags & clonk_engine::PLAYER_INFO_FLAG_INVISIBLE != 0
-                    })
+                    .is_some_and(|info| info.flags & clonk_engine::PLAYER_INFO_FLAG_INVISIBLE != 0)
             })
             .map(|player| ObserverPlayerEntry {
                 id: player.id(),
@@ -951,15 +949,13 @@ impl GameApp {
         players: &[clonk_engine::ControlPlayerInfoEntry],
     ) {
         let resources = &self.admission_resources;
-        let joins = self.control_player_infos.issue_reserved_player_snapshots(
-            client_id,
-            players,
-            |core| {
-                resources.complete_path(core.id).and_then(|path| {
-                    clonk_engine::LegacyCString::from_bytes(path_to_legacy_bytes(path))
-                })
-            },
-        );
+        let joins =
+            self.control_player_infos
+                .issue_reserved_player_snapshots(client_id, players, |core| {
+                    resources.complete_path(core.id).and_then(|path| {
+                        clonk_engine::LegacyCString::from_bytes(path_to_legacy_bytes(path))
+                    })
+                });
         let tick = self.local_control_submission_tick();
         for join in joins {
             if let Some(Err(error)) = self
@@ -1065,10 +1061,7 @@ impl GameApp {
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok())
             == Some(info.by_client);
-        let had_client_packet = self
-            .control_player_infos
-            .client_packet(client_id)
-            .is_some();
+        let had_client_packet = self.control_player_infos.client_packet(client_id).is_some();
         let send_clean_follow_up = matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_)))
             && info.by_client == 0
             && info.flags & clonk_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED != 0
@@ -1088,8 +1081,7 @@ impl GameApp {
             if send_clean_follow_up {
                 updated_clients.insert(client_id);
             }
-            self.control_player_infos
-                .client_packets(&updated_clients)
+            self.control_player_infos.client_packets(&updated_clients)
         } else {
             Vec::new()
         };
@@ -1118,10 +1110,8 @@ impl GameApp {
         issue_joins_now: bool,
         capture_join_players_on_echo: bool,
     ) -> Result<()> {
-        let mut controls =
-            VecDeque::from([(info, issue_joins_now, capture_join_players_on_echo)]);
-        while let Some((info, issue_joins_now, capture_join_players_on_echo)) =
-            controls.pop_front()
+        let mut controls = VecDeque::from([(info, issue_joins_now, capture_join_players_on_echo)]);
+        while let Some((info, issue_joins_now, capture_join_players_on_echo)) = controls.pop_front()
         {
             let capture_join_players = capture_join_players_on_echo
                 && self.mode == AppMode::Running
@@ -1156,11 +1146,7 @@ impl GameApp {
             for follow_up in follow_ups.into_iter().rev() {
                 // HandlePlayerInfo's nested DirectExec precedes the next outer
                 // admission control and inherits its join-issuance boundary.
-                controls.push_front((
-                    follow_up,
-                    issue_joins_now,
-                    capture_join_players_on_echo,
-                ));
+                controls.push_front((follow_up, issue_joins_now, capture_join_players_on_echo));
             }
         }
         Ok(())
@@ -1177,7 +1163,10 @@ impl GameApp {
             .register_player_info_resources(&info.players);
         self.register_classic_lobby_player_resources(&info.players);
         for player in &mut join_players_on_echo {
-            let Some(normalized) = info.players.iter().find(|normalized| normalized.id == player.id)
+            let Some(normalized) = info
+                .players
+                .iter()
+                .find(|normalized| normalized.id == player.id)
             else {
                 continue;
             };
@@ -1207,8 +1196,9 @@ impl GameApp {
         let source_path = Path::new(file);
         let player_file = PlayerFile::load_from_path(source_path)
             .map_err(|error| format!("failed to load {}: {error}", source_path.display()))?;
-        let wire_name = clonk_engine::LegacyCString::from_bytes(clonk_script::c4_string_bytes(file))
-            .ok_or_else(|| "player filename contains an interior NUL".to_string())?;
+        let wire_name =
+            clonk_engine::LegacyCString::from_bytes(clonk_script::c4_string_bytes(file))
+                .ok_or_else(|| "player filename contains an interior NUL".to_string())?;
         let selected = SelectedClientPlayer::new(source_path, wire_name, player_file);
         let alternate_color = selected.alternate_color();
         let request = selected
@@ -1260,8 +1250,8 @@ impl GameApp {
                 .apply_admitted_player_team_update(update.info_id, update.team, update.color)
                 .map_err(|error| error.to_string())?;
         }
-        let resolved_profile = offline_player_real_path(source_path)
-            .unwrap_or_else(|_| source_path.to_path_buf());
+        let resolved_profile =
+            offline_player_real_path(source_path).unwrap_or_else(|_| source_path.to_path_buf());
         for player in &admitted.players {
             self.local_player_profile_paths
                 .insert(player.id, resolved_profile.clone());
@@ -1513,10 +1503,7 @@ impl GameApp {
         recheck_random_teams: bool,
     ) -> Vec<clonk_engine::PlayerInfoControlData> {
         let recheck_random_teams = recheck_random_teams
-            && matches!(
-                self.runtime_network_role(),
-                RuntimeNetworkRole::Host
-            )
+            && matches!(self.runtime_network_role(), RuntimeNetworkRole::Host)
             && self.engine.is_control_host();
         let memberships = ordered_control_player_team_memberships(&self.control_player_infos);
         let exact_metadata = self.network_team_assignment.as_mut().map(|assignment| {
@@ -1615,7 +1602,11 @@ impl GameApp {
             section,
             &[(
                 key,
-                clonk_app_netplay::NativeConfigValue::RawAscii(if enabled { "true" } else { "false" }),
+                clonk_app_netplay::NativeConfigValue::RawAscii(if enabled {
+                    "true"
+                } else {
+                    "false"
+                }),
             )],
         ) {
             tracing::error!(%error, section, key, "failed to persist game option");
@@ -1623,7 +1614,10 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn player_selection_tooltip_target_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
+    pub(crate) fn player_selection_tooltip_target_at(
+        &self,
+        point: GuiPoint,
+    ) -> Option<StartupTooltip> {
         let dialog = self.startup_player_dialog.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let layout = dialog.layout();
@@ -1647,7 +1641,12 @@ impl GameApp {
             return Some(tooltip);
         }
         if dialog.is_crew_mode() {
-            dialog.tooltip_at(point, self.startup_crew_models.iter().map(|crew| crew.name.as_str()))
+            dialog.tooltip_at(
+                point,
+                self.startup_crew_models
+                    .iter()
+                    .map(|crew| crew.name.as_str()),
+            )
         } else {
             dialog.tooltip_at(
                 point,

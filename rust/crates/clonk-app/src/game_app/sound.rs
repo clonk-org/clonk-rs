@@ -217,7 +217,11 @@ impl GameApp {
         let Some(audio) = self.audio.as_mut() else {
             return false;
         };
-        for candidate in [name.to_string(), format!("{name}.ogg"), format!("{name}.mp3")] {
+        for candidate in [
+            name.to_string(),
+            format!("{name}.ogg"),
+            format!("{name}.mp3"),
+        ] {
             match audio.try_start_sound(
                 &candidate,
                 None,
@@ -365,11 +369,7 @@ impl GameApp {
                     } else {
                         format!("{{{nick}}} {message}")
                     };
-                    self.append_control_message_log(
-                        line,
-                        0x00ff_ffff,
-                        Some(control.by_client),
-                    );
+                    self.append_control_message_log(line, 0x00ff_ffff, Some(control.by_client));
                     outcome.displayed = true;
                     check_alert = true;
                 } else {
@@ -437,7 +437,10 @@ impl GameApp {
         outcome
     }
 
-    pub(crate) fn play_options_sound(&mut self, sound: clonk_frontend::startup_options_dlg::SoundSheetSound) {
+    pub(crate) fn play_options_sound(
+        &mut self,
+        sound: clonk_frontend::startup_options_dlg::SoundSheetSound,
+    ) {
         self.play_ui_sound(match sound {
             clonk_frontend::startup_options_dlg::SoundSheetSound::ArrowHit => "ArrowHit",
             clonk_frontend::startup_options_dlg::SoundSheetSound::Command => "Command",
@@ -603,8 +606,7 @@ impl GameApp {
                     // controls on another thread. Capture that instant now and
                     // arm the worker only after sync controls have supplied the
                     // live rate and target FPS.
-                    let control_tick_reached_at =
-                        control_tick.map(|_| tokio::time::Instant::now());
+                    let control_tick_reached_at = control_tick.map(|_| tokio::time::Instant::now());
                     for tick in due_ticks {
                         network.finalize_tick(tick);
                     }
@@ -647,18 +649,15 @@ impl GameApp {
                         // before control/simulation (src/C4GameControl.cpp:262-265;
                         // src/C4Game.cpp:786-797). The decoded packet order is
                         // authoritative, including interleaved SyncCheck packets.
-                        let pending_player_resource = self
-                            .network_ticks
-                            .ready
-                            .get(&tick)
-                            .and_then(|controls| {
+                        let pending_player_resource =
+                            self.network_ticks.ready.get(&tick).and_then(|controls| {
                                 pending_admission_resource(
                                     &mut self.admission_resources,
                                     &self.control_clients,
                                     controls,
                                     &self.aborted_player_resource_joins,
                                 )
-                        });
+                            });
                         if let Some(pending) = pending_player_resource {
                             let player_name = pending
                                 .player_name
@@ -673,12 +672,9 @@ impl GameApp {
                                 .unwrap_or_else(|| {
                                     pending.core.filename.to_string_lossy().into_owned()
                                 });
-                            let template = self.runtime_resource_text(
-                                "IDS_NET_RES_PLRFILE",
-                                "player file for %s",
-                            );
-                            let display_name =
-                                format_resource_string(template, &[&player_name]);
+                            let template = self
+                                .runtime_resource_text("IDS_NET_RES_PLRFILE", "player file for %s");
+                            let display_name = format_resource_string(template, &[&player_name]);
                             self.begin_blocking_resource_wait_at(
                                 BlockingResourceScope::PlayerJoin,
                                 pending.core.id,
@@ -788,10 +784,8 @@ impl GameApp {
                                 *owner != OWNER_NONE && self.engine.player(*owner).is_none()
                             })
                     });
-                let requested_removed_player =
-                    self.apply_pending_viewport_presentation_requests();
-                let retired_viewport_owner =
-                    retired_viewport_owner.or(requested_removed_player);
+                let requested_removed_player = self.apply_pending_viewport_presentation_requests();
+                let retired_viewport_owner = retired_viewport_owner.or(requested_removed_player);
                 if let Some(owner) = retired_viewport_owner {
                     // Player::Execute retires at most one player per frame.
                     // Its C4PlayerList::Remove path closes all of that
