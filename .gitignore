@@ -107,3 +107,4 @@ planet/System.c4g/*
 !planet/System.c4g/*.txt
 !planet/System.c4g/*.ttf
 !planet/System.c4g/COPYING
+/planet/Extra.c4g/

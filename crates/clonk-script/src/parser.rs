@@ -76,6 +76,7 @@ impl<'a> Parser<'a> {
         parser
     }
 
+    #[cfg(test)]
     pub(crate) fn with_strict_level(source: &'a str, strict_level: Option<u8>) -> Self {
         let mut parser = Self::new(source);
         parser.strict_level = strict_level.unwrap_or(0);

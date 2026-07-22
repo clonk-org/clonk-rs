@@ -155,10 +155,6 @@ impl WidgetId {
     pub(crate) fn index(self) -> usize {
         self.0
     }
-
-    pub(crate) const fn from_raw(index: usize) -> Self {
-        Self(index)
-    }
 }
 
 impl fmt::Display for WidgetId {

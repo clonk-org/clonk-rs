@@ -183,7 +183,7 @@ pub(crate) fn resolve_local_resource_candidates_with_group_maker(
         let standalone_name = opened_group
             .as_ref()
             .map(|group| opened_local_group_name(candidate, group))
-            .unwrap_or_else(|| candidate.lookup_name.clone());
+            .unwrap_or_else(|| candidate.lookup_name().to_vec());
         let contents_crc = if let Some(group) = opened_group.as_ref() {
             group.contents_crc_or_zero()
         } else if metadata.as_ref().is_some_and(fs::Metadata::is_file) {
@@ -307,7 +307,7 @@ fn open_group_candidate(path: &Path) -> Option<Group> {
 fn opened_local_group_name(candidate: &LocalResourceCandidate, group: &Group) -> Vec<u8> {
     let separator = std::path::MAIN_SEPARATOR as u8;
     let mut opened_name = candidate
-        .lookup_name
+        .lookup_name()
         .iter()
         .map(|byte| if *byte == b'\\' { separator } else { *byte })
         .collect::<Vec<_>>();

@@ -480,7 +480,6 @@ impl NetworkControlClock {
 #[derive(Debug)]
 struct NetworkWorkerReady {
     local_client_id: ClientId,
-    local_addresses: Vec<NetworkAddress>,
     league_start_response: Option<clonk_network::LeagueStartResponse>,
     league_runtime_available: bool,
     league_record_runtime: Option<LeagueRecordRuntimeHandle>,
@@ -5314,7 +5313,6 @@ async fn run_host_worker(
     netpuncher_state.lock().local_addresses = local_addresses.clone();
     let _ = local_id_tx.send(Ok(NetworkWorkerReady {
         local_client_id: HOST_CLIENT_ID,
-        local_addresses,
         league_start_response,
         league_runtime_available: league_runtime.is_some(),
         league_record_runtime: league_record_runtime.clone(),
@@ -6551,7 +6549,6 @@ async fn run_client_worker(
     });
     let _ = local_id_tx.send(Ok(NetworkWorkerReady {
         local_client_id: client_id,
-        local_addresses: Vec::new(),
         league_start_response: None,
         league_runtime_available: league_runtime.is_some(),
         league_record_runtime: None,
@@ -9229,6 +9226,8 @@ Message=Server says Andr\xe9\r\n\
         let (event_tx, _event_rx) = mpsc::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
+        let netpuncher_state = test_netpuncher_state();
+        let worker_state = Arc::clone(&netpuncher_state);
         let worker = tokio::spawn(async move {
             run_host_worker(
                 settings,
@@ -9238,7 +9237,7 @@ Message=Server says Andr\xe9\r\n\
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
-                test_netpuncher_state(),
+                worker_state,
             )
             .await
         });
@@ -9248,14 +9247,15 @@ Message=Server says Andr\xe9\r\n\
             .expect("host worker readiness timeout")
             .expect("host worker readiness");
         assert_eq!(ready.local_client_id, HOST_CLIENT_ID);
-        assert_eq!(ready.local_addresses.len(), 2);
-        assert_eq!(ready.local_addresses[0].protocol, NetworkProtocol::Tcp);
-        assert_eq!(ready.local_addresses[1].protocol, NetworkProtocol::Udp);
+        let local_addresses = &netpuncher_state.lock().local_addresses;
+        assert_eq!(local_addresses.len(), 2);
+        assert_eq!(local_addresses[0].protocol, NetworkProtocol::Tcp);
+        assert_eq!(local_addresses[1].protocol, NetworkProtocol::Udp);
         assert_eq!(
-            ready.local_addresses[0].endpoint,
-            ready.local_addresses[1].endpoint
+            local_addresses[0].endpoint,
+            local_addresses[1].endpoint
         );
-        assert_ne!(ready.local_addresses[0].endpoint.port(), 0);
+        assert_ne!(local_addresses[0].endpoint.port(), 0);
 
         command_tx
             .send(NetworkCommand::Shutdown)
@@ -9302,7 +9302,7 @@ Message=Server says Andr\xe9\r\n\
             .await
         });
 
-        let ready = local_id_rx
+        local_id_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("host worker readiness timeout")
             .expect("UDP fallback host readiness");
@@ -9310,7 +9310,6 @@ Message=Server says Andr\xe9\r\n\
             NetworkProtocol::Udp,
             configured_address,
         )];
-        assert_eq!(ready.local_addresses, expected_addresses);
         assert_eq!(netpuncher_state.lock().local_addresses, expected_addresses);
         assert!(matches!(
             event_rx.recv_timeout(Duration::from_secs(2)),
@@ -9348,6 +9347,8 @@ Message=Server says Andr\xe9\r\n\
         let (event_tx, event_rx) = mpsc::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
+        let netpuncher_state = test_netpuncher_state();
+        let worker_state = Arc::clone(&netpuncher_state);
         let worker = tokio::spawn(async move {
             run_host_worker(
                 settings,
@@ -9357,17 +9358,17 @@ Message=Server says Andr\xe9\r\n\
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
-                test_netpuncher_state(),
+                worker_state,
             )
             .await
         });
 
-        let ready = local_id_rx
+        local_id_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("host worker readiness timeout")
             .expect("configured UDP-only host readiness");
         assert_eq!(
-            ready.local_addresses,
+            netpuncher_state.lock().local_addresses,
             vec![NetworkAddress::new(
                 NetworkProtocol::Udp,
                 configured_address,

@@ -30,6 +30,9 @@ members = [
 resolver = "2"
 default-members = ["crates/clonk-app"]
 
+[patch.crates-io]
+block = { path = "third_party/block" }
+
 # Keep the ordinary edit/build loop lightly optimized. Live gameplay uses the
 # `play` profile below so runtime-heavy rendering and simulation do not force
 # level-3 codegen onto every development build.
