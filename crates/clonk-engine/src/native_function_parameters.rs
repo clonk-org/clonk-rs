@@ -681,13 +681,33 @@ mod tests {
     };
 
     fn production_registration_names() -> Vec<&'static str> {
-        let source = include_str!("compat.rs");
-        let (_, after_start) = source
-            .split_once("fn populate_host_registration_template(script: &mut ScriptEngine) {")
+        // `populate_host_registration_template` lives in the `registration`
+        // compat submodule; brace-match its own body instead of an
+        // incidentally-nearby marker, since family regrouping no longer
+        // guarantees any particular item follows it in file order.
+        let source = include_str!("compat/registration.rs");
+        let marker = "fn populate_host_registration_template(script: &mut ScriptEngine) {";
+        let start = source
+            .find(marker)
             .expect("production registration function exists");
-        let (registrations, _) = after_start
-            .split_once("/// One synced draw through the active random context")
-            .expect("production registration function end marker exists");
+        let body_start = start + marker.len();
+        let mut depth = 1i32;
+        let mut body_end = body_start;
+        for (offset, ch) in source[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = body_start + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(depth == 0, "production registration function end brace exists");
+        let registrations = &source[body_start..body_end];
 
         registrations
             .split("script.register_host_")
