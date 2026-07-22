@@ -4,21 +4,20 @@ A Rust port of the [LegacyClonk](https://github.com/legacyclonk/LegacyClonk)
 engine, developed for bit-for-bit lockstep parity with the original C++
 implementation.
 
-The engine, frontend, and tooling live in [`rust/`](rust/) as a Cargo
-workspace of `clonk-*` packages; `clonk-app` is the game binary. Game data
+The engine, frontend, and tooling form a Cargo workspace of `clonk-*`
+packages at the repository root;  `clonk-app` is the game binary. Game data
 lives in [`planet/`](planet/) and the [`content/`](content/) submodule.
 
 ## Building
 
 ```
-cd rust
 cargo build --workspace
 cargo nextest run --workspace
 ```
 
-See [`rust/CLAUDE.md`](rust/CLAUDE.md) for engineering constraints,
-[`rust/PORT_STATUS.md`](rust/PORT_STATUS.md) for parity status, and
-[`rust/REFACTOR_PLAN.md`](rust/REFACTOR_PLAN.md) for the ongoing
+See [`CLAUDE.md`](CLAUDE.md) for engineering constraints,
+[`PORT_STATUS.md`](PORT_STATUS.md) for parity status, and
+[`REFACTOR_PLAN.md`](REFACTOR_PLAN.md) for the ongoing
 decomposition campaign.
 
 ## The C++ oracle

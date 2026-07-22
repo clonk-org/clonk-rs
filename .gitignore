@@ -79,7 +79,7 @@ docs/generated/
 Clonk.log
 
 # Rust build artifacts
-rust/target/
+target/
 
 # Game data files and directories
 *.c4p
