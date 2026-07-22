@@ -1,0 +1,1651 @@
+//! Host packet dispatch: client messages, forwarding, control ingest/resync, broadcasts, membership.
+//!
+//! Moved byte-verbatim from `session.rs` (wave 2 of the decomposition
+//! campaign, see REFACTOR_PLAN.md). Structural only.
+
+use super::*;
+
+pub(crate) async fn handle_client_message(
+    connection_id: u32,
+    client_id: ClientId,
+    message: ControlMessage,
+    ping_ms: i32,
+    state: &mut HostState,
+) {
+    // The per-message `ping_ms` mirrors `getPingTime()` at receive time and
+    // stays with the message for activation requests
+    // (src/C4Network2.cpp:1564); route ping state is maintained by the
+    // transport task's `ConnectionPing` messages instead.
+    match message {
+        ControlMessage::Ping(packet) => {
+            if let Some(route) = state.accepted_routes.get(&connection_id) {
+                let _ = route.outbound.try_send(ControlMessage::Pong(packet));
+            }
+        }
+        ControlMessage::Pong(_) => {}
+        ControlMessage::ConnectionRequest(_) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: "accepted client sent a duplicate connection request".to_string(),
+                })
+                .await;
+        }
+        ControlMessage::ConnectionReply(_) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: "accepted client sent a duplicate connection reply".to_string(),
+                })
+                .await;
+        }
+        ControlMessage::ForwardRequest(packet) => {
+            handle_forward_request(connection_id, client_id, packet, ping_ms, state).await;
+        }
+        ControlMessage::Forward(packet) => {
+            handle_forwarded_packet_for_host(connection_id, client_id, packet, ping_ms, state)
+                .await;
+        }
+        ControlMessage::PostMortem(packet) => {
+            handle_post_mortem_recovery(client_id, packet, ping_ms, state).await;
+        }
+        // PID_JoinData is host-to-client only; C++ silently ignores it on a
+        // host (src/C4Network2.cpp:938-946).
+        ControlMessage::JoinData(_) => {}
+        // League results are host-authored. C++ recognizes the packet on a
+        // host but accepts it only when it arrived from the host client
+        // (src/C4Network2Players.cpp:392-419).
+        ControlMessage::LeagueRoundResults(_) => {}
+        ControlMessage::Address(packet) => {
+            handle_received_host_address(client_id, packet, state).await;
+        }
+        ControlMessage::TcpSimOpen(_) => {
+            // Host-side simultaneous-open socket ownership is not part of the
+            // client mesh loop. The typed packet remains accepted/nonfatal.
+        }
+        ControlMessage::Resource(packet) => {
+            let now_seconds = state.resource_epoch.elapsed().as_secs();
+            if let Some(backend) = state.resource_backend.as_mut() {
+                let mut random = resource_safe_random;
+                match backend.on_packet(client_id as i32, &packet, now_seconds, &mut random) {
+                    Ok(events) => {
+                        if matches!(&packet, ResourcePacket::Derive(_)) {
+                            let _ = state
+                                .resource_catalog
+                                .on_packet(client_id as i32, &packet);
+                        }
+                        update_derived_resource_sources(
+                            &mut state.published_player_sources,
+                            &events,
+                        );
+                        dispatch_host_resource_events(events, false, state).await;
+                    }
+                    Err(error) => report_host_resource_error(error, state).await,
+                }
+            } else {
+                let actions = state.resource_catalog.on_packet(client_id as i32, &packet);
+                dispatch_host_resource_actions(actions, state).await;
+            }
+        }
+        ControlMessage::Status(_) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: "client attempted to originate host Status".to_string(),
+                })
+                .await;
+        }
+        ControlMessage::StatusAck(status) => {
+            let accepted = state
+                .status_barrier
+                .remote_ack_changes_state(client_id, status);
+            if accepted {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::StatusAck { client_id, status })
+                    .await;
+            }
+            let effects = state.status_barrier.remote_ack(client_id, status);
+            apply_barrier_effects(effects, state).await;
+        }
+        ControlMessage::LobbyCountdown(packet) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::LobbyCountdown { packet })
+                .await;
+        }
+        // A Request is host-authored. C++ rejects every network-origin
+        // Request while running as the host, regardless of packet.Client
+        // (src/C4Network2.cpp:1642-1654).
+        ControlMessage::ReadyCheck(packet) if packet.data.vote_requested() => {}
+        ControlMessage::ReadyCheck(packet) => {
+            apply_ready_check_to_host_state(packet, state);
+            let _ = state.event_tx.send(HostEvent::ReadyCheck { packet }).await;
+        }
+        ControlMessage::ActivationRequest { tick } => {
+            let waited_for = matches!(
+                state.status_barrier.remotes.get(&client_id),
+                Some(RemoteBarrierState::NotReady | RemoteBarrierState::Ready)
+            );
+            let _ = state
+                .event_tx
+                .send(HostEvent::ActivationRequest {
+                    client_id,
+                    tick,
+                    waited_for,
+                    ping_ms,
+                })
+                .await;
+        }
+        ControlMessage::PlayerInfoUpdate(request) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::PlayerInfoUpdate { client_id, request })
+                .await;
+        }
+        ControlMessage::Control(packet) => {
+            // C4GameControlNetwork::HandleControl receives the source client
+            // ID but deliberately does not authenticate the packet envelope
+            // against it. Only PID_ControlPkt checks its embedded ByClient.
+            ingest_control(packet, ControlIngress::Network, state).await;
+        }
+        ControlMessage::Request { from_tick } => {
+            fulfill_resync_request(client_id, from_tick, state).await;
+        }
+        ControlMessage::Packet { delivery, data } => {
+            broadcast_packet(delivery, data, Some(client_id), state).await;
+        }
+        ControlMessage::ExecSync { control_tick } => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: format!(
+                        "client attempted to release synchronized controls at tick {control_tick}"
+                    ),
+                })
+                .await;
+        }
+    }
+}
+
+async fn handle_post_mortem_recovery(
+    source_client_id: ClientId,
+    packet: crate::PostMortemPacket,
+    ping_ms: i32,
+    state: &mut HostState,
+) {
+    state.closed_routes.expire();
+    if let Some(expected_client_id) = state.closed_routes.client_id(packet.connection_id) {
+        if expected_client_id != source_client_id {
+            return;
+        }
+    }
+    let Some(replay) = state.closed_routes.recover(&packet) else {
+        let retiring_route = state
+            .accepted_routes
+            .get(&packet.connection_id)
+            .is_some_and(|route| route.client_id == source_client_id)
+            .then(|| {
+                state
+                    .accepted_routes
+                    .get(&packet.connection_id)
+                    .expect("checked accepted route exists")
+                    .outbound
+                    .clone()
+            });
+        if let Some(outbound) = retiring_route {
+            state
+                .pending_post_mortems
+                .insert(packet.connection_id, (source_client_id, packet, ping_ms));
+            // C++ retires even a locally-live route as soon as its peer sends
+            // PID_PostMortem. The independent signal avoids waiting behind
+            // that route's outbound queue or its liveness timeout.
+            outbound.retire();
+        }
+        return;
+    };
+    for nested_packet in replay.packets {
+        match crate::transport::parse_complete_packet(&nested_packet) {
+            Ok(Some(message)) => {
+                Box::pin(handle_client_message(
+                    replay.connection_id,
+                    replay.client_id,
+                    message,
+                    ping_ms,
+                    state,
+                ))
+                .await;
+            }
+            Ok(None) => {
+                report_unhandled_forwarded_packet(replay.client_id, &nested_packet, state).await;
+            }
+            Err(error) => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::TransportError {
+                        client_id: Some(replay.client_id),
+                        error: format!(
+                            "invalid post-mortem packet for closed connection {}: {error}",
+                            replay.connection_id
+                        ),
+                    })
+                    .await;
+            }
+        }
+    }
+}
+
+pub(crate) fn forward_selects(packet: &crate::ForwardPacket, client_id: i32) -> bool {
+    let listed = packet.clients.contains(&client_id);
+    if listed {
+        !packet.negative_list
+    } else {
+        packet.negative_list
+    }
+}
+
+pub(crate) fn decentral_control_message(packet: &ControlPacket) -> Result<ControlMessage, TransportError> {
+    decentral_control_message_to_unconnected(packet, std::iter::empty())
+}
+
+pub(crate) fn decentral_control_message_to_unconnected(
+    packet: &ControlPacket,
+    directly_reached: impl IntoIterator<Item = ClientId>,
+) -> Result<ControlMessage, TransportError> {
+    Ok(ControlMessage::ForwardRequest(crate::ForwardPacket {
+        negative_list: true,
+        clients: directly_reached
+            .into_iter()
+            .filter_map(|client_id| i32::try_from(client_id).ok())
+            .collect(),
+        nested_packet: crate::transport::encode_complete_control_packet(packet)?,
+    }))
+}
+
+async fn report_forward_error(source: ClientId, error: String, state: &HostState) {
+    let _ = state
+        .event_tx
+        .send(HostEvent::TransportError {
+            client_id: Some(source),
+            error,
+        })
+        .await;
+}
+
+async fn report_unhandled_forwarded_packet(
+    source: ClientId,
+    nested_packet: &[u8],
+    state: &HostState,
+) {
+    let Some(&packet_type) = nested_packet.first() else {
+        return;
+    };
+    let _ = state
+        .event_tx
+        .send(HostEvent::UnhandledPacket {
+            client_id: Some(source),
+            packet_type,
+        })
+        .await;
+}
+
+async fn handle_forward_request(
+    connection_id: u32,
+    source: ClientId,
+    packet: crate::ForwardPacket,
+    ping_ms: i32,
+    state: &mut HostState,
+) {
+    // C4Network2IO keeps connection-list order, excludes the requester's
+    // client ID, and deduplicates targets into a positive list. Rust assigns
+    // monotonically increasing IDs, so reverse ID order mirrors the current
+    // head-inserted C++ connection list (src/C4Network2IO.cpp:1066-1082).
+    let target_ids = state
+        .clients
+        .keys()
+        .rev()
+        .copied()
+        .filter(|client_id| *client_id != source)
+        .filter(|client_id| {
+            i32::try_from(*client_id).is_ok_and(|client_id| forward_selects(&packet, client_id))
+        })
+        .collect::<Vec<_>>();
+    if target_ids.len() <= 2 {
+        for client_id in &target_ids {
+            let _ = send_host_raw(
+                state,
+                *client_id,
+                ConnectionTrafficClass::Message,
+                packet.nested_packet.clone(),
+            )
+            .await;
+        }
+    } else {
+        let forwarded = ControlMessage::Forward(crate::ForwardPacket {
+            negative_list: false,
+            clients: target_ids
+                .iter()
+                .filter_map(|client_id| i32::try_from(*client_id).ok())
+                .collect(),
+            nested_packet: packet.nested_packet.clone(),
+        });
+        for client_id in &target_ids {
+            let _ = send_host_message(
+                state,
+                *client_id,
+                ConnectionTrafficClass::Message,
+                forwarded.clone(),
+            )
+            .await;
+        }
+    }
+    if forward_selects(&packet, HOST_CLIENT_ID as i32) {
+        dispatch_forwarded_packet_for_host(
+            connection_id,
+            source,
+            &packet.nested_packet,
+            ping_ms,
+            state,
+        )
+        .await;
+    }
+}
+
+async fn handle_forwarded_packet_for_host(
+    connection_id: u32,
+    source: ClientId,
+    packet: crate::ForwardPacket,
+    ping_ms: i32,
+    state: &mut HostState,
+) {
+    if !forward_selects(&packet, HOST_CLIENT_ID as i32) {
+        return;
+    }
+    dispatch_forwarded_packet_for_host(
+        connection_id,
+        source,
+        &packet.nested_packet,
+        ping_ms,
+        state,
+    )
+    .await;
+}
+
+async fn dispatch_forwarded_packet_for_host(
+    connection_id: u32,
+    source: ClientId,
+    nested_packet: &[u8],
+    ping_ms: i32,
+    state: &mut HostState,
+) {
+    let message = match crate::transport::parse_complete_packet(nested_packet) {
+        Ok(Some(message)) => message,
+        Ok(None) => {
+            report_unhandled_forwarded_packet(source, nested_packet, state).await;
+            return;
+        }
+        Err(error) => {
+            report_forward_error(source, format!("invalid forwarded packet: {error}"), state).await;
+            return;
+        }
+    };
+    match message {
+        ControlMessage::Packet { delivery, data }
+            if matches!(delivery, ControlDelivery::Direct | ControlDelivery::Private) =>
+        {
+            dispatch_packet(delivery, data, Some(source), false, state).await;
+        }
+        message => {
+            Box::pin(handle_client_message(
+                connection_id,
+                source,
+                message,
+                ping_ms,
+                state,
+            ))
+            .await;
+        }
+    }
+}
+
+pub(crate) async fn dispatch_host_resource_actions(
+    actions: Vec<crate::ResourceCatalogAction>,
+    state: &mut HostState,
+) {
+    for action in actions {
+        match action {
+            crate::ResourceCatalogAction::SendToPeer { peer_id, packet } => {
+                let Ok(client_id) = ClientId::try_from(peer_id) else {
+                    continue;
+                };
+                let traffic = resource_traffic_class(&packet);
+                let _ =
+                    send_host_message(state, client_id, traffic, ControlMessage::Resource(packet))
+                        .await;
+            }
+            crate::ResourceCatalogAction::Broadcast { packet } => {
+                let traffic = resource_traffic_class(&packet);
+                for client_id in host_target_client_ids(state, None) {
+                    let _ = send_host_message(
+                        state,
+                        client_id,
+                        traffic,
+                        ControlMessage::Resource(packet.clone()),
+                    )
+                    .await;
+                }
+            }
+            external => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::ResourceAction(external))
+                    .await;
+            }
+        }
+    }
+}
+
+pub(crate) async fn dispatch_host_resource_events(
+    events: Vec<crate::ResourceTransferEvent>,
+    completion_local: bool,
+    state: &mut HostState,
+) {
+    for event in events {
+        match event {
+            crate::ResourceTransferEvent::Transport(action) => {
+                dispatch_host_resource_actions(vec![action], state).await;
+            }
+            crate::ResourceTransferEvent::Progress {
+                resource_id,
+                present_percent,
+            } => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::ResourceProgress {
+                        resource_id,
+                        present_percent,
+                    })
+                    .await;
+            }
+            crate::ResourceTransferEvent::Completed {
+                resource_id,
+                core,
+                path,
+            } => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::ResourceComplete {
+                        resource_id,
+                        core,
+                        path,
+                        local: completion_local,
+                    })
+                    .await;
+            }
+            crate::ResourceTransferEvent::LoadFailed { resource_id } => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::ResourceLoadFailed { resource_id })
+                    .await;
+            }
+        }
+    }
+}
+
+pub(crate) async fn report_host_resource_error(error: crate::ResourceTransferError, state: &HostState) {
+    let _ = state
+        .event_tx
+        .send(HostEvent::TransportError {
+            client_id: None,
+            error: format!("resource transfer failed: {error}"),
+        })
+        .await;
+}
+
+async fn handle_received_host_address(
+    source_client_id: ClientId,
+    packet: crate::AddressPacket,
+    state: &mut HostState,
+) {
+    if !state.client_cores.contains_key(&packet.client_id) {
+        return;
+    }
+    let Some(peer_addr) = state
+        .clients
+        .get(&source_client_id)
+        .map(|client| client.peer_addr)
+    else {
+        return;
+    };
+    let packet = packet.announcement_for_peer(peer_addr);
+    let insertion = crate::append_received_address(
+        state.client_addresses.entry(packet.client_id).or_default(),
+        packet.address,
+    );
+    if !matches!(insertion, crate::AddressInsertion::Added { .. }) {
+        return;
+    }
+
+    // AddAddr(..., true) re-announces a newly learned address to every
+    // connected client, including the source connection. The source then
+    // suppresses the duplicate on receipt (src/C4Network2Client.cpp:259-278,
+    // 581-597).
+    for client_id in host_target_client_ids(state, None) {
+        let _ = send_host_message(
+            state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::Address(packet),
+        )
+        .await;
+    }
+}
+
+pub(crate) async fn handle_client_disconnected(
+    connection_id: u32,
+    client_id: ClientId,
+    next_inbound_packet: u32,
+    post_mortem: Option<crate::PostMortemPacket>,
+    reason: Option<String>,
+    state: &mut HostState,
+) {
+    let disconnected_route = state.accepted_routes.remove(&connection_id);
+    if disconnected_route.is_none() {
+        return;
+    }
+    if let Some(route) = &disconnected_route {
+        state
+            .closed_routes
+            .retain(connection_id, route.client_id, next_inbound_packet);
+    }
+    if let Some((source_client_id, packet, ping_ms)) =
+        state.pending_post_mortems.remove(&connection_id)
+    {
+        handle_post_mortem_recovery(source_client_id, packet, ping_ms, state).await;
+    }
+    let is_secondary_route = disconnected_route.as_ref().is_some_and(|route| {
+        state
+            .clients
+            .get(&client_id)
+            .is_some_and(|client| !route.outbound.same_channel(&client.outbound))
+    });
+    let promoted_route = disconnected_route
+        .as_ref()
+        .filter(|route| {
+            state
+                .clients
+                .get(&client_id)
+                .is_some_and(|client| route.outbound.same_channel(&client.outbound))
+        })
+        .and_then(|_| preferred_host_route(state, client_id, ConnectionTrafficClass::Message))
+        .map(|route| (route.outbound.clone(), route.peer_addr));
+    if let Some(AcceptedConnectionRoute {
+        client_id: route_client_id,
+        remote_connection_id: _remote_connection_id,
+        peer_addr: _peer_addr,
+        protocol: _protocol,
+        outbound: _outbound,
+        ping: _,
+    }) = disconnected_route
+    {
+        debug_assert_eq!(route_client_id, client_id);
+    }
+    if is_secondary_route {
+        if let Some(post_mortem) = post_mortem {
+            let _ = try_send_host_message(
+                state,
+                client_id,
+                ConnectionTrafficClass::Message,
+                ControlMessage::PostMortem(post_mortem),
+            );
+        }
+        if let Some(reason) = reason {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: reason,
+                })
+                .await;
+        }
+        return;
+    }
+    if let Some((outbound, peer_addr)) = promoted_route {
+        if let Some(client) = state.clients.get_mut(&client_id) {
+            client.outbound = outbound.clone();
+            client.peer_addr = peer_addr;
+        }
+        if let Some(post_mortem) = post_mortem {
+            let _ = try_send_host_message(
+                state,
+                client_id,
+                ConnectionTrafficClass::Message,
+                ControlMessage::PostMortem(post_mortem),
+            );
+        }
+        if let Some(reason) = reason {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: reason,
+                })
+                .await;
+        }
+        return;
+    }
+    mark_client_removing(client_id, state);
+    let disconnected = state.clients.remove(&client_id);
+    let removed_logical_client = disconnected.is_some();
+    if let Some(client) = &disconnected {
+        state.pending_kinds.remove(&client.core.client_id);
+        if let Some(remote) = state.status_barrier.remotes.get_mut(&client_id) {
+            *remote = RemoteBarrierState::Removing;
+        }
+    }
+
+    if removed_logical_client {
+        // C4Network2::OnClientDisconnect reports the league disconnect before
+        // scheduling the synchronized client removal. This event is separate
+        // from ClientLeft so controlled removal and host teardown cannot be
+        // mistaken for a failed connection.
+        let _ = state
+            .event_tx
+            .send(HostEvent::ClientConnectionFailed { client_id })
+            .await;
+        let _ = state
+            .event_tx
+            .send(HostEvent::ClientLeft { client_id })
+            .await;
+    }
+
+    if let Some(client) = disconnected {
+        // Socket loss stops waiting for this peer's status acknowledgement,
+        // but the running control client remains active until the synchronized
+        // ClientRemove executes. C4ClientList::CtrlRemove only flags the net
+        // client before queuing CDT_Sync; C4GameControlNetwork refreshes its
+        // active-client copy at that synchronization boundary
+        // (src/C4Client.cpp:293-303;
+        // src/C4GameControlNetwork.cpp:181-220,260-297,329-345).
+        queue_disconnected_client_remove(&client.core, state).await;
+    }
+    let barrier_effects = state.status_barrier.remove_remote(client_id);
+    apply_barrier_effects(barrier_effects, state).await;
+    if removed_logical_client {
+        let retry_effects = retry_unreached_status_after_disconnect(
+            &mut state.status_barrier,
+            state.coordinator.current_tick(),
+        );
+        apply_barrier_effects(retry_effects, state).await;
+    }
+
+    if let Some(reason) = reason {
+        let _ = state
+            .event_tx
+            .send(HostEvent::TransportError {
+                client_id: Some(client_id),
+                error: reason,
+            })
+            .await;
+    }
+}
+
+pub(crate) async fn handle_admission_failed(connection_id: u32, error: String, state: &mut HostState) {
+    state.pending_route_peers.remove(&connection_id);
+    state.pending_route_clients.remove(&connection_id);
+    let provisional_client_id = state.pending_admissions.remove(&connection_id);
+    if let Some(core) =
+        provisional_client_id.and_then(|client_id| state.client_cores.get(&client_id).cloned())
+    {
+        if let Ok(client_id) = ClientId::try_from(core.client_id) {
+            mark_client_removing(client_id, state);
+        }
+        queue_disconnected_client_remove(&core, state).await;
+        let retry_effects = retry_unreached_status_after_disconnect(
+            &mut state.status_barrier,
+            state.coordinator.current_tick(),
+        );
+        apply_barrier_effects(retry_effects, state).await;
+    }
+    let _ = state
+        .event_tx
+        .send(HostEvent::TransportError {
+            client_id: provisional_client_id.and_then(|id| ClientId::try_from(id).ok()),
+            error,
+        })
+        .await;
+}
+
+pub(crate) fn retry_unreached_status_after_disconnect(
+    barrier: &mut StatusBarrier,
+    current_tick: Tick,
+) -> Vec<BarrierEffect> {
+    if !matches!(
+        barrier.phase,
+        BarrierPhase::Waiting {
+            local_reached: false
+        }
+    ) || !matches!(barrier.status.state, NETWORK_STATE_GO | NETWORK_STATE_PAUSE)
+    {
+        return Vec::new();
+    }
+
+    let status = NetworkStatus {
+        target_tick: i32::try_from(current_tick).unwrap_or(i32::MAX),
+        ..barrier.status
+    };
+    // ChangeGameStatus immediately asks the runtime to CheckStatusReached.
+    // Keep local arrival app-owned even when this target equals the session
+    // coordinator's tick; otherwise a one-shot commit can outrun GameApp.
+    barrier.change_status(status)
+}
+
+async fn queue_disconnected_client_remove(
+    core: &clonk_engine::ClientCoreControlData,
+    state: &mut HostState,
+) {
+    let reason = clonk_engine::LegacyCString::from_bytes(b"disconnected".to_vec())
+        .unwrap_or_default();
+    queue_host_client_remove(core, reason, state).await;
+}
+
+pub(crate) async fn fail_host_pending_join_data(
+    reason: clonk_engine::LegacyCString,
+    state: &mut HostState,
+) -> usize {
+    let pending = pending_join_data_client_ids(&state.clients, &state.removing_clients)
+        .into_iter()
+        .filter_map(|client_id| state.clients.get(&client_id).map(|client| client.core.clone()))
+        .collect::<Vec<_>>();
+    let removed = pending.len();
+    for core in pending {
+        queue_host_client_remove(&core, reason.clone(), state).await;
+    }
+    removed
+}
+
+async fn queue_host_client_remove(
+    core: &clonk_engine::ClientCoreControlData,
+    reason: clonk_engine::LegacyCString,
+    state: &mut HostState,
+) {
+    let Ok(data) = crate::encode_control_entry_payload(&clonk_engine::ControlPacket::ClientRemove(
+        clonk_engine::ClientRemoveControlData {
+            client_id: core.client_id,
+            reason,
+            by_client: 0,
+        },
+    )) else {
+        return;
+    };
+    broadcast_packet(ControlDelivery::Sync, data, None, state).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlIngress {
+    Local,
+    Network,
+}
+
+pub(crate) async fn ingest_control(packet: ControlPacket, ingress: ControlIngress, state: &mut HostState) {
+    let client_id = packet.client_id();
+    // Validate everything PackCompleteCtrl needs before the coordinator
+    // consumes contributions and advances its tick. A malformed frame must
+    // not create a permanent hole in the lockstep stream.
+    if let Err(error) = validate_control_envelope(&packet) {
+        let _ = state
+            .event_tx
+            .send(HostEvent::TransportError {
+                client_id: Some(client_id),
+                error: format!("invalid control packet: {error}"),
+            })
+            .await;
+        return;
+    }
+    if let Err(error) = validate_queued_control_authors(&packet) {
+        let _ = state
+            .event_tx
+            .send(HostEvent::TransportError {
+                client_id: Some(client_id),
+                error,
+            })
+            .await;
+        return;
+    }
+    if !state.backlog.contains_packet(client_id, packet.tick()) {
+        state.client_performance.record_arrival(
+            client_id,
+            packet.tick(),
+            tokio::time::Instant::now(),
+        );
+    }
+    if ingress == ControlIngress::Local {
+        state.local_control_backlog.record_packet(&packet);
+    }
+    state.backlog.record_packet(&packet);
+    // A host's own DoInput broadcasts before AddCtrl in CNM_Decentral. A raw
+    // network PID_Control goes straight to HandleControl and is only stored;
+    // client fallback fanout belongs to PID_FwdReq instead (pristine C++
+    // src/C4GameControlNetwork.cpp:156-179,517-529).
+    if ingress == ControlIngress::Local && state.control_mode == 0 {
+        broadcast_control(&packet, state).await;
+    }
+    match state.coordinator.ingest(packet) {
+        Ok(ControlOutcome { ready, missing, .. }) => {
+            for batch in ready {
+                publish_ready_batch(batch, state).await;
+            }
+            if !missing.is_empty() {
+                schedule_missing(missing, state);
+            }
+        }
+        Err(crate::ControlError::UnknownClient(_)) if ingress == ControlIngress::Network => {
+            // HandleControl accepts network control independently of the
+            // activated client list. Rust cannot use that contribution in the
+            // active coordinator yet, but a valid early packet is not a
+            // transport error and must not create per-tick error noise.
+        }
+        Err(error) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: error.to_string(),
+                })
+                .await;
+        }
+    }
+}
+
+/// Authenticate security-sensitive inner authors in a queued contribution.
+///
+/// C++ typed packet unpack rejects unknown control IDs, so every queued frame
+/// reaching the coordinator is fully decoded and checked here.
+pub(crate) fn validate_queued_control_authors(packet: &ControlPacket) -> Result<(), String> {
+    let frame = crate::decode_control_packet(packet)
+        .map_err(|error| format!("invalid control packet: {error}"))?;
+    let expected_author = i32::try_from(frame.client_id).map_err(|_| {
+        format!(
+            "queued control packet has unsupported author id {}",
+            frame.client_id
+        )
+    })?;
+    for control in &frame.controls {
+        let (name, author) = match control {
+            clonk_engine::ControlPacket::ClientJoin(control) => {
+                ("CID_ClientJoin", control.by_client)
+            }
+            clonk_engine::ControlPacket::ClientUpdate(control) => {
+                ("CID_ClientUpdate", control.by_client)
+            }
+            clonk_engine::ControlPacket::ClientRemove(control) => {
+                ("CID_ClientRemove", control.by_client)
+            }
+            clonk_engine::ControlPacket::PlayerInfo(control) => {
+                ("CID_PlrInfo", control.by_client)
+            }
+            clonk_engine::ControlPacket::JoinPlayer(control) => {
+                ("CID_JoinPlr", control.by_client)
+            }
+            clonk_engine::ControlPacket::PlayerSelect(control) => {
+                ("CID_PlrSelect", control.by_client)
+            }
+            clonk_engine::ControlPacket::PlayerControl(control) => {
+                ("CID_PlrControl", control.by_client)
+            }
+            clonk_engine::ControlPacket::PlayerCommand(control) => {
+                ("CID_PlrCommand", control.by_client)
+            }
+            clonk_engine::ControlPacket::Script(script) => ("CID_Script", script.by_client),
+            clonk_engine::ControlPacket::MessageBoardAnswer(answer) => {
+                ("CID_MessageBoardAnswer", answer.by_client)
+            }
+            clonk_engine::ControlPacket::Message(message) => ("CID_Message", message.by_client),
+            clonk_engine::ControlPacket::CustomCommand(command) => {
+                ("CID_CustomCommand", command.by_client)
+            }
+            clonk_engine::ControlPacket::EmMoveObject(control) => ("CID_EMMoveObj", control.by_client),
+            clonk_engine::ControlPacket::EmDrawTool(control) => ("CID_EMDrawTool", control.by_client),
+            clonk_engine::ControlPacket::EmDropDef(control) => ("CID_EMDropDef", control.by_client),
+            clonk_engine::ControlPacket::ActivateGameGoalMenu(control) => {
+                ("CID_ActivateGameGoalMenu", control.by_client)
+            }
+            clonk_engine::ControlPacket::ToggleHostility(control) => {
+                ("CID_ToggleHostility", control.by_client)
+            }
+            clonk_engine::ControlPacket::ActivateGameGoalRule(control) => {
+                ("CID_ActivateGameGoalRule", control.by_client)
+            }
+            clonk_engine::ControlPacket::SetPlayerTeam(control) => {
+                ("CID_SetPlayerTeam", control.by_client)
+            }
+            clonk_engine::ControlPacket::EliminatePlayer(control) => {
+                ("CID_EliminatePlayer", control.by_client)
+            }
+            clonk_engine::ControlPacket::RemovePlayer(remove) => ("CID_RemovePlr", remove.by_client),
+            clonk_engine::ControlPacket::Set(set) => ("CID_Set", set.by_client),
+            clonk_engine::ControlPacket::Vote(vote) => ("CID_Vote", vote.by_client),
+            clonk_engine::ControlPacket::VoteEnd(vote) => ("CID_VoteEnd", vote.by_client),
+            clonk_engine::ControlPacket::InitScenarioPlayer(control) => {
+                ("CID_InitScenarioPlayer", control.by_client)
+            }
+            clonk_engine::ControlPacket::SurrenderPlayer(control) => {
+                ("CID_SurrenderPlayer", control.by_client)
+            }
+            clonk_engine::ControlPacket::Synchronize(control) => {
+                ("CID_Synchronize", control.by_client)
+            }
+            clonk_engine::ControlPacket::SyncCheck(control) => {
+                ("CID_SyncCheck", control.by_client)
+            }
+            // DebugRec has no inherited C4ControlPacket body, so the outer
+            // authenticated contribution is its only author identity.
+            clonk_engine::ControlPacket::DebugRecord(_) => continue,
+            _ => continue,
+        };
+        if author != expected_author {
+            return Err(format!(
+                "queued {name} claimed author {author}, but authenticated author is {expected_author}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn schedule_missing(missing: Vec<MissingRange>, state: &mut HostState) {
+    let requests = state.scheduler.schedule(missing.iter(), Instant::now());
+    for request in requests {
+        if !state
+            .clients
+            .get(&request.client_id)
+            .is_some_and(|client| client.join_data_sent)
+        {
+            continue;
+        }
+        let _ = try_send_host_message(
+            state,
+            request.client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::Request {
+                from_tick: request.from_tick,
+            },
+        );
+    }
+}
+
+pub(crate) async fn request_missing_controls(state: &mut HostState) {
+    let missing = state.coordinator.missing_ranges();
+    if missing.is_empty() {
+        return;
+    }
+    schedule_missing(missing, state);
+}
+
+async fn fulfill_resync_request(client_id: ClientId, from_tick: Tick, state: &mut HostState) {
+    let resend = state.backlog.fulfill_request(from_tick);
+    for packet in resend {
+        if !send_host_message(
+            state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::Control(packet),
+        )
+        .await
+        {
+            return;
+        }
+    }
+}
+
+pub(crate) async fn publish_ready_batch(batch: ReadyBatch, state: &mut HostState) {
+    let aggregated = match aggregate_ready_batch(&batch) {
+        Ok(packet) => packet,
+        Err(error) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: None,
+                    error: format!("failed to aggregate ready tick {}: {error}", batch.tick()),
+                })
+                .await;
+            return;
+        }
+    };
+
+    state.backlog.record_ready_batch(&batch);
+    state.backlog.record_packet(&aggregated);
+    // Only central/async hosts transmit C4ClientIDAll. Decentralized peers
+    // already received each contribution and pack this packet themselves
+    // (src/C4GameControlNetwork.cpp:763-777).
+    if state.control_mode != 0 {
+        broadcast_control(&aggregated, state).await;
+    }
+    let _ = state
+        .event_tx
+        .send(HostEvent::Ready { packet: aggregated })
+        .await;
+}
+
+async fn broadcast_control(packet: &ControlPacket, state: &mut HostState) {
+    for client_id in host_target_client_ids(state, None) {
+        let _ = send_host_message(
+            state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::Control(packet.clone()),
+        )
+        .await;
+    }
+}
+
+pub(crate) async fn broadcast_packet(
+    delivery: ControlDelivery,
+    data: Vec<u8>,
+    origin: Option<ClientId>,
+    state: &mut HostState,
+) {
+    dispatch_packet(delivery, data, origin, true, state).await;
+}
+
+async fn dispatch_packet(
+    delivery: ControlDelivery,
+    data: Vec<u8>,
+    origin: Option<ClientId>,
+    relay_to_clients: bool,
+    state: &mut HostState,
+) {
+    match delivery {
+        ControlDelivery::Sync => {
+            let expected_author = origin
+                .and_then(|client_id| i32::try_from(client_id).ok())
+                .unwrap_or(0);
+            let control = match authenticated_single_control(&data, expected_author) {
+                Ok(control) => control,
+                Err(error) => {
+                    let _ = state
+                        .event_tx
+                        .send(HostEvent::TransportError {
+                            client_id: origin,
+                            error,
+                        })
+                        .await;
+                    return;
+                }
+            };
+            if expected_author == HOST_CLIENT_ID as i32 {
+                if let clonk_engine::ControlPacket::ClientRemove(remove) = &control {
+                    if remove.by_client == HOST_CLIENT_ID as i32 {
+                        if let Ok(client_id) = ClientId::try_from(remove.client_id) {
+                            if state.client_cores.contains_key(&remove.client_id)
+                                || state.clients.contains_key(&client_id)
+                                || state.status_barrier.remotes.contains_key(&client_id)
+                            {
+                                mark_client_removing(client_id, state);
+                            }
+                        }
+                    }
+                }
+            }
+            // The client that originated a Sync packet deleted its local copy
+            // and waits for the host echo, so include every client here
+            // (src/C4GameControlNetwork.cpp:181-220,568-572).
+            if relay_to_clients {
+                for client_id in host_target_client_ids(state, None) {
+                    let _ = send_host_message(
+                        state,
+                        client_id,
+                        ConnectionTrafficClass::Message,
+                        ControlMessage::Packet {
+                            delivery,
+                            data: data.clone(),
+                        },
+                    )
+                    .await;
+                }
+            }
+            state.pending_sync.push(control);
+            if state.status_barrier.is_frozen() {
+                execute_frozen_sync(state.coordinator.current_tick(), state).await;
+            } else if let Ok(next_control_tick) = i32::try_from(state.coordinator.current_tick()) {
+                let effects = state.status_barrier.sync(next_control_tick);
+                apply_barrier_effects(effects, state).await;
+            }
+        }
+        ControlDelivery::Queue | ControlDelivery::Decide => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: origin,
+                    error: format!("single control packet cannot use {delivery:?} delivery"),
+                })
+                .await;
+        }
+        ControlDelivery::Direct | ControlDelivery::Private => {
+            let expected_author = origin
+                .and_then(|client_id| i32::try_from(client_id).ok())
+                .unwrap_or(0);
+            let mut control = match authenticated_single_control(&data, expected_author) {
+                Ok(control) => control,
+                Err(error) => {
+                    let _ = state
+                        .event_tx
+                        .send(HostEvent::TransportError {
+                            client_id: origin,
+                            error,
+                        })
+                        .await;
+                    return;
+                }
+            };
+            let mut local_data = data.clone();
+            if let clonk_engine::ControlPacket::PlayerInfo(info) = &mut control {
+                let local_sources = load_authoritative_player_resources(
+                    &state.resource_resolver,
+                    &mut state.resource_catalog,
+                    state.resource_backend.as_mut(),
+                    info,
+                );
+                for (path, core) in &local_sources {
+                    let _ = state
+                        .event_tx
+                        .send(HostEvent::ResourceComplete {
+                            resource_id: core.id,
+                            core: core.clone(),
+                            path: path.clone(),
+                            local: true,
+                        })
+                        .await;
+                }
+                state.published_player_sources.extend(local_sources);
+                if let Ok(normalized) = crate::encode_control_entry_payload(&control) {
+                    local_data = normalized;
+                }
+            }
+            if relay_to_clients {
+                for client_id in host_target_client_ids(state, origin) {
+                    let _ = send_host_message(
+                        state,
+                        client_id,
+                        ConnectionTrafficClass::Message,
+                        ControlMessage::Packet {
+                            delivery,
+                            data: data.clone(),
+                        },
+                    )
+                    .await;
+                }
+            }
+            let _ = state
+                .event_tx
+                .send(HostEvent::Direct {
+                    client_id: origin.unwrap_or(BROADCAST_CLIENT_ID),
+                    delivery,
+                    data: local_data,
+                })
+                .await;
+        }
+    }
+}
+
+pub(crate) fn authenticated_single_control(
+    data: &[u8],
+    expected_author: i32,
+) -> Result<clonk_engine::ControlPacket, String> {
+    let control = decode_control_entry_payload(data)
+        .map_err(|error| format!("invalid single control packet: {error}"))?;
+    let author = match &control {
+        clonk_engine::ControlPacket::ClientJoin(data) => data.by_client,
+        clonk_engine::ControlPacket::ClientUpdate(data) => data.by_client,
+        clonk_engine::ControlPacket::ClientRemove(data) => data.by_client,
+        clonk_engine::ControlPacket::PlayerSelect(data) => data.by_client,
+        clonk_engine::ControlPacket::PlayerControl(data) => data.by_client,
+        clonk_engine::ControlPacket::PlayerCommand(data) => data.by_client,
+        clonk_engine::ControlPacket::Script(data) => data.by_client,
+        clonk_engine::ControlPacket::MessageBoardAnswer(data) => data.by_client,
+        clonk_engine::ControlPacket::Message(data) => data.by_client,
+        clonk_engine::ControlPacket::CustomCommand(data) => data.by_client,
+        clonk_engine::ControlPacket::EmMoveObject(data) => data.by_client,
+        clonk_engine::ControlPacket::EmDrawTool(data) => data.by_client,
+        clonk_engine::ControlPacket::EmDropDef(data) => data.by_client,
+        clonk_engine::ControlPacket::ActivateGameGoalMenu(data) => data.by_client,
+        clonk_engine::ControlPacket::ToggleHostility(data) => data.by_client,
+        clonk_engine::ControlPacket::ActivateGameGoalRule(data) => data.by_client,
+        clonk_engine::ControlPacket::SetPlayerTeam(data) => data.by_client,
+        clonk_engine::ControlPacket::EliminatePlayer(data) => data.by_client,
+        clonk_engine::ControlPacket::InitScenarioPlayer(data) => data.by_client,
+        clonk_engine::ControlPacket::SurrenderPlayer(data) => data.by_client,
+        clonk_engine::ControlPacket::Synchronize(data) => data.by_client,
+        clonk_engine::ControlPacket::SyncCheck(data) => data.by_client,
+        clonk_engine::ControlPacket::JoinPlayer(data) => data.by_client,
+        clonk_engine::ControlPacket::RemovePlayer(data) => data.by_client,
+        clonk_engine::ControlPacket::PlayerInfo(data) => data.by_client,
+        clonk_engine::ControlPacket::Vote(data) | clonk_engine::ControlPacket::VoteEnd(data) => {
+            data.by_client
+        }
+        clonk_engine::ControlPacket::Set(data) => data.by_client,
+        // C4ControlDebugRec contains only its opaque StdBuf. The authenticated
+        // control envelope is therefore its sole author identity.
+        clonk_engine::ControlPacket::DebugRecord(_) => expected_author,
+        clonk_engine::ControlPacket::Unknown { .. } => {
+            return Err("unsupported single control packet".to_string())
+        }
+    };
+    if author != expected_author {
+        return Err(format!(
+            "single control claimed author {author}, but authenticated author is {expected_author}"
+        ));
+    }
+    Ok(control)
+}
+
+pub(crate) fn control_requires_host_ingress(control: &clonk_engine::ControlPacket) -> bool {
+    matches!(
+        control,
+        clonk_engine::ControlPacket::ClientJoin(_)
+            | clonk_engine::ControlPacket::ClientUpdate(_)
+            | clonk_engine::ControlPacket::ClientRemove(_)
+            | clonk_engine::ControlPacket::VoteEnd(_)
+            | clonk_engine::ControlPacket::EliminatePlayer(_)
+            | clonk_engine::ControlPacket::Synchronize(_)
+            | clonk_engine::ControlPacket::RemovePlayer(_)
+            | clonk_engine::ControlPacket::PlayerInfo(_)
+    )
+}
+
+pub(crate) fn validate_peer_control_packet(packet: &ControlPacket, peer_id: ClientId) -> Result<(), String> {
+    if packet.client_id() != peer_id {
+        return Err(format!(
+            "peer {peer_id} sent a control contribution for client {}",
+            packet.client_id()
+        ));
+    }
+    validate_control_envelope(packet).map_err(|error| format!("invalid control packet: {error}"))?;
+    validate_queued_control_authors(packet)?;
+    let frame = crate::decode_control_packet(packet)
+        .map_err(|error| format!("invalid control packet: {error}"))?;
+    if frame.controls.iter().any(control_requires_host_ingress) {
+        return Err("peer control contribution contains a host-authority control".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_peer_control_or_recovery(
+    packet: &ControlPacket,
+    peer_id: ClientId,
+    recovery_from_tick: Option<Tick>,
+) -> Result<(), String> {
+    if recovery_from_tick.is_some_and(|from_tick| packet.tick() >= from_tick) {
+        return validate_control_envelope(packet)
+            .map(|_| ())
+            .map_err(|error| format!("invalid recovery control packet: {error}"));
+    }
+    validate_peer_control_packet(packet, peer_id)
+}
+
+pub(crate) fn extend_peer_recovery_window(recovery_from_tick: &mut Option<Tick>, from_tick: Tick) {
+    *recovery_from_tick = Some(
+        recovery_from_tick.map_or(from_tick, |outstanding| outstanding.min(from_tick)),
+    );
+}
+
+pub(crate) async fn broadcast_exec_sync(control_tick: Tick, state: &mut HostState) {
+    if state.pending_sync.is_empty() {
+        return;
+    }
+    for client_id in host_target_client_ids(state, None) {
+        let _ = send_host_message(
+            state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::ExecSync { control_tick },
+        )
+        .await;
+    }
+    let controls = std::mem::take(&mut state.pending_sync);
+    apply_host_membership_controls(&controls, state).await;
+    let _ = state
+        .event_tx
+        .send(HostEvent::SyncScheduled {
+            control_tick,
+            controls,
+        })
+        .await;
+}
+
+async fn execute_frozen_sync(control_tick: Tick, state: &mut HostState) {
+    if state.pending_sync.is_empty() {
+        return;
+    }
+    let controls = std::mem::take(&mut state.pending_sync);
+    apply_host_membership_controls(&controls, state).await;
+    let _ = state
+        .event_tx
+        .send(HostEvent::SyncScheduled {
+            control_tick,
+            controls,
+        })
+        .await;
+    for client_id in host_target_client_ids(state, None) {
+        let _ = send_host_message(
+            state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::ExecSync { control_tick },
+        )
+        .await;
+    }
+}
+
+async fn apply_host_membership_controls(
+    controls: &[clonk_engine::ControlPacket],
+    state: &mut HostState,
+) {
+    for control in controls {
+        match control {
+            clonk_engine::ControlPacket::ClientUpdate(update)
+                if update.by_client == HOST_CLIENT_ID as i32 =>
+            {
+                let Ok(client_id) = ClientId::try_from(update.client_id) else {
+                    continue;
+                };
+                match update.update_type {
+                    clonk_engine::CLIENT_UPDATE_ACTIVATE => {
+                        let activated = update.data != 0;
+                        if let Some(core) = state.client_cores.get_mut(&update.client_id) {
+                            core.activated = activated;
+                            core.observer = false;
+                        } else {
+                            continue;
+                        }
+                        if let Some(client) = state.clients.get_mut(&client_id) {
+                            client.core.activated = activated;
+                            client.core.observer = false;
+                        }
+                        if activated {
+                            let _ = state.coordination_register(client_id);
+                        } else {
+                            coordination_unregister(client_id, state).await;
+                        }
+                    }
+                    clonk_engine::CLIENT_UPDATE_SET_OBSERVER => {
+                        if let Some(core) = state.client_cores.get_mut(&update.client_id) {
+                            core.activated = false;
+                            core.observer = true;
+                        } else {
+                            continue;
+                        }
+                        if let Some(client) = state.clients.get_mut(&client_id) {
+                            client.core.activated = false;
+                            client.core.observer = true;
+                        }
+                        coordination_unregister(client_id, state).await;
+                    }
+                    _ => {}
+                }
+            }
+            clonk_engine::ControlPacket::ClientRemove(remove)
+                if remove.by_client == HOST_CLIENT_ID as i32 =>
+            {
+                if let Ok(client_id) = ClientId::try_from(remove.client_id) {
+                    close_removed_client_connections(client_id, state).await;
+                    coordination_unregister(client_id, state).await;
+                }
+                if let Some(core) = state.client_cores.remove(&remove.client_id) {
+                    state.admission.remove_client_name(&core.name);
+                }
+                state.client_addresses.remove(&remove.client_id);
+                state.resource_catalog.remove_at_client(remove.client_id);
+                if let Some(backend) = state.resource_backend.as_mut() {
+                    backend.remove_at_client(remove.client_id);
+                }
+                state.pending_kinds.remove(&remove.client_id);
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn close_removed_client_connections(client_id: ClientId, state: &mut HostState) {
+    let routes = state
+        .accepted_routes
+        .iter()
+        .filter(|(_, route)| route.client_id == client_id)
+        .map(|(connection_id, route)| (*connection_id, route.outbound.clone()))
+        .collect::<Vec<_>>();
+    for (connection_id, _) in &routes {
+        state.accepted_routes.remove(connection_id);
+    }
+    invalidate_pending_client_routes(client_id, state);
+    state
+        .pending_post_mortems
+        .retain(|_, (pending_client_id, _, _)| *pending_client_id != client_id);
+    state.closed_routes.remove_client(client_id);
+    let removed_client = state.clients.remove(&client_id);
+    let barrier_effects = state.status_barrier.remove_remote(client_id);
+    let reply = crate::ConnectionReply {
+        ok: false,
+        message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
+            .unwrap_or_default(),
+        wrong_password: false,
+    };
+    for (_, outbound) in routes {
+        if outbound.try_close(reply.clone()).is_err() {
+            outbound.retire();
+        }
+    }
+    if removed_client.is_some() {
+        let _ = state
+            .event_tx
+            .send(HostEvent::ClientLeft { client_id })
+            .await;
+    }
+    Box::pin(apply_barrier_effects(barrier_effects, state)).await;
+    state.removing_clients.remove(&client_id);
+}
+
+async fn coordination_unregister(client_id: ClientId, state: &mut HostState) {
+    let ready_batches = state
+        .coordinator
+        .remove_client(client_id)
+        .unwrap_or_default();
+    state.scheduler.remove_client(client_id);
+    for batch in ready_batches {
+        publish_ready_batch(batch, state).await;
+    }
+}
+
+pub(crate) async fn broadcast_status(status: NetworkStatus, acknowledgement: bool, state: &mut HostState) {
+    for client_id in host_target_client_ids(state, None) {
+        let message = if acknowledgement {
+            ControlMessage::StatusAck(status)
+        } else {
+            ControlMessage::Status(status)
+        };
+        let _ = send_host_message(state, client_id, ConnectionTrafficClass::Message, message).await;
+    }
+}
+
+pub(crate) async fn broadcast_ready_check(
+    packet: ReadyCheckPacket,
+    except_client_id: Option<ClientId>,
+    state: &mut HostState,
+) {
+    for client_id in host_target_client_ids(state, except_client_id) {
+        let _ = send_host_message(
+            state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::ReadyCheck(packet),
+        )
+        .await;
+    }
+}
+
+pub(crate) async fn broadcast_lobby_countdown(packet: LobbyCountdownPacket, state: &mut HostState) {
+    for client_id in host_target_client_ids(state, None) {
+        let _ = send_host_message(
+            state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::LobbyCountdown(packet),
+        )
+        .await;
+    }
+}
+
+pub(crate) async fn broadcast_league_round_results(
+    packet: crate::LeagueRoundResultsPacket,
+    state: &mut HostState,
+) {
+    for client_id in host_target_client_ids(state, None) {
+        let _ = send_host_message(
+            state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::LeagueRoundResults(packet.clone()),
+        )
+        .await;
+    }
+}
+
+pub(crate) fn apply_ready_check_to_host_state(packet: ReadyCheckPacket, state: &mut HostState) {
+    if packet.data.vote_requested() {
+        return;
+    }
+    let ready = packet.data.is_ready();
+    if let Some(core) = state.client_cores.get_mut(&packet.client_id) {
+        core.lobby_ready = ready;
+    }
+    if let Ok(client_id) = ClientId::try_from(packet.client_id) {
+        if let Some(client) = state.clients.get_mut(&client_id) {
+            client.core.lobby_ready = ready;
+        }
+    }
+}
+
+pub(crate) fn contiguous_client_controls(
+    backlog: &ControlBacklog,
+    client_id: ClientId,
+    from_tick: Tick,
+) -> Vec<ControlPacket> {
+    let mut expected_tick = from_tick;
+    let mut contiguous = Vec::new();
+    for (tick, packets) in backlog.packets_from(from_tick) {
+        if tick != expected_tick {
+            break;
+        }
+        let Some(packet) = packets
+            .into_iter()
+            .find(|packet| packet.client_id() == client_id)
+        else {
+            break;
+        };
+        contiguous.push(packet);
+        expected_tick = expected_tick.saturating_add(1);
+    }
+    contiguous
+}
+
+pub(crate) fn contiguous_complete_controls(
+    backlog: &ControlBacklog,
+    from_tick: Tick,
+) -> Result<Vec<ControlPacket>, String> {
+    let mut expected_tick = from_tick;
+    let mut contiguous = Vec::new();
+    for (tick, packets) in backlog.packets_from(from_tick) {
+        if tick != expected_tick {
+            break;
+        }
+        let Some(complete) = packets
+            .into_iter()
+            .find(|packet| packet.client_id() == BROADCAST_CLIENT_ID)
+        else {
+            break;
+        };
+        contiguous.push(complete);
+        expected_tick = expected_tick.saturating_add(1);
+    }
+    Ok(contiguous)
+}
+
+async fn apply_host_control_mode(mode: i32, from_tick: i32, state: &mut HostState) {
+    if state.control_mode == mode {
+        return;
+    }
+    state.control_mode = mode;
+    let Ok(from_tick) = Tick::try_from(from_tick) else {
+        return;
+    };
+    let packets = match mode {
+        0 => contiguous_client_controls(&state.local_control_backlog, HOST_CLIENT_ID, from_tick),
+        1 => match contiguous_complete_controls(&state.backlog, from_tick) {
+            Ok(packets) => packets,
+            Err(error) => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::TransportError {
+                        client_id: None,
+                        error,
+                    })
+                    .await;
+                return;
+            }
+        },
+        _ => Vec::new(),
+    };
+    for packet in packets {
+        broadcast_control(&packet, state).await;
+    }
+}
+
+pub(crate) async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &mut HostState) {
+    let mut committed = false;
+    for effect in effects {
+        match effect {
+            BarrierEffect::InvalidateReference
+            | BarrierEffect::DriveControlTo(_)
+            | BarrierEffect::StopControl
+            | BarrierEffect::SweepUnjoinedPlayers
+            | BarrierEffect::StartControl => {}
+            BarrierEffect::SetControlMode { mode, from_tick } => {
+                apply_host_control_mode(mode, from_tick, state).await
+            }
+            BarrierEffect::BroadcastStatus(status) => {
+                broadcast_status(status, false, state).await;
+                let _ = state.event_tx.send(HostEvent::StatusChanged(status)).await;
+            }
+            BarrierEffect::ExecutePendingSyncControls(actual_control_tick) => {
+                if let Ok(control_tick) = Tick::try_from(actual_control_tick) {
+                    broadcast_exec_sync(control_tick, state).await;
+                }
+            }
+            BarrierEffect::BroadcastStatusAck(status) => {
+                broadcast_status(status, true, state).await;
+                if status.state == NETWORK_STATE_GO {
+                    state.game_started = true;
+                }
+                committed = true;
+            }
+            BarrierEffect::SendStatusAck { client_id, status } => {
+                let _ = send_host_message(
+                    state,
+                    client_id,
+                    ConnectionTrafficClass::Message,
+                    ControlMessage::StatusAck(status),
+                )
+                .await;
+            }
+        }
+    }
+    if committed {
+        let _ = state
+            .event_tx
+            .send(HostEvent::StatusCommitted(state.status_barrier.status))
+            .await;
+    }
+}
+
