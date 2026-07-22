@@ -1,9 +1,10 @@
 # C++↔Rust Differential Parity Harness (Phase 1)
 
-This harness verifies that the Rust port (`rust/crates/lc-engine`) reproduces the
+This harness verifies that the Rust port (`crates/clonk-engine`) reproduces the
 determinism-critical C++ primitives **bit-for-bit**. It is a true *differential*
-against the C++ golden oracle (`../src`), not a Rust-vs-Rust regression check
-(that is `cargo xtask engine-snapshots verify`).
+against the pinned C++ golden oracle (`vendor/legacyclonk-oracle` under the
+workspace's `code/` directory), not a Rust-vs-Rust regression check (that is
+`cargo xtask engine-snapshots verify`).
 
 It exists to **gate Theme C** (wiring fixed-point precision through the physics /
 collision / procedure code): the sub-pixel accumulation it covers is exactly the
@@ -32,6 +33,8 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `action_direction` | `src/C4ActionDirection.h`, called by `C4Object::ExecAction`/`SetDir` | raw-C4Fixed facing, TurnAction fixed-position resync, and stale pre-transition phase ordering |
 | `action_swim_direction` | `src/C4ActionDirection.h`, called by DFA_SWIM/`SetDir` | SwimAccel facing changes, TurnAction two-axis fixed-position resync, and stale Swim phase ordering |
 | `action_callbacks` | `src/C4ActionCallbacks.h`, called by `C4Object::SetAction` | synchronous callback count and Start-before-End/Abort ordering |
+| `connect_missing_target_removal` | mechanically extracted `C4Object.cpp` DFA_CONNECT missing-target branch | `LineBreak(true)` before `AssignRemoval`/`Destruction`, with final deleted status |
+| `connect_geometry_break_removal` | mechanically extracted `C4Shape::LineConnect` vertex guard + later DFA_CONNECT break branch | zero-argument `LineBreak()` before the same removal lifecycle |
 | `solid_mask_graphics` | `src/C4SolidMaskBitmap.h`, called by `C4SolidMask` | active/default graphics selection and transparent/solid mask sampling after `SetGraphics` |
 | `shake_objects` | complete `C4Game::ShakeObjects` + `C4Object::Fling` bodies | master-order gates, `Random(3)`/`Rnd3()` consumption, attachment material identity, and raw Fling fallback |
 | `blast_free` | complete `C4Landscape::ClearPix`, `BlastFreePix`, and `BlastFree` bodies | exact circle scan, pre-mutation material counts, duplicate-slot BlastShiftTo/DefaultMatTex byte selection, IFT preservation, and RNG order |
@@ -119,6 +122,16 @@ live shadow-diff — see "Phase 2" below.
   used by `C4Object::SetAction`. Its Start-only case is the minimized Goldrush
   frame-192 WIPF double-`Sitting` divergence; real Rust script fixtures also
   cover script Start/Abort and natural Start/End ordering.
+- `connect_missing_target_removal` compiles the exact production target-check
+  and `if (fBroke)` block lifted from DFA_CONNECT. A minimal C++ lifecycle
+  scaffold records `LineBreak(true)`, `AssignRemoval`'s `Destruction`, and final
+  status. `connect_geometry_break_removal` additionally compiles the exact
+  `C4Shape::LineConnect` one-vertex failure guard and the later DFA_CONNECT
+  `LineBreak()`/removal block. Rust drives both through the real
+  `Engine::exec_connect_line` method and inspects each deleted line before frame
+  cleanup. These focused fixtures do not model the rest of `AssignRemoval`
+  (contents, effects, or pointer clearing), nor LineConnect's
+  landscape-dependent path and bend search after its vertex-count guard.
 - `solid_mask_graphics` calls the production `C4SolidMaskBitmap.h` helpers used
   by `C4SolidMask`. Its decisive `(219,86)` input is the minimized Goldrush
   frame-184 CTWR Graphics2/SNKE contact: default graphics are transparent,
@@ -158,7 +171,7 @@ C++ source and regenerate.
 
 ```sh
 # Verify:
-cargo nextest run -p lc-engine-unit-tests --test engine_inline \
+cargo nextest run -p clonk-engine-unit-tests --test engine_inline \
   -E 'test(parity_differential_matches_cpp_golden)'
 #   or, via the xtask wrapper:
 cargo xtask parity verify
@@ -170,7 +183,13 @@ parity/oracle/gen_golden.sh
 cargo xtask parity record
 ```
 
-The Rust checker is `rust/crates/lc-engine/src/parity_differential.rs`. On any
+The generator defaults to the pinned sibling checkout at
+`../../vendor/legacyclonk-oracle` relative to this repository and archives the
+`oracle-src-pinned` tag into its disposable `.gen` directory before extraction
+and compilation. Set `LEGACYCLONK_ORACLE_ROOT` to use another repository, or
+`LEGACYCLONK_ORACLE_REVISION` for an intentional source revision override.
+
+The Rust checker is `crates/clonk-engine/src/parity_differential.rs`. On any
 mismatch it panics with `PARITY DIVERGENCE in <section> entry <i> field <f>:
 C++ golden = <x>, Rust = <y>` — i.e. the first divergence, fully localized.
 

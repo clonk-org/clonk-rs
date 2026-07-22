@@ -424,6 +424,143 @@ fn action_callback_local(engine: &Engine, id: crate::ObjectId, name: &str) -> i6
         .unwrap_or(0)
 }
 
+fn connect_removal_engine(geometry_break: bool) -> (Engine, crate::ObjectId) {
+    let script = r#"#strict
+local callbackOrder, lineBreakCount, lineBreakArgumentPresent, lineBreakAutomatic, destructionCount;
+
+protected func LineBreak(automatic)
+{
+    callbackOrder = callbackOrder * 10 + 1;
+    lineBreakCount = lineBreakCount + 1;
+    if (GetType(automatic) != 0) lineBreakArgumentPresent = 1;
+    if (automatic) lineBreakAutomatic = 1;
+    return 1;
+}
+
+protected func Destruction()
+{
+    callbackOrder = callbackOrder * 10 + 2;
+    destructionCount = destructionCount + 1;
+    return 1;
+}
+"#;
+    let mut definition =
+        Definition::from_script("RPLN", "CONNECT removal line", script).expect("fixture compiles");
+    definition.set_c4_callback_convention(true);
+    definition.set_line(1);
+    if geometry_break {
+        definition.set_shape_vertices(vec![crate::ObjectVertex::new(0, 0)]);
+    }
+    definition.configure_actions(
+        Some("Connect".to_string()),
+        HashMap::from([(
+            "Connect".to_string(),
+            ActionSpec::default().with_procedure("CONNECT"),
+        )]),
+    );
+
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_definition(definition)
+        .expect("fixture registers");
+    if geometry_break {
+        engine
+            .register_definition(
+                Definition::from_script("CEND", "CONNECT endpoint", "#strict\n")
+                    .expect("endpoint fixture compiles"),
+            )
+            .expect("endpoint fixture registers");
+    }
+    let mut action = ActionState::new("Connect");
+    if geometry_break {
+        action.target = Some(
+            engine
+                .spawn_object(
+                    SpawnConfig::new("CEND").with_position(crate::Vector2::new(10, 0)),
+                )
+                .expect("first endpoint spawns"),
+        );
+        action.target2 = Some(
+            engine
+                .spawn_object(
+                    SpawnConfig::new("CEND").with_position(crate::Vector2::new(20, 0)),
+                )
+                .expect("second endpoint spawns"),
+        );
+    }
+    let id = engine
+        .spawn_object(
+            SpawnConfig::new("RPLN")
+                .with_action(action)
+                .with_category(CATEGORY_OBJECT)
+                .with_local_vars(HashMap::from([
+                    ("callbackOrder".to_string(), ScriptValue::Int(0)),
+                    ("lineBreakCount".to_string(), ScriptValue::Int(0)),
+                    (
+                        "lineBreakArgumentPresent".to_string(),
+                        ScriptValue::Int(0),
+                    ),
+                    ("lineBreakAutomatic".to_string(), ScriptValue::Int(0)),
+                    ("destructionCount".to_string(), ScriptValue::Int(0)),
+                ]))
+                .with_loaded(true),
+        )
+        .expect("fixture spawns");
+    (engine, id)
+}
+
+fn expect_connect_removal_case(golden: &Value, section: &str, geometry_break: bool) {
+    let case = &golden[section];
+    let (mut engine, id) = connect_removal_engine(geometry_break);
+    let idx = engine.find_object_index(id).expect("line exists");
+    assert!(!engine
+        .exec_connect_line(idx)
+        .expect("CONNECT break branch executes"));
+    expect_eq(
+        section,
+        0,
+        "line_break_count",
+        i(case, "line_break_count"),
+        action_callback_local(&engine, id, "lineBreakCount"),
+    );
+    expect_eq(
+        section,
+        0,
+        "line_break_argument_count",
+        i(case, "line_break_argument_count"),
+        action_callback_local(&engine, id, "lineBreakArgumentPresent"),
+    );
+    expect_eq(
+        section,
+        0,
+        "line_break_automatic",
+        i(case, "line_break_automatic"),
+        action_callback_local(&engine, id, "lineBreakAutomatic"),
+    );
+    expect_eq(
+        section,
+        0,
+        "destruction_count",
+        i(case, "destruction_count"),
+        action_callback_local(&engine, id, "destructionCount"),
+    );
+    expect_eq(
+        section,
+        0,
+        "callback_order",
+        i(case, "callback_order"),
+        action_callback_local(&engine, id, "callbackOrder"),
+    );
+    let object = &engine.objects[idx];
+    expect_eq(
+        section,
+        0,
+        "status",
+        i(case, "status"),
+        i64::from(object.state.status.to_script_value()),
+    );
+}
+
 fn solid_mask_sprite(alpha: u8) -> DefinitionSpriteImage {
     const WIDTH: u32 = 220;
     const HEIGHT: u32 = 87;
@@ -2316,6 +2453,19 @@ func Trigger(object pOther) {
             action_callback_local(&engine, id, "oldCount"),
         );
     }
+
+    // 14b. C4Object.cpp DFA_CONNECT missing-target branch (5368-5376 in the
+    //      pinned oracle): LineBreak(true) runs before AssignRemoval, whose
+    //      Destruction callback runs while the line is still live. Call the
+    //      real Engine procedure directly so its deleted object's callback
+    //      locals remain observable before end-of-frame tombstone cleanup.
+    expect_connect_removal_case(&golden, "connect_missing_target_removal", false);
+
+    // 14c. The later geometry-break branch (pinned C4Object.cpp:5435-5441)
+    //      calls LineBreak with no argument before the same AssignRemoval.
+    //      A one-vertex line makes real C4Shape::LineConnect fail its pinned
+    //      C4Shape.cpp:275 guard in both oracle and Rust fixtures.
+    expect_connect_removal_case(&golden, "connect_geometry_break_removal", true);
 
     // 15. C4SolidMask constructor bitmap selection (C4SolidMask.cpp:400-412,
     //     C4Object.cpp:5908-5923). Minimized from Goldrush frame 184, CTWR

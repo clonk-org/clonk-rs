@@ -4597,7 +4597,7 @@ public func Swap() { return(ChangeDef(NEWD)); }
         Ok(())
     }
 
-    // DFA_CONNECT (C4Object.cpp:5341-5420): a Line object's first vertex
+    // DFA_CONNECT (C4Object.cpp:5363-5447): a Line object's first vertex
     // tracks Action.Target and its last vertex tracks Action.Target2 —
     // C4D_Line_Vertex connects to the target's vertex (index from the
     // numbered Local[2]/Local[3], default 0), LineIntersect=1 assigns the
@@ -4760,7 +4760,193 @@ public func Swap() { return(ChangeDef(NEWD)); }
         engine.tick_without_snapshot().expect("tick");
         assert!(
             engine.find_object_index(beam_id).is_none(),
-            "broken line fires LineBreak and removes itself (C4Object.cpp:5347-5354)"
+            "broken line fires LineBreak and removes itself (C4Object.cpp:5368-5375)"
+        );
+    }
+
+    #[test]
+    fn connect_target_loss_runs_line_break_then_assign_removal_destruction() {
+        // C++'s DFA_CONNECT missing-target branch calls LineBreak(true) and
+        // then AssignRemoval (src/C4Object.cpp:5368-5375). AssignRemoval calls
+        // Destruction before idling and deleting the line (:251-275), so both
+        // callbacks are synchronously visible in that exact order.
+        let mut engine = Engine::with_seed(0);
+        let mut line = Definition::from_script(
+            "LINE",
+            "Broken connect line",
+            r#"#strict
+local lifecycle;
+public func Record(int digit)
+{
+    lifecycle = lifecycle * 10 + digit;
+    return true;
+}
+protected func LineBreak(bool target_missing)
+{
+    if (target_missing) GetActionTarget(0)->Record(1);
+    return true;
+}
+protected func Destruction()
+{
+    GetActionTarget(0)->Record(2);
+    return true;
+}
+"#,
+        )
+        .expect("line compiles");
+        line.set_line(8); // C4D_Line_Vertex
+        line.configure_actions(
+            None,
+            HashMap::from([(
+                "Connect".to_string(),
+                ActionSpec::default()
+                    .with_procedure("CONNECT")
+                    .with_delay(1)
+                    .with_length(1)
+                    .with_next("Connect"),
+            )]),
+        );
+        engine.register_definition(line).expect("line registers");
+
+        let observer = engine
+            .spawn_object(
+                SpawnConfig::new("LINE")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_local_vars(HashMap::from([(
+                        "lifecycle".to_string(),
+                        Value::Int(0),
+                    )])),
+            )
+            .expect("observer spawns");
+        let mut connect = ActionState::new("Connect");
+        connect.target = Some(observer);
+        let line = engine
+            .spawn_object(
+                SpawnConfig::new("LINE")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_action(connect),
+            )
+            .expect("line spawns with its second target missing");
+
+        engine
+            .tick_without_snapshot()
+            .expect("broken CONNECT line executes");
+
+        assert!(
+            engine.find_object_index(line).is_none(),
+            "AssignRemoval deletes the broken line"
+        );
+        let observer = engine
+            .object_snapshot(observer)
+            .expect("lifecycle observer remains live");
+        assert_eq!(
+            observer.local_vars.get("lifecycle"),
+            Some(&Value::Int(12)),
+            "LineBreak must run before AssignRemoval's Destruction callback"
+        );
+    }
+
+    #[test]
+    fn connect_geometry_break_runs_unflagged_line_break_then_destruction_and_removal() {
+        // With both CONNECT targets live, C++ moves the line endpoints through
+        // C4Shape::LineConnect (src/C4Object.cpp:5378-5433). A one-vertex line
+        // fails there immediately (src/C4Shape.cpp:273-275), after which C++
+        // calls LineBreak with zero arguments and then AssignRemoval
+        // (src/C4Object.cpp:5435-5440). AssignRemoval calls Destruction before
+        // setting Status=0 (src/C4Object.cpp:240-284).
+        let mut engine = Engine::with_seed(0);
+        let mut line = Definition::from_script(
+            "LINE",
+            "Geometry-broken connect line",
+            r#"#strict
+local lifecycle;
+public func Record(int digit)
+{
+    lifecycle = lifecycle * 10 + digit;
+    return true;
+}
+protected func LineBreak(bool target_missing)
+{
+    if (target_missing)
+    {
+        GetActionTarget(0)->Record(9);
+        return true;
+    }
+    GetActionTarget(0)->Record(1);
+    return true;
+}
+protected func Destruction()
+{
+    GetActionTarget(0)->Record(2);
+    return true;
+}
+"#,
+        )
+        .expect("line compiles");
+        line.set_line(8); // C4D_Line_Vertex
+        line.set_line_intersect(0);
+        line.set_shape_vertices(vec![ObjectVertex::new(0, 0)]);
+        line.configure_actions(
+            None,
+            HashMap::from([(
+                "Connect".to_string(),
+                ActionSpec::default()
+                    .with_procedure("CONNECT")
+                    .with_delay(1)
+                    .with_length(1)
+                    .with_next("Connect"),
+            )]),
+        );
+        engine.register_definition(line).expect("line registers");
+
+        let observer = engine
+            .spawn_object(
+                SpawnConfig::new("LINE")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 0))
+                    .with_local_vars(HashMap::from([(
+                        "lifecycle".to_string(),
+                        Value::Int(0),
+                    )])),
+            )
+            .expect("first live target spawns");
+        let second_target = engine
+            .spawn_object(
+                SpawnConfig::new("LINE")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(20, 0)),
+            )
+            .expect("second live target spawns");
+        let mut connect = ActionState::new("Connect");
+        connect.target = Some(observer);
+        connect.target2 = Some(second_target);
+        let broken_line = engine
+            .spawn_object(
+                SpawnConfig::new("LINE")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_action(connect),
+            )
+            .expect("one-vertex line spawns between live targets");
+
+        engine
+            .tick_without_snapshot()
+            .expect("geometry-broken CONNECT line executes");
+
+        assert!(
+            engine.find_object_index(broken_line).is_none(),
+            "AssignRemoval deletes the geometry-broken line"
+        );
+        assert!(
+            engine.find_object_index(second_target).is_some(),
+            "the second action target remains live"
+        );
+        let observer = engine
+            .object_snapshot(observer)
+            .expect("first action target remains live");
+        assert_eq!(
+            observer.local_vars.get("lifecycle"),
+            Some(&Value::Int(12)),
+            "zero-argument LineBreak must run before AssignRemoval's Destruction callback"
         );
     }
 
@@ -5161,4 +5347,3 @@ public func Swap() { return(ChangeDef(NEWD)); }
             "walk attach snaps the stander up one pixel (C4Shape::Attach)"
         );
     }
-

@@ -18,10 +18,22 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-src="$repo/src"
+oracle_repo="${LEGACYCLONK_ORACLE_ROOT:-$repo/../../vendor/legacyclonk-oracle}"
+oracle_revision="${LEGACYCLONK_ORACLE_REVISION:-oracle-src-pinned}"
 out="$repo/parity/golden/parity_golden.json"
 gen="$here/.gen" # working dir for generated build inputs
+if ! oracle_commit="$(git -C "$oracle_repo" rev-parse --verify "$oracle_revision^{commit}")"; then
+  echo "C++ oracle revision $oracle_revision not found in $oracle_repo" >&2
+  exit 1
+fi
 mkdir -p "$gen"
+oracle_snapshot="$gen/oracle-src-$oracle_commit"
+if [[ ! -f "$oracle_snapshot/.complete" ]]; then
+  mkdir -p "$oracle_snapshot"
+  git -C "$oracle_repo" archive "$oracle_commit" src | tar -x -C "$oracle_snapshot"
+  touch "$oracle_snapshot/.complete"
+fi
+src="$oracle_snapshot/src"
 
 # 1. Strip src/Fixed.h into a standalone header: drop the StdCompiler/StdAdaptors
 #    includes and the serialization CompileFunc; the C4Fixed math is unchanged.
@@ -72,6 +84,39 @@ awk '
   p && /^}$/ { found = 1; exit }
   END { if (!found) exit 1 }
 ' "$src/C4Object.cpp" > "$gen/object_fling.inc"
+
+# Compile the complete missing/incomplete-target check and its decisive
+# callback -> AssignRemoval -> return block verbatim. Starting at the unique
+# production comment makes the extraction fail if that exact section moves.
+awk '
+  /^[[:space:]]*case DFA_CONNECT:/ { in_connect = 1 }
+  in_connect && /^[[:space:]]*\/\/ Line destruction check:/ && !p { p = 1 }
+  p { print }
+  p && /^[[:space:]]*}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_connect_missing_target.inc"
+
+# The later fBroke arm is the geometry/LineConnect failure path. Its callback
+# intentionally has no arguments, unlike the missing-target branch above.
+awk '
+  /^[[:space:]]*case DFA_CONNECT:/ { in_connect = 1 }
+  in_connect && /^[[:space:]]*\/\/ Line fBroke$/ && !p { p = 1 }
+  p { print }
+  p && /^[[:space:]]*}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Object.cpp" > "$gen/object_connect_geometry_break.inc"
+
+# C4Shape::LineConnect's first guard is enough to force the geometry branch
+# without scaffolding the landscape-dependent path/bend search that follows.
+awk '
+  /^bool C4Shape::LineConnect\(/ { in_line_connect = 1 }
+  in_line_connect && /^[[:space:]]*if \(VtxNum < 2\) return false;$/ {
+    print
+    found = 1
+    exit
+  }
+  END { if (!found) exit 1 }
+' "$src/C4Shape.cpp" > "$gen/shape_line_connect_vertex_guard.inc"
 
 awk '
   /^void C4Object::DigOutMaterialCast\(/ { p = 1 }
@@ -165,12 +210,14 @@ awk '
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;
-#    then run it to produce the golden JSON.
+#    then run it to produce the golden JSON. The pinned ExecuteScan body keeps
+#    its intentional nested-if formatting, so suppress only that style warning.
 cxx="${CXX:-clang++}"
 "$cxx" -std=c++20 -O0 \
+  -Wno-dangling-else \
   -I"$gen" -I"$src" \
   "$here/oracle_main.cpp" "$gen/sine_table.cpp" \
   -o "$gen/oracle"
 
 "$gen/oracle" > "$out"
-echo "wrote $out ($(wc -c < "$out") bytes)"
+echo "wrote $out ($(wc -c < "$out") bytes) from $oracle_revision ($oracle_commit)"

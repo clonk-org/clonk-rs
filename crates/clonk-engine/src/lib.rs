@@ -43253,7 +43253,7 @@ impl Engine {
         true
     }
 
-    /// DFA_CONNECT (C4Object.cpp:5341-5420): a Line object's first
+    /// DFA_CONNECT (C4Object.cpp:5363-5447): a Line object's first
     /// vertex tracks Action.Target and its last vertex Action.Target2 —
     /// C4D_Line_Vertex (8) connects to the target's own vertex (index
     /// from the numbered Local[2]/Local[3], both 0 for CHBM), any other
@@ -43262,6 +43262,7 @@ impl Engine {
     /// incomplete target fires LineBreak(true) and removes the line.
     /// Returns false when the object removed itself.
     fn exec_connect_line(&mut self, idx: usize) -> Result<bool, EngineError> {
+        let object_id = self.objects[idx].id;
         let definition_id = self.objects[idx].definition_id.clone();
         let Some(definition) = self.definitions.get(&definition_id) else {
             return Ok(true);
@@ -43334,7 +43335,7 @@ impl Engine {
 
         if broke {
             // Call(PSF_LineBreak, {true}) then AssignRemoval
-            // (C4Object.cpp:5349-5353); the call is fail-safe like every
+            // (C4Object.cpp:5371-5375); the call is fail-safe like every
             // engine callback.
             if self
                 .definitions
@@ -43348,15 +43349,7 @@ impl Engine {
                     vec![Value::Bool(true)],
                 ))?;
             }
-            if idx < self.objects.len() && !self.objects[idx].destroyed {
-                tracing::warn!(
-                    object = self.objects[idx].id.as_u64(),
-                    "CONNECTBREAK exec_connect_line removes the line"
-                );
-                // Connect beams carry no effects in content; drop the
-                // stop events like the simple destroy paths.
-                let _ = self.objects[idx].mark_destroyed();
-            }
+            let _ = self.assign_object_removal(object_id)?;
             return Ok(false);
         }
 
@@ -43421,9 +43414,7 @@ impl Engine {
             {
                 tolerate_script_error(self.call_object_function(idx, "LineBreak", Vec::new()))?;
             }
-            if idx < self.objects.len() && !self.objects[idx].destroyed {
-                let _ = self.objects[idx].mark_destroyed();
-            }
+            let _ = self.assign_object_removal(object_id)?;
             return Ok(false);
         }
         Ok(true)

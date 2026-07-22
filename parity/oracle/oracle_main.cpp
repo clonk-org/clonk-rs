@@ -1106,6 +1106,121 @@ static void printActionCallbackCases()
     printf("]");
 }
 
+// --- DFA_CONNECT missing target: exact production check/removal branch -----
+// gen_golden.sh extracts pinned C4Object.cpp:5368-5376 unchanged. This scaffold
+// supplies null targets and models only the observable lifecycle it invokes:
+// LineBreak(true), then AssignRemoval's Destruction callback, then Status=0.
+struct ConnectOracleBool
+{
+    bool Value;
+};
+
+static ConnectOracleBool C4VBool(bool value) { return {value}; }
+static constexpr const char *PSF_LineBreak = "~LineBreak";
+
+struct ConnectMissingTargetOracle
+{
+    struct TargetState
+    {
+        int32_t Con;
+    };
+
+    struct ActionState
+    {
+        TargetState *Target{};
+        TargetState *Target2{};
+    } Action;
+
+    struct GeometryShape
+    {
+        int32_t VtxNum{1};
+
+        bool LineConnect()
+        {
+#include "shape_line_connect_vertex_guard.inc"
+            return true;
+        }
+    } Shape;
+
+    static constexpr int32_t FullCon = 100000;
+    int32_t Status{1};
+    int32_t CallbackOrder{};
+    int32_t LineBreakCount{};
+    int32_t LineBreakArgumentCount{};
+    int32_t DestructionCount{};
+    bool LineBreakAutomatic{};
+
+    void Call(const char *function, std::initializer_list<ConnectOracleBool> args)
+    {
+        if (std::string_view(function) != PSF_LineBreak) return;
+        CallbackOrder = CallbackOrder * 10 + 1;
+        ++LineBreakCount;
+        LineBreakArgumentCount = static_cast<int32_t>(args.size());
+        LineBreakAutomatic = args.size() == 1 && args.begin()->Value;
+    }
+
+    void Call(const char *function)
+    {
+        if (std::string_view(function) != PSF_LineBreak) return;
+        CallbackOrder = CallbackOrder * 10 + 1;
+        ++LineBreakCount;
+        LineBreakArgumentCount = 0;
+        LineBreakAutomatic = false;
+    }
+
+    void Destruction()
+    {
+        CallbackOrder = CallbackOrder * 10 + 2;
+        ++DestructionCount;
+    }
+
+    void AssignRemoval()
+    {
+        Destruction();
+        Status = 0;
+    }
+
+    void ExecuteMissingTarget()
+    {
+        bool fBroke = false;
+#include "object_connect_missing_target.inc"
+    }
+
+    void ExecuteGeometryBreak()
+    {
+        // The mechanically extracted C4Shape.cpp:275 guard supplies the
+        // geometry failure; the later C4Object branch is also exact source.
+        bool fBroke = !Shape.LineConnect();
+#include "object_connect_geometry_break.inc"
+    }
+};
+
+static void printConnectRemovalState(const char *section,
+                                     const ConnectMissingTargetOracle &object)
+{
+    printf("\"%s\":{\"callback_order\":%d,\"line_break_count\":%d,"
+           "\"line_break_argument_count\":%d,\"line_break_automatic\":%d,"
+           "\"destruction_count\":%d,\"status\":%d}",
+           section, object.CallbackOrder, object.LineBreakCount,
+           object.LineBreakArgumentCount,
+           object.LineBreakAutomatic ? 1 : 0, object.DestructionCount,
+           object.Status);
+}
+
+static void printConnectMissingTargetCase()
+{
+    ConnectMissingTargetOracle object;
+    object.ExecuteMissingTarget();
+    printConnectRemovalState("connect_missing_target_removal", object);
+}
+
+static void printConnectGeometryBreakCase()
+{
+    ConnectMissingTargetOracle object;
+    object.ExecuteGeometryBreak();
+    printConnectRemovalState("connect_geometry_break_removal", object);
+}
+
 struct SolidMaskOracleBitmap
 {
     bool Transparent;
@@ -1680,6 +1795,16 @@ int main()
     // 14. C4Object::SetAction callback order/count. The first case is the
     //     minimized Goldrush frame-192 WIPF duplicate StartCall divergence.
     printActionCallbackCases();
+    printf(",\n");
+
+    // 14b. Exact DFA_CONNECT missing/incomplete-target branch: LineBreak(true)
+    //      must precede AssignRemoval and its Destruction callback.
+    printConnectMissingTargetCase();
+    printf(",\n");
+
+    // 14c. Exact later DFA_CONNECT geometry-break branch: LineBreak() has no
+    //      argument, then follows the same AssignRemoval lifecycle.
+    printConnectGeometryBreakCase();
     printf(",\n");
 
     // 15. C4SolidMask active graphics sampling. The variant_2 case is the

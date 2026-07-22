@@ -35,6 +35,7 @@ mod get_material_val;
 mod global_call;
 mod goldrush_scenario_batches;
 mod hangle_movement;
+mod harpoonrace_reload;
 mod is_newgfx;
 mod legacy_scenario_loading;
 mod literal_zero_strictness;
