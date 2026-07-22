@@ -201233,18 +201233,24 @@ func ControlDig() { dig_count = 1; return(1); }
         assert!(!app.exit_requested);
     }
 
+    /// Run a test body on an explicitly sized thread. Debug builds keep one
+    /// O0 stack slot per by-value `GameApp` in a frame, so bodies that
+    /// accumulate a dozen apps sit right at libtest's default thread stack;
+    /// 16 MiB restores the headroom without touching the body itself.
+    fn run_on_multi_app_test_stack(body: fn()) {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(body)
+            .expect("spawn multi-app test worker")
+            .join()
+            .expect("multi-app test worker completes");
+    }
+
     #[test]
     fn l031_debug_key_gates_remaps_and_native_priority_are_nonfatal() {
         // Thirteen sandbox apps live in this one debug-build frame; their
         // combined O0 stack slots sit right at the default test-thread stack.
-        // Run the unchanged body on an explicitly sized thread so GameApp
-        // growth cannot tip this test over the guard page.
-        std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
-            .spawn(l031_debug_key_gates_remaps_and_native_priority_body)
-            .expect("spawn l031 debug-key worker")
-            .join()
-            .expect("l031 debug-key worker completes");
+        run_on_multi_app_test_stack(l031_debug_key_gates_remaps_and_native_priority_body);
     }
 
     fn l031_debug_key_gates_remaps_and_native_priority_body() {
