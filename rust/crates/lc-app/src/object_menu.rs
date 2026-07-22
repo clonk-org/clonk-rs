@@ -2678,7 +2678,10 @@ fn render_engine_normal_menu(
             (width - 2) as u32,
             CLASSIC_COMMAND_HEIGHT as u32,
         );
-        draw_border(surface, extra, CLASSIC_EXTRA_FRAME_COLOR, gamma);
+        // C4Menu::DrawFrame divider (C4Menu.cpp:846-849,932-935);
+        // CStdDDraw::DrawFrame never rasterizes the bottom-right corner
+        // (capture: Drachenfels divider (1208,662) stays background).
+        draw_hv_border(surface, extra, CLASSIC_EXTRA_FRAME_COLOR, gamma);
         let mut remaining = extra;
         if gfx.show_commands {
             let mut truncate_control = || {
@@ -3884,36 +3887,49 @@ fn fill_rect(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&Gam
     lc_frontend::draw_color_rect(surface, rect, color, gamma);
 }
 
+fn pack_engine_color(color: Color) -> u32 {
+    (u32::from(255 - color.a) << 24)
+        | (u32::from(color.r) << 16)
+        | (u32::from(color.g) << 8)
+        | u32::from(color.b)
+}
+
+/// `CStdDDraw::DrawFrameDw` (StdDDraw2.cpp:1181-1187): the directed line loop
+/// covers every corner exactly once. Verified against a real C++ GL capture
+/// (Drachenfels tooltip frame, 2026-07-21): the former full-length strips
+/// double-blended the corners, which no C++ frame does.
 fn draw_border(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&GammaRamp>) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
-    if surface.is_gpu_scene_capture_active() {
-        // Retained capture keeps the native DrawFrameDw line primitives; the
-        // software oracle below keeps its pinned strip blend.
-        let packed = (u32::from(255 - color.a) << 24)
-            | (u32::from(color.r) << 16)
-            | (u32::from(color.g) << 8)
-            | u32::from(color.b);
-        lc_frontend::classic_gui::draw_engine_frame(
-            surface,
-            rect.x,
-            rect.y,
-            rect.x + rect.width as i32 - 1,
-            rect.y + rect.height as i32 - 1,
-            packed,
-            gamma,
-        );
+    lc_frontend::classic_gui::draw_engine_frame(
+        surface,
+        rect.x,
+        rect.y,
+        rect.x + rect.width as i32 - 1,
+        rect.y + rect.height as i32 - 1,
+        pack_engine_color(color),
+        gamma,
+    );
+}
+
+/// `CStdDDraw::DrawFrame` (StdDDraw2.cpp:1173-1179) as reached from
+/// `C4Menu::DrawFrame` (C4Menu.cpp:932-935): two horizontals plus two
+/// verticals whose shared excluded endpoint leaves the bottom-right corner
+/// unpainted on render targets.
+fn draw_hv_border(surface: &mut Surface, rect: Rect, color: Color, gamma: Option<&GammaRamp>) {
+    if rect.width == 0 || rect.height == 0 {
         return;
     }
-    let top = Rect::new(rect.x, rect.y, rect.width, 1);
-    let bottom = Rect::new(rect.x, rect.y + rect.height as i32 - 1, rect.width, 1);
-    let left = Rect::new(rect.x, rect.y, 1, rect.height);
-    let right = Rect::new(rect.x + rect.width as i32 - 1, rect.y, 1, rect.height);
-    fill_rect(surface, top, color, gamma);
-    fill_rect(surface, bottom, color, gamma);
-    fill_rect(surface, left, color, gamma);
-    fill_rect(surface, right, color, gamma);
+    lc_frontend::classic_gui::draw_engine_frame_hv(
+        surface,
+        rect.x,
+        rect.y,
+        rect.x + rect.width as i32 - 1,
+        rect.y + rect.height as i32 - 1,
+        pack_engine_color(color),
+        gamma,
+    );
 }
 
 #[cfg(test)]
@@ -3947,6 +3963,62 @@ mod tests {
 
     fn repository_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+    }
+
+    // C++ GL capture oracle (M06-P3-L034, 2026-07-21, Drachenfels choice-menu
+    // tooltip at (942,580) 182x26 in Screenshot001.png): every frame pixel
+    // over the opaque #F1EA78 fill — corners included — reads (121,117,60):
+    // one DrawLineDw blend of 0x7f000000 with GL round-to-nearest and the
+    // gamma black floor. Full strips double-blended corners to (61,59,30).
+    #[test]
+    fn m06_l034_classic_tooltip_border_corners_blend_once_per_cpp_capture() {
+        let gamma = GammaRamp::from_control_points([0x000000, 0x808080, 0xffffff]);
+        let mut surface = Surface::new(16, 12, PixelFormat::Rgba8888);
+        surface.fill(CLASSIC_TOOLTIP_BG_COLOR);
+        draw_border(
+            &mut surface,
+            Rect::new(2, 2, 12, 8),
+            CLASSIC_TOOLTIP_FRAME_COLOR,
+            Some(&gamma),
+        );
+        let frame = Some(Color::opaque(121, 117, 60));
+        for (x, y) in [(2, 2), (13, 2), (2, 9), (13, 9)] {
+            assert_eq!(
+                surface.get_pixel(x, y),
+                frame,
+                "corner ({x},{y}) must blend once like the C++ capture"
+            );
+        }
+        assert_eq!(surface.get_pixel(7, 2), frame);
+        assert_eq!(surface.get_pixel(2, 5), frame);
+    }
+
+    // C++ GL capture oracle (M06-P3-L034, 2026-07-21, Drachenfels extra-bar
+    // divider (1032,647)-(1208,662) in Screenshot001.png): three corners and
+    // the edges paint (68,1,1) while the bottom-right corner stays at the
+    // (1,1,1) background — both `CStdDDraw::DrawFrame` lines exclude it.
+    #[test]
+    fn m06_l034_classic_divider_skips_bottom_right_corner_per_cpp_capture() {
+        let gamma = GammaRamp::from_control_points([0x000000, 0x808080, 0xffffff]);
+        let mut surface = Surface::new(16, 12, PixelFormat::Rgba8888);
+        surface.fill(Color::opaque(1, 1, 1));
+        draw_hv_border(
+            &mut surface,
+            Rect::new(2, 2, 12, 8),
+            CLASSIC_EXTRA_FRAME_COLOR,
+            Some(&gamma),
+        );
+        let divider = Some(Color::opaque(68, 1, 1));
+        assert_eq!(surface.get_pixel(2, 2), divider);
+        assert_eq!(surface.get_pixel(13, 2), divider);
+        assert_eq!(surface.get_pixel(2, 9), divider);
+        assert_eq!(
+            surface.get_pixel(13, 9),
+            Some(Color::opaque(1, 1, 1)),
+            "CStdDDraw::DrawFrame never rasterizes the shared bottom-right endpoint"
+        );
+        assert_eq!(surface.get_pixel(7, 9), divider);
+        assert_eq!(surface.get_pixel(13, 5), divider);
     }
 
     fn solid_image(width: u32, height: u32, color: Color) -> ImageData {
@@ -7349,20 +7421,22 @@ mod tests {
         let character_knight_1 = render(&character_knight, 1);
         let character_mage_1 = render(&character_mage, 1);
         let character_mage_90 = render(&character_mage, 90);
-        assert_eq!(difficulty_1.snapshot().to_string(), "640x480#285ae675");
+        // Re-pinned for M06-P3-L034 against the 2026-07-21 Drachenfels C++ GL
+        // capture (Screenshot001.png): the extra-bar divider leaves its
+        // bottom-right corner unpainted (capture (1208,662) = background,
+        // CStdDDraw::DrawFrame end-drop) and the delayed tooltip frame blends
+        // every corner exactly once ((942,580)/(1123,580) = (121,117,60), not
+        // the double-blended (61,59,30) the former full strips produced).
+        assert_eq!(difficulty_1.snapshot().to_string(), "640x480#fbce6a84");
         assert_eq!(difficulty_89.snapshot(), difficulty_1.snapshot());
-        assert_eq!(difficulty_90.snapshot().to_string(), "640x480#8e8c2f59");
+        assert_eq!(difficulty_90.snapshot().to_string(), "640x480#5cf97238");
         assert_eq!(
             [
                 character_knight_1.snapshot().to_string(),
                 character_mage_1.snapshot().to_string(),
                 character_mage_90.snapshot().to_string(),
             ],
-            [
-                "640x480#6eb1959e",
-                "640x480#8a94364e",
-                "640x480#2d34951c",
-            ]
+            ["640x480#aa8f5b23", "640x480#da400073", "640x480#50fdcf07"]
         );
     }
 }

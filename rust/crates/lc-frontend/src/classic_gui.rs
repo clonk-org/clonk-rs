@@ -771,6 +771,29 @@ pub fn draw_engine_frame(
     draw_engine_line(surface, x1, y2, x1, y1, color, gamma);
 }
 
+/// `CStdDDraw::DrawFrame` (StdDDraw2.cpp:1173-1179): both horizontal lines
+/// run `x1->x2` and both verticals `y1->y2` (render targets route through
+/// `DrawLine`), so the four GL lines share `(x2,y2)` only as an excluded
+/// endpoint — the bottom-right corner is never rasterized — while `(x1,y1)`
+/// starts two lines and rasterizes twice. C++ capture evidence: Drachenfels
+/// object-menu extra divider (1032,647)-(1208,662), 2026-07-21 — three
+/// corners painted (68,1,1), bottom-right left at the (1,1,1) background.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_engine_frame_hv(
+    surface: &mut Surface,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    color: u32,
+    gamma: Option<&GammaRamp>,
+) {
+    draw_engine_line(surface, x1, y1, x2, y1, color, gamma);
+    draw_engine_line(surface, x1, y2, x2, y2, color, gamma);
+    draw_engine_line(surface, x1, y1, x1, y2, color, gamma);
+    draw_engine_line(surface, x2, y1, x2, y2, color, gamma);
+}
+
 /// Default `C4GUI::Element::Draw3DFrame`, preserving C++ draw order and the
 /// GL line diamond-exit endpoint rule (`C4Gui.cpp:264-279`).
 pub fn draw_3d_frame(surface: &mut Surface, rect: IntRect, gamma: Option<&GammaRamp>) {
@@ -1179,6 +1202,80 @@ mod tests {
                 "DrawFrameDw is composed from DrawLineDw segments"
             );
         }
+    }
+
+    // `CStdDDraw::DrawFrame` (StdDDraw2.cpp:1173-1179) on a render target:
+    // two horizontals `x1->x2`, two verticals `y1->y2`. Their excluded GL
+    // endpoints never rasterize the shared bottom-right corner while the
+    // shared origin rasterizes twice. Capture oracle (M06-P3-L034,
+    // 2026-07-21, Drachenfels divider (1032,647)-(1208,662)): bottom-right
+    // (1208,662) stayed background while the other corners painted.
+    #[test]
+    fn hv_engine_frame_skips_shared_end_corner_and_double_covers_origin() {
+        let background = Color::opaque(100, 100, 100);
+        let mut cpu = Surface::new(8, 8, PixelFormat::Rgba8888);
+        cpu.fill(background);
+        // engine alpha 0x7f -> GL source alpha 128/255; one blend over 100
+        // stores round(100*127/255) = 50, a second blend stores 25.
+        draw_engine_frame_hv(&mut cpu, 1, 1, 6, 6, 0x7f00_0000, None);
+        let once = Some(Color::new(50, 50, 50, 255));
+        let twice = Some(Color::new(25, 25, 25, 255));
+        assert_eq!(
+            cpu.get_pixel(1, 1),
+            twice,
+            "both first lines start at the origin"
+        );
+        assert_eq!(cpu.get_pixel(6, 1), once);
+        assert_eq!(cpu.get_pixel(1, 6), once);
+        assert_eq!(
+            cpu.get_pixel(6, 6),
+            Some(background),
+            "every line excludes the shared bottom-right endpoint"
+        );
+        for v in 2..6 {
+            assert_eq!(cpu.get_pixel(v, 1), once);
+            assert_eq!(cpu.get_pixel(v, 6), once);
+            assert_eq!(cpu.get_pixel(1, v), once);
+            assert_eq!(cpu.get_pixel(6, v), once);
+        }
+
+        let mut retained = Surface::new(8, 8, PixelFormat::Rgba8888);
+        retained.begin_gpu_scene_capture();
+        draw_engine_frame_hv(&mut retained, 1, 1, 6, 6, 0x7f00_0000, None);
+        let scene = retained
+            .take_gpu_scene_capture()
+            .expect("capture remains active")
+            .into_scene([8, 8], Color::transparent(), &GammaRamp::identity());
+        // Consecutive compatible LineList commands may be coalesced; the
+        // segment list in submission order is the invariant.
+        let segments = scene
+            .commands
+            .iter()
+            .flat_map(|command| {
+                let lc_graphics::GpuCommand::Solid {
+                    vertices, topology, ..
+                } = command
+                else {
+                    panic!("DrawFrame did not remain solid painter commands");
+                };
+                assert_eq!(*topology, lc_graphics::GpuPrimitiveTopology::LineList);
+                assert_eq!(vertices.len() % 2, 0);
+                vertices
+                    .chunks_exact(2)
+                    .map(|pair| (pair[0].position, pair[1].position))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            segments,
+            vec![
+                ([1.5, 1.5, 1.0], [6.5, 1.5, 1.0]),
+                ([1.5, 6.5, 1.0], [6.5, 6.5, 1.0]),
+                ([1.5, 1.5, 1.0], [1.5, 6.5, 1.0]),
+                ([6.5, 1.5, 1.0], [6.5, 6.5, 1.0]),
+            ],
+            "retained capture records the native DrawFrame segments in call order"
+        );
     }
 
     #[test]

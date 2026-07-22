@@ -203,6 +203,68 @@ presentations, 5.794 ms average and 9.202 ms maximum graphics-pass time, with no
 automatic graphics skips. This is a fingerprinted reference, not a universal
 60 FPS claim.
 
+## Menu frame rasterization verified against a real C++ GL capture (M06-P3-L034)
+
+The L033 residue — whether the CPU menu-frame bytes match native
+`DrawFrameDw`/`DrawFrame` line output — was settled on 2026-07-21 against a
+live C++ capture and the CPU paths were corrected to line-accurate coverage.
+
+Capture procedure (reproducible in ~2 minutes):
+
+1. Harness: a scratch directory containing a copy of
+   `build-arm64-native/clonk.app` (binary of 2026-07-12; the rendering
+   sources `StdGL.cpp`/`StdDDraw2.cpp`/`C4Menu.cpp`/`C4Gui.cpp` last changed
+   2024-12-03, so any current build is equivalent), symlinks to
+   `planet/Graphics.c4g`, `planet/System.c4g`, `content/{Objects,Knights,
+   Fantasy}.c4d`, `content/{Material,Music,Sound}.c4g`, `content/Fantasy.c4f`,
+   and a copy of a player file (`Neuling.c4p`). The engine resolves its data
+   directory from the app-bundle parent, not the cwd.
+2. Private config via `LC_CONFIG_FILE` (C4Config.cpp:768): `DisplayMode=Window`,
+   `ResolutionX=1280`, `ResolutionY=720`, `Scale=100`, `Shader=true`,
+   `DisableGamma=false`, `ShowCommands=true`, `ShowCommandKeys=true`,
+   `Participants="Neuling.c4p"`, sound/music/signups off.
+3. `./clonk.app/Contents/MacOS/clonk "Fantasy.c4f/Drachenfels.c4s"` — the
+   scenario script opens the "Select difficulty" object menu automatically.
+   Leave mouse input untouched (tooltips draw only while
+   `!Mouse.IsActiveInput()`, C4Menu.cpp:808-820); the delayed tooltip appears
+   after 90 frames. Post F9 with a `CGEventPostToPid` helper; the engine
+   writes `Screenshots/Screenshot001.png` next to the data directory.
+4. Decode without color management (pure-zlib PNG reader) and probe bytes.
+
+Measured facts (Drachenfels, 1280x720, default gamma ramp
+`[0x000000, 0x808080, 0xffffff]`):
+
+- Tooltip (`C4GUI::Screen::DrawToolTip`, C4Gui.cpp:907-925) at (942,580)
+  182x26: fill `#F1EA78` stores exactly (241,234,120) and text `#483222`
+  stores (72,50,34) — the identity ramp does not alter nonzero channels.
+  Every `DrawFrameDw` frame pixel over the fill, the four corners included,
+  reads (121,117,60): exactly one source-over blend of 0x7f000000 with GL
+  round-to-nearest on store and the gamma shader's black floor (0 -> 1;
+  120.53 rounding up to 121 proves both). The directed line loop
+  (StdDDraw2.cpp:1181-1187) covers every corner exactly once; the former Rust
+  full-length strips double-blended corners to (61,59,30) and diverged.
+- Extra-bar divider (`C4Menu::DrawFrame` -> `CStdDDraw::DrawFrame`,
+  C4Menu.cpp:846-849,932-935, StdDDraw2.cpp:1173-1179) at (1032,647)-(1208,662):
+  palette color 80 stores (68,1,1) (black-floored `#440000`); the top and
+  left corners paint, the right column stops at y=661 and the bottom row at
+  x=1207, and the shared excluded endpoint (1208,662) — the bottom-right
+  corner — stays at the (1,1,1) background. The former strips painted it.
+- Dialog `Draw3DFrame` (C4Gui.cpp:264-279) borders over the (1,1,1) fog:
+  single-blend values (38,11,1) outer `#772200@0xaf`, (17,6,1) inner
+  `#331100@0xaf`, (54,22,1) `#AA4400@0xaf`, and the never-covered bottom-right
+  pixels stay background — matching the end-exclusive strip/line coverage the
+  Rust `draw_3d_frame` already used (the June startup captures had pinned the
+  same corner semantics bit-exactly across six screens).
+
+Consequences now in code: `classic_gui::draw_engine_frame_hv` models
+`CStdDDraw::DrawFrame`'s horizontal/vertical line set (and records those four
+native segments during retained capture — the previous strip-era recording
+used the `DrawFrameDw` loop, which wrongly painted the divider's bottom-right
+corner); `ingame_menu`/`object_menu` frame outlines route through the engine
+line rasterizer for both CPU and capture, so the pinned software oracle now
+carries line-identical bytes (`m06_l034_*` tests pin the capture values, and
+the re-pinned Dragon Rock hashes embed them end to end).
+
 ## Remaining limits and review rules
 
 - A true operating-system/device-loss injection test is not portable. Direct
