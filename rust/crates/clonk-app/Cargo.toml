@@ -7,6 +7,7 @@ edition = "2021"
 anyhow = "1.0"
 arboard = { version = "3.3", default-features = false }
 gilrs = "0.10"
+clonk-app-core = { path = "../clonk-app-core" }
 clonk-app-menus = { path = "../clonk-app-menus" }
 clonk-app-netplay = { path = "../clonk-app-netplay" }
 clonk-app-render = { path = "../clonk-app-render" }

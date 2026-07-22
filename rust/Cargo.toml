@@ -9,6 +9,7 @@ members = [
     "crates/clonk-engine-integration-tests",
     "crates/clonk-engine-core",
     "crates/clonk-app",
+    "crates/clonk-app-core",
     "crates/clonk-app-menus",
     "crates/clonk-app-netplay",
     "crates/clonk-app-render",

@@ -1,10 +1,10 @@
 [package]
-name = "clonk-app-menus"
+name = "clonk-app-core"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-clonk-app-core = { path = "../clonk-app-core" }
+clonk-core = { path = "../clonk-core" }
 clonk-engine = { path = "../clonk-engine" }
 clonk-frontend = { path = "../clonk-frontend" }
 clonk-graphics = { path = "../clonk-graphics" }
@@ -12,5 +12,5 @@ clonk-gui = { path = "../clonk-gui" }
 
 [dev-dependencies]
 # Keep clonk-engine's property-test dependencies in this test graph so focused
-# menu-crate runs share one clonk-engine fingerprint with the workspace gate.
+# core-crate runs share one clonk-engine fingerprint with the workspace gate.
 clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }

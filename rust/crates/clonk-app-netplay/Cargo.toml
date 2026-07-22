@@ -12,6 +12,7 @@ test-hooks = []
 
 [dependencies]
 anyhow = "1.0"
+clonk-app-core = { path = "../clonk-app-core" }
 clonk-core = { path = "../clonk-core" }
 clonk-engine = { path = "../clonk-engine" }
 clonk-network = { path = "../clonk-network" }

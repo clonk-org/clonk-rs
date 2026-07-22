@@ -693,6 +693,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "clap",
+ "clonk-app-core",
  "clonk-app-menus",
  "clonk-app-netplay",
  "clonk-app-render",
@@ -733,9 +734,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "clonk-app-core"
+version = "0.1.0"
+dependencies = [
+ "clonk-core",
+ "clonk-engine",
+ "clonk-frontend",
+ "clonk-graphics",
+ "clonk-gui",
+]
+
+[[package]]
 name = "clonk-app-menus"
 version = "0.1.0"
 dependencies = [
+ "clonk-app-core",
  "clonk-engine",
  "clonk-frontend",
  "clonk-graphics",
@@ -747,6 +760,7 @@ name = "clonk-app-netplay"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clonk-app-core",
  "clonk-core",
  "clonk-engine",
  "clonk-network",

@@ -1,7 +1,7 @@
 use std::{cell::RefCell, collections::HashMap};
 
 use clonk_engine::{
-    CommandKind, ContextMenuEntry, ControlCommand, DefinitionPictureImage, Engine, EngineError,
+    CommandKind, ContextMenuEntry, ControlCommand, Engine, EngineError,
     OWNER_NONE, ObjectId, ObjectMenuExtra, ObjectMenuSymbol, SimulationSnapshot,
 };
 use clonk_frontend::{
@@ -12,6 +12,7 @@ use clonk_graphics::clonk_font::TextAlign;
 use clonk_graphics::{Color, GammaRamp, PixelFormat, Rect, Surface, TextFont};
 use clonk_gui::ImageData;
 
+use clonk_app_core::pictures::definition_menu_picture;
 use clonk_app_menus::ingame_menu::{
     IngameMenuGraphics, draw_3d_frame, draw_caption_bar, draw_command_key, draw_image_region,
     draw_image_region_aspect, draw_ok_cancel, draw_tooltip, tooltip_position, tooltip_wrap_width,
@@ -898,71 +899,6 @@ pub(crate) fn engine_script_menu_presentation_geometry(
         scroll_y: layout.scroll_y,
         max_scroll_y: layout.max_scroll_y,
     })
-}
-
-pub(crate) fn apply_definition_owner_color(
-    pixels: &mut [u8],
-    mask: &[u8],
-    owner: [u8; 3],
-) {
-    if mask.len() == pixels.len() {
-        for (pixel, overlay) in pixels.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
-            let overlay_alpha = u32::from(overlay[3]);
-            let base_alpha = u32::from(pixel[3]);
-            let inverse = 255 - overlay_alpha;
-            let output_alpha_weight = overlay_alpha * 255 + base_alpha * inverse;
-            if output_alpha_weight == 0 {
-                pixel.copy_from_slice(&[0, 0, 0, 0]);
-                continue;
-            }
-            for (channel_index, (channel, owner)) in
-                pixel[..3].iter_mut().zip(owner).enumerate()
-            {
-                let tinted = u32::from(overlay[channel_index]) * u32::from(owner) / 255;
-                let premultiplied = tinted * overlay_alpha * 255
-                    + u32::from(*channel) * base_alpha * inverse;
-                *channel = (premultiplied / output_alpha_weight) as u8;
-            }
-            pixel[3] = (output_alpha_weight / 255).min(255) as u8;
-        }
-        return;
-    }
-
-    for (index, mask_value) in mask.iter().copied().enumerate() {
-        let offset = index * 4;
-        let Some(pixel) = pixels.get_mut(offset..offset + 4) else {
-            break;
-        };
-        let mask = u16::from(mask_value);
-        if mask == 0 {
-            continue;
-        }
-        let inverse = 255_u16 - mask;
-        for (channel, owner) in pixel[..3].iter_mut().zip(owner) {
-            *channel = ((u16::from(*channel) * inverse + u16::from(owner) * mask) / 255)
-                as u8;
-        }
-    }
-}
-
-fn apply_default_menu_owner_color(pixels: &mut [u8], mask: &[u8]) {
-    // C4Def::Picture2Facet calls Graphics.GetBitmap(0); C4Surface::SetClr
-    // maps zero to 0xff, the engine's default blue owner color
-    // (C4Def.cpp:1374-1378; C4DefGraphics.h:49; C4Surface.h:110).
-    apply_definition_owner_color(pixels, mask, [0, 0, 255]);
-}
-
-pub(crate) fn definition_menu_picture(image: DefinitionPictureImage) -> ImageData {
-    let width = image.width();
-    let height = image.height();
-    let mask = image.color_mask();
-    let pixels = image.into_pixels();
-    let Some(mask) = mask else {
-        return ImageData::from_arc(width, height, pixels);
-    };
-    let mut pixels = pixels.to_vec();
-    apply_default_menu_owner_color(&mut pixels, &mask);
-    ImageData::new(width, height, pixels)
 }
 
 fn precompose_definition_menu_title_icon(icon: &ImageData) -> ImageData {
@@ -3935,6 +3871,7 @@ fn draw_hv_border(surface: &mut Surface, rect: Rect, color: Color, gamma: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clonk_app_core::pictures::apply_default_menu_owner_color;
     use clonk_engine::scenario::{LegacyDefinitionResolver, load_system_scripts};
     use clonk_engine::{
         CommandStackSnapshot, Definition, Engine, JoinPlayerConfig, MovementProfile,
@@ -6248,7 +6185,7 @@ mod tests {
             .items
             .iter()
             .map(|item| {
-                crate::object_menu_item_picture(
+                clonk_app_core::pictures::object_menu_item_picture(
                     &engine,
                     &snapshot,
                     item,

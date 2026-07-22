@@ -1,4 +1,13 @@
     use super::*;
+    use clonk_app_core::ClassicGuiBootstrapDefect;
+    use clonk_app_core::pictures::{
+        centered_picture_transform, compose_inventory_picture,
+        compose_inventory_picture_with_allowed_modes, compose_owned_menu_picture,
+        compose_owned_menu_picture_with_allowed_modes, inventory_blit_mode,
+        inventory_object_picture, inventory_picture_pixels, object_menu_item_picture,
+        prepare_inventory_definition_layers, prepare_inventory_owner_pixels,
+        prepare_inventory_picture, prepare_inventory_pixels, prepared_inventory_alpha,
+    };
     use flate2::read::ZlibDecoder;
     use clonk_audio::decode_audio;
     use clonk_engine::command::CommandData;
@@ -8,6 +17,7 @@
         ObjectStatus, PlayerState, PlayerStatus, ScriptError, SimulationSnapshot, Vector2,
     };
     use clonk_graphics::clonk_font::{ClonkFont, ClonkFontRole, GlyphCell};
+    use clonk_graphics::BlitMode;
     use clonk_script::Value;
     use parking_lot::ReentrantMutex;
     use std::collections::HashMap;
