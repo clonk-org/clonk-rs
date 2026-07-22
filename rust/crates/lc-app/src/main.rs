@@ -142709,7 +142709,6 @@ public func Grant(password) { return GainMissionAccess(password); }
             .message_dialog_resources()
             .expect("message dialog resources resolve from the rebound sheets");
         assert_eq!(message.progress.pixels()[..4], [0x77, 0x88, 0x99, 0xff]);
-        drop(message);
         app.assets
             .input_dialog_resources()
             .expect("input dialog resources resolve from the rebound sheets");
@@ -142727,7 +142726,6 @@ public func Grant(password) { return GainMissionAccess(password); }
             .static_info_dialog_resources()
             .expect("info dialog resources resolve from the rebound sheets");
         assert_eq!(info.scroll.pixels()[..4], [0x44, 0x55, 0x66, 0xff]);
-        drop(info);
         assert_eq!(
             app.ensure_ingame_menu_gfx()
                 .caption_bar
