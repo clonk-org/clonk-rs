@@ -22,8 +22,6 @@ mod control;
 mod control_execution;
 mod direct_com;
 #[doc(hidden)] pub mod effect;
-#[cfg(feature = "ffi")]
-pub mod ffi;
 pub mod fixtures;
 mod init_placement;
 mod input;

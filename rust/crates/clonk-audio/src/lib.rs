@@ -1,6 +1,4 @@
 mod decoder;
-#[cfg(feature = "ffi")]
-pub mod ffi;
 mod fluidsynth;
 mod midi;
 mod mixer;

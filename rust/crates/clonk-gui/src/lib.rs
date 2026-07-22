@@ -1,4 +1,3 @@
-pub mod ffi;
 mod scenario_browser;
 
 use clonk_graphics::{Color, TextFont};

@@ -2,8 +2,6 @@ mod ast;
 mod debugger;
 mod engine;
 mod error;
-#[cfg(feature = "ffi")]
-mod ffi;
 mod lexer;
 mod parser;
 mod token;

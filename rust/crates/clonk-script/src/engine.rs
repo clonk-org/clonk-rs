@@ -1222,13 +1222,6 @@ impl Engine {
         Ok(())
     }
 
-    #[cfg(feature = "ffi")]
-    pub(crate) fn load_script_c4_string(&mut self, source: &str) -> Result<(), ScriptError> {
-        let script = Script::compile_c4_string(source)?;
-        self.add_script(script);
-        Ok(())
-    }
-
     pub fn add_script(&mut self, mut script: Script) {
         // C4Aul's preparse pass registers every static declaration before the
         // later global Parse pass marks function-body strings Hold. Preserve

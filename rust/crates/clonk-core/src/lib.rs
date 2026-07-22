@@ -1,6 +1,4 @@
 pub mod chrono_util;
-#[cfg(feature = "ffi")]
-pub mod ffi;
 pub mod std_buf;
 pub mod std_config;
 pub mod std_file;

@@ -6,7 +6,6 @@ edition = "2021"
 [features]
 default = []
 bench = ["dep:criterion"]
-ffi = []
 
 [dependencies]
 thiserror = "1"

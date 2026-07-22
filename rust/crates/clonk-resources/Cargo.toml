@@ -5,7 +5,6 @@ edition = "2021"
 
 [features]
 default = []
-ffi = []
 
 [dependencies]
 walkdir = "2"
