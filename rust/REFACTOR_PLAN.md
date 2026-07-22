@@ -110,3 +110,33 @@ extraction is the standing "next lever". Do not re-try rejected experiments
 - Step 3 landed (clonk-app-netplay): netplay package suite 238/238; clonk-app
   join/lobby/network consumer sweep 257/257; warm incremental
   `cargo check -p clonk-app --tests` after a touch of main.rs ≈ 2.0s.
+- Step 4 landed (clonk-app-core + object_menu move): the shared picture
+  pipeline left main.rs for `clonk_app_core::pictures` (the
+  object_menu_item_picture closure, the inventory_*/menu_rank_*/
+  compose_owned_* helpers, ScriptTextSpecResources and the text-spec
+  resolvers, plus object_menu's apply_definition_owner_color and
+  definition_menu_picture); the clonk-app-menus menu_images leaves sank to
+  `core::menu_images` (menus re-exports the old paths, the further
+  clonk-graphics sink stays a step-7 candidate); netplay's generic
+  configured_native_*/NativeConfigValue/update_configured_native_values
+  machinery re-housed as `core::native_config` with its 8 tests (netplay
+  re-exports the old paths and imports the shared decode/trim helpers);
+  AppMode and the ClassicGameLobbyBoundary/Child +
+  ClassicGuiBootstrap/ClassicStartupBootstrap Issue/Defect leaf enums moved
+  to the core root. main.rs re-imports every moved name under its old path
+  (test-only names via the main_tests prelude), so call sites and spliced
+  test parts did not churn; the FrontendAssets-coupled constructors stayed
+  behind as script_text_spec_resources_from_assets{,_and_hud} free
+  functions. object_menu.rs then completed its step-2 deferral into
+  clonk-app-menus (pub(crate)->pub; set_mode_for_parity_test behind a menus
+  `test-hooks` feature mirroring netplay's; main.rs keeps
+  `use clonk_app_menus::object_menu;` so game_message.rs's
+  crate::object_menu::draw_menu_decoration seam and the test parts'
+  object_menu:: paths still resolve). Focused: core 8/8, netplay
+  configured/native 34/34, menus 115/115 (78 + 37 object_menu tests
+  including both real-asset cases), clonk-app consumer sweep 61/61
+  pre-move / 30/30 post-move (object_menu's ids now carry the menus
+  prefix). Warm incremental `cargo check -p clonk-app --tests`: main.rs
+  body edit ≈ 1.9s (parity with steps 1-3); a core body edit cascades
+  core→menus→netplay→app in ≈ 2.1s, while the core-only
+  `cargo check -p clonk-app-core --tests` loop is ≈ 0.16s.

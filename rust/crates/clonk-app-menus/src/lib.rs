@@ -7,6 +7,7 @@ pub mod game_over;
 pub mod ingame_menu;
 pub mod menu_controls;
 pub mod menu_images;
+pub mod object_menu;
 
 pub use menu_images::{copy_menu_image_aspect, software_blit_menu_image};
 

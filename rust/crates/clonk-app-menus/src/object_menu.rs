@@ -13,7 +13,7 @@ use clonk_graphics::{Color, GammaRamp, PixelFormat, Rect, Surface, TextFont};
 use clonk_gui::ImageData;
 
 use clonk_app_core::pictures::definition_menu_picture;
-use clonk_app_menus::ingame_menu::{
+use crate::ingame_menu::{
     IngameMenuGraphics, draw_3d_frame, draw_caption_bar, draw_command_key, draw_image_region,
     draw_image_region_aspect, draw_ok_cancel, draw_tooltip, tooltip_position, tooltip_wrap_width,
 };
@@ -179,7 +179,7 @@ fn engine_script_menu_title(menu: &clonk_engine::ObjectMenuState) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct EngineScriptMenuLayout {
+pub struct EngineScriptMenuLayout {
     pub bounds: Rect,
     pub title: Rect,
     /// Visible `ScrollWindow` client area. Item rectangles are translated by
@@ -523,7 +523,7 @@ fn dialog_visible_caption(item: &clonk_engine::ObjectMenuItem) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EngineScriptMenuPointerTarget {
+pub enum EngineScriptMenuPointerTarget {
     Close,
     Title,
     Item(usize),
@@ -531,7 +531,7 @@ pub(crate) enum EngineScriptMenuPointerTarget {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct EngineScriptMenuPresentationGeometry {
+pub struct EngineScriptMenuPresentationGeometry {
     pub bounds: Rect,
     pub title: Option<Rect>,
     pub client: Option<Rect>,
@@ -546,7 +546,7 @@ fn rect_contains_point(rect: Rect, point: GuiPoint) -> bool {
         && point.y < (rect.y + rect.height as i32) as f32
 }
 
-pub(crate) fn engine_script_menu_pointer_target(
+pub fn engine_script_menu_pointer_target(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
@@ -567,7 +567,7 @@ pub(crate) fn engine_script_menu_pointer_target(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn engine_script_menu_pointer_target_with_info(
+pub fn engine_script_menu_pointer_target_with_info(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
@@ -681,7 +681,7 @@ fn engine_script_menu_pointer_target_for_layout(
 /// ScrollWindow offset. Unlike the legacy wrapper, this does not adjust the
 /// scroll to the current selection; wheel scrolling may hide the selection.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn engine_script_menu_pointer_target_with_presentation(
+pub fn engine_script_menu_pointer_target_with_presentation(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
@@ -732,7 +732,7 @@ pub(crate) fn engine_script_menu_pointer_target_with_presentation(
 /// Hit-test a not-yet-initialized free-alignment anchor with the same
 /// one-time clamping used by `C4Menu::InitLocation`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn engine_script_menu_pointer_target_with_free_anchor(
+pub fn engine_script_menu_pointer_target_with_free_anchor(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
@@ -785,7 +785,7 @@ pub(crate) fn engine_script_menu_pointer_target_with_free_anchor(
 /// menu presentation style. The returned origin can be retained as an exact
 /// location for redraws, refills, and title dragging.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn engine_script_menu_presentation_geometry_with_free_anchor(
+pub fn engine_script_menu_presentation_geometry_with_free_anchor(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
@@ -846,7 +846,7 @@ pub(crate) fn engine_script_menu_presentation_geometry_with_free_anchor(
 /// title-drag routing. Dialog-style menus have no ScrollWindow offset, while
 /// normal/context/info menus expose the same clamped pixel state as render.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn engine_script_menu_presentation_geometry(
+pub fn engine_script_menu_presentation_geometry(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
@@ -1093,7 +1093,7 @@ fn draw_magic_value_footer(
 /// current magic exactly where C4Menu::DrawElement does so. This operates on
 /// the app's per-frame presentation clone; engine-owned menu state remains
 /// untouched.
-pub(crate) fn resolve_engine_script_menu_footer(
+pub fn resolve_engine_script_menu_footer(
     engine: &mut Engine,
     menu: &mut clonk_engine::ObjectMenuState,
 ) -> Result<(), EngineError> {
@@ -1550,7 +1550,7 @@ fn collect_inline_image_specs(text: &str, specs: &mut Vec<String>) {
     }
 }
 
-pub(crate) fn engine_script_menu_inline_image_specs(
+pub fn engine_script_menu_inline_image_specs(
     menu: &clonk_engine::ObjectMenuState,
 ) -> Vec<String> {
     let mut specs = Vec::new();
@@ -1566,7 +1566,7 @@ pub(crate) fn engine_script_menu_inline_image_specs(
     specs
 }
 
-pub(crate) fn engine_script_menu_layout(
+pub fn engine_script_menu_layout(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
@@ -1615,7 +1615,7 @@ fn engine_script_menu_layout_with_images(
 /// offset. Callers set `adjust_selection` only for the native sites which
 /// invoke `C4Menu::AdjustPosition`; wheel scrolling and redraws pass `false`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn engine_script_menu_layout_with_presentation(
+pub fn engine_script_menu_layout_with_presentation(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
@@ -1644,7 +1644,7 @@ pub(crate) fn engine_script_menu_layout_with_presentation(
 /// bounds may then be retained and supplied to the ordinary presentation
 /// helper as an exact dragged/initialized location.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn engine_script_menu_layout_with_free_anchor(
+pub fn engine_script_menu_layout_with_free_anchor(
     area: Rect,
     font: &HudFont<'_>,
     menu: &clonk_engine::ObjectMenuState,
@@ -1979,7 +1979,7 @@ fn draw_decoration_facet(
     );
 }
 
-pub(crate) fn validate_menu_decoration_for_area(
+pub fn validate_menu_decoration_for_area(
     area: Rect,
     decoration: &clonk_engine::ObjectMenuFrameDecoration,
     image: Option<&ImageData>,
@@ -2040,7 +2040,7 @@ pub(crate) fn validate_menu_decoration_for_area(
     Ok(())
 }
 
-pub(crate) fn draw_menu_decoration(
+pub fn draw_menu_decoration(
     surface: &mut Surface,
     bounds: Rect,
     decoration: &clonk_engine::ObjectMenuFrameDecoration,
@@ -2896,7 +2896,7 @@ impl MenuEntry for BuildMenuItem {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MenuMode {
+pub enum MenuMode {
     Inventory,
     Container,
     Context,
@@ -2996,12 +2996,12 @@ pub struct ObjectMenuState {
 }
 
 impl ObjectMenuState {
-    pub(crate) fn mode(&self) -> MenuMode {
+    pub fn mode(&self) -> MenuMode {
         self.mode
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_mode_for_parity_test(&mut self, mode: MenuMode) {
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_mode_for_parity_test(&mut self, mode: MenuMode) {
         self.mode = mode;
     }
 

@@ -753,6 +753,10 @@ dependencies = [
  "clonk-frontend",
  "clonk-graphics",
  "clonk-gui",
+ "clonk-resources",
+ "clonk-script",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

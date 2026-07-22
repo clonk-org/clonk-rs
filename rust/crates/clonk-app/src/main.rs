@@ -24,7 +24,7 @@ mod input;
 mod local_control;
 use clonk_app_netplay::network;
 mod network_team_assignment;
-mod object_menu;
+use clonk_app_menus::object_menu;
 mod offline_savegame;
 mod offline_startup;
 use clonk_app_netplay::prepared_host_bootstrap;
@@ -205,7 +205,7 @@ use clonk_app_netplay::network::{
 };
 use clonk_app_netplay::network_host_preparation::NetworkHostPreparation;
 use network_team_assignment::{NetworkTeamAssignmentState, NetworkTeamControlError};
-use object_menu::{
+use clonk_app_menus::object_menu::{
     engine_script_menu_inline_image_specs, engine_script_menu_layout_with_free_anchor,
     engine_script_menu_layout_with_presentation,
     engine_script_menu_pointer_target_with_free_anchor,

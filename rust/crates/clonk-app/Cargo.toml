@@ -52,9 +52,11 @@ zbus = { version = "4.4", default-features = false, features = ["async-io"] }
 windows = { version = "0.54", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications", "Win32_Foundation", "Win32_Globalization", "Win32_System_Registry", "Win32_System_WinRT", "Win32_UI_Shell"] }
 
 [dev-dependencies]
-# The app test suite drives NetworkManager through the netplay crate's test
-# stubs; the feature stands in for the `#[cfg(test)]` gate that covered them
-# before the crate split and stays out of production builds.
+# The app test suite drives NetworkManager and the object-menu parity mutator
+# through the netplay/menus crates' test stubs; the features stand in for the
+# `#[cfg(test)]` gates that covered them before the crate splits and stay out
+# of production builds.
+clonk-app-menus = { path = "../clonk-app-menus", features = ["test-hooks"] }
 clonk-app-netplay = { path = "../clonk-app-netplay", features = ["test-hooks"] }
 flate2 = "1"
 # Keep clonk-engine's property-test dependencies in the app test graph so adding
