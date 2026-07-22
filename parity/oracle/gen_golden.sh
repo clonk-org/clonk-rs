@@ -207,6 +207,32 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Landscape.cpp" > "$gen/landscape_blast_free.inc"
 
+# C4Rect::Scaled is the production truncation used to map a game-unit rect into
+# a scaled definition's bitmap space. Lift the whole method.
+awk '
+  /^C4Rect C4Rect::Scaled\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Rect.cpp" > "$gen/rect_scaled.inc"
+
+# The post-load percent->float conversion that feeds every scaled draw call.
+# Anchored inside C4Def::Load so the extraction fails if the statement moves.
+awk '
+  /^bool C4Def::Load\(/ { p = 1 }
+  p && /^[[:space:]]*Scale = C4DefCore::Scale \/ 100\.0f;$/ { print; found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Def.cpp" > "$gen/def_scale_from_defcore.inc"
+
+# C4Def::Picture2Facet's decisive statement: the phase offset is composed in
+# GAME units and only the resulting rect is scaled into bitmap space, so the
+# truncation applies to the already-offset x. Anchored on the signature.
+awk '
+  /^void C4Def::Picture2Facet\(/ { p = 1; next }
+  p && /const auto scaledRect =/ { print; found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Def.cpp" > "$gen/def_picture2facet_rect.inc"
+
 # 4. Compile the oracle against the real C4Random.h (no DEBUGREC), the real
 #    C4ScriptKiller.h/C4LandscapePath.h/C4ActionDirection.h/
 #    C4SolidMaskBitmap.h production helpers, and the generated header/table;

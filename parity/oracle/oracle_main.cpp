@@ -59,8 +59,14 @@
 #include <C4LandscapePath.h> // real production coarse-path traversal
 #include <C4ScriptKiller.h> // real production script-host helper
 #include <C4SolidMaskBitmap.h> // real production active-bitmap mask sampling
+#include <C4Rect.h>            // real production rect, incl. the Scaled() decl
 
 extern long SineTable[9001]; // defined by the generated sine_table.cpp
+
+// Real production C4Rect::Scaled body, lifted from src/C4Rect.cpp by
+// gen_golden.sh. The truncation it performs is what maps a game-unit Picture
+// rect into a scaled definition's bitmap space.
+#include "rect_scaled.inc"
 
 // --- Randomize3 / Rnd3: verbatim from src/C4Random.cpp:24-42 -----------------
 static const int FRndRes = 500;
@@ -1271,6 +1277,80 @@ static void printSolidMaskGraphicsCases()
     printf("]");
 }
 
+// --- DefCore Scale -> Picture facet: src/C4Def.cpp:745,1341 ------------------
+// C4DefCore::Scale is the uint32 percentage (src/C4Def.h:274); C4Def::Scale is
+// the float multiplier it becomes (src/C4Def.h:335), shadowing the base member.
+// The scaffold reproduces exactly that shadowing so the two lifted production
+// statements below compile and resolve their names as they do in the engine.
+struct C4DefCore
+{
+    uint32_t Scale;
+};
+
+struct DefPictureScaleOracle : C4DefCore
+{
+    float Scale;
+    C4Rect PictureRect;
+
+    // Production: `Scale = C4DefCore::Scale / 100.0f;`
+    void PostLoadScale()
+    {
+#include "def_scale_from_defcore.inc"
+    }
+
+    // Production: the `const auto scaledRect = ...;` statement of
+    // C4Def::Picture2Facet. Phase is composed in GAME units, then the whole
+    // rect is scaled, so truncation applies to the already-offset x.
+    C4Rect Picture2FacetRect(int32_t xPhase) const
+    {
+#include "def_picture2facet_rect.inc"
+        return scaledRect;
+    }
+};
+
+static void printDefPictureScaleCases()
+{
+    struct Case
+    {
+        const char *name;
+        uint32_t scalePercent;
+        int32_t x, y, wdt, hgt;
+        int32_t xPhase;
+    };
+    // Scale=100 pins the identity path; the rest pin truncation toward zero and
+    // the phase-before-scale composition (a phase applied after scaling would
+    // give a different x wherever Wdt * scale truncates).
+    const Case cases[] = {
+        {"unscaled_phase0",      100,  0,  0, 64, 64, 0},
+        {"unscaled_phase2",      100,  0,  0, 64, 64, 2},
+        {"double_unit",          200,  0,  0,  1,  1, 0},
+        {"double_offset_phase3", 200, 10,  4, 16, 20, 3},
+        {"triple_phase1",        300,  5,  7,  9, 11, 1},
+        {"one_and_a_half",       150,  1,  1,  3,  3, 1},
+        {"one_and_a_quarter",    125,  3,  3,  7,  7, 2},
+        {"fractional_third",      33, 10, 10, 10, 10, 0},
+    };
+
+    printf("\"def_picture_scale\":[");
+    bool first = true;
+    for (const auto &c : cases)
+    {
+        DefPictureScaleOracle def{};
+        def.C4DefCore::Scale = c.scalePercent;
+        def.PostLoadScale();
+        def.PictureRect = C4Rect{c.x, c.y, c.wdt, c.hgt};
+        const C4Rect r = def.Picture2FacetRect(c.xPhase);
+        printf("%s{\"name\":\"%s\",\"scale_percent\":%u,\"scale\":%.9g,"
+               "\"picture_x\":%d,\"picture_y\":%d,\"picture_wdt\":%d,\"picture_hgt\":%d,"
+               "\"phase\":%d,\"x\":%d,\"y\":%d,\"wdt\":%d,\"hgt\":%d}",
+               first ? "" : ",", c.name, static_cast<unsigned int>(c.scalePercent),
+               static_cast<double>(def.Scale),
+               c.x, c.y, c.wdt, c.hgt, c.xPhase, r.x, r.y, r.Wdt, r.Hgt);
+        first = false;
+    }
+    printf("]");
+}
+
 // --- C4Value hash: mirrors src/C4Value.cpp:923-1029 --------------------------
 // based on boost container_hash's hashCombine
 static constexpr void hashCombine(std::size_t &hash, std::size_t nextHash)
@@ -1810,6 +1890,13 @@ int main()
     // 15. C4SolidMask active graphics sampling. The variant_2 case is the
     //     minimized Goldrush frame-184 CTWR/SNKE contact divergence.
     printSolidMaskGraphicsCases();
+    printf(",\n");
+
+    // 15b. DefCore Scale -> Picture facet rect. Pins the percent->float
+    //      conversion, C4Rect::Scaled's truncation, and Picture2Facet's
+    //      phase-before-scale composition — the contract any HD (Scale != 100)
+    //      content depends on.
+    printDefPictureScaleCases();
     printf(",\n");
 
     // 16. Exact DigOutMaterialCast spawn arguments and the twenty following

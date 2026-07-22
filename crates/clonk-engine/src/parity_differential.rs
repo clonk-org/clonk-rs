@@ -36,7 +36,8 @@ use crate::rng::LcgRng;
 use crate::scenario::MapPixelClassifier;
 use crate::{
     contact_action_wall_tumble_x, ActionSpec, ActionState, CommandDirection, Definition,
-    DefinitionRect, DefinitionSpriteImage, DefinitionTargetRect, Direction, Engine,
+    DefinitionPicture, DefinitionRect, DefinitionSpriteImage, DefinitionTargetRect, Direction,
+    Engine,
     ObjectBaseGraphics, ObjectStatus, ObjectUpdate, PhysicalInfo, PhysicsSettings, PlayerConfig,
     ShapeAttachRecord, SpawnConfig, CATEGORY_LIVING, CATEGORY_OBJECT, OWNER_NONE,
 };
@@ -574,6 +575,42 @@ fn solid_mask_sprite(alpha: u8) -> DefinitionSpriteImage {
         pixels: Arc::from(pixels.into_boxed_slice()),
         color_mask: None,
     }
+}
+
+/// Sprite whose pixels encode their own coordinates (R = x, G = y), so the
+/// first pixel of a cropped facet recovers the source rect's origin.
+fn coordinate_sprite(size: u32) -> DefinitionSpriteImage {
+    let mut pixels = vec![0; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let base = ((y * size + x) * 4) as usize;
+            pixels[base] = x as u8;
+            pixels[base + 1] = y as u8;
+            pixels[base + 3] = 255;
+        }
+    }
+    DefinitionSpriteImage {
+        width: size,
+        height: size,
+        pixels: Arc::from(pixels.into_boxed_slice()),
+        color_mask: None,
+    }
+}
+
+fn def_picture_scale_engine(scale_percent: u32, picture: DefinitionPicture) -> Engine {
+    let mut definition = Definition::from_script("PSCL", "Picture Scale", "#strict\n")
+        .expect("fixture compiles");
+    definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+    definition.set_picture(Some(picture));
+    // C4Def.cpp:745 `Scale = C4DefCore::Scale / 100.0f`, as wired at lib.rs:12841.
+    definition.set_graphics_scale(scale_percent as f32 / 100.0);
+    definition.set_sprite_image(Some(coordinate_sprite(256)));
+
+    let mut engine = Engine::with_seed(7);
+    engine
+        .register_definition(definition)
+        .expect("definition registers");
+    engine
 }
 
 fn solid_mask_graphics_engine() -> (Engine, crate::ObjectId) {
@@ -2536,6 +2573,62 @@ func Trigger(object pOther) {
                 mask_pixel,
             );
         }
+    }
+
+    // 15b. DefCore Scale -> Picture facet rect (C4Def.cpp:745 percent->float,
+    //      C4Def.cpp:1341 Picture2Facet, C4Rect.cpp:37-44 Scaled). The Picture
+    //      rect is authored in GAME units; the phase offset is composed there
+    //      and only the resulting rect is scaled into bitmap space, so the
+    //      truncation applies to the already-offset x. This is the contract any
+    //      HD (Scale != 100) content depends on.
+    for (idx, case) in golden["def_picture_scale"]
+        .as_array()
+        .expect("def_picture_scale is an array")
+        .iter()
+        .enumerate()
+    {
+        let engine = def_picture_scale_engine(
+            u(case, "scale_percent") as u32,
+            DefinitionPicture {
+                x: i(case, "picture_x") as i32,
+                y: i(case, "picture_y") as i32,
+                width: i(case, "picture_wdt") as i32,
+                height: i(case, "picture_hgt") as i32,
+            },
+        );
+        let image = engine
+            .definition_picture_phase_image("PSCL", i(case, "phase") as i32)
+            .expect("scaled picture facet");
+        expect_eq(
+            "def_picture_scale",
+            idx,
+            "wdt",
+            i(case, "wdt"),
+            i64::from(image.width()),
+        );
+        expect_eq(
+            "def_picture_scale",
+            idx,
+            "hgt",
+            i(case, "hgt"),
+            i64::from(image.height()),
+        );
+        // R/G of the first pixel are the source coordinates the crop started at.
+        let pixels = image.pixels();
+        expect_eq(
+            "def_picture_scale",
+            idx,
+            "x",
+            i(case, "x"),
+            i64::from(pixels[0]),
+        );
+        expect_eq(
+            "def_picture_scale",
+            idx,
+            "y",
+            i(case, "y"),
+            i64::from(pixels[1]),
+        );
     }
 
     // 16. Movement: per-frame sub-pixel accumulation (the Theme-C core).
