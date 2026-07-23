@@ -1043,6 +1043,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let mut object = make_snapshot().objects.remove(0);
         object.definition_id = "IgnoreFog".into();
@@ -1242,6 +1243,7 @@ mod tests {
             // Expected source: Facet(2,1) + TopFace(1,1)
             // + FacetSize(2,1) * (reversed phase 2, DrawDir 2) = (7,4).
             top_face: Some(DefinitionTargetRect::new(1, 1, 1, 1, 0, 0)),
+            picture: None,
         };
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(10, 10);
@@ -1307,6 +1309,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(2, 1, 2, 2, 1, 0)),
+            picture: None,
         };
         let override_sprite = DefinitionSprite {
             graphics_scale: 2.0,
@@ -1321,6 +1324,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
+            picture: None,
         };
         let sprites = Arc::new(HashMap::from([
             (sprite_map_key("TestObject", None), definition_sprite),
@@ -1393,6 +1397,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(2, 2, 1, 1, 0, 0)),
+            picture: None,
         };
         let override_sprite = DefinitionSprite {
             graphics_scale: 0.5,
@@ -1405,6 +1410,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let sprites = Arc::new(HashMap::from([
             (sprite_map_key("TestObject", None), definition_sprite),
@@ -1463,6 +1469,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let background = Color::opaque(0, 0, 0);
         let render = |source, transform| {
@@ -1563,6 +1570,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(1, 1, 1, 1, 0, 0)),
+            picture: None,
         };
         let override_sprite = DefinitionSprite {
             graphics_scale: 1.0,
@@ -1575,6 +1583,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
+            picture: None,
         };
         let sprites = Arc::new(HashMap::from([
             (sprite_map_key("TestObject", None), definition_sprite),
@@ -1639,6 +1648,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
+            picture: None,
         };
         let sprites = Arc::new(HashMap::from([(
             sprite_map_key("TestObject", None),
@@ -1696,6 +1706,7 @@ mod tests {
             line: 0,
             stretch_growth: true,
             top_face: Some(DefinitionTargetRect::new(0, 0, 2, 2, 1, 1)),
+            picture: None,
         };
         let sprites = Arc::new(HashMap::from([(
             sprite_map_key("TestObject", None),
@@ -1739,6 +1750,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let render = |transform| {
             let mut graphics = GraphicsSystem::new(
@@ -1813,6 +1825,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let mut object = make_snapshot().objects.remove(0);
         object.position = Vector2::new(12, 12);
@@ -3450,6 +3463,7 @@ mod tests {
                     line: engine.definition_line(definition_id),
                     stretch_growth: engine.definition_stretch_growth(definition_id),
                     top_face: engine.definition_top_face(definition_id),
+                    picture: None,
                 },
             );
         }
@@ -3602,6 +3616,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let mut graphics = GraphicsSystem::new(
             32,
@@ -3751,6 +3766,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let mut graphics = GraphicsSystem::new(
             24,
@@ -4525,6 +4541,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let template = make_snapshot().objects.remove(0);
         let mut power = template.clone();
@@ -5935,6 +5952,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let mut recolored = make_snapshot().objects.remove(0);
         recolored.definition_id = "ObjectColor".to_string();
@@ -6043,6 +6061,7 @@ mod tests {
             line: engine.definition_line("FISH"),
             stretch_growth: engine.definition_stretch_growth("FISH"),
             top_face: engine.definition_top_face("FISH"),
+            picture: None,
         };
         let mut graphics = GraphicsSystem::new(
             16,
@@ -6119,6 +6138,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let mut object = make_snapshot().objects.remove(0);
         object.definition_id = "OwnerTransparency".to_string();
@@ -6182,6 +6202,7 @@ mod tests {
                 line: 0,
                 stretch_growth: false,
                 top_face: None,
+                picture: None,
             },
         );
         sprites.insert(
@@ -6211,6 +6232,7 @@ mod tests {
                 line: 0,
                 stretch_growth: false,
                 top_face: None,
+                picture: None,
             },
         );
         sprites.insert(
@@ -6230,6 +6252,7 @@ mod tests {
                 line: 0,
                 stretch_growth: false,
                 top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
+                picture: None,
             },
         );
 
@@ -6310,6 +6333,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let render = |object_mode, overlay_mode| {
             let mut object = object.clone();
@@ -6410,6 +6434,7 @@ mod tests {
                     line: 0,
                     stretch_growth: false,
                     top_face: None,
+                    picture: None,
                 },
             ),
             (
@@ -6425,6 +6450,7 @@ mod tests {
                     line: 0,
                     stretch_growth: false,
                     top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 1, 0)),
+                    picture: None,
                 },
             ),
         ]));
@@ -6608,6 +6634,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
 
         let mut template = make_snapshot().objects.remove(0);
@@ -6739,6 +6766,7 @@ mod tests {
             line,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let mut graphics = GraphicsSystem::new(
             160,
@@ -6909,6 +6937,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let mut star = make_snapshot().objects.remove(0);
         star.definition_id = "STAR".to_string();
@@ -6970,6 +6999,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let mut sprites = HashMap::from([(
             sprite_map_key("BaseMod2", None),
@@ -7009,6 +7039,7 @@ mod tests {
                 line: 0,
                 stretch_growth: false,
                 top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
+                picture: None,
             },
         );
         sprites.insert(
@@ -7086,6 +7117,7 @@ mod tests {
                 line: 0,
                 stretch_growth: false,
                 top_face: None,
+                picture: None,
             },
         );
         sprites.insert(
@@ -7101,6 +7133,7 @@ mod tests {
                 line: 0,
                 stretch_growth: false,
                 top_face: None,
+                picture: None,
             },
         );
         let template = make_snapshot().objects.remove(0);
@@ -7195,6 +7228,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let owner = Color::opaque(64, 128, 192);
         let render = |mode| {
@@ -7259,6 +7293,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let render = |overlay_mode, overlay_modulation, rotation| {
             let mut object = make_snapshot().objects.remove(0);
@@ -7341,6 +7376,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let mut firelump = make_snapshot().objects.remove(0);
         firelump.definition_id = "FRBL".to_string();
@@ -11063,6 +11099,7 @@ mod tests {
                 line: 0,
                 stretch_growth,
                 top_face: None,
+                picture: None,
             },
         );
         Arc::new(sprites)
@@ -11591,6 +11628,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let hud = Arc::new(HudGraphics {
             fire: Some(fire_test_strip()),
@@ -11654,6 +11692,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let hud = Arc::new(HudGraphics {
             fire: Some(fire_test_strip()),
@@ -11825,6 +11864,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let hud = Arc::new(HudGraphics {
             fire: Some(fire_test_strip()),
@@ -11918,6 +11958,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let mut graphics = GraphicsSystem::new(
             10,
@@ -11979,6 +12020,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let mut graphics = GraphicsSystem::new(
             10,
@@ -12147,6 +12189,7 @@ mod tests {
                 line: 0,
                 stretch_growth: false,
                 top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 0, 0)),
+                picture: None,
             },
         );
         sprites.insert(
@@ -12162,6 +12205,7 @@ mod tests {
                 line: 0,
                 stretch_growth: false,
                 top_face: None,
+                picture: None,
             },
         );
 
@@ -12238,6 +12282,7 @@ mod tests {
                 line: 0,
                 stretch_growth: false,
                 top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)),
+                picture: None,
             },
         );
         sprites.insert(
@@ -12256,6 +12301,7 @@ mod tests {
                 line: 0,
                 stretch_growth: false,
                 top_face: Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 10)),
+                picture: None,
             },
         );
 
@@ -12585,6 +12631,7 @@ mod tests {
                 line: 0,
                 stretch_growth: false,
                 top_face: None,
+                picture: None,
             },
         );
 
@@ -12686,6 +12733,7 @@ mod tests {
                 line: 0,
                 stretch_growth: false,
                 top_face: None,
+                picture: None,
             },
         );
         sprites.insert(
@@ -12701,6 +12749,7 @@ mod tests {
                 line: 0,
                 stretch_growth: false,
                 top_face: None,
+                picture: None,
             },
         );
 
@@ -14698,6 +14747,7 @@ mod tests {
             line: 0,
             stretch_growth: false,
             top_face: None,
+            picture: None,
         };
         let sprites = Arc::new(HashMap::from([(
             sprite_map_key("TestObject", None),

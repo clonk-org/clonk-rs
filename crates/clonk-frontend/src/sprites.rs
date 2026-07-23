@@ -140,6 +140,15 @@ pub struct DefinitionSprite {
     pub stretch_growth: bool,
     /// DefCore `TopFace`: source facet and object-relative target rectangle.
     pub top_face: Option<DefinitionTargetRect>,
+    /// DefCore `Picture` rect in RAW definition units, exactly as
+    /// `C4GraphicsOverlay::UpdateFacet` stores it for MODE_IngamePicture and
+    /// MODE_Picture (src/C4DefGraphics.cpp:660-664). It must stay unscaled:
+    /// `C4Facet::DrawT` applies the definition `Scale` to the SOURCE crop only
+    /// (src/C4Facet.cpp:74-79), while the rect doubles as the fZoomToShape
+    /// denominator and the destination extent. A missing or zero-size DefCore
+    /// entry already arrives as `(0, 0, Shape.Wdt, Shape.Hgt)`
+    /// (src/C4Def.cpp:222-224).
+    pub picture: Option<DefinitionRect>,
 }
 
 /// Source facet selected from one particle definition's `Graphics.png`.
