@@ -8863,13 +8863,21 @@ impl ObjectScopeContext {
         self.pending_update.shape_vertices = Some(vertices);
     }
 
-    pub(crate) fn set_graphics_overlay(&mut self, overlay: ObjectGraphicsOverlay) -> bool {
+    pub(crate) fn set_graphics_overlay(&mut self, mut overlay: ObjectGraphicsOverlay) -> bool {
         let mut change = false;
         if let Some(existing) = self
             .graphics_overlays
             .iter_mut()
             .find(|existing| existing.id == overlay.id)
         {
+            // C4GraphicsOverlay::Set reassigns mode, graphics, action, blit mode
+            // and overlay object, resets iPhase, and deliberately keeps the
+            // transform ("// (keep transform)") and dwClrModulation
+            // (src/C4DefGraphics.cpp:682-693). Content sets a graphics overlay
+            // and its SetObjDrawTransform independently, so rebuilding from
+            // scratch would drop the transform on every graphics refresh.
+            overlay.transform = existing.transform;
+            overlay.color_modulation = existing.color_modulation;
             if *existing != overlay {
                 *existing = overlay;
                 change = true;
