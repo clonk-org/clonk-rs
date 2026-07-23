@@ -2157,12 +2157,9 @@ pub(crate) fn set_plr_view_range(args: &[Value]) -> Result<Value, RuntimeError> 
         if !context.ensure_object_scope(target) {
             return Ok(Value::Int(0));
         }
-        if let Some(scope) = context.object_scope_mut(target) {
-            scope.set_plr_view_range(range);
-            Ok(Value::Int(1))
-        } else {
-            Ok(Value::Int(0))
-        }
+        Ok(Value::Int(i32::from(
+            context.set_object_plr_view_range(target, range),
+        )))
     })
 }
 
@@ -3672,11 +3669,14 @@ pub(crate) fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
         });
         if let Some(owner) = callback_owner {
             context.insert_player_crew(owner, to);
-            if let Some(scope) = context.object_scope_mut(to) {
+            let view_range = context.object_scope_mut(to).map(|scope| {
                 scope.set_controller(owner);
-                if scope.plr_view_range() == 0 {
-                    scope.set_plr_view_range(500);
-                }
+                scope.plr_view_range()
+            });
+            if view_range == Some(0) {
+                context.set_object_plr_view_range(to, 500);
+            } else if view_range.is_some() {
+                context.actualize_object_plr_view_range(to);
             }
         }
         let donor_member = context.object_in_any_crew(from);
@@ -3769,6 +3769,49 @@ pub(crate) fn retire_host_crew_info(context: &mut EffectHostContext, link: CrewI
         state.idle.insert(key, rebuilt);
     }
     true
+}
+
+/// The `Info` arm of `C4Object::AssignDeath`: the persistent entry remains
+/// linked to the corpse, but is marked dead, counted and retired before
+/// contents/player pointers are cleared (C4Object.cpp:1185-1190).
+pub(crate) fn assign_death_host_crew_info(
+    context: &mut EffectHostContext,
+    target: ObjectId,
+) {
+    let Some(link) = context
+        .object_scope(target)
+        .and_then(ObjectScopeContext::info_link)
+    else {
+        return;
+    };
+    let game_time = context.world.game_time();
+    let (death_count, total_playing_time) = {
+        let mut state = context.world.crew_info_state.borrow_mut();
+        let Some(entry) = state.entries.get_mut(&link) else {
+            return;
+        };
+        entry.has_died = true;
+        entry.death_count = entry.death_count.wrapping_add(1);
+        if entry.in_action {
+            entry.total_playing_time = entry
+                .total_playing_time
+                .wrapping_add(game_time.wrapping_sub(entry.in_action_time));
+            entry.in_action = false;
+        }
+        (entry.death_count, entry.total_playing_time)
+    };
+    let _ = retire_host_crew_info(context, link);
+    if let Some(scope) = context.object_scope_mut(target) {
+        if let Some(mut info) = scope.info_core().cloned() {
+            info.death_count = death_count;
+            info.total_playing_time = total_playing_time;
+            scope.set_info_core(Some(info));
+        }
+    }
+    context.record_player_command(PlayerCommand::AssignDeathCrewInfo {
+        object_id: target,
+        link,
+    });
 }
 
 fn relink_host_crew_info(
@@ -4071,14 +4114,11 @@ pub(crate) fn make_crew_member_live(target: ObjectId, player: i32) -> Result<boo
             };
             recruit_or_create_crew_info(context, player, definition_id.as_str())?
         };
-        {
+        let view_range = {
             let Some(object) = context.object_scope_mut(target) else {
                 return Ok(false);
             };
             object.set_crew_member(true);
-            if object.plr_view_range() == 0 {
-                object.set_plr_view_range(500);
-            }
             if let Some((link, info, _, info_physical)) = assignment.as_ref() {
                 object.set_info_rank(Some(info.rank));
                 object.set_info_link(Some(*link));
@@ -4090,6 +4130,12 @@ pub(crate) fn make_crew_member_live(target: ObjectId, player: i32) -> Result<boo
             // C4Player::MakeCrewMember changes Controller, never Owner
             // (C4Player.cpp:1202-1204).
             object.set_controller(player);
+            object.plr_view_range()
+        };
+        if view_range == 0 {
+            context.set_object_plr_view_range(target, 500);
+        } else {
+            context.actualize_object_plr_view_range(target);
         }
         context.refresh_scope_fair_crew(target);
         if let Some((link, info, created_entry, _)) = assignment {
@@ -4411,13 +4457,12 @@ pub(crate) fn clear_player_object_pointers_host(target: ObjectId) {
             let Some(context) = borrow.as_mut() else {
                 return false;
             };
-            let removed_cursor = context
-                .player_state(player_id)
-                .is_some_and(|player| player.cursor == Some(target));
-            if let Some(player) = context.player_state_mut(player_id) {
-                player.clear_object_pointers(target);
-            }
-            context.record_player_command(PlayerCommand::ClearPlayerObjectPointersWithoutAdjust {
+            let Some(player) = context.player_state_mut(player_id) else {
+                return false;
+            };
+            let removed_cursor =
+                player.clear_object_pointers_before_cursor_adjust(target);
+            context.record_player_command(PlayerCommand::ClearPlayerObjectPointersBeforeAdjust {
                 player_id,
                 object: target,
             });
@@ -4426,7 +4471,65 @@ pub(crate) fn clear_player_object_pointers_host(target: ObjectId) {
         if removed_cursor {
             adjust_cursor_host(player_id);
         }
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            if let Some(player) = context.player_state_mut(player_id) {
+                player.clear_object_pointers_after_cursor_adjust(target);
+            }
+            // C4Player::ClearPointers(..., false) removes this player's
+            // runtime FoW link immediately. AssignDeath uses the separate
+            // death helper below and deliberately retains it for decay.
+            context
+                .world
+                .remove_player_fow_view_object(player_id, target);
+            context.record_player_command(PlayerCommand::ClearPlayerObjectPointersAfterAdjust {
+                player_id,
+                object: target,
+            });
+        });
     }
+}
+
+/// The single-owner `C4Player::ClearPointers(object, true)` call made by
+/// AssignDeath. Other players are deliberately untouched, and the owner's
+/// FoWViewObjs entry is retained for normal dead-view decay
+/// (C4Object.cpp:1194-1200; C4Player.cpp:57-82).
+pub(crate) fn clear_owner_death_pointers_host(target: ObjectId, owner: i32) {
+    let removed_cursor = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        let Some(player) = context.player_state_mut(owner) else {
+            return false;
+        };
+        let removed_cursor =
+            player.clear_object_pointers_before_cursor_adjust(target);
+        context.record_player_command(PlayerCommand::ClearPlayerObjectPointersBeforeAdjust {
+            player_id: owner,
+            object: target,
+        });
+        removed_cursor
+    });
+    if removed_cursor {
+        adjust_cursor_host(owner);
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        if let Some(player) = context.player_state_mut(owner) {
+            player.clear_object_pointers_after_cursor_adjust(target);
+        }
+        context.record_player_command(PlayerCommand::ClearPlayerObjectPointersAfterAdjust {
+            player_id: owner,
+            object: target,
+        });
+    });
 }
 
 /// C4Player::AdjustCursorCommand (C4Player.cpp:1235-1258).
@@ -4434,11 +4537,34 @@ fn adjust_cursor_host(player_id: i32) -> bool {
     let Some((previous, next)) = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow.as_mut()?;
+        context.player_state_mut(player_id)?.reset_cursor_view();
+        context.record_player_command(PlayerCommand::ResetCursorView { player_id });
         let player = context.player_state(player_id)?.clone();
         let next = hi_rank_active_crew(context, &player, true)
             .or_else(|| hi_rank_active_crew(context, &player, false));
         let previous = player.cursor;
-        context.player_state_mut(player_id)?.cursor = next;
+        if previous != next {
+            let focus = {
+                let player = context.player_state_mut(player_id)?;
+                player.cursor = next;
+                player.resolved_view_object()
+            };
+            let position = focus.and_then(|object| {
+                context
+                    .object_scope(object)
+                    .map(ObjectScopeContext::effective_position)
+                    .or_else(|| {
+                        context
+                            .get_world_object(object)
+                            .map(|object| object.position())
+                    })
+            });
+            context.player_state_mut(player_id)?.update_view(position);
+            context.record_player_command(PlayerCommand::UpdatePlayerView {
+                player_id,
+                position,
+            });
+        }
         Some((previous, next))
     }) else {
         return false;
@@ -4597,14 +4723,17 @@ pub(crate) fn set_crew_status(args: &[Value]) -> Result<Value, RuntimeError> {
             {
                 return None;
             }
-            if let Some(scope) = context.object_scope_mut(target) {
+            let view_range = context.object_scope_mut(target).map(|scope| {
                 scope.set_crew_status_member(true);
                 // MakeCrewMember(pObj, false): Controller changes; Owner and
                 // Info do not (C4Player.cpp:1167-1215).
                 scope.set_controller(player_id);
-                if scope.plr_view_range() == 0 {
-                    scope.set_plr_view_range(500);
-                }
+                scope.plr_view_range()
+            });
+            if view_range == Some(0) {
+                context.set_object_plr_view_range(target, 500);
+            } else if view_range.is_some() {
+                context.actualize_object_plr_view_range(target);
             }
             if !context.insert_player_crew(player_id, target) {
                 return None;

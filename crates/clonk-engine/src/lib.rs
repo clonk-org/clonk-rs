@@ -5062,7 +5062,10 @@ impl ObjectState {
         }
         let mut energy_died = false;
         if let Some(energy) = delta.energy {
-            energy_died = self.alive && self.energy != 0 && energy == 0;
+            energy_died = !delta.host_energy_death_checked
+                && self.alive
+                && self.energy != 0
+                && energy == 0;
             self.energy = energy;
         }
         if let Some(breath) = delta.breath {
@@ -5352,6 +5355,10 @@ struct ObjectDelta {
     /// `SetRDir`. Mirrors C++ `pObj->rdir = itofix(n, prec)` (`C4Script.cpp:710`).
     rotation_velocity: Option<C4Fixed>,
     energy: Option<i32>,
+    /// The energy write already evaluated C4Object::DoEnergy's synchronous
+    /// zero-crossing predicate at its host-call site. This marker belongs to
+    /// this specific write: a later merged energy overwrite replaces it.
+    host_energy_death_checked: bool,
     /// C4Object::Breath overwrite staged by FnDoBreath.
     breath: Option<i32>,
     /// C4Object::NeedEnergy overwrite.
@@ -5513,6 +5520,7 @@ impl ObjectDelta {
         }
         if let Some(energy) = update.energy {
             self.energy = Some(energy);
+            self.host_energy_death_checked = update.host_energy_death_checked;
         }
         if let Some(breath) = update.breath {
             self.breath = Some(breath);
@@ -5676,6 +5684,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             rotation: update.rotation,
             rotation_velocity: update.rotation_velocity,
             energy: update.energy,
+            host_energy_death_checked: update.host_energy_death_checked,
             breath: update.breath,
             need_energy: update.need_energy,
             energy_loss_cause: update.energy_loss_cause,
@@ -5860,6 +5869,13 @@ pub struct ObjectUpdate {
     #[serde(default)]
     pub rotation: Option<i32>,
     pub energy: Option<i32>,
+    /// Runtime-only marker that this exact energy write already evaluated
+    /// the native DoEnergy death predicate synchronously. It prevents the
+    /// later callback fold from replaying AssignDeath after a revival or a
+    /// SetAlive change, and never enters save/control data.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub host_energy_death_checked: bool,
     /// C4Object::Breath overwrite on the raw physical scale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breath: Option<i32>,
@@ -6899,6 +6915,11 @@ impl Object {
             // Line shape independent (C4Object.cpp:322-324).
             return;
         }
+        // C4Shape::CopyFrom replaces AttachMat from the definition shape
+        // while deliberately retaining iAttachX/Y/Vtx
+        // (C4Shape.cpp:421-443). Definition shapes start unattached.
+        self.state.shape_attach.mat_valid = false;
+        self.state.shape_attach.mat_vehicle = false;
         self.state.shape_override = None;
         self.shape_rect = self.definition_derived_shape_rect();
         self.shape_fire_top = self.definition_derived_fire_top();
@@ -7872,7 +7893,14 @@ impl Object {
     {
         for operation in operations {
             match operation {
-                CommandOperation::Clear => self.commands.clear(),
+                // C4Object::ClearCommands removes the complete native
+                // command chain. The compatibility queue contains deferred
+                // continuations for that same chain, so entries already
+                // present at this chronological Clear must disappear too.
+                CommandOperation::Clear => {
+                    self.commands.clear();
+                    self.command_queue.clear();
+                }
                 CommandOperation::PushFront(request) => {
                     let _ = self.commands.push_front(request);
                 }
@@ -10100,6 +10128,7 @@ fn movement_circle_wrap_retains_pre_wrap_live_shape() {
         border_bound: 0,
         rotateable: 1,
         action_procedure: ActionProcedure::Undefined,
+        action_is_idle: true,
         layer_bounds: None,
     });
     let movement = MovementContactConfig {
@@ -10165,6 +10194,7 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
         border_bound: 0,
         rotateable: 0,
         action_procedure: ActionProcedure::Undefined,
+        action_is_idle: true,
         layer_bounds: None,
     });
     let movement = MovementContactConfig {
@@ -10233,6 +10263,7 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
             border_bound: case.border_bound,
             rotateable: 0,
             action_procedure: ActionProcedure::Undefined,
+            action_is_idle: true,
             layer_bounds: None,
         });
         let object = &mut engine.objects[object_index];
@@ -18116,19 +18147,6 @@ fn mission_access_store_updates_semicolon_modules_case_insensitively() {
     assert_eq!(store.update_modules("alpha;GAMMA", true), "Beta");
 }
 
-/// Stack-scoped source for Contact* callbacks while `Engine::objects` is
-/// split into exclusive slices by movement. The provider reborrows only the
-/// non-moving slices and never dereferences the separately seeded mover.
-struct MovementLazyHostWorldSource {
-    before: Cell<*const Object>,
-    before_len: usize,
-    after: Cell<*const Object>,
-    after_len: usize,
-    mover_index: usize,
-    definitions: *const HashMap<DefinitionId, Definition>,
-    landscape: Cell<*const Landscape>,
-}
-
 pub struct Engine {
     #[doc(hidden)] pub(crate) definitions: HashMap<DefinitionId, Definition>,
     /// Definition registration order — C++ links scripts in child
@@ -18744,6 +18762,9 @@ pub struct SolidMaskBake {
 /// 276-305).
 #[derive(Debug)]
 struct SolidMaskAttachmentBackup {
+    /// Identity of the exact C4SolidMask instance that captured these
+    /// riders. Recreating the mask discards its internal attachment list.
+    instance_sequence: Option<u64>,
     removal_position: Vector2,
     object_ids: Vec<ObjectId>,
 }
@@ -19094,6 +19115,7 @@ struct MovementLiveConfig {
     border_bound: i32,
     rotateable: i32,
     action_procedure: ActionProcedure,
+    action_is_idle: bool,
     layer_bounds: Option<LayerMovementBounds>,
 }
 
@@ -19109,11 +19131,11 @@ fn movement_live_config_for(
     layer_bounds: Option<LayerMovementBounds>,
 ) -> MovementLiveConfig {
     let definition = definitions.get(&object.definition_id);
+    let action_library = definition.map(Definition::action_library);
     MovementLiveConfig {
         border_bound: definition.map(Definition::border_bound).unwrap_or(0),
         rotateable: definition.map(Definition::rotateable).unwrap_or(0),
-        action_procedure: definition
-            .map(Definition::action_library)
+        action_procedure: action_library
             .map(|library| {
                 library.procedure_for_entry(
                     &object.state.action.name,
@@ -19121,6 +19143,8 @@ fn movement_live_config_for(
                 )
             })
             .unwrap_or(ActionProcedure::Undefined),
+        action_is_idle: action_library
+            .is_none_or(|library| library.is_idle_state(&object.state.action)),
         layer_bounds,
     }
 }
@@ -26991,91 +27015,6 @@ impl Engine {
         unsafe { &*std::ptr::addr_of!((*engine).landscape) }.clone()
     }
 
-    /// Resolve one non-mover object while movement owns the engine vector as
-    /// split mutable slices.
-    ///
-    /// # Safety
-    ///
-    /// `source` points to a live `MovementLazyHostWorldSource`; its slices,
-    /// definitions, and current landscape outlive the synchronous Contact*
-    /// call. The mover is always seeded and is not present in either slice.
-    unsafe fn lazy_movement_host_world_object(
-        source: *const (),
-        id: ObjectId,
-    ) -> Option<(usize, HostWorldObject)> {
-        let source = unsafe { &*source.cast::<MovementLazyHostWorldSource>() };
-        let definitions = unsafe { &*source.definitions };
-        let before = source.before.get();
-        let after = source.after.get();
-        for offset in 0..source.before_len {
-            let object = unsafe { &*before.add(offset) };
-            if object.id == id {
-                return Some((offset, Self::host_world_object(definitions, object)));
-            }
-        }
-        for offset in 0..source.after_len {
-            let object = unsafe { &*after.add(offset) };
-            if object.id == id {
-                let index = source.mover_index + 1 + offset;
-                return Some((index, Self::host_world_object(definitions, object)));
-            }
-        }
-        None
-    }
-
-    /// Materialize all non-mover entries from movement's scoped slices.
-    ///
-    /// # Safety
-    ///
-    /// The `lazy_movement_host_world_object` contract applies. Excluded
-    /// entries were already copied into the host context and are skipped
-    /// before dereference.
-    unsafe fn lazy_movement_host_world_objects(
-        source: *const (),
-        excluded: &HashSet<usize>,
-    ) -> Vec<(usize, HostWorldObject)> {
-        let source = unsafe { &*source.cast::<MovementLazyHostWorldSource>() };
-        let definitions = unsafe { &*source.definitions };
-        let before = source.before.get();
-        let after = source.after.get();
-        let mut result = Vec::with_capacity(
-            source
-                .before_len
-                .saturating_add(source.after_len)
-                .saturating_sub(excluded.len()),
-        );
-        for offset in 0..source.before_len {
-            if excluded.contains(&offset) {
-                continue;
-            }
-            let object = unsafe { &*before.add(offset) };
-            result.push((offset, Self::host_world_object(definitions, object)));
-        }
-        for offset in 0..source.after_len {
-            let index = source.mover_index + 1 + offset;
-            if excluded.contains(&index) {
-                continue;
-            }
-            let object = unsafe { &*after.add(offset) };
-            result.push((index, Self::host_world_object(definitions, object)));
-        }
-        result
-    }
-
-    /// Clone movement's current landscape only when Contact* queries it.
-    ///
-    /// # Safety
-    ///
-    /// The source updates this pointer at callback entry and the landscape
-    /// remains immutably borrowed until the script call returns.
-    unsafe fn lazy_movement_host_world_landscape(source: *const ()) -> Option<Landscape> {
-        #[cfg(test)]
-        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
-        let source = unsafe { &*source.cast::<MovementLazyHostWorldSource>() };
-        let landscape = source.landscape.get();
-        (!landscape.is_null()).then(|| unsafe { (&*landscape).clone() })
-    }
-
     /// Build the shared/static portion of a script host context without
     /// materializing every object's mutable script state or cloning the
     /// landscape shell. Movement can finish this lazily on first contact.
@@ -27118,6 +27057,12 @@ impl Engine {
             self.next_object_id,
             self.team_home_base_rule,
         )
+        .with_player_fow_view_objects(
+            self.players
+                .values()
+                .map(|player| (player.id(), player.fow_view_objects().iter().copied())),
+        )
+        .with_game_time(self.game_time)
         .with_needed_material_strings(Rc::clone(&self.needed_material_strings))
         .with_object_no_dig_resource_string(Rc::clone(&self.object_no_dig_resource_string))
         .with_construction_check_strings(Rc::clone(&self.construction_check_strings))
@@ -33239,29 +33184,12 @@ impl Engine {
                     // DoMovement itself owns the mask lifecycle: DigFree and
                     // pre-motion contacts see the put mask, the first
                     // DoMotion removes it, and the tail always re-puts it.
-                    let movement_outcome = self.exec_object_movement(
+                    let _movement_outcome = self.exec_mobile_object_movement(
                         idx,
                         &action_library,
                         &definition_id,
                         &solid_mask_indices,
                     )?;
-                    if !movement_outcome.alive {
-                        continue;
-                    }
-                    // Demobilization (C4Movement.cpp:572) runs after
-                    // DoMovement, so same-frame friction/contact zeroing
-                    // demobilizes immediately.
-                    let object = &mut self.objects[idx];
-                    if !object.fixed_velocity.x.is_nonzero()
-                        && !object.fixed_velocity.y.is_nonzero()
-                        && !object.rotation_velocity.is_nonzero()
-                    {
-                        object.state.mobile = false;
-                    }
-                    // Stabilize while not rotating (C4Movement.cpp:574).
-                    if !self.objects[idx].rotation_velocity.is_nonzero() {
-                        self.stabilize_object(idx, &solid_mask_indices)?;
-                    }
                 } else {
                     // Static objects stabilize every frame
                     // (C4Movement.cpp:579).
@@ -33279,18 +33207,16 @@ impl Engine {
                         object.fixed_rotation = itofix(object.state.rotation);
                         object.state.mobile = true;
                     }
-                }
 
-                // C4Object::ExecMovement applies this raw assignment after
-                // both its mobile and static legs (C4Movement.cpp:596). It
-                // deliberately leaves fix_r, rdir, Shape, and OCF untouched,
-                // and reads the live Def after any movement callbacks.
-                let non_rotateable = self
-                    .definitions
-                    .get(&self.objects[idx].definition_id)
-                    .is_some_and(|definition| definition.rotateable() == 0);
-                if non_rotateable {
-                    self.objects[idx].state.rotation = 0;
+                    // C4Object::ExecMovement applies this raw assignment after
+                    // its static leg too (C4Movement.cpp:611-612).
+                    let non_rotateable = self
+                        .definitions
+                        .get(&self.objects[idx].definition_id)
+                        .is_some_and(|definition| definition.rotateable() == 0);
+                    if non_rotateable {
+                        self.objects[idx].state.rotation = 0;
+                    }
                 }
             }
 
@@ -34145,6 +34071,7 @@ impl Engine {
             rotation,
             rotation_velocity,
             energy,
+            host_energy_death_checked,
             breath,
             energy_loss_cause,
             fire,
@@ -34207,7 +34134,6 @@ impl Engine {
             );
         }
         let fow_range_changed = plr_view_range.is_some();
-        let fow_crew_actualize = crew_member == Some(true);
 
         let definition_id = self.objects[index].definition_id.clone();
         let previous_action_name = self.objects[index].state.action.name.clone();
@@ -34321,7 +34247,10 @@ impl Engine {
                 // AssignDeath below when a nonzero energy reaches 0
                 // (C4Object::DoEnergy, C4Object.cpp:1363) — host DoEnergy
                 // folds arrive here.
-                energy_died = object.state.alive && object.state.energy != 0 && energy == 0;
+                energy_died = !host_energy_death_checked
+                    && object.state.alive
+                    && object.state.energy != 0
+                    && energy == 0;
                 object.state.energy = energy;
             }
             if let Some(breath) = breath {
@@ -34523,7 +34452,7 @@ impl Engine {
 
         let current_status = self.objects[index].state.status;
         self.update_inactive_list_for_status_change(object_id, previous_status, current_status);
-        if fow_range_changed || fow_crew_actualize {
+        if fow_range_changed {
             self.actualize_object_fow_view_range(object_id);
         } else if previous_owner != new_owner {
             self.actualize_object_fow_after_owner_change(object_id, new_owner);
@@ -34989,6 +34918,9 @@ impl Engine {
         let crew_status_change = object_update
             .as_ref()
             .is_some_and(|update| update.crew_status_change);
+        let fow_range_changed = object_update
+            .as_ref()
+            .is_some_and(|update| update.plr_view_range.is_some());
         let final_shape_override = object_update
             .as_ref()
             .and_then(|update| update.shape_override);
@@ -35202,7 +35134,7 @@ impl Engine {
                     .unwrap_or(false);
                 let delta: ObjectDelta = update.into();
                 let outcome = object.apply_delta(&delta, action_library);
-                energy_died = outcome.energy_died;
+                energy_died |= outcome.energy_died;
                 if let Some(change) = outcome.action_change {
                     if !callbacks_dispatched {
                         object.record_action_event(change.previous, ActionTransitionKind::Forced);
@@ -35253,7 +35185,8 @@ impl Engine {
 
         if energy_died {
             // C4Object::DoEnergy kills synchronously when a nonzero
-            // energy reaches 0 (C4Object.cpp:1363).
+            // energy reaches 0
+            // (oracle-src-pinned src/C4Object.cpp:1372-1393).
             self.assign_death(index, false)?;
         }
 
@@ -35274,6 +35207,14 @@ impl Engine {
                 new_owner,
                 new_crew_member,
             );
+        }
+        let current_status = self.objects[index].state.status;
+        if fow_range_changed {
+            self.actualize_object_fow_view_range(object_id);
+        } else if previous_owner != new_owner {
+            self.actualize_object_fow_after_owner_change(object_id, new_owner);
+        } else if current_status == ObjectStatus::Deleted {
+            self.remove_object_from_fow_view_lists(object_id);
         }
 
         if !global_effects.is_empty() {
@@ -35534,6 +35475,10 @@ impl Engine {
                 .update
                 .as_ref()
                 .is_some_and(|update| update.crew_status_change);
+            let fow_range_changed = outcome
+                .update
+                .as_ref()
+                .is_some_and(|update| update.plr_view_range.is_some());
             let final_shape_override = outcome
                 .update
                 .as_ref()
@@ -35643,6 +35588,14 @@ impl Engine {
                     new_owner,
                     new_crew_member,
                 );
+            }
+            let current_status = self.objects[index].state.status;
+            if fow_range_changed {
+                self.actualize_object_fow_view_range(object_id);
+            } else if previous_owner != new_owner {
+                self.actualize_object_fow_after_owner_change(object_id, new_owner);
+            } else if current_status == ObjectStatus::Deleted {
+                self.remove_object_from_fow_view_lists(object_id);
             }
 
             let mut effect_solid_mask_changed = false;
@@ -39638,6 +39591,43 @@ impl Engine {
                         Rc::make_mut(&mut self.crew_ranks).remove(&object_id.as_u64());
                     }
                 }
+                PlayerCommand::AssignDeathCrewInfo { object_id, link } => {
+                    let mut info_update = None;
+                    if let Some(entry) = self
+                        .crew_rosters
+                        .get_mut(&link.player_id)
+                        .and_then(|roster| roster.get_mut(link.roster_index))
+                    {
+                        entry.has_died = true;
+                        entry.death_count = entry.death_count.wrapping_add(1);
+                        if entry.in_action {
+                            entry.total_playing_time = entry.total_playing_time.wrapping_add(
+                                self.game_time.wrapping_sub(entry.in_action_time),
+                            );
+                            entry.in_action = false;
+                        }
+                        info_update = Some((
+                            entry.death_count,
+                            entry.total_playing_time,
+                            entry.in_action_time,
+                            entry.age,
+                        ));
+                    }
+                    if self.crew_info_links.get(&object_id) == Some(&link) {
+                        if let (
+                            Some(info),
+                            Some((death_count, total_playing_time, in_action_time, age)),
+                        ) = (
+                            Rc::make_mut(&mut self.crew_object_infos).get_mut(&object_id),
+                            info_update,
+                        ) {
+                            info.death_count = death_count;
+                            info.total_playing_time = total_playing_time;
+                            info.in_action_time = in_action_time;
+                            info.age = age;
+                        }
+                    }
+                }
                 PlayerCommand::LinkCrewInfo {
                     object_id,
                     link,
@@ -39836,7 +39826,7 @@ impl Engine {
                         }
                     }
                 }
-                PlayerCommand::ClearPlayerObjectPointersWithoutAdjust { player_id, object } => {
+                PlayerCommand::ClearPlayerObjectPointersBeforeAdjust { player_id, object } => {
                     if self.crew_cursor(player_id) == Some(object) {
                         if let Some(selection) = self.crew_selection.get_mut(&player_id) {
                             selection.set_cursor(None);
@@ -39850,9 +39840,27 @@ impl Engine {
                         }
                     }
                     if let Some(player) = self.players.get_mut(&player_id) {
-                        player.clear_object_pointers(object);
+                        player.clear_object_pointers_before_cursor_adjust(object);
                     }
                     self.remove_from_roles(player_id, object);
+                }
+                PlayerCommand::ClearPlayerObjectPointersAfterAdjust { player_id, object } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.clear_object_pointers_after_cursor_adjust(object);
+                    }
+                }
+                PlayerCommand::ResetCursorView { player_id } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.reset_cursor_view();
+                    }
+                }
+                PlayerCommand::UpdatePlayerView {
+                    player_id,
+                    position,
+                } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.update_view(position);
+                    }
                 }
                 PlayerCommand::ClearLastPlrCom { player_id } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
@@ -40358,10 +40366,11 @@ impl Engine {
     /// current position; any contact keeps the tilt. NoStabilize defs opt
     /// out (:491). The upright probe is the ordinary ContactCheck, including
     /// Contact* callback dispatch for ContactCalls definitions (:503).
-    fn stabilize_object(
+    #[doc(hidden)]
+    pub fn stabilize_object(
         &mut self,
         idx: usize,
-        solid_mask_indices: &[usize],
+        _solid_mask_indices: &[usize],
     ) -> Result<(), EngineError> {
         let rotation = self.objects[idx].state.rotation;
         // C++ repeatedly folds arbitrary saved/scripted angles into
@@ -40396,6 +40405,8 @@ impl Engine {
         let original_vertex_contacts = self.objects[idx].frame_vertex_contacts.clone();
         let original_shape_contact_cnat = self.objects[idx].frame_shape_contact_cnat;
         let original_shape_contact_count = self.objects[idx].frame_shape_contact_count;
+        let original_shape_attach = self.objects[idx].state.shape_attach;
+        let original_contact_density = self.objects[idx].state.contact_density;
         let object_id = self.objects[idx].id;
         let position = self.objects[idx].state.position;
         // C++ temporarily writes r=0 and UpdateShape() before ContactCheck,
@@ -40403,12 +40414,14 @@ impl Engine {
         // is left untouched unless stabilization succeeds (:498-514).
         self.objects[idx].state.rotation = 0;
         self.objects[idx].refresh_shape_geometry();
+        self.update_sector_for_index(idx);
         debug_assert_eq!(self.objects[idx].state.vertices, upright_vertices);
         let contact = self
             .landscape
             .as_ref()
             .map(|landscape| {
-                let solid_masks = self.solid_masks_for_movement(solid_mask_indices);
+                let solid_masks =
+                    self.solid_masks_for_movement(&self.active_solid_mask_indices());
                 shape_contact_check(
                     &self.objects[idx].state.vertices,
                     position,
@@ -40431,17 +40444,36 @@ impl Engine {
                 // ContactCheck rejected the trial: restore exactly Shape and
                 // integer r. Callback changes to other fields (including
                 // fix_r) remain live, matching C++'s two assignments (:505-508).
+                let owns_shape_vertices = self.objects[index].own_shape_vertices.is_some();
                 self.objects[index].state.vertices = original_vertices;
                 self.objects[index].state.shape_vertices = original_shape_vertices;
+                self.objects[index].own_shape_vertices = owns_shape_vertices.then(|| {
+                    self.objects[index]
+                        .state
+                        .shape_vertices
+                        .own_original_vertices()
+                });
                 self.objects[index].shape_rect = original_shape_rect;
                 self.objects[index].shape_fire_top = original_fire_top;
                 self.objects[index].state.shape_override = original_shape_override;
                 self.objects[index].frame_vertex_contacts = original_vertex_contacts;
                 self.objects[index].frame_shape_contact_cnat = original_shape_contact_cnat;
                 self.objects[index].frame_shape_contact_count = original_shape_contact_count;
+                self.objects[index].state.shape_attach = original_shape_attach;
+                self.objects[index].state.contact_density = original_contact_density;
                 self.objects[index].state.rotation = rotation;
             } else {
-                self.objects[index].fixed_rotation = C4Fixed::ZERO;
+                // ContactCheck callbacks may have rebuilt Shape and changed r.
+                // Native Stabilize commits that live r into fix_r, then runs
+                // UpdateFace(true) (C4Movement.cpp:524-535).
+                let live_rotation = self.objects[index].state.rotation;
+                self.objects[index].fixed_rotation = itofix(live_rotation);
+                let shape_updated = self.objects[index].shape_template.line == 0;
+                self.objects[index].refresh_shape_geometry();
+                if shape_updated {
+                    self.update_sector_for_index(index);
+                }
+                self.update_solid_mask(index);
             }
         }
         Ok(())
@@ -40477,7 +40509,900 @@ impl Engine {
         }
     }
 
-    /// The Mobile leg of C4Object::ExecMovement - DoMovement plus the
+    fn movement_live_config_at(&self, object_id: ObjectId) -> Option<MovementLiveConfig> {
+        let index = self.find_object_index(object_id)?;
+        Some(movement_live_config_for(
+            &self.objects[index],
+            &self.definitions,
+            self.layer_movement_bounds_for(index),
+        ))
+    }
+
+    fn dispatch_live_movement_contact(
+        &mut self,
+        object_id: ObjectId,
+        dispatch: MovementContactDispatch,
+    ) -> Result<(), EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        self.dispatch_contact_callbacks(index, dispatch)
+    }
+
+    fn refresh_live_movement_solid_masks(&self, solid_masks: &mut Vec<SolidMaskRect>) {
+        *solid_masks = self.solid_masks_for_movement(&self.active_solid_mask_indices());
+    }
+
+    fn apply_live_movement_side_bounds(
+        &mut self,
+        object_id: ObjectId,
+        target_x: &mut i32,
+        solid_masks: &mut Vec<SolidMaskRect>,
+    ) -> Result<(), EngineError> {
+        let layer_contacts = self
+            .movement_live_config_at(object_id)
+            .and_then(|live| {
+                let layer = live.layer_bounds?;
+                if layer.border_bound & C4D_BORDER_LAYER == 0
+                    || (!live.action_is_idle
+                        && matches!(live.action_procedure, ActionProcedure::Attach))
+                {
+                    return None;
+                }
+                let index = self.find_object_index(object_id)?;
+                let object = &self.objects[index];
+                let shape_x = object.current_shape_rect().map(|shape| shape.x).unwrap_or(0);
+                let (low, high) = if object.state.category & CATEGORY_STATIC_BACK != 0 {
+                    (
+                        layer.position.x + layer.shape_rect.x,
+                        layer.position.x + layer.shape_rect.x + layer.shape_rect.width,
+                    )
+                } else {
+                    (
+                        layer.position.x + layer.shape_rect.x - shape_x,
+                        layer.position.x + layer.shape_rect.x + layer.shape_rect.width + shape_x,
+                    )
+                };
+                Some(target_bounds(
+                    target_x,
+                    low,
+                    high,
+                    CNAT_LEFT,
+                    CNAT_RIGHT,
+                ))
+            })
+            .unwrap_or([None, None]);
+        for cnat in layer_contacts.into_iter().flatten() {
+            let Some(index) = self.find_object_index(object_id) else {
+                return Ok(());
+            };
+            let object = &mut self.objects[index];
+            object.fixed_velocity.x = C4Fixed::ZERO;
+            object.refresh_velocity_from_fixed();
+            self.dispatch_live_movement_contact(
+                object_id,
+                MovementContactDispatch::Direct(cnat),
+            )?;
+            self.refresh_live_movement_solid_masks(solid_masks);
+        }
+
+        if self
+            .movement_live_config_at(object_id)
+            .is_none_or(|live| live.border_bound & C4D_BORDER_SIDES == 0)
+        {
+            return Ok(());
+        }
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        let shape_x = self.objects[index]
+            .current_shape_rect()
+            .map(|shape| shape.x)
+            .unwrap_or(0);
+        let width = self
+            .landscape
+            .as_ref()
+            .map(|landscape| i32::try_from(landscape.width()).unwrap_or(i32::MAX))
+            .unwrap_or(0);
+        for cnat in target_bounds(
+            target_x,
+            -shape_x,
+            width.saturating_add(shape_x),
+            CNAT_LEFT,
+            CNAT_RIGHT,
+        )
+        .into_iter()
+        .flatten()
+        {
+            let Some(index) = self.find_object_index(object_id) else {
+                return Ok(());
+            };
+            let object = &mut self.objects[index];
+            object.fixed_velocity.x = C4Fixed::ZERO;
+            object.refresh_velocity_from_fixed();
+            self.dispatch_live_movement_contact(
+                object_id,
+                MovementContactDispatch::Direct(cnat),
+            )?;
+            self.refresh_live_movement_solid_masks(solid_masks);
+        }
+        Ok(())
+    }
+
+    fn apply_live_movement_vertical_bounds(
+        &mut self,
+        object_id: ObjectId,
+        target_y: &mut i32,
+        solid_masks: &mut Vec<SolidMaskRect>,
+    ) -> Result<(), EngineError> {
+        let layer_contacts = self
+            .movement_live_config_at(object_id)
+            .and_then(|live| {
+                let layer = live.layer_bounds?;
+                if layer.border_bound & C4D_BORDER_LAYER == 0
+                    || (!live.action_is_idle
+                        && matches!(live.action_procedure, ActionProcedure::Attach))
+                {
+                    return None;
+                }
+                let index = self.find_object_index(object_id)?;
+                let object = &self.objects[index];
+                let shape_y = object.current_shape_rect().map(|shape| shape.y).unwrap_or(0);
+                let (low, high) = if object.state.category & CATEGORY_STATIC_BACK != 0 {
+                    (
+                        layer.position.y + layer.shape_rect.y,
+                        layer.position.y + layer.shape_rect.y + layer.shape_rect.height,
+                    )
+                } else {
+                    (
+                        layer.position.y + layer.shape_rect.y - shape_y,
+                        layer.position.y + layer.shape_rect.y + layer.shape_rect.height + shape_y,
+                    )
+                };
+                Some(target_bounds(
+                    target_y,
+                    low,
+                    high,
+                    CNAT_TOP,
+                    CNAT_BOTTOM,
+                ))
+            })
+            .unwrap_or([None, None]);
+        for cnat in layer_contacts.into_iter().flatten() {
+            let Some(index) = self.find_object_index(object_id) else {
+                return Ok(());
+            };
+            let object = &mut self.objects[index];
+            object.fixed_velocity.y = C4Fixed::ZERO;
+            object.refresh_velocity_from_fixed();
+            self.dispatch_live_movement_contact(
+                object_id,
+                MovementContactDispatch::Direct(cnat),
+            )?;
+            self.refresh_live_movement_solid_masks(solid_masks);
+        }
+
+        if self
+            .movement_live_config_at(object_id)
+            .is_some_and(|live| live.border_bound & C4D_BORDER_TOP != 0)
+        {
+            let Some(index) = self.find_object_index(object_id) else {
+                return Ok(());
+            };
+            let shape_y = self.objects[index]
+                .current_shape_rect()
+                .map(|shape| shape.y)
+                .unwrap_or(0);
+            for cnat in target_bounds(
+                target_y,
+                -shape_y,
+                1_000_000,
+                CNAT_TOP,
+                CNAT_BOTTOM,
+            )
+            .into_iter()
+            .flatten()
+            {
+                let Some(index) = self.find_object_index(object_id) else {
+                    return Ok(());
+                };
+                let object = &mut self.objects[index];
+                object.fixed_velocity.y = C4Fixed::ZERO;
+                object.refresh_velocity_from_fixed();
+                self.dispatch_live_movement_contact(
+                    object_id,
+                    MovementContactDispatch::Direct(cnat),
+                )?;
+                self.refresh_live_movement_solid_masks(solid_masks);
+            }
+        }
+        if self
+            .movement_live_config_at(object_id)
+            .is_some_and(|live| live.border_bound & C4D_BORDER_BOTTOM != 0)
+        {
+            let Some(index) = self.find_object_index(object_id) else {
+                return Ok(());
+            };
+            let shape_y = self.objects[index]
+                .current_shape_rect()
+                .map(|shape| shape.y)
+                .unwrap_or(0);
+            let bottom = self
+                .landscape
+                .as_ref()
+                .map(Landscape::estimated_height)
+                .unwrap_or(0)
+                .saturating_add(shape_y);
+            for cnat in target_bounds(
+                target_y,
+                -1_000_000,
+                bottom,
+                CNAT_TOP,
+                CNAT_BOTTOM,
+            )
+            .into_iter()
+            .flatten()
+            {
+                let Some(index) = self.find_object_index(object_id) else {
+                    return Ok(());
+                };
+                let object = &mut self.objects[index];
+                object.fixed_velocity.y = C4Fixed::ZERO;
+                object.refresh_velocity_from_fixed();
+                self.dispatch_live_movement_contact(
+                    object_id,
+                    MovementContactDispatch::Direct(cnat),
+                )?;
+                self.refresh_live_movement_solid_masks(solid_masks);
+            }
+        }
+        if let Some(index) = self.find_object_index(object_id) {
+            self.objects[index].refresh_velocity_from_fixed();
+        }
+        Ok(())
+    }
+
+    fn probe_live_movement_contact(
+        &mut self,
+        object_id: ObjectId,
+        candidate: Vector2,
+        solid_masks: &mut Vec<SolidMaskRect>,
+        solid_mask_removed: bool,
+    ) -> Result<bool, EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(false);
+        };
+        let contact = {
+            let object = &self.objects[index];
+            let Some(landscape) = self.landscape.as_ref() else {
+                return Ok(false);
+            };
+            shape_contact_check(
+                &object.state.vertices,
+                candidate,
+                landscape,
+                &self.materials,
+                solid_masks.as_slice(),
+                solid_mask_removed.then_some(object_id),
+                object.state.contact_density,
+            )
+        };
+        let contacted = contact.is_contact();
+        self.objects[index].latch_shape_contact(&contact);
+        if contacted {
+            self.dispatch_live_movement_contact(
+                object_id,
+                MovementContactDispatch::ShapeProbe,
+            )?;
+            self.refresh_live_movement_solid_masks(solid_masks);
+        }
+        Ok(contacted
+            && self.find_object_index(object_id).is_some_and(|index| {
+                self.objects[index].frame_shape_contact_count != 0
+            }))
+    }
+
+    fn begin_live_object_motion(
+        &mut self,
+        object_id: ObjectId,
+        solid_mask_removed: &mut bool,
+        mask_attachments: &mut Option<SolidMaskAttachmentBackup>,
+    ) {
+        if let Some(index) = self.find_object_index(object_id) {
+            if let Some(backup) = self.remove_solid_mask_for_movement(index) {
+                *mask_attachments = Some(backup);
+            }
+        }
+        *solid_mask_removed = true;
+    }
+
+    fn advance_live_attached_position(
+        &mut self,
+        object_id: ObjectId,
+        solid_masks: &mut Vec<SolidMaskRect>,
+        initial_solid_mask_removed: bool,
+        mask_attachments: &mut Option<SolidMaskAttachmentBackup>,
+    ) -> Result<MovementStepOutcome, EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(MovementStepOutcome::default());
+        };
+        {
+            let object = &mut self.objects[index];
+            object.fixed_position += object.fixed_velocity;
+        }
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(MovementStepOutcome::default());
+        };
+        let mut target_x = fixtoi(self.objects[index].fixed_position.x);
+        let mut target_y = fixtoi(self.objects[index].fixed_position.y);
+        self.apply_live_movement_side_bounds(object_id, &mut target_x, solid_masks)?;
+        self.apply_live_movement_vertical_bounds(object_id, &mut target_y, solid_masks)?;
+
+        let mut no_attach = false;
+        let mut any_contact = false;
+        let mut contact_cnat = CNAT_NONE;
+        let mut solid_mask_removed = initial_solid_mask_removed;
+        let mut first_step = true;
+        while first_step
+            || self.find_object_index(object_id).is_some_and(|index| {
+                let position = self.objects[index].state.position;
+                position.x != target_x || position.y != target_y
+            })
+        {
+            first_step = false;
+            let Some(index) = self.find_object_index(object_id) else {
+                break;
+            };
+            let original = {
+                let position = self.objects[index].state.position;
+                Vector2::new(
+                    position.x + sign_i32(target_x - position.x),
+                    position.y + sign_i32(target_y - position.y),
+                )
+            };
+            let mut candidate = original;
+            let attached = {
+                let object = &mut self.objects[index];
+                let Some(landscape) = self.landscape.as_ref() else {
+                    break;
+                };
+                shape_attach(
+                    &object.state.vertices,
+                    &mut candidate,
+                    object.movement_attach(),
+                    landscape,
+                    &self.materials,
+                    solid_masks.as_slice(),
+                    solid_mask_removed.then_some(object_id),
+                    object.state.contact_density,
+                    &mut object.state.shape_attach,
+                )
+            };
+            if !attached {
+                no_attach = true;
+            }
+
+            let contacted = self.probe_live_movement_contact(
+                object_id,
+                candidate,
+                solid_masks,
+                solid_mask_removed,
+            )?;
+            let Some(index) = self.find_object_index(object_id) else {
+                break;
+            };
+            if contacted {
+                any_contact = true;
+                contact_cnat |= self.objects[index].frame_t_contact;
+                let object = &mut self.objects[index];
+                object.fixed_position =
+                    FixedVec2::from_ints(object.state.position.x, object.state.position.y);
+                // C4Movement.cpp:363-368 applies these attachment
+                // overrides after ContactCheck, even when the contact aborts
+                // the step.
+                if candidate.x != original.x {
+                    object.fixed_velocity.x = C4Fixed::ZERO;
+                }
+                if candidate.y != original.y {
+                    object.fixed_velocity.y = C4Fixed::ZERO;
+                }
+                break;
+            }
+
+            let override_x = candidate.x != original.x;
+            let override_y = candidate.y != original.y;
+            self.begin_live_object_motion(
+                object_id,
+                &mut solid_mask_removed,
+                mask_attachments,
+            );
+            let Some(index) = self.find_object_index(object_id) else {
+                break;
+            };
+            let object = &mut self.objects[index];
+            object.motion_x = object
+                .motion_x
+                .saturating_add(candidate.x - object.state.position.x);
+            object.motion_y = object
+                .motion_y
+                .saturating_add(candidate.y - object.state.position.y);
+            object.state.position = candidate;
+            if override_x {
+                target_x = object.state.position.x;
+                object.fixed_velocity.x = C4Fixed::ZERO;
+                object.fixed_position.x = itofix(object.state.position.x);
+            }
+            if override_y {
+                target_y = object.state.position.y;
+                object.fixed_velocity.y = C4Fixed::ZERO;
+                object.fixed_position.y = itofix(object.state.position.y);
+            }
+        }
+        if let Some(index) = self.find_object_index(object_id) {
+            self.objects[index].refresh_velocity_from_fixed();
+        }
+        Ok(MovementStepOutcome {
+            no_attach,
+            redirect_yr: false,
+            any_contact,
+            contact_cnat,
+            solid_mask_removed,
+        })
+    }
+
+    fn advance_live_position_per_pixel(
+        &mut self,
+        object_id: ObjectId,
+        solid_masks: &mut Vec<SolidMaskRect>,
+        mask_attachments: &mut Option<SolidMaskAttachmentBackup>,
+    ) -> Result<MovementStepOutcome, EngineError> {
+        if self.landscape.is_none() {
+            let Some(index) = self.find_object_index(object_id) else {
+                return Ok(MovementStepOutcome::default());
+            };
+            let object = &mut self.objects[index];
+            let previous_position = object.state.position;
+            object.advance_fixed_position();
+            object.motion_x = object
+                .motion_x
+                .saturating_add(object.state.position.x - previous_position.x);
+            object.motion_y = object
+                .motion_y
+                .saturating_add(object.state.position.y - previous_position.y);
+            return Ok(MovementStepOutcome {
+                solid_mask_removed: object.state.position != previous_position,
+                ..MovementStepOutcome::default()
+            });
+        }
+
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(MovementStepOutcome::default());
+        };
+        if self.objects[index].movement_attach() != CNAT_NONE {
+            return self.advance_live_attached_position(
+                object_id,
+                solid_masks,
+                false,
+                mask_attachments,
+            );
+        }
+
+        let mut outcome = MovementStepOutcome::default();
+        let mut solid_mask_removed = false;
+        {
+            let object = &mut self.objects[index];
+            object.fixed_position.x += object.fixed_velocity.x;
+        }
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok(outcome);
+        };
+        let mut target_x = fixtoi(self.objects[index].fixed_position.x);
+        self.apply_live_movement_side_bounds(object_id, &mut target_x, solid_masks)?;
+        while self
+            .find_object_index(object_id)
+            .is_some_and(|index| self.objects[index].state.position.x != target_x)
+        {
+            let Some(index) = self.find_object_index(object_id) else {
+                break;
+            };
+            let position = self.objects[index].state.position;
+            let next_x = position.x + sign_i32(target_x - position.x);
+            let candidate = Vector2::new(next_x, position.y);
+            let contacted = self.probe_live_movement_contact(
+                object_id,
+                candidate,
+                solid_masks,
+                solid_mask_removed,
+            )?;
+            let Some(index) = self.find_object_index(object_id) else {
+                break;
+            };
+            if contacted {
+                outcome.any_contact = true;
+                outcome.contact_cnat |= self.objects[index].frame_t_contact;
+                let object = &mut self.objects[index];
+                object.fixed_position.x = itofix(object.state.position.x);
+                redirect_force(
+                    &mut object.fixed_velocity.x,
+                    &mut object.fixed_velocity.y,
+                    -1,
+                );
+                let friction = object.live_contact_first_friction();
+                apply_contact_friction(&mut object.fixed_velocity.y, friction);
+                break;
+            }
+            self.begin_live_object_motion(
+                object_id,
+                &mut solid_mask_removed,
+                mask_attachments,
+            );
+            let Some(index) = self.find_object_index(object_id) else {
+                break;
+            };
+            let object = &mut self.objects[index];
+            object.motion_x = object
+                .motion_x
+                .saturating_add(next_x - object.state.position.x);
+            object.state.position.x = next_x;
+        }
+
+        let Some(index) = self.find_object_index(object_id) else {
+            outcome.solid_mask_removed = solid_mask_removed;
+            return Ok(outcome);
+        };
+        {
+            let object = &mut self.objects[index];
+            object.fixed_position.y += object.fixed_velocity.y;
+        }
+        let Some(index) = self.find_object_index(object_id) else {
+            outcome.solid_mask_removed = solid_mask_removed;
+            return Ok(outcome);
+        };
+        let mut target_y = fixtoi(self.objects[index].fixed_position.y);
+        self.apply_live_movement_vertical_bounds(object_id, &mut target_y, solid_masks)?;
+        while self
+            .find_object_index(object_id)
+            .is_some_and(|index| self.objects[index].state.position.y != target_y)
+        {
+            let Some(index) = self.find_object_index(object_id) else {
+                break;
+            };
+            let position = self.objects[index].state.position;
+            let next_y = position.y + sign_i32(target_y - position.y);
+            let candidate = Vector2::new(position.x, next_y);
+            let contacted = self.probe_live_movement_contact(
+                object_id,
+                candidate,
+                solid_masks,
+                solid_mask_removed,
+            )?;
+            let Some(index) = self.find_object_index(object_id) else {
+                break;
+            };
+            if contacted {
+                outcome.any_contact = true;
+                outcome.contact_cnat |= self.objects[index].frame_t_contact;
+                let object = &mut self.objects[index];
+                object.fixed_position.y = itofix(object.state.position.y);
+                let friction = object.live_contact_first_friction();
+                apply_contact_friction(&mut object.fixed_velocity.x, friction);
+                if !object.live_contact_has_vertex_cnat(CNAT_LEFT) {
+                    redirect_force(
+                        &mut object.fixed_velocity.y,
+                        &mut object.fixed_velocity.x,
+                        -1,
+                    );
+                } else if !object.live_contact_has_vertex_cnat(CNAT_RIGHT) {
+                    redirect_force(
+                        &mut object.fixed_velocity.y,
+                        &mut object.fixed_velocity.x,
+                        1,
+                    );
+                } else {
+                    if object.state.ocf & crate::ocf::ROTATE != 0
+                        && object.frame_shape_contact_count == 1
+                        && !object.state.alive
+                    {
+                        let weight = object.live_contact_first_weight();
+                        redirect_force(
+                            &mut object.fixed_velocity.y,
+                            &mut object.rotation_velocity,
+                            -weight,
+                        );
+                        outcome.redirect_yr = true;
+                    }
+                    object.fixed_velocity.y = C4Fixed::ZERO;
+                }
+                break;
+            }
+            self.begin_live_object_motion(
+                object_id,
+                &mut solid_mask_removed,
+                mask_attachments,
+            );
+            let Some(index) = self.find_object_index(object_id) else {
+                break;
+            };
+            let object = &mut self.objects[index];
+            object.motion_y = object
+                .motion_y
+                .saturating_add(next_y - object.state.position.y);
+            object.state.position.y = next_y;
+        }
+
+        outcome.solid_mask_removed = solid_mask_removed;
+        if self
+            .find_object_index(object_id)
+            .is_some_and(|index| self.objects[index].movement_attach() != CNAT_NONE)
+        {
+            let attached = self.advance_live_attached_position(
+                object_id,
+                solid_masks,
+                solid_mask_removed,
+                mask_attachments,
+            )?;
+            outcome.no_attach |= attached.no_attach;
+            outcome.redirect_yr |= attached.redirect_yr;
+            outcome.any_contact |= attached.any_contact;
+            outcome.contact_cnat |= attached.contact_cnat;
+            outcome.solid_mask_removed |= attached.solid_mask_removed;
+        }
+        if let Some(index) = self.find_object_index(object_id) {
+            self.objects[index].refresh_velocity_from_fixed();
+        }
+        Ok(outcome)
+    }
+
+    fn advance_live_rotation(
+        &mut self,
+        object_id: ObjectId,
+        solid_masks: &mut Vec<SolidMaskRect>,
+        no_attach: bool,
+        redirect_yr: bool,
+        solid_mask_removed: bool,
+    ) -> Result<(bool, u32, bool), EngineError> {
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok((false, CNAT_NONE, false));
+        };
+        if self.objects[index].state.ocf & crate::ocf::ROTATE == 0
+            || !self.objects[index].rotation_velocity.is_nonzero()
+        {
+            return Ok((false, CNAT_NONE, false));
+        }
+        {
+            let object = &mut self.objects[index];
+            object.fixed_rotation += object.rotation_velocity * 5;
+        }
+        let rotateable = self
+            .movement_live_config_at(object_id)
+            .map(|live| live.rotateable)
+            .unwrap_or(0);
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok((false, CNAT_NONE, false));
+        };
+        {
+            let object = &mut self.objects[index];
+            if rotateable > 1 {
+                let limit = itofix(rotateable);
+                if object.fixed_rotation > limit {
+                    object.fixed_rotation = limit;
+                    object.rotation_velocity = C4Fixed::ZERO;
+                }
+                if object.fixed_rotation < -limit {
+                    object.fixed_rotation = -limit;
+                    object.rotation_velocity = C4Fixed::ZERO;
+                }
+            }
+        }
+        let Some(index) = self.find_object_index(object_id) else {
+            return Ok((false, CNAT_NONE, false));
+        };
+        let target_rotation = fixtoi(self.objects[index].fixed_rotation);
+        let mut any_contact = false;
+        let mut contact_cnat = CNAT_NONE;
+        let mut turned = false;
+
+        if self.landscape.is_some() {
+            while self
+                .find_object_index(object_id)
+                .is_some_and(|index| self.objects[index].state.rotation != target_rotation)
+            {
+                let Some(index) = self.find_object_index(object_id) else {
+                    break;
+                };
+                let (
+                    previous_rotation,
+                    previous_vertices,
+                    previous_shape_vertices,
+                    previous_shape_rect,
+                    previous_fire_top,
+                    previous_shape_override,
+                    previous_vertex_contacts,
+                    previous_shape_contact_cnat,
+                    previous_shape_contact_count,
+                    previous_attach,
+                    previous_contact_density,
+                ) = {
+                    let object = &self.objects[index];
+                    (
+                        object.state.rotation,
+                        object.state.vertices.clone(),
+                        object.state.shape_vertices.clone(),
+                        object.shape_rect,
+                        object.shape_fire_top,
+                        object.state.shape_override,
+                        object.frame_vertex_contacts.clone(),
+                        object.frame_shape_contact_cnat,
+                        object.frame_shape_contact_count,
+                        object.state.shape_attach,
+                        object.state.contact_density,
+                    )
+                };
+                let shape_updated = {
+                    let object = &mut self.objects[index];
+                    object.state.rotation +=
+                        sign_i32(target_rotation - object.state.rotation);
+                    let shape_updated = object.shape_template.line == 0;
+                    if shape_updated {
+                        object.refresh_shape_geometry();
+                    }
+                    shape_updated
+                };
+                if shape_updated {
+                    // UpdateShape calls UpdatePos before Shape.Attach and
+                    // ContactCheck for every attempted degree
+                    // (C4Object.cpp:322-344; C4Movement.cpp:397-411).
+                    self.update_sector_for_index(index);
+                }
+
+                let Some(index) = self.find_object_index(object_id) else {
+                    break;
+                };
+                let mut candidate_position = self.objects[index].state.position;
+                let attach = self.objects[index].movement_attach();
+                if attach != CNAT_NONE && !no_attach {
+                    let object = &mut self.objects[index];
+                    let Some(landscape) = self.landscape.as_ref() else {
+                        break;
+                    };
+                    shape_attach(
+                        &object.state.vertices,
+                        &mut candidate_position,
+                        attach,
+                        landscape,
+                        &self.materials,
+                        solid_masks.as_slice(),
+                        solid_mask_removed.then_some(object_id),
+                        object.state.contact_density,
+                        &mut object.state.shape_attach,
+                    );
+                }
+
+                let contacted = self.probe_live_movement_contact(
+                    object_id,
+                    candidate_position,
+                    solid_masks,
+                    solid_mask_removed,
+                )?;
+                let Some(index) = self.find_object_index(object_id) else {
+                    break;
+                };
+                if contacted {
+                    any_contact = true;
+                    contact_cnat |= self.objects[index].frame_t_contact;
+                    let contact_count = self.objects[index].frame_shape_contact_count;
+                    let object = &mut self.objects[index];
+                    let owns_shape_vertices = object.own_shape_vertices.is_some();
+                    object.state.rotation = previous_rotation;
+                    object.state.vertices = previous_vertices;
+                    object.state.shape_vertices = previous_shape_vertices;
+                    object.own_shape_vertices = owns_shape_vertices
+                        .then(|| object.state.shape_vertices.own_original_vertices());
+                    object.shape_rect = previous_shape_rect;
+                    object.shape_fire_top = previous_fire_top;
+                    object.state.shape_override = previous_shape_override;
+                    object.frame_vertex_contacts = previous_vertex_contacts;
+                    object.frame_shape_contact_cnat = previous_shape_contact_cnat;
+                    object.frame_shape_contact_count = previous_shape_contact_count;
+                    object.state.shape_attach = previous_attach;
+                    object.state.contact_density = previous_contact_density;
+                    object.fixed_rotation = itofix(previous_rotation);
+                    if contact_count == 1 && !redirect_yr {
+                        redirect_force(
+                            &mut object.rotation_velocity,
+                            &mut object.fixed_velocity.y,
+                            -1,
+                        );
+                    }
+                    object.rotation_velocity = C4Fixed::ZERO;
+                    object.refresh_velocity_from_fixed();
+                    self.update_sector_for_index(index);
+                    break;
+                }
+                if let Some(index) = self.find_object_index(object_id) {
+                    self.objects[index].state.position = candidate_position;
+                    turned = true;
+                }
+            }
+        } else if let Some(index) = self.find_object_index(object_id) {
+            let object = &mut self.objects[index];
+            let changed = object.state.rotation != target_rotation;
+            object.state.rotation = target_rotation;
+            if changed && object.shape_template.line == 0 {
+                object.refresh_shape_geometry();
+            }
+            turned = changed;
+        }
+
+        if let Some(index) = self.find_object_index(object_id) {
+            let object = &mut self.objects[index];
+            let half_circle = itofix(FIX_HALF_CIRCLE);
+            let full_circle = itofix(FIX_FULL_CIRCLE);
+            if object.fixed_rotation < -half_circle {
+                object.fixed_rotation += full_circle;
+                object.state.rotation = fixtoi(object.fixed_rotation);
+            }
+            if object.fixed_rotation > half_circle {
+                object.fixed_rotation -= full_circle;
+                object.state.rotation = fixtoi(object.fixed_rotation);
+            }
+        }
+        Ok((any_contact, contact_cnat, turned))
+    }
+
+    /// Complete mobile leg of C4Object::ExecMovement. AssignRemoval from a
+    /// DoMovement callback does not unwind the native stack: demobilization,
+    /// Stabilize and the raw non-rotateable assignment still run before
+    /// C4Object::Execute observes Status=0 (oracle-src-pinned
+    /// src/C4Movement.cpp:558-620; src/C4Object.cpp:1082-1094).
+    #[doc(hidden)]
+    pub fn exec_mobile_object_movement(
+        &mut self,
+        idx: usize,
+        action_library: &ActionLibrary,
+        definition_id: &DefinitionId,
+        solid_mask_indices: &[usize],
+    ) -> Result<ExecMovementOutcome, EngineError> {
+        let object_id = self.objects[idx].id;
+        let outcome = self.exec_object_movement(
+            idx,
+            action_library,
+            definition_id,
+            solid_mask_indices,
+        )?;
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(outcome);
+        };
+
+        // Same-frame friction/contact zeroing demobilizes immediately
+        // (C4Movement.cpp:592-593).
+        let object = &mut self.objects[idx];
+        if !object.fixed_velocity.x.is_nonzero()
+            && !object.fixed_velocity.y.is_nonzero()
+            && !object.rotation_velocity.is_nonzero()
+        {
+            object.state.mobile = false;
+        }
+        // Stabilize while not rotating, including a Status=0 tombstone still
+        // resident on this synchronous stack (C4Movement.cpp:594-595).
+        if !self.objects[idx].rotation_velocity.is_nonzero() {
+            self.stabilize_object(idx, solid_mask_indices)?;
+        }
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(outcome);
+        };
+        // This is a raw r assignment: fix_r, rdir, Shape and OCF stay live.
+        let non_rotateable = self
+            .definitions
+            .get(&self.objects[idx].definition_id)
+            .is_some_and(|definition| definition.rotateable() == 0);
+        if non_rotateable {
+            self.objects[idx].state.rotation = 0;
+        }
+        Ok(outcome)
+    }
+
+    /// The DoMovement portion of C4Object::ExecMovement plus the
     /// tail C++ runs inside it: the InLiquid update
     /// (C4Movement.cpp:443-460), ContactAction/NoAttachAction dispatch
     /// (:463-470) and the Hit* calls (:472-478). Reports both whether the
@@ -40490,7 +41415,7 @@ impl Engine {
         idx: usize,
         _action_library: &ActionLibrary,
         definition_id: &DefinitionId,
-        solid_mask_indices: &[usize],
+        _solid_mask_indices: &[usize],
     ) -> Result<ExecMovementOutcome, EngineError> {
         // C4Object::DoMovement resets the displacement cache before any
         // restriction, collision probe, or DoMotion call.
@@ -40510,490 +41435,104 @@ impl Engine {
             object.refresh_velocity_from_fixed();
         }
         self.apply_dig_procedure(idx, definition_id);
+        // C++ captures ix0/iy0 after DigFree and before any translation or
+        // rotation. Its final UpdatePos is selected from this exact pair
+        // after all movement callbacks have completed (C4Movement.cpp:247,
+        // 480-491).
+        let entry_position = self.objects[idx].state.position;
         // DoMovement snapshots post-action dirs for Hit* arguments but gates
         // the callbacks with the already-cached OCF field; command/action
         // mutations may have refreshed that cache without making its clock
         // identical to the dirs (C4Movement.cpp:250-252,477-483).
         let old_movement_velocity = self.objects[idx].fixed_velocity;
         let old_movement_hit_flags = self.objects[idx].state.ocf;
-        let layer_bounds = self.layer_movement_bounds_for(idx);
-        let movement_live = Cell::new(movement_live_config_for(
-            &self.objects[idx],
-            &self.definitions,
-            layer_bounds,
-        ));
-        let solid_masks = self.solid_masks_for_movement(solid_mask_indices);
         let object_id = self.objects[idx].id;
-        let movement = MovementContactConfig {
-            live: &movement_live,
-            solid_masks: &solid_masks,
-            object_id,
-        };
-        // The contact-callback closure below early-outs unless the def sets
-        // ContactCalls=1 (rare). Keep the immutable definition borrowed from
-        // the definitions field: cloning it also cloned its pristine script
-        // AST and action tables for every moving ContactCalls object, even on
-        // frames with no contact.
-        let mut contact_rng = self.rng.clone();
-        let mut contact_audio = self.audio_registry.clone();
-        let mut contact_next_object_id = self.next_object_id;
-        let contact_global_effects = self.global_effects.clone();
-        // C++ calls Contact* directly against the live game. Build our
-        // snapshot adapter only if movement discovers a real contact and a
-        // matching callback. In object-heavy scenarios, eagerly cloning the
-        // whole world for every freely swimming ContactCalls object is an
-        // accidental O(movers * objects) cost.
-        let initial_contact_function_calls = self
-            .definitions
-            .get(&self.objects[idx].definition_id)
-            .is_some_and(Definition::contact_function_calls);
-        let contact_world_base = initial_contact_function_calls
-            .then(|| self.host_world_context_base());
-        let contact_physics = self.physics;
-        let contact_environment = self.environment;
-        let contact_frame = self.frame;
-        let contact_game_over_triggered = self.game_over_triggered;
-        let mut contact_outcomes = Vec::new();
-        let mut contact_container_changes = Vec::new();
-        let mut contact_change_def_reinserts = HashMap::new();
-        let mut contact_change_def_solid_mask = false;
-        let mut contact_selection_changes = Vec::new();
-        let contact_definitions = &self.definitions;
-        let contact_material_capacity = self.materials.len();
+        let live_solid_mask_indices = self.active_solid_mask_indices();
+        let mut solid_masks = self.solid_masks_for_movement(&live_solid_mask_indices);
         let mut mask_attachments = None;
-        let mut movement_outcome = {
-            let mut landscape = self.landscape.as_mut();
-            let materials = &self.materials;
-            let mass_movers = &mut self.mass_movers;
-            let sectors = self.sectors.as_ref();
-            let (objects_before, objects_tail) = self.objects.split_at_mut(idx);
-            let (object, objects_after) = objects_tail.split_first_mut().expect("index checked");
-            let movement_world_source = MovementLazyHostWorldSource {
-                before: Cell::new(objects_before.as_ptr()),
-                before_len: objects_before.len(),
-                after: Cell::new(objects_after.as_ptr()),
-                after_len: objects_after.len(),
-                mover_index: idx,
-                definitions: std::ptr::from_ref(contact_definitions),
-                landscape: Cell::new(std::ptr::null()),
-            };
-            // SAFETY: this provider is installed only on `contact_world`.
-            // Its declaration order below makes it drop before the
-            // stack-scoped source and split slices on every exit path; the
-            // successful path also empties it explicitly.
-            let movement_world_provider = unsafe {
-                LazyHostWorldProvider::new(
-                    std::ptr::from_ref(&movement_world_source).cast(),
-                    Self::lazy_movement_host_world_object,
-                    Self::lazy_movement_host_world_objects,
-                    Self::lazy_movement_host_world_landscape,
-                )
-            };
-            let movement_others = RefCell::new((objects_before, objects_after));
-            // Declared after both the raw provider source and the split-slice
-            // owner so reverse drop order destroys every provider-carrying
-            // context first, including on `?` returns and panic unwinding.
-            let contact_world = RefCell::new(None::<HostWorldContext>);
-            let mut run_contact_callback = |object: &mut Object,
-                                            landscape: &Landscape,
-                                            dispatch: MovementContactDispatch|
-             -> Result<(), EngineError> {
-                let (directions, shape_probe) = match dispatch {
-                    MovementContactDispatch::ShapeProbe => {
-                        ([CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, CNAT_BOTTOM], true)
-                    }
-                    MovementContactDispatch::Direct(cnat) => ([cnat, 0, 0, 0], false),
-                };
-                for cnat in directions {
-                    if cnat == CNAT_NONE {
-                        continue;
-                    }
-                    // ContactCheck's loop condition reads the live Shape;
-                    // TargetBounds instead dispatches its single direct CNAT.
-                    if shape_probe && object.frame_shape_contact_cnat & cnat == 0 {
-                        continue;
-                    }
-                    let Some(function_name) = contact_callback_name(cnat) else {
-                        continue;
-                    };
-                    let Some(definition) = contact_definitions.get(&object.definition_id) else {
-                        continue;
-                    };
-                    if !definition.contact_function_calls() {
-                        continue;
-                    }
-                    // C4Object::Call with no matching Contact* function is
-                    // a no-op. In particular it must not run the outcome
-                    // fold and its SetOCF emulation: C++ keeps Execute's
-                    // pre-movement OCF cached for the later Splash gate.
-                    if !definition.has_function(function_name) {
-                        continue;
-                    }
-                    if coach_debug_id() == Some(object.id.as_u64()) {
-                        crate::rng::rng_trace_line(&format!(
-                            "CONTACTCB {function_name} at ({},{})",
-                            object.state.position.x, object.state.position.y
-                        ));
-                    }
-                    movement_world_source
-                        .landscape
-                        .set(std::ptr::from_ref(landscape));
-                    if contact_world.borrow().is_none() {
-                        let Some(base) = contact_world_base.as_ref() else {
-                            return Ok(());
-                        };
-                        *contact_world.borrow_mut() = Some(
-                            base.clone()
-                                .with_lazy_world_provider(movement_world_provider),
-                        );
-                    }
-                    contact_world
-                        .borrow_mut()
-                        .as_mut()
-                        .expect("contact world initialized for matching callback")
-                        .seed_object(
-                            idx,
-                            Self::host_world_object(contact_definitions, object),
-                        );
-                    let state_snapshot = object.script_state_snapshot();
-                    let world = contact_world
-                        .borrow()
-                        .as_ref()
-                        .expect("contact world initialized for matching callback")
-                        .clone()
-                        .with_next_object_id(contact_next_object_id);
-                    let (value, mut outcome, audio_state, new_rng) = definition
-                        .call_object_function(
-                            &state_snapshot,
-                            object.id,
-                            function_name,
-                            &[],
-                            contact_rng.clone(),
-                            &contact_global_effects,
-                            contact_physics,
-                            contact_environment,
-                            contact_frame,
-                            world,
-                            contact_game_over_triggered,
-                            contact_audio.clone(),
-                        )?;
-                    contact_rng = new_rng;
-                    contact_audio = audio_state;
-                    contact_next_object_id = outcome.next_object_id;
-
-                    if let Some(preview) = outcome.host_raster_preview.clone() {
-                        contact_world
-                            .borrow_mut()
-                            .as_mut()
-                            .expect("contact world remains initialized")
-                            .apply_host_raster_preview(preview);
-                    } else {
-                        contact_world
-                            .borrow_mut()
-                            .as_mut()
-                            .expect("contact world remains initialized")
-                            .preview_solid_mask_operations(&outcome.solid_mask_operations);
-                    }
-
-                    if let Some(update) = outcome.object_update.take() {
-                        let previous_owner = object.state.owner;
-                        let previous_crew_member = object.state.crew_member;
-                        let previous_position = object.state.position;
-                        let preserves_position = update.position.is_none();
-                        let callbacks_dispatched = update
-                            .action
-                            .as_ref()
-                            .map(|action| action.callbacks_dispatched)
-                            .unwrap_or(false);
-                        let delta: ObjectDelta = update.into();
-                        let definition_changed = delta.change_def.is_some();
-                        let callback_action_library = if let Some(new_def) =
-                            delta.change_def.as_deref()
-                        {
-                            let definition = contact_definitions.get(new_def).ok_or_else(|| {
-                                EngineError::UnknownDefinition(new_def.to_string())
-                            })?;
-                            Self::apply_change_object_def_to_object(
-                                object,
-                                new_def,
-                                definition,
-                                contact_material_capacity,
-                                None,
-                            );
-                            contact_change_def_solid_mask = true;
-                            definition.action_library()
-                        } else {
-                            contact_definitions
-                                .get(&object.definition_id)
-                                .ok_or_else(|| {
-                                    EngineError::UnknownDefinition(object.definition_id.clone())
-                                })?
-                                .action_library()
-                        };
-                        if definition_changed {
-                            contact_change_def_reinserts
-                                .insert(object.id, delta.change_def_reinsert);
-                        }
-                        let apply_outcome = object.apply_delta(&delta, callback_action_library);
-                        if definition_changed {
-                            if let Some(current_definition) =
-                                contact_definitions.get(&object.definition_id)
-                            {
-                                let contents_count = {
-                                    let world = contact_world.borrow();
-                                    Self::host_retained_contents_count(
-                                        world
-                                            .as_ref()
-                                            .expect("contact world remains initialized"),
-                                        &object.state.contents,
-                                    )
-                                };
-                                object.state.ocf = current_definition
-                                    .compute_ocf_with_contents_count(&object.state, contents_count);
-                            }
-                        }
-                        if preserves_position {
-                            object.state.position = previous_position;
-                        }
-                        if let Some(change) = apply_outcome.action_change {
-                            if !callbacks_dispatched {
-                                object.record_action_event(
-                                    change.previous,
-                                    ActionTransitionKind::Forced,
-                                );
-                            }
-                        }
-                        if let Some((previous, new)) = apply_outcome.container_change {
-                            contact_container_changes.push((object.id, previous, new));
-                        }
-                        let new_owner = object.state.owner;
-                        let new_crew_member = object.state.crew_member;
-                        if previous_owner != new_owner || previous_crew_member != new_crew_member {
-                            contact_selection_changes.push((
-                                object.id,
-                                previous_owner,
-                                previous_crew_member,
-                                new_owner,
-                                new_crew_member,
-                            ));
-                        }
-                    }
-
-                    let layer_bounds = {
-                        let others = movement_others.borrow();
-                        let (objects_before, objects_after) = &*others;
-                        layer_movement_bounds_from_split(
-                            object,
-                            objects_before,
-                            objects_after,
-                            contact_definitions,
-                        )
-                    };
-                    movement.live.set(movement_live_config_for(
-                        object,
-                        contact_definitions,
-                        layer_bounds,
-                    ));
-
-                    contact_outcomes.push(outcome);
-                    if value.as_bool() {
-                        break;
-                    }
-                }
-                Ok(())
-            };
-            let mut on_do_motion = |object: &mut Object,
-                                    landscape: &mut Landscape|
-             -> Result<(), EngineError> {
-                let mut others = movement_others.borrow_mut();
-                let (objects_before, objects_after) = &mut *others;
-                mask_attachments = Self::remove_solid_mask_from_fields(
-                    object,
-                    objects_before,
-                    objects_after,
-                    contact_definitions,
-                    materials,
-                    mass_movers,
-                    landscape,
-                    sectors,
-                    true,
-                    true,
-                );
-                if let Some(world) = contact_world.borrow_mut().as_mut() {
-                    let bakes = objects_before
-                        .iter()
-                        .chain(std::iter::once(&*object))
-                        .chain(objects_after.iter())
-                        .filter_map(|object| {
-                            object
-                                .solid_mask_bake
-                                .clone()
-                                .map(|bake| (object.id, bake))
-                        })
-                        .collect();
-                    world.refresh_after_do_motion(object.id, landscape, bakes);
-                }
-                // The mutable slice reborrow above invalidates raw pointers
-                // derived before DoMotion. Re-derive them after the last
-                // slice access so a later Contact* callback has current
-                // provenance as well as the same stable addresses.
-                movement_world_source
-                    .before
-                    .set(objects_before.as_ptr());
-                movement_world_source.after.set(objects_after.as_ptr());
-                Ok(())
-            };
-            let mut outcome = object.advance_fixed_position_per_pixel(
-                landscape.as_deref_mut(),
-                materials,
-                movement,
-                &mut run_contact_callback,
-                &mut on_do_motion,
-            )?;
-            let (rotation_contact, rotation_cnat) = object.advance_fixed_rotation(
-                landscape.as_deref(),
-                materials,
-                movement,
-                outcome.no_attach,
-                outcome.redirect_yr,
-                outcome.solid_mask_removed,
-                &mut run_contact_callback,
-            )?;
-            drop(on_do_motion);
-            drop(run_contact_callback);
-            // Drop every clone carrying the stack-scoped movement provider
-            // before its raw source and split slices leave this block.
-            let _ = contact_world.borrow_mut().take();
-            outcome.any_contact |= rotation_contact;
-            outcome.contact_cnat |= rotation_cnat;
-            // DoMovement restores the accumulated iContacts after all
-            // translation/rotation probes so a later free ContactCheck in
-            // the same movement cannot hide an earlier rejected step.
-            if outcome.any_contact {
-                object.frame_t_contact = outcome.contact_cnat;
-            }
-            outcome
-        };
+        let mut movement_outcome = self.advance_live_position_per_pixel(
+            object_id,
+            &mut solid_masks,
+            &mut mask_attachments,
+        )?;
+        let (rotation_contact, rotation_cnat, turned) = self.advance_live_rotation(
+            object_id,
+            &mut solid_masks,
+            movement_outcome.no_attach,
+            movement_outcome.redirect_yr,
+            movement_outcome.solid_mask_removed,
+        )?;
+        movement_outcome.any_contact |= rotation_contact;
+        movement_outcome.contact_cnat |= rotation_cnat;
         let did_motion = movement_outcome.solid_mask_removed;
-        self.rng = contact_rng;
-        self.audio_registry = contact_audio;
-        self.sync_next_object_id(contact_next_object_id);
-        for (changed_object_id, previous_owner, previous_crew_member, new_owner, new_crew_member) in
-            contact_selection_changes
-        {
-            self.update_selection_for_state_change(
-                changed_object_id,
-                previous_owner,
-                previous_crew_member,
-                new_owner,
-                new_crew_member,
-            );
-        }
-        for (changed_object_id, previous, new) in contact_container_changes {
-            self.apply_container_change(changed_object_id, previous, new, false)?;
-        }
-        for (changed_object_id, reinsert) in contact_change_def_reinserts {
-            if reinsert {
-                self.reinsert_change_def_contents_link(changed_object_id)?;
-            }
-        }
-        if contact_change_def_solid_mask {
-            self.update_solid_mask(idx);
-        }
-        for outcome in contact_outcomes {
-            let Some(current_index) = self.find_object_index(object_id) else {
-                break;
-            };
-            let current_definition_id = self.objects[current_index].definition_id.clone();
-            let current_action_library = self
-                .definitions
-                .get(&current_definition_id)
-                .ok_or_else(|| EngineError::UnknownDefinition(current_definition_id.clone()))?
-                .action_library()
-                .clone();
-            self.apply_callback_outcome(
-                current_index,
-                outcome,
-                &current_action_library,
-                object_id,
-                &current_definition_id,
-                false,
-            )?;
-        }
         // DoMovement's unconditional UpdateSolidMask(true) tail precedes
         // InLiquid, ContactAction, NoAttachAction, and Hit callbacks
         // (C4Movement.cpp:443-478). With no DoMotion this performs the real
         // remove(no backup)+put cycle; after motion it re-puts at the final
         // position and translates the riders captured by the first removal.
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(ExecMovementOutcome {
+                alive: false,
+                did_motion,
+            });
+        };
         self.update_solid_mask(idx);
         self.restore_solid_mask_attachments(
             idx,
             did_motion.then_some(mask_attachments).flatten(),
         );
-        if self.objects[idx].destroyed
-            || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
-        {
-            return Ok(ExecMovementOutcome {
-                alive: false,
-                did_motion,
-            });
-        }
-        self.update_sector_for_index(idx);
         // C4Object::InLiquid update, inline in DoMovement after
         // integration and BEFORE ContactAction/NoAttachAction
         // (C4Movement.cpp:443-460): IsInLiquidCheck probes
         // GBackLiquid(x, y + Float*Con/FullCon - 1)
         // (C4Object.cpp:5609-5612); entering liquid clears fNoAttach
         // (:452). DoMovement never runs contained or C4D_StaticBack
-        // (C4Movement.cpp:553-575; the C++ Mobile gate is unmodeled).
+        // (C4Movement.cpp:553-575; the outer ExecMovement gate has already
+        // selected this DoMovement invocation). A callback changing
+        // Contained/category does not retroactively skip this tail.
         // The entry Splash (:450-451, OCF_HitSpeed2 && Mass>3) draws
         // synced RNG and is a documented PORT_STATUS gap.
-        if self.objects[idx].state.container.is_none()
-            && self.objects[idx].state.category & CATEGORY_STATIC_BACK == 0
-        {
-            let probe = {
-                let state = &self.objects[idx].state;
-                let float_line = self
-                    .definitions
-                    .get(&self.objects[idx].definition_id)
-                    .map(|definition| definition.float_line)
-                    .unwrap_or(0);
-                let offset = float_line
-                    .saturating_mul(state.construction)
-                    .checked_div(FULL_CON)
-                    .unwrap_or(0);
-                Vector2::new(state.position.x, state.position.y + offset - 1)
-            };
-            let wet = self
-                .landscape
-                .as_ref()
-                .map(|landscape| landscape.is_liquid_at(probe.x, probe.y))
-                .unwrap_or(false);
+        let probe = {
             let state = &self.objects[idx].state;
-            if wet && !state.in_liquid {
-                // Entry splash (C4Movement.cpp:450-453): fast + heavy
-                // objects splash — synced RNG draws + FXU1 bubbles.
-                let object_mass = self.effective_object_mass(idx);
-                let state = &self.objects[idx].state;
-                let should_splash =
-                    state.ocf & crate::ocf::HIT_SPEED2 != 0 && object_mass > 3;
-                let (splash_x, splash_y, splash_amt) = {
-                    let shape = self.objects[idx].current_shape_rect();
-                    let area = shape
-                        .map(|rect| rect.width * rect.height / 10)
-                        .unwrap_or(0)
-                        .min(20);
-                    (state.position.x, state.position.y + 1, area)
-                };
-                if should_splash {
-                    self.splash(splash_x, splash_y, splash_amt)?;
-                }
-                let state = &mut self.objects[idx].state;
-                state.in_liquid = true;
-                movement_outcome.no_attach = false;
-            } else if !wet && self.objects[idx].state.in_liquid {
-                self.objects[idx].state.in_liquid = false;
+            let float_line = self
+                .definitions
+                .get(&self.objects[idx].definition_id)
+                .map(|definition| definition.float_line)
+                .unwrap_or(0);
+            let offset = float_line
+                .saturating_mul(state.construction)
+                .checked_div(FULL_CON)
+                .unwrap_or(0);
+            Vector2::new(state.position.x, state.position.y + offset - 1)
+        };
+        let wet = self
+            .landscape
+            .as_ref()
+            .map(|landscape| landscape.is_liquid_at(probe.x, probe.y))
+            .unwrap_or(false);
+        let state = &self.objects[idx].state;
+        if wet && !state.in_liquid {
+            // Entry splash (C4Movement.cpp:450-453): fast + heavy
+            // objects splash — synced RNG draws + FXU1 bubbles.
+            let object_mass = self.effective_object_mass(idx);
+            let state = &self.objects[idx].state;
+            let should_splash = state.ocf & crate::ocf::HIT_SPEED2 != 0 && object_mass > 3;
+            let (splash_x, splash_y, splash_amt) = {
+                let shape = self.objects[idx].current_shape_rect();
+                let area = shape
+                    .map(|rect| rect.width * rect.height / 10)
+                    .unwrap_or(0)
+                    .min(20);
+                (state.position.x, state.position.y + 1, area)
+            };
+            if should_splash {
+                self.splash(splash_x, splash_y, splash_amt)?;
             }
+            let state = &mut self.objects[idx].state;
+            state.in_liquid = true;
+            movement_outcome.no_attach = false;
+        } else if !wet && self.objects[idx].state.in_liquid {
+            self.objects[idx].state.in_liquid = false;
         }
         // Contact Action, then Attachment Loss Action, then the Hit
         // script calls (C4Movement.cpp:463-478).
@@ -41004,22 +41543,19 @@ impl Engine {
                     did_motion,
                 });
             };
+            // The most recent rotation/contact probe remains visible through
+            // UpdateSolidMask and InLiquid/Splash. C++ restores accumulated
+            // iContacts to t_contact only immediately before ContactAction
+            // (C4Movement.cpp:443-470).
+            self.objects[idx].frame_t_contact = movement_outcome.contact_cnat;
             let definition_id = self.objects[idx].definition_id.clone();
+            let live_solid_mask_indices = self.active_solid_mask_indices();
             self.exec_contact_action(
                 idx,
                 movement_outcome.contact_cnat,
                 &definition_id,
-                solid_mask_indices,
+                &live_solid_mask_indices,
             )?;
-            if self.find_object_index(object_id).is_none_or(|idx| {
-                self.objects[idx].destroyed
-                    || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
-            }) {
-                return Ok(ExecMovementOutcome {
-                    alive: false,
-                    did_motion,
-                });
-            }
         }
         if movement_outcome.no_attach {
             let Some(idx) = self.find_object_index(object_id) else {
@@ -41029,22 +41565,19 @@ impl Engine {
                 });
             };
             let definition_id = self.objects[idx].definition_id.clone();
-            let Some(action_library) = self
+            let live_solid_mask_indices = self.active_solid_mask_indices();
+            if let Some(action_library) = self
                 .definitions
                 .get(&definition_id)
                 .map(|definition| definition.action_library().clone())
-            else {
-                return Ok(ExecMovementOutcome {
-                    alive: false,
-                    did_motion,
-                });
-            };
-            self.apply_no_attach_action(
-                idx,
-                &definition_id,
-                &action_library,
-                solid_mask_indices,
-            )?;
+            {
+                self.apply_no_attach_action(
+                    idx,
+                    &definition_id,
+                    &action_library,
+                    &live_solid_mask_indices,
+                )?;
+            }
         }
         if movement_outcome.any_contact {
             self.invoke_movement_hit_callbacks(
@@ -41053,20 +41586,29 @@ impl Engine {
                 object_id,
             )?;
         }
-        if self.find_object_index(object_id).is_none_or(|idx| {
-            self.objects[idx].destroyed
-                || matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
-        }) {
-            return Ok(ExecMovementOutcome {
-                alive: false,
-                did_motion,
-            });
+        // C4Movement's final graphics/position tail runs after Hit*. Any
+        // accepted rotation degree makes fTurned sticky and therefore calls
+        // UpdateFace(true): rebuild the LIVE definition shape, UpdatePos, and
+        // perform the second solid-mask remove/re-put. Without rotation,
+        // UpdatePos runs only when the entry integer position differs
+        // (C4Movement.cpp:398-429,443-491; C4Object.cpp:322-376).
+        if let Some(idx) = self.find_object_index(object_id) {
+            if turned {
+                let shape_updated = self.objects[idx].shape_template.line == 0;
+                self.objects[idx].refresh_shape_geometry();
+                if shape_updated {
+                    self.update_sector_for_index(idx);
+                }
+                self.update_solid_mask(idx);
+            } else if self.objects[idx].state.position != entry_position {
+                self.update_sector_for_index(idx);
+            }
         }
-
-        Ok(ExecMovementOutcome {
-            alive: true,
-            did_motion,
-        })
+        let alive = self.find_object_index(object_id).is_some_and(|idx| {
+            !self.objects[idx].destroyed
+                && !matches!(self.objects[idx].state.status, ObjectStatus::Deleted)
+        });
+        Ok(ExecMovementOutcome { alive, did_motion })
     }
 
     /// `DoGravity(this)` as used by the ExecAction idle and insufficient
@@ -43681,6 +44223,12 @@ impl Engine {
         let Some(object_id) = self.objects.get(idx).map(|object| object.id) else {
             return Ok(());
         };
+        // Direct/test callers pass the accumulated DoMovement contacts just
+        // like C4Movement's `t_contact = iContacts` immediately before this
+        // call. From here on ContactAction must re-read the live member after
+        // every nested action callback (C4Movement.cpp:467-471;
+        // C4Object.cpp:4319-4569).
+        self.objects[idx].frame_t_contact = t_contact;
         // ContactAction resolves physicals before even its idle-action gate;
         // Def, Action and OCF are read only after that callback returns
         // (C4Object.cpp:4324-4330).
@@ -43689,8 +44237,7 @@ impl Engine {
             return Ok(());
         };
         let live_definition_id = self.objects[idx].definition_id.clone();
-        let definition_id = &live_definition_id;
-        let Some(definition) = self.definitions.get(definition_id) else {
+        let Some(definition) = self.definitions.get(&live_definition_id) else {
             return Ok(());
         };
         let library = definition.action_library().clone();
@@ -43702,9 +44249,6 @@ impl Engine {
         let procedure = library.procedure_for_entry(&action_name, action.act_map_index);
         let action_disabled =
             library.disables_object_for_entry(&action_name, action.act_map_index);
-        let ocf = self.objects[idx].state.ocf;
-        let com_dir = self.objects[idx].state.command_direction;
-        let direction = self.objects[idx].state.direction;
         let can_scale = physical.can_scale != 0;
         let can_hangle = physical.can_hangle != 0;
 
@@ -43716,62 +44260,101 @@ impl Engine {
             com == sample || com % 8 + 1 == sample || com == sample % 8 + 1
         };
 
-        // Hit Bottom (C4Object.cpp:4321-4367)
-        if t_contact & CNAT_BOTTOM != 0 {
+        // Hit Bottom (C4Object.cpp:4332-4380). Only iProcedure and
+        // fDisabled above are stack locals; t_contact, OCF, Action.Dir and
+        // Action.ComDir remain live object fields throughout ContactAction.
+        if self
+            .find_object_index(object_id)
+            .is_some_and(|idx| self.objects[idx].frame_t_contact & CNAT_BOTTOM != 0)
+        {
             match procedure {
                 ActionProcedure::Flight => {
+                    let Some(idx) = self.find_object_index(object_id) else {
+                        return Ok(());
+                    };
                     if self.objects[idx].fixed_velocity.y >= C4Fixed::ZERO {
                         // FlatHit / HardHit / Walk
-                        if (ocf & crate::ocf::HIT_SPEED4 != 0 || action_disabled)
-                            && self.object_action_flat(idx, definition_id, direction)?
+                        if self.objects[idx].state.ocf & crate::ocf::HIT_SPEED4 != 0
+                            || action_disabled
                         {
-                            return Ok(());
+                            let direction = self.objects[idx].state.direction;
+                            let definition_id = self.objects[idx].definition_id.clone();
+                            if self.object_action_flat(idx, &definition_id, direction)? {
+                                return Ok(());
+                            }
                         }
-                        if ocf & crate::ocf::HIT_SPEED3 != 0
-                            && self.action_with_calls(idx, definition_id, "KneelDown")?
-                        {
-                            let object = &mut self.objects[idx];
-                            object.fixed_velocity = FixedVec2::ZERO;
-                            object.state.velocity = Vector2::ZERO;
+                        let Some(idx) = self.find_object_index(object_id) else {
                             return Ok(());
+                        };
+                        if self.objects[idx].state.ocf & crate::ocf::HIT_SPEED3 != 0 {
+                            let definition_id = self.objects[idx].definition_id.clone();
+                            if self.action_with_calls(idx, &definition_id, "KneelDown")? {
+                                if let Some(idx) = self.find_object_index(object_id) {
+                                    let object = &mut self.objects[idx];
+                                    object.fixed_velocity = FixedVec2::ZERO;
+                                    object.state.velocity = Vector2::ZERO;
+                                }
+                                return Ok(());
+                            }
                         }
                         // Walk keeping horizontal momentum
                         // (C4Object.cpp:4330-4338).
+                        let Some(idx) = self.find_object_index(object_id) else {
+                            return Ok(());
+                        };
                         let last_xdir = self.objects[idx].fixed_velocity.x;
-                        if self.action_with_calls(idx, definition_id, "Walk")? {
-                            let object = &mut self.objects[idx];
-                            object.fixed_velocity = FixedVec2::new(last_xdir, C4Fixed::ZERO);
-                            object.state.velocity = object.velocity_pixels();
+                        let definition_id = self.objects[idx].definition_id.clone();
+                        if self.action_with_calls(idx, &definition_id, "Walk")? {
+                            if let Some(idx) = self.find_object_index(object_id) {
+                                let object = &mut self.objects[idx];
+                                object.fixed_velocity =
+                                    FixedVec2::new(last_xdir, C4Fixed::ZERO);
+                                object.state.velocity = object.velocity_pixels();
+                            }
                         }
                         return Ok(());
                     }
                 }
                 ActionProcedure::Scale => {
+                    let Some(idx) = self.find_object_index(object_id) else {
+                        return Ok(());
+                    };
+                    let com_dir = self.objects[idx].state.command_direction;
+                    let definition_id = self.objects[idx].definition_id.clone();
                     if !com_dir_like(com_dir, CommandDirection::Down) {
                         let _ = self.object_action_corner_scale(
                             idx,
-                            definition_id,
+                            &definition_id,
                             procedure,
                             solid_mask_indices,
                         )?;
                         return Ok(());
                     }
-                    self.object_action_stand(idx, definition_id)?;
+                    self.object_action_stand(idx, &definition_id)?;
                     return Ok(());
                 }
-                ActionProcedure::Dig => match com_dir {
-                    CommandDirection::DownLeft => {
-                        self.objects[idx].state.command_direction = CommandDirection::Left;
-                    }
-                    CommandDirection::DownRight => {
-                        self.objects[idx].state.command_direction = CommandDirection::Right;
-                    }
-                    _ => {
-                        self.object_com_stop_dig(idx, definition_id)?;
+                ActionProcedure::Dig => {
+                    let Some(idx) = self.find_object_index(object_id) else {
                         return Ok(());
+                    };
+                    match self.objects[idx].state.command_direction {
+                        CommandDirection::DownLeft => {
+                            self.objects[idx].state.command_direction = CommandDirection::Left;
+                        }
+                        CommandDirection::DownRight => {
+                            self.objects[idx].state.command_direction = CommandDirection::Right;
+                        }
+                        _ => {
+                            let definition_id = self.objects[idx].definition_id.clone();
+                            self.object_com_stop_dig(idx, &definition_id)?;
+                            return Ok(());
+                        }
                     }
-                },
+                }
                 ActionProcedure::Swim => {
+                    let Some(idx) = self.find_object_index(object_id) else {
+                        return Ok(());
+                    };
                     let above_liquid = {
                         let position = self.objects[idx].state.position;
                         self.landscape
@@ -43780,9 +44363,10 @@ impl Engine {
                             .unwrap_or(false)
                     };
                     if !above_liquid {
+                        let definition_id = self.objects[idx].definition_id.clone();
                         let _ = self.object_action_corner_scale(
                             idx,
-                            definition_id,
+                            &definition_id,
                             procedure,
                             solid_mask_indices,
                         )?;
@@ -43793,47 +44377,72 @@ impl Engine {
             }
         }
 
-        // Hit Ceiling (C4Object.cpp:4369-4404)
-        if t_contact & CNAT_TOP != 0 {
+        // Hit Ceiling (C4Object.cpp:4382-4421).
+        if self
+            .find_object_index(object_id)
+            .is_some_and(|idx| self.objects[idx].frame_t_contact & CNAT_TOP != 0)
+        {
             match procedure {
                 ActionProcedure::Walk => {
-                    self.object_action_stand(idx, definition_id)?;
+                    let Some(idx) = self.find_object_index(object_id) else {
+                        return Ok(());
+                    };
+                    let definition_id = self.objects[idx].definition_id.clone();
+                    self.object_action_stand(idx, &definition_id)?;
                     return Ok(());
                 }
                 ActionProcedure::Scale => {
+                    let Some(idx) = self.find_object_index(object_id) else {
+                        return Ok(());
+                    };
+                    let com_dir = self.objects[idx].state.command_direction;
                     if com_dir_like(com_dir, CommandDirection::Up) {
                         if can_hangle {
-                            let new_dir = if direction == Direction::Left {
+                            let new_dir = if self.objects[idx].state.direction == Direction::Left {
                                 Direction::Right
                             } else {
                                 Direction::Left
                             };
-                            self.object_action_hangle(idx, definition_id, new_dir)?;
+                            let definition_id = self.objects[idx].definition_id.clone();
+                            self.object_action_hangle(idx, &definition_id, new_dir)?;
                             return Ok(());
                         }
                         self.objects[idx].state.command_direction = CommandDirection::Stop;
                     }
                 }
                 ActionProcedure::Flight => {
-                    if ocf & crate::ocf::HIT_SPEED3 != 0 || action_disabled {
+                    let Some(idx) = self.find_object_index(object_id) else {
+                        return Ok(());
+                    };
+                    let direction = self.objects[idx].state.direction;
+                    let definition_id = self.objects[idx].definition_id.clone();
+                    if self.objects[idx].state.ocf & crate::ocf::HIT_SPEED3 != 0
+                        || action_disabled
+                    {
                         self.object_action_tumble(
                             idx,
-                            definition_id,
+                            &definition_id,
                             direction,
                             C4Fixed::ZERO,
                             C4Fixed::ZERO,
                         )?;
                     } else if can_hangle {
-                        self.object_action_hangle(idx, definition_id, direction)?;
+                        self.object_action_hangle(idx, &definition_id, direction)?;
                         return Ok(());
                     }
                 }
                 ActionProcedure::Dig => {
-                    self.object_com_stop_dig(idx, definition_id)?;
+                    let Some(idx) = self.find_object_index(object_id) else {
+                        return Ok(());
+                    };
+                    let definition_id = self.objects[idx].definition_id.clone();
+                    self.object_com_stop_dig(idx, &definition_id)?;
                     return Ok(());
                 }
                 ActionProcedure::Hang => {
-                    self.objects[idx].state.command_direction = CommandDirection::Stop;
+                    if let Some(idx) = self.find_object_index(object_id) {
+                        self.objects[idx].state.command_direction = CommandDirection::Stop;
+                    }
                 }
                 _ => {}
             }
@@ -43842,7 +44451,10 @@ impl Engine {
         // Hit Left / Right Walls (C4Object.cpp:4406-4520)
         for (cnat, wall_direction) in [(CNAT_LEFT, Direction::Left), (CNAT_RIGHT, Direction::Right)]
         {
-            if t_contact & cnat == 0 {
+            let Some(idx) = self.find_object_index(object_id) else {
+                return Ok(());
+            };
+            if self.objects[idx].frame_t_contact & cnat == 0 {
                 continue;
             }
             let tumble_x = contact_action_wall_tumble_x(cnat);
@@ -43858,27 +44470,35 @@ impl Engine {
             };
             match procedure {
                 ActionProcedure::Flight => {
-                    if ocf & crate::ocf::HIT_SPEED3 != 0 || action_disabled {
+                    let definition_id = self.objects[idx].definition_id.clone();
+                    if self.objects[idx].state.ocf & crate::ocf::HIT_SPEED3 != 0
+                        || action_disabled
+                    {
                         self.object_action_tumble(
                             idx,
-                            definition_id,
+                            &definition_id,
                             wall_direction,
                             tumble_x,
                             C4Fixed::ZERO,
                         )?;
                     } else if can_scale {
-                        self.object_action_scale(idx, definition_id, wall_direction)?;
+                        self.object_action_scale(idx, &definition_id, wall_direction)?;
                         return Ok(());
                     }
                 }
                 ActionProcedure::Walk => {
+                    let com_dir = self.objects[idx].state.command_direction;
                     if com_dir_like(com_dir, toward) {
                         if can_scale {
-                            self.object_action_scale(idx, definition_id, wall_direction)?;
+                            let definition_id = self.objects[idx].definition_id.clone();
+                            self.object_action_scale(idx, &definition_id, wall_direction)?;
                             return Ok(());
                         }
                         self.objects[idx].state.command_direction = CommandDirection::Stop;
                     }
+                    let Some(idx) = self.find_object_index(object_id) else {
+                        return Ok(());
+                    };
                     if com_dir_like(self.objects[idx].state.command_direction, away) {
                         // Slide off (C4Object.cpp:4437/4491).
                         let xdir = self.objects[idx].fixed_velocity.x / 2;
@@ -43888,29 +44508,36 @@ impl Engine {
                     return Ok(());
                 }
                 ActionProcedure::Swim => {
+                    let com_dir = self.objects[idx].state.command_direction;
                     if com_dir_like(com_dir, toward) && can_scale {
-                        self.object_action_scale(idx, definition_id, wall_direction)?;
+                        let definition_id = self.objects[idx].definition_id.clone();
+                        self.object_action_scale(idx, &definition_id, wall_direction)?;
                         return Ok(());
                     }
+                    let definition_id = self.objects[idx].definition_id.clone();
                     let _ = self.object_action_corner_scale(
                         idx,
-                        definition_id,
+                        &definition_id,
                         procedure,
                         solid_mask_indices,
                     )?;
                     return Ok(());
                 }
                 ActionProcedure::Hang => {
-                    if can_scale
-                        && self.object_action_scale(idx, definition_id, wall_direction)?
-                    {
-                        return Ok(());
+                    if can_scale {
+                        let definition_id = self.objects[idx].definition_id.clone();
+                        if self.object_action_scale(idx, &definition_id, wall_direction)? {
+                            return Ok(());
+                        }
                     }
-                    self.objects[idx].state.command_direction = CommandDirection::Stop;
+                    if let Some(idx) = self.find_object_index(object_id) {
+                        self.objects[idx].state.command_direction = CommandDirection::Stop;
+                    }
                     return Ok(());
                 }
                 ActionProcedure::Dig => {
-                    self.object_com_stop_dig(idx, definition_id)?;
+                    let definition_id = self.objects[idx].definition_id.clone();
+                    self.object_com_stop_dig(idx, &definition_id)?;
                     return Ok(());
                 }
                 _ => {}
@@ -43919,10 +44546,14 @@ impl Engine {
 
         // Flight stuck: enforce slide free (C4Object.cpp:4524-4546).
         if matches!(procedure, ActionProcedure::Flight) {
+            let Some(idx) = self.find_object_index(object_id) else {
+                return Ok(());
+            };
             let velocity = self.objects[idx].fixed_velocity;
             if !velocity.y.is_nonzero() {
-                let allow_down = i32::from(t_contact & CNAT_BOTTOM == 0);
-                if t_contact & CNAT_RIGHT != 0 {
+                let allow_down =
+                    i32::from(self.objects[idx].frame_t_contact & CNAT_BOTTOM == 0);
+                if self.objects[idx].frame_t_contact & CNAT_RIGHT != 0 {
                     let position = self.objects[idx].state.position;
                     self.force_object_position(
                         idx,
@@ -43932,7 +44563,10 @@ impl Engine {
                     object.fixed_velocity = FixedVec2::ZERO;
                     object.state.velocity = Vector2::ZERO;
                 }
-                if t_contact & CNAT_LEFT != 0 {
+                let Some(idx) = self.find_object_index(object_id) else {
+                    return Ok(());
+                };
+                if self.objects[idx].frame_t_contact & CNAT_LEFT != 0 {
                     let position = self.objects[idx].state.position;
                     self.force_object_position(
                         idx,
@@ -43943,8 +44577,13 @@ impl Engine {
                     object.state.velocity = Vector2::ZERO;
                 }
             }
+            let Some(idx) = self.find_object_index(object_id) else {
+                return Ok(());
+            };
             let velocity = self.objects[idx].fixed_velocity;
-            if !velocity.x.is_nonzero() && t_contact & CNAT_TOP != 0 {
+            if !velocity.x.is_nonzero()
+                && self.objects[idx].frame_t_contact & CNAT_TOP != 0
+            {
                 let position = self.objects[idx].state.position;
                 self.force_object_position(idx, Vector2::new(position.x, position.y + 1));
                 let object = &mut self.objects[idx];
@@ -44194,6 +44833,9 @@ impl Engine {
         idx: usize,
         dispatch: MovementContactDispatch,
     ) -> Result<(), EngineError> {
+        let Some(object_id) = self.objects.get(idx).map(|object| object.id) else {
+            return Ok(());
+        };
         let (directions, shape_probe) = match dispatch {
             MovementContactDispatch::ShapeProbe => {
                 ([CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, CNAT_BOTTOM], true)
@@ -44204,11 +44846,10 @@ impl Engine {
             if cnat == CNAT_NONE {
                 continue;
             }
-            if self
-                .objects
-                .get(idx)
-                .is_none_or(|object| object.state.status == ObjectStatus::Deleted)
-            {
+            let Some(idx) = self.find_object_index(object_id) else {
+                break;
+            };
+            if self.objects[idx].state.status == ObjectStatus::Deleted {
                 break;
             }
             if shape_probe && self.objects[idx].frame_shape_contact_cnat & cnat == 0 {
@@ -44217,7 +44858,7 @@ impl Engine {
             let Some(function_name) = contact_callback_name(cnat) else {
                 continue;
             };
-            let Some((object_id, callback_definition_id, action_library)) = self
+            let Some((callback_definition_id, action_library, has_function)) = self
                 .objects
                 .get(idx)
                 .and_then(|object| {
@@ -44225,15 +44866,18 @@ impl Engine {
                         .get(&object.definition_id)
                         .map(|definition| {
                             (
-                                object.id,
                                 object.definition_id.clone(),
                                 definition.action_library().clone(),
+                                definition.has_function(function_name),
                             )
                         })
                 })
             else {
                 break;
             };
+            if !has_function {
+                continue;
+            }
             let contact_calls = self
                 .definitions
                 .get(&callback_definition_id)
@@ -48063,8 +48707,11 @@ impl Engine {
         // matching cursor/view pointer, then choose a replacement cursor.
         let owner = self.objects[idx].state.owner;
         let owner_player_exists = self.players.contains_key(&owner);
-        let removed_cursor = self.crew_cursor(owner) == Some(object_id);
-        if removed_cursor {
+        let removed_cursor = self
+            .players
+            .get(&owner)
+            .is_some_and(|player| player.cursor() == Some(object_id));
+        if self.crew_cursor(owner) == Some(object_id) {
             if let Some(selection) = self.crew_selection.get_mut(&owner) {
                 selection.set_cursor(None);
             }
@@ -48077,7 +48724,7 @@ impl Engine {
             }
         }
         if let Some(player) = self.players.get_mut(&owner) {
-            player.clear_object_pointers(object_id);
+            player.clear_object_pointers_before_cursor_adjust(object_id);
         }
         self.remove_from_roles(owner, object_id);
         let still_in_crew = self
@@ -48090,12 +48737,14 @@ impl Engine {
         if removed_cursor {
             self.player_adjust_cursor_command(owner)?;
         }
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.clear_object_pointers_after_cursor_adjust(object_id);
+        }
         // C++ retains a dead living object's range only while the owning
         // player's runtime FoWViewObjs still contains it.
         let retained_by_owner_fow = self.find_object_index(object_id).is_some_and(|idx| {
             let state = &self.objects[idx].state;
             owner_player_exists
-                && state.owner == owner
                 && state.category & CATEGORY_LIVING != 0
                 && self
                     .players
@@ -51116,7 +51765,7 @@ impl Engine {
         let layer = self.objects.iter().find(|object| object.id == layer_id)?;
         let definition = self.definitions.get(&layer.definition_id)?;
         Some(LayerMovementBounds {
-            position: layer.position_pixels(),
+            position: layer.state.position,
             shape_rect: layer.current_shape_rect()?,
             border_bound: definition.border_bound(),
         })
@@ -51565,9 +52214,11 @@ impl Engine {
         cause_instability: bool,
         backup_attachments: bool,
     ) -> Option<SolidMaskAttachmentBackup> {
+        let instance_sequence = mover.solid_mask_instance_sequence;
         let empty_put = std::mem::take(&mut mover.solid_mask_empty_put);
         let Some(bake) = mover.solid_mask_bake.take() else {
             return (empty_put && backup_attachments).then(|| SolidMaskAttachmentBackup {
+                instance_sequence,
                 removal_position: mover.state.position,
                 object_ids: Vec::new(),
             });
@@ -51709,6 +52360,7 @@ impl Engine {
             .map(|object| object.id)
             .collect();
         Some(SolidMaskAttachmentBackup {
+            instance_sequence,
             removal_position: mover.state.position,
             object_ids,
         })
@@ -51871,6 +52523,7 @@ impl Engine {
             .map(|index| self.objects[index].id)
             .collect();
         Some(SolidMaskAttachmentBackup {
+            instance_sequence: mover.solid_mask_instance_sequence,
             removal_position: mover.state.position,
             object_ids,
         })
@@ -51891,6 +52544,14 @@ impl Engine {
         let Some(mover) = self.objects.get(mover_index) else {
             return;
         };
+        // Attached riders are owned by one concrete C4SolidMaskData object.
+        // SetSolidMask, ChangeDef and graphics changes delete that instance;
+        // a later Put of the replacement must not inherit the old list.
+        if backup.instance_sequence.is_none()
+            || mover.solid_mask_instance_sequence != backup.instance_sequence
+        {
+            return;
+        }
         // C++ restores only from Put; a removed/ineligible mover clears the
         // backup without translating anything. A fully clipped regular Put
         // still sets MaskPut despite having no raster bake.

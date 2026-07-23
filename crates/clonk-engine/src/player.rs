@@ -700,14 +700,26 @@ impl PlayerState {
         }
     }
 
-    pub(crate) fn clear_object_pointers(&mut self, object: ObjectId) {
+    pub(crate) fn clear_object_pointers_before_cursor_adjust(
+        &mut self,
+        object: ObjectId,
+    ) -> bool {
         self.crew.retain(|member| *member != object);
         if self.captain == Some(object) {
             self.captain = None;
         }
         if self.cursor == Some(object) {
+            // C4Player::ClearPointers writes Cursor=null before entering
+            // AdjustCursorCommand, while ViewCursor/ViewTarget remain live
+            // until that callbackful command has returned.
             self.cursor = None;
+            true
+        } else {
+            false
         }
+    }
+
+    pub(crate) fn clear_object_pointers_after_cursor_adjust(&mut self, object: ObjectId) {
         if self.view_cursor == Some(object) {
             self.view_cursor = None;
         }
@@ -716,6 +728,41 @@ impl PlayerState {
         }
         self.remove_message_board_query(Some(object));
         self.sync_viewport_focus();
+    }
+
+    pub(crate) fn reset_cursor_view(&mut self) {
+        if self.view_cursor.is_none() && self.cursor.is_none() {
+            return;
+        }
+        self.view_mode = PLAYER_VIEW_MODE_CURSOR;
+        self.view_target = None;
+    }
+
+    pub(crate) fn resolved_view_object(&self) -> Option<ObjectId> {
+        resolved_view_object(
+            self.view_mode,
+            self.view_target,
+            self.view_cursor,
+            self.cursor,
+        )
+    }
+
+    pub(crate) fn update_view(&mut self, position: Option<Vector2>) {
+        let focus = self.view_cursor.or(self.cursor);
+        if let Some(position) = position {
+            self.view_center = Some(position);
+        }
+        for viewport in &mut self.viewports {
+            viewport.focus = focus;
+            if let Some(position) = position {
+                viewport.center = position;
+            }
+        }
+    }
+
+    pub(crate) fn clear_object_pointers(&mut self, object: ObjectId) {
+        self.clear_object_pointers_before_cursor_adjust(object);
+        self.clear_object_pointers_after_cursor_adjust(object);
     }
 
     pub(crate) fn call_message_board(&mut self, query: MessageBoardQuery) {
@@ -2259,13 +2306,26 @@ impl Player {
     }
 
     pub(crate) fn clear_object_pointers(&mut self, object: ObjectId) {
+        self.clear_object_pointers_before_cursor_adjust(object);
+        self.clear_object_pointers_after_cursor_adjust(object);
+    }
+
+    pub(crate) fn clear_object_pointers_before_cursor_adjust(
+        &mut self,
+        object: ObjectId,
+    ) -> bool {
         self.crew.retain(|member| *member != object);
         if self.captain == Some(object) {
             self.captain = None;
         }
         if self.cursor == Some(object) {
             self.cursor = None;
+            return true;
         }
+        false
+    }
+
+    pub(crate) fn clear_object_pointers_after_cursor_adjust(&mut self, object: ObjectId) {
         if self.view_cursor == Some(object) {
             self.view_cursor = None;
         }

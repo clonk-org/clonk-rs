@@ -111,6 +111,107 @@ pub(crate) fn clear_effects_for_assign_removal(target: ObjectId) -> Result<bool,
     Ok(true)
 }
 
+/// `C4Effect::ClearAll(..., C4FxCall_RemoveDeath)` for
+/// `C4Object::AssignDeath`. The entry list is frozen before the recursive
+/// tail-to-head walk, each node is marked dead before its Stop callback, and
+/// a `-1` result restores that exact node. Unlike AssignRemoval, dead nodes
+/// stay linked and effects added by Stop callbacks are not part of this walk
+/// (C4Effect.cpp:407-425; C4Object.cpp:1164-1174).
+pub(crate) fn clear_effects_for_assign_death(
+    target: ObjectId,
+) -> Result<bool, RuntimeError> {
+    let effects = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Vec::new();
+        };
+        if !context.ensure_object_scope(target) {
+            return Vec::new();
+        }
+        context
+            .object_scope(target)
+            .map(|scope| {
+                scope
+                    .effects
+                    .snapshot()
+                    .into_iter()
+                    .filter(|effect| effect.priority != 0)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+
+    for effect in effects.into_iter().rev() {
+        if !object_is_present(target) {
+            break;
+        }
+        let live_callback = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(scope) = borrow
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(target))
+            else {
+                return None;
+            };
+            let live = scope
+                .effects
+                .effects
+                .iter_mut()
+                .find(|live| live.number == effect.number && live.priority != 0)?;
+            let previous_priority = live.priority;
+            live.priority = 0;
+            let callback_effect = live.clone();
+            scope
+                .effects
+                .commands
+                .push(EffectCommand::remove_number(effect.number, true));
+            Some((previous_priority, callback_effect))
+        });
+        let Some((previous_priority, callback_effect)) = live_callback else {
+            continue;
+        };
+
+        let function = format!("Fx{}Stop", callback_effect.name);
+        let stop_result = dispatch_effect_fx_callback_fail_safe(
+            &callback_effect,
+            &function,
+            &[
+                object_reference_value(target),
+                Value::Int(callback_effect.number),
+                Value::Int(4),
+            ],
+        );
+        if !object_is_present(target) {
+            break;
+        }
+        if stop_result == -1 {
+            HOST_CONTEXT.with(|cell| {
+                let mut borrow = cell.borrow_mut();
+                let Some(scope) = borrow
+                    .as_mut()
+                    .and_then(|context| context.object_scope_mut(target))
+                else {
+                    return;
+                };
+                let Some(live) = scope
+                    .effects
+                    .effects
+                    .iter_mut()
+                    .find(|live| live.number == effect.number && live.priority == 0)
+                else {
+                    return;
+                };
+                live.priority = previous_priority;
+                scope
+                    .effects
+                    .commands
+                    .push(EffectCommand::update(live.clone()));
+            });
+        }
+    }
+    Ok(true)
+}
+
 /// Effect-name parameter shared by AddEffect/RemoveEffect/GetEffect/
 /// GetEffectCount: C++ declares it `C4String *`, and pre-#strict-3 callers
 /// legally pass falsy values that CheckConvertFunctionParameters Set0()s to
@@ -1498,28 +1599,41 @@ pub(crate) fn dispatch_effects_do_damage(
     cause: i32,
     caused_by: i32,
 ) -> Option<i32> {
-    let effects: Vec<EffectState> = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Vec::new();
-        };
+    let mut current_number = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        if !context.ensure_object_scope(target) {
+            return None;
+        }
         context
-            .object_scope(target)
-            .map(|scope| scope.effects.snapshot())
-            .or_else(|| {
-                context
-                    .get_world_object(target)
-                    .and_then(|object| object.full_state().map(|state| state.effects.clone()))
-            })
-            .unwrap_or_default()
+            .object_scope(target)?
+            .effects
+            .effects
+            .first()
+            .map(|effect| effect.number)
     });
-    if effects.is_empty() {
-        return None;
-    }
+    current_number?;
+
     let target_value = object_reference_value(target);
-    for effect in effects {
+    while let Some(number) = current_number {
+        // C4Effect::DoDamage walks live nodes: an earlier callback may mark a
+        // later node dead, ChangeEffect may replace its callback name, and
+        // AddEffect may insert a new successor before the walk advances.
+        let live_effect = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.object_scope(target))
+                .and_then(|scope| {
+                    scope
+                        .effects
+                        .effects
+                        .iter()
+                        .find(|live| live.number == number)
+                        .cloned()
+                })
+        });
         // IsDead: a zero priority marks a dead effect (C4Effect.h).
-        if effect.priority != 0 {
+        if let Some(effect) = live_effect.filter(|effect| effect.priority != 0) {
             let function = format!("Fx{}Damage", effect.name);
             let call_args = [
                 target_value.clone(),
@@ -1552,17 +1666,33 @@ pub(crate) fn dispatch_effects_do_damage(
         let target_gone = HOST_CONTEXT.with(|cell| {
             cell.borrow()
                 .as_ref()
-                .map(|context| {
-                    context
-                        .get_world_object(target)
-                        .map(|object| object.status() == ObjectStatus::Deleted)
-                        .unwrap_or(true)
-                })
-                .unwrap_or(true)
+                .is_none_or(|context| !context.object_status_present(target))
         });
         if target_gone || change == 0 {
             break;
         }
+
+        // This is the linked-list `pEff = pEff->pNext` performed after the
+        // callback in C++. Looking up the successor now (rather than freezing
+        // the entry list) visits additions after the current node and does not
+        // restart at additions inserted before it.
+        current_number = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.object_scope(target))
+                .and_then(|scope| {
+                    let position = scope
+                        .effects
+                        .effects
+                        .iter()
+                        .position(|effect| effect.number == number)?;
+                    scope
+                        .effects
+                        .effects
+                        .get(position + 1)
+                        .map(|effect| effect.number)
+                })
+        });
     }
     Some(change)
 }
@@ -2206,28 +2336,15 @@ fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<b
         alive
     });
     if alive_now {
-        let scaled = (-level / 3).saturating_mul(LEGACY_MAX_PHYSICAL / 100);
-        let scaled =
-            match dispatch_effects_do_damage(target, scaled, crate::C4FX_CALL_ENG_BLAST, caused_by)
-            {
-                Some(0) => None,
-                Some(modified) => Some(modified),
-                None => Some(scaled),
-            };
-        if let Some(scaled) = scaled {
-            let max_energy = resolve_object_physical(target, false)
-                .map(|physical| physical.energy)
-                .unwrap_or(0);
-            HOST_CONTEXT.with(|cell| {
-                let mut borrow = cell.borrow_mut();
-                let Some(context) = borrow.as_mut() else {
-                    return;
-                };
-                if let Some(scope) = context.object_scope_mut(target) {
-                    scope.adjust_energy(scaled, true, max_energy);
-                }
-            });
-        }
+        let _ = do_energy_with_cause_override(
+            &[
+                Value::Int(-level / 3),
+                object_reference_value(target),
+                Value::Bool(false),
+                Value::Int(crate::C4FX_CALL_ENG_BLAST),
+            ],
+            Some(caused_by),
+        )?;
     }
     // Incinerate arm (C4Object.cpp:1420-1423): the LIVE Damage — staged
     // writes plus whatever the ~Damage callback changed — against

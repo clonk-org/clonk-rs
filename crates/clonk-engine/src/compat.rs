@@ -16636,7 +16636,8 @@ func Missing() { return ComponentAll(0, WOOD); }
         // C4Object removal calls C4Player::ClearPointers synchronously, so
         // untouched saved ViewCursor pointers and a ViewTarget installed
         // earlier in this VM call both disappear before the next getter
-        // (C4Player.cpp:55-73; C4Script.cpp:455-460).
+        // (oracle-src-pinned src/C4Player.cpp:57-77;
+        // src/C4Script.cpp:456-460).
         let cursor = ObjectId::new(956);
         let removed = ObjectId::new(957);
         let player = PlayerState {
@@ -16652,7 +16653,8 @@ func Missing() { return ComponentAll(0, WOOD); }
                 find_world_object(removed.as_u64(), "GONE", 0, 0, 15),
             ],
             vec![player],
-        );
+        )
+        .with_player_fow_view_objects([(15, [removed])]);
         let mut script = clonk_script::Engine::new();
         register_host_functions(&mut script);
         script
@@ -16690,16 +16692,21 @@ func Missing() { return ComponentAll(0, WOOD); }
 
         let (result, outcome) = with_effect_context(Some(object), &[], world, 1, || {
             let result = script.call("Probe", &[Value::Object(removed.as_u64())]);
-            let state = HOST_CONTEXT.with(|cell| {
-                cell.borrow()
-                    .as_ref()
-                    .and_then(|context| context.player_state(15))
-                    .cloned()
-                    .expect("player remains in host context")
+            let (state, retained_fow_link) = HOST_CONTEXT.with(|cell| {
+                let borrow = cell.borrow();
+                let context = borrow.as_ref().expect("host context remains");
+                (
+                    context
+                        .player_state(15)
+                        .cloned()
+                        .expect("player remains in host context"),
+                    context.world.player_has_fow_view_object(15, removed),
+                )
             });
-            result.map(|result| (result, state))
+            result.map(|result| (result, state, retained_fow_link))
         });
-        let (result, state) = result.expect("pointer-clear probe succeeds");
+        let (result, state, retained_fow_link) =
+            result.expect("pointer-clear probe succeeds");
 
         assert_eq!(
             result,
@@ -16718,18 +16725,81 @@ func Missing() { return ComponentAll(0, WOOD); }
                     player_id: 15,
                     object: Some(target),
                 },
-                PlayerCommand::ClearPlayerObjectPointersWithoutAdjust {
+                PlayerCommand::ClearPlayerObjectPointersBeforeAdjust {
                     player_id: 15,
-                    object,
+                    object: before,
                 },
-            ] if *target == removed && *object == removed
+                PlayerCommand::ClearPlayerObjectPointersAfterAdjust {
+                    player_id: 15,
+                    object: after,
+                },
+            ] if *target == removed && *before == removed && *after == removed
         ));
         assert_eq!(state.cursor, Some(cursor));
         assert_eq!(state.view_cursor, None);
         assert_eq!(state.view_target, None);
         assert_eq!(state.view_mode, crate::PLAYER_VIEW_MODE_TARGET);
+        assert!(
+            !retained_fow_link,
+            "non-death ClearPointers removes the player's FoW link synchronously"
+        );
         assert_eq!(state.viewports[0].focus, Some(cursor));
         assert_eq!(state.viewports[0].center, Vector2::new(12, 34));
+    }
+
+    #[test]
+    fn remove_object_copy_out_clears_authoritative_fow_membership() {
+        // AssignRemoval clears Status and then Game.ClearPointers reaches the
+        // owner's non-death FoW removal before RemoveObject returns
+        // (oracle-src-pinned src/C4Object.cpp:240-320;
+        // src/C4Player.cpp:57-77; src/C4Script.cpp:456-460).
+        let definition = crate::Definition::from_script(
+            "RFOW",
+            "Removed FoW object",
+            r#"#strict
+public func Trigger()
+{
+    return RemoveObject();
+}
+"#,
+        )
+        .expect("removed-FoW script compiles");
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Player"))
+            .expect("removed-FoW player registers");
+        engine
+            .register_definition(definition)
+            .expect("removed-FoW definition registers");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("RFOW")
+                    .with_owner(0)
+                    .with_plr_view_range(500),
+            )
+            .expect("removed-FoW object spawns");
+        let index = engine
+            .find_object_index(target)
+            .expect("removed-FoW object exists");
+        assert!(
+            engine
+                .player(0)
+                .is_some_and(|player| player.has_fow_view_object(target))
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Trigger", Vec::new())
+                .expect("removed-FoW trigger succeeds"),
+            Value::Bool(true)
+        );
+        assert!(engine.objects[index].destroyed);
+        assert!(
+            !engine
+                .player(0)
+                .is_some_and(|player| player.has_fow_view_object(target)),
+            "AssignRemoval's status-zero copy-out removes the authoritative FoW link"
+        );
     }
 
     #[test]
@@ -25462,7 +25532,9 @@ func ChangeAndProbe()
     fn kill_pads_discards_and_exposes_same_call_death() {
         // Typed C4Aul dispatch pads target=nil, converts the bool slot, and
         // discards surplus values. The first live call succeeds; Alive is
-        // already false to the rest of the VM call, so a repeat is false.
+        // already false to the rest of the VM call, so a repeat is false
+        // (oracle-src-pinned src/C4Script.cpp:335-345;
+        // src/C4Object.cpp:1164-1205).
         let args = [
             Value::Nil,
             Value::Bool(true),
@@ -25475,18 +25547,23 @@ func ChangeAndProbe()
             Ok::<_, RuntimeError>(())
         });
         result.expect("Kill calls succeed");
-        assert_eq!(outcome.other_objects.len(), 1);
-        let death = &outcome.other_objects[0];
-        assert_eq!(death.object_id, ObjectId::new(1));
-        assert_eq!(death.assign_death, Some(true));
         assert!(
-            death.update.is_none(),
-            "Kill does not fake death with an Alive or Energy write"
+            outcome.other_objects.is_empty(),
+            "the active object's synchronous death stays on its update channel"
         );
+        let update = outcome
+            .object_update
+            .expect("the completed lifecycle records its final state");
+        assert_eq!(update.alive, Some(false));
+        assert_eq!(update.selected, Some(false));
     }
 
     #[test]
     fn kill_foreign_target_uses_the_valid_callers_controller() {
+        // FnKill attributes a foreign target to the valid calling Controller
+        // before completing AssignDeath synchronously
+        // (oracle-src-pinned src/C4Script.cpp:335-345;
+        // src/C4Object.cpp:1164-1205).
         let target_state = Rc::new(crate::preview_spawn_state(
             Vector2::ZERO,
             1,
@@ -25565,7 +25642,15 @@ func ChangeAndProbe()
             .iter()
             .find(|outcome| outcome.object_id == ObjectId::new(7))
             .expect("the target carries its death outcome");
-        assert_eq!(death.assign_death, Some(false));
+        assert_eq!(
+            death
+                .update
+                .as_ref()
+                .and_then(|update| update.alive),
+            Some(false),
+            "foreign AssignDeath completes before copy-out"
+        );
+        assert_eq!(death.assign_death, None);
         assert_eq!(
             death
                 .update
@@ -25573,6 +25658,1881 @@ func ChangeAndProbe()
                 .and_then(|update| update.energy_loss_cause),
             Some(0),
             "a valid calling Controller receives kill attribution"
+        );
+    }
+
+    #[test]
+    fn do_energy_runs_assign_death_before_the_invoking_script_continues() {
+        // C4Object::DoEnergy calls AssignDeath inline on the nonzero -> zero
+        // transition, and AssignDeath calls Death before DoEnergy returns
+        // (oracle-src-pinned src/C4Object.cpp:1164-1205,1372-1393).
+        let mut definition = crate::Definition::from_script(
+            "CLNK",
+            "Clonk",
+            r#"#strict
+local order;
+public func Trigger()
+{
+    order = 1;
+    DoEnergy(-10, 0, true);
+    order = order * 10 + 3;
+    return order;
+}
+protected func Death()
+{
+    order = order * 10 + 2;
+}
+"#,
+        )
+        .expect("death-order script compiles");
+        definition.set_physical(PhysicalInfo {
+            energy: C4_MAX_PHYSICAL,
+            ..PhysicalInfo::default()
+        });
+        let death_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_death_calls = Arc::clone(&death_calls);
+        definition.set_debugger_hooks(
+            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| {
+                if name == "Death" {
+                    observed_death_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }),
+        );
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("death-order definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        let index = engine.find_object_index(clonk).expect("clonk exists");
+        engine.objects[index].state.energy = 10;
+        engine.objects[index].state.alive = true;
+
+        let result = engine
+            .call_object_function(index, "Trigger", Vec::new())
+            .expect("lethal Trigger succeeds");
+        assert_eq!(engine.objects[index].state.energy, 0);
+        assert_eq!(
+            death_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the synchronous lifecycle must call Death exactly once"
+        );
+        assert_eq!(
+            result,
+            Value::Int(123),
+            "Death must run between DoEnergy and the following statement"
+        );
+    }
+
+    #[test]
+    fn punch_suppresses_catch_blow_after_lethal_death_removes_target() {
+        // ObjectComPunch continues its native fling bookkeeping after
+        // DoEnergy, but the final pTarget->Call(CatchBlow) is a no-op when
+        // synchronous Death made Status zero (oracle-src-pinned
+        // src/C4ObjectCom.cpp:737-767; src/C4Object.cpp:2224-2227).
+        let catch_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_catch_calls = Arc::clone(&catch_calls);
+        let attacker_definition = crate::Definition::from_script(
+            "PATK",
+            "Punch attacker",
+            r#"#strict
+public func Trigger(target)
+{
+    return Punch(target, 10);
+}
+"#,
+        )
+        .expect("punch attacker compiles");
+        let mut target_definition = crate::Definition::from_script(
+            "PTGT",
+            "Punch target",
+            r#"#strict
+protected func Death()
+{
+    RemoveObject();
+}
+protected func CatchBlow(strength, attacker)
+{
+    return 1;
+}
+"#,
+        )
+        .expect("punch target compiles");
+        target_definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
+        target_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), crate::ActionSpec::default()),
+                ("Dead".to_string(), crate::ActionSpec::default()),
+                ("Tumble".to_string(), crate::ActionSpec::default()),
+                ("GetPunched".to_string(), crate::ActionSpec::default()),
+            ]),
+        );
+        target_definition.set_debugger_hooks(
+            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| {
+                if name == "CatchBlow" {
+                    observed_catch_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }),
+        );
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(attacker_definition)
+            .expect("punch attacker registers");
+        engine
+            .register_definition(target_definition)
+            .expect("punch target registers");
+        let attacker = engine
+            .spawn_object(SpawnConfig::new("PATK"))
+            .expect("punch attacker spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("PTGT").with_alive(true))
+            .expect("punch target spawns");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        engine.objects[target_index].state.energy = 1;
+        let attacker_index = engine
+            .find_object_index(attacker)
+            .expect("attacker exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    attacker_index,
+                    "Trigger",
+                    vec![object_reference_value(target)],
+                )
+                .expect("lethal Punch completes"),
+            Value::Bool(true)
+        );
+        assert!(engine.objects[target_index].destroyed);
+        assert_eq!(
+            catch_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "C4Object::Call suppresses CatchBlow after Death removes the target"
+        );
+    }
+
+    #[test]
+    fn do_energy_stops_damage_effect_walk_after_target_removal() {
+        // C4Effect::DoDamage rechecks pObj->Status after every Fx*Damage
+        // callback and returns immediately once the target was removed
+        // (oracle-src-pinned src/C4Effect.cpp:427-436).
+        let first_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_first = Arc::clone(&first_calls);
+        let observed_second = Arc::clone(&second_calls);
+        let mut target_definition = crate::Definition::from_script(
+            "TARG",
+            "Target",
+            r#"#strict
+public func Setup()
+{
+    AddEffect("First", this, 10, 0, this);
+    AddEffect("Second", this, 20, 0, this);
+}
+protected func FxFirstDamage(target, number, change, cause, caused_by)
+{
+    RemoveObject(target);
+    return change;
+}
+protected func FxSecondDamage(target, number, change, cause, caused_by)
+{
+    return change;
+}
+"#,
+        )
+        .expect("damage-removal target compiles");
+        target_definition.set_debugger_hooks(
+            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| match name {
+                "FxFirstDamage" => {
+                    observed_first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                "FxSecondDamage" => {
+                    observed_second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                _ => {}
+            }),
+        );
+        let caller_definition = crate::Definition::from_script(
+            "CALL",
+            "Caller",
+            r#"#strict
+public func Trigger(target)
+{
+    return DoEnergy(-1, target, true);
+}
+"#,
+        )
+        .expect("damage-removal caller compiles");
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(target_definition)
+            .expect("damage-removal target registers");
+        engine
+            .register_definition(caller_definition)
+            .expect("damage-removal caller registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG").with_alive(true))
+            .expect("damage-removal target spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("damage-removal caller spawns");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        engine
+            .call_object_function(target_index, "Setup", Vec::new())
+            .expect("damage effects install");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Trigger",
+                    vec![object_reference_value(target)],
+                )
+                .expect("foreign DoEnergy returns"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            first_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            second_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the removed target stops the live C4Effect list walk"
+        );
+    }
+
+    #[test]
+    fn do_energy_skips_a_later_damage_effect_removed_by_an_earlier_hook() {
+        // C4Effect::DoDamage reads IsDead() from each live list node when it
+        // reaches that node; an earlier hook may therefore suppress a later
+        // hook by marking its effect dead (oracle-src-pinned
+        // src/C4Effect.cpp:427-436; src/C4Script.cpp:5487-5513).
+        let first_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_first = Arc::clone(&first_calls);
+        let observed_second = Arc::clone(&second_calls);
+        let mut target_definition = crate::Definition::from_script(
+            "TARG",
+            "Target",
+            r#"#strict
+public func Setup()
+{
+    AddEffect("First", this, 10, 0, this);
+    AddEffect("Second", this, 20, 0, this);
+}
+public func Trigger()
+{
+    return DoEnergy(-1, this, true);
+}
+protected func FxFirstDamage(target, number, change, cause, caused_by)
+{
+    RemoveEffect("Second", target, 0, true);
+    return change;
+}
+protected func FxSecondDamage(target, number, change, cause, caused_by)
+{
+    return change;
+}
+"#,
+        )
+        .expect("damage-effect-removal target compiles");
+        target_definition.set_debugger_hooks(
+            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| match name {
+                "FxFirstDamage" => {
+                    observed_first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                "FxSecondDamage" => {
+                    observed_second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                _ => {}
+            }),
+        );
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(target_definition)
+            .expect("damage-effect-removal target registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG").with_alive(true))
+            .expect("damage-effect-removal target spawns");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        engine
+            .call_object_function(target_index, "Setup", Vec::new())
+            .expect("damage effects install");
+
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "Trigger", Vec::new())
+                .expect("DoEnergy returns"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            first_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            second_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "DoDamage must read the later node's live dead state"
+        );
+    }
+
+    #[test]
+    fn do_energy_damage_walk_follows_live_next_after_callback_additions() {
+        // C4Effect::DoDamage advances through the current node's live pNext
+        // only after Fx*Damage returns. An effect inserted after that node is
+        // therefore visited in this chain; one inserted before it is not
+        // (oracle-src-pinned src/C4Effect.cpp:427-436,59-93).
+        let definition = crate::Definition::from_script(
+            "TARG",
+            "Target",
+            r#"#strict
+local order;
+public func Setup()
+{
+    AddEffect("First", this, 10, 0, this);
+    AddEffect("Second", this, 30, 0, this);
+}
+public func Trigger()
+{
+    order = 0;
+    DoEnergy(-1, this, true);
+    return order;
+}
+protected func FxFirstDamage(target, number, change, cause, caused_by)
+{
+    order = order * 10 + 1;
+    AddEffect("Before", this, 5, 0, this);
+    AddEffect("Between", this, 20, 0, this);
+    return change;
+}
+protected func FxBeforeDamage(target, number, change, cause, caused_by)
+{
+    order = order * 10 + 9;
+    return change;
+}
+protected func FxBetweenDamage(target, number, change, cause, caused_by)
+{
+    order = order * 10 + 2;
+    return change;
+}
+protected func FxSecondDamage(target, number, change, cause, caused_by)
+{
+    order = order * 10 + 3;
+    return change;
+}
+"#,
+        )
+        .expect("live-next damage script compiles");
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("live-next damage target registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG").with_alive(true))
+            .expect("live-next damage target spawns");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        engine
+            .call_object_function(target_index, "Setup", Vec::new())
+            .expect("initial damage effects install");
+
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "Trigger", Vec::new())
+                .expect("DoEnergy returns"),
+            Value::Int(123),
+            "the walk visits the new successor before the old successor without restarting at the new head"
+        );
+    }
+
+    #[test]
+    fn kill_remove_death_revival_and_forcing_match_cpp_order_exactly_once() {
+        // FnKill enters AssignDeath inline; RemoveDeath may revive and deny its
+        // effect removal, while forced death continues through Death and final OCF
+        // (oracle-src-pinned src/C4Script.cpp:335-345;
+        // src/C4Object.cpp:1164-1205; src/C4Effect.cpp:407-425;
+        // src/C4Object.h:361).
+        fn run(forced: bool) -> (Value, bool, String, usize, usize, usize, Value) {
+            let mut definition = crate::Definition::from_script(
+                "CLNK",
+                "Clonk",
+                r#"#strict
+local order, stop_alive, stop_ocf_alive;
+public func Trigger(forced)
+{
+    order = 1;
+    AddEffect("Guard", this, 1, 0, this);
+    Kill(this, forced);
+    order = order * 10 + 3;
+    return order;
+}
+protected func FxGuardStop(target, number, reason)
+{
+    stop_alive = GetAlive(target);
+    stop_ocf_alive = GetOCF(target) & OCF_Alive;
+    if (reason == 4)
+    {
+        SetAlive(true, target);
+        return -1;
+    }
+    return 0;
+}
+protected func Death()
+{
+    order = order * 10 + 2;
+    return 0;
+}
+public func StopProbe()
+{
+    if (stop_alive) return -1;
+    return stop_ocf_alive;
+}
+"#,
+            )
+            .expect("revival script compiles");
+            definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
+            definition.configure_actions(
+                Some("Idle".to_string()),
+                HashMap::from([
+                    ("Idle".to_string(), crate::ActionSpec::default()),
+                    ("Dead".to_string(), crate::ActionSpec::default()),
+                ]),
+            );
+
+            let stop_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let death_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed_stops = Arc::clone(&stop_calls);
+            let observed_deaths = Arc::clone(&death_calls);
+            definition.set_debugger_hooks(
+                clonk_script::DebuggerHooks::new().with_on_call(move |name, _| match name {
+                    "FxGuardStop" => {
+                        observed_stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    "Death" => {
+                        observed_deaths.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    _ => {}
+                }),
+            );
+
+            let mut engine = crate::Engine::with_seed(0);
+            engine
+                .register_definition(definition)
+                .expect("revival definition registers");
+            let clonk = engine
+                .spawn_object(SpawnConfig::new("CLNK"))
+                .expect("clonk spawns");
+            let index = engine.find_object_index(clonk).expect("clonk exists");
+            engine.objects[index].state.alive = true;
+            engine.refresh_object_ocf(index);
+
+            let result = engine
+                .call_object_function(index, "Trigger", vec![Value::Bool(forced)])
+                .expect("Kill trigger succeeds");
+            let stop_probe = engine
+                .call_object_function(index, "StopProbe", Vec::new())
+                .expect("Stop observation remains readable");
+            let object = &engine.objects[index];
+            (
+                result,
+                object.state.alive,
+                object.state.action.name.clone(),
+                object.state.effects.len(),
+                stop_calls.load(std::sync::atomic::Ordering::SeqCst),
+                death_calls.load(std::sync::atomic::Ordering::SeqCst),
+                stop_probe,
+            )
+        }
+
+        let revived = run(false);
+        assert_eq!(revived.0, Value::Int(13));
+        assert!(revived.1, "RemoveDeath SetAlive revival aborts ordinary Kill");
+        assert_eq!(revived.2, "Idle");
+        assert_eq!(revived.3, 1, "Stop=-1 restores the effect node");
+        assert_eq!(revived.4, 1, "RemoveDeath Stop runs exactly once");
+        assert_eq!(revived.5, 0, "an accepted revival suppresses Death");
+        assert_eq!(
+            revived.6,
+            Value::Int(crate::ocf::ALIVE as i32),
+            "AssignDeath's raw Alive=false is visible while cached OCF stays stale during Stop"
+        );
+
+        let forced = run(true);
+        assert_eq!(
+            forced.0,
+            Value::Int(123),
+            "forced Kill runs Death before the invoking script resumes"
+        );
+        assert!(!forced.1, "forced Kill overrides the Stop callback's revival");
+        assert_eq!(forced.2, "Dead");
+        assert_eq!(forced.3, 1, "forced death still honors Stop=-1");
+        assert_eq!(forced.4, 1, "forced RemoveDeath Stop runs exactly once");
+        assert_eq!(forced.5, 1, "forced Kill calls Death exactly once");
+        assert_eq!(
+            forced.6,
+            Value::Int(crate::ocf::ALIVE as i32),
+            "forced death uses the same raw-Alive/cached-OCF ordering"
+        );
+    }
+
+    #[test]
+    fn assign_death_clear_all_dispatches_stop_from_each_current_live_node() {
+        // C4Effect::ClearAll freezes the recursive node order, but reads the
+        // lower node's current pFnStop only after the higher callback returns.
+        // ChangeEffect therefore changes the later Stop callback
+        // (oracle-src-pinned src/C4Effect.cpp:407-425;
+        // src/C4Script.cpp:5516-5543).
+        let high_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let old_low_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let changed_low_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_high = Arc::clone(&high_calls);
+        let observed_old_low = Arc::clone(&old_low_calls);
+        let observed_changed_low = Arc::clone(&changed_low_calls);
+        let mut definition = crate::Definition::from_script(
+            "TARG",
+            "Target",
+            r#"#strict
+public func Trigger()
+{
+    AddEffect("Low", this, 10, 0, this);
+    AddEffect("High", this, 20, 0, this);
+    return Kill(this, true);
+}
+protected func FxHighStop(target, number, reason)
+{
+    if (reason == 4) ChangeEffect("Low", target, 0, "Changed", -1);
+    return 0;
+}
+protected func FxLowStop(target, number, reason)
+{
+    return 0;
+}
+protected func FxChangedStop(target, number, reason)
+{
+    return 0;
+}
+"#,
+        )
+        .expect("ClearAll live-node target compiles");
+        definition.set_debugger_hooks(
+            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| match name {
+                "FxHighStop" => {
+                    observed_high.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                "FxLowStop" => {
+                    observed_old_low.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                "FxChangedStop" => {
+                    observed_changed_low.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                _ => {}
+            }),
+        );
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("ClearAll live-node target registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG").with_alive(true))
+            .expect("ClearAll live-node target spawns");
+        let target_index = engine.find_object_index(target).expect("target exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(target_index, "Trigger", Vec::new())
+                .expect("forced Kill returns"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            high_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            old_low_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "ClearAll must not dispatch the lower node's stale callback"
+        );
+        assert_eq!(
+            changed_low_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "ClearAll must dispatch the callback installed before that node unwinds"
+        );
+    }
+
+    #[test]
+    fn assign_death_keeps_stop_ocf_stale_but_refreshes_dead_action_callbacks() {
+        // AssignDeath's raw Alive write stays invisible to cached OCF until
+        // SetAction performs SetOCF, which also makes a dead living object
+        // non-inflammable (oracle-src-pinned src/C4Object.cpp:564-568,
+        // 1164-1205, 4165-4169).
+        let mut definition = crate::Definition::from_script(
+            "DCOF",
+            "Death OCF",
+            r#"#strict
+local stop_alive, stop_ocf_alive, stop_ocf_crew, stop_ocf_inflammable;
+local start_ocf_alive, start_ocf_crew, start_ocf_inflammable;
+local abort_ocf_alive, abort_ocf_crew, abort_ocf_inflammable;
+local death_ocf_alive, death_ocf_crew, death_ocf_inflammable;
+public func Trigger()
+{
+    AddEffect("Probe", this, 1, 0, this);
+    Kill(this, true);
+    return 1;
+}
+protected func FxProbeStop()
+{
+    stop_alive = GetAlive();
+    stop_ocf_alive = GetOCF() & OCF_Alive;
+    stop_ocf_crew = GetOCF() & OCF_CrewMember;
+    stop_ocf_inflammable = GetOCF() & OCF_Inflammable;
+    return 0;
+}
+protected func DeadStart()
+{
+    start_ocf_alive = GetOCF() & OCF_Alive;
+    start_ocf_crew = GetOCF() & OCF_CrewMember;
+    start_ocf_inflammable = GetOCF() & OCF_Inflammable;
+}
+protected func WalkAbort()
+{
+    abort_ocf_alive = GetOCF() & OCF_Alive;
+    abort_ocf_crew = GetOCF() & OCF_CrewMember;
+    abort_ocf_inflammable = GetOCF() & OCF_Inflammable;
+}
+protected func Death()
+{
+    death_ocf_alive = GetOCF() & OCF_Alive;
+    death_ocf_crew = GetOCF() & OCF_CrewMember;
+    death_ocf_inflammable = GetOCF() & OCF_Inflammable;
+}
+"#,
+        )
+        .expect("death OCF script compiles");
+        definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
+        definition.set_crew_member(true);
+        definition.set_fire_properties(1, false, false);
+        definition.configure_actions(
+            Some("Walk".to_string()),
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    crate::ActionSpec::default().with_abort_call("WalkAbort"),
+                ),
+                (
+                    "Dead".to_string(),
+                    crate::ActionSpec::default().with_start_call("DeadStart"),
+                ),
+            ]),
+        );
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("death OCF definition registers");
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("DCOF")
+                    .with_alive(true)
+                    .with_action(ActionState::new("Walk")),
+            )
+            .expect("death OCF object spawns");
+        let index = engine
+            .find_object_index(object_id)
+            .expect("death OCF object exists");
+        engine.refresh_object_ocf(index);
+
+        engine
+            .call_object_function(index, "Trigger", Vec::new())
+            .expect("death OCF trigger succeeds");
+
+        let locals = &engine.objects[index].state.local_vars;
+        assert_eq!(locals.get("stop_alive"), Some(&Value::Bool(false)));
+        assert_eq!(
+            locals.get("stop_ocf_alive"),
+            Some(&Value::Int(crate::ocf::ALIVE as i32)),
+            "the initial raw Alive write leaves OCF stale during RemoveDeath"
+        );
+        assert_eq!(
+            locals.get("stop_ocf_crew"),
+            Some(&Value::Int(crate::ocf::CREW_MEMBER as i32))
+        );
+        assert_eq!(
+            locals.get("stop_ocf_inflammable"),
+            Some(&Value::Int(crate::ocf::INFLAMMABLE as i32)),
+            "the initial raw Alive write leaves OCF_Inflammable stale during RemoveDeath"
+        );
+        for name in [
+            "start_ocf_alive",
+            "start_ocf_crew",
+            "start_ocf_inflammable",
+            "abort_ocf_alive",
+            "abort_ocf_crew",
+            "abort_ocf_inflammable",
+            "death_ocf_alive",
+            "death_ocf_crew",
+            "death_ocf_inflammable",
+        ] {
+            assert_eq!(
+                locals.get(name),
+                Some(&Value::Int(0)),
+                "{name} observes SetAction's explicit SetOCF"
+            );
+        }
+        assert_eq!(
+            engine.objects[index].state.ocf & crate::ocf::INFLAMMABLE,
+            0,
+            "AssignDeath's final SetOCF keeps a dead living object non-inflammable"
+        );
+    }
+
+    #[test]
+    fn set_category_after_kill_refreshes_and_persists_the_later_ocf() {
+        // C4Object::SetCategory assigns Category, calls Resort, and then
+        // SetOCF. When it follows synchronous AssignDeath, this later cache
+        // must win both immediately and at copy-out (oracle-src-pinned
+        // src/C4Object.h:311; src/C4Object.cpp:564-568,602-624,
+        // 1164-1205).
+        let mut definition = crate::Definition::from_script(
+            "DCTG",
+            "Death category",
+            r#"#strict
+local before_category_ocf, after_category_ocf;
+public func Trigger()
+{
+    Kill(this, true);
+    before_category_ocf = GetOCF();
+    SetCategory(C4D_Object);
+    after_category_ocf = GetOCF();
+    return true;
+}
+"#,
+        )
+        .expect("death-category script compiles");
+        definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
+        definition.set_fire_properties(1, false, false);
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), crate::ActionSpec::default()),
+                ("Dead".to_string(), crate::ActionSpec::default()),
+            ]),
+        );
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("death-category definition registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("DCTG").with_alive(true))
+            .expect("death-category object spawns");
+        let index = engine
+            .find_object_index(target)
+            .expect("death-category object exists");
+        engine.refresh_object_ocf(index);
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Trigger", Vec::new())
+                .expect("death-category trigger succeeds"),
+            Value::Bool(true)
+        );
+
+        let state = &engine.objects[index].state;
+        let before = state
+            .local_vars
+            .get("before_category_ocf")
+            .and_then(Value::as_c4_int)
+            .expect("pre-category OCF recorded") as u32;
+        let after = state
+            .local_vars
+            .get("after_category_ocf")
+            .and_then(Value::as_c4_int)
+            .expect("post-category OCF recorded") as u32;
+        assert_ne!(before & crate::ocf::LIVING, 0);
+        assert_eq!(before & crate::ocf::INFLAMMABLE, 0);
+        assert_eq!(after & crate::ocf::LIVING, 0);
+        assert_ne!(after & crate::ocf::INFLAMMABLE, 0);
+        assert_eq!(state.category, crate::CATEGORY_OBJECT);
+        assert_eq!(
+            state.ocf, after,
+            "AssignDeath's earlier final-cache transport must not overwrite SetCategory's later SetOCF"
+        );
+    }
+
+    #[test]
+    fn kill_foreign_target_completes_death_before_caller_resumes_exactly_once() {
+        // FnKill calls a foreign target's AssignDeath before returning, so Death's
+        // writes and Alive=false are immediately visible to the caller
+        // (oracle-src-pinned src/C4Script.cpp:335-345;
+        // src/C4Object.cpp:1164-1205).
+        let death_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_deaths = Arc::clone(&death_calls);
+        let mut target_definition = crate::Definition::from_script(
+            "TARG",
+            "Target",
+            r#"#strict
+local death_count;
+protected func Death()
+{
+    death_count++;
+    return 0;
+}
+public func DeathCount()
+{
+    return death_count;
+}
+"#,
+        )
+        .expect("target script compiles");
+        target_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), crate::ActionSpec::default()),
+                ("Dead".to_string(), crate::ActionSpec::default()),
+            ]),
+        );
+        target_definition.set_debugger_hooks(
+            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| {
+                if name == "Death" {
+                    observed_deaths.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }),
+        );
+        let caller_definition = crate::Definition::from_script(
+            "CALL",
+            "Caller",
+            r#"#strict
+public func Trigger(target)
+{
+    if (!Kill(target)) return -1;
+    if (GetAlive(target)) return -2;
+    return target->DeathCount();
+}
+"#,
+        )
+        .expect("caller script compiles");
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(target_definition)
+            .expect("target definition registers");
+        engine
+            .register_definition(caller_definition)
+            .expect("caller definition registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("target spawns");
+        let caller_index = engine
+            .find_object_index(caller)
+            .expect("caller remains present");
+        let target_index = engine
+            .find_object_index(target)
+            .expect("target remains present");
+        engine.objects[target_index].state.alive = true;
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Trigger",
+                    vec![object_reference_value(target)],
+                )
+                .expect("foreign Kill succeeds"),
+            Value::Int(1),
+            "Death and the raw Alive write are visible before Kill returns"
+        );
+        assert!(
+            !engine.objects[target_index].state.alive,
+            "foreign target's final death state folds once"
+        );
+        assert_eq!(
+            death_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "foreign target Death runs exactly once"
+        );
+    }
+
+    #[test]
+    fn assign_death_clears_preexisting_authoritative_command_queue() {
+        // AssignDeath calls ClearCommands before contents, player pointers, and Death
+        // (oracle-src-pinned src/C4Object.cpp:1180-1200,3873-3884).
+        let mut definition = crate::Definition::from_script(
+            "QDED",
+            "Queued death",
+            r#"#strict
+public func Trigger()
+{
+    return Kill(this, true);
+}
+"#,
+        )
+        .expect("queued-death script compiles");
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), crate::ActionSpec::default()),
+                ("Dead".to_string(), crate::ActionSpec::default()),
+            ]),
+        );
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("queued-death definition registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("QDED").with_alive(true))
+            .expect("queued-death object spawns");
+        let index = engine
+            .find_object_index(target)
+            .expect("queued-death object exists");
+        engine.objects[index]
+            .command_queue
+            .push_back(QueuedCommand::new(7, ObjectUpdate::default()));
+
+        assert_eq!(engine.objects[index].command_queue.len(), 1);
+        assert_eq!(
+            engine
+                .call_object_function(index, "Trigger", Vec::new())
+                .expect("queued-death trigger succeeds"),
+            Value::Bool(true)
+        );
+        assert!(
+            engine.objects[index].command_queue.is_empty(),
+            "AssignDeath's ClearCommands clears commands already queued before Kill"
+        );
+    }
+
+    #[test]
+    fn foreign_death_callback_set_owner_rehomes_retained_fow_view() {
+        // AssignDeath captures pPlr before ClearPointers, performs the
+        // living/FoW retention test before Death, and then Death may change
+        // Owner while the retained nonzero range remains. The foreign-object
+        // copy-out must therefore move the FoW link to the new owner even
+        // though PlrViewRange itself did not change
+        // (oracle-src-pinned src/C4Object.cpp:1193-1204,5493-5522).
+        let mut target_definition = crate::Definition::from_script(
+            "FOWD",
+            "FoW death",
+            r#"#strict
+protected func Death()
+{
+    SetOwner(1);
+}
+"#,
+        )
+        .expect("FoW-death script compiles");
+        target_definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
+        target_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), crate::ActionSpec::default()),
+                ("Dead".to_string(), crate::ActionSpec::default()),
+            ]),
+        );
+        let caller_definition = crate::Definition::from_script(
+            "FOWC",
+            "FoW caller",
+            r#"#strict
+public func Trigger(target)
+{
+    return Kill(target, true);
+}
+"#,
+        )
+        .expect("FoW caller script compiles");
+
+        let mut engine = crate::Engine::with_seed(0);
+        for player in [0, 1] {
+            engine
+                .register_player(crate::PlayerConfig::new(
+                    player,
+                    format!("Player {player}"),
+                ))
+                .expect("FoW player registers");
+        }
+        engine
+            .register_definition(target_definition)
+            .expect("FoW-death definition registers");
+        engine
+            .register_definition(caller_definition)
+            .expect("FoW caller definition registers");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("FOWD")
+                    .with_owner(0)
+                    .with_alive(true)
+                    .with_plr_view_range(500),
+            )
+            .expect("FoW-death target spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("FOWC"))
+            .expect("FoW caller spawns");
+        assert!(
+            engine
+                .player(0)
+                .is_some_and(|player| player.has_fow_view_object(target))
+        );
+        assert!(
+            !engine
+                .player(1)
+                .is_some_and(|player| player.has_fow_view_object(target))
+        );
+
+        let caller_index = engine.find_object_index(caller).expect("FoW caller exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Trigger",
+                    vec![object_reference_value(target)],
+                )
+                .expect("foreign FoW death succeeds"),
+            Value::Bool(true)
+        );
+        let target_state = engine
+            .object_snapshot(target)
+            .expect("dead FoW target remains allocated");
+        assert_eq!(target_state.owner, 1);
+        assert_eq!(
+            target_state.plr_view_range, 500,
+            "the original owner's live FoW link retains the dead living range before Death"
+        );
+        assert!(
+            !engine
+                .player(0)
+                .is_some_and(|player| player.has_fow_view_object(target)),
+            "Death's SetOwner removes the retained link from the original owner"
+        );
+        assert!(
+            engine
+                .player(1)
+                .is_some_and(|player| player.has_fow_view_object(target)),
+            "Death's SetOwner installs the retained link on the new owner"
+        );
+    }
+
+    #[test]
+    fn assign_death_cursor_replacement_resets_view_in_cpp_order_for_both_paths() {
+        // Death ClearPointers removes Crew before AdjustCursorCommand resets/follows
+        // the old view cursor, then clears ViewCursor and ViewTarget
+        // (oracle-src-pinned src/C4Player.cpp:57-77,923-928,
+        // 1235-1259,1692-1716; src/C4Object.cpp:1193-1195).
+        fn run(foreign_vm_path: bool) -> (crate::Engine, ObjectId, ObjectId) {
+            let mut crew_definition =
+                crate::Definition::from_script("VCRE", "View crew", "#strict")
+                    .expect("view-crew script compiles");
+            crew_definition.set_category(
+                crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING,
+            );
+            crew_definition.set_crew_member(true);
+            crew_definition.configure_actions(
+                Some("Idle".to_string()),
+                HashMap::from([
+                    ("Idle".to_string(), crate::ActionSpec::default()),
+                    ("Dead".to_string(), crate::ActionSpec::default()),
+                ]),
+            );
+            let caller_definition = crate::Definition::from_script(
+                "VCRL",
+                "View caller",
+                r#"#strict
+public func Trigger(target)
+{
+    return Kill(target, true);
+}
+"#,
+            )
+            .expect("view caller script compiles");
+
+            let mut engine = crate::Engine::with_seed(0);
+            engine
+                .register_player(crate::PlayerConfig::new(0, "Player"))
+                .expect("view player registers");
+            engine
+                .register_definition(crew_definition)
+                .expect("view-crew definition registers");
+            engine
+                .register_definition(caller_definition)
+                .expect("view caller definition registers");
+            let dying = engine
+                .spawn_object(
+                    SpawnConfig::new("VCRE")
+                        .with_owner(0)
+                        .with_alive(true)
+                        .with_crew_member(true)
+                        .with_position(Vector2::new(40, 50)),
+                )
+                .expect("dying view crew spawns");
+            let replacement = engine
+                .spawn_object(
+                    SpawnConfig::new("VCRE")
+                        .with_owner(0)
+                        .with_alive(true)
+                        .with_crew_member(true)
+                        .with_position(Vector2::new(140, 150)),
+                )
+                .expect("replacement view crew spawns");
+            engine
+                .select_crew(0, [dying, replacement])
+                .expect("view crew selects");
+            engine
+                .set_crew_cursor(0, Some(dying))
+                .expect("dying crew becomes cursor");
+            {
+                let player = engine.player_mut(0).expect("view player remains");
+                player.set_view_cursor(Some(dying));
+                player.set_view_target(Some(replacement));
+                player.set_view_center(Vector2::new(1, 2));
+                player.replace_viewports(vec![
+                    PlayerViewport::new(Vector2::new(1, 2))
+                        .with_focus(Some(replacement)),
+                ]);
+            }
+
+            if foreign_vm_path {
+                let caller = engine
+                    .spawn_object(SpawnConfig::new("VCRL"))
+                    .expect("view caller spawns");
+                let caller_index =
+                    engine.find_object_index(caller).expect("view caller exists");
+                assert_eq!(
+                    engine
+                        .call_object_function(
+                            caller_index,
+                            "Trigger",
+                            vec![object_reference_value(dying)],
+                        )
+                        .expect("foreign view death succeeds"),
+                    Value::Bool(true)
+                );
+            } else {
+                let dying_index =
+                    engine.find_object_index(dying).expect("dying crew exists");
+                engine
+                    .assign_death(dying_index, true)
+                    .expect("direct view death succeeds");
+            }
+            (engine, dying, replacement)
+        }
+
+        for foreign_vm_path in [false, true] {
+            let (engine, dying, replacement) = run(foreign_vm_path);
+            let player = engine.player(0).expect("view player survives");
+            assert_eq!(
+                player.cursor(),
+                Some(replacement),
+                "AdjustCursorCommand selects the remaining crew"
+            );
+            assert_eq!(player.view_cursor(), None);
+            assert_eq!(
+                player.raw_view_mode(),
+                crate::PLAYER_VIEW_MODE_CURSOR,
+                "ResetCursorView runs before the dying ViewCursor is cleared"
+            );
+            assert_eq!(player.raw_view_target(), None);
+            assert_eq!(
+                player.view_center(),
+                Vector2::new(40, 50),
+                "UpdateView still follows the old ViewCursor at its native call point"
+            );
+            assert_eq!(
+                player.viewports()[0].center,
+                Vector2::new(40, 50)
+            );
+            assert_eq!(
+                player.viewports()[0].focus,
+                Some(replacement),
+                "the ClearPointers suffix retargets presentation focus after clearing ViewCursor"
+            );
+            assert!(
+                !player.crew().contains(&dying),
+                "the dying cursor leaves Crew before the replacement search"
+            );
+        }
+    }
+
+    #[test]
+    fn assign_death_skips_death_callback_after_remove_death_destroys_target() {
+        // RemoveDeath may AssignRemoval and zero Status; AssignDeath continues, but
+        // C4Object::Call suppresses Death for a status-zero object
+        // (oracle-src-pinned src/C4Effect.cpp:407-425;
+        // src/C4Object.cpp:240-320,1164-1205,2224-2227).
+        let stop_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let death_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_stops = Arc::clone(&stop_calls);
+        let observed_deaths = Arc::clone(&death_calls);
+        let mut target_definition = crate::Definition::from_script(
+            "TARG",
+            "Target",
+            r#"#strict
+public func Setup()
+{
+    AddEffect("Vanish", this, 1, 0, this);
+}
+protected func FxVanishStop(target, number, reason)
+{
+    if (reason == 4) RemoveObject(target);
+    return 0;
+}
+protected func Death()
+{
+    return 0;
+}
+"#,
+        )
+        .expect("removal target script compiles");
+        target_definition.set_debugger_hooks(
+            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| match name {
+                "FxVanishStop" => {
+                    observed_stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                "Death" => {
+                    observed_deaths.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                _ => {}
+            }),
+        );
+        let caller_definition = crate::Definition::from_script(
+            "CALL",
+            "Caller",
+            r#"#strict
+public func Trigger(target)
+{
+    return Kill(target, true);
+}
+"#,
+        )
+        .expect("removal caller script compiles");
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(target_definition)
+            .expect("removal target registers");
+        engine
+            .register_definition(caller_definition)
+            .expect("removal caller registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG").with_alive(true))
+            .expect("removal target spawns");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("removal caller spawns");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        engine
+            .call_object_function(target_index, "Setup", Vec::new())
+            .expect("death-removal effect installs");
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Trigger",
+                    vec![object_reference_value(target)],
+                )
+                .expect("foreign forced Kill returns"),
+            Value::Bool(true)
+        );
+        assert!(
+            engine.objects[target_index].destroyed,
+            "the RemoveDeath callback's AssignRemoval folds immediately"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(target)
+                .expect("the removed C++ object remains allocated as a tombstone")
+                .status,
+            ObjectStatus::Deleted,
+            "AssignRemoval clears raw Status before the Kill call resumes"
+        );
+        assert_eq!(
+            stop_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            death_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "C4Object::Call is a no-op once raw Status is zero"
+        );
+    }
+
+    #[test]
+    fn assign_death_retries_live_contents_head_after_exit_reports_reentry() {
+        // AssignDeath re-reads Contents.GetObject after every Exit; Exit reports
+        // re-entry through its Ejection callback before returning
+        // (oracle-src-pinned src/C4Object.cpp:1191-1192,1532-1563).
+        let mut container_definition = crate::Definition::from_script(
+            "CONT",
+            "Container",
+            r#"#strict
+local ejections, death_ejections;
+public func Trigger()
+{
+    Kill(this, true);
+}
+protected func Ejection(item)
+{
+    ejections++;
+    if (ejections == 1) Enter(this, item);
+}
+protected func Death()
+{
+    death_ejections = ejections;
+}
+"#,
+        )
+        .expect("contents retry script compiles");
+        container_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), crate::ActionSpec::default()),
+                ("Dead".to_string(), crate::ActionSpec::default()),
+            ]),
+        );
+        let item_definition =
+            crate::Definition::from_script("ITEM", "Item", "#strict")
+                .expect("contents item compiles");
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(container_definition)
+            .expect("contents container registers");
+        engine
+            .register_definition(item_definition)
+            .expect("contents item registers");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT").with_alive(true))
+            .expect("contents container spawns");
+        let item = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+            .expect("contained item spawns");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("contents container exists");
+
+        engine
+            .call_object_function(container_index, "Trigger", Vec::new())
+            .expect("contents death succeeds");
+
+        let container_state = engine
+            .object_snapshot(container)
+            .expect("dead container remains");
+        assert_eq!(
+            container_state.local_vars.get("ejections"),
+            Some(&Value::Int(2)),
+            "AssignDeath retries the re-entered live head"
+        );
+        assert_eq!(
+            container_state.local_vars.get("death_ejections"),
+            Some(&Value::Int(2)),
+            "Death runs only after the contents list is empty"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(item)
+                .expect("item remains")
+                .container,
+            None
+        );
+    }
+
+    #[test]
+    fn assign_death_replays_same_key_reentries_in_enter_order() {
+        // AssignDeath re-reads the live first contents link after every Exit
+        // (oracle-src-pinned src/C4Object.cpp:1191-1192).
+        // C4ObjectList::Add(stContents) inserts
+        // each re-entry before the first matching category/id link at the
+        // instant Enter runs (src/C4ObjectList.cpp:147-175), so entering B then
+        // A yields the later A as the next object to eject.
+        let mut container_definition = crate::Definition::from_script(
+            "CONT",
+            "Container",
+            r#"#strict
+local seed, first, second, ejection_order;
+public func Trigger(object a, object b, object marker)
+{
+    first = a;
+    second = b;
+    seed = marker;
+    a->SetTag(1);
+    b->SetTag(2);
+    a->Prime();
+    b->Prime();
+    Kill(this, true);
+    return ejection_order;
+}
+protected func Ejection(object item)
+{
+    if (item == seed)
+    {
+        Enter(this, second);
+        Enter(this, first);
+    }
+    else
+    {
+        ejection_order = ejection_order * 10 + item->Tag();
+    }
+}
+"#,
+        )
+        .expect("ordered contents script compiles");
+        container_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), crate::ActionSpec::default()),
+                ("Dead".to_string(), crate::ActionSpec::default()),
+            ]),
+        );
+        let item_definition = crate::Definition::from_script(
+            "ITEM",
+            "Item",
+            r#"#strict
+local tag;
+public func SetTag(int value) { tag = value; }
+public func Prime() { return tag; }
+public func Tag() { return tag; }
+"#,
+        )
+        .expect("ordered item script compiles");
+        let seed_definition = crate::Definition::from_script("SEED", "Seed", "#strict")
+            .expect("ordered seed script compiles");
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(container_definition)
+            .expect("ordered container registers");
+        engine
+            .register_definition(item_definition)
+            .expect("ordered item registers");
+        engine
+            .register_definition(seed_definition)
+            .expect("ordered seed registers");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT").with_alive(true))
+            .expect("ordered container spawns");
+        let first = engine
+            .spawn_object(SpawnConfig::new("ITEM"))
+            .expect("first ordered item spawns");
+        let second = engine
+            .spawn_object(SpawnConfig::new("ITEM"))
+            .expect("second ordered item spawns");
+        let seed = engine
+            .spawn_object(SpawnConfig::new("SEED").with_container(container))
+            .expect("ordered seed contents spawn");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("ordered container exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    container_index,
+                    "Trigger",
+                    vec![
+                        object_reference_value(first),
+                        object_reference_value(second),
+                        object_reference_value(seed),
+                    ],
+                )
+                .expect("ordered contents death succeeds"),
+            Value::Int(12),
+            "B then A re-entry must eject A then B like stContents"
+        );
+    }
+
+    #[test]
+    fn assign_death_does_not_reapply_an_old_contents_rotation_after_reentry() {
+        // ScrollContents performs one raw remove-and-append
+        // (oracle-src-pinned src/C4Script.cpp:1793-1804).
+        // If that new front later exits and
+        // re-enters, C4ObjectList::Add(stContents) chooses a fresh sorted
+        // position (src/C4ObjectList.cpp:147-175); the old rotation is not a
+        // persistent preference. AssignDeath observes that new head on its
+        // next Contents.GetObject() (src/C4Object.cpp:1191-1192).
+        let mut container_definition = crate::Definition::from_script(
+            "CONT",
+            "Container",
+            r#"#strict
+local low, reentered, ejection_order;
+public func Trigger(object low_item)
+{
+    low = low_item;
+    ScrollContents();
+    Kill(this, true);
+    return ejection_order;
+}
+protected func Ejection(object item)
+{
+    ejection_order = ejection_order * 10 + item->Tag();
+    if (item == low && !reentered)
+    {
+        reentered = true;
+        Enter(this, item);
+    }
+}
+"#,
+        )
+        .expect("rotated contents script compiles");
+        container_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), crate::ActionSpec::default()),
+                ("Dead".to_string(), crate::ActionSpec::default()),
+            ]),
+        );
+        let mut high_definition =
+            crate::Definition::from_script("HIGH", "High", "#strict\npublic func Tag() { return 2; }")
+                .expect("high contents script compiles");
+        high_definition.set_category(crate::CATEGORY_OBJECT);
+        let mut low_definition =
+            crate::Definition::from_script("LOW", "Low", "#strict\npublic func Tag() { return 1; }")
+                .expect("low contents script compiles");
+        low_definition.set_category(crate::CATEGORY_VEHICLE);
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(container_definition)
+            .expect("rotated container registers");
+        engine
+            .register_definition(high_definition)
+            .expect("high contents register");
+        engine
+            .register_definition(low_definition)
+            .expect("low contents register");
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT").with_alive(true))
+            .expect("rotated container spawns");
+        let low = engine
+            .spawn_object(SpawnConfig::new("LOW").with_container(container))
+            .expect("low contents spawn");
+        let high = engine
+            .spawn_object(SpawnConfig::new("HIGH").with_container(container))
+            .expect("high contents spawn");
+        let container_index = engine
+            .find_object_index(container)
+            .expect("rotated container exists");
+        assert_eq!(
+            engine.objects[container_index].state.contents,
+            vec![high, low],
+            "fixture begins in stContents category order"
+        );
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    container_index,
+                    "Trigger",
+                    vec![object_reference_value(low)],
+                )
+                .expect("rotated contents death succeeds"),
+            Value::Int(121),
+            "the re-entered low item sorts behind high before its final Exit"
+        );
+    }
+
+    #[test]
+    fn death_callback_set_alive_survives_assign_deaths_final_set_ocf() {
+        // Death runs before AssignDeath's final SetOCF, so Death's SetAlive refresh
+        // remains visible after the lifecycle returns
+        // (oracle-src-pinned src/C4Object.cpp:1199-1204;
+        // src/C4Object.h:361; src/C4Script.cpp:814-818).
+        let death_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_deaths = Arc::clone(&death_calls);
+        let mut definition = crate::Definition::from_script(
+            "CLNK",
+            "Clonk",
+            r#"#strict
+public func Trigger()
+{
+    Kill(this, true);
+    return GetAlive();
+}
+protected func Death()
+{
+    SetAlive(true);
+    return 0;
+}
+"#,
+        )
+        .expect("Death-revival script compiles");
+        definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
+        definition.set_crew_member(true);
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), crate::ActionSpec::default()),
+                ("Dead".to_string(), crate::ActionSpec::default()),
+            ]),
+        );
+        definition.set_debugger_hooks(
+            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| {
+                if name == "Death" {
+                    observed_deaths.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }),
+        );
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("Death-revival definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        let index = engine.find_object_index(clonk).expect("clonk exists");
+        engine.objects[index].state.alive = true;
+        engine.refresh_object_ocf(index);
+
+        assert_eq!(
+            engine
+                .call_object_function(index, "Trigger", Vec::new())
+                .expect("forced Kill returns after Death revival"),
+            Value::Bool(true),
+            "Death's SetAlive is visible after AssignDeath returns"
+        );
+        let object = &engine.objects[index];
+        assert!(object.state.alive);
+        assert_eq!(object.state.action.name, "Dead");
+        assert!(
+            !object.state.crew_member,
+            "the owner roster projection is cleared independently"
+        );
+        assert_ne!(
+            object.state.ocf & crate::ocf::ALIVE,
+            0,
+            "AssignDeath's final SetOCF acknowledges the callback's revival"
+        );
+        assert_ne!(
+            object.state.ocf & crate::ocf::CREW_MEMBER,
+            0,
+            "revived OCF uses the definition CrewMember capability, not the cleared roster bit"
+        );
+        assert_eq!(
+            death_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the revived object is not killed again during copy-out"
+        );
+    }
+
+    #[test]
+    fn foreign_death_revival_uses_definition_crew_capability_not_runtime_roster() {
+        // C4Object::SetOCF reads Def->CrewMember, not whether any player's
+        // Crew list still contains the object
+        // (oracle-src-pinned src/C4Object.cpp:622-624,1193-1204).
+        // AssignDeath clears the runtime roster before Death, and a foreign
+        // target executes through a freshly materialized nested scope.
+        let mut target_definition = crate::Definition::from_script(
+            "CLNK",
+            "Foreign revived Clonk",
+            r#"#strict
+protected func Death()
+{
+    SetAlive(true);
+    return 0;
+}
+"#,
+        )
+        .expect("foreign revival target compiles");
+        target_definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
+        target_definition.set_crew_member(true);
+        target_definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), crate::ActionSpec::default()),
+                ("Dead".to_string(), crate::ActionSpec::default()),
+            ]),
+        );
+        let caller_definition = crate::Definition::from_script(
+            "CALL",
+            "Foreign revival caller",
+            r#"#strict
+public func Trigger(target)
+{
+    Kill(target, true);
+    return [GetAlive(target), GetOCF(target) & OCF_CrewMember];
+}
+"#,
+        )
+        .expect("foreign revival caller compiles");
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(target_definition)
+            .expect("foreign revival target registers");
+        engine
+            .register_definition(caller_definition)
+            .expect("foreign revival caller registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("foreign revival caller spawns");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_alive(true)
+                    .with_crew_member(false),
+            )
+            .expect("foreign revival target spawns outside every runtime roster");
+        let caller_index = engine
+            .find_object_index(caller)
+            .expect("foreign revival caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Trigger",
+                    vec![object_reference_value(target)],
+                )
+                .expect("foreign forced Kill returns after revival"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(crate::ocf::CREW_MEMBER as i32),
+            ]),
+            "the caller immediately observes final SetOCF using Def->CrewMember"
+        );
+        let target_index = engine
+            .find_object_index(target)
+            .expect("foreign revived target remains");
+        let object = &engine.objects[target_index];
+        assert!(object.state.alive);
+        assert!(
+            !object.state.crew_member,
+            "Death revival does not implicitly restore a player Crew link"
+        );
+        assert_ne!(
+            object.state.ocf & crate::ocf::CREW_MEMBER,
+            0,
+            "runtime roster state must not replace the definition capability"
+        );
+    }
+
+    #[test]
+    fn assign_death_callback_recruit_actualizes_nonzero_fow_range_before_retention() {
+        // AssignDeath tests the captured owner's live FoWViewObjs only after
+        // ClearPointers has selected the replacement crew. That replacement
+        // may re-recruit the dying object; MakeCrewMember must run its
+        // nonzero-range PlrFoWActualize arm before AssignDeath performs the
+        // retention test (oracle-src-pinned src/C4Object.cpp:1193-1198;
+        // src/C4Player.cpp:1194-1199).
+        let mut definition = crate::Definition::from_script(
+            "CLNK",
+            "Death recruitment",
+            r#"#strict
+local victim, death_view_range;
+public func SetVictim(target) { victim = target; }
+public func Trigger() { Kill(this, true); }
+protected func CrewSelection(unselect, cursor)
+{
+    if (!unselect && !cursor && victim)
+        SetCrewStatus(0, true, victim);
+}
+protected func Death()
+{
+    death_view_range = GetObjectVal("PlrViewRange", 0, this());
+}
+"#,
+        )
+        .expect("death-recruitment definition compiles");
+        definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
+        definition.set_crew_member(true);
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), crate::ActionSpec::default()),
+                ("Dead".to_string(), crate::ActionSpec::default()),
+            ]),
+        );
+
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Owner"))
+            .expect("death-recruitment owner registers");
+        engine
+            .register_definition(definition)
+            .expect("death-recruitment definition registers");
+        let target = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(0)
+                    .with_alive(true)
+                    .with_crew_member(true)
+                    .with_plr_view_range(333),
+            )
+            .expect("dying crew target spawns");
+        let replacement = engine
+            .spawn_object(
+                SpawnConfig::new("CLNK")
+                    .with_owner(0)
+                    .with_alive(true)
+                    .with_crew_member(true),
+            )
+            .expect("replacement crew spawns");
+        let replacement_index = engine
+            .find_object_index(replacement)
+            .expect("replacement crew exists");
+        engine
+            .call_object_function(
+                replacement_index,
+                "SetVictim",
+                vec![object_reference_value(target)],
+            )
+            .expect("replacement remembers the dying target");
+        engine
+            .set_crew_cursor(0, Some(target))
+            .expect("dying target becomes cursor");
+
+        // Model a live nonzero PlrViewRange whose runtime FoW link was
+        // cleared earlier. The replacement's recruitment must restore it
+        // synchronously, before AssignDeath decides whether to zero range.
+        engine
+            .players
+            .get_mut(&0)
+            .expect("owner exists")
+            .remove_fow_view_object(target);
+        assert!(
+            !engine
+                .player(0)
+                .expect("owner remains")
+                .has_fow_view_object(target)
+        );
+
+        let target_index = engine
+            .find_object_index(target)
+            .expect("dying target exists");
+        engine
+            .call_object_function(target_index, "Trigger", Vec::new())
+            .expect("forced death completes");
+
+        let target_state = engine
+            .object_snapshot(target)
+            .expect("dead recruited target remains");
+        assert_eq!(target_state.plr_view_range, 333);
+        assert_eq!(
+            target_state.local_vars.get("death_view_range"),
+            Some(&Value::Int(333)),
+            "Death observes the retained range after callback recruitment"
+        );
+        assert!(
+            engine
+                .player(0)
+                .expect("owner remains")
+                .has_fow_view_object(target),
+            "nonzero-range MakeCrewMember re-adds the live FoW link"
+        );
+        assert!(
+            engine.player(0).expect("owner remains").crew().contains(&target),
+            "the cursor-replacement callback re-recruits the dying target"
         );
     }
 

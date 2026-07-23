@@ -2787,6 +2787,70 @@ fn call_world_object_function_with_options(
     Some(result)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContentsLinkOperation {
+    Remove {
+        container: ObjectId,
+        child: ObjectId,
+    },
+    Insert {
+        container: ObjectId,
+        child: ObjectId,
+        position: usize,
+    },
+    MoveToBack {
+        container: ObjectId,
+        child: ObjectId,
+    },
+    RotateToFront {
+        container: ObjectId,
+        child: ObjectId,
+    },
+}
+
+impl ContentsLinkOperation {
+    fn container(self) -> ObjectId {
+        match self {
+            Self::Remove { container, .. }
+            | Self::Insert { container, .. }
+            | Self::MoveToBack { container, .. }
+            | Self::RotateToFront { container, .. } => container,
+        }
+    }
+
+    fn mutates_link(self, container: ObjectId, child: ObjectId) -> bool {
+        match self {
+            Self::Remove {
+                container: operation_container,
+                child: operation_child,
+            }
+            | Self::Insert {
+                container: operation_container,
+                child: operation_child,
+                ..
+            }
+            | Self::MoveToBack {
+                container: operation_container,
+                child: operation_child,
+            } => operation_container == container && operation_child == child,
+            Self::RotateToFront { .. } => false,
+        }
+    }
+
+    fn reorders(self, container: ObjectId) -> bool {
+        matches!(
+            self,
+            Self::MoveToBack {
+                container: operation_container,
+                ..
+            } | Self::RotateToFront {
+                container: operation_container,
+                ..
+            } if operation_container == container
+        )
+    }
+}
+
 pub(crate) struct EffectHostContext {
     object: Option<ObjectScopeContext>,
     /// Definition context for no-object script execution (`cthr->Def`).
@@ -2824,6 +2888,11 @@ pub(crate) struct EffectHostContext {
     /// call. Unlike `unlinked_content_links`, these are omitted from the
     /// snapshot base but remain eligible for the live Enter-growth pass.
     relinked_content_links: HashSet<(ObjectId, ObjectId)>,
+    /// Exact chronological contents-link mutations made during this VM
+    /// invocation. C4ObjectList::Add chooses its stContents position at the
+    /// instant Enter runs (C4ObjectList.cpp:147-175); rebuilding from final
+    /// scopes would reorder already-scoped equal-key re-entries.
+    contents_link_operations: Vec<ContentsLinkOperation>,
     /// Callback-private copy of every active grid solid-mask bake. This is
     /// updated together with `world.landscape` so nested callbacks observe
     /// C++'s immediate C4SolidMask Remove/Put lifecycle.
@@ -3151,6 +3220,7 @@ impl EffectHostContext {
             removed_object_references: HashSet::new(),
             unlinked_content_links: HashSet::new(),
             relinked_content_links: HashSet::new(),
+            contents_link_operations: Vec::new(),
             nested_order: Vec::new(),
             foreign_local_cells: HashMap::new(),
         }
@@ -4108,18 +4178,64 @@ impl EffectHostContext {
         // DoPlrLaunch) must see the list shrink.
         if !object.contents.is_empty() {
             object.contents.retain(|child_id| {
-                !self.unlinked_content_links.contains(&(id, *child_id))
-                    && !self.relinked_content_links.contains(&(id, *child_id))
-                    && self
-                        .object_scope(*child_id)
-                        // Contents is a raw C4ObjectList. AssignRemoval sets
-                        // Status=0 before recursively removing contents, but
-                        // does not unlink this object from its own container
-                        // until that recursion returns. GetObject/Find/count
-                        // callers apply their separate Status filters.
-                        .map(|scope| scope.current_container == Some(id))
-                        .unwrap_or(true)
+                let touched = self
+                    .contents_link_operations
+                    .iter()
+                    .any(|operation| operation.mutates_link(id, *child_id));
+                preserved_child == Some(*child_id)
+                    || touched
+                    || (!self.unlinked_content_links.contains(&(id, *child_id))
+                        && !self.relinked_content_links.contains(&(id, *child_id))
+                        && self
+                            .object_scope(*child_id)
+                            // Contents is a raw C4ObjectList. AssignRemoval sets
+                            // Status=0 before recursively removing contents, but
+                            // does not unlink this object from its own container
+                            // until that recursion returns. GetObject/Find/count
+                            // callers apply their separate Status filters.
+                            .map(|scope| scope.current_container == Some(id))
+                            .unwrap_or(true))
             });
+        }
+        for operation in self
+            .contents_link_operations
+            .iter()
+            .copied()
+            .filter(|operation| operation.container() == id)
+        {
+            match operation {
+                ContentsLinkOperation::Remove { child, .. } => {
+                    object.contents.retain(|candidate| *candidate != child);
+                }
+                ContentsLinkOperation::Insert {
+                    child, position, ..
+                } => {
+                    if !object.contents.contains(&child) {
+                        object
+                            .contents
+                            .insert(position.min(object.contents.len()), child);
+                    }
+                }
+                ContentsLinkOperation::MoveToBack { child, .. } => {
+                    if let Some(position) = object
+                        .contents
+                        .iter()
+                        .position(|candidate| *candidate == child)
+                    {
+                        let child = object.contents.remove(position);
+                        object.contents.push(child);
+                    }
+                }
+                ContentsLinkOperation::RotateToFront { child, .. } => {
+                    if let Some(position) = object
+                        .contents
+                        .iter()
+                        .position(|candidate| *candidate == child)
+                    {
+                        object.contents.rotate_left(position);
+                    }
+                }
+            }
         }
         // ...and it GROWS for same-call Enters: C4Object::Enter adds to the
         // container's Contents immediately (`Contents.Add(this,
@@ -4131,6 +4247,10 @@ impl EffectHostContext {
                 scope.current_container == Some(id)
                     && !self.unlinked_content_links.contains(&(id, scope.id))
                     && !object.contents.contains(&scope.id)
+                    && !self
+                        .contents_link_operations
+                        .iter()
+                        .any(|operation| operation.mutates_link(id, scope.id))
             })
             .map(|scope| scope.id)
             .collect();
@@ -4138,9 +4258,16 @@ impl EffectHostContext {
             let position = self.contents_insert_position(&object.contents, child, preserved_child);
             object.contents.insert(position, child);
         }
-        if let Some(new_front) = self
-            .object_scope(id)
-            .and_then(|scope| scope.pending_update.contents_front)
+        let recorded_reorder = self
+            .contents_link_operations
+            .iter()
+            .any(|operation| operation.reorders(id));
+        if let Some(new_front) = (!recorded_reorder)
+            .then(|| {
+                self.object_scope(id)
+                    .and_then(|scope| scope.pending_update.contents_front)
+            })
+            .flatten()
         {
             if let Some(index) = object.contents.iter().position(|child| *child == new_front) {
                 object.contents.rotate_left(index);
@@ -4891,17 +5018,26 @@ impl EffectHostContext {
         if previous != container {
             if let Some(previous) = previous {
                 self.track_contents_link_removal(previous, child);
+                self.record_contents_link_removal(previous, child);
             }
         }
+        let changed = previous != container;
         let Some(scope) = self.object_scope_mut(child) else {
             return false;
         };
         scope.set_container(container);
+        if changed {
+            if let Some(container) = container {
+                self.link_content_after_enter(container, child);
+            }
+        }
         true
     }
 
     pub(crate) fn stage_object_command_update(&mut self, object: ObjectId, update: ObjectUpdate) {
-        if let Some(container) = update.container {
+        let container_change = update.container;
+        let mut container_changed = false;
+        if let Some(container) = container_change {
             let previous = match self.object_scope(object) {
                 Some(scope) => scope.container(),
                 None => self
@@ -4909,13 +5045,22 @@ impl EffectHostContext {
                     .and_then(|state| state.container()),
             };
             if previous != container {
+                container_changed = true;
                 if let Some(previous) = previous {
                     self.track_contents_link_removal(previous, object);
+                    self.record_contents_link_removal(previous, object);
                 }
             }
         }
         if let Some(scope) = self.object_scope_mut(object) {
             scope.stage_command_update(update);
+        }
+        if let Some(container) = container_change {
+            if container_changed {
+                if let Some(container) = container {
+                    self.link_content_after_enter(container, object);
+                }
+            }
         }
     }
 
@@ -5112,11 +5257,78 @@ impl EffectHostContext {
 
     pub(crate) fn unlink_content_for_removal(&mut self, parent: ObjectId, child: ObjectId) {
         self.track_contents_link_removal(parent, child);
+        self.record_contents_link_removal(parent, child);
         self.unlinked_content_links.insert((parent, child));
     }
 
     pub(crate) fn relink_content_after_exit(&mut self, parent: ObjectId, child: ObjectId) {
+        self.record_contents_link_removal(parent, child);
         self.relinked_content_links.insert((parent, child));
+    }
+
+    fn record_contents_link_removal(&mut self, container: ObjectId, child: ObjectId) {
+        let linked = self
+            .get_world_object_preserving_contents_link(container, Some(child))
+            .is_some_and(|object| object.contents().contains(&child));
+        if linked {
+            self.contents_link_operations
+                .push(ContentsLinkOperation::Remove { container, child });
+        }
+    }
+
+    pub(crate) fn link_content_after_enter(&mut self, container: ObjectId, child: ObjectId) {
+        let Some(mut contents) = self
+            .get_world_object(container)
+            .map(|object| object.contents().to_vec())
+        else {
+            return;
+        };
+        // `scope.set_container` has already exposed the new Contained word,
+        // so the legacy scope-growth fallback may have projected `child`
+        // before this explicit C4ObjectList::Add event is recorded. Native
+        // Enter computes the insertion against the list before that add.
+        contents.retain(|candidate| *candidate != child);
+        let position = self.contents_insert_position(&contents, child, None);
+        self.contents_link_operations
+            .push(ContentsLinkOperation::Insert {
+                container,
+                child,
+                position,
+            });
+    }
+
+    pub(crate) fn move_content_link_to_back(
+        &mut self,
+        container: ObjectId,
+        child: ObjectId,
+    ) -> bool {
+        let linked = self
+            .get_world_object(container)
+            .is_some_and(|object| object.contents().contains(&child));
+        if linked {
+            // FnScrollContents removes the raw first live link and appends
+            // that same link with stNone (C4Script.cpp:1879-1891).
+            self.contents_link_operations
+                .push(ContentsLinkOperation::MoveToBack { container, child });
+        }
+        linked
+    }
+
+    pub(crate) fn rotate_contents_link_to_front(
+        &mut self,
+        container: ObjectId,
+        child: ObjectId,
+    ) -> bool {
+        let linked = self
+            .get_world_object(container)
+            .is_some_and(|object| object.contents().contains(&child));
+        if linked {
+            // C4ObjectList::ShiftContents is one imperative cyclic relink,
+            // not a persistent front preference (C4ObjectList.cpp:815-833).
+            self.contents_link_operations
+                .push(ContentsLinkOperation::RotateToFront { container, child });
+        }
+        linked
     }
 
     fn clear_removed_references_in_locals(&self, locals: &mut HashMap<String, Value>) {
@@ -5293,6 +5505,11 @@ impl EffectHostContext {
             |metadata| metadata.physical,
         );
         let state = object.full_state()?;
+        // C4Object::SetOCF derives OCF_CrewMember from Def->CrewMember,
+        // independently of the player's live Crew roster. Engine-backed
+        // nested scopes therefore use definition metadata; old host-only
+        // fixtures without a definition table retain their snapshot field.
+        let crew_member = metadata.map_or(state.crew_member, |metadata| metadata.crew_member);
         let mut scope = ObjectScopeContext::new(
             object.id,
             state.container,
@@ -5323,7 +5540,7 @@ impl EffectHostContext {
             state.action.target2,
             state.shape_vertices.clone(),
             ocf_base,
-            state.crew_member,
+            crew_member,
             state.plr_view_range,
             state.graphics_overlays.clone(),
             state.base_graphics.clone(),
@@ -5598,6 +5815,42 @@ impl EffectHostContext {
         self.object_scope_mut(target)
             .map(|scope| scope.set_selected(selected))
             .is_some()
+    }
+
+    /// Live `C4Object::SetPlrViewRange`: update the object word and
+    /// synchronously resort it in the current owner's FoWViewObjs list.
+    pub(crate) fn set_object_plr_view_range(&mut self, target: ObjectId, range: i32) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        let Some(owner) = self.object_scope_mut(target).map(|scope| {
+            scope.set_plr_view_range(range);
+            scope.owner()
+        }) else {
+            return false;
+        };
+        self.world
+            .actualize_player_fow_view_object(target, owner, range);
+        true
+    }
+
+    /// Live `C4Object::PlrFoWActualize` without changing PlrViewRange. The
+    /// same-value update token replays the list remove/add ordering when the
+    /// copied host outcome is folded back into the authoritative Engine.
+    pub(crate) fn actualize_object_plr_view_range(&mut self, target: ObjectId) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        let Some((owner, range)) = self.object_scope_mut(target).map(|scope| {
+            let range = scope.plr_view_range();
+            scope.pending_update.plr_view_range = Some(range);
+            (scope.owner(), range)
+        }) else {
+            return false;
+        };
+        self.world
+            .actualize_player_fow_view_object(target, owner, range);
+        true
     }
 
     /// Materializes a nested scope for `target` so per-object writes (menus)
@@ -6824,7 +7077,14 @@ impl EffectHostContext {
                     active_assign_death,
                 )
             }
-            None => (Vec::new(), None, Vec::new(), Vec::new(), false, None),
+            None => (
+                Vec::new(),
+                None,
+                Vec::new(),
+                Vec::new(),
+                false,
+                None,
+            ),
         };
 
         // The outer object update has its dedicated channel. Carry Kill as
@@ -7355,6 +7615,11 @@ pub(crate) struct ObjectScopeContext {
     /// Live C4Shape::ContactDensity, independently mutable from the def.
     current_contact_density: i32,
     current_alive: bool,
+    /// Raw `C4Object::Alive` assignment whose matching `SetOCF` has not run
+    /// yet. AssignDeath writes Alive directly before RemoveDeath and again
+    /// after SetAction; unlike script SetAlive those writes deliberately
+    /// leave the cached OCF stale until AssignDeath's final SetOCF.
+    raw_alive_override: Option<bool>,
     /// C4Object::Mobile, including explicit native helper overrides.
     current_mobile: bool,
     /// This frame's live C4Action::t_attach bitset.
@@ -7508,6 +7773,7 @@ impl ObjectScopeContext {
             current_construction: clamped_construction,
             current_contact_density: crate::CONTACT_DENSITY_SOLID,
             current_alive: alive,
+            raw_alive_override: None,
             current_mobile: false,
             current_t_attach: 0,
             current_in_liquid: in_liquid,
@@ -7984,6 +8250,13 @@ impl ObjectScopeContext {
         self.pending_update.crew_member = Some(crew_member);
     }
 
+    /// AssignDeath changes the player's runtime roster projection, not the
+    /// definition's CrewMember capability used by SetOCF. Keep that live
+    /// capability intact while transporting the final roster bit.
+    pub(crate) fn stage_crew_member_state(&mut self, crew_member: bool) {
+        self.pending_update.crew_member = Some(crew_member);
+    }
+
     pub(crate) fn set_crew_status_member(&mut self, crew_member: bool) {
         self.set_crew_member(crew_member);
         self.pending_update.crew_status_change = true;
@@ -8011,7 +8284,8 @@ impl ObjectScopeContext {
     }
 
     pub(crate) fn alive(&self) -> bool {
-        self.pending_update.alive.unwrap_or(self.current_alive)
+        self.raw_alive_override
+            .unwrap_or_else(|| self.pending_update.alive.unwrap_or(self.current_alive))
     }
 
     pub(crate) fn mobile(&self) -> bool {
@@ -8113,18 +8387,27 @@ impl ObjectScopeContext {
     }
 
     pub(crate) fn set_alive(&mut self, alive: bool) {
+        self.raw_alive_override = None;
         self.current_alive = alive;
         self.pending_update.alive = Some(alive);
     }
 
-    /// Script Kill's same-call preview. The engine-side AssignDeath outcome
-    /// owns the final Alive value because a non-forced death effect may
-    /// revive the object; staging `alive = false` here would overwrite that
-    /// revival when the outer callback outcome folds.
-    pub(crate) fn request_assign_death(&mut self, forced: bool) {
-        self.current_alive = false;
-        self.assign_death = Some(forced);
+    /// AssignDeath's direct `Alive = 0` assignment. This changes raw
+    /// same-call reads without acknowledging the change in cached OCF.
+    pub(crate) fn set_raw_alive(&mut self, alive: bool) {
+        self.raw_alive_override = Some(alive);
     }
+
+    /// Commit AssignDeath's last raw Alive word immediately before its
+    /// explicit final SetOCF. A Death callback that called SetAlive already
+    /// cleared the override and therefore keeps its revived value.
+    pub(crate) fn commit_raw_alive(&mut self) {
+        if let Some(alive) = self.raw_alive_override.take() {
+            self.current_alive = alive;
+            self.pending_update.alive = Some(alive);
+        }
+    }
+
 
     pub(crate) fn category(&self) -> i32 {
         self.pending_update
@@ -8148,6 +8431,10 @@ impl ObjectScopeContext {
     pub(crate) fn clear_command_stack(&mut self) {
         let preserve_grab_pointer_order = self.live_commands.has_pending_grab_attempt();
         self.live_commands.clear();
+        // Callback continuations queued before ClearCommands belong to the
+        // cleared C4Command stack. Later same-call command events may append
+        // again and therefore survive, preserving the native call order.
+        self.queued_commands.clear();
         self.command_operations.push(CommandOperation::Clear);
         self.command_count = 0;
         if preserve_grab_pointer_order {
@@ -8411,6 +8698,23 @@ impl ObjectScopeContext {
     pub(crate) fn refresh_cached_ocf(&mut self) {
         let base = self.ocf();
         let mut mask = self.staged_ocf(base);
+        // AssignDeath's direct Alive writes deliberately do not invalidate
+        // cached OCF. This helper represents an explicit SetOCF call
+        // (including SetActionByName("Dead")), so acknowledge the raw word
+        // here without making ordinary world reads during RemoveDeath do so.
+        if self.raw_alive_override.is_some() {
+            mask &= !(ocf::LIVING | ocf::ALIVE | ocf::CREW_MEMBER | ocf::FIGHT_READY);
+            let alive = self.alive();
+            if self.category() & crate::CATEGORY_LIVING != 0 {
+                mask |= ocf::LIVING;
+                if alive {
+                    mask |= ocf::ALIVE | ocf::FIGHT_READY;
+                }
+            }
+            if self.crew_member && alive {
+                mask |= ocf::CREW_MEMBER;
+            }
+        }
         // SetOCF recomputes these object-state bits from scratch. Ordinary
         // SetXDir/SetYDir do not call this helper, while Exit/Enter/SetAction
         // do, preserving the C++ timing of stale versus refreshed masks.

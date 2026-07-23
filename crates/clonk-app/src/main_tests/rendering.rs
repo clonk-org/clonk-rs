@@ -287,6 +287,58 @@
     }
 
     #[test]
+    fn running_graphics_recreation_keeps_script_particle_catalog() {
+        // FI5B has a deliberately transparent object facet. Its shipped
+        // Flying callback presents the launched flame exclusively through
+        // global Fire2 particles (Flamethrower.c4d/Fire.c4d/Script.c:20-46).
+        // C++ keeps the loaded particle definitions in Game.Particles across
+        // viewport recreation and draws GlobalParticles after normal objects
+        // (oracle-src-pinned src/C4Particles.cpp:118-189;
+        // src/C4Viewport.cpp:1071-1079).
+        let mut app = new_running_sandbox_app();
+        let flame = ResourceParticleDefinition {
+            core: clonk_resources::ParticleDefinitionCore {
+                name: "Fire2".to_string(),
+                init_fn: "StdInit".to_string(),
+                exec_fn: "StdExec".to_string(),
+                draw_fn: "Std".to_string(),
+                additive: 1,
+                attach: 1,
+                alpha_fade: 10,
+                ..clonk_resources::ParticleDefinitionCore::default()
+            },
+            image: GraphicsImage::new(1, 1, vec![255, 96, 0, 255]),
+            facet: clonk_resources::ParticleFacet {
+                width: 1,
+                height: 1,
+                ..clonk_resources::ParticleFacet::default()
+            },
+        };
+        app.engine
+            .register_particle_resource(&flame)
+            .expect("register Fire2 render fixture");
+        app.rebuild_definition_sprites();
+        assert!(
+            app.graphics.particle_sprite("Fire2").is_some(),
+            "precondition: the scenario definition rebuild installs Fire2"
+        );
+
+        let label = app.scenario_label.clone();
+        let ground = app.fallback_ground;
+        app.configure_running_state(label, ground);
+        assert!(
+            app.graphics.particle_sprite("Fire2").is_some(),
+            "entering the running presentation must retain script particle graphics"
+        );
+
+        app.resize(321, 201).expect("resize running presentation");
+        assert!(
+            app.graphics.particle_sprite("Fire2").is_some(),
+            "resizing the running presentation must retain script particle graphics"
+        );
+    }
+
+    #[test]
     fn viewport_buttons_use_only_the_exact_mouse_viewport() {
         let mut app = new_running_sandbox_app();
         let owner = app.local_owner;

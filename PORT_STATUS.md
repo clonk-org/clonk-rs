@@ -103,13 +103,18 @@ lightning/volcano effects start at the native `(50,50)` default.
 Loaded `Objects.txt` sector ranks follow the C++ forward master list before
 `FixObjectOrder`; runtime sector insertion follows live master order. Dragon
 Rock restores saved-open entrances; TENT walk+Up and endboss
-`Kill(g_pDragon)` are pinned. `Kill` routes through the central `AssignDeath` path, including guarded controller
-credit, effect revival/force, action callbacks, inventory ejection, crew/cursor
-cleanup, and OCF refresh; the death operation still folds after its invoking
-callback rather than synchronously. Sky Race starts with one LOAM
+`Kill(g_pDragon)` are pinned. `Kill`, `DoEnergy`, `Punch`, and `Blast`
+complete the central `AssignDeath` path synchronously before the invoking
+C4Script statement continues, including guarded controller credit, effect
+revival/force, action callbacks, inventory ejection, crew/cursor/FoW cleanup,
+and final OCF refresh. Sky Race starts with one LOAM
 bridge chunk; deaths/relaunch, 100% progress, rivalry elimination/retirement,
 GOAL-delayed game over, and winner evaluation are pinned. Real CLNK ceiling
 contact, attached Hangle traversal, auto-stop release, and let-go match C++.
+Movement reacquires the live object and landscape after every `Contact*`
+callback, so each callback's complete outcome—including death, revival,
+removal, definition/mask changes, and foreign-object writes—is visible to the
+next contact direction, collision response, rotation, and movement tail.
 Movement removes unbounded side/bottom crossings in the same tick with exact
 Border, DFA_ATTACH, and C4D_Parallax/Local[0] exemptions.
 `BlastFree` has the void/padded four-int C++ ABI; its landscape mutation still

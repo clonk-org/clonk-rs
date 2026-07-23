@@ -28819,6 +28819,7 @@ impl GameApp {
         graphics.inherit_debug_draw_state(&self.graphics);
         graphics.inherit_runtime_sprite_filtering(&self.graphics);
         graphics.inherit_advanced_renderer_config(&self.graphics);
+        graphics.set_particle_sprites(Arc::new(particle_sprite_map(&self.engine)));
         graphics.set_clonk_fonts(self.assets.clonk_fonts.clone());
         graphics.set_game_palette(game_palette);
         graphics.set_liquid_animation(liquid_animation);
@@ -34041,6 +34042,11 @@ impl GameApp {
         graphics.inherit_liquid_animation_cycle(&self.graphics);
         graphics.inherit_runtime_sprite_filtering(&self.graphics);
         graphics.inherit_advanced_renderer_config(&self.graphics);
+        // Particle definitions live in Game.Particles independently of the
+        // viewport (oracle-src-pinned src/C4Particles.cpp:118-189). Rebind
+        // their draw resources when entering the running presentation just
+        // like a viewport recreation.
+        graphics.set_particle_sprites(Arc::new(particle_sprite_map(&self.engine)));
         self.graphics = graphics;
         self.graphics
             .set_clonk_fonts(self.assets.clonk_fonts.clone());

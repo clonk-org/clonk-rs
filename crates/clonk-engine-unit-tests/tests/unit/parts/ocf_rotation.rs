@@ -5361,6 +5361,212 @@ protected func WetStart()
         );
     }
 
+    #[test]
+    fn rejected_stabilize_keeps_the_trial_update_pos_sector_links_like_cpp() {
+        // UpdateShape performs Stabilize's one UpdatePos before ContactCheck.
+        // On rejection C++ restores only Shape and r; it deliberately does not
+        // perform a second UpdatePos (oracle-src-pinned
+        // src/C4Movement.cpp:493-519; src/C4Object.cpp:322-355).
+        let library = MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=100\n",
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(120, 50, Some(earth)));
+
+        let mut definition =
+            Definition::from_script("SRJT", "Rejected stabilizer", "")
+                .expect("definition compiles");
+        definition.set_rotateable(1);
+        definition.set_contact_density(50);
+        definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        definition
+            .set_shape_vertices(vec![ObjectVertex::new(0, 2).with_cnat(CNAT_BOTTOM)]);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("SRJT")
+                    .with_position(Vector2::new(49, 49))
+                    .with_rotation(5),
+            )
+            .expect("object spawns");
+        let index = engine.find_object_index(object_id).expect("object exists");
+        assert_eq!(
+            engine
+                .sectors
+                .as_ref()
+                .expect("sectors exist")
+                .shape_ids(sector::SectorKey::Inside { x: 1, y: 0 }),
+            &[object_id],
+            "the rotated entry shape crosses the sector boundary"
+        );
+
+        engine
+            .stabilize_object(index, &[])
+            .expect("stabilize executes");
+
+        let object = &engine.objects[index];
+        assert_eq!(object.state.rotation, 5, "ground contact rejects upright");
+        assert_eq!(
+            object.current_shape_rect(),
+            Some(DefinitionRect::new(-2, -2, 4, 4)),
+            "the rejected trial restores the rotated Shape value"
+        );
+        assert!(
+            engine
+                .sectors
+                .as_ref()
+                .expect("sectors exist")
+                .shape_ids(sector::SectorKey::Inside { x: 1, y: 0 })
+                .is_empty(),
+            "sector links remain those produced by the upright trial UpdateShape"
+        );
+    }
+
+    #[test]
+    fn accepted_stabilize_commits_callback_live_rotation_and_rebuilds_face_like_cpp() {
+        // ContactBottom's SetR rebuild clears Shape.ContactCount, so the outer
+        // ContactCheck returns zero and accepts stabilization. The accepted
+        // arm then reads callback-live r and runs UpdateFace(true), clearing
+        // the later SetShape override (oracle-src-pinned
+        // src/C4Movement.cpp:166-182,493-519; src/C4Object.cpp:322-365).
+        let script = r#"#strict 3
+public func ContactBottom()
+{
+    SetR(73);
+    SetShape(-7, -8, 14, 16);
+    return 0;
+}
+"#;
+        let library = MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=100\n",
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(120, 50, Some(earth)));
+
+        let mut definition =
+            Definition::from_script("SACC", "Accepted stabilizer", script)
+                .expect("definition compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_contact_function_calls(true);
+        definition.set_rotateable(1);
+        definition.set_contact_density(50);
+        definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        definition
+            .set_shape_vertices(vec![ObjectVertex::new(0, 2).with_cnat(CNAT_BOTTOM)]);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("SACC")
+                    .with_position(Vector2::new(49, 49))
+                    .with_rotation(5),
+            )
+            .expect("object spawns");
+        let index = engine.find_object_index(object_id).expect("object exists");
+
+        engine
+            .stabilize_object(index, &[])
+            .expect("stabilize executes");
+
+        let object = &engine.objects[index];
+        assert_eq!(object.state.rotation, 73);
+        assert_eq!(object.fixed_rotation, itofix(73));
+        assert_eq!(
+            object.state.shape_override, None,
+            "the accepted arm's UpdateFace(true) rebuilds the definition shape"
+        );
+    }
+
+    #[test]
+    fn contact_removal_still_completes_exec_movement_tail_like_cpp() {
+        // AssignRemoval inside DoMovement does not unwind C++ ExecMovement:
+        // demobilization, Stabilize and the non-rotateable r=0 assignment run
+        // before C4Object::Execute checks Status (oracle-src-pinned
+        // src/C4Movement.cpp:558-620; src/C4Object.cpp:1082-1094).
+        let script = r#"#strict 3
+public func ContactBottom()
+{
+    RemoveObject();
+    return 0;
+}
+"#;
+        let library = MaterialLibrary::parse(
+            "[Material Earth]\nName=Earth\nDensity=100\n",
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(120, 50, Some(earth)));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+
+        let mut victim_definition =
+            Definition::from_script("TOMB", "Movement tombstone", script)
+                .expect("victim definition compiles");
+        victim_definition.set_c4_callback_convention(true);
+        victim_definition.set_contact_function_calls(true);
+        victim_definition.set_contact_density(50);
+        victim_definition
+            .set_shape_vertices(vec![ObjectVertex::new(0, 2).with_cnat(CNAT_BOTTOM)]);
+        engine
+            .register_definition(victim_definition)
+            .expect("victim definition registers");
+
+        let victim = engine
+            .spawn_object(
+                SpawnConfig::new("TOMB")
+                    .with_position(Vector2::new(20, 49))
+                    .with_rotation(20)
+                    .with_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(1)))
+                    .with_mobile(true),
+            )
+            .expect("victim spawns");
+        let victim_index = engine
+            .find_object_index(victim)
+            .expect("victim exists");
+        let definition_id = engine.objects[victim_index].definition_id.clone();
+        let actions = engine
+            .definition(&definition_id)
+            .expect("victim definition remains")
+            .action_library()
+            .clone();
+
+        let outcome = engine
+            .exec_mobile_object_movement(victim_index, &actions, &definition_id, &[])
+            .expect("mobile ExecMovement completes");
+
+        assert!(!outcome.alive, "ContactBottom removes the victim");
+        let victim_index = engine
+            .find_object_index(victim)
+            .expect("the synchronous tombstone remains addressable");
+        assert!(
+            engine.objects[victim_index].destroyed,
+            "victim state after movement: position={:?} velocity={:?} contact={} status={:?}",
+            engine.objects[victim_index].state.position,
+            engine.objects[victim_index].fixed_velocity,
+            engine.objects[victim_index].frame_t_contact,
+            engine.objects[victim_index].state.status
+        );
+        assert_eq!(
+            engine.objects[victim_index].state.rotation, 0,
+            "non-rotateable ExecMovement tail still runs after Contact removal"
+        );
+    }
+
     // Mirrors the ExecAction upright-attachment check
     // (C4Object.cpp:4698-4705): a resting (non-Mobile) object whose def
     // sets UprightAttach re-arms Mobile every frame while standing within
@@ -5530,4 +5736,3 @@ protected func WetStart()
             "world-side allocations advance the engine counter"
         );
     }
-

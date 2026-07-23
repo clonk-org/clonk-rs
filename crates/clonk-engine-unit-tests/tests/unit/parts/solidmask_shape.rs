@@ -1846,6 +1846,110 @@ Basement=-18\nConSizeOff=-20\n",
     }
 
     #[test]
+    fn movement_callback_recreated_mask_drops_stale_rider_backup_like_cpp() {
+        // DoMotion's Remove(true,true) stores the rider backup inside the
+        // exact C4SolidMask instance (oracle-src-pinned src/C4Movement.cpp:
+        // 121-126; src/C4SolidMask.cpp:276-305). SetSolidMask deletes that
+        // instance and immediately creates/re-puts a replacement
+        // (src/C4Object.cpp:3809-3817), so DoMovement's final
+        // UpdateSolidMask(true) cannot carry the old instance's rider
+        // (src/C4Movement.cpp:443-445; src/C4SolidMask.cpp:178-195).
+        let mut landscape = vehicle_grid_landscape(24, 20);
+        landscape.grid_write_byte(13, 10, 1);
+
+        let mut mover = Definition::from_script(
+            "RMSK",
+            "Recreated mask mover",
+            r#"
+            #strict 2
+            local contact_calls;
+            protected func ContactRight()
+            {
+                ++contact_calls;
+                SetSolidMask(0, 0, 1, 1);
+                return 0;
+            }
+            "#,
+        )
+        .expect("mover script compiles");
+        mover.set_c4_callback_convention(true);
+        mover.set_category(CATEGORY_OBJECT);
+        mover.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        mover.set_shape_vertices(vec![
+            ObjectVertex::new(1, 0).with_cnat(CNAT_RIGHT),
+        ]);
+        mover.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
+        mover.set_sprite_image(Some(one_pixel_sprite(255)));
+        mover.set_contact_density(50);
+        mover.set_contact_function_calls(true);
+
+        let mut rider = simple_definition("RIDR");
+        rider.set_category(CATEGORY_OBJECT);
+        rider.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        rider.set_shape_vertices(vec![
+            ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM),
+        ]);
+        rider.set_contact_density(50);
+
+        let mut engine = Engine::with_seed(66);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine.register_definition(mover).expect("mover registers");
+        engine.register_definition(rider).expect("rider registers");
+        let mover = engine
+            .spawn_object(
+                SpawnConfig::new("RMSK")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 10))
+                    .with_fixed_position(FixedVec2::from_ints(10, 10))
+                    .with_fixed_velocity(FixedVec2::new(itofix(2), C4Fixed::ZERO))
+                    .with_mobile(true)
+                    .with_loaded(true),
+            )
+            .expect("mover spawns");
+        let mover_index = engine.find_object_index(mover).expect("mover exists");
+        engine.update_solid_mask(mover_index);
+        let rider = engine
+            .spawn_object(
+                SpawnConfig::new("RIDR")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 9))
+                    .with_fixed_position(FixedVec2::from_ints(10, 9))
+                    .with_loaded(true),
+            )
+            .expect("rider spawns");
+        assert_eq!(vehicle_pixels(&engine), vec![(10, 10)]);
+
+        let definition_id = engine.objects[mover_index].definition_id.clone();
+        let actions = engine
+            .definition(&definition_id)
+            .expect("mover definition remains")
+            .action_library()
+            .clone();
+        engine
+            .exec_object_movement(mover_index, &actions, &definition_id, &[])
+            .expect("contacting movement succeeds");
+
+        let mover = engine.object_snapshot(mover).expect("mover remains");
+        assert_eq!(mover.position, Vector2::new(11, 10));
+        assert_eq!(
+            mover.local_vars.get("contact_calls"),
+            Some(&Value::Int(1)),
+            "the second candidate invokes the mask-recreating callback"
+        );
+        assert_eq!(
+            vehicle_pixels(&engine),
+            vec![(11, 10)],
+            "the callback's replacement mask remains put at the committed position"
+        );
+        assert_eq!(
+            engine.object_snapshot(rider).expect("rider remains").position,
+            Vector2::new(10, 9),
+            "the replacement mask must not inherit the deleted instance's rider backup"
+        );
+    }
+
+    #[test]
     fn solid_mask_rider_capture_respects_contact_density_boundary() {
         fn move_platform(contact_density: i32) -> (Vector2, Vector2) {
             let mut platform = movement_mask_definition("PLAT", 3, -2);
@@ -4367,6 +4471,89 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
     }
 
     #[test]
+    fn contact_action_rereads_live_ocf_after_ceiling_tumble_callback() {
+        // ContactAction snapshots iProcedure/fDisabled/pPhysical, but it reads
+        // the object's OCF again for each directional arm. A ceiling tumble's
+        // StartCall can therefore clear HitSpeed3 before the later left-wall
+        // arm is evaluated (oracle-src-pinned src/C4Object.cpp:4324-4330,
+        // 4383-4414,4424-4439; src/C4ObjectCom.cpp:74-79).
+        let script = r#"#strict 3
+local tumble_starts;
+
+protected func OnTumbleStart()
+{
+    ++tumble_starts;
+    SetXDir(0, nil, 100);
+    SetYDir(0, nil, 100);
+    SetCategory(C4D_Object);
+    SetAction("Flight");
+    return(0);
+}
+"#;
+        let mut definition =
+            Definition::from_script("CAOC", "ContactAction live OCF", script)
+                .expect("contact action probe compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_category(CATEGORY_OBJECT);
+        definition.configure_actions(
+            Some("Idle".to_owned()),
+            HashMap::from([
+                ("Idle".to_owned(), ActionSpec::default()),
+                (
+                    "Flight".to_owned(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+                (
+                    "Tumble".to_owned(),
+                    ActionSpec::default().with_start_call("OnTumbleStart"),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("contact action probe registers");
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("CAOC")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_action(ActionState::new("Flight"))
+                    .with_fixed_velocity(FixedVec2::new(itofix(6), C4Fixed::ZERO))
+                    .with_loaded(true),
+            )
+            .expect("contact action probe spawns");
+        let index = engine
+            .find_object_index(object_id)
+            .expect("contact action probe exists");
+        engine.refresh_object_ocf(index);
+        assert_ne!(
+            engine.objects[index].state.ocf & ocf::HIT_SPEED3,
+            0,
+            "the ceiling arm must enter its high-speed tumble"
+        );
+        let definition_id = engine.objects[index].definition_id.clone();
+
+        engine
+            .exec_contact_action(index, CNAT_TOP | CNAT_LEFT, &definition_id, &[])
+            .expect("contact action executes");
+
+        let object = &engine.objects[engine
+            .find_object_index(object_id)
+            .expect("contact action probe survives")];
+        assert_eq!(
+            object.state.local_vars.get("tumble_starts"),
+            Some(&Value::Int(1)),
+            "the callback-cleared live OCF prevents a second wall tumble"
+        );
+        assert_eq!(
+            object.state.ocf & ocf::HIT_SPEED3,
+            0,
+            "SetCategory's callback-time SetOCF observes the zeroed dirs"
+        );
+    }
+
+    #[test]
     fn stopped_scaler_no_attach_jumps_away_from_each_wall() {
         let mut scaler = simple_definition("STSC");
         scaler.configure_actions(
@@ -4519,6 +4706,154 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
     }
 
     #[test]
+    fn lethal_contact_assigns_death_before_later_cnat_and_vertical_redirect() {
+        // C4Object::ContactCheck dispatches Left/Right/Top/Bottom synchronously
+        // (oracle-src-pinned src/C4Movement.cpp:166-182). ContactLeft's
+        // DoEnergy reaches zero and therefore completes AssignDeath before
+        // ContactRight runs (src/C4Object.cpp:1164-1205,1372-1393). Only after
+        // the complete ContactCheck does vertical movement inspect !Alive and
+        // redirect ydir into rdir (src/C4Movement.cpp:284-321).
+        let script = r#"#strict 3
+local contact_order, death_rdir, right_alive, right_action, right_rdir;
+
+protected func ContactLeft()
+{
+    contact_order = 1;
+    DoEnergy(-1);
+    return(0);
+}
+
+protected func Death()
+{
+    contact_order = contact_order * 10 + 2;
+    death_rdir = GetRDir(nil, 100);
+    return(0);
+}
+
+protected func ContactRight()
+{
+    contact_order = contact_order * 10 + 3;
+    right_alive = GetAlive();
+    right_action = GetAction();
+    right_rdir = GetRDir(nil, 100);
+    return(0);
+}
+
+protected func ContactBottom()
+{
+    contact_order = contact_order * 10 + 4;
+    return(0);
+}
+"#;
+        let library = MaterialLibrary::parse(
+            r#"
+[Material Earth]
+Name=Earth
+Density=100
+"#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut definition =
+            Definition::from_script("DCNT", "Death contact ordering", script)
+                .expect("contact definition compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_contact_function_calls(true);
+        definition.set_contact_density(50);
+        definition.set_rotateable(360);
+        definition.set_shape_vertices(vec![
+            ObjectVertex::new(1, 1).with_cnat(CNAT_LEFT | CNAT_RIGHT | CNAT_BOTTOM),
+        ]);
+        definition.set_physical(PhysicalInfo {
+            energy: 10_000,
+            ..PhysicalInfo::default()
+        });
+        definition.configure_actions(
+            Some("Flight".to_owned()),
+            HashMap::from([
+                (
+                    "Flight".to_owned(),
+                    ActionSpec::default().with_procedure("FLIGHT"),
+                ),
+                ("Dead".to_owned(), ActionSpec::default()),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(20, 7, Some(earth)));
+        engine.set_physics(PhysicsSettings::new(0, 20, -20));
+        engine
+            .register_definition(definition)
+            .expect("contact definition registers");
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("DCNT")
+                    .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                    .with_position(Vector2::new(5, 5))
+                    .with_energy(1_000)
+                    .with_alive(true)
+                    .with_action(ActionState::new("Flight"))
+                    .with_mobile(true),
+            )
+            .expect("contact object spawns");
+        let index = engine
+            .find_object_index(object_id)
+            .expect("contact object exists");
+        engine.objects[index]
+            .set_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, itofix(1)));
+        engine.refresh_object_ocf(index);
+        let definition_id = engine.objects[index].definition_id.clone();
+        let actions = engine
+            .definition(&definition_id)
+            .expect("contact definition remains registered")
+            .action_library()
+            .clone();
+
+        engine
+            .exec_object_movement(index, &actions, &definition_id, &[])
+            .expect("lethal contact movement executes");
+
+        let object = engine
+            .object_snapshot(object_id)
+            .expect("AssignDeath retains the corpse");
+        assert_eq!(object.energy, 0);
+        assert!(!object.alive);
+        assert_eq!(object.action.name, "Dead");
+        assert_eq!(
+            object.local_vars.get("contact_order"),
+            Some(&Value::Int(1234)),
+            "Death completes between the first and second Contact* callbacks"
+        );
+        assert_eq!(
+            object.local_vars.get("right_alive"),
+            Some(&Value::Bool(false)),
+            "the later ContactRight observes AssignDeath's Alive=false"
+        );
+        assert_eq!(
+            object.local_vars.get("right_action"),
+            Some(&Value::String("Dead".to_owned().into())),
+            "the later ContactRight observes AssignDeath's Dead action"
+        );
+        assert_eq!(
+            object.local_vars.get("death_rdir"),
+            Some(&Value::Int(0)),
+            "Death runs before vertical contact redirects ydir into rdir"
+        );
+        assert_eq!(
+            object.local_vars.get("right_rdir"),
+            Some(&Value::Int(0)),
+            "all Contact* callbacks finish before vertical redirection"
+        );
+        assert_eq!(
+            object.rotation_velocity,
+            Some(fixed100(-50)),
+            "the post-callback !Alive branch redirects 0.5 ydir into -0.5 rdir"
+        );
+    }
+
+    #[test]
     fn gravity_crossing_hit2_threshold_uses_cached_pre_action_ocf() {
         // UpdateOCF sees ydir=1.9 (HitSpeed1 only), then DFA_FLIGHT adds
         // GravAccel=0.2 before DoMovement. The contact therefore passes
@@ -4584,6 +4919,311 @@ protected func OnActionJump(int xdir, int ydir, bool by_com)
                 vec![clonk_script::Value::Nil, clonk_script::Value::Int(210)],
             )],
             "the cached tier and the post-gravity argument use different clocks"
+        );
+    }
+
+    #[test]
+    fn rejected_rotation_preserves_contact_callback_position_like_cpp() {
+        // A rejected rotation saves and restores only Shape and the integer
+        // rotation, then calls UpdatePos. It does not restore x/y changed by
+        // ContactCheck's synchronous Contact* callback
+        // (oracle-src-pinned src/C4Movement.cpp:372-436, especially :394-420).
+        let script = r#"#strict 3
+local contact_calls;
+
+protected func ContactRight()
+{
+    contact_calls = 1;
+    SetPosition(8, 3);
+    return(0);
+}
+"#;
+        let library = MaterialLibrary::parse(
+            r#"
+[Material Earth]
+Name=Earth
+Density=100
+"#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut definition =
+            Definition::from_script("RPOS", "Rotation callback position", script)
+                .expect("rotation probe compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_contact_function_calls(true);
+        definition.set_contact_density(50);
+        definition.set_rotateable(360);
+        definition
+            .set_shape_vertices(vec![ObjectVertex::new(2, 0).with_cnat(CNAT_RIGHT)]);
+        definition.configure_actions(
+            Some("Idle".to_owned()),
+            HashMap::from([("Idle".to_owned(), ActionSpec::default())]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        let mut surface = vec![20; 12];
+        surface[6] = 0;
+        engine.set_landscape(
+            Landscape::new_with_material(12, surface, Some(earth))
+                .expect("landscape constructs"),
+        );
+        engine
+            .register_definition(definition)
+            .expect("rotation probe registers");
+        assert!(
+            engine
+                .definition("RPOS")
+                .expect("rotation probe definition exists")
+                .has_function("ContactRight"),
+            "the fixture exposes its contact callback"
+        );
+        assert!(
+            engine
+                .definition("RPOS")
+                .expect("rotation probe definition exists")
+                .contact_function_calls(),
+            "the fixture enables Contact* dispatch"
+        );
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("RPOS")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(4, 10))
+                    .with_fixed_position(FixedVec2::from_ints(4, 10))
+                    .with_action(ActionState::new("Idle"))
+                    .with_mobile(true),
+            )
+            .expect("rotation probe spawns");
+        let index = engine
+            .find_object_index(object_id)
+            .expect("rotation probe exists");
+        engine.objects[index].rotation_velocity = itofix(1);
+        engine.refresh_object_ocf(index);
+        let definition_id = engine.objects[index].definition_id.clone();
+        let actions = engine
+            .definition(&definition_id)
+            .expect("rotation probe definition remains registered")
+            .action_library()
+            .clone();
+
+        engine
+            .exec_object_movement(index, &actions, &definition_id, &[])
+            .expect("rotation contact movement executes");
+
+        let index = engine
+            .find_object_index(object_id)
+            .expect("rotation probe survives");
+        let object = &engine.objects[index];
+        assert_eq!(
+            object.state.local_vars.get("contact_calls"),
+            Some(&Value::Int(1)),
+            "the attempted rotation reaches ContactRight exactly once: \
+             rotation={} rdir={:?} ocf={} vertices={:?} position={:?}",
+            object.state.rotation,
+            object.rotation_velocity,
+            object.state.ocf,
+            object.state.vertices,
+            object.state.position
+        );
+        assert_eq!(
+            object.state.position,
+            Vector2::new(8, 3),
+            "the rejected rotation must preserve ContactRight's SetPosition"
+        );
+        assert_eq!(object.fixed_position, FixedVec2::from_ints(8, 3));
+        assert_eq!(object.state.rotation, 0);
+        assert_eq!(object.fixed_rotation, C4Fixed::ZERO);
+        assert_eq!(
+            object.state.vertices,
+            vec![ObjectVertex::new(2, 0).with_cnat(CNAT_RIGHT)],
+            "the rejected trial still restores the pre-rotation Shape"
+        );
+    }
+
+    #[test]
+    fn accepted_attached_rotation_clears_attach_material_in_final_update_face_like_cpp() {
+        // Every accepted degree first runs UpdateShape and then Shape.Attach,
+        // leaving Shape.AttachMat set to the attached material. fTurned makes
+        // DoMovement finish with UpdateFace(true), whose UpdateShape copies
+        // the definition's MNone AttachMat while retaining iAttachX/Y/Vtx
+        // (oracle-src-pinned src/C4Movement.cpp:372-436,485-489;
+        // src/C4Object.cpp:322-344,357-380; src/C4Shape.cpp:421-441).
+        let library = MaterialLibrary::parse(
+            r#"
+[Material Earth]
+Name=Earth
+Density=100
+"#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut definition = simple_definition("RATT");
+        definition.set_rotateable(360);
+        definition.set_contact_density(50);
+        definition
+            .set_shape_vertices(vec![ObjectVertex::new(0, 1).with_cnat(CNAT_BOTTOM)]);
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        engine.set_landscape(Landscape::flat_with_material(20, 10, Some(earth)));
+        engine
+            .register_definition(definition)
+            .expect("rotation probe registers");
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("RATT")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(10, 8))
+                    .with_fixed_position(FixedVec2::from_ints(10, 8))
+                    .with_mobile(true),
+            )
+            .expect("rotation probe spawns");
+        let index = engine
+            .find_object_index(object_id)
+            .expect("rotation probe exists");
+        engine.objects[index].frame_t_attach = CNAT_BOTTOM;
+        engine.objects[index].state.t_attach = CNAT_BOTTOM;
+        engine.objects[index].rotation_velocity = itofix(1);
+        engine.refresh_object_ocf(index);
+        let definition_id = engine.objects[index].definition_id.clone();
+        let actions = engine
+            .definition(&definition_id)
+            .expect("rotation probe definition remains registered")
+            .action_library()
+            .clone();
+
+        engine
+            .exec_object_movement(index, &actions, &definition_id, &[])
+            .expect("attached rotation executes");
+
+        let object = &engine.objects[engine
+            .find_object_index(object_id)
+            .expect("rotation probe survives")];
+        assert_eq!(object.state.rotation, 5, "the rotation must be accepted");
+        assert_eq!(
+            (object.state.shape_attach.x, object.state.shape_attach.y),
+            (10, 10),
+            "the successful Shape.Attach coordinates remain cached"
+        );
+        assert!(
+            !object.state.shape_attach.mat_valid,
+            "the trailing UpdateFace(true) resets AttachMat to MNone"
+        );
+    }
+
+    #[test]
+    fn accepted_rotation_rebuilds_shape_after_hit_like_cpp() {
+        // Hit runs before fTurned's final UpdateFace(true). Consequently a
+        // SetShape made by Hit is visible inside that callback but is then
+        // discarded when UpdateFace rebuilds Shape from the live definition
+        // (oracle-src-pinned src/C4Movement.cpp:372-436,472-490;
+        // src/C4Object.cpp:322-344,357-376).
+        let script = r#"#strict 3
+local hit_calls, hit_rotation;
+
+protected func Hit()
+{
+    ++hit_calls;
+    hit_rotation = GetR();
+    SetShape(-7, -8, 14, 16);
+    return(0);
+}
+"#;
+        let library = MaterialLibrary::parse(
+            r#"
+[Material Earth]
+Name=Earth
+Density=100
+"#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let earth = materials.id_of("Earth").expect("earth exists");
+        let mut definition =
+            Definition::from_script("RHIT", "Rotation Hit ordering", script)
+                .expect("rotation Hit probe compiles");
+        definition.set_c4_callback_convention(true);
+        definition.set_contact_density(50);
+        definition.set_rotateable(360);
+        definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
+        definition
+            .set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_RIGHT)]);
+        definition.configure_actions(
+            Some("Idle".to_owned()),
+            HashMap::from([("Idle".to_owned(), ActionSpec::default())]),
+        );
+
+        let mut engine = Engine::with_seed(0);
+        engine.set_materials(materials);
+        let mut surface = vec![20; 12];
+        surface[5] = 0;
+        engine.set_landscape(
+            Landscape::new_with_material(12, surface, Some(earth))
+                .expect("landscape constructs"),
+        );
+        engine
+            .register_definition(definition)
+            .expect("rotation Hit probe registers");
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("RHIT")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(4, 5))
+                    .with_fixed_position(FixedVec2::from_ints(4, 5))
+                    .with_action(ActionState::new("Idle"))
+                    .with_mobile(true),
+            )
+            .expect("rotation Hit probe spawns");
+        let index = engine
+            .find_object_index(object_id)
+            .expect("rotation Hit probe exists");
+        engine.objects[index]
+            .set_fixed_velocity(FixedVec2::new(fixed100(190), C4Fixed::ZERO));
+        engine.objects[index].rotation_velocity = itofix(1);
+        engine.refresh_object_ocf(index);
+        assert_ne!(
+            engine.objects[index].state.ocf & ocf::HIT_SPEED1,
+            0,
+            "the entry OCF must gate Hit"
+        );
+        let definition_id = engine.objects[index].definition_id.clone();
+        let actions = engine
+            .definition(&definition_id)
+            .expect("rotation Hit definition remains registered")
+            .action_library()
+            .clone();
+
+        engine
+            .exec_object_movement(index, &actions, &definition_id, &[])
+            .expect("contacting rotation executes");
+
+        let object = &engine.objects[engine
+            .find_object_index(object_id)
+            .expect("rotation Hit probe survives")];
+        assert_eq!(object.state.position, Vector2::new(4, 5));
+        assert_eq!(object.state.rotation, 5, "the free rotation is accepted");
+        assert_eq!(
+            object.state.local_vars.get("hit_calls"),
+            Some(&Value::Int(1)),
+            "the horizontal collision dispatches Hit once"
+        );
+        assert_eq!(
+            object.state.local_vars.get("hit_rotation"),
+            Some(&Value::Int(5)),
+            "Hit observes the accepted rotation before the final UpdateFace"
+        );
+        assert_eq!(
+            object.state.shape_override, None,
+            "the final UpdateFace(true) discards Hit's SetShape override"
+        );
+        assert_ne!(
+            object.current_shape_rect(),
+            Some(DefinitionRect::new(-7, -8, 14, 16)),
+            "the final shape no longer exposes Hit's SetShape geometry"
         );
     }
 
@@ -6520,4 +7160,3 @@ protected func Initialize() {
         assert_eq!(object.action.name, "Slide");
         assert_eq!(object.position, Vector2::new(5, 5));
     }
-

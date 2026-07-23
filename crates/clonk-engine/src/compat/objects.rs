@@ -673,6 +673,13 @@ pub(crate) fn refresh_live_object_ocf(context: &mut EffectHostContext, target: O
         return false;
     };
     let collection = live_collection_eligible(context, target, false);
+    let prey = metadata
+        .fire
+        .def_core_values
+        .def_core
+        .get("Prey")
+        .and_then(|values| values.first())
+        .is_some_and(|value| matches!(value, DefCorePrimitive::Int(value) if *value != 0));
     let solid_center = context
         .landscape_ref()
         .is_some_and(|landscape| landscape.is_solid_at(position.x, position.y));
@@ -711,6 +718,7 @@ pub(crate) fn refresh_live_object_ocf(context: &mut EffectHostContext, target: O
     // Con is rebuilt from the live definition/scope. DoCon calls SetOCF
     // before UpdateFace and before any lifecycle callback.
     mask &= !(ocf::CONSTRUCT
+        | ocf::INFLAMMABLE
         | ocf::FULL_CON
         | ocf::ROTATE
         | ocf::ENTRANCE
@@ -720,9 +728,21 @@ pub(crate) fn refresh_live_object_ocf(context: &mut EffectHostContext, target: O
         | ocf::POWER_CONSUMER
         | ocf::POWER_SUPPLY
         | ocf::CONTAINER
-        | ocf::FIGHT_READY);
+        | ocf::FIGHT_READY
+        | ocf::PREY);
     if metadata.constructable && construction < FULL_CON && rotation == 0 && !on_fire {
         mask |= ocf::CONSTRUCT;
+    }
+    // SetOCF, unlike UpdateOCF, rebuilds the definition/alive-dependent
+    // inflammability bit. AssignDeath relies on this exact distinction:
+    // its raw Alive=false leaves the old bit visible to RemoveDeath, while
+    // SetAction("Dead") clears it before Start/Abort/Death callbacks
+    // (oracle-src-pinned src/C4Object.cpp:562-566,1164-1205).
+    if !on_fire
+        && metadata.fire.contact_incinerate > 0
+        && (category & crate::CATEGORY_LIVING == 0 || alive)
+    {
+        mask |= ocf::INFLAMMABLE;
     }
     if construction >= FULL_CON {
         mask |= ocf::FULL_CON;
@@ -768,6 +788,9 @@ pub(crate) fn refresh_live_object_ocf(context: &mut EffectHostContext, target: O
         && !metadata.fire.no_fight
     {
         mask |= ocf::FIGHT_READY;
+    }
+    if prey && alive {
+        mask |= ocf::PREY;
     }
     mask &= !(ocf::IN_SOLID | ocf::IN_FREE | ocf::AVAILABLE);
     if container.is_none() {
@@ -1381,6 +1404,7 @@ fn enter_object_live_internal(
                 spawn.controller = Some(controller);
             }
         }
+        context.link_content_after_enter(container, target);
         if f_copy_motion {
             // Native Enter removes the outside solid mask before CopyMotion,
             // so SetOCF at the destination cannot sample the object's own
@@ -3086,16 +3110,17 @@ pub(crate) fn scroll_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(front) = contents.first().copied() else {
             return Ok(Value::Nil);
         };
-        let Some(new_front) = contents.get(1).copied() else {
-            return Ok(object_reference_value(front));
-        };
+        let new_front = contents.get(1).copied().unwrap_or(front);
+        let _ = context.move_content_link_to_back(target, front);
         if !context.ensure_object_scope(target) {
             return Ok(Value::Nil);
         }
         let Some(container) = context.object_scope_mut(target) else {
             return Ok(Value::Nil);
         };
-        container.shift_contents_front(new_front);
+        if new_front != front {
+            container.shift_contents_front(new_front);
+        }
         Ok(object_reference_value(new_front))
     })
 }
@@ -3265,14 +3290,24 @@ pub(crate) fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
     // The cyclic relink (C4ObjectList::ShiftContents, C4ObjectList.cpp:
     // 815-833) via ObjectUpdate.contents_front.
     let shifted = HOST_CONTEXT.with(|cell| {
-        cell.borrow_mut()
-            .as_mut()
-            .and_then(|context| context.object_context_mut())
-            .map(|object| object.shift_contents_front(new_front))
-            .is_some()
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut()?;
+        let shifted = context.rotate_contents_link_to_front(container, new_front);
+        if shifted {
+            context
+                .object_context_mut()
+                .map(|object| object.shift_contents_front(new_front));
+        }
+        Some(shifted)
     });
-    if !shifted {
+    let Some(shifted) = shifted else {
         return Ok(Value::Bool(false));
+    };
+    if !shifted {
+        // C4Object::ShiftContents already selected a candidate and returns
+        // true after DirectComContents even if its callback removed that
+        // candidate before the one-shot relink (C4Object.cpp:5790-5828).
+        return Ok(Value::Bool(true));
     }
     // ~Selection(container) on the new front; a falsy return plays the
     // Grab sound at the container (C4Object.cpp:5767).
@@ -9220,6 +9255,11 @@ pub(crate) fn set_category(args: &[Value]) -> Result<Value, RuntimeError> {
         // C4Object::SetCategory immediately calls Resort(), which leaves the
         // link in place but arms the post-CrossCheck global unsorted sweep.
         context.record_object_order_command(ObjectOrderCommand::ResortObject(target));
+        // SetCategory's trailing SetOCF is synchronous. In particular, a
+        // category change after AssignDeath must replace its earlier final
+        // cache before both the next statement and copy-out
+        // (oracle-src-pinned src/C4Object.h:311).
+        let _ = refresh_live_object_ocf(context, target);
         Ok(Value::Bool(true))
     })
 }

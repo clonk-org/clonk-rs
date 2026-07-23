@@ -44,23 +44,23 @@ pub(crate) fn kill(args: &[Value]) -> Result<Value, RuntimeError> {
     // C4Aul's typed two-parameter dispatch discards surplus values after
     // evaluating them (C4AulExec.cpp:1364-1396).
 
-    HOST_CONTEXT.with(|cell| {
+    let target = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         };
         // `cthr->Obj`, not the mutable effect carrier: definition-owned
         // callbacks may carry pForObj state while executing with Obj=null.
         let caller = context.script_object_context;
         let Some(target) = target_id.or(caller) else {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         };
         if !context.ensure_object_scope(target)
             || !context
                 .object_scope(target)
                 .is_some_and(ObjectScopeContext::alive)
         {
-            return Ok(Value::Bool(false));
+            return Ok(None);
         }
 
         let caller_controller = caller.and_then(|caller| {
@@ -78,15 +78,148 @@ pub(crate) fn kill(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(controller) = valid_controller {
             stage_energy_loss_cause(context, target, -1, crate::C4FX_CALL_ENG_SCRIPT, controller);
         }
-        // C++ flips Alive before clearing death effects. Keep that state
-        // visible to later host calls in this VM session without emitting a
-        // bare Alive delta: AssignDeath owns the authoritative final value,
-        // including non-forced revival by an effect.
-        if let Some(scope) = context.object_scope_mut(target) {
-            scope.request_assign_death(forced);
+        Ok(Some(target))
+    })?;
+    let Some(target) = target else {
+        return Ok(Value::Bool(false));
+    };
+    let _ = assign_death_live(target, forced)?;
+    Ok(Value::Bool(true))
+}
+
+/// Complete synchronous `C4Object::AssignDeath` over the VM's live object
+/// scopes. This is shared by script Kill and host DoEnergy so every callback
+/// and same-call read observes the native ordering before the invoking script
+/// resumes (oracle-src-pinned src/C4Object.cpp:1164-1205).
+pub(crate) fn assign_death_live(
+    target: ObjectId,
+    forced: bool,
+) -> Result<bool, RuntimeError> {
+    let death_causing_player = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return None;
+        };
+        if !context.ensure_object_scope(target)
+            || !context
+                .object_scope(target)
+                .is_some_and(ObjectScopeContext::alive)
+        {
+            return None;
         }
-        Ok(Value::Bool(true))
-    })
+        let cause = context
+            .object_scope(target)
+            .and_then(|scope| scope.pending_update.energy_loss_cause)
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .map(|object| object.last_energy_loss_cause)
+            })
+            .unwrap_or(OWNER_NONE);
+        if let Some(scope) = context.object_scope_mut(target) {
+            // Alive is cleared before RemoveDeath callbacks both to expose
+            // the death-in-progress state and to prevent recursive death.
+            scope.set_raw_alive(false);
+        }
+        Some(cause)
+    });
+    let Some(death_causing_player) = death_causing_player else {
+        return Ok(false);
+    };
+
+    let _ = clear_effects_for_assign_death(target)?;
+    let revived = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_scope(target))
+            .is_some_and(ObjectScopeContext::alive)
+    });
+    if revived && !forced {
+        return Ok(true);
+    }
+
+    // SetActionByName("Dead") is an ordinary native action transition:
+    // NoOtherAction may reject it and Start/Abort callbacks run inline.
+    let _ = native_set_action_by_name(target, "Dead")?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.set_selected(false);
+            // Forced death clears a RemoveDeath callback's revival again.
+            scope.set_raw_alive(false);
+            scope.clear_command_stack();
+        }
+        assign_death_host_crew_info(context, target);
+    });
+
+    // Re-read the live list head after every callbackful Exit. Ejection or
+    // Departure is allowed to mutate the remaining contents.
+    loop {
+        let content = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| first_retained_content(context, target))
+        });
+        let Some(content) = content else {
+            break;
+        };
+        let _ = exit_object_at_current_position(content)?;
+    }
+
+    // C++ snapshots pPlr from the current Owner before ClearPointers. The
+    // callbackful cursor adjustment may subsequently change Owner, Category
+    // or FoW membership, but the retention test still uses that same player.
+    let owner_player = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let owner = context.object_scope(target)?.owner();
+        context.player_state(owner).map(|_| owner)
+    });
+    if let Some(owner) = owner_player {
+        clear_owner_death_pointers_host(target, owner);
+    }
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        let retain_living_owner_view = owner_player.is_some_and(|owner| {
+            context
+                .object_scope(target)
+                .is_some_and(|scope| scope.category() & crate::CATEGORY_LIVING != 0)
+                && context.world.player_has_fow_view_object(owner, target)
+        });
+        let still_in_crew = context.object_in_any_crew(target);
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.stage_crew_member_state(still_in_crew);
+        }
+        if !retain_living_owner_view {
+            context.set_object_plr_view_range(target, 0);
+        }
+        context.record_crew_rosters();
+    });
+
+    let call_death = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|context| context.object_status_present(target))
+    });
+    if call_death {
+        call_object_own_fail_safe(target, "Death", &[Value::Int(death_causing_player)]);
+    }
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            if let Some(scope) = context.object_scope_mut(target) {
+                scope.commit_raw_alive();
+                scope.persist_final_ocf = true;
+            }
+            let _ = refresh_live_object_ocf(context, target);
+        }
+    });
+    Ok(true)
 }
 
 /// FnPunch (C4Script.cpp:328-332) → ObjectComPunch (C4ObjectCom.cpp:
@@ -185,37 +318,16 @@ pub(crate) fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
             .map(ObjectScopeContext::controller)
             .unwrap_or(OWNER_NONE)
     });
-    let staged = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
-        stage_energy_loss_cause(
-            context,
-            target,
-            -punch,
-            crate::C4FX_CALL_ENG_GET_PUNCHED,
-            attacker_controller,
-        );
-        context.object_scope(target).is_some()
-    });
-    if !staged {
-        return Ok(Value::Bool(false));
-    }
-    let Some(max_energy) = resolve_object_physical(target, false).map(|physical| physical.energy)
-    else {
-        return Ok(Value::Bool(false));
-    };
-    let written = HOST_CONTEXT.with(|cell| {
-        cell.borrow_mut()
-            .as_mut()
-            .and_then(|context| context.object_scope_mut(target))
-            .map(|scope| {
-                scope.adjust_energy(-punch, false, max_energy);
-            })
-            .is_some()
-    });
-    if !written {
+    let energy_result = do_energy_with_cause_override(
+        &[
+            Value::Int(-punch),
+            object_reference_value(target),
+            Value::Bool(false),
+            Value::Int(crate::C4FX_CALL_ENG_GET_PUNCHED),
+        ],
+        Some(attacker_controller),
+    )?;
+    if !energy_result.as_bool() {
         return Ok(Value::Bool(false));
     }
     // Native reads the attacker's facing only after DoEnergy returned, then
@@ -291,15 +403,19 @@ pub(crate) fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     });
     // PSF_CatchBlow after a successful fling (C4ObjectCom.cpp:754,762).
-    if let Some(Err(error)) = call_world_object_own_function(
-        target,
-        "CatchBlow",
-        &[Value::Int(punch), object_reference_value(attacker)],
-    ) {
-        tracing::warn!(
-            %error,
-            "script error in CatchBlow; continuing like the C++ fail-safe exec"
-        );
+    // C4Object::Call first checks raw Status, which a synchronous lethal
+    // DoEnergy/Death callback may have cleared before Punch reaches here.
+    if object_is_present(target) {
+        if let Some(Err(error)) = call_world_object_own_function(
+            target,
+            "CatchBlow",
+            &[Value::Int(punch), object_reference_value(attacker)],
+        ) {
+            tracing::warn!(
+                %error,
+                "script error in CatchBlow; continuing like the C++ fail-safe exec"
+            );
+        }
     }
     Ok(Value::Bool(true))
 }
@@ -1686,9 +1802,14 @@ pub(crate) fn do_energy_with_cause_override(
         let Some(scope) = context.object_scope(target) else {
             return Ok(None);
         };
-        Ok(Some((target, caused_by, scope.alive())))
+        Ok(Some((
+            target,
+            caused_by,
+            scope.alive(),
+            scope.energy() == 0,
+        )))
     })?;
-    let Some((target, caused_by, alive)) = staged else {
+    let Some((target, caused_by, alive, was_zero)) = staged else {
         return Ok(Value::Bool(false));
     };
     // The percent scale precedes the effects hook (C4Object.cpp:1347 vs
@@ -1711,15 +1832,25 @@ pub(crate) fn do_energy_with_cause_override(
     else {
         return Ok(Value::Bool(false));
     };
-    HOST_CONTEXT.with(|cell| {
+    let should_assign_death = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
-            return;
+            return false;
         };
         if let Some(scope) = context.object_scope_mut(target) {
-            scope.adjust_energy(scaled, true, max_energy);
+            let energy = scope.adjust_energy(scaled, true, max_energy);
+            // This write has evaluated C++'s death predicate against the
+            // same-call state. Copy-out must not derive it again from the
+            // frame-entry Alive value.
+            scope.pending_update.host_energy_death_checked = true;
+            scope.alive() && energy == 0 && !was_zero
+        } else {
+            false
         }
     });
+    if should_assign_death {
+        let _ = assign_death_live(target, false)?;
+    }
     Ok(Value::Bool(true))
 }
 
@@ -6637,7 +6768,7 @@ fn set_owner_live(target: ObjectId, new_owner: i32) -> bool {
                 .unwrap_or(0)
         });
 
-        let (old_owner, flag_base_target, owner_changed) = {
+        let (old_owner, flag_base_target, owner_changed, plr_view_range) = {
             let object = context.object_scope_mut(target)?;
             // C++ refreshes the currently selected ColorByOwner graphics
             // before its same-owner early return.
@@ -6653,8 +6784,22 @@ fn set_owner_live(target: ObjectId, new_owner: i32) -> bool {
             if owner_changed {
                 object.set_owner(new_owner);
             }
-            (old_owner, flag_base_target, owner_changed)
+            (
+                old_owner,
+                flag_base_target,
+                owner_changed,
+                object.plr_view_range(),
+            )
         };
+
+        if owner_changed {
+            context.world.change_player_fow_view_object_owner(
+                target,
+                old_owner,
+                new_owner,
+                plr_view_range,
+            );
+        }
 
         // C4Object::SetOwner refreshes selected ColorByOwner graphics before
         // its same-owner early return. UpdateFace(false) performs an ordinary
@@ -6773,7 +6918,7 @@ pub(crate) fn set_alive(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
+    let updated = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow
             .as_mut()
@@ -6791,7 +6936,22 @@ pub(crate) fn set_alive(args: &[Value]) -> Result<Value, RuntimeError> {
 
         object.set_alive(alive);
         Ok(Value::Bool(true))
-    })
+    })?;
+    if updated == Value::Bool(true) {
+        let target = HOST_CONTEXT.with(|cell| {
+            cell.borrow().as_ref().and_then(|context| {
+                target_id.or_else(|| context.object_context().map(ObjectScopeContext::id))
+            })
+        });
+        if let Some(target) = target {
+            HOST_CONTEXT.with(|cell| {
+                if let Some(context) = cell.borrow_mut().as_mut() {
+                    let _ = refresh_live_object_ocf(context, target);
+                }
+            });
+        }
+    }
+    Ok(updated)
 }
 
 pub(crate) fn get_owner(args: &[Value]) -> Result<Value, RuntimeError> {

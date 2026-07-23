@@ -958,6 +958,13 @@ pub enum PlayerCommand {
         object_id: ObjectId,
         link: CrewInfoLink,
     },
+    /// `C4Object::AssignDeath` marks the still-linked object info dead,
+    /// increments its death count and retires its active stint. Unlike
+    /// `RetireCrewInfo`, the object keeps its Info pointer.
+    AssignDeathCrewInfo {
+        object_id: ObjectId,
+        link: CrewInfoLink,
+    },
     /// Link an exact persistent CrewInfo entry to a live object. A newly
     /// created entry is appended before the link is installed; an existing
     /// entry is merely recruited. The full payload moves with GrabInfo.
@@ -1085,11 +1092,21 @@ pub enum PlayerCommand {
     /// C4Player::ClearPointers for an object removed during the same script
     /// call. Ordered after earlier SetPlrView/SetViewCursor commands.
     ClearObjectPointers { object: ObjectId },
-    /// One `C4Player::ClearPointers` step whose `AdjustCursorCommand` already
-    /// ran synchronously in the host. Keeping this per-player preserves the
-    /// exact player-list interleaving with selection callbacks: a callback
-    /// may mutate another player's pointers before that player's turn.
-    ClearPlayerObjectPointersWithoutAdjust { player_id: i32, object: ObjectId },
+    /// The prefix of one `C4Player::ClearPointers` step: clear Captain/Crew
+    /// and write Cursor=null before callbackful AdjustCursorCommand.
+    ClearPlayerObjectPointersBeforeAdjust { player_id: i32, object: ObjectId },
+    /// The suffix of one `C4Player::ClearPointers` step, after
+    /// AdjustCursorCommand: clear ViewCursor/ViewTarget/menu/query pointers.
+    ClearPlayerObjectPointersAfterAdjust { player_id: i32, object: ObjectId },
+    /// `C4Player::AdjustCursorCommand` starts with ResetCursorView while the
+    /// old ViewCursor is still live.
+    ResetCursorView { player_id: i32 },
+    /// Its conditional UpdateView call, with the focus position resolved at
+    /// the exact host-call point before selection callbacks.
+    UpdatePlayerView {
+        player_id: i32,
+        position: Option<Vector2>,
+    },
     /// FnClearLastPlrCom (C4Script.cpp:2624-2635): clear the pending
     /// single/double-click command latches, preserving LastComDelay.
     ClearLastPlrCom { player_id: i32 },
@@ -1729,6 +1746,10 @@ pub struct HostWorldContext {
     /// Shared process-presentation sink for the global Game.PathFinder graph.
     pub(crate) pathfinder_debug: Rc<RefCell<PathfinderDebugSnapshot>>,
     pub(crate) players: Rc<HashMap<i32, PlayerState>>,
+    /// Runtime-only `C4Player::FoWViewObjs` membership. PlayerState omits
+    /// this list, but AssignDeath needs it before Death is called to decide
+    /// whether a dead living object retains its view range.
+    player_fow_view_objects: Rc<HashMap<i32, HashSet<ObjectId>>>,
     /// Process-local display names for configured keyboard/gamepad controls,
     /// keyed by the player's effective control-set number.
     control_key_names: Rc<HashMap<i32, Vec<crate::ControlKeyName>>>,
@@ -1865,6 +1886,8 @@ pub struct HostWorldContext {
     /// installed (and in fixture contexts).
     scenario_script: Option<Arc<ScriptEngine>>,
     pub(crate) frame: u64,
+    /// Live `Game.Time`, used by C4ObjectInfo::Retire during AssignDeath.
+    game_time: i32,
     pub(crate) base_buy_enabled: bool,
     pub(crate) base_sell_enabled: bool,
     pub(crate) base_auto_sell_enabled: bool,
@@ -1925,6 +1948,7 @@ impl Default for HostWorldContext {
             pathfinder_transfer_zones_enabled: true,
             pathfinder_debug: Rc::new(RefCell::new(PathfinderDebugSnapshot::default())),
             players: Rc::new(HashMap::new()),
+            player_fow_view_objects: Rc::new(HashMap::new()),
             control_key_names: Rc::new(HashMap::new()),
             player_info_ids: Rc::new(HashSet::new()),
             player_order: Rc::new(Vec::new()),
@@ -1975,6 +1999,7 @@ impl Default for HostWorldContext {
             crew_info_links: Rc::new(HashMap::new()),
             materials: None,
             frame: 0,
+            game_time: 0,
             base_buy_enabled: true,
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
@@ -2302,6 +2327,7 @@ impl HostWorldContext {
             player_order: Rc::new(player_ids),
             player_info_ids: Rc::new(player_info_ids),
             players: Rc::new(players),
+            player_fow_view_objects: Rc::new(HashMap::new()),
             control_key_names: Rc::new(HashMap::new()),
             teams: Rc::new(Vec::new()),
             crew_selection: Rc::new(crew_selection),
@@ -2348,6 +2374,7 @@ impl HostWorldContext {
             crew_info_links: Rc::new(HashMap::new()),
             materials: None,
             frame: 0,
+            game_time: 0,
             base_buy_enabled: true,
             base_sell_enabled: true,
             base_auto_sell_enabled: true,
@@ -2364,6 +2391,100 @@ impl HostWorldContext {
     pub(crate) fn with_sky_adjustment(mut self, adjustment: SkyAdjustment) -> Self {
         self.sky_adjustment = adjustment;
         self
+    }
+
+    pub(crate) fn with_player_fow_view_objects<I, O>(mut self, players: I) -> Self
+    where
+        I: IntoIterator<Item = (i32, O)>,
+        O: IntoIterator<Item = ObjectId>,
+    {
+        self.player_fow_view_objects = Rc::new(
+            players
+                .into_iter()
+                .map(|(player, objects)| (player, objects.into_iter().collect()))
+                .collect(),
+        );
+        self
+    }
+
+    pub(crate) fn player_has_fow_view_object(
+        &self,
+        player: i32,
+        object: ObjectId,
+    ) -> bool {
+        self.player_fow_view_objects
+            .get(&player)
+            .is_some_and(|objects| objects.contains(&object))
+    }
+
+    pub(crate) fn remove_player_fow_view_object(
+        &mut self,
+        player: i32,
+        object: ObjectId,
+    ) {
+        if let Some(objects) =
+            Rc::make_mut(&mut self.player_fow_view_objects).get_mut(&player)
+        {
+            objects.remove(&object);
+        }
+    }
+
+    /// `C4Object::PlrFoWActualize`: remove and conditionally re-add the
+    /// object in its current owner's list, or every player's list when it
+    /// has no valid owner.
+    pub(crate) fn actualize_player_fow_view_object(
+        &mut self,
+        object: ObjectId,
+        owner: i32,
+        range: i32,
+    ) {
+        let player_ids = if self.players.contains_key(&owner) {
+            vec![owner]
+        } else {
+            self.players.keys().copied().collect()
+        };
+        let memberships = Rc::make_mut(&mut self.player_fow_view_objects);
+        for player in player_ids {
+            let objects = memberships.entry(player).or_default();
+            objects.remove(&object);
+            if range != 0 {
+                objects.insert(object);
+            }
+        }
+    }
+
+    /// The FoW-list half of `C4Object::SetOwner`: remove through the OLD
+    /// owner semantics, then actualize the NEW valid owner when non-null.
+    pub(crate) fn change_player_fow_view_object_owner(
+        &mut self,
+        object: ObjectId,
+        old_owner: i32,
+        new_owner: i32,
+        range: i32,
+    ) {
+        let old_player_ids = if self.players.contains_key(&old_owner) {
+            vec![old_owner]
+        } else {
+            self.players.keys().copied().collect()
+        };
+        let memberships = Rc::make_mut(&mut self.player_fow_view_objects);
+        for player in old_player_ids {
+            if let Some(objects) = memberships.get_mut(&player) {
+                objects.remove(&object);
+            }
+        }
+        if new_owner != OWNER_NONE {
+            self.actualize_player_fow_view_object(object, new_owner, range);
+        }
+    }
+
+    pub(crate) fn with_game_time(mut self, game_time: i32) -> Self {
+        self.game_time = game_time;
+        self
+    }
+
+    pub(crate) fn game_time(&self) -> i32 {
+        self.game_time
     }
 
     pub(crate) fn with_sky_fade(mut self, top: RgbColor, bottom: RgbColor) -> Self {

@@ -3144,19 +3144,30 @@ impl Engine {
 
     /// `C4Player::AdjustCursorCommand` (C4Player.cpp:1235-1258).
     pub(super) fn player_adjust_cursor_command(&mut self, owner: i32) -> Result<(), EngineError> {
+        // ResetCursorView runs before the replacement search while the old
+        // ViewCursor is still live (C4Player.cpp:1241-1244).
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.reset_cursor_view();
+        }
         // Find hirank Select, else any (:1240-1245).
         let hi_rank = self
             .player_hi_rank_active_crew(owner, true)
             .or_else(|| self.player_hi_rank_active_crew(owner, false));
-        let previous = self.crew_cursor(owner);
+        let previous = self
+            .players
+            .get(&owner)
+            .and_then(|player| player.cursor());
         if previous != hi_rank {
             self.crew_selection
                 .entry(owner)
                 .or_default()
                 .set_cursor(hi_rank);
-        }
-        if let Some(player) = self.players.get_mut(&owner) {
-            player.set_cursor(hi_rank);
+            if let Some(player) = self.players.get_mut(&owner) {
+                player.set_cursor(hi_rank);
+            }
+            // UpdateView precedes both selection callbacks and resolves the
+            // still-live ViewCursor before ClearPointers' suffix clears it.
+            self.update_player_view(owner);
         }
         // UnSelect previous cursor (:1253).
         if let Some(previous_index) = previous
@@ -3167,7 +3178,11 @@ impl Engine {
         }
         // We have a cursor: do select it (:1255) — the non-cursor DoSelect
         // sets the Select flag too.
-        if let Some(cursor_index) = hi_rank.and_then(|id| self.find_object_index(id)) {
+        let live_cursor = self
+            .players
+            .get(&owner)
+            .and_then(|player| player.cursor());
+        if let Some(cursor_index) = live_cursor.and_then(|id| self.find_object_index(id)) {
             self.object_do_select(cursor_index, owner, false)?;
         }
         if let Some(player) = self.players.get_mut(&owner) {

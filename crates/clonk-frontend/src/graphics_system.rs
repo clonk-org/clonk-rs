@@ -408,6 +408,11 @@ impl GraphicsSystem {
         self.particle_sprites = sprites;
     }
 
+    /// Look up one installed exact-case particle render definition.
+    pub fn particle_sprite(&self, name: &str) -> Option<&ParticleRenderDefinition> {
+        self.particle_sprites.get(name)
+    }
+
     pub fn set_presentation_scale(&mut self, scale: f32) {
         self.presentation_scale = if scale.is_finite() {
             scale.max(f32::EPSILON)
