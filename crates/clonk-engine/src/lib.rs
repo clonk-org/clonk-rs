@@ -15193,6 +15193,10 @@ impl Definition {
             *self.physical(),
         )
         .with_base_graphics(state.base_graphics.clone())
+        // The scope publishes its whole overlay list, so it must start
+        // from the object's real overlays: C4Object::GetGraphicsOverlay
+        // splices a single node (src/C4Object.cpp:5962-5977).
+        .with_graphics_overlays(state.graphics_overlays.clone())
         .with_walk_rotation(self.walk_rotation_seed(state))
         .with_script_fixed_position(state.script_fixed_position)
         .with_script_fixed_velocity(state.script_fixed_velocity)
@@ -15329,6 +15333,10 @@ impl Definition {
             *self.physical(),
         )
         .with_base_graphics(state.base_graphics.clone())
+        // The scope publishes its whole overlay list, so it must start
+        // from the object's real overlays: C4Object::GetGraphicsOverlay
+        // splices a single node (src/C4Object.cpp:5962-5977).
+        .with_graphics_overlays(state.graphics_overlays.clone())
         .with_walk_rotation(self.walk_rotation_seed(state))
         .with_script_fixed_position(state.script_fixed_position)
         .with_script_fixed_velocity(state.script_fixed_velocity)
@@ -16209,6 +16217,10 @@ impl Definition {
             *self.physical(),
         )
         .with_base_graphics(state.base_graphics.clone())
+        // The scope publishes its whole overlay list, so it must start
+        // from the object's real overlays: C4Object::GetGraphicsOverlay
+        // splices a single node (src/C4Object.cpp:5962-5977).
+        .with_graphics_overlays(state.graphics_overlays.clone())
         .with_walk_rotation(self.walk_rotation_seed(state))
         .with_script_fixed_position(state.script_fixed_position)
         .with_script_fixed_velocity(state.script_fixed_velocity)

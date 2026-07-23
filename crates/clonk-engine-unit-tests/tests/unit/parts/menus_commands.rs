@@ -934,6 +934,119 @@ func Probe(object target)
     }
 
     #[test]
+    fn context_menu_overlay_write_keeps_the_objects_other_overlays() {
+        // execute_context_menu's non-legacy branch dispatches through
+        // call_menu_callback, whose carrier context is built separately from
+        // the object's primary scope. C4Object::GetGraphicsOverlay splices one
+        // node into the live pGfxOverlay list (src/C4Object.cpp:5962-5977), so
+        // a context-menu callback that sets one overlay must leave the rest.
+        let script = r#"
+        func Arm() {
+            return SetGraphics(0, this(), PICT, 1, GFXOV_MODE_Action, "O20");
+        }
+        func ContextPaint(menuObj) {
+            SetGraphics(0, this(), PICT, 9, GFXOV_MODE_Action, "Pointer");
+            return 1;
+        }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        for (id, definition_script) in [("PICT", ""), ("CLNK", script)] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, id, definition_script)
+                        .expect("definition compiles"),
+                )
+                .expect("definition registers");
+        }
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick_without_snapshot().expect("tick succeeds");
+
+        let index = engine.find_object_index(clonk).expect("clonk exists");
+        engine
+            .call_object_function(index, "Arm", Vec::new())
+            .expect("overlay 1 installs");
+        engine
+            .execute_context_menu(clonk, "ContextPaint")
+            .expect("context menu entry runs");
+
+        let overlays = engine
+            .object_snapshot(clonk)
+            .expect("clonk survives")
+            .graphics_overlays
+            .iter()
+            .map(|overlay| overlay.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            overlays,
+            vec![1, 9],
+            "the context-menu callback wrote overlay 9; overlay 1 must survive"
+        );
+    }
+
+    #[test]
+    fn menu_callback_overlay_write_keeps_the_objects_other_overlays() {
+        // C4Object::GetGraphicsOverlay splices one node into the live
+        // pGfxOverlay list (src/C4Object.cpp:5962-5977), so a menu callback
+        // that sets one overlay leaves the object's others alone. The Rust
+        // scope publishes its whole overlay list, so the menu callback carrier
+        // context must be seeded with the object's real overlays -- the same
+        // omission that truncated ClonkMars' MHUD from an effect timer.
+        let script = r#"
+        func OnMenuSelection(sel, menuObj) {
+            SetGraphics(0, this(), PICT, 9, GFXOV_MODE_Action, "Pointer");
+        }
+        func OpenMenu() {
+            CreateMenu(WIPF, this(), this(), 0, "Choose");
+            AddMenuItem("A", "CmdA", WIPF, this());
+            AddMenuItem("B", "CmdB", WIPF, this());
+            return 1;
+        }
+        func Arm() {
+            return SetGraphics(0, this(), PICT, 1, GFXOV_MODE_Action, "O20");
+        }
+        func Sel(i) { return SelectMenuItem(i, this()); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        for (id, definition_script) in [("PICT", ""), ("CLNK", script)] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, id, definition_script)
+                        .expect("definition compiles"),
+                )
+                .expect("definition registers");
+        }
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick_without_snapshot().expect("tick succeeds");
+
+        let mut call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, args)
+                .expect("call succeeds")
+        };
+        call(&mut engine, "Arm", Vec::new());
+        call(&mut engine, "OpenMenu", Vec::new());
+        call(&mut engine, "Sel", vec![Value::Int(1)]);
+
+        let overlays = engine
+            .object_snapshot(clonk)
+            .expect("clonk survives")
+            .graphics_overlays
+            .iter()
+            .map(|overlay| overlay.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            overlays,
+            vec![1, 9],
+            "the menu callback wrote overlay 9; overlay 1 must survive"
+        );
+    }
+
+    #[test]
     fn select_menu_item_moves_selection_and_fires_on_menu_selection_like_cpp() {
         // FnSelectMenuItem (C4Script.cpp:1736-1741) -> C4Menu::SetSelection
         // (C4Menu.cpp:557-594): only SELECTABLE items move the selection,
