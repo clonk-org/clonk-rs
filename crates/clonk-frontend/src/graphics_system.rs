@@ -7518,7 +7518,20 @@ impl GraphicsSystem {
                     gamma,
                     object_ancestry,
                 ),
-                _ => {}
+                // C4Object::Draw skips exactly one mode — IsPicture(), which is
+                // `eMode == MODE_Picture` (src/C4Object.cpp:2526-2529;
+                // src/C4DefGraphics.h:247), and C4GraphicsOverlay::Draw asserts
+                // it never arrives (src/C4DefGraphics.cpp:758). MODE_None
+                // survives that filter but IsValid rejects it, because
+                // UpdateFacet leaves fctBlit defaulted (src/C4DefGraphics.cpp:
+                // 638-639, :709-710).
+                GraphicsOverlayMode::Picture | GraphicsOverlayMode::None => {}
+                // TODO: MODE_ExtraGraphics redraws the host from the overlay's
+                // graphics (src/C4DefGraphics.cpp:788-811); tracked in
+                // PORT_STATUS.md. Listed explicitly so a new mode cannot be lost
+                // to a catch-all the way these two were.
+                GraphicsOverlayMode::ExtraGraphics => {}
+                GraphicsOverlayMode::IngamePicture => {}
             }
         }
     }

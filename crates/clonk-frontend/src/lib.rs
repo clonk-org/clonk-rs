@@ -6590,6 +6590,63 @@ mod tests {
     }
 
     #[test]
+    fn picture_and_none_overlay_modes_never_draw_in_the_object_walk() {
+        // C4Object::Draw filters the overlay chain on !IsPicture(), and
+        // IsPicture() is `eMode == MODE_Picture` alone
+        // (src/C4Object.cpp:2526-2529; src/C4DefGraphics.h:247) —
+        // C4GraphicsOverlay::Draw even asserts it (src/C4DefGraphics.cpp:758).
+        // MODE_None passes that filter but IsValid rejects it because
+        // UpdateFacet leaves fctBlit defaulted (src/C4DefGraphics.cpp:638-639,
+        // :709-710). Locks both before the dispatcher's catch-all is removed.
+        let sprite = solid_sprite(
+            "PicSrc",
+            16,
+            16,
+            Color::opaque(220, 40, 40),
+            Some(DefinitionRect::new(-8, -8, 16, 16)),
+            false,
+        );
+        let background = Color::opaque(200, 0, 200);
+        let render = |mode| {
+            let mut object = make_snapshot().objects.remove(0);
+            object.position = Vector2::new(8, 8);
+            object.graphics_overlays = vec![ObjectGraphicsOverlay::new(1, mode)
+                .with_definition(Some("PicSrc".to_string()))];
+            let mut graphics = GraphicsSystem::new(
+                16,
+                16,
+                16,
+                "Non-drawing overlay modes",
+                test_font(),
+                Arc::clone(&sprite),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.surface_mut().fill(background);
+            graphics.draw_object_overlays(
+                &object,
+                &[],
+                &[],
+                OWNER_NONE,
+                None,
+                8.0,
+                8.0,
+                1.0,
+                0.0,
+                None,
+                None,
+            );
+            let surface = graphics.surface().clone();
+            (0..16).all(|y| {
+                (0..16).all(|x| surface.get_pixel(x, y) == Some(background))
+            })
+        };
+
+        assert!(render(GraphicsOverlayMode::Picture), "MODE_Picture is in-game invisible");
+        assert!(render(GraphicsOverlayMode::None), "MODE_None has no facet");
+    }
+
+    #[test]
     fn parallax_action_overlay_ignores_viewport_scroll() {
         // C4Object::Draw resolves its output origin through TargetPos before
         // the face draw (src/C4Object.cpp:2271), and C4GraphicsOverlay::Draw
