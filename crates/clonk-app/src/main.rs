@@ -7373,7 +7373,7 @@ fn classic_client_settings_for_reference(
 ) -> Result<ClientSettings> {
     let mut settings = client_settings_for_paths(reference.source_address, player_name, paths)
         .with_compatibility_build(reference.build)
-        .with_join_attempts(reference.join_attempts_for_local_host())
+        .with_join_route_plan(reference.join_route_plan_for_local_host())
         .with_netpuncher(
             reference.netpuncher_address.clone(),
             clonk_network::NetpuncherGameIds {
@@ -7390,9 +7390,9 @@ fn classic_client_settings_for_reference(
 
 fn startup_network_connect_targets(settings: &ClientSettings) -> String {
     settings
-        .server_addresses
+        .logical_server_addresses
         .iter()
-        .filter(|address| !address.is_ip_null())
+        .filter(|address| !address.is_ip_null() && settings.join_protocol_enabled(address))
         .map(|address| {
             let protocol = match address.protocol {
                 clonk_network::NetworkProtocol::Tcp => "TCP".to_string(),
@@ -19515,7 +19515,7 @@ impl NetworkLobbyState {
         // hover, press, focus, and tooltip timing survive frame boundaries.
         let mut options = scenario_game_options.clone();
         options.set_lobby_league(self.league_mode);
-        options.set_countdown(self.countdown.is_some());
+        options.set_countdown(self.controller.countdown().is_locked());
         let layout = self.controller.layout(width, height, fonts);
         options.set_bounds(layout.game_option_strip);
         let _ = self.controller.chat_scroll_metrics(&layout, &fonts.text);

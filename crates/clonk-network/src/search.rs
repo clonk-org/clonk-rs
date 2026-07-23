@@ -99,6 +99,17 @@ pub struct NetworkGameReference {
     pub tcp_addresses: Vec<SocketAddr>,
 }
 
+/// Prepared C++ client routes before `InitClient` starts the transports.
+///
+/// `logical_addresses` retains one prepared reference address per advertised
+/// route for progress/diagnostic presentation. `dial_attempts` expands local
+/// routes over the machine's interface IDs for the actual transports.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetworkJoinRoutePlan {
+    pub logical_addresses: Vec<NetworkAddress>,
+    pub dial_attempts: Vec<NetworkAddress>,
+}
+
 impl Default for NetworkGameReference {
     fn default() -> Self {
         Self {
@@ -181,32 +192,54 @@ impl NetworkGameReference {
         have_global_ipv6: bool,
         local_interface_ids: &[u32],
     ) -> Vec<NetworkAddress> {
-        let mut attempts = Vec::new();
-        for address in self.join_addresses(have_global_ipv6) {
-            if address.is_ip_null() {
-                continue;
-            }
+        self.join_route_plan(have_global_ipv6, local_interface_ids)
+            .dial_attempts
+    }
+
+    /// Keeps C++'s original prepared address list distinct from the scoped
+    /// endpoints generated for transport connection attempts.
+    pub fn join_route_plan(
+        &self,
+        have_global_ipv6: bool,
+        local_interface_ids: &[u32],
+    ) -> NetworkJoinRoutePlan {
+        let logical_addresses = self
+            .join_addresses(have_global_ipv6)
+            .into_iter()
+            .filter(|address| !address.is_ip_null())
+            .collect::<Vec<_>>();
+        let mut dial_attempts = Vec::new();
+        for address in logical_addresses.iter().copied() {
             if cpp_is_local_address(address.endpoint) {
                 for &scope_id in local_interface_ids {
                     let mut attempt = address;
                     if let SocketAddr::V6(endpoint) = &mut attempt.endpoint {
                         endpoint.set_scope_id(scope_id);
                     }
-                    attempts.push(attempt);
+                    dial_attempts.push(attempt);
                 }
             } else {
-                attempts.push(address);
+                dial_attempts.push(address);
             }
         }
-        attempts
+        NetworkJoinRoutePlan {
+            logical_addresses,
+            dial_attempts,
+        }
     }
 
     /// Prepares the complete reference attempt list against this machine's
     /// IPv6 capabilities, matching the inputs C++ obtains from its local
     /// client/interface inventory before `InitClient` starts every route.
     pub fn join_attempts_for_local_host(&self) -> Vec<NetworkAddress> {
+        self.join_route_plan_for_local_host().dial_attempts
+    }
+
+    /// Prepares logical reference routes and expanded dial attempts from the
+    /// same snapshot of this machine's IPv6 capabilities.
+    pub fn join_route_plan_for_local_host(&self) -> NetworkJoinRoutePlan {
         let (have_global_ipv6, local_interface_ids) = local_join_capabilities();
-        self.join_attempts(have_global_ipv6, &local_interface_ids)
+        self.join_route_plan(have_global_ipv6, &local_interface_ids)
     }
 
     fn is_same_host_and_address(&self, other: &Self) -> bool {
@@ -2181,8 +2214,32 @@ Title=Recovered game\n"
             ..NetworkGameReference::default()
         };
 
+        let expected_attempts = [
+            global_v4,
+            NetworkAddress::new(
+                NetworkProtocol::Udp,
+                SocketAddr::V6(SocketAddrV6::new(
+                    "fe80::beef".parse().unwrap(),
+                    11_113,
+                    0,
+                    3,
+                )),
+            ),
+            NetworkAddress::new(
+                NetworkProtocol::Udp,
+                SocketAddr::V6(SocketAddrV6::new(
+                    "fe80::beef".parse().unwrap(),
+                    11_113,
+                    0,
+                    7,
+                )),
+            ),
+            link_local_v4,
+            link_local_v4,
+        ];
+        let route_plan = reference.join_route_plan(false, &[3, 7]);
         assert_eq!(
-            reference.join_attempts(false, &[3, 7]),
+            route_plan.logical_addresses,
             [
                 global_v4,
                 NetworkAddress::new(
@@ -2191,22 +2248,15 @@ Title=Recovered game\n"
                         "fe80::beef".parse().unwrap(),
                         11_113,
                         0,
-                        3,
-                    )),
-                ),
-                NetworkAddress::new(
-                    NetworkProtocol::Udp,
-                    SocketAddr::V6(SocketAddrV6::new(
-                        "fe80::beef".parse().unwrap(),
-                        11_113,
-                        0,
-                        7,
+                        9,
                     )),
                 ),
                 link_local_v4,
-                link_local_v4,
-            ]
+            ],
+            "the progress routes retain one source-scoped logical address"
         );
+        assert_eq!(route_plan.dial_attempts, expected_attempts);
+        assert_eq!(reference.join_attempts(false, &[3, 7]), expected_attempts);
     }
 
     #[test]

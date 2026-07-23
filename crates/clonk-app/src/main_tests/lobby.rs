@@ -9335,6 +9335,91 @@
     }
 
     #[test]
+    fn joined_lobby_long_countdown_keeps_game_options_unlocked_and_renderable() {
+        // MainDlg maps values above AlmostStartCountdownTime to
+        // CDS_LongCountdown. SetCountdownState immediately passes
+        // IsCountdown()==false to the retained game-option strip because only
+        // the final ten seconds and Start lock it
+        // (src/C4GameLobby.cpp:346-425; src/C4GameLobby.h:93).
+        let mut app = new_real_menu_app(320, 200);
+        app.graphics.set_runtime_sprite_filtering(1.0, false);
+        app.configure_native_startup_fonts(1.0, false);
+        app.startup_view = StartupView::NetworkLobby;
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
+        app.sync_network_lobby_game_option_state();
+
+        event_tx
+            .send(NetworkEvent::LobbyCountdown(
+                clonk_network::LobbyCountdownPacket::new(12),
+            ))
+            .expect("queue long lobby countdown");
+        app.process_network_events()
+            .expect("apply long lobby countdown");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .controller
+                .countdown(),
+            clonk_frontend::game_lobby::LobbyCountdownState::Long { seconds: 12 }
+        );
+        assert!(!app.scenario_game_options.values().countdown);
+
+        app.sync_network_lobby_game_option_state();
+        assert!(
+            !app.scenario_game_options.values().countdown,
+            "ordinary lobby synchronization must preserve LongCountdown's unlocked strip"
+        );
+        let assets = Arc::clone(&app.assets);
+        let (_, options) = app
+            .network_lobby
+            .as_mut()
+            .expect("joined lobby")
+            .classic_render_state(
+                app.graphics.surface(),
+                assets.as_ref(),
+                &app.scenario_game_options,
+            )
+            .expect("long countdown remains renderable");
+        assert!(!options.values().countdown);
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("render joined lobby during a long countdown");
+        let presentation = retained_test_presentation(&app);
+        let retained = app
+            .render_retained_gpu_frame(presentation)
+            .expect("retain joined lobby during a long countdown");
+        assert_retained_frame_has_commands("joined lobby long countdown", &retained);
+
+        event_tx
+            .send(NetworkEvent::LobbyCountdown(
+                clonk_network::LobbyCountdownPacket::new(10),
+            ))
+            .expect("queue final lobby countdown");
+        app.process_network_events()
+            .expect("apply final lobby countdown");
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .expect("joined lobby")
+                .controller
+                .countdown(),
+            clonk_frontend::game_lobby::LobbyCountdownState::Final { seconds: 10 }
+        );
+        assert!(app.scenario_game_options.values().countdown);
+        let final_frame = app
+            .render_retained_gpu_frame(presentation)
+            .expect("retain joined lobby during the final countdown");
+        assert_retained_frame_has_commands("joined lobby final countdown", &final_frame);
+    }
+
+    #[test]
     fn inbound_lobby_countdown_updates_cpp_countdown_start_and_abort_states() {
         // MainDlg maps -1 to no countdown, zero to the start transition, and
         // values through ten to the active countdown state

@@ -26,7 +26,7 @@ use clonk_network::{
     ClientEvent, ClientHandle, ClientId, ClientMeshPuncherConfig, ClientPlayerResourceRequest,
     ControlDelivery, ControlPacket, HostConfig, HostEvent, HostHandle, HostJoinSnapshot,
     HostUdpBinding, LegacyControlFrame, LegacyControlSet, NetpuncherGameIds, NetworkAddress,
-    NetworkProtocol, NetworkStatus, ParticipantKind, Tick,
+    NetworkJoinRoutePlan, NetworkProtocol, NetworkStatus, ParticipantKind, Tick,
 };
 pub use clonk_network::{
     RuntimeLobbyClientTelemetry, RuntimeNetworkClientState, RuntimeNetworkConnection,
@@ -59,6 +59,11 @@ pub struct HostSettings {
 
 #[derive(Debug, Clone)]
 pub struct ClientSettings {
+    /// Original prepared reference routes, retained once each for connection
+    /// progress and diagnostics before local routes are expanded by interface.
+    pub logical_server_addresses: Vec<NetworkAddress>,
+    /// Concrete transport endpoints to dial. Local reference routes may occur
+    /// once per local interface ID.
     pub server_addresses: Vec<NetworkAddress>,
     /// C++ `C4XVERBUILD` value this client presents for the selected game.
     /// Reference-backed joins use the host's advertised build so Rust release
@@ -92,11 +97,13 @@ impl ClientSettings {
         } else {
             SocketAddr::from(([0_u16; 8], 0))
         };
+        let logical_server_addresses = vec![
+            NetworkAddress::new(NetworkProtocol::Tcp, server_addr),
+            NetworkAddress::new(NetworkProtocol::Udp, server_addr),
+        ];
         Self {
-            server_addresses: vec![
-                NetworkAddress::new(NetworkProtocol::Tcp, server_addr),
-                NetworkAddress::new(NetworkProtocol::Udp, server_addr),
-            ],
+            logical_server_addresses: logical_server_addresses.clone(),
+            server_addresses: logical_server_addresses,
             compatibility_build: clonk_network::CURRENT_GAME_BUILD,
             player_name,
             observer: false,
@@ -115,12 +122,28 @@ impl ClientSettings {
         }
     }
 
+    /// Replaces only the concrete dial attempts. The logical routes remain
+    /// available for progress presentation.
     pub fn with_join_attempts(
         mut self,
         addresses: impl IntoIterator<Item = NetworkAddress>,
     ) -> Self {
         self.server_addresses = addresses.into_iter().collect();
         self
+    }
+
+    pub fn with_join_route_plan(mut self, route_plan: NetworkJoinRoutePlan) -> Self {
+        self.logical_server_addresses = route_plan.logical_addresses;
+        self.server_addresses = route_plan.dial_attempts;
+        self
+    }
+
+    pub fn join_protocol_enabled(&self, address: &NetworkAddress) -> bool {
+        client_join_protocol_enabled(
+            address,
+            self.mesh_tcp_bind_address.is_some(),
+            self.mesh_udp_bind_address.is_some(),
+        )
     }
 
     pub fn with_compatibility_build(mut self, compatibility_build: i32) -> Self {

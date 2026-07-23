@@ -4502,7 +4502,7 @@ impl GameApp {
             return Ok(());
         }
         self.prepare_network_join_game_state();
-        let attempts = reference.join_attempts_for_local_host();
+        let route_plan = reference.join_route_plan_for_local_host();
         let netpuncher_address = reference.netpuncher_address.clone();
         let netpuncher_game_ids = clonk_network::NetpuncherGameIds {
             ipv4: reference.netpuncher_ipv4,
@@ -4518,7 +4518,7 @@ impl GameApp {
         }
         let settings = settings
             .with_compatibility_build(reference.build)
-            .with_join_attempts(attempts)
+            .with_join_route_plan(route_plan)
             .with_netpuncher(netpuncher_address, netpuncher_game_ids);
         self.startup_game_search = None;
         self.pending_network_join = Some(settings);

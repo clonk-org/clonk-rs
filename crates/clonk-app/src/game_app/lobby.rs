@@ -69,7 +69,7 @@ impl GameApp {
         let Some((is_host, countdown)) = self
             .network_lobby
             .as_ref()
-            .map(|lobby| (lobby.is_host, lobby.countdown.is_some()))
+            .map(|lobby| (lobby.is_host, lobby.controller.countdown().is_locked()))
         else {
             return;
         };

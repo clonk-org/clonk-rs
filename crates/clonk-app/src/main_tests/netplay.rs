@@ -7852,6 +7852,64 @@
     }
 
     #[test]
+    fn l084_join_progress_lists_logical_routes_once_without_collapsing_dial_attempts() {
+        // C++ expands a local address over every interface for NetIO.Connect,
+        // but appends the original C4Network2Address only once to the progress
+        // message (oracle-src-pinned src/C4Network2.cpp:375-405,412-423).
+        let original = "[fe80::cafe]:11112".parse().unwrap();
+        let scoped = |protocol, scope_id| {
+            clonk_network::NetworkAddress::new(
+                protocol,
+                std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                    "fe80::cafe".parse().unwrap(),
+                    11_112,
+                    0,
+                    scope_id,
+                )),
+            )
+        };
+        let attempts = vec![
+            scoped(clonk_network::NetworkProtocol::Tcp, 3),
+            scoped(clonk_network::NetworkProtocol::Tcp, 7),
+            scoped(clonk_network::NetworkProtocol::Udp, 3),
+            scoped(clonk_network::NetworkProtocol::Udp, 7),
+        ];
+        let settings = ClientSettings::new(original, "Player").with_join_route_plan(
+            clonk_network::NetworkJoinRoutePlan {
+                logical_addresses: vec![
+                    clonk_network::NetworkAddress::new(
+                        clonk_network::NetworkProtocol::Tcp,
+                        original,
+                    ),
+                    clonk_network::NetworkAddress::new(
+                        clonk_network::NetworkProtocol::Udp,
+                        original,
+                    ),
+                ],
+                dial_attempts: attempts.clone(),
+            },
+        );
+
+        assert_eq!(
+            settings.server_addresses, attempts,
+            "the network worker must retain every scoped dial attempt"
+        );
+        assert_eq!(
+            startup_network_connect_targets(&settings),
+            "TCP:[fe80::cafe]:11112, UDP:[fe80::cafe]:11112",
+            "the dialog must list each original logical route exactly once"
+        );
+
+        let mut tcp_only = settings;
+        tcp_only.mesh_udp_bind_address = None;
+        assert_eq!(
+            startup_network_connect_targets(&tcp_only),
+            "TCP:[fe80::cafe]:11112",
+            "C++ names only protocols for which NetIO.Connect accepted an attempt"
+        );
+    }
+
+    #[test]
     fn l084_join_progress_names_target_and_dismisses_on_resolution() {
         use clonk_frontend::message_dialog::{
             MessageDialogButton, MessageDialogButtons, MessageDialogIcon, MessageDialogSize,
@@ -9546,6 +9604,11 @@
             clonk_network::CURRENT_GAME_BUILD + 2
         );
         assert_eq!(settings.server_addresses, [global_tcp, private_udp]);
+        assert_eq!(
+            settings.logical_server_addresses,
+            [global_tcp, private_udp],
+            "reference joins retain the C++ progress routes separately"
+        );
         assert_eq!(
             settings.netpuncher_address.as_deref(),
             Some("puncher.invalid:11115")
