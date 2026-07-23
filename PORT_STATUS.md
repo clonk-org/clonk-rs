@@ -167,6 +167,13 @@ live comparison.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.
+- Graphics overlays: the draw dispatcher handles MODE_Action/Base/Object and
+  drops MODE_IngamePicture and MODE_ExtraGraphics, where C++ skips only
+  MODE_Picture (`C4Object.cpp:2526-2529`, `C4DefGraphics.h:242`). The
+  `fZoomToShape` fit (`C4DefGraphics.cpp:660-664,821-825`) and the
+  MODE_ExtraGraphics re-entrant base draw (`C4DefGraphics.cpp:788-811`) have no
+  Rust counterpart. Visible in ClonkMars: MHUD's item-pickup log icons
+  (`Helpers.c4d/HUD.c4d/Script.c` `DrawLogItem`) never appear.
 
 Comparator caveats: presentation RNG is opt-in; fields compare only when both
 bridges expose them (the C++ bridge omits layer/visibility/player hostility).
