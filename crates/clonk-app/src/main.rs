@@ -29019,6 +29019,21 @@ impl GameApp {
             let line = self.engine.definition_line(definition_id);
             let stretch_growth = self.engine.definition_stretch_growth(definition_id);
             let top_face = self.engine.definition_top_face(definition_id);
+            // C4GraphicsOverlay::UpdateFacet takes pSourceGfx->pDef->PictureRect
+            // verbatim and unscaled (src/C4DefGraphics.cpp:660-664); the
+            // definition Scale is applied to the source crop by C4Facet::DrawT
+            // (src/C4Facet.cpp:74-79).
+            let picture = self
+                .engine
+                .definition_picture(definition_id)
+                .map(|picture| {
+                    clonk_engine::DefinitionRect::new(
+                        picture.x,
+                        picture.y,
+                        picture.width,
+                        picture.height,
+                    )
+                });
             debug_geometry.insert(
                 definition_id.to_string(),
                 DefinitionDebugGeometry {
@@ -29048,7 +29063,7 @@ impl GameApp {
                         line,
                         stretch_growth,
                         top_face,
-                        picture: None,
+                        picture,
                         image: ImageData::from_arc(width, height, pixels),
                         actions: actions.clone(),
                         color_mask: mask,
@@ -29070,7 +29085,7 @@ impl GameApp {
                         line,
                         stretch_growth,
                         top_face,
-                        picture: None,
+                        picture,
                         image: ImageData::from_arc(width, height, image.into_pixels()),
                         actions: actions.clone(),
                         color_mask: mask,
@@ -29085,6 +29100,7 @@ impl GameApp {
                 existing.line = line;
                 existing.stretch_growth = stretch_growth;
                 existing.top_face = top_face;
+                existing.picture = picture;
             }
 
             for variant in self.engine.definition_sprite_variant_names(definition_id) {
@@ -29109,7 +29125,7 @@ impl GameApp {
                             line,
                             stretch_growth,
                             top_face,
-                            picture: None,
+                            picture,
                             image: ImageData::from_arc(width, height, pixels),
                             actions: actions.clone(),
                             color_mask: mask,

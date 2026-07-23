@@ -219,6 +219,74 @@
     }
 
     #[test]
+    fn definition_sprite_carries_the_raw_defcore_picture_rect() {
+        // C4GraphicsOverlay::UpdateFacet takes pSourceGfx->pDef->PictureRect
+        // verbatim for MODE_IngamePicture/MODE_Picture
+        // (src/C4DefGraphics.cpp:660-664). It must arrive UNSCALED: C4Facet::DrawT
+        // applies the definition Scale to the source crop only
+        // (src/C4Facet.cpp:74-79), and the rect also serves as the fZoomToShape
+        // denominator and the destination extent.
+        let mut app = new_running_sandbox_app();
+
+        let mut with_picture = Definition::from_script("PIC2", "Pictured", "#strict\n")
+            .expect("pictured definition compiles");
+        with_picture.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-8, -10, 16, 20)));
+        with_picture.set_picture(Some(clonk_engine::DefinitionPicture {
+            x: 192,
+            y: 100,
+            width: 32,
+            height: 40,
+        }));
+        with_picture.set_sprite_image(Some(clonk_engine::DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: Arc::from([0xff, 0, 0, 0xff]),
+            color_mask: None,
+        }));
+        app.engine
+            .register_definition(with_picture)
+            .expect("register pictured definition");
+
+        // C4DefCore::Load replaces a missing Picture with the shape-sized
+        // top-left facet, ignoring the shape offsets (src/C4Def.cpp:222-224).
+        let mut without_picture = Definition::from_script("PIC0", "Unpictured", "#strict\n")
+            .expect("unpictured definition compiles");
+        without_picture.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-8, -10, 16, 20)));
+        without_picture.set_picture(Some(clonk_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 20,
+        }));
+        without_picture.set_sprite_image(Some(clonk_engine::DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: Arc::from([0xff, 0, 0, 0xff]),
+            color_mask: None,
+        }));
+        app.engine
+            .register_definition(without_picture)
+            .expect("register unpictured definition");
+
+        app.rebuild_definition_sprites();
+
+        let picture_of = |id: &str| {
+            app.graphics
+                .object_sprite(&sprite_map_key(id, None))
+                .expect("definition sprite is installed")
+                .picture
+        };
+        assert_eq!(
+            picture_of("PIC2"),
+            Some(clonk_engine::DefinitionRect::new(192, 100, 32, 40)),
+        );
+        assert_eq!(
+            picture_of("PIC0"),
+            Some(clonk_engine::DefinitionRect::new(0, 0, 16, 20)),
+        );
+    }
+
+    #[test]
     fn viewport_buttons_use_only_the_exact_mouse_viewport() {
         let mut app = new_running_sandbox_app();
         let owner = app.local_owner;

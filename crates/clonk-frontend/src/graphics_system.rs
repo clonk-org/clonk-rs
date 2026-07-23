@@ -395,6 +395,11 @@ impl GraphicsSystem {
         self.object_sprites = sprites;
     }
 
+    /// Look up one installed definition sprite by its `sprite_map_key`.
+    pub fn object_sprite(&self, key: &str) -> Option<&DefinitionSprite> {
+        self.object_sprites.get(key)
+    }
+
     /// Install the final exact-case, post-overload particle render catalog.
     pub fn set_particle_sprites(
         &mut self,
