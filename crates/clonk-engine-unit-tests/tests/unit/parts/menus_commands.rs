@@ -1022,7 +1022,7 @@ func Probe(object target)
             .expect("clonk spawns");
         engine.tick_without_snapshot().expect("tick succeeds");
 
-        let mut call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
             let idx = engine.find_object_index(clonk).expect("clonk exists");
             engine
                 .call_object_function(idx, name, args)
@@ -6528,4 +6528,3 @@ func FxAmplifierDamage(pTarget, iNumber, iChange, iCause, iCausedBy)
             .expect("energy change succeeds");
         assert_eq!(engine.objects[crate_idx].state.energy, 0);
     }
-
