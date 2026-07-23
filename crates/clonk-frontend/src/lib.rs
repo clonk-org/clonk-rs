@@ -6706,6 +6706,124 @@ mod tests {
     }
 
     #[test]
+    fn shipped_clonkmars_hud_item_log_icon_matches_the_cpp_geometry() {
+        // End-to-end pin for ClonkMars' MHUD item-pickup log
+        // (content/ClonkMars.c4d/Helpers.c4d/HUD.c4d/Script.c DrawLogItem):
+        //   SetGraphics(0, this, val, HUD_ItemLog, GFXOV_MODE_IngamePicture)
+        //   SetObjDrawTransform(15*1000/w, 0, OverlayShiftX(w) + 18000,
+        //                       0, 15*1000/h, OverlayShiftY(h) + 7000, this, ov)
+        // with OverlayShiftX(w) = 1000*(Offset.x + w/2). The script asks for a
+        // 15px icon, but fZoomToShape multiplies that by
+        // min(160/64, 120/64) = 1.875 (src/C4DefGraphics.cpp:820-825), so C++
+        // actually renders 64 * 0.234 * 1.875 = 28.08px. That is the oracle;
+        // do not "correct" it toward the content's stated intent.
+        let hud = crate::test_support::repo_root()
+            .join("content/ClonkMars.c4d/Helpers.c4d/HUD.c4d");
+        if !hud.is_dir() {
+            return;
+        }
+        let def_core = std::fs::read_to_string(hud.join("DefCore.txt"))
+            .expect("read shipped MHUD DefCore");
+        let value = |key: &str| {
+            def_core
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(key))
+                .unwrap_or_else(|| panic!("MHUD DefCore has {key}"))
+                .to_string()
+        };
+        assert_eq!(value("Width="), "160");
+        assert_eq!(value("Height="), "120");
+        assert_eq!(value("Offset="), "-80,-60");
+
+        // The content comment assumes a 64x64 item picture.
+        let picture_extent = 64;
+        let marker = Color::opaque(15, 120, 240);
+        let source_sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(
+                picture_extent as u32,
+                picture_extent as u32,
+                [15, 120, 240, 255].repeat((picture_extent * picture_extent) as usize),
+            ),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-32, -32, 64, 64)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: Some(DefinitionRect::new(0, 0, picture_extent, picture_extent)),
+        };
+        let hud_sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(1, 1, vec![0, 0, 0, 0]),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-80, -60, 160, 120)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: None,
+        };
+
+        // DrawLogItem's transform, in the engine's 1/1000 units.
+        let scale = 15.0 * 1000.0 / picture_extent as f32 / 1000.0;
+        let shift_x = (-80 + picture_extent / 2) as f32 + 18.0;
+        let shift_y = (-60 + picture_extent / 2) as f32 + 7.0;
+
+        let mut object = make_snapshot().objects.remove(0);
+        object.definition_id = "MHUD".to_string();
+        object.position = Vector2::new(150, 105);
+        object.graphics_overlays = vec![ObjectGraphicsOverlay::new(
+            6,
+            GraphicsOverlayMode::IngamePicture,
+        )
+        .with_definition(Some("ITEM".to_string()))
+        .with_transform(Some(DrawTransform::from_components(
+            scale, scale, shift_x, shift_y,
+        )))];
+
+        let mut graphics = GraphicsSystem::new(
+            200,
+            140,
+            140,
+            "ClonkMars item log",
+            test_font(),
+            Arc::new(HashMap::from([
+                (sprite_map_key("MHUD", None), hud_sprite),
+                (sprite_map_key("ITEM", None), source_sprite),
+            ])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_point_filtering(true);
+        graphics.surface_mut().fill(Color::opaque(10, 10, 10));
+        graphics.draw_object_overlays(
+            &object,
+            &[],
+            &[],
+            OWNER_NONE,
+            None,
+            150.0,
+            105.0,
+            1.0,
+            0.0,
+            None,
+            None,
+        );
+
+        // Final map is x' = 0.43875x + 27.9375, y' = 0.43875y + 19.55625 over a
+        // 64x64 quad at (118, 73): x 79.71..107.79, y 51.59..79.67.
+        let bbox = colour_bbox(graphics.surface(), marker).expect("item-log icon is drawn");
+        assert_eq!(bbox, (80, 52, 107, 79));
+        assert_eq!(bbox.2 - bbox.0 + 1, 28, "64px picture renders 28px wide");
+        assert_eq!(bbox.3 - bbox.1 + 1, 28, "64px picture renders 28px tall");
+    }
+
+    #[test]
     fn picture_and_none_overlay_modes_never_draw_in_the_object_walk() {
         // C4Object::Draw filters the overlay chain on !IsPicture(), and
         // IsPicture() is `eMode == MODE_Picture` alone
