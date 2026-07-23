@@ -83,7 +83,10 @@
         fs::write(global.join("Old Base.ogg"), b"old base").expect("old global track");
         fs::write(global.join("Removed.mod"), b"removed").expect("removed global track");
         fs::write(extras.join("Old Match.mp3"), b"old wildcard").expect("old wildcard track");
-        fs::write(dir.path().join("MoreMusic.txt"), b"Extras/*.mp3\n")
+        // \x2A is the byte for '*'; writing it as an escape keeps cloc's Rust
+        // filter from misreading the glob's slash-star as a block-comment open
+        // and stalling (the bytes are unchanged).
+        fs::write(dir.path().join("MoreMusic.txt"), b"Extras/\x2A.mp3\n")
             .expect("initial MoreMusic manifest");
 
         let local_scenario = dir.path().join("Local.c4s");
@@ -132,9 +135,10 @@
         fs::write(global.join("New Base.ogg"), b"new base").expect("new global track");
         fs::write(global.join("Frontend.ogg"), b"new frontend").expect("new frontend track");
         fs::write(extras.join("New Match.ogg"), b"new wildcard").expect("new wildcard track");
+        // \x2A is '*' (see note above); bytes identical, dodges the same cloc stall.
         fs::write(
             dir.path().join("MoreMusic.txt"),
-            b"Extras/*.ogg\n#clear\nMusic.c4g\nExtras/*.ogg\n",
+            b"Extras/\x2A.ogg\n#clear\nMusic.c4g\nExtras/\x2A.ogg\n",
         )
         .expect("replacement MoreMusic manifest");
 
