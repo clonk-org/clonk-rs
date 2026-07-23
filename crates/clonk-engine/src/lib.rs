@@ -16811,6 +16811,13 @@ impl Definition {
                         .unwrap_or(*self.physical()),
                 )
                 .with_base_graphics(state.base_graphics.clone())
+                // C4Object::GetGraphicsOverlay splices a single node into the
+                // live pGfxOverlay list (src/C4Object.cpp:5962-5977), so an
+                // effect callback that writes one overlay leaves the object's
+                // other overlays alone. The scope publishes its WHOLE overlay
+                // list (compat/contexts.rs:8892), so it must start from the
+                // carrier's real overlays or the write deletes the rest.
+                .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_walk_rotation(carrier_walk_rotation)
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
