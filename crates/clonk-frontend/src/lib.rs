@@ -4109,9 +4109,21 @@ mod tests {
             .world_to_screen(0, fogged.position)
             .expect("far world object in viewport");
         let normal = (normal.0.round() as u32 + 1, normal.1.round() as u32 + 1);
-        let parallax_screen = baseline
-            .world_to_screen(0, Vector2::new(120, 50))
-            .expect("parallax foreground in viewport");
+        // world_to_screen models an ordinary world object. This one is
+        // C4D_Parallax with Local(0)/Local(1) unset and non-negative
+        // coordinates, so ApplyParallaxity yields cotx = coty = 0
+        // (src/C4Object.cpp:5839-5852) and C4Object::Draw anchors it to the
+        // viewport content origin rather than to the scroll
+        // (src/C4Object.cpp:2271).
+        let parallax_viewport = baseline
+            .active_viewports
+            .iter()
+            .find(|viewport| viewport.owner == 0)
+            .expect("owner viewport");
+        let parallax_screen = (
+            120.0 * parallax_viewport.zoom + parallax_viewport.content_rect.x as f32,
+            50.0 * parallax_viewport.zoom + parallax_viewport.content_rect.y as f32,
+        );
         let parallax_pixel = (
             parallax_screen.0.round() as u32 + 1,
             parallax_screen.1.round() as u32 + 1,
@@ -6552,6 +6564,120 @@ mod tests {
     }
 
     #[test]
+    fn parallax_action_overlay_ignores_viewport_scroll() {
+        // C4Object::Draw resolves its output origin through TargetPos before
+        // the face draw (src/C4Object.cpp:2271), and C4GraphicsOverlay::Draw
+        // repeats that resolution for every overlay
+        // (src/C4DefGraphics.cpp:763-765). For a C4D_Parallax object whose
+        // Local(0)/Local(1) are unset and whose coordinates are non-negative,
+        // ApplyParallaxity yields riTx = riTy = 0 (src/C4Object.cpp:5839-5852),
+        // so the overlay is pinned to the viewport at every scroll position.
+        // ClonkMars' MHUD oxygen meter is exactly that object: a C4D_Parallax
+        // StaticBack at (150,105) carrying a MODE_Action overlay per meter.
+        let mut pixels = vec![0u8; 8 * 4 * 4];
+        for y in 0..4 {
+            for x in 4..8 {
+                let base = (y * 8 + x) * 4;
+                pixels[base..base + 4].copy_from_slice(&[60, 20, 80, 255]);
+            }
+        }
+        let sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(8, 4, pixels),
+            actions: HashMap::from([(
+                "O20".to_string(),
+                DefinitionActionGraphics {
+                    facet: Some(clonk_engine::DefinitionActionFacet {
+                        x: 4,
+                        y: 0,
+                        width: 4,
+                        height: 4,
+                        target_x: 0,
+                        target_y: 0,
+                    }),
+                    length: Some(1),
+                    ..DefinitionActionGraphics::default()
+                },
+            )]),
+            color_mask: None,
+            // The left half of the sheet is fully transparent, so the base
+            // face contributes nothing and only the overlay is asserted on.
+            shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+        };
+
+        let mut template = make_snapshot().objects.remove(0);
+        template.crew_member = false;
+        template.id = ObjectId::new(1);
+        template.definition_id = "ParallaxHud".to_string();
+        template.position = Vector2::new(10, 6);
+        template.category = CATEGORY_PARALLAX_FLAG;
+        template.graphics_overlays = vec![ObjectGraphicsOverlay::new(
+            1,
+            GraphicsOverlayMode::Action,
+        )
+        .with_definition(Some("ParallaxHud".to_string()))
+        .with_action(Some("O20".to_string()))];
+
+        let render = |viewport: Vector2| {
+            let mut graphics = GraphicsSystem::new(
+                24,
+                16,
+                16,
+                "Parallax action overlay",
+                test_font(),
+                Arc::new(HashMap::from([(
+                    sprite_map_key("ParallaxHud", None),
+                    sprite.clone(),
+                )])),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.viewport_x = viewport.x as f32;
+            graphics.viewport_y = viewport.y as f32;
+            graphics.surface_mut().fill(Color::opaque(10, 10, 10));
+            graphics.draw_objects(
+                &[template.clone()],
+                &[],
+                &HashMap::new(),
+                &[],
+                4,
+                1.0,
+                &HashMap::new(),
+                ObjectRenderPass::Normal,
+                None,
+            );
+            graphics.surface().clone()
+        };
+
+        // A 4x4 facet centred on the object's own coordinates (10,6) covers
+        // x 8..12, y 4..8 regardless of how far the landscape has scrolled.
+        let marker = Some(Color::opaque(60, 20, 80));
+        let background = Some(Color::opaque(10, 10, 10));
+
+        let unscrolled = render(Vector2::new(0, 0));
+        assert_eq!(unscrolled.get_pixel(8, 4), marker);
+        assert_eq!(unscrolled.get_pixel(11, 7), marker);
+
+        let scrolled = render(Vector2::new(5, 3));
+        assert_eq!(
+            scrolled.get_pixel(8, 4),
+            marker,
+            "TargetPos pins a zero-parallax overlay against viewport scroll"
+        );
+        assert_eq!(scrolled.get_pixel(11, 7), marker);
+        assert_eq!(
+            scrolled.get_pixel(3, 1),
+            background,
+            "the overlay must not slide by the raw scroll offset"
+        );
+    }
+
+    #[test]
     fn nested_object_overlay_line_calls_use_rewritten_audibility_facets() {
         let mut template = make_snapshot().objects.remove(0);
         template.crew_member = false;
@@ -8986,6 +9112,87 @@ mod tests {
     }
 
     #[test]
+    fn parallax_select_mark_ignores_viewport_scroll() {
+        // C4Object::DrawSelectMark resolves cox/coy through TargetPos exactly
+        // like C4Object::Draw does (src/C4Object.cpp:3887-3893), so the marks
+        // stay locked to a pinned C4D_Parallax object instead of scrolling
+        // off-screen with the landscape.
+        let mut snapshot = make_snapshot();
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+        snapshot.objects[0].position = Vector2::new(100, 60);
+        snapshot.objects[0].owner = 1;
+
+        let mut pinned = snapshot.objects[0].clone();
+        pinned.id = ObjectId::new(2);
+        pinned.definition_id = "PinnedHud".into();
+        pinned.position = Vector2::new(20, 15);
+        pinned.crew_member = false;
+        pinned.category = clonk_engine::DEFAULT_CATEGORY | CATEGORY_PARALLAX_FLAG;
+        snapshot.objects.push(pinned.clone());
+        snapshot.render_order = snapshot.objects.iter().map(|object| object.id).collect();
+        snapshot.players.push(PlayerState {
+            id: 1,
+            cursor: Some(pinned.id),
+            control: clonk_engine::PlayerControlState {
+                select_flash: 30,
+                ..Default::default()
+            },
+            ..PlayerState::default()
+        });
+
+        // A fully transparent face keeps the assertion on the mark alone.
+        let sprites = solid_sprite(
+            "PinnedHud",
+            12,
+            12,
+            Color::new(0, 0, 0, 0),
+            Some(DefinitionRect::new(-6, -6, 12, 12)),
+            false,
+        );
+        let hud = HudGraphics {
+            select_mark: Some(ImageData::new(
+                20,
+                5,
+                (0..100).flat_map(|_| [0, 220, 0, 255]).collect(),
+            )),
+            ..Default::default()
+        };
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Parallax select mark",
+            test_font(),
+            sprites,
+            empty_cursor_atlas(),
+            Arc::new(hud),
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[ViewportInput::new(
+                1,
+                snapshot.objects[0].position,
+                1.0,
+                &snapshot.objects[0],
+            )],
+        );
+
+        // The camera is scrolled to (48,20) by the far focus object, so the
+        // unresolved origin would place this mark at (-36,-13) — outside the
+        // cull margin entirely. TargetPos pins it at x + Shape.x - 2 = 12.
+        let (viewport_x, viewport_y) = graphics.viewport();
+        assert!(
+            viewport_x > 16 && viewport_y > 5,
+            "camera must be scrolled far enough to separate the two origins",
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(13, 8),
+            Some(standard_gamma_color(Color::opaque(0, 220, 0))),
+            "select marks follow the pinned parallax object",
+        );
+    }
+
+    #[test]
     fn l066_foreground_parallax_split_straddles_cursor_marks_like_cpp() {
         // ForeObjects.DrawIfCategory(... C4D_Parallax, true) draws the
         // non-parallax foreground before Game.DrawCursors; the false pass
@@ -9038,8 +9245,17 @@ mod tests {
                 &[ViewportInput::from_focus(&snapshot.objects[0])],
             );
             let (viewport_x, viewport_y) = graphics.viewport();
-            let x = snapshot.objects[0].position.x - viewport_x - 6;
-            let y = snapshot.objects[0].position.y - viewport_y - 6;
+            // C4D_Parallax with Local(0)/Local(1) unset and non-negative
+            // coordinates resolves to cotx = coty = 0, so both the face and
+            // its select marks are pinned to the viewport
+            // (src/C4Object.cpp:2271,3887-3893,5839-5852).
+            let (target_x, target_y) = if category & CATEGORY_PARALLAX_FLAG != 0 {
+                (0, 0)
+            } else {
+                (viewport_x, viewport_y)
+            };
+            let x = snapshot.objects[0].position.x - target_x - 6;
+            let y = snapshot.objects[0].position.y - target_y - 6;
             graphics.surface().get_pixel(x as u32, y as u32)
         };
 

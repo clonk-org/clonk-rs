@@ -2644,8 +2644,6 @@ impl GraphicsSystem {
                         snapshot,
                         &highlight_ids,
                         input.owner,
-                        origin_x,
-                        origin_y,
                         zoom,
                         gamma,
                     );
@@ -2826,8 +2824,6 @@ impl GraphicsSystem {
         snapshot: &SimulationSnapshot,
         highlights: &HashSet<ObjectId>,
         owner: i32,
-        origin_x: f32,
-        origin_y: f32,
         zoom: f32,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
@@ -2859,8 +2855,12 @@ impl GraphicsSystem {
             if self.debug_draw_flags.show_solid_mask && self.object_has_debug_solid_mask(object) {
                 continue;
             }
-            let screen_x = (object.position.x as f32 - origin_x) * zoom;
-            let screen_y = (object.position.y as f32 - origin_y) * zoom;
+            // DrawSelectMark resolves its origin through TargetPos just like
+            // C4Object::Draw, so marks stay locked to a pinned C4D_Parallax
+            // object (src/C4Object.cpp:3887-3893).
+            let (target_x, target_y) = self.object_target_position(object);
+            let screen_x = (object.position.x as f32 - target_x) * zoom;
+            let screen_y = (object.position.y as f32 - target_y) * zoom;
             if screen_x < -margin
                 || screen_x > surface_width + margin
                 || screen_y < -margin
@@ -6401,8 +6401,16 @@ impl GraphicsSystem {
         let owner_color = Some(object_color_by_owner_tint(object));
         let rotation_degrees = (object.rotation.rem_euclid(360)) as f32;
 
-        let screen_x = (object.position.x as f32 - self.viewport_x) * zoom;
-        let screen_y = (object.position.y as f32 - self.viewport_y) * zoom;
+        // C4Object::Draw resolves the face origin through TargetPos, which
+        // applies parallaxity for C4D_Parallax objects (src/C4Object.cpp:2271).
+        // It holds that in the locals cotx/coty and never writes back into
+        // cgo.TargetX/Y, so every C4GraphicsOverlay::Draw re-derives its own
+        // target from the untouched viewport scroll
+        // (src/C4DefGraphics.cpp:763-765). Keep self.viewport_x/y as that raw
+        // scroll and hand the resolved origin down explicitly.
+        let (target_x, target_y) = self.object_target_position(object);
+        let screen_x = (object.position.x as f32 - target_x) * zoom;
+        let screen_y = (object.position.y as f32 - target_y) * zoom;
 
         let base_transform = object.draw_transform;
         let (base_definition_id, base_graphics_name) =
@@ -6436,7 +6444,7 @@ impl GraphicsSystem {
             .cloned()
             .or_else(|| sprite.clone());
         if let Some(geometry_sprite) = geometry_sprite.as_ref() {
-            let target_position = self.object_target_position(object);
+            let target_position = (target_x, target_y);
             let shape = self.live_object_shape(geometry_sprite, object);
             if !self.object_reaches_post_face_draw(object, geometry_sprite, shape) {
                 self.draw_definition_particles(
@@ -6460,6 +6468,14 @@ impl GraphicsSystem {
             );
         }
         if let Some(sprite) = sprite {
+            // The face blit consumes the resolved origin (cox/coy are measured
+            // from cotx/coty), so point the draw origin at it for exactly that
+            // call. It is restored before the overlay walk, which resolves its
+            // own target from the raw scroll (src/C4DefGraphics.cpp:763).
+            let saved_viewport_x = self.viewport_x;
+            let saved_viewport_y = self.viewport_y;
+            self.viewport_x = target_x;
+            self.viewport_y = target_y;
             self.draw_object_face(
                 object,
                 objects,
@@ -6472,6 +6488,8 @@ impl GraphicsSystem {
                     .with_renderer_config(self.advanced_renderer_config),
                 gamma,
             );
+            self.viewport_x = saved_viewport_x;
+            self.viewport_y = saved_viewport_y;
             self.draw_object_overlays_with_particles(
                 object,
                 objects,
