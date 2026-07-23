@@ -6261,7 +6261,7 @@ impl GraphicsSystem {
             if let Some(construction) = self.hud_graphics.construction.clone() {
                 let fog = self.fog_draw_context();
                 let shape = Self::con_scaled_shape(
-                    Self::sprite_def_shape(&definition_sprite),
+                    Self::sprite_def_shape(definition_sprite),
                     object.construction.clamp(0, FULL_CON),
                     definition_sprite.stretch_growth,
                 );
@@ -6307,7 +6307,7 @@ impl GraphicsSystem {
             return;
         };
         let shape = Self::con_scaled_shape(
-            Self::sprite_def_shape(&definition_sprite),
+            Self::sprite_def_shape(definition_sprite),
             construction,
             definition_sprite.stretch_growth,
         );
@@ -7560,11 +7560,18 @@ impl GraphicsSystem {
                 // UpdateFacet leaves fctBlit defaulted (src/C4DefGraphics.cpp:
                 // 638-639, :709-710).
                 GraphicsOverlayMode::Picture | GraphicsOverlayMode::None => {}
-                // TODO: MODE_ExtraGraphics redraws the host from the overlay's
-                // graphics (src/C4DefGraphics.cpp:788-811); tracked in
-                // PORT_STATUS.md. Listed explicitly so a new mode cannot be lost
-                // to a catch-all the way these two were.
-                GraphicsOverlayMode::ExtraGraphics => {}
+                GraphicsOverlayMode::ExtraGraphics => {
+                    let blit = self.configured_blit(SpriteBlitState::for_overlay(object, overlay));
+                    self.draw_overlay_extra_graphics(
+                        object,
+                        objects,
+                        overlay,
+                        owner_color,
+                        zoom,
+                        blit,
+                        gamma,
+                    );
+                }
                 GraphicsOverlayMode::IngamePicture => {
                     let blit = self.configured_blit(SpriteBlitState::for_overlay(object, overlay));
                     self.draw_overlay_ingame_picture(
@@ -7866,6 +7873,68 @@ impl GraphicsSystem {
                     .flatten()
             })
             .cloned()
+    }
+
+    /// `C4GraphicsOverlay` MODE_ExtraGraphics: redraw the HOST object's own
+    /// face from the overlay's bitmap (src/C4DefGraphics.cpp:788-811). C++
+    /// swaps `pSourceGfx` in with `SetGraphics(gfx, fTemp = true)`, installs the
+    /// composed transform, and re-enters `C4Object::Draw`/`DrawTopFace` with
+    /// ODM_BaseOnly. `fTemp` swaps only the bitmap: Shape, GrowthType and the
+    /// live ActMap stay owned by the host's definition
+    /// (src/C4Object.cpp:377-382, :4230-4245).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_overlay_extra_graphics(
+        &mut self,
+        object: &ObjectSnapshot,
+        objects: &[ObjectSnapshot],
+        overlay: &ObjectGraphicsOverlay,
+        owner_color: Option<u32>,
+        zoom: f32,
+        blit: SpriteBlitState,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) {
+        let Some(sprite) = self.overlay_source_sprite(object, overlay) else {
+            return;
+        };
+        // `trf = *pPrevTrf; trf *= Transform;` — the host's own transform
+        // applies first (inner), the overlay's second (outer). `trf` is a stack
+        // object, so pDrawTransform is never null and the untransformed fast
+        // path is unreachable (src/C4DefGraphics.cpp:794-806).
+        let overlay_transform = overlay.transform.unwrap_or_else(DrawTransform::identity);
+        let transform = Some(
+            object
+                .draw_transform
+                .map_or(overlay_transform, |previous| {
+                    previous.combined(overlay_transform)
+                }),
+        );
+
+        // The nested Draw runs against the same cgo, whose TargetX/Y the host's
+        // own face pass already resolved through TargetPos
+        // (src/C4Object.cpp:2271). The overlay walk keeps self.viewport_x on the
+        // raw scroll, so re-establish the resolved origin for the face blits.
+        let saved_viewport_x = self.viewport_x;
+        let saved_viewport_y = self.viewport_y;
+        let (target_x, target_y) = self.object_target_position(object);
+        self.viewport_x = target_x;
+        self.viewport_y = target_y;
+
+        let rotation_degrees = (object.rotation.rem_euclid(360)) as f32;
+        self.draw_object_face(
+            object,
+            objects,
+            &sprite,
+            owner_color,
+            zoom,
+            rotation_degrees,
+            transform,
+            blit,
+            gamma,
+        );
+        self.paint_object_top_face_with(object, &sprite, &sprite, transform, true, blit, gamma);
+
+        self.viewport_x = saved_viewport_x;
+        self.viewport_y = saved_viewport_y;
     }
 
     /// `C4GraphicsOverlay` MODE_IngamePicture: blit the SOURCE definition's

@@ -6706,6 +6706,167 @@ mod tests {
     }
 
     #[test]
+    fn extra_graphics_overlay_redraws_the_host_face_from_the_overlay_bitmap() {
+        // MODE_ExtraGraphics swaps the host's bitmap for the overlay's, installs
+        // the composed transform, and re-enters the host's own base draw:
+        //   pForObj->SetGraphics(pSourceGfx, true);
+        //   pForObj->pDrawTransform = &trf;
+        //   pForObj->Draw(cgo, iByPlayer, ODM_BaseOnly);
+        //   pForObj->DrawTopFace(cgo, iByPlayer, ODM_BaseOnly);
+        // (src/C4DefGraphics.cpp:788-811). SetGraphics(gfx, fTemp) swaps only
+        // the bitmap; Shape and the ActMap stay with the host's own definition
+        // (src/C4Object.cpp:377-382). This is the Knights shield
+        // (content/Knights.c4d/Crew.c4d/Knight.c4d/Script.c:1214), which passes
+        // GetID() so host and source share a definition and differ only in the
+        // named graphics sheet.
+        let sheet = |rgba: [u8; 4]| DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(8, 8, rgba.repeat(64)),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-4, -4, 8, 8)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: None,
+        };
+        let base_colour = Color::opaque(200, 40, 40);
+        let shield_colour = Color::opaque(40, 80, 200);
+
+        let render = |with_overlay: bool| {
+            let mut object = make_snapshot().objects.remove(0);
+            object.definition_id = "KNIG".to_string();
+            object.position = Vector2::new(16, 16);
+            object.graphics_overlays = if with_overlay {
+                vec![ObjectGraphicsOverlay::new(
+                    1,
+                    GraphicsOverlayMode::ExtraGraphics,
+                )
+                .with_definition(Some("KNIG".to_string()))
+                .with_graphics_name(Some("Shield".to_string()))]
+            } else {
+                Vec::new()
+            };
+            let mut graphics = GraphicsSystem::new(
+                32,
+                32,
+                32,
+                "Extra graphics overlay",
+                test_font(),
+                Arc::new(HashMap::from([
+                    (sprite_map_key("KNIG", None), sheet([200, 40, 40, 255])),
+                    (
+                        sprite_map_key("KNIG", Some("Shield")),
+                        sheet([40, 80, 200, 255]),
+                    ),
+                ])),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.set_point_filtering(true);
+            graphics.surface_mut().fill(Color::opaque(10, 10, 10));
+            graphics.draw_object_overlays(
+                &object,
+                &[],
+                &[],
+                OWNER_NONE,
+                None,
+                16.0,
+                16.0,
+                1.0,
+                0.0,
+                None,
+                None,
+            );
+            graphics.surface().clone()
+        };
+
+        // Without the overlay the walk draws nothing at all.
+        assert_eq!(colour_bbox(&render(false), shield_colour), None);
+
+        // With it, the host's own 8x8 Shape is redrawn from the shield sheet at
+        // the host's shape origin (16-4, 16-4) = (12, 12).
+        let drawn = render(true);
+        assert_eq!(
+            colour_bbox(&drawn, shield_colour),
+            Some((12, 12, 19, 19)),
+            "the host face is redrawn from the overlay's bitmap at host geometry"
+        );
+        // The overlay must not pull in the host's own base sheet: that is drawn
+        // by the normal face pass, not by the overlay walk.
+        assert_eq!(colour_bbox(&drawn, base_colour), None);
+    }
+
+    #[test]
+    fn extra_graphics_overlay_composes_the_host_transform_first() {
+        // `trf = *pPrevTrf; trf *= Transform;` (src/C4DefGraphics.cpp:795-804).
+        // CBltTransform::operator*= applies the RIGHT operand last
+        // (src/StdDDraw2.h:96-110), so the host's own draw transform is the
+        // inner map and the overlay's is the outer one. With a host translate
+        // of +4 and an overlay scale of 2 that is x' = 2(x + 4); the reversed
+        // order would give x' = 2x + 4 and shift the face by 4 px instead of 8.
+        let sheet = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(8, 8, [40, 80, 200, 255].repeat(64)),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-4, -4, 8, 8)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: None,
+        };
+        let mut object = make_snapshot().objects.remove(0);
+        object.definition_id = "KNIG".to_string();
+        object.position = Vector2::new(16, 16);
+        object.draw_transform = Some(DrawTransform::from_components(1.0, 1.0, 4.0, 0.0));
+        object.graphics_overlays = vec![ObjectGraphicsOverlay::new(
+            1,
+            GraphicsOverlayMode::ExtraGraphics,
+        )
+        .with_definition(Some("KNIG".to_string()))
+        .with_transform(Some(DrawTransform::from_components(2.0, 2.0, 0.0, 0.0)))];
+
+        let mut graphics = GraphicsSystem::new(
+            48,
+            48,
+            48,
+            "Extra graphics transform order",
+            test_font(),
+            Arc::new(HashMap::from([(sprite_map_key("KNIG", None), sheet)])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_point_filtering(true);
+        graphics.surface_mut().fill(Color::opaque(10, 10, 10));
+        graphics.draw_object_overlays(
+            &object,
+            &[],
+            &[],
+            OWNER_NONE,
+            None,
+            16.0,
+            16.0,
+            1.0,
+            0.0,
+            None,
+            None,
+        );
+
+        // The 8x8 face spans world 12..20. Composed and rebased at the shape
+        // centre (16,16) the map is x' = 2x - 8, y' = 2y - 16, so the block
+        // covers x 16..31 and y 8..23.
+        assert_eq!(
+            colour_bbox(graphics.surface(), Color::opaque(40, 80, 200)),
+            Some((16, 8, 31, 23)),
+        );
+    }
+
+    #[test]
     fn shipped_clonkmars_hud_item_log_icon_matches_the_cpp_geometry() {
         // End-to-end pin for ClonkMars' MHUD item-pickup log
         // (content/ClonkMars.c4d/Helpers.c4d/HUD.c4d/Script.c DrawLogItem):
