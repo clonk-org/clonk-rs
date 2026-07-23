@@ -167,13 +167,29 @@ live comparison.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.
-- Graphics overlays: the draw dispatcher handles MODE_Action/Base/Object and
-  drops MODE_IngamePicture and MODE_ExtraGraphics, where C++ skips only
-  MODE_Picture (`C4Object.cpp:2526-2529`, `C4DefGraphics.h:242`). The
-  `fZoomToShape` fit (`C4DefGraphics.cpp:660-664,821-825`) and the
-  MODE_ExtraGraphics re-entrant base draw (`C4DefGraphics.cpp:788-811`) have no
-  Rust counterpart. Visible in ClonkMars: MHUD's item-pickup log icons
-  (`Helpers.c4d/HUD.c4d/Script.c` `DrawLogItem`) never appear.
+- Graphics overlays: all seven modes now dispatch, and the walk is exhaustive so
+  a new mode cannot be lost to a catch-all. Residual divergences:
+  - MODE_Base blits the whole `Graphics.png` sheet centred on the object, where
+    C++ sets the facet to `(0, 0, Shape.Wdt, Shape.Hgt)` with
+    `TargetX/Y = Shape.x + Shape.Wdt/2, Shape.y + Shape.Hgt/2`
+    (`C4DefGraphics.cpp:642`), which telescopes to a draw at
+    `(iTx + Shape.x, iTy + Shape.y)` (`C4DefGraphics.cpp:826`). Coincides only
+    when the sheet is exactly shape-sized and single-frame, which is true of the
+    shipped MODE_Base users checked so far.
+  - MODE_Base and MODE_Action pass a source scale of 1.0 instead of the source
+    definition's `Scale`, which C++ hands to `DrawT` for every facet mode
+    (`C4DefGraphics.cpp:826`). Latent: no shipped content sets `Scale`.
+  - `draw_object_face` reads geometry (Shape, GrowthType, ActMap) from the same
+    sprite it blits from, so a cross-definition `SetGraphics(name, obj, idSrcDef, 0)`
+    takes the SOURCE definition's geometry. C++ `SetGraphics(gfx, fTemp)` swaps
+    only the bitmap (`C4Object.cpp:377-382`, `:4230-4245`). Not on the
+    MODE_ExtraGraphics path: the shipped Knights shield passes `GetID()`, so host
+    and source share a definition.
+  - `C4Object::UpdateGraphics` does not forward `fTemp` to `UpdateFace`
+    (`C4Object.cpp:406`), so each C++ MODE_ExtraGraphics draw runs `UpdatePos`
+    and `UpdateSolidMask` twice per frame from inside the render loop.
+    Deliberately not ported — the Rust frontend draws from an immutable
+    snapshot. Inert for shipped content; do not read it as a Rust bug.
 
 Comparator caveats: presentation RNG is opt-in; fields compare only when both
 bridges expose them (the C++ bridge omits layer/visibility/player hostility).
