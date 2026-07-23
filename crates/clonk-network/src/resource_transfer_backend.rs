@@ -213,9 +213,9 @@ impl ResourceTransferBackend {
         }
     }
 
-    /// Registers contents-identical local data whose standalone bytes differ
-    /// from the official core. It remains locally usable, but its catalog entry
-    /// is not binary-compatible and therefore never serves transfer chunks.
+    /// Registers local logical data whose standalone bytes must not be served
+    /// as the official core. This covers contents-identical repacks and the
+    /// explicit Rust/C++ local-System compatibility boundary.
     pub fn register_local_logical(
         &mut self,
         core: NetworkResourceCore,

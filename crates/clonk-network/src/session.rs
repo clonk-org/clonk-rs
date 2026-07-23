@@ -6242,6 +6242,95 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn cpp_interop_trusts_the_explicit_local_system_across_builds() {
+        // C++ publishes System as non-loadable and normally gates it by
+        // ContentsCRC (src/C4Network2Res.cpp:441-493,1458-1461). Once admitted,
+        // however, it executes the process-local Application.SystemGroup
+        // (src/C4Application.cpp:127-134; src/C4Game.cpp:2764-2793). A Rust
+        // client therefore maps the C++ core to its explicitly trusted local
+        // System while retaining exact checks for every transferable resource.
+        let directories = SessionResourceDirectories::new();
+        let host_system_path = directories.host.join("System.c4g");
+        let client_system_path = directories.client.join("System.c4g");
+        fs::create_dir(&host_system_path).unwrap();
+        fs::create_dir(&client_system_path).unwrap();
+        fs::write(host_system_path.join("Host.c"), b"C++ host system").unwrap();
+        fs::write(
+            client_system_path.join("Client.c"),
+            b"Rust client system",
+        )
+        .unwrap();
+        let publication = crate::build_host_resource_core(
+            &host_system_path,
+            &directories.host,
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::System,
+                2,
+                clonk_engine::LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+                "C++ host",
+            ),
+        )
+        .unwrap();
+        let mut host_config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
+        snapshot.dynamic.id = 3;
+        snapshot.parameters.scenario.id = 0;
+        snapshot
+            .parameters
+            .game_resources
+            .push(publication.core.clone());
+        host_config.initial_join_snapshot = Some(snapshot);
+        host_config.resource_directory = Some(directories.host.clone());
+        host_config.resource_files = vec![HostedResourceFile {
+            core: publication.core.clone(),
+            path: host_system_path,
+            ownership: crate::ResourceFileOwnership::Persistent,
+            binary_compatible: false,
+        }];
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+        let mut client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone())
+                .with_trusted_local_system_path(client_system_path.clone()),
+        )
+        .await
+        .expect("a trusted Rust System permits C++ cross-build bootstrap");
+
+        assert_eq!(
+            client.take_join_data().unwrap().status.state,
+            NETWORK_STATE_LOBBY
+        );
+        let mut events = client.take_event_receiver();
+        loop {
+            match timeout(EVENT_WAIT, events.recv()).await.unwrap() {
+                Some(ClientEvent::ResourceComplete {
+                    resource_id: 2,
+                    core,
+                    path,
+                    local,
+                }) => {
+                    assert_eq!(core, publication.core);
+                    assert_eq!(path, client_system_path);
+                    assert!(local);
+                    break;
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("trusted System join disconnected: {reason:?}")
+                }
+                Some(_) => {}
+                None => panic!("client event stream closed before System completion"),
+            }
+        }
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn client_rejects_nonloadable_dynamic_when_game_resources_are_empty() {
         // HandleJoinData requires ResDynamic independently of GameRes. A
         // non-loadable dynamic core with no contents-identical local file

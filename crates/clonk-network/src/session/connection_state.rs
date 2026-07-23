@@ -554,6 +554,14 @@ fn add_resolved_resource(
             }
             (local.binary_compatible(), false)
         }
+        crate::ClientBootstrapResourceSource::TrustedLocalSystem(path) => {
+            if let Some(backend) = backend {
+                backend
+                    .register_local_logical(resource.core.clone(), path)
+                    .map_err(|error| error.to_string())?;
+            }
+            (false, false)
+        }
         crate::ClientBootstrapResourceSource::Download => {
             if let Some(backend) = backend {
                 backend
@@ -840,16 +848,22 @@ impl ClientResourceState {
     ) -> Result<ClientBootstrapRegistration, String> {
         let registration =
             add_resolved_resource(&mut self.catalog, self.backend.as_mut(), resource)?;
-        if let (
-            ClientBootstrapRegistration::Registered,
-            crate::ClientBootstrapResourceSource::Local(local),
-        ) = (registration, &resource.source)
-        {
-            self.initial_complete_resources
-                .push((resource.core.clone(), local.path().to_path_buf()));
-            if let Some(path) = local_resource_lookup_path(local) {
-                self.local_resource_sources
-                    .insert(path, resource.core.clone());
+        if registration == ClientBootstrapRegistration::Registered {
+            match &resource.source {
+                crate::ClientBootstrapResourceSource::Local(local) => {
+                    self.initial_complete_resources
+                        .push((resource.core.clone(), local.path().to_path_buf()));
+                    if let Some(path) = local_resource_lookup_path(local) {
+                        self.local_resource_sources
+                            .insert(path, resource.core.clone());
+                    }
+                }
+                crate::ClientBootstrapResourceSource::TrustedLocalSystem(path) => {
+                    self.initial_complete_resources
+                        .push((resource.core.clone(), path.clone()));
+                }
+                crate::ClientBootstrapResourceSource::Download
+                | crate::ClientBootstrapResourceSource::UnavailableNonLoadable(_) => {}
             }
         }
         Ok(registration)
@@ -911,4 +925,3 @@ impl ClientResourceState {
         Ok(state)
     }
 }
-

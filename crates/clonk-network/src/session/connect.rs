@@ -776,6 +776,7 @@ where
         resource_directory,
         mut bootstrap_local_candidates,
         local_system_path,
+        trusted_local_system_path,
         local_resource_roots,
         mesh_tcp_bind_address: _,
         mesh_udp_bind_address: _,
@@ -927,11 +928,15 @@ where
     let standalone_directory = resource_directory
         .as_deref()
         .unwrap_or_else(|| std::path::Path::new("Network"));
-    let bootstrap_resolver = crate::client_bootstrap::ClientBootstrapResolver::new_with_group_maker(
-        &bootstrap_local_candidates,
-        standalone_directory.to_path_buf(),
-        group_maker,
-    );
+    let mut bootstrap_resolver =
+        crate::client_bootstrap::ClientBootstrapResolver::new_with_group_maker(
+            &bootstrap_local_candidates,
+            standalone_directory.to_path_buf(),
+            group_maker,
+        );
+    if let Some(path) = trusted_local_system_path {
+        bootstrap_resolver = bootstrap_resolver.with_trusted_local_system_path(path);
+    }
     let mut initialized_game_resources = 0;
     for core in &join_data.parameters.game_resources {
         if resource_state
@@ -1994,4 +1999,3 @@ where
     }
     Ok(())
 }
-

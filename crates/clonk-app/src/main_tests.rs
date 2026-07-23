@@ -3078,8 +3078,15 @@
         let scenario_path = directory.path().join("Scenario.c4s");
         let dynamic_path = directory.path().join("Dynamic.c4s");
         let game_resource_path = directory.path().join("Objects.c4d");
+        let system_resource_path = directory.path().join("System.c4g");
         let material_resource_path = directory.path().join("HostMaterials.c4g");
         let local_material_fallback_path = directory.path().join("Material.c4g");
+        fs::create_dir(&system_resource_path).expect("create trusted local System");
+        fs::write(
+            system_resource_path.join("Local.c"),
+            b"// Rust client System",
+        )
+        .expect("write trusted local System");
         let mut scenario_group = clonk_resources::MutableGroup::new("Scenario.c4s");
         scenario_group
             .add_file(
@@ -3214,9 +3221,12 @@
         snapshot.dynamic = resource(71, b"Dynamic.c4s");
         let mut definitions = resource(72, b"Objects.c4d");
         definitions.resource_type = clonk_network::HostResourceType::Definitions as u8;
+        let mut system = resource(74, b"System.c4g");
+        system.resource_type = clonk_network::HostResourceType::System as u8;
+        system.loadable = false;
         let mut materials = resource(73, b"HostMaterials.c4g");
         materials.resource_type = clonk_network::HostResourceType::Material as u8;
-        snapshot.parameters.game_resources = vec![definitions, materials];
+        snapshot.parameters.game_resources = vec![definitions, system, materials];
         let mut reference_status = host_config.initial_status;
         reference_status.target_tick = -1;
         let join_data = clonk_network::JoinDataEnvelope {
@@ -3234,6 +3244,14 @@
         event_tx
             .send(NetworkEvent::JoinData(join_data.clone()))
             .expect("queue JoinData");
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: 74,
+                core: join_data.parameters.game_resources[1].clone(),
+                path: system_resource_path,
+                local: true,
+            })
+            .expect("complete trusted local System");
         event_tx
             .send(NetworkEvent::StatusRequested(go))
             .expect("queue GO request");
@@ -3340,7 +3358,7 @@
         event_tx
             .send(NetworkEvent::ResourceComplete {
                 resource_id: 73,
-                core: join_data.parameters.game_resources[1].clone(),
+                core: join_data.parameters.game_resources[2].clone(),
                 path: material_resource_path,
                 local: false,
             })
@@ -3463,6 +3481,15 @@
             dialog.continuation,
             MessageDialogContinuation::NetworkClientStartWait
         )));
+        let initial_frame = app.engine.frame();
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick: 23,
+                controls: Vec::new(),
+            })
+            .expect("queue first playable network tick");
+        app.update().expect("play first network frame");
+        assert_eq!(app.engine.frame(), initial_frame + 1);
     }
 
     fn set_control_test_team(

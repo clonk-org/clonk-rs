@@ -411,6 +411,10 @@ pub struct ClientConfig {
     pub resource_directory: Option<PathBuf>,
     pub bootstrap_local_candidates: crate::ClientBootstrapLocalCandidates,
     pub local_system_path: Option<PathBuf>,
+    /// Explicit cross-build compatibility boundary. When present, this valid
+    /// local System group remains authoritative even if a C++ host advertises
+    /// a different non-loadable System ContentsCRC.
+    pub trusted_local_system_path: Option<PathBuf>,
     pub local_resource_roots: Vec<PathBuf>,
     /// TCP endpoint accepted for already joined client-to-client mesh routes.
     /// `None` keeps the listener disabled for embedders that do not expose a
@@ -436,6 +440,7 @@ impl ClientConfig {
             resource_directory: Some(default_client_resource_directory()),
             bootstrap_local_candidates: crate::ClientBootstrapLocalCandidates::default(),
             local_system_path: None,
+            trusted_local_system_path: None,
             local_resource_roots: Vec::new(),
             mesh_tcp_bind_address: None,
             mesh_udp_bind_address: None,
@@ -473,6 +478,13 @@ impl ClientConfig {
 
     pub fn with_local_system_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.local_system_path = Some(path.into());
+        self
+    }
+
+    pub fn with_trusted_local_system_path(mut self, path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        self.local_system_path = Some(path.clone());
+        self.trusted_local_system_path = Some(path);
         self
     }
 
@@ -1765,4 +1777,3 @@ impl ClientHandle {
         Ok(())
     }
 }
-

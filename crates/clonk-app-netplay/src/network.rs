@@ -6501,7 +6501,7 @@ async fn run_client_worker(
         client_config = client_config.with_mesh_udp_bind_address(bind_address);
     }
     if let Some(system_path) = settings.local_system_path {
-        client_config = client_config.with_local_system_path(system_path);
+        client_config = client_config.with_trusted_local_system_path(system_path);
     }
     let server_addresses = settings
         .server_addresses
@@ -10305,6 +10305,123 @@ Message=Server says Andr\xe9\r\n\
             .send(NetworkCommand::Shutdown)
             .await
             .expect("stop connected client worker");
+        worker.await.expect("join worker task").expect("stop worker");
+        host.shutdown().await.expect("stop host");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn client_worker_uses_the_installed_system_for_cpp_cross_build_join() {
+        // C++ cannot transfer NRT_System (src/C4Network2Res.cpp:1458-1461).
+        // The Rust app already executes its installed System group, matching
+        // Application.SystemGroup ownership after C++ bootstrap
+        // (src/C4Application.cpp:127-134; src/C4Game.cpp:2764-2793).
+        let temporary = tempfile::tempdir().expect("temporary resource roots");
+        let host_root = temporary.path().join("host");
+        let client_root = temporary.path().join("client");
+        let host_system = host_root.join("System.c4g");
+        let client_system = client_root.join("System.c4g");
+        std::fs::create_dir_all(&host_system).expect("host System directory");
+        std::fs::create_dir_all(&client_system).expect("client System directory");
+        std::fs::write(host_system.join("Host.c"), b"C++ host system")
+            .expect("host System contents");
+        std::fs::write(client_system.join("Client.c"), b"Rust client system")
+            .expect("client System contents");
+        let publication = clonk_network::build_host_resource_core(
+            &host_system,
+            &host_root,
+            clonk_network::HostResourceCoreSpec::new(
+                clonk_network::HostResourceType::System,
+                2,
+                clonk_engine::LegacyCString::from_bytes(b"System.c4g".to_vec())
+                    .expect("static resource name"),
+                "C++ host",
+            ),
+        )
+        .expect("publish host System");
+        let mut host_config = HostConfig::default();
+        let snapshot = host_config
+            .initial_join_snapshot
+            .as_mut()
+            .expect("default JoinData");
+        snapshot.dynamic.id = 3;
+        snapshot.parameters.scenario.id = 0;
+        snapshot
+            .parameters
+            .game_resources
+            .push(publication.core.clone());
+        host_config.resource_directory = Some(host_root);
+        host_config.resource_files = vec![clonk_network::HostedResourceFile {
+            core: publication.core.clone(),
+            path: host_system,
+            ownership: clonk_network::ResourceFileOwnership::Persistent,
+            binary_compatible: false,
+        }];
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind C++-style host");
+        let address = listener.local_addr().expect("host address");
+        let host = start_host(listener, host_config).await.expect("start host");
+        let mut settings = ClientSettings::new(address, "Alice").with_join_attempts([
+            NetworkAddress::new(NetworkProtocol::Tcp, address),
+        ]);
+        settings.mesh_udp_bind_address = None;
+        settings.resource_directory = client_root.join("Network");
+        settings.local_system_path = Some(client_system.clone());
+        let (command_tx, command_rx) = tokio_mpsc::channel(8);
+        let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let worker = tokio::spawn(async move {
+            let mut command_rx = command_rx;
+            run_client_worker(
+                settings,
+                0,
+                &mut command_rx,
+                &mut tokio_mpsc::unbounded_channel().1,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+                test_netpuncher_state(),
+                Arc::new(AtomicI32::new(0)),
+                None,
+            )
+            .await
+        });
+
+        assert!(matches!(
+            local_id_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("worker reports readiness"),
+            Ok(NetworkWorkerReady { local_client_id, .. }) if local_client_id > 0
+        ));
+        let mut saw_join_data = false;
+        let mut saw_system = false;
+        while !saw_join_data || !saw_system {
+            match event_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("worker emits bootstrap events")
+            {
+                NetworkEvent::JoinData(_) => saw_join_data = true,
+                NetworkEvent::ResourceComplete {
+                    resource_id: 2,
+                    core,
+                    path,
+                    local,
+                } => {
+                    assert_eq!(core, publication.core);
+                    assert_eq!(path, client_system);
+                    assert!(local);
+                    saw_system = true;
+                }
+                NetworkEvent::Error(error) => panic!("client worker failed: {error}"),
+                _ => {}
+            }
+        }
+
+        command_tx
+            .send(NetworkCommand::Shutdown)
+            .await
+            .expect("stop client worker");
         worker.await.expect("join worker task").expect("stop worker");
         host.shutdown().await.expect("stop host");
     }

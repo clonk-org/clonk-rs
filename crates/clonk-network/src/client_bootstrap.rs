@@ -271,6 +271,9 @@ impl ClientBootstrapResourceRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientBootstrapResourceSource {
     Local(LocalResourceMatch),
+    /// The installed System used by the Rust runtime for C++ cross-build
+    /// compatibility. Unlike `Local`, this does not claim ContentsCRC identity.
+    TrustedLocalSystem(PathBuf),
     Download,
     UnavailableNonLoadable(NonLoadableResourceMismatch),
 }
@@ -303,7 +306,8 @@ impl ClientBootstrapPlan {
             .iter()
             .filter(|resource| resource.role.is_required())
             .all(|resource| match &resource.source {
-                ClientBootstrapResourceSource::Local(_) => true,
+                ClientBootstrapResourceSource::Local(_)
+                | ClientBootstrapResourceSource::TrustedLocalSystem(_) => true,
                 ClientBootstrapResourceSource::Download => {
                     completed_downloads.contains(&resource.core.id)
                 }
@@ -326,6 +330,7 @@ pub(crate) struct ClientBootstrapResolver {
     local_candidates: ClientBootstrapLocalCandidates,
     standalone_directory: PathBuf,
     group_maker: LegacyCString,
+    trusted_local_system_path: Option<PathBuf>,
 }
 
 impl ClientBootstrapResolver {
@@ -349,7 +354,13 @@ impl ClientBootstrapResolver {
             local_candidates: local_candidates.clone(),
             standalone_directory: standalone_directory.into(),
             group_maker,
+            trusted_local_system_path: None,
         }
+    }
+
+    pub(crate) fn with_trusted_local_system_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.trusted_local_system_path = Some(path.into());
+        self
     }
 
     pub(crate) fn resolve(
@@ -357,13 +368,34 @@ impl ClientBootstrapResolver {
         role: ClientBootstrapResourceRole,
         core: &NetworkResourceCore,
     ) -> Result<ClientBootstrapResourcePlan, ClientBootstrapPlanError> {
-        plan_resource(
+        let result = plan_resource(
             role,
             core,
             &self.local_candidates,
             &self.standalone_directory,
             self.group_maker.as_bytes(),
-        )
+        );
+        let Err(error) = result else {
+            return result;
+        };
+        let trusted_system = matches!(
+            error,
+            ClientBootstrapPlanError::MissingRequiredNonLoadable {
+                role: ClientBootstrapResourceRole::GameResource,
+                ..
+            }
+        ) && core.resource_type == crate::HostResourceType::System as u8;
+        let trusted_path = trusted_system
+            .then_some(self.trusted_local_system_path.as_ref())
+            .flatten()
+            .filter(|path| clonk_resources::Group::open(path).is_ok());
+        trusted_path.map_or(Err(error), |path| {
+            Ok(ClientBootstrapResourcePlan {
+                role,
+                core: core.clone(),
+                source: ClientBootstrapResourceSource::TrustedLocalSystem(path.clone()),
+            })
+        })
     }
 }
 
@@ -935,6 +967,72 @@ mod tests {
             ClientBootstrapPlanError::MissingRequiredNonLoadable {
                 role: ClientBootstrapResourceRole::GameResource,
                 resource_id: 9,
+                filename,
+            } if filename == b"System.c4g"
+        ));
+    }
+
+    #[test]
+    fn trusted_local_system_does_not_relax_nonloadable_definitions() {
+        // AddLoad rejects every non-loadable core after SetByCore fails; the
+        // Rust/C++ System boundary must not change Definitions behavior
+        // (src/C4Network2Res.cpp:441-493,1473-1507;
+        // src/C4GameParameters.cpp:125-160).
+        let directory = TestDirectory::new();
+        let local_system = directory.root.join("System.c4g");
+        fs::create_dir(&local_system).unwrap();
+        fs::write(local_system.join("Local.c"), b"local System").unwrap();
+        let definitions = resource_core(4, 10, false, b"Objects.c4d", b"host definitions");
+        let resolver = ClientBootstrapResolver::new(
+            &ClientBootstrapLocalCandidates::default(),
+            &directory.standalone,
+        )
+        .with_trusted_local_system_path(local_system);
+
+        let error = resolver
+            .resolve(ClientBootstrapResourceRole::GameResource, &definitions)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClientBootstrapPlanError::MissingRequiredNonLoadable {
+                role: ClientBootstrapResourceRole::GameResource,
+                resource_id: 10,
+                filename,
+            } if filename == b"Objects.c4d"
+        ));
+    }
+
+    #[test]
+    fn invalid_trusted_local_system_does_not_relax_nonloadable_system() {
+        // C++ cannot load NRT_System from the network. The Rust compatibility
+        // boundary therefore requires an actually openable process-local
+        // System group rather than merely trusting a configured path
+        // (src/C4Network2Res.cpp:1458-1461,1473-1507).
+        let directory = TestDirectory::new();
+        let missing_system = directory.root.join("MissingSystem.c4g");
+        let system = resource_core(
+            crate::HostResourceType::System as u8,
+            2,
+            false,
+            b"System.c4g",
+            b"C++ host System",
+        );
+        let resolver = ClientBootstrapResolver::new(
+            &ClientBootstrapLocalCandidates::default(),
+            &directory.standalone,
+        )
+        .with_trusted_local_system_path(missing_system);
+
+        let error = resolver
+            .resolve(ClientBootstrapResourceRole::GameResource, &system)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClientBootstrapPlanError::MissingRequiredNonLoadable {
+                role: ClientBootstrapResourceRole::GameResource,
+                resource_id: 2,
                 filename,
             } if filename == b"System.c4g"
         ));
