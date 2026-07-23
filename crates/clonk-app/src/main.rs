@@ -7907,8 +7907,25 @@ fn run_integration_test(
             let has_sprite = app
                 .object_sprites
                 .contains_key(&sprite_map_key(&object.definition_id, None));
+            let overlays = object
+                .graphics_overlays
+                .iter()
+                .map(|overlay| {
+                    format!(
+                        "{}:{:?}{}",
+                        overlay.id,
+                        overlay.mode,
+                        overlay
+                            .action
+                            .as_deref()
+                            .map(|action| format!("({action})"))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
             println!(
-                "  obj id={} def={} pos=({}, {}) cat={:#x} sprite={} contained={:?} overlays={} action={}",
+                "  obj id={} def={} pos=({}, {}) cat={:#x} sprite={} contained={:?} overlays=[{}] action={}",
                 object.id.as_u64(),
                 object.definition_id,
                 object.position.x,
@@ -7916,7 +7933,7 @@ fn run_integration_test(
                 object.category,
                 has_sprite,
                 object.container.map(|id| id.as_u64()),
-                object.graphics_overlays.len(),
+                overlays,
                 object.action.name,
             );
         }
