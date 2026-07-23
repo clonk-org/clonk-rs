@@ -6589,6 +6589,122 @@ mod tests {
         );
     }
 
+    /// Bounding box of every pixel matching `wanted`, as (min_x, min_y, max_x, max_y).
+    fn colour_bbox(surface: &Surface, wanted: Color) -> Option<(u32, u32, u32, u32)> {
+        let mut found: Option<(u32, u32, u32, u32)> = None;
+        for y in 0..surface.height() {
+            for x in 0..surface.width() {
+                if surface.get_pixel(x, y) == Some(wanted) {
+                    found = Some(match found {
+                        None => (x, y, x, y),
+                        Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                    });
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn ingame_picture_overlay_draws_the_source_picture_rect_zoomed_to_the_host_shape() {
+        // C4GraphicsOverlay::UpdateFacet sets MODE_IngamePicture's facet to the
+        // SOURCE definition's PictureRect and turns on fZoomToShape
+        // (src/C4DefGraphics.cpp:660-664). Draw then rebases the script
+        // transform at the object origin, applies
+        // fZoom = min(Shape.Wdt/fct.Wdt, Shape.Hgt/fct.Hgt) about that origin,
+        // and blits the facet centred there (src/C4DefGraphics.cpp:818-826).
+        let host_sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(1, 1, vec![0, 0, 0, 0]),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-8, -6, 16, 12)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: None,
+        };
+        // 16x16 sheet, transparent except a 4x4 marker block at (8,0) that the
+        // source definition declares as its DefCore Picture rect.
+        let marker = Color::opaque(30, 210, 90);
+        let mut pixels = vec![0u8; 16 * 16 * 4];
+        for y in 0..4 {
+            for x in 8..12 {
+                let base = (y * 16 + x) * 4;
+                pixels[base..base + 4].copy_from_slice(&[30, 210, 90, 255]);
+            }
+        }
+        let source_sprite = DefinitionSprite {
+            graphics_scale: 1.0,
+            image: ImageData::new(16, 16, pixels),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-2, -2, 4, 4)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: Some(DefinitionRect::new(8, 0, 4, 4)),
+        };
+
+        let render = |transform: Option<DrawTransform>| {
+            let mut object = make_snapshot().objects.remove(0);
+            object.definition_id = "PicHost".to_string();
+            object.position = Vector2::new(20, 20);
+            object.graphics_overlays = vec![ObjectGraphicsOverlay::new(
+                1,
+                GraphicsOverlayMode::IngamePicture,
+            )
+            .with_definition(Some("PicSrc".to_string()))
+            .with_transform(transform)];
+            let mut graphics = GraphicsSystem::new(
+                40,
+                40,
+                40,
+                "Ingame picture overlay",
+                test_font(),
+                Arc::new(HashMap::from([
+                    (sprite_map_key("PicHost", None), host_sprite.clone()),
+                    (sprite_map_key("PicSrc", None), source_sprite.clone()),
+                ])),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            // Keep the magnified edges exactly the marker colour so the bbox is
+            // a real assertion rather than a bilinear smear.
+            graphics.set_point_filtering(true);
+            graphics.surface_mut().fill(Color::opaque(10, 10, 10));
+            graphics.draw_object_overlays(
+                &object,
+                &[],
+                &[],
+                OWNER_NONE,
+                None,
+                20.0,
+                20.0,
+                1.0,
+                0.0,
+                None,
+                None,
+            );
+            colour_bbox(graphics.surface(), marker)
+        };
+
+        // fZoom = min(16/4, 12/4) = 3. The 4x4 facet is centred at the object
+        // origin (20,20) — i.e. 18..22 — then scaled 3x about (20,20), giving
+        // 14..26 on both axes: a 12x12 block.
+        assert_eq!(render(None), Some((14, 14, 25, 25)));
+
+        // C4DrawTransform::ScaleAt composes the zoom OUTSIDE the script
+        // transform (src/StdDDraw2.h:83-94), so a script translation of +4 is
+        // multiplied by fZoom and moves the block by 12, not 4.
+        let translated = DrawTransform::from_components(1.0, 1.0, 4.0, 0.0);
+        assert_eq!(render(Some(translated)), Some((26, 14, 37, 25)));
+    }
+
     #[test]
     fn picture_and_none_overlay_modes_never_draw_in_the_object_walk() {
         // C4Object::Draw filters the overlay chain on !IsPicture(), and

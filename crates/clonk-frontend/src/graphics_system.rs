@@ -7531,7 +7531,20 @@ impl GraphicsSystem {
                 // PORT_STATUS.md. Listed explicitly so a new mode cannot be lost
                 // to a catch-all the way these two were.
                 GraphicsOverlayMode::ExtraGraphics => {}
-                GraphicsOverlayMode::IngamePicture => {}
+                GraphicsOverlayMode::IngamePicture => {
+                    let blit = self.configured_blit(SpriteBlitState::for_overlay(object, overlay));
+                    self.draw_overlay_ingame_picture(
+                        object,
+                        overlay,
+                        owner_color,
+                        screen_x,
+                        screen_y,
+                        zoom,
+                        overlay.transform,
+                        blit,
+                        gamma,
+                    );
+                }
             }
         }
     }
@@ -7790,6 +7803,127 @@ impl GraphicsSystem {
             transform,
             blit,
             gamma,
+        );
+    }
+
+    /// Resolve the bitmap an overlay draws from: `pSourceGfx`, which
+    /// `FnSetGraphics` derives from the overlay's source definition and
+    /// graphics name, falling back to the host's own graphics
+    /// (src/C4Script.cpp:4537-4607; src/C4DefGraphics.cpp:226-229).
+    fn overlay_source_sprite(
+        &self,
+        object: &ObjectSnapshot,
+        overlay: &ObjectGraphicsOverlay,
+    ) -> Option<DefinitionSprite> {
+        let definition_id = overlay
+            .definition
+            .as_deref()
+            .unwrap_or(&object.definition_id);
+        let graphics_name = overlay.graphics_name.as_deref();
+        self.object_sprites
+            .get(&sprite_map_key(definition_id, graphics_name))
+            .or_else(|| {
+                graphics_name
+                    .and_then(|_| self.object_sprites.get(&sprite_map_key(definition_id, None)))
+            })
+            .or_else(|| {
+                (definition_id != object.definition_id)
+                    .then(|| self.object_sprites.get(&sprite_map_key(&object.definition_id, None)))
+                    .flatten()
+            })
+            .cloned()
+    }
+
+    /// `C4GraphicsOverlay` MODE_IngamePicture: blit the SOURCE definition's
+    /// DefCore `Picture` rect, uniformly zoomed so it fits the HOST object's
+    /// shape (src/C4DefGraphics.cpp:660-664 for the facet, :818-826 for the
+    /// draw). Unlike MODE_Picture this one is drawn in-game
+    /// (src/C4DefGraphics.h:247).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_overlay_ingame_picture(
+        &mut self,
+        object: &ObjectSnapshot,
+        overlay: &ObjectGraphicsOverlay,
+        owner_color: Option<u32>,
+        screen_x: f32,
+        screen_y: f32,
+        zoom: f32,
+        transform: Option<DrawTransform>,
+        blit: SpriteBlitState,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) {
+        let Some(sprite) = self.overlay_source_sprite(object, overlay) else {
+            return;
+        };
+        // `pDef` in UpdateFacet is pSourceGfx->pDef — the overlay's source
+        // definition, never the host (src/C4DefGraphics.cpp:632, :663).
+        let Some(facet) = sprite.picture else {
+            return;
+        };
+        if facet.width <= 0 || facet.height <= 0 {
+            return;
+        }
+        // fZoomToShape divides by the HOST object's live shape, guarding the
+        // denominator with an integer max before the float divide
+        // (src/C4DefGraphics.cpp:821-824).
+        let host_shape = self
+            .object_sprites
+            .get(&sprite_map_key(&object.definition_id, None))
+            .map(|host| self.live_object_shape(host, object))
+            .unwrap_or_else(|| Self::sprite_def_shape(&sprite));
+        let fzoom = (host_shape.width as f32 / facet.width.max(1) as f32)
+            .min(host_shape.height as f32 / facet.height.max(1) as f32);
+
+        let source_rect = SourceRect::new(facet.x, facet.y, facet.width, facet.height);
+        // C4Facet::DrawT applies the SOURCE definition's Scale to the crop only
+        // (src/C4Facet.cpp:74-79); the destination keeps the logical extent.
+        let source = FloatSourceRect::scaled(source_rect, sprite.graphics_scale);
+        if !source.is_valid() {
+            return;
+        }
+        let fog = self.fog_draw_context();
+        let (source, sampling) = self.runtime_sprite_blit(
+            source,
+            (
+                facet.width as f32 * fzoom * zoom,
+                facet.height as f32 * fzoom * zoom,
+            ),
+            true,
+        );
+        // C4GraphicsOverlay::Draw always passes a transform pointer, so the
+        // straight-blit fast path is unreachable here (src/C4DefGraphics.cpp:818).
+        let center = (screen_x / zoom, screen_y / zoom);
+        // `iTx - fctBlit.Wdt / 2` is integer division in C++ (:826).
+        let dest = (
+            center.0 - (facet.width / 2) as f32,
+            center.1 - (facet.height / 2) as f32,
+            facet.width as f32,
+            facet.height as f32,
+        );
+        let mut matrix = draw_transform_at(
+            transform
+                .map(|transform| transform.matrix())
+                .unwrap_or(GraphicsTransform::identity().mat),
+            center.0,
+            center.1,
+        );
+        // ScaleAt composes the zoom as the OUTER transform, so it multiplies
+        // the script transform's translation too (src/StdDDraw2.h:83-94).
+        matrix = matrix.scale_at(fzoom, fzoom, center.0, center.1);
+        matrix = matrix.multiply(&GraphicsTransform::set_move_scale(0.0, 0.0, zoom, zoom));
+        draw_image_region_transformed_float_source(
+            &mut self.surface,
+            dest,
+            &matrix,
+            &sprite.image,
+            sprite.color_mask.as_ref(),
+            &source,
+            sampling,
+            false,
+            owner_color,
+            blit,
+            gamma,
+            fog.as_ref(),
         );
     }
 
