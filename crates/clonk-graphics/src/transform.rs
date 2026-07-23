@@ -72,6 +72,21 @@ impl Transform {
         }
     }
 
+    /// Scale about the fixpoint `(tx, ty)`, mirroring C++
+    /// `CBltTransform::ScaleAt` (`src/StdDDraw2.h:90-94`), which is
+    /// `MoveScale(-tx*(sx-1), -ty*(sy-1), sx, sy)` and thus
+    /// `(*this) *= SetMoveScale(...)` (`src/StdDDraw2.h:83-88`). The scale is
+    /// applied as the OUTER transform, so an existing translation is scaled
+    /// with it.
+    pub fn scale_at(&self, sx: f32, sy: f32, tx: f32, ty: f32) -> Self {
+        self.multiply(&Self::set_move_scale(
+            -tx * (sx - 1.0),
+            -ty * (sy - 1.0),
+            sx,
+            sy,
+        ))
+    }
+
     /// Apply the matrix to a point with homogeneous divide, mirroring C++
     /// `CBltTransform::TransformPoint`.
     pub fn transform_point(&self, x: f32, y: f32) -> (f32, f32) {
@@ -170,6 +185,35 @@ mod tests {
     fn identity_leaves_point_unchanged() {
         let t = Transform::identity();
         assert_eq!(t.transform_point(12.0, -7.0), (12.0, -7.0));
+    }
+
+    #[test]
+    fn scale_at_scales_an_existing_translate() {
+        // `CBltTransform::ScaleAt` is `MoveScale(-tx*(sx-1), -ty*(sy-1), sx, sy)`
+        // (src/StdDDraw2.h:90-94), and `MoveScale` is `(*this) *= SetMoveScale(...)`
+        // (src/StdDDraw2.h:83-88). `operator*=` applies the right operand LAST
+        // (src/StdDDraw2.h:96-110), so the incoming translate is scaled too. This
+        // is what makes C4GraphicsOverlay's fZoomToShape multiply a script
+        // SetObjDrawTransform translation (src/C4DefGraphics.cpp:820-825).
+        let script = Transform::set(0.234, 0.0, -30.0, 0.0, 0.234, -21.0, 0.0, 0.0, 1.0);
+
+        // Pivot at the origin. A linear-part-only scale would leave mat[2] at -30.
+        let at_origin = script.scale_at(1.875, 1.875, 0.0, 0.0);
+        assert_eq!(at_origin.mat[0], 0.43875);
+        assert_eq!(at_origin.mat[2], -56.25);
+        assert_eq!(at_origin.mat[4], 0.43875);
+        assert_eq!(at_origin.mat[5], -39.375);
+
+        // Pivot at the object origin, as C4GraphicsOverlay::Draw uses it. The
+        // rebased matrix is what `C4DrawTransform(Transform, iTx, iTy)` produces
+        // (src/C4Facet.cpp:512-523): c' = -30 - 0.234*400 + 400 = 276.4,
+        // f' = -21 - 0.234*300 + 300 = 208.8.
+        let rebased = Transform::set(0.234, 0.0, 276.4, 0.0, 0.234, 208.8, 0.0, 0.0, 1.0);
+        let zoomed = rebased.scale_at(1.875, 1.875, 400.0, 300.0);
+        assert_eq!(zoomed.mat[2], 168.25);
+        assert_eq!(zoomed.mat[5], 129.0);
+        // rebased sends 400 -> 370; zooming about 400 gives 400 + 1.875*(370-400).
+        assert_eq!(zoomed.transform_point(400.0, 300.0), (343.75, 260.625));
     }
 
     #[test]
