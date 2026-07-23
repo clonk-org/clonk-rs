@@ -5817,8 +5817,13 @@ pub(crate) fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
             .with_blit_mode(blit_mode)
             .with_overlay_object(overlay_object);
 
-        let changed = object.set_graphics_overlay(overlay);
-        Ok(Value::Bool(changed))
+        // FnSetGraphics returns true for every valid overlay it sets --
+        // "// Okay, valid overlay set!" -- and false only when IsValid rejects
+        // the result (src/C4Script.cpp:4596-4603). The bool below reports
+        // whether the stored state moved, which drives the pending update; it
+        // is not the script-visible result.
+        object.set_graphics_overlay(overlay);
+        Ok(Value::Bool(true))
     })
 }
 

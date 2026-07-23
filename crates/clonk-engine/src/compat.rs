@@ -31580,6 +31580,79 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     }
 
     #[test]
+    fn set_graphics_returns_true_when_the_overlay_is_unchanged() {
+        // FnSetGraphics returns true for every valid overlay it sets --
+        // "// Okay, valid overlay set! return true;" -- and returns false only
+        // when IsValid rejects the result (src/C4Script.cpp:4596-4603). Rust
+        // forwarded set_graphics_overlay's "did anything change" bool, so
+        // re-setting an identical overlay reported failure. Knights' WearShield
+        // guards on this: `if(!SetGraphics(..., GFXOV_MODE_ExtraGraphics))
+        // return();` (content/Knights.c4d/Crew.c4d/Knight.c4d/Script.c:1214).
+        let object_id = ObjectId::new(11);
+        let existing = ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Action)
+            .with_definition(Some("Clonk".into()))
+            .with_action(Some("Pointer".into()));
+
+        let object_context = HostObjectContext::with_category(
+            object_id,
+            None,
+            ObjectStatus::Normal,
+            0,
+            0,
+            crate::FULL_CON,
+            OWNER_NONE,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            0,
+            &[],
+            "Idle",
+            0,
+            0,
+            0, // action_phase
+            ActionLibrary::default(),
+            Direction::Right,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            DEFAULT_CATEGORY,
+            ocf::NORMAL,
+            false,
+            None,
+            None,
+        )
+        .with_graphics_overlays(vec![existing])
+        .with_base_graphics(None);
+
+        // Two identical calls in one scope: the second changes nothing.
+        let call = || {
+            set_graphics(&[
+                Value::Nil,
+                Value::Nil,
+                Value::C4Id("Clonk".into()),
+                Value::Int(1),
+                Value::Int(GraphicsOverlayMode::Action as i32),
+                Value::String("Pointer".into()),
+            ])
+        };
+        let (results, _outcome) = with_effect_context(
+            Some(object_context),
+            &[],
+            HostWorldContext::default(),
+            100,
+            || -> Result<Vec<Value>, RuntimeError> { Ok(vec![call()?, call()?]) },
+        );
+
+        let results = results.expect("SetGraphics succeeds");
+        assert_eq!(
+            results,
+            vec![Value::Bool(true), Value::Bool(true)],
+            "re-setting an identical overlay is still a valid overlay set"
+        );
+    }
+
+    #[test]
     fn set_graphics_removes_overlay_when_definition_missing() {
         let object_id = ObjectId::new(7);
         let overlay = ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Action)
