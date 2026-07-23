@@ -30269,6 +30269,22 @@ impl GameApp {
         Ok(())
     }
 
+    fn append_network_client_join_log(&mut self, name: &[u8]) {
+        // C4ControlClientJoin logs only after the host-authored core was
+        // accepted, before refreshing the lobby client list
+        // (src/C4Control.cpp:552-565). C4Log then routes this ordinary log to
+        // MainDlg::OnLog (src/C4Log.cpp:227-239;
+        // src/C4GameLobby.cpp:738-753).
+        let name = legacy_presentation_text(name);
+        let template = startup_resource_string(
+            self.app_paths.as_ref(),
+            "IDS_NET_CLIENT_JOIN",
+            "Client %s connected.",
+        );
+        let message = format_resource_string(template, &[&name]);
+        self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
+    }
+
     fn append_control_message_log(
         &mut self,
         line: String,
@@ -32495,6 +32511,7 @@ impl GameApp {
                 }
                 NetworkControl::ClientJoin(join) => {
                     if self.control_clients.apply_join(&join) {
+                        self.append_network_client_join_log(join.core.name.as_bytes());
                         self.network_client_activity
                             .reset_client(join.core.client_id);
                         self.publish_updated_host_join_snapshot();

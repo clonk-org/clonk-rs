@@ -3777,11 +3777,9 @@ impl GameApp {
         {
             tracing::error!(%error, "failed to submit lobby ready state");
         }
-        self.status_text = if ready {
-            "You are ready".to_string()
-        } else {
-            "You are not ready".to_string()
-        };
+        // MainDlg::OnReadyCheck broadcasts, mutates the local core and
+        // refreshes its row without presenting a status overlay
+        // (src/C4GameLobby.cpp:329-344).
         self.on_lobby_client_ready_state_change(changed_client_id)
     }
 

@@ -3885,6 +3885,7 @@ impl GameApp {
                         match control {
                             NetworkControl::ClientJoin(join) => {
                                 if self.control_clients.apply_join(&join) {
+                                    self.append_network_client_join_log(join.core.name.as_bytes());
                                     self.network_client_activity
                                         .reset_client(join.core.client_id);
                                     self.publish_updated_host_join_snapshot();
@@ -3941,11 +3942,6 @@ impl GameApp {
                         kind,
                     } => {
                         tracing::info!(%client_id, %name, ?kind, "network client connected");
-                        let already_local_classic = self.classic_host_lobby_active()
-                            && self
-                                .network
-                                .as_ref()
-                                .is_some_and(|network| network.local_client_id() == client_id);
                         if let Some(lobby) = self.network_lobby.as_mut() {
                             lobby.register_peer(client_id, name.clone(), kind);
                         }
@@ -3960,9 +3956,11 @@ impl GameApp {
                                 ),
                             );
                         }
-                        if !already_local_classic {
-                            self.status_text = format!("{name} joined the lobby");
-                        }
+                        // The transport callback updates connection state only.
+                        // C++ MainDlg::OnClientConnect is empty; the accepted
+                        // C4ControlClientJoin owns the visible lobby log
+                        // (src/C4GameLobby.cpp:669-675;
+                        // src/C4Control.cpp:554-565).
                     }
                     NetworkEvent::PeerDisconnected { client_id, reason } => {
                         self.forget_pending_runtime_join_client(client_id);
@@ -4007,20 +4005,20 @@ impl GameApp {
                             );
                             self.change_network_control_to_local(local_client_id);
                         }
-                        match reason {
-                            Some(reason) => {
-                                tracing::info!(
-                                    %client_id,
-                                    reason = %reason,
-                                    "network client disconnected"
-                                );
-                                self.status_text = format!("Client {client_id} left: {reason}");
-                            }
-                            None => {
-                                tracing::info!(%client_id, "network client disconnected");
-                                self.status_text = format!("Client {client_id} left the lobby");
-                            }
+                        if let Some(reason) = reason {
+                            tracing::info!(
+                                %client_id,
+                                reason = %reason,
+                                "network client disconnected"
+                            );
+                        } else {
+                            tracing::info!(%client_id, "network client disconnected");
                         }
+                        // An ordinary remote-client transport loss is likewise
+                        // presentation-silent. C++ waits for the authoritative
+                        // ClientRemove control to write the localized lobby log
+                        // (src/C4Network2.cpp:1774-1833;
+                        // src/C4Control.cpp:637-670).
                     }
                     NetworkEvent::PeerConnectionFailed { client_id } => {
                         self.forget_pending_runtime_join_client(client_id);

@@ -7039,9 +7039,25 @@
             .expect("queue authoritative remote client");
         app.process_network_events()
             .expect("authoritative remote row is projected");
-        assert_eq!(app.status_text, "Remote joined the lobby");
+        // Raw transport callbacks stay presentation-silent. The accepted
+        // host-authored control owns C++'s localized lobby log
+        // (src/C4GameLobby.cpp:669-675; src/C4Control.cpp:554-565;
+        // src/C4Log.cpp:227-239).
+        assert!(app.status_text.is_empty());
         assert!(app.network_lobby.is_none());
         assert!(app.classic_host_lobby.is_some());
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .logs()
+                .last(),
+            Some(&LobbyLogLine {
+                text: "Client Remote connected.".to_string(),
+                color: [0xaf, 0xaf, 0xaf, 0xff],
+            })
+        );
         assert!(app
             .classic_host_lobby
             .as_ref()
@@ -7119,8 +7135,12 @@
 
     #[test]
     fn connected_client_enters_exact_classic_lobby() {
+        // The client worker announces its own established transport after
+        // JoinData. C++ MainDlg::OnClientConnect is presentation-silent; only
+        // authoritative C4ControlClientJoin writes the lobby log
+        // (src/C4GameLobby.cpp:669-675; src/C4Control.cpp:554-565).
         let mut app = new_menu_app(640, 480);
-        let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
+        let (manager, events) = NetworkManager::test_stub_for_client_id(7);
         let (sender, receiver) = mpsc::channel();
         sender
             .send(Ok((
@@ -7152,6 +7172,20 @@
         assert!(!app.network_control_running);
         assert!(app.control_clients.contains(7));
         assert!(!app.control_clients.is_activated(7));
+
+        events
+            .send(NetworkEvent::PeerConnected {
+                client_id: 7,
+                name: "Client".to_string(),
+                kind: ParticipantKind::Player,
+            })
+            .expect("queue the worker's local transport announcement");
+        app.process_network_events()
+            .expect("local transport announcement keeps the lobby active");
+        assert!(
+            app.status_text.is_empty(),
+            "raw transport establishment must not poison the exact lobby renderer"
+        );
     }
 
     #[test]
@@ -10010,6 +10044,13 @@
         app.process_network_events()
             .expect("apply player-owning client disconnect");
 
+        // C4Network2's raw disconnect callback only mutates transport/control
+        // state. Presentation belongs to the later authoritative ClientRemove
+        // control (src/C4Network2.cpp:1774-1833; src/C4Control.cpp:637-670).
+        assert!(
+            app.status_text.is_empty(),
+            "raw disconnect must not poison the exact lobby renderer"
+        );
         assert!(!app
             .network_lobby
             .as_ref()

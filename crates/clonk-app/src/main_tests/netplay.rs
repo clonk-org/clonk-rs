@@ -3821,7 +3821,12 @@
             .expect("Space toggles the focused Ready checkbox");
         assert_eq!(app.ui_sound_log, ["ArrowHit".to_string()]);
         assert!(app.network_lobby.as_ref().expect("joined lobby").local_ready());
-        assert_eq!(app.status_text, "You are ready");
+        // MainDlg::OnReadyCheck publishes and refreshes the row without
+        // creating any status overlay (src/C4GameLobby.cpp:329-344).
+        assert!(
+            app.status_text.is_empty(),
+            "accepted Ready must leave the exact lobby renderer usable"
+        );
         let checks = commands.take_submitted_ready_checks();
         assert_eq!(checks.len(), 1, "the accepted toggle submits exactly once");
         assert!(checks[0].data.is_ready());
