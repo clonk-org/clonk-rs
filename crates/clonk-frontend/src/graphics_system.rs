@@ -6218,12 +6218,46 @@ impl GraphicsSystem {
         let Some(definition_sprite) = definition_sprite else {
             return;
         };
+        self.paint_object_top_face_with(
+            object,
+            &bitmap_sprite,
+            &definition_sprite,
+            object.draw_transform,
+            false,
+            blit,
+            gamma,
+        );
+    }
+
+    /// `C4Object::DrawTopFace` with an explicit bitmap, definition metadata and
+    /// draw transform. `base_only` is `eDrawMode == ODM_BaseOnly`, which skips
+    /// the construction sign and returns for contained objects
+    /// (src/C4Object.cpp:2656-2658).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn paint_object_top_face_with(
+        &mut self,
+        object: &ObjectSnapshot,
+        bitmap_sprite: &DefinitionSprite,
+        definition_sprite: &DefinitionSprite,
+        transform: Option<DrawTransform>,
+        base_only: bool,
+        blit: SpriteBlitState,
+        gamma: Option<&clonk_graphics::GammaRamp>,
+    ) {
+        // `if (Contained) if (eDrawMode != ODM_Overlay) return;`
+        // (src/C4Object.cpp:2656). The ordinary list pass filters contained
+        // objects before it gets here, so this only bites for ODM_BaseOnly.
+        if base_only && object.container.is_some() {
+            return;
+        }
 
         // C4Object::DrawTopFace draws fctConstruction at the bottom-left of
         // the CURRENT Con-scaled Shape, after every object's base pass. It is
         // a plain global-resource facet: no owner tint, object transform,
         // ColorMod, rotation or object blit mode (C4Object.cpp:2617-2638).
-        if object.ocf & clonk_engine::ocf::CONSTRUCT != 0 && object.rotation == 0 {
+        // `if (OCF & OCF_Construct) if (r == 0) if (eDrawMode != ODM_BaseOnly)`
+        // (src/C4Object.cpp:2658).
+        if !base_only && object.ocf & clonk_engine::ocf::CONSTRUCT != 0 && object.rotation == 0 {
             if let Some(construction) = self.hud_graphics.construction.clone() {
                 let fog = self.fog_draw_context();
                 let shape = Self::con_scaled_shape(
@@ -6332,7 +6366,7 @@ impl GraphicsSystem {
             top_face.height.saturating_mul(con) / FULL_CON
         });
         self.blit_face(
-            &bitmap_sprite,
+            bitmap_sprite,
             SourceRect::new(source_x, source_y, top_face.width, top_face.height),
             (
                 (cox + target_x) as f32,
@@ -6348,7 +6382,7 @@ impl GraphicsSystem {
             Some(object_color_by_owner_tint(object)),
             self.viewport_zoom.max(MIN_VIEWPORT_ZOOM),
             0.0,
-            object.draw_transform,
+            transform,
             blit,
             gamma,
         );
