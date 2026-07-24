@@ -21,8 +21,7 @@
         let app = new_menu_app(320, 200);
         let (sender, receiver) = mpsc::channel();
         sender
-            .send(ConsoleInputEvent::Error(io::Error::new(
-                io::ErrorKind::Other,
+            .send(ConsoleInputEvent::Error(io::Error::other(
                 "fixture stdin failure",
             )))
             .expect("queue console reader failure");
@@ -2925,16 +2924,17 @@
         let draws = [1, 2, 3, 4, 5, 6];
         let mut draw = 0;
         let mut ranges = Vec::new();
-        let mut next_random = |range| {
-            ranges.push(range);
-            let value = draws[draw];
-            draw += 1;
-            value
-        };
+        {
+            let mut next_random = |range| {
+                ranges.push(range);
+                let value = draws[draw];
+                draw += 1;
+                value
+            };
 
-        app.add_classic_lobby_script_player_with_random(&mut next_random);
-        app.add_classic_lobby_script_player_with_random(&mut next_random);
-        drop(next_random);
+            app.add_classic_lobby_script_player_with_random(&mut next_random);
+            app.add_classic_lobby_script_player_with_random(&mut next_random);
+        }
 
         let requests = commands.take_player_info_updates();
         assert_eq!(requests.len(), 2);
@@ -4241,9 +4241,11 @@
             .to_path_buf();
         let fantasy = repository.join("content/Fantasy.c4f");
         let scenario = fantasy.join("Drachenfels.c4s");
-        if !scenario.exists() {
-            return;
-        }
+        assert!(
+            scenario.is_dir(),
+            "the initialized official content submodule must provide {}",
+            scenario.display()
+        );
 
         let selected = load_scenario_music_bytes(&scenario)
             .expect("inspect Dragon Rock music")

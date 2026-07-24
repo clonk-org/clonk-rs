@@ -1,4 +1,5 @@
 mod audit;
+mod dependency_licenses;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clonk_engine::fixtures::SNAPSHOT_SCENARIOS;
@@ -13,6 +14,13 @@ use walkdir::WalkDir;
 use xtask::dev_check;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipWriter};
+
+const ROOT_GAME_PACKS: [&str; 4] = [
+    "EkeReloaded.c4d",
+    "EkeReloaded.c4f",
+    "ClonkMars.c4d",
+    "ClonkMars.c4f",
+];
 
 fn main() -> Result<()> {
     clonk_logging::init();
@@ -292,8 +300,7 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
                 if verbose {
                     tracing::info!("HUNG      {label}");
                 }
-                apply_failures
-                    .push((label, "HUNG: apply did not finish within 120s".to_string()));
+                apply_failures.push((label, "HUNG: apply did not finish within 120s".to_string()));
                 // The worker thread is abandoned; the sweep process exits at
                 // the end regardless.
             }
@@ -303,8 +310,8 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
     let mut report = String::new();
     report.push_str(&format!(
         "\nscenario sweep: {total} scenarios — {loaded} load ({load_pct}%), {applied} apply ({apply_pct}%)\n",
-        load_pct = if total > 0 { loaded * 100 / total } else { 0 },
-        apply_pct = if total > 0 { applied * 100 / total } else { 0 },
+        load_pct = (loaded * 100).checked_div(total).unwrap_or(0),
+        apply_pct = (applied * 100).checked_div(total).unwrap_or(0),
     ));
     for (title, failures) in [
         ("LOAD failures", &load_failures),
@@ -323,7 +330,7 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
                 .push(label.as_str());
         }
         let mut classes: Vec<_> = by_class.into_iter().collect();
-        classes.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        classes.sort_by_key(|entry| std::cmp::Reverse(entry.1.len()));
         for (class, scenarios) in classes {
             report.push_str(&format!("  {:3}x {class}\n", scenarios.len()));
             for sample in scenarios.iter().take(3) {
@@ -487,7 +494,11 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
             .collect();
         tracing::info!(stage, counts = counts.join(" "), "watched defs");
         if let Some(landscape) = engine.landscape() {
-            tracing::info!(liquid_750_622 = landscape.is_liquid_at(750, 622), solid_750_622 = landscape.is_solid_at(750, 622), "probe");
+            tracing::info!(
+                liquid_750_622 = landscape.is_liquid_at(750, 622),
+                solid_750_622 = landscape.is_solid_at(750, 622),
+                "probe"
+            );
             // `LC_XTASK_PROBE=x,y;x,y`: solidity/liquid at arbitrary
             // pixels — the headless stand-in for GBackSolid spot checks.
             for spec in std::env::var("LC_XTASK_PROBE")
@@ -496,7 +507,10 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
                 .filter(|spec| !spec.is_empty())
             {
                 if let Some((x, y)) = spec.split_once(',').and_then(|(x, y)| {
-                    x.trim().parse::<i32>().ok().zip(y.trim().parse::<i32>().ok())
+                    x.trim()
+                        .parse::<i32>()
+                        .ok()
+                        .zip(y.trim().parse::<i32>().ok())
                 }) {
                     tracing::info!(
                         x,
@@ -614,7 +628,15 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
         }
     }
     if std::env::var("LC_XTASK_PROBE_MAT").is_ok() {
-        for (x, y) in [(1998, 556), (1998, 557), (1998, 558), (1998, 559), (1998, 560), (1996, 557), (2000, 559)] {
+        for (x, y) in [
+            (1998, 556),
+            (1998, 557),
+            (1998, 558),
+            (1998, 559),
+            (1998, 560),
+            (1996, 557),
+            (2000, 559),
+        ] {
             println!(
                 "MATPROBE ({x},{y}) byte={:?} density={:?} material={:?} in_liquid_probe={:?}",
                 engine.debug_landscape_byte(x, y),
@@ -654,7 +676,11 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
     // and every 5 frames.
     let obj_dump: Vec<u64> = std::env::var("LC_XTASK_OBJ_DUMP")
         .ok()
-        .map(|raw| raw.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect()
+        })
         .unwrap_or_default();
     for id in &obj_dump {
         println!("OBJDUMP joined {id} {:?}", engine.debug_object_by_id(*id));
@@ -664,9 +690,11 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
             .iter()
             .find(|object| object.id.as_u64() == *id)
         {
-            let effects: Vec<String> =
-                object.effects.iter().map(|e| e.name.clone()).collect();
-            println!("OBJDUMP effects {id} {effects:?} owner={} alive={} def={} crew={}", object.owner, object.alive, object.definition_id, object.crew_member);
+            let effects: Vec<String> = object.effects.iter().map(|e| e.name.clone()).collect();
+            println!(
+                "OBJDUMP effects {id} {effects:?} owner={} alive={} def={} crew={}",
+                object.owner, object.alive, object.definition_id, object.crew_member
+            );
         }
     }
     for frame in 0..ticks {
@@ -713,12 +741,12 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
                 }
             }
             Err(error) => {
-                let chain: Vec<String> = std::iter::successors(
-                    Some(&error as &dyn std::error::Error),
-                    |err| err.source(),
-                )
-                .map(|err| err.to_string())
-                .collect();
+                let chain: Vec<String> =
+                    std::iter::successors(Some(&error as &dyn std::error::Error), |err| {
+                        err.source()
+                    })
+                    .map(|err| err.to_string())
+                    .collect();
                 tracing::error!(frame, error = chain.join(" <- "), "tick failed");
                 break;
             }
@@ -896,17 +924,35 @@ fn load_recording(path: &Path) -> Result<Recording> {
 
 fn package() -> Result<()> {
     let paths = WorkspacePaths::detect()?;
-    build_clonk_game(&paths)?;
+    build_runtime_binaries(&paths)?;
+    audit_release_dependencies(&paths)?;
+    dependency_licenses::validate_runtime_dependency_notices(
+        &paths.workspace_dir,
+        &paths
+            .repo_root
+            .join("licenses/RUST_THIRD_PARTY_LICENSES.txt"),
+    )?;
     let package_dir = assemble_package_layout(&paths)?;
     let archive = create_archive(&paths, &package_dir)?;
     tracing::info!(path = %archive.display(), "packaged Rust port");
     Ok(())
 }
 
-fn build_clonk_game(paths: &WorkspacePaths) -> Result<()> {
-    tracing::info!("building clonk-game (release)");
-    let status = Command::new("cargo")
-        .args(["build", "--release", "-p", "clonk-game"])
+fn build_runtime_binaries(paths: &WorkspacePaths) -> Result<()> {
+    tracing::info!("building clonk-game and clonk-app (release)");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = Command::new(&cargo)
+        .args([
+            "build",
+            "--release",
+            "--locked",
+            "-p",
+            "clonk-game",
+            "-p",
+            "clonk-app",
+        ])
+        .arg("--target-dir")
+        .arg(&paths.target_dir)
         .current_dir(&paths.workspace_dir)
         .status()
         .context("failed to invoke cargo build")?;
@@ -917,7 +963,15 @@ fn build_clonk_game(paths: &WorkspacePaths) -> Result<()> {
 }
 
 fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
-    let dist_dir = paths.workspace_dir.join("target").join("dist");
+    let content_src = paths.repo_root.join("content");
+    if !content_src.join("Objects.c4d").is_dir() {
+        bail!(
+            "required game content was not found at {}; initialize the content submodule with `git submodule update --init --recursive`",
+            content_src.display()
+        );
+    }
+
+    let dist_dir = paths.target_dir.join("dist");
     let package_dir = dist_dir.join("clonk-rust");
 
     if package_dir.exists() {
@@ -931,28 +985,33 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
     fs::create_dir_all(&bin_dir)
         .with_context(|| format!("failed to create {}", bin_dir.display()))?;
 
-    let exe_name = format!("clonk-game{}", env::consts::EXE_SUFFIX);
-    let built_binary = paths
-        .workspace_dir
-        .join("target")
-        .join("release")
-        .join(&exe_name);
-    if !built_binary.exists() {
-        bail!("expected clonk-game binary at {}", built_binary.display());
+    for binary_name in ["clonk-game", "clonk-app"] {
+        let exe_name = executable_name(binary_name);
+        let built_binary = paths.release_dir.join(&exe_name);
+        if !built_binary.exists() {
+            bail!(
+                "expected {binary_name} binary at {}",
+                built_binary.display()
+            );
+        }
+        let packaged_binary = bin_dir.join(&exe_name);
+        fs::copy(&built_binary, &packaged_binary).with_context(|| {
+            format!(
+                "failed to copy {} to {}",
+                built_binary.display(),
+                packaged_binary.display()
+            )
+        })?;
+        set_executable(&packaged_binary)?;
     }
-    let packaged_binary = bin_dir.join(&exe_name);
-    fs::copy(&built_binary, &packaged_binary).with_context(|| {
-        format!(
-            "failed to copy {} to {}",
-            built_binary.display(),
-            packaged_binary.display()
-        )
-    })?;
-    set_executable(&packaged_binary)?;
 
     copy_file(
         &paths.repo_root.join("COPYING"),
         &package_dir.join("COPYING"),
+    )?;
+    copy_file(
+        &paths.repo_root.join("TRADEMARK"),
+        &package_dir.join("TRADEMARK"),
     )?;
     copy_file(
         &paths.repo_root.join("README.md"),
@@ -962,19 +1021,72 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
         &paths.repo_root.join("credits.txt"),
         &package_dir.join("credits.txt"),
     )?;
+    copy_file(
+        &paths.repo_root.join("THIRD_PARTY_GAME_CONTENT.md"),
+        &package_dir.join("THIRD_PARTY_GAME_CONTENT.md"),
+    )?;
 
-    let planet_src = paths.repo_root.join("planet");
+    for pack in ROOT_GAME_PACKS {
+        let source = paths.repo_root.join(pack);
+        if !source.is_dir() {
+            bail!(
+                "required authorized game pack was not found at {}",
+                source.display()
+            );
+        }
+        let destination = package_dir.join(pack);
+        copy_tracked_directory(&paths.repo_root, Path::new(pack), &destination)?;
+        if !directory_contains_file(&destination)? {
+            bail!("required authorized game pack {pack} did not contain any tracked files");
+        }
+    }
+
     let planet_dst = package_dir.join("planet");
-    copy_directory(&planet_src, &planet_dst)?;
+    copy_tracked_directory(&paths.repo_root, Path::new("planet"), &planet_dst)?;
+
+    let content_dst = package_dir.join("content");
+    copy_tracked_directory(&content_src, Path::new(""), &content_dst)?;
+
+    let licenses_dst = package_dir.join("licenses");
+    copy_tracked_directory(&paths.repo_root, Path::new("licenses"), &licenses_dst)?;
+    for relative in [
+        "RUST_THIRD_PARTY_LICENSES.txt",
+        "third_party/freetype/FTL.TXT",
+        "third_party/libpng/LICENSE",
+        "third_party/minimp3/LICENSE",
+        "third_party/zlib/LICENSE",
+    ] {
+        if !licenses_dst.join(relative).is_file() {
+            bail!(
+                "required dependency license licenses/{relative} was not included; ensure it is tracked by Git"
+            );
+        }
+    }
 
     Ok(package_dir)
 }
 
+fn executable_name(binary_name: &str) -> String {
+    format!("{binary_name}{}", env::consts::EXE_SUFFIX)
+}
+
+fn directory_contains_file(path: &Path) -> Result<bool> {
+    for entry in WalkDir::new(path) {
+        if entry?.file_type().is_file() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn create_archive(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf> {
-    let dist_dir = paths.workspace_dir.join("target").join("dist");
+    let dist_dir = paths.target_dir.join("dist");
     fs::create_dir_all(&dist_dir)
         .with_context(|| format!("failed to create {}", dist_dir.display()))?;
-    let archive_path = dist_dir.join("clonk-rust.zip");
+    let archive_path = dist_dir.join(archive_file_name(
+        env!("CARGO_PKG_VERSION"),
+        &paths.target_triple,
+    ));
     if archive_path.exists() {
         fs::remove_file(&archive_path)
             .with_context(|| format!("failed to remove {}", archive_path.display()))?;
@@ -994,8 +1106,18 @@ fn create_archive(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf>
 
     let file_options = FileOptions::default().compression_method(CompressionMethod::Deflated);
 
-    for entry in WalkDir::new(package_dir) {
-        let entry = entry?;
+    let mut entries = WalkDir::new(package_dir)
+        .into_iter()
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| {
+        entry
+            .path()
+            .strip_prefix(package_dir)
+            .map(path_to_zip_string)
+            .unwrap_or_default()
+    });
+
+    for entry in entries {
         let rel_path = entry.path().strip_prefix(package_dir).unwrap();
         if rel_path.as_os_str().is_empty() {
             continue;
@@ -1030,6 +1152,10 @@ fn create_archive(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf>
     Ok(archive_path)
 }
 
+fn archive_file_name(version: &str, target_triple: &str) -> String {
+    format!("clonk-rust-{version}-{target_triple}.zip")
+}
+
 fn copy_file(src: &Path, dst: &Path) -> Result<()> {
     if !src.exists() {
         bail!("required file {} was not found", src.display());
@@ -1049,7 +1175,10 @@ fn copy_directory(src: &Path, dst: &Path) -> Result<()> {
     }
     fs::create_dir_all(dst).with_context(|| format!("failed to create {}", dst.display()))?;
 
-    for entry in WalkDir::new(src) {
+    for entry in WalkDir::new(src)
+        .into_iter()
+        .filter_entry(is_runtime_package_entry)
+    {
         let entry = entry?;
         let rel = entry.path().strip_prefix(src).unwrap();
         if rel.as_os_str().is_empty() {
@@ -1078,6 +1207,129 @@ fn copy_directory(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+fn copy_tracked_directory(repository: &Path, directory: &Path, dst: &Path) -> Result<()> {
+    let src = repository.join(directory);
+    if !repository.join(".git").exists() {
+        // Source archives do not carry Git metadata and are already expected
+        // to contain only published content.
+        return copy_directory(&src, dst);
+    }
+
+    let pathspec = if directory.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        directory
+    };
+    let diff_status = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["diff", "--quiet", "--no-ext-diff", "--"])
+        .arg(pathspec)
+        .status()
+        .with_context(|| format!("failed to inspect tracked files under {}", src.display()))?;
+    match diff_status.code() {
+        Some(0) => {}
+        Some(1) => bail!(
+            "tracked files under {} differ from the Git index; stage or discard those changes before packaging",
+            src.display()
+        ),
+        _ => bail!(
+            "git diff failed while inspecting {} with status {:?}",
+            src.display(),
+            diff_status.code()
+        ),
+    }
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["ls-files", "-z", "--"])
+        .arg(pathspec)
+        .output()
+        .with_context(|| format!("failed to list tracked files under {}", src.display()))?;
+    if !output.status.success() {
+        bail!(
+            "failed to list tracked files under {}: git exited with status {:?}",
+            src.display(),
+            output.status.code()
+        );
+    }
+
+    fs::create_dir_all(dst).with_context(|| format!("failed to create {}", dst.display()))?;
+    for raw_path in output.stdout.split(|byte| *byte == 0) {
+        if raw_path.is_empty() {
+            continue;
+        }
+        let repository_relative_text = std::str::from_utf8(raw_path)
+            .with_context(|| format!("tracked path under {} is not UTF-8", repository.display()))?;
+        let repository_relative = Path::new(repository_relative_text);
+        let relative = if directory.as_os_str().is_empty() {
+            repository_relative
+        } else {
+            repository_relative
+                .strip_prefix(directory)
+                .with_context(|| {
+                    format!(
+                        "tracked path {} is outside {}",
+                        repository_relative.display(),
+                        src.display()
+                    )
+                })?
+        };
+        if !is_safe_relative_path(relative) || !is_runtime_package_path(relative) {
+            continue;
+        }
+
+        let source = repository.join(repository_relative);
+        let metadata = fs::symlink_metadata(&source)
+            .with_context(|| format!("failed to inspect tracked file {}", source.display()))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        copy_file(&source, &dst.join(relative))?;
+    }
+    Ok(())
+}
+
+fn is_safe_relative_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+fn is_runtime_package_path(path: &Path) -> bool {
+    path.components().all(|component| {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        !matches!(
+            name.to_str(),
+            Some(
+                ".git"
+                    | ".github"
+                    | ".gitignore"
+                    | ".gitattributes"
+                    | ".editorconfig"
+                    | ".DS_Store"
+            )
+        )
+    })
+}
+
+fn is_runtime_package_entry(entry: &walkdir::DirEntry) -> bool {
+    if entry.depth() == 0 {
+        return true;
+    }
+    if entry.file_type().is_symlink() {
+        return false;
+    }
+    is_runtime_package_path(Path::new(entry.file_name()))
+}
+
 fn path_to_zip_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -1096,9 +1348,182 @@ fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn rustc_host_target(workspace_dir: &Path) -> Result<String> {
+    let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let output = Command::new(&rustc)
+        .arg("-vV")
+        .current_dir(workspace_dir)
+        .output()
+        .context("failed to query the rustc host target")?;
+    if !output.status.success() {
+        bail!("rustc -vV failed with status {:?}", output.status.code());
+    }
+    let stdout = String::from_utf8(output.stdout).context("rustc -vV output was not UTF-8")?;
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("host: ").map(str::to_string))
+        .context("rustc -vV did not report a host target")
+}
+
+fn audit_release_dependencies(paths: &WorkspacePaths) -> Result<()> {
+    for binary_name in ["clonk-game", "clonk-app"] {
+        let binary = paths.release_dir.join(executable_name(binary_name));
+        if paths.target_triple.contains("apple-darwin") {
+            audit_macos_release_binary(&binary)?;
+        } else if paths.target_triple.contains("linux") {
+            audit_linux_release_binary(&binary, paths.target_triple == paths.host_triple)?;
+        }
+    }
+    Ok(())
+}
+
+fn audit_macos_release_binary(binary: &Path) -> Result<()> {
+    let output = Command::new("otool")
+        .arg("-L")
+        .arg(binary)
+        .output()
+        .with_context(|| format!("failed to audit dynamic libraries for {}", binary.display()))?;
+    if !output.status.success() {
+        bail!(
+            "otool -L failed for {} with status {:?}",
+            binary.display(),
+            output.status.code()
+        );
+    }
+    let stdout = String::from_utf8(output.stdout).context("otool -L output was not UTF-8")?;
+    validate_macos_dependency_output(binary, &stdout)
+}
+
+fn audit_linux_release_binary(binary: &Path, resolve_dependencies: bool) -> Result<()> {
+    let dynamic = Command::new("readelf")
+        .args(["-d"])
+        .arg(binary)
+        .output()
+        .with_context(|| format!("failed to inspect ELF metadata for {}", binary.display()))?;
+    if !dynamic.status.success() {
+        bail!(
+            "readelf -d failed for {} with status {:?}",
+            binary.display(),
+            dynamic.status.code()
+        );
+    }
+    let dynamic_stdout =
+        String::from_utf8(dynamic.stdout).context("readelf -d output was not UTF-8")?;
+    validate_linux_elf_output(binary, &dynamic_stdout)?;
+
+    if resolve_dependencies {
+        let linked = Command::new("ldd")
+            .arg(binary)
+            .env_remove("LD_LIBRARY_PATH")
+            .output()
+            .with_context(|| format!("failed to resolve ELF libraries for {}", binary.display()))?;
+        if !linked.status.success() {
+            bail!(
+                "ldd failed for {} with status {:?}",
+                binary.display(),
+                linked.status.code()
+            );
+        }
+        let linked_stdout = String::from_utf8(linked.stdout).context("ldd output was not UTF-8")?;
+        validate_linux_dependency_output(binary, &linked_stdout)?;
+    }
+    Ok(())
+}
+
+fn validate_macos_dependency_output(binary: &Path, output: &str) -> Result<()> {
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if line.ends_with(':') {
+            continue;
+        }
+        let dependency = line.split_whitespace().next().unwrap_or_default();
+        if dependency.starts_with("/System/Library/")
+            || dependency.starts_with("/usr/lib/")
+            || dependency.starts_with("@loader_path/")
+            || dependency.starts_with("@executable_path/")
+        {
+            continue;
+        }
+        bail!(
+            "{} has non-relocatable dynamic dependency {dependency}",
+            binary.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_linux_dependency_output(binary: &Path, output: &str) -> Result<()> {
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if line.contains("=> not found") {
+            bail!("{} has an unresolved dependency: {line}", binary.display());
+        }
+        let resolved = line
+            .split_once("=>")
+            .map(|(_, path)| path.trim())
+            .unwrap_or(line)
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        if !resolved.starts_with('/') {
+            continue;
+        }
+        if resolved.starts_with("/lib/")
+            || resolved.starts_with("/lib64/")
+            || resolved.starts_with("/usr/lib/")
+            || resolved.starts_with("/usr/lib64/")
+        {
+            continue;
+        }
+        bail!(
+            "{} has non-relocatable dynamic dependency {resolved}",
+            binary.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_linux_elf_output(binary: &Path, output: &str) -> Result<()> {
+    for line in output
+        .lines()
+        .filter(|line| line.contains("(RPATH)") || line.contains("(RUNPATH)"))
+    {
+        let Some((_, paths)) = line.split_once('[') else {
+            continue;
+        };
+        let paths = paths.split_once(']').map_or(paths, |(paths, _)| paths);
+        for path in paths.split(':').filter(|path| !path.is_empty()) {
+            if path == "$ORIGIN"
+                || path.starts_with("$ORIGIN/")
+                || path.starts_with("/lib/")
+                || path.starts_with("/lib64/")
+                || path.starts_with("/usr/lib/")
+                || path.starts_with("/usr/lib64/")
+            {
+                continue;
+            }
+            bail!(
+                "{} has non-relocatable ELF search path {path}",
+                binary.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 struct WorkspacePaths {
     workspace_dir: PathBuf,
     repo_root: PathBuf,
+    target_dir: PathBuf,
+    release_dir: PathBuf,
+    host_triple: String,
+    target_triple: String,
 }
 
 impl WorkspacePaths {
@@ -1110,10 +1535,472 @@ impl WorkspacePaths {
             .to_path_buf();
         // The workspace was hoisted to the repository root.
         let repo_root = workspace_dir.clone();
+        let target_dir = env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    workspace_dir.join(path)
+                }
+            })
+            .unwrap_or_else(|| workspace_dir.join("target"));
+        let host_triple = rustc_host_target(&workspace_dir)?;
+        let explicit_target = env::var("CARGO_BUILD_TARGET")
+            .ok()
+            .filter(|target| !target.is_empty());
+        let target_triple = explicit_target
+            .clone()
+            .unwrap_or_else(|| host_triple.clone());
+        if !target_triple
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            bail!(
+                "CARGO_BUILD_TARGET must be a target triple suitable for an archive name, got `{target_triple}`"
+            );
+        }
+        let release_dir = explicit_target.map_or_else(
+            || target_dir.join("release"),
+            |target| target_dir.join(target).join("release"),
+        );
         Ok(Self {
             workspace_dir,
             repo_root,
+            target_dir,
+            release_dir,
+            host_triple,
+            target_triple,
         })
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn write_fixture(path: &Path, contents: &[u8]) {
+        fs::create_dir_all(path.parent().expect("fixture path has a parent"))
+            .expect("create fixture parent");
+        fs::write(path, contents).expect("write fixture");
+    }
+
+    fn package_fixture() -> (TempDir, WorkspacePaths) {
+        let temp = TempDir::new().expect("temporary workspace");
+        let root = temp.path();
+
+        for name in [
+            "COPYING",
+            "TRADEMARK",
+            "README.md",
+            "credits.txt",
+            "THIRD_PARTY_GAME_CONTENT.md",
+        ] {
+            write_fixture(&root.join(name), name.as_bytes());
+        }
+        write_fixture(&root.join("licenses/dependency.txt"), b"dependency license");
+        for (relative, contents) in [
+            (
+                "licenses/RUST_THIRD_PARTY_LICENSES.txt",
+                b"Rust dependency licenses".as_slice(),
+            ),
+            (
+                "licenses/third_party/freetype/FTL.TXT",
+                b"FreeType license".as_slice(),
+            ),
+            (
+                "licenses/third_party/libpng/LICENSE",
+                b"libpng license".as_slice(),
+            ),
+            (
+                "licenses/third_party/minimp3/LICENSE",
+                b"minimp3 license".as_slice(),
+            ),
+            (
+                "licenses/third_party/zlib/LICENSE",
+                b"zlib license".as_slice(),
+            ),
+        ] {
+            write_fixture(&root.join(relative), contents);
+        }
+        write_fixture(&root.join("planet/System.c4g/C4.c"), b"system");
+        write_fixture(&root.join("planet/Graphics.c4g/Logo.png"), b"logo");
+        write_fixture(&root.join("content/Objects.c4d/DefCore.txt"), b"objects");
+        write_fixture(
+            &root.join("content/Worlds.c4f/Test.c4s/Scenario.txt"),
+            b"scenario",
+        );
+        write_fixture(
+            &root.join("EkeReloaded.c4d/DefCore.txt"),
+            b"eke definitions",
+        );
+        write_fixture(
+            &root.join("EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
+            b"harpoon race",
+        );
+        write_fixture(&root.join("ClonkMars.c4d/DefCore.txt"), b"mars definitions");
+        write_fixture(
+            &root.join("ClonkMars.c4f/Test.c4s/Scenario.txt"),
+            b"mars scenario",
+        );
+        write_fixture(
+            &root
+                .join("workspace-target/release")
+                .join(executable_name("clonk-game")),
+            b"launcher",
+        );
+        write_fixture(
+            &root
+                .join("workspace-target/release")
+                .join(executable_name("clonk-app")),
+            b"runtime",
+        );
+
+        let paths = WorkspacePaths {
+            workspace_dir: root.to_path_buf(),
+            repo_root: root.to_path_buf(),
+            target_dir: root.join("workspace-target"),
+            release_dir: root.join("workspace-target/release"),
+            host_triple: "test-target".to_string(),
+            target_triple: "test-target".to_string(),
+        };
+        (temp, paths)
+    }
+
+    #[test]
+    fn package_layout_contains_both_binaries_content_and_legal_files() {
+        let (_temp, paths) = package_fixture();
+
+        let package_dir = assemble_package_layout(&paths).expect("assemble package");
+
+        for relative in [
+            PathBuf::from("bin").join(executable_name("clonk-game")),
+            PathBuf::from("bin").join(executable_name("clonk-app")),
+            PathBuf::from("COPYING"),
+            PathBuf::from("TRADEMARK"),
+            PathBuf::from("README.md"),
+            PathBuf::from("credits.txt"),
+            PathBuf::from("THIRD_PARTY_GAME_CONTENT.md"),
+            PathBuf::from("licenses/dependency.txt"),
+            PathBuf::from("licenses/RUST_THIRD_PARTY_LICENSES.txt"),
+            PathBuf::from("licenses/third_party/freetype/FTL.TXT"),
+            PathBuf::from("licenses/third_party/libpng/LICENSE"),
+            PathBuf::from("licenses/third_party/minimp3/LICENSE"),
+            PathBuf::from("licenses/third_party/zlib/LICENSE"),
+            PathBuf::from("planet/System.c4g/C4.c"),
+            PathBuf::from("planet/Graphics.c4g/Logo.png"),
+            PathBuf::from("content/Objects.c4d/DefCore.txt"),
+            PathBuf::from("content/Worlds.c4f/Test.c4s/Scenario.txt"),
+            PathBuf::from("EkeReloaded.c4d/DefCore.txt"),
+            PathBuf::from("EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
+            PathBuf::from("ClonkMars.c4d/DefCore.txt"),
+            PathBuf::from("ClonkMars.c4f/Test.c4s/Scenario.txt"),
+        ] {
+            assert!(
+                package_dir.join(&relative).is_file(),
+                "package is missing {}",
+                relative.display()
+            );
+        }
+    }
+
+    #[test]
+    fn archive_identity_includes_version_and_target_triple() {
+        assert_eq!(
+            archive_file_name("1.2.3", "aarch64-apple-darwin"),
+            "clonk-rust-1.2.3-aarch64-apple-darwin.zip"
+        );
+    }
+
+    #[test]
+    fn archive_entries_are_sorted_and_repeatable() {
+        let (_temp, paths) = package_fixture();
+        let package_dir = assemble_package_layout(&paths).expect("assemble package");
+
+        let archive = create_archive(&paths, &package_dir).expect("create archive");
+        let first_bytes = fs::read(&archive).expect("read first archive");
+        let file = File::open(&archive).expect("open archive");
+        let mut zip = zip::ZipArchive::new(file).expect("open zip");
+        let names = (0..zip.len())
+            .map(|index| {
+                zip.by_index(index)
+                    .expect("read zip entry")
+                    .name()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "archive entries are not path-sorted");
+
+        let extracted = TempDir::new().expect("temporary extraction directory");
+        zip.extract(extracted.path())
+            .expect("extract package archive");
+        for relative in [
+            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-game")),
+            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-app")),
+            PathBuf::from("clonk-rust/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
+            PathBuf::from("clonk-rust/licenses/RUST_THIRD_PARTY_LICENSES.txt"),
+        ] {
+            assert!(
+                extracted.path().join(&relative).is_file(),
+                "extracted package is missing {}",
+                relative.display()
+            );
+        }
+        drop(zip);
+
+        create_archive(&paths, &package_dir).expect("recreate archive");
+        let second_bytes = fs::read(&archive).expect("read second archive");
+        assert_eq!(
+            first_bytes, second_bytes,
+            "archive bytes changed on rebuild"
+        );
+    }
+
+    #[test]
+    fn macos_dependency_audit_rejects_homebrew_linkage() {
+        let binary = Path::new("/package/bin/clonk-app");
+        let system_only = "\
+/package/bin/clonk-app:\n\
+\t/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit\n\
+\t/usr/lib/libSystem.B.dylib\n";
+        validate_macos_dependency_output(binary, system_only)
+            .expect("system libraries are portable");
+
+        let homebrew = "\
+/package/bin/clonk-app:\n\
+\t/opt/homebrew/opt/freetype/lib/libfreetype.6.dylib\n";
+        let error = validate_macos_dependency_output(binary, homebrew)
+            .expect_err("Homebrew dependency must fail packaging");
+        assert!(
+            error.to_string().contains("/opt/homebrew"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn linux_dependency_audit_rejects_missing_or_user_local_libraries() {
+        let binary = Path::new("/package/bin/clonk-app");
+        let system_only = "\
+\tlinux-vdso.so.1 (0x00007fff)\n\
+\tlibz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007fff)\n";
+        validate_linux_dependency_output(binary, system_only)
+            .expect("system libraries are portable");
+
+        for nonportable in [
+            "\tlibfreetype.so.6 => not found\n",
+            "\tlibfreetype.so.6 => /home/user/local/libfreetype.so.6 (0x00007fff)\n",
+        ] {
+            assert!(
+                validate_linux_dependency_output(binary, nonportable).is_err(),
+                "nonportable dependency was accepted: {nonportable}"
+            );
+        }
+    }
+
+    #[test]
+    fn elf_dependency_audit_allows_origin_but_rejects_host_search_paths() {
+        let binary = Path::new("/package/bin/clonk-app");
+        validate_linux_elf_output(
+            binary,
+            "0x000000000000001d (RUNPATH) Library runpath: [$ORIGIN/lib]",
+        )
+        .expect("$ORIGIN is relocatable");
+
+        let error = validate_linux_elf_output(
+            binary,
+            "0x000000000000001d (RUNPATH) Library runpath: [/opt/homebrew/lib]",
+        )
+        .expect_err("host search path must fail packaging");
+        assert!(
+            error.to_string().contains("/opt/homebrew"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn package_layout_rejects_an_uninitialized_content_submodule() {
+        let (_temp, paths) = package_fixture();
+        fs::remove_dir_all(paths.repo_root.join("content/Objects.c4d"))
+            .expect("remove content sentinel");
+
+        let error = assemble_package_layout(&paths).expect_err("uninitialized content must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("initialize the content submodule"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_layout_excludes_repository_metadata_and_external_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let (_temp, paths) = package_fixture();
+        write_fixture(
+            &paths.repo_root.join("content/.github/workflows/build.yml"),
+            b"workflow",
+        );
+        let private_file = paths.repo_root.join("private.txt");
+        write_fixture(&private_file, b"must not be packaged");
+        symlink(
+            &private_file,
+            paths.repo_root.join("content/external-private-link"),
+        )
+        .expect("create external fixture symlink");
+
+        let package_dir = assemble_package_layout(&paths).expect("assemble package");
+
+        for relative in ["content/.github", "content/external-private-link"] {
+            assert!(
+                !package_dir.join(relative).exists(),
+                "development-only path leaked into package: {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_layout_excludes_untracked_content_from_a_submodule_checkout() {
+        let (_temp, paths) = package_fixture();
+        let content = paths.repo_root.join("content");
+        let init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&content)
+            .status()
+            .expect("run git init");
+        assert!(init.success(), "git init failed");
+        let add = Command::new("git")
+            .args(["add", "Objects.c4d", "Worlds.c4f"])
+            .current_dir(&content)
+            .status()
+            .expect("run git add");
+        assert!(add.success(), "git add failed");
+        write_fixture(
+            &content.join("EkeReloaded.c4f/Secret.txt"),
+            b"untracked private content",
+        );
+
+        let package_dir = assemble_package_layout(&paths).expect("assemble package");
+
+        assert!(
+            !package_dir.join("content/EkeReloaded.c4f").exists(),
+            "untracked duplicate Eke Reloaded content leaked into the package"
+        );
+    }
+
+    #[test]
+    fn package_layout_excludes_untracked_planet_assets_from_a_checkout() {
+        let (_temp, paths) = package_fixture();
+        let init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&paths.repo_root)
+            .status()
+            .expect("run git init");
+        assert!(init.success(), "git init failed");
+        let add = Command::new("git")
+            .args([
+                "add",
+                "planet",
+                "licenses",
+                "EkeReloaded.c4d",
+                "EkeReloaded.c4f",
+                "ClonkMars.c4d",
+                "ClonkMars.c4f",
+            ])
+            .current_dir(&paths.repo_root)
+            .status()
+            .expect("run git add");
+        assert!(add.success(), "git add failed");
+        write_fixture(
+            &paths.repo_root.join("planet/PrivateAsset.c4g/Secret.txt"),
+            b"untracked private asset",
+        );
+
+        let package_dir = assemble_package_layout(&paths).expect("assemble package");
+
+        assert!(
+            !package_dir.join("planet/PrivateAsset.c4g").exists(),
+            "untracked planet asset leaked into the package"
+        );
+    }
+
+    #[test]
+    fn package_layout_rejects_an_untracked_dependency_notice() {
+        let (_temp, paths) = package_fixture();
+        let init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&paths.repo_root)
+            .status()
+            .expect("run git init");
+        assert!(init.success(), "git init failed");
+        let add = Command::new("git")
+            .args([
+                "add",
+                "planet",
+                "licenses/dependency.txt",
+                "licenses/third_party",
+                "EkeReloaded.c4d",
+                "EkeReloaded.c4f",
+                "ClonkMars.c4d",
+                "ClonkMars.c4f",
+            ])
+            .current_dir(&paths.repo_root)
+            .status()
+            .expect("run git add");
+        assert!(add.success(), "git add failed");
+
+        let error =
+            assemble_package_layout(&paths).expect_err("untracked notice must fail packaging");
+
+        assert!(
+            error.to_string().contains("RUST_THIRD_PARTY_LICENSES.txt"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            error.to_string().contains("tracked by Git"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn package_layout_rejects_modified_tracked_planet_bytes() {
+        let (_temp, paths) = package_fixture();
+        let init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&paths.repo_root)
+            .status()
+            .expect("run git init");
+        assert!(init.success(), "git init failed");
+        let add = Command::new("git")
+            .args([
+                "add",
+                "planet",
+                "licenses",
+                "EkeReloaded.c4d",
+                "EkeReloaded.c4f",
+                "ClonkMars.c4d",
+                "ClonkMars.c4f",
+            ])
+            .current_dir(&paths.repo_root)
+            .status()
+            .expect("run git add");
+        assert!(add.success(), "git add failed");
+        write_fixture(
+            &paths.repo_root.join("planet/System.c4g/C4.c"),
+            b"modified after staging",
+        );
+
+        let error = assemble_package_layout(&paths)
+            .expect_err("modified tracked asset must fail packaging");
+
+        assert!(
+            error.to_string().contains("differ from the Git index"),
+            "unexpected error: {error:#}"
+        );
+    }
 }

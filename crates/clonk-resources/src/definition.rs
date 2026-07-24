@@ -1,7 +1,7 @@
 use crate::{
-    bitmap::IndexedBitmap, decode_legacy_script_text,
-    graphics::blacken_fully_transparent_rgba, language::component_language_string,
-    ComponentGroups, GraphicsImage, Group, GroupEntry, GroupError, LoadedComponent,
+    bitmap::IndexedBitmap, decode_legacy_script_text, graphics::blacken_fully_transparent_rgba,
+    language::component_language_string, ComponentGroups, GraphicsImage, Group, GroupEntry,
+    GroupError, LoadedComponent,
 };
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -107,11 +107,7 @@ impl Definition {
         group: &Group,
         languages: &[S],
     ) -> Result<Self, DefinitionError> {
-        Self::load_with_languages_and_components(
-            group,
-            languages,
-            &ComponentGroups::local(group),
-        )
+        Self::load_with_languages_and_components(group, languages, &ComponentGroups::local(group))
     }
 
     /// Loads the remaining definition resources after the caller has already
@@ -260,7 +256,10 @@ fn load_definition_description<S: AsRef<str>>(
 /// language segment (`SCopySegment(..., 2)`, C4ComponentHost.cpp:70-79).
 fn component_language_code(language: &str) -> String {
     let code = clonk_script::c4_string_bytes(language);
-    let visible = code.iter().position(|byte| *byte == 0).unwrap_or(code.len());
+    let visible = code
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(code.len());
     clonk_script::c4_string_from_bytes(&code[..visible.min(2)])
 }
 
@@ -282,14 +281,16 @@ fn load_definition_clonk_names<S: AsRef<str>>(
     components: &ComponentGroups,
     languages: &[S],
 ) -> Result<Option<String>, DefinitionError> {
-    Ok(first_localized_component(components, "ClonkNames", languages)?.map(|component| {
-        let visible = component
-            .bytes
-            .split(|byte| *byte == 0)
-            .next()
-            .unwrap_or_default();
-        decode_legacy_script_text(visible)
-    }))
+    Ok(
+        first_localized_component(components, "ClonkNames", languages)?.map(|component| {
+            let visible = component
+                .bytes
+                .split(|byte| *byte == 0)
+                .next()
+                .unwrap_or_default();
+            decode_legacy_script_text(visible)
+        }),
+    )
 }
 
 /// C4Def performs this local wildcard probe before RankSystem::LoadEx. A
@@ -316,15 +317,13 @@ fn load_definition_name<S: AsRef<str>>(
         return Ok(None);
     };
     let text = decode_legacy_script_text(&component.bytes);
-    let localized_name = |code: &str| {
-        component_language_string(&text, code).map(str::to_string)
-    };
+    let localized_name = |code: &str| component_language_string(&text, code).map(str::to_string);
     if languages.is_empty() {
         Ok(localized_name(""))
     } else {
-        Ok(languages.iter().find_map(|language| {
-            localized_name(&component_language_code(language.as_ref()))
-        }))
+        Ok(languages
+            .iter()
+            .find_map(|language| localized_name(&component_language_code(language.as_ref()))))
     }
 }
 
@@ -888,10 +887,7 @@ fn definition_image_format_bytes(filename: &[u8]) -> Option<image::ImageFormat> 
 /// and other image formats. A recognized but invalid 8-bit BMP must not fall
 /// back because the indexed decoder carries the intentional native-layout
 /// hardening.
-fn decode_definition_image(
-    data: &[u8],
-    format: image::ImageFormat,
-) -> Option<image::RgbaImage> {
+fn decode_definition_image(data: &[u8], format: image::ImageFormat) -> Option<image::RgbaImage> {
     decode_definition_image_result(data, format).ok()
 }
 
@@ -924,9 +920,7 @@ pub const C4_MAX_PHYSICAL: i32 = 100_000;
 /// `[Physical]` section of DefCore.txt with the `C4PhysInfoNameMap` field
 /// names (C4InfoCore.cpp:181-205). Defaults are all zero
 /// (`C4PhysicalInfo::Default`, C4InfoCore.cpp:239-242).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct PhysicalInfo {
     pub energy: i32,
     pub breath: i32,
@@ -1890,8 +1884,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 }
             }
             "ColorByOwner" => {
-                color_by_owner =
-                    reflected_int!("ColorByOwner", parse_reflected_int(value)) != 0;
+                color_by_owner = reflected_int!("ColorByOwner", parse_reflected_int(value)) != 0;
             }
             "ColorByMaterial" => {
                 color_by_material = truncate_c4_string_bytes(rct_all_value, 15);
@@ -1927,10 +1920,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "Offset" => {
                 let mut parts = parse_int_array(value);
-                shape_offset = Some((
-                    parts.next().unwrap_or(0),
-                    parts.next().unwrap_or(0),
-                ));
+                shape_offset = Some((parts.next().unwrap_or(0), parts.next().unwrap_or(0)));
             }
             "FireTop" => {
                 fire_top = parse_i32(value).unwrap_or(0);
@@ -1996,8 +1986,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 no_horizontal_move = parse_i32(value).unwrap_or(0);
             }
             "NoBurnDecay" => {
-                no_burn_decay =
-                    reflected_int!("NoBurnDecay", parse_reflected_int(value)) != 0;
+                no_burn_decay = reflected_int!("NoBurnDecay", parse_reflected_int(value)) != 0;
             }
             "NoBreath" => {
                 no_breath = reflected_int!("NoBreath", parse_reflected_int(value)) != 0;
@@ -2027,14 +2016,11 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "GrabPutGet" => {
                 // StdBitfieldAdapt over C4D_GrabPut/C4D_GrabGet tokens
                 // (src/C4Def.cpp:364-373); numeric values pass through.
-                grab_put_get = parse_named_bitfield(
-                    value,
-                    &[("C4D_GrabGet", 2), ("C4D_GrabPut", 1)],
-                );
+                grab_put_get =
+                    parse_named_bitfield(value, &[("C4D_GrabGet", 2), ("C4D_GrabPut", 1)]);
             }
             "NoBurnDamage" => {
-                no_burn_damage =
-                    reflected_int!("NoBurnDamage", parse_reflected_int(value)) != 0;
+                no_burn_damage = reflected_int!("NoBurnDamage", parse_reflected_int(value)) != 0;
             }
             "BurnTo" => {
                 burn_turn_to = parse_optional_c4_id_adapt(raw_value);
@@ -2050,22 +2036,19 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 collection_limit = reflected_int!("CollectionLimit", parse_i32(value).unwrap_or(0));
             }
             "Collectible" => {
-                collectible =
-                    reflected_int!("Collectible", parse_reflected_int(value)) != 0;
+                collectible = reflected_int!("Collectible", parse_reflected_int(value)) != 0;
             }
             "NoGet" => {
                 no_get = reflected_int!("NoGet", parse_i32(value).unwrap_or(0));
             }
             "Construction" => {
-                constructable =
-                    reflected_int!("Construction", parse_reflected_int(value)) != 0;
+                constructable = reflected_int!("Construction", parse_reflected_int(value)) != 0;
             }
             "ConSizeOff" => {
                 con_size_off = reflected_int!("ConSizeOff", parse_i32(value).unwrap_or(0));
             }
             "StretchGrowth" => {
-                stretch_growth =
-                    reflected_int!("StretchGrowth", parse_reflected_int(value)) != 0;
+                stretch_growth = reflected_int!("StretchGrowth", parse_reflected_int(value)) != 0;
             }
             "Oversize" => {
                 // C4Compiler stores this BOOL through an integer adapter;
@@ -2102,16 +2085,14 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 needed_gfx_mode = parse_i32(value).unwrap_or(0);
             }
             "SilentCommands" => {
-                silent_commands =
-                    reflected_int!("SilentCommands", parse_reflected_int(value)) != 0;
+                silent_commands = reflected_int!("SilentCommands", parse_reflected_int(value)) != 0;
             }
             "NoComponentMass" => {
                 no_component_mass =
                     reflected_int!("NoComponentMass", parse_reflected_int(value)) != 0;
             }
             "NoStabilize" => {
-                no_stabilize =
-                    reflected_int!("NoStabilize", parse_reflected_int(value)) != 0;
+                no_stabilize = reflected_int!("NoStabilize", parse_reflected_int(value)) != 0;
             }
             "HideHUDBars" => {
                 hide_hud_bars = parse_named_bitfield(
@@ -2391,9 +2372,10 @@ fn parse_named_bitfield(value: &str, names: &[(&str, i32)]) -> i32 {
             cursor += consumed;
         } else {
             let start = cursor;
-            while bytes.get(cursor).is_some_and(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
-            }) {
+            while bytes
+                .get(cursor)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
                 cursor += 1;
             }
             if cursor == start {
@@ -2522,13 +2504,17 @@ fn ini_section(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     let mut cursor = 1;
-    while bytes.get(cursor).is_some_and(|byte| {
-        byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_')
-    }) {
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_'))
+    {
         cursor += 1;
     }
     let name_end = cursor;
-    while bytes.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
         cursor += 1;
     }
     (bytes.get(cursor) == Some(&b']'))
@@ -2545,13 +2531,17 @@ pub(crate) fn ini_value(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     let mut cursor = 0;
-    while bytes.get(cursor).is_some_and(|byte| {
-        byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_')
-    }) {
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_'))
+    {
         cursor += 1;
     }
     let name_end = cursor;
-    while bytes.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
         cursor += 1;
     }
     (bytes.get(cursor) == Some(&b'=')).then(|| (&line[..name_end], &line[cursor + 1..]))
@@ -2628,10 +2618,7 @@ fn parse_act_map(bytes: &[u8]) -> Result<ActionMap, DefinitionError> {
         {
             section_stack.pop();
         }
-        if !compile_current_action
-            || section_stack.len() != 1
-            || !section_stack[0].1
-        {
+        if !compile_current_action || section_stack.len() != 1 || !section_stack[0].1 {
             continue;
         }
         let value = raw_value.trim_start_matches([' ', '\t']);
@@ -2921,17 +2908,16 @@ fn crop_definition_picture_mask(
 const BASE_GRAPHICS_FILES: [&[u8]; 2] = [b"graphics.png", b"graphics.bmp"];
 const C4_MAX_NAME_BYTES: usize = 30;
 
+type LoadedDefinitionGraphics = (
+    Option<GraphicsImage>,
+    Option<ColorByOwnerMask>,
+    HashMap<String, DefinitionGraphicsVariant>,
+);
+
 fn load_definition_graphics(
     group: &Group,
     color_by_owner: bool,
-) -> Result<
-    (
-        Option<GraphicsImage>,
-        Option<ColorByOwnerMask>,
-        HashMap<String, DefinitionGraphicsVariant>,
-    ),
-    DefinitionError,
-> {
+) -> Result<LoadedDefinitionGraphics, DefinitionError> {
     let entries = group.entries()?;
     let (png_candidates, bmp_candidates) = collect_graphics_entries(&entries);
     if png_candidates.is_empty() && bmp_candidates.is_empty() {
@@ -3425,7 +3411,10 @@ fn parse_action_attach(value: &str) -> i32 {
     let mut cursor = 0;
     let mut flags = 0;
     loop {
-        while bytes.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        {
             cursor += 1;
         }
         if let Some((value, consumed)) = parse_action_i32_prefix(&bytes[cursor..]) {
@@ -3433,9 +3422,10 @@ fn parse_action_attach(value: &str) -> i32 {
             cursor += consumed;
         } else {
             let start = cursor;
-            while bytes.get(cursor).is_some_and(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
-            }) {
+            while bytes
+                .get(cursor)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
                 cursor += 1;
             }
             if cursor == start {
@@ -3453,7 +3443,10 @@ fn parse_action_attach(value: &str) -> i32 {
                 _ => 0,
             };
         }
-        while bytes.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        {
             cursor += 1;
         }
         if bytes.get(cursor) != Some(&b'|') {
@@ -3470,7 +3463,10 @@ pub(crate) fn parse_action_i32_prefix(value: &[u8]) -> Option<(i32, usize)> {
 
 fn parse_action_integer_prefix(value: &[u8]) -> Option<(u128, bool, usize)> {
     let mut cursor = 0;
-    while value.get(cursor).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+    while value
+        .get(cursor)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
         cursor += 1;
     }
     let number_start = cursor;
@@ -3572,8 +3568,7 @@ pub(crate) fn parse_action_u64_prefix(value: &[u8]) -> Option<(u64, usize)> {
 }
 
 fn parse_u32(value: &str) -> Option<u32> {
-    parse_action_u64_prefix(&clonk_script::c4_string_bytes(value))
-        .map(|(value, _)| value as u32)
+    parse_action_u64_prefix(&clonk_script::c4_string_bytes(value)).map(|(value, _)| value as u32)
 }
 
 fn fill_i32_array(value: &str, target: &mut [i32]) {
@@ -3598,10 +3593,7 @@ pub(crate) fn parse_int_array(value: &str) -> impl Iterator<Item = i32> {
     parse_int_array_with_default(value, 0)
 }
 
-pub(crate) fn parse_int_array_with_default(
-    value: &str,
-    default: i32,
-) -> impl Iterator<Item = i32> {
+pub(crate) fn parse_int_array_with_default(value: &str, default: i32) -> impl Iterator<Item = i32> {
     let bytes = clonk_script::c4_string_bytes(value);
     let mut values = Vec::new();
     let mut cursor = 0;
@@ -3871,7 +3863,14 @@ Entrance=1,2,,4
     fn action_facet_accepts_partial_target_offsets_like_c4targetrect() {
         let five = parse_action_facet("0,328,24,20,-4").expect("5-value facet parses");
         assert_eq!(
-            (five.x, five.y, five.width, five.height, five.target_x, five.target_y),
+            (
+                five.x,
+                five.y,
+                five.width,
+                five.height,
+                five.target_x,
+                five.target_y
+            ),
             (0, 328, 24, 20, -4, 0)
         );
         let six = parse_action_facet("0,260,16,24,0,-4").expect("6-value facet parses");
@@ -3896,8 +3895,7 @@ Entrance=1,2,,4
             (1, 0, 0, 0),
             "a failed primitive leaves the compiler cursor before later separators"
         );
-        let trailing_junk =
-            parse_action_facet("1junk,2,3,4,5,6").expect("numeric prefix parses");
+        let trailing_junk = parse_action_facet("1junk,2,3,4,5,6").expect("numeric prefix parses");
         assert_eq!(
             (
                 trailing_junk.x,
@@ -3919,7 +3917,10 @@ Entrance=1,2,,4
         )
         .expect("core parses");
         let shape = core.shape.expect("shape synthesized");
-        assert_eq!((shape.x, shape.y, shape.width, shape.height), (-24, -20, 48, 40));
+        assert_eq!(
+            (shape.x, shape.y, shape.width, shape.height),
+            (-24, -20, 48, 40)
+        );
     }
     use super::*;
     use std::fs;
@@ -4056,9 +4057,7 @@ Entrance=1,2,,4
         assert_eq!(legacy.image.pixels(), &[77, 88, 99, 255]);
         let uppercase_legacy_name = clonk_script::c4_string_from_bytes(b"\xdc");
         assert!(
-            additional
-                .get(&normalize_variant_key(&uppercase_legacy_name))
-                .is_some(),
+            additional.contains_key(&normalize_variant_key(&uppercase_legacy_name)),
             "C4 SEqualNoCase folds native umlaut pairs"
         );
 
@@ -4310,7 +4309,7 @@ Entrance=1,2,,4
         overlay.put_pixel(2, 0, image::Rgba([0, 0, 255, 255]));
         overlay.put_pixel(3, 0, image::Rgba([0, 0, 0, 255]));
 
-        let mask = extract_mask_from_overlay(&overlay, &mut base).expect("mask extracted");
+        let mask = extract_mask_from_overlay(&overlay, &base).expect("mask extracted");
 
         // The base remains byte-exact; Overlay.png is a second surface, not a
         // scalar mask baked into the first one.
@@ -4361,8 +4360,7 @@ Entrance=1,2,,4
 
         let blank_dir = temp.path().join("Blank.c4d");
         fs::create_dir(&blank_dir).expect("blank definition directory");
-        fs::write(blank_dir.join("DefCore.txt"), b"[DefCore]\nid=BLNK\n")
-            .expect("blank DefCore");
+        fs::write(blank_dir.join("DefCore.txt"), b"[DefCore]\nid=BLNK\n").expect("blank DefCore");
         image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]))
             .save(blank_dir.join("Graphics.png"))
             .expect("transparent base graphics");
@@ -4495,9 +4493,7 @@ Entrance=1,2,,4
             fs::create_dir(&directory).expect("definition directory");
             fs::write(
                 directory.join("DefCore.txt"),
-                format!(
-                    "[DefCore]\nid=PICT\nWidth=42\nHeight=48\nOffset=-21,-24\n{picture}"
-                ),
+                format!("[DefCore]\nid=PICT\nWidth=42\nHeight=48\nOffset=-21,-24\n{picture}"),
             )
             .expect("DefCore");
             let group = Group::open(&directory).expect("open definition");
@@ -4544,11 +4540,7 @@ Entrance=1,2,,4
                 .picture_color_by_owner_mask
                 .expect("picture owner mask");
             assert_eq!((mask.width, mask.height), (2, 1), "{name}");
-            assert_eq!(
-                mask.pixels,
-                [136, 136, 136, 255].repeat(2),
-                "{name}"
-            );
+            assert_eq!(mask.pixels, [136, 136, 136, 255].repeat(2), "{name}");
         }
     }
 
@@ -4638,9 +4630,11 @@ Entrance=1,2,,4
             env!("CARGO_MANIFEST_DIR"),
             "/../../content/Objects.c4d/Crew.c4d/Clonk.c4d"
         ));
-        if !directory.is_dir() {
-            return;
-        }
+        assert!(
+            directory.is_dir(),
+            "the initialized official content submodule must provide {}",
+            directory.display()
+        );
 
         let definition = Definition::load(&Group::open(directory).expect("open Clonk definition"))
             .expect("load Clonk definition");
@@ -4668,9 +4662,11 @@ Entrance=1,2,,4
             env!("CARGO_MANIFEST_DIR"),
             "/../../content/Knights.c4d/Crew.c4d/Knight.c4d"
         ));
-        if !directory.is_dir() {
-            return;
-        }
+        assert!(
+            directory.is_dir(),
+            "the initialized official content submodule must provide {}",
+            directory.display()
+        );
 
         let group = Group::open(directory).expect("open Knight definition");
         let definition = Definition::load(&group).expect("load Knight definition");
@@ -4695,7 +4691,7 @@ Entrance=1,2,,4
         .into_rgba8();
         blacken_fully_transparent_rgba(expected_image.as_mut());
         blacken_fully_transparent_rgba(overlay.as_mut());
-        let expected_mask = extract_mask_from_overlay(&overlay, &mut expected_image)
+        let expected_mask = extract_mask_from_overlay(&overlay, &expected_image)
             .expect("shield overlay contains an owner-color mask");
 
         let actual_mask = shield
@@ -4850,9 +4846,11 @@ Entrance=1,2,,4
             env!("CARGO_MANIFEST_DIR"),
             "/../../content/Missions.c4f/LastWill.c4s/Dlg.c4d"
         ));
-        if !directory.is_dir() {
-            return;
-        }
+        assert!(
+            directory.is_dir(),
+            "the initialized official content submodule must provide {}",
+            directory.display()
+        );
 
         let definition = Definition::load(&Group::open(directory).expect("open Dlg definition"))
             .expect("load Dlg definition");
@@ -4904,13 +4902,10 @@ Entrance=1,2,,4
         .into_rgba8();
         let expected_auto_mask = generate_color_by_owner_mask(&mut expected_auto)
             .expect("named graphics contain an auto-mask shade");
-        let mut expected_primary_portrait = image::load_from_memory(
-            &group
-                .read_file("Portrait1.png")
-                .expect("read PNG portrait"),
-        )
-        .expect("decode PNG portrait")
-        .into_rgba8();
+        let mut expected_primary_portrait =
+            image::load_from_memory(&group.read_file("Portrait1.png").expect("read PNG portrait"))
+                .expect("decode PNG portrait")
+                .into_rgba8();
         let expected_primary_portrait_mask =
             generate_color_by_owner_mask(&mut expected_primary_portrait)
                 .expect("PNG portrait contains an auto-mask shade");
@@ -5079,14 +5074,12 @@ Entrance=1,2,,4
         let content = temp.path().join("content");
         let def_dir = content.join("Ranked.c4d");
         fs::create_dir_all(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=RANK\n")
-            .expect("DefCore");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=RANK\n").expect("DefCore");
 
         let language_container = temp.path().join("Language.c4g");
         let pack_def = language_container.join("Pack.c4g/Ranked.c4d");
         fs::create_dir_all(&pack_def).expect("pack definition directory");
-        fs::write(pack_def.join("RankUS.txt"), b"Packed recruit\r\n")
-            .expect("pack rank names");
+        fs::write(pack_def.join("RankUS.txt"), b"Packed recruit\r\n").expect("pack rank names");
 
         let packs = crate::LanguagePacks::discover(
             std::slice::from_ref(&language_container),
@@ -5095,22 +5088,15 @@ Entrance=1,2,,4
         let group = Group::open(&def_dir).expect("open definition");
         let components = packs.component_groups(&group, None, None);
 
-        let without_marker = Definition::load_with_languages_and_components(
-            &group,
-            &["US", "DE"],
-            &components,
-        )
-        .expect("load definition without local marker");
+        let without_marker =
+            Definition::load_with_languages_and_components(&group, &["US", "DE"], &components)
+                .expect("load definition without local marker");
         assert_eq!(without_marker.rank_names, None);
 
-        fs::write(def_dir.join("RankDE.txt"), b"Lokaler Marker\r\n")
-            .expect("local rank marker");
-        let with_marker = Definition::load_with_languages_and_components(
-            &group,
-            &["US", "DE"],
-            &components,
-        )
-        .expect("load definition with local marker");
+        fs::write(def_dir.join("RankDE.txt"), b"Lokaler Marker\r\n").expect("local rank marker");
+        let with_marker =
+            Definition::load_with_languages_and_components(&group, &["US", "DE"], &components)
+                .expect("load definition with local marker");
         assert_eq!(
             with_marker
                 .rank_names
@@ -5480,20 +5466,20 @@ Entrance=1,2,,4
             .save(def_dir.join("Rank.png"))
             .expect("narrow rank strip");
 
-        let definition = Definition::load(
-            &Group::open(&def_dir).expect("open definition"),
-        )
-        .expect("definition loads");
+        let definition = Definition::load(&Group::open(&def_dir).expect("open definition"))
+            .expect("definition loads");
         assert!(definition.rank_symbols_image.is_none());
         assert_eq!(definition.rank_symbol_count, None);
     }
 
     #[test]
     fn all_shipped_portrait_variants_are_retained_recursively() {
-        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../Content"));
-        if !root.is_dir() {
-            return;
-        }
+        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../content"));
+        assert!(
+            root.is_dir(),
+            "the initialized official content submodule must provide {}",
+            root.display()
+        );
         let mut definition_dirs = std::collections::BTreeSet::new();
         for entry in walkdir::WalkDir::new(root)
             .into_iter()
@@ -5501,8 +5487,8 @@ Entrance=1,2,,4
             .filter(|entry| entry.file_type().is_file())
         {
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-            let portrait = name.starts_with("portrait")
-                && (name.ends_with(".png") || name.ends_with(".bmp"));
+            let portrait =
+                name.starts_with("portrait") && (name.ends_with(".png") || name.ends_with(".bmp"));
             if portrait {
                 let parent = entry.path().parent().expect("portrait has parent");
                 if parent.join("DefCore.txt").is_file() {
@@ -5543,7 +5529,7 @@ Entrance=1,2,,4
             }
             checked += expected.len();
         }
-        assert_eq!(checked, 75, "recursive shipped portrait census changed");
+        assert_eq!(checked, 85, "recursive shipped portrait census changed");
     }
 
     #[test]
@@ -5591,12 +5577,12 @@ Entrance=1,2,,4
         assert_eq!(defaulted.blit_mode, 0);
         assert_eq!(defaulted.move_to_range, 0);
 
-        let signed = parse_def_core(b"[DefCore]\nid=SIGN\nMoveToRange=-3\n")
-            .expect("signed range parses");
+        let signed =
+            parse_def_core(b"[DefCore]\nid=SIGN\nMoveToRange=-3\n").expect("signed range parses");
         assert_eq!(signed.move_to_range, -3);
 
-        let raw_crew = parse_def_core(b"[DefCore]\nid=CREW\nCrewMember=-2\n")
-            .expect("raw crew value parses");
+        let raw_crew =
+            parse_def_core(b"[DefCore]\nid=CREW\nCrewMember=-2\n").expect("raw crew value parses");
         assert_eq!(raw_crew.crew_member, -2);
     }
 
@@ -5691,10 +5677,8 @@ Entrance=1,2,,4
 
     #[test]
     fn parse_def_core_truncates_native_strings_at_byte_and_nul_boundaries() {
-        let parsed = parse_def_core(
-            b"[DefCore]\nid=BYTE\nName=pre\xfc\0ignored\nTimerCall=Late\n",
-        )
-        .expect("NUL-terminated DefCore parses");
+        let parsed = parse_def_core(b"[DefCore]\nid=BYTE\nName=pre\xfc\0ignored\nTimerCall=Late\n")
+            .expect("NUL-terminated DefCore parses");
         assert_eq!(
             clonk_script::c4_string_bytes(parsed.name.as_deref().expect("Name")),
             b"pre\xfc"
@@ -5717,8 +5701,8 @@ Entrance=1,2,,4
 
     #[test]
     fn parse_def_core_keeps_raw_and_utf8_names_byte_distinct() {
-        let raw = parse_def_core(b"[DefCore]\nid=BYTE\nName=\x80\n")
-            .expect("raw-byte DefCore parses");
+        let raw =
+            parse_def_core(b"[DefCore]\nid=BYTE\nName=\x80\n").expect("raw-byte DefCore parses");
         let utf8 = parse_def_core(b"[DefCore]\nid=BYTE\nName=\xe2\x82\xac\n")
             .expect("UTF-8 DefCore parses");
         let raw = raw.name.as_deref().expect("raw Name");
@@ -5766,10 +5750,8 @@ Jump=40000junk
             ("0b101", 0),
             ("-1", u32::MAX),
         ] {
-            let scale = parse_def_core(
-                format!("[DefCore]\nid=SCAL\nScale={raw}\n").as_bytes(),
-            )
-            .expect("Scale DefCore parses");
+            let scale = parse_def_core(format!("[DefCore]\nid=SCAL\nScale={raw}\n").as_bytes())
+                .expect("Scale DefCore parses");
             assert_eq!(scale.graphics_scale, expected, "Scale={raw}");
         }
     }
@@ -5777,15 +5759,13 @@ Jump=40000junk
     #[test]
     fn parse_def_core_uses_cpp_boolean_only_for_boolean_typed_fields() {
         for value in ["true", "yes"] {
-            let parsed = parse_def_core(
-                format!("[DefCore]\nid=REBY\nRebuy={value}\n").as_bytes(),
-            )
-            .expect("Rebuy DefCore parses");
+            let parsed = parse_def_core(format!("[DefCore]\nid=REBY\nRebuy={value}\n").as_bytes())
+                .expect("Rebuy DefCore parses");
             assert!(!parsed.rebuyable, "int32 Rebuy={value} defaults to zero");
         }
 
-        let gold = parse_def_core(b"[DefCore]\nid=GOLD\nBaseAutoSell=2\n")
-            .expect("GOLD DefCore parses");
+        let gold =
+            parse_def_core(b"[DefCore]\nid=GOLD\nBaseAutoSell=2\n").expect("GOLD DefCore parses");
         assert!(
             gold.base_auto_sell,
             "invalid Boolean text restores the GOLD-specific default"
@@ -5830,10 +5810,7 @@ Jump=40000junk
         );
         assert_eq!(ordinary.category, 1 << 3, "CrewMember=0 changes nothing");
 
-        let derived = load(
-            "Derived.c4d",
-            "[DefCore]\nid=CREW\nCrewMember=-2\n",
-        );
+        let derived = load("Derived.c4d", "[DefCore]\nid=CREW\nCrewMember=-2\n");
         assert_eq!(
             derived.category,
             C4D_CREW_MEMBER | 1,
@@ -5959,8 +5936,8 @@ Jump=40000junk
     fn parse_def_core_no_sell_preserves_signed_value_and_default() {
         // C4DefCore::CompileFunc stores NoSell as int32_t with zero as its
         // default; SellFromBase treats either sign of a nonzero value as set.
-        let parsed = parse_def_core(b"[DefCore]\nid=LOCK\nNoSell=-2\n")
-            .expect("NoSell DefCore parses");
+        let parsed =
+            parse_def_core(b"[DefCore]\nid=LOCK\nNoSell=-2\n").expect("NoSell DefCore parses");
         assert_eq!(parsed.no_sell, -2);
 
         let defaulted = parse_def_core(b"[DefCore]\nid=OPEN\n").expect("default DefCore parses");
@@ -5984,8 +5961,8 @@ Jump=40000junk
         assert_eq!(defaulted.allow_picture_stack, 0);
         assert_eq!(defaulted.graphics_scale, 100);
 
-        let scaled = parse_def_core(b"[DefCore]\nid=SCALE\nScale=125\n")
-            .expect("graphics scale parses");
+        let scaled =
+            parse_def_core(b"[DefCore]\nid=SCALE\nScale=125\n").expect("graphics scale parses");
         assert_eq!(scaled.graphics_scale, 125);
     }
 
@@ -5994,10 +5971,8 @@ Jump=40000junk
         // C4Def::CompileFunc passes Line through mkBitfieldAdapt with the
         // C4D_Line_* table (C4Def.cpp:319-333). DrainPipe.c4d encodes the
         // drain value 3 as Power(1)|Source(2), not the Drain alias.
-        let parsed = parse_def_core(
-            b"[DefCore]\nid=DPIP\nLine=C4D_LinePower|C4D_LineSource\n",
-        )
-        .expect("drain-pipe DefCore parses");
+        let parsed = parse_def_core(b"[DefCore]\nid=DPIP\nLine=C4D_LinePower|C4D_LineSource\n")
+            .expect("drain-pipe DefCore parses");
 
         assert_eq!(parsed.line, 3);
     }
@@ -6031,9 +6006,8 @@ Jump=40000junk
         );
         assert_eq!(stopped.core.category, 1 << 3);
 
-        let wrong_case =
-            parse_def_core(b"[DefCore]\nid=CASE\nCategory=c4d_structure\n")
-                .expect("wrong-case name is a valid unknown identifier");
+        let wrong_case = parse_def_core(b"[DefCore]\nid=CASE\nCategory=c4d_structure\n")
+            .expect("wrong-case name is a valid unknown identifier");
         assert_eq!(wrong_case.category, 0);
         let wrong_case_loaded = load(
             "WrongCase.c4d",
@@ -6072,10 +6046,8 @@ HideHUDElements=Portrait|Bogus|Inventory
         assert_eq!(non_pipe.category, 1 << 1);
         assert_eq!(non_pipe.line_connect, 1);
 
-        let malformed = parse_def_core(
-            b"[DefCore]\nid=ZERO\nCategory=C4D_Structure||C4D_Goal\n",
-        )
-        .expect("the outer default adaptor handles malformed bitfields");
+        let malformed = parse_def_core(b"[DefCore]\nid=ZERO\nCategory=C4D_Structure||C4D_Goal\n")
+            .expect("the outer default adaptor handles malformed bitfields");
         assert_eq!(malformed.category, 0);
     }
 
@@ -6088,8 +6060,7 @@ HideHUDElements=Portrait|Bogus|Inventory
         let def_dir = temp.path().join("Hut3.c4d");
         fs::create_dir(&def_dir).expect("definition directory");
         fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=HUT3\n").expect("DefCore");
-        fs::write(def_dir.join("DescUS.txt"), b"  A safe home base.\r\n")
-            .expect("US description");
+        fs::write(def_dir.join("DescUS.txt"), b"  A safe home base.\r\n").expect("US description");
 
         let group = Group::open(&def_dir).expect("open definition");
         let definition = Definition::load(&group).expect("load definition");
@@ -6109,12 +6080,10 @@ HideHUDElements=Portrait|Bogus|Inventory
         let temp = tempdir().expect("tempdir");
         let both_dir = temp.path().join("Both.c4d");
         fs::create_dir(&both_dir).expect("both-language definition directory");
-        fs::write(both_dir.join("DefCore.txt"), b"[DefCore]\nid=BOTH\n")
-            .expect("DefCore");
+        fs::write(both_dir.join("DefCore.txt"), b"[DefCore]\nid=BOTH\n").expect("DefCore");
         fs::write(both_dir.join("DescDE.txt"), b"  Deutsche Beschreibung  ")
             .expect("German description");
-        fs::write(both_dir.join("DescUS.txt"), b"English description")
-            .expect("US description");
+        fs::write(both_dir.join("DescUS.txt"), b"English description").expect("US description");
         let both = Group::open(&both_dir).expect("open both-language definition");
         let german = Definition::load_with_languages(&both, &["DE", "US"])
             .expect("load German-first definition");
@@ -6122,15 +6091,16 @@ HideHUDElements=Portrait|Bogus|Inventory
 
         let de_only_dir = temp.path().join("GermanOnly.c4d");
         fs::create_dir(&de_only_dir).expect("German-only definition directory");
-        fs::write(de_only_dir.join("DefCore.txt"), b"[DefCore]\nid=DEON\n")
-            .expect("DefCore");
-        fs::write(de_only_dir.join("DescDE.txt"), b"Nur Deutsch")
-            .expect("German description");
-        fs::write(de_only_dir.join("Desc.txt"), b"Plain fallback must not load")
-            .expect("plain description");
+        fs::write(de_only_dir.join("DefCore.txt"), b"[DefCore]\nid=DEON\n").expect("DefCore");
+        fs::write(de_only_dir.join("DescDE.txt"), b"Nur Deutsch").expect("German description");
+        fs::write(
+            de_only_dir.join("Desc.txt"),
+            b"Plain fallback must not load",
+        )
+        .expect("plain description");
         let de_only = Group::open(&de_only_dir).expect("open German-only definition");
-        let us_only = Definition::load_with_languages(&de_only, &["US"])
-            .expect("load US-only sequence");
+        let us_only =
+            Definition::load_with_languages(&de_only, &["US"]).expect("load US-only sequence");
         assert_eq!(us_only.description(), None);
         let german_fallback = Definition::load_with_languages(&de_only, &["US", "DE"])
             .expect("load German second candidate");
@@ -6145,16 +6115,12 @@ HideHUDElements=Portrait|Bogus|Inventory
         let temp = tempdir().expect("tempdir");
         let def_dir = temp.path().join("Crew.c4d");
         fs::create_dir(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=CREW\n")
-            .expect("DefCore");
-        fs::write(def_dir.join("ClonkNamesDE.txt"), b"J\xfcrgen\n")
-            .expect("German clonk names");
-        fs::write(def_dir.join("ClonkNamesUS.txt"), b"John\n")
-            .expect("US clonk names");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=CREW\n").expect("DefCore");
+        fs::write(def_dir.join("ClonkNamesDE.txt"), b"J\xfcrgen\n").expect("German clonk names");
+        fs::write(def_dir.join("ClonkNamesUS.txt"), b"John\n").expect("US clonk names");
         fs::write(def_dir.join("ClonkNamesD.txt"), b"Nul Code\n")
             .expect("single-byte language code clonk names");
-        fs::write(def_dir.join("ClonkNames.txt"), b"Plain\n")
-            .expect("plain clonk names");
+        fs::write(def_dir.join("ClonkNames.txt"), b"Plain\n").expect("plain clonk names");
         let group = Group::open(&def_dir).expect("open definition");
 
         let german = Definition::load_with_languages(&group, &["DE", "US"])
@@ -6169,8 +6135,7 @@ HideHUDElements=Portrait|Bogus|Inventory
             .expect("language code stops at its native NUL");
         assert_eq!(nul_code.clonk_names.as_deref(), Some("Nul Code\n"));
 
-        let plain = Definition::load_with_languages(&group, &["FI"])
-            .expect("load plain fallback");
+        let plain = Definition::load_with_languages(&group, &["FI"]).expect("load plain fallback");
         assert_eq!(plain.clonk_names.as_deref(), Some("Plain\n"));
 
         fs::write(def_dir.join("ClonkNamesUS.txt"), b"Before\0After\n")
@@ -6179,8 +6144,7 @@ HideHUDElements=Portrait|Bogus|Inventory
             .expect("load NUL-terminated component");
         assert_eq!(nul_terminated.clonk_names.as_deref(), Some("Before"));
 
-        fs::write(def_dir.join("ClonkNamesUS.txt"), b"\0After")
-            .expect("leading-NUL clonk names");
+        fs::write(def_dir.join("ClonkNamesUS.txt"), b"\0After").expect("leading-NUL clonk names");
         let empty_owned = Definition::load_with_languages(&group, &["US"])
             .expect("a nonzero component with an empty C string still loads");
         assert_eq!(empty_owned.clonk_names.as_deref(), Some(""));
@@ -6192,8 +6156,7 @@ HideHUDElements=Portrait|Bogus|Inventory
 
         let advancing_dir = temp.path().join("Advancing.c4d");
         fs::create_dir(&advancing_dir).expect("advancing definition directory");
-        fs::write(advancing_dir.join("DefCore.txt"), b"[DefCore]\nid=ADVN\n")
-            .expect("DefCore");
+        fs::write(advancing_dir.join("DefCore.txt"), b"[DefCore]\nid=ADVN\n").expect("DefCore");
         fs::write(advancing_dir.join("DescUS.txt"), []).expect("empty US description");
         fs::write(advancing_dir.join("descde.TXT"), b"Gemischte Schreibweise")
             .expect("mixed-case German description");
@@ -6204,12 +6167,9 @@ HideHUDElements=Portrait|Bogus|Inventory
 
         let blocking_dir = temp.path().join("Blocking.c4d");
         fs::create_dir(&blocking_dir).expect("blocking definition directory");
-        fs::write(blocking_dir.join("DefCore.txt"), b"[DefCore]\nid=BLOK\n")
-            .expect("DefCore");
-        fs::write(blocking_dir.join("DescUS.txt"), b" \r\n\t")
-            .expect("whitespace US description");
-        fs::write(blocking_dir.join("DescDE.txt"), b"Must not load")
-            .expect("German description");
+        fs::write(blocking_dir.join("DefCore.txt"), b"[DefCore]\nid=BLOK\n").expect("DefCore");
+        fs::write(blocking_dir.join("DescUS.txt"), b" \r\n\t").expect("whitespace US description");
+        fs::write(blocking_dir.join("DescDE.txt"), b"Must not load").expect("German description");
         let blocking = Group::open(&blocking_dir).expect("open blocking definition");
         let definition = Definition::load_with_languages(&blocking, &["US", "DE"])
             .expect("whitespace candidate loads then trims");
@@ -6217,14 +6177,19 @@ HideHUDElements=Portrait|Bogus|Inventory
 
         let plain_dir = temp.path().join("Plain.c4d");
         fs::create_dir(&plain_dir).expect("plain definition directory");
-        fs::write(plain_dir.join("DefCore.txt"), b"[DefCore]\nid=PLAN\n")
-            .expect("DefCore");
-        fs::write(plain_dir.join("Desc.txt"), b"Explicit empty-code description")
-            .expect("plain description");
+        fs::write(plain_dir.join("DefCore.txt"), b"[DefCore]\nid=PLAN\n").expect("DefCore");
+        fs::write(
+            plain_dir.join("Desc.txt"),
+            b"Explicit empty-code description",
+        )
+        .expect("plain description");
         let plain = Group::open(&plain_dir).expect("open plain definition");
         let definition = Definition::load_with_languages(&plain, &[] as &[&str])
             .expect("empty language sequence tries one empty code");
-        assert_eq!(definition.description(), Some("Explicit empty-code description"));
+        assert_eq!(
+            definition.description(),
+            Some("Explicit empty-code description")
+        );
     }
 
     #[test]
@@ -6235,8 +6200,7 @@ HideHUDElements=Portrait|Bogus|Inventory
         let content = temp.path().join("content");
         let def_dir = content.join("Hut3.c4d");
         fs::create_dir_all(&def_dir).expect("definition directory");
-        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=HUT3\n")
-            .expect("DefCore");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=HUT3\n").expect("DefCore");
         fs::write(def_dir.join("DescUS.txt"), b"Local English description")
             .expect("local US description");
 
@@ -6254,12 +6218,9 @@ HideHUDElements=Portrait|Bogus|Inventory
         );
         let group = Group::open(&def_dir).expect("open definition");
         let components = packs.component_groups(&group, None, None);
-        let definition = Definition::load_with_languages_and_components(
-            &group,
-            &["DE", "US"],
-            &components,
-        )
-        .expect("load pack-described definition");
+        let definition =
+            Definition::load_with_languages_and_components(&group, &["DE", "US"], &components)
+                .expect("load pack-described definition");
 
         assert_eq!(definition.description(), Some("Falsche Sprache"));
     }
@@ -6306,15 +6267,12 @@ HideHUDElements=Portrait|Bogus|Inventory
             b"[DefCore]\nid=MIXD\nName=Fallback\n",
         )
         .expect("DefCore");
-        fs::write(
-            def_dir.join("Names.txt"),
-            b"US:Cabin\nDE:Huette\r\n",
-        )
-        .expect("mixed-line-ending names");
+        fs::write(def_dir.join("Names.txt"), b"US:Cabin\nDE:Huette\r\n")
+            .expect("mixed-line-ending names");
 
         let group = Group::open(&def_dir).expect("open definition");
-        let definition = Definition::load_with_languages(&group, &["US", "DE"])
-            .expect("load definition name");
+        let definition =
+            Definition::load_with_languages(&group, &["US", "DE"]).expect("load definition name");
 
         assert_eq!(definition.core.name.as_deref(), Some("Cabin\nDE:Huette"));
     }
@@ -6329,16 +6287,15 @@ HideHUDElements=Portrait|Bogus|Inventory
             b"[DefCore]\nid=EMNM\nName=Core Name\n",
         )
         .expect("DefCore");
-        fs::write(def_dir.join("Names.txt"), b"US:\r\nDE:Huette\r\n")
-            .expect("localized names");
+        fs::write(def_dir.join("Names.txt"), b"US:\r\nDE:Huette\r\n").expect("localized names");
 
         let group = Group::open(&def_dir).expect("open definition");
         let empty = Definition::load_with_languages(&group, &["US", "DE"])
             .expect("empty first language name");
         assert_eq!(empty.core.name.as_deref(), Some(""));
 
-        let missing = Definition::load_with_languages(&group, &["FR"])
-            .expect("missing language name");
+        let missing =
+            Definition::load_with_languages(&group, &["FR"]).expect("missing language name");
         assert_eq!(missing.core.name.as_deref(), Some("Core Name"));
     }
 
@@ -6364,8 +6321,7 @@ HideHUDElements=Portrait|Bogus|Inventory
         .expect("DefCore");
         fs::write(def_dir.join("ActMap.txt"), []).expect("empty ActMap");
         fs::write(def_dir.join("NamesUS.txt"), []).expect("empty localized names");
-        fs::write(def_dir.join("Names.txt"), b"US:Fallback Name\n")
-            .expect("fallback names");
+        fs::write(def_dir.join("Names.txt"), b"US:Fallback Name\n").expect("fallback names");
 
         let group = Group::open(&def_dir).expect("open definition");
         let definition =
@@ -6394,8 +6350,7 @@ HideHUDElements=Portrait|Bogus|Inventory
         .expect("DefCore");
         fs::write(def_dir.join("NamesUS.txt"), b"DE:Deutsch\n")
             .expect("nonmatching localized names");
-        fs::write(def_dir.join("Names.txt"), b"US:Fallback Name\n")
-            .expect("fallback names");
+        fs::write(def_dir.join("Names.txt"), b"US:Fallback Name\n").expect("fallback names");
 
         let group = Group::open(&def_dir).expect("open definition");
         let definition = Definition::load_with_languages(&group, &["US"])
@@ -6518,17 +6473,13 @@ NextAction=Dup
 
     #[test]
     fn parse_real_bird_defcore_physical_float() {
-        // The real CRLF content file (skipped when the content tree is
-        // absent) — pins the [Physical] Float=200 parse that drives the
-        // DFA_FLOAT speed clamp.
-        let Ok(bytes) = std::fs::read(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../content/Objects.c4d/Animals.c4d/Bird.c4d/DefCore.txt"
-            ),
-        ) else {
-            return;
-        };
+        // The real CRLF content file pins the [Physical] Float=200 parse that
+        // drives the DFA_FLOAT speed clamp.
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../content/Objects.c4d/Animals.c4d/Bird.c4d/DefCore.txt"
+        ))
+        .expect("initialized official content submodule provides Bird DefCore.txt");
         let core = parse_def_core(&bytes).expect("parses");
         assert_eq!(core.physical.float, 200, "[Physical] Float=200");
         assert_eq!(core.physical.energy, 40000, "[Physical] Energy=40000");
@@ -6637,10 +6588,8 @@ Energy=50000
 
     #[test]
     fn def_core_physical_requires_exact_compiler_key_names() {
-        let mismatched = parse_def_core(
-            b"[DefCore]\nid=CASE\n[Physical]\nENERGY=50000\n",
-        )
-        .expect("case-mismatched physical parses");
+        let mismatched = parse_def_core(b"[DefCore]\nid=CASE\n[Physical]\nENERGY=50000\n")
+            .expect("case-mismatched physical parses");
         assert_eq!(mismatched.physical, PhysicalInfo::default());
 
         let exact = parse_def_core(b"[DefCore]\nid=GOOD\n[Physical]\nEnergy=50000\n")
@@ -6703,9 +6652,8 @@ Energy=50000
 
     #[test]
     fn def_core_category_tokens_are_case_sensitive() {
-        let parsed =
-            parse_def_core(b"[DefCore]\nid=BITS\nCategory=C4D_Structure|c4d_goal\n")
-                .expect("an unknown category token only warns");
+        let parsed = parse_def_core(b"[DefCore]\nid=BITS\nCategory=C4D_Structure|c4d_goal\n")
+            .expect("an unknown category token only warns");
 
         assert_eq!(
             parsed.category,
@@ -6733,8 +6681,14 @@ Energy=50000
 
         assert_eq!(parsed.id, "TOKN", "pre-section id stays at the tree root");
         assert_eq!(parsed.mass, 0, "case and trailing key spaces are exact");
-        assert_eq!(parsed.physical.energy, 123, "section trailing text is ignored");
-        assert_eq!(parsed.physical.jump, 456, "non-alpha section lines are inert");
+        assert_eq!(
+            parsed.physical.energy, 123,
+            "section trailing text is ignored"
+        );
+        assert_eq!(
+            parsed.physical.jump, 456,
+            "non-alpha section lines are inert"
+        );
         assert_eq!(parsed.physical.walk, 0, "section names are case-sensitive");
 
         assert!(matches!(
@@ -6892,24 +6846,20 @@ Energy=50000
     fn parse_def_core_fire_top_and_default() {
         // C4Shape::CompileFunc compiles FireTop directly into DefCore with
         // default zero (C4Shape.cpp:496-510; C4Def.cpp:300-302).
-        let parsed = parse_def_core(b"[DefCore]\nid=WMPF\nFireTop=10\n")
-            .expect("def core parses");
+        let parsed = parse_def_core(b"[DefCore]\nid=WMPF\nFireTop=10\n").expect("def core parses");
         assert_eq!(parsed.fire_top, 10);
 
-        let defaulted =
-            parse_def_core(b"[DefCore]\nid=NONE\n").expect("default def core parses");
+        let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("default def core parses");
         assert_eq!(defaulted.fire_top, 0);
     }
 
     #[test]
     fn parse_def_core_lift_top_and_default() {
         // C4Def.cpp:385 stores LiftTop as a signed DefCore integer.
-        let parsed = parse_def_core(b"[DefCore]\nid=ELEV\nLiftTop=20\n")
-            .expect("def core parses");
+        let parsed = parse_def_core(b"[DefCore]\nid=ELEV\nLiftTop=20\n").expect("def core parses");
         assert_eq!(parsed.lift_top, 20);
 
-        let defaulted =
-            parse_def_core(b"[DefCore]\nid=ELEV\n").expect("default def core parses");
+        let defaulted = parse_def_core(b"[DefCore]\nid=ELEV\n").expect("default def core parses");
         assert_eq!(defaulted.lift_top, 0);
     }
 
@@ -7220,10 +7170,7 @@ Default=Ghost
         } else {
             assert_eq!(parse_action_i32("2147483648"), Some(i32::MAX));
             assert_eq!(parse_action_i32("0xFFFFFFFF"), Some(i32::MAX));
-            assert_eq!(
-                parse_action_i32("999999999999999999999999"),
-                Some(i32::MAX)
-            );
+            assert_eq!(parse_action_i32("999999999999999999999999"), Some(i32::MAX));
             assert_eq!(
                 parse_action_i32("-999999999999999999999999"),
                 Some(i32::MIN)
@@ -7243,10 +7190,9 @@ Default=Ghost
             assert_eq!(parse_action_attach(source), expected, "{source}");
         }
 
-        let map = parse_act_map(
-            b"[Action]\nName=Numbers\nLength=-0x2\nAttach=CNAT_Left # comment\n",
-        )
-        .expect("numeric cursor integration parses");
+        let map =
+            parse_act_map(b"[Action]\nName=Numbers\nLength=-0x2\nAttach=CNAT_Left # comment\n")
+                .expect("numeric cursor integration parses");
         let action = map.get("Numbers").expect("numeric action exists");
         assert_eq!(action.reflected_ints.get("Length"), Some(&0));
         assert_eq!(action.reflected_ints.get("Attach"), Some(&1));
@@ -7313,12 +7259,11 @@ Default=Ghost
 
     #[test]
     fn parse_def_core_fragile_uses_nonzero_truthiness_and_defaults_false() {
-        let parsed = parse_def_core(b"[DefCore]\nid=BOOM\nFragile=-2\n")
-            .expect("Fragile DefCore parses");
+        let parsed =
+            parse_def_core(b"[DefCore]\nid=BOOM\nFragile=-2\n").expect("Fragile DefCore parses");
         assert!(parsed.fragile);
 
-        let defaulted = parse_def_core(b"[DefCore]\nid=SAFE\n")
-            .expect("default DefCore parses");
+        let defaulted = parse_def_core(b"[DefCore]\nid=SAFE\n").expect("default DefCore parses");
         assert!(!defaulted.fragile);
     }
 
@@ -7328,8 +7273,7 @@ Default=Ghost
             .expect("Projectile DefCore parses");
         assert_eq!(parsed.projectile, -2);
 
-        let defaulted =
-            parse_def_core(b"[DefCore]\nid=SAFE\n").expect("default DefCore parses");
+        let defaulted = parse_def_core(b"[DefCore]\nid=SAFE\n").expect("default DefCore parses");
         assert_eq!(defaulted.projectile, 0);
     }
 
@@ -7481,8 +7425,7 @@ Default=Ghost
     fn parse_def_core_oversize_field_like_cpp() {
         // C4Def.cpp:392: nonzero Oversize removes DoCon's upper FullCon
         // clamp, while an omitted field defaults to zero.
-        let parsed = parse_def_core(b"[DefCore]\nid=GROW\nOversize=-2\n")
-            .expect("defcore parsed");
+        let parsed = parse_def_core(b"[DefCore]\nid=GROW\nOversize=-2\n").expect("defcore parsed");
         assert!(parsed.oversize, "every nonzero C++ BOOL value is true");
 
         let defaulted = parse_def_core(b"[DefCore]\nid=JOLT\n").expect("defcore parsed");
@@ -7510,8 +7453,8 @@ Default=Ghost
     fn parse_def_core_auto_context_menu_flag_like_cpp() {
         // Mirrors src/C4Def.cpp:416: DefCore `AutoContextMenu` compiles as
         // an integer flag.
-        let parsed = parse_def_core(b"[DefCore]\nid=HUT3\nAutoContextMenu=1\n")
-            .expect("defcore parsed");
+        let parsed =
+            parse_def_core(b"[DefCore]\nid=HUT3\nAutoContextMenu=1\n").expect("defcore parsed");
 
         assert!(parsed.auto_context_menu);
     }
@@ -7529,12 +7472,12 @@ Default=Ghost
     fn parse_def_core_silent_commands_integer_and_default_like_cpp() {
         // C4Def::CompileFunc reads the int32 SilentCommands with a zero
         // default (src/C4Def.cpp:404), not through the Boolean reader.
-        let enabled = parse_def_core(b"[DefCore]\nid=CLNK\nSilentCommands=1\n")
-            .expect("defcore parsed");
+        let enabled =
+            parse_def_core(b"[DefCore]\nid=CLNK\nSilentCommands=1\n").expect("defcore parsed");
         assert!(enabled.silent_commands);
 
-        let invalid = parse_def_core(b"[DefCore]\nid=CLNK\nSilentCommands=yes\n")
-            .expect("defcore parsed");
+        let invalid =
+            parse_def_core(b"[DefCore]\nid=CLNK\nSilentCommands=yes\n").expect("defcore parsed");
         assert!(!invalid.silent_commands);
 
         let defaulted = parse_def_core(b"[DefCore]\nid=ROCK\n").expect("defcore parsed");
@@ -7545,15 +7488,15 @@ Default=Ghost
     fn parse_def_core_construct_to_as_build_turn_to_like_cpp() {
         // C4Def::CompileFunc exposes the BuildTurnTo field under the legacy
         // DefCore key `ConstructTo` (src/C4Def.cpp:361).
-        let parsed = parse_def_core(b"[DefCore]\nid=SITE\nConstructTo=DONE\n")
-            .expect("defcore parsed");
+        let parsed =
+            parse_def_core(b"[DefCore]\nid=SITE\nConstructTo=DONE\n").expect("defcore parsed");
         assert_eq!(parsed.build_turn_to.as_deref(), Some("DONE"));
 
         let defaulted = parse_def_core(b"[DefCore]\nid=SITE\n").expect("defcore parsed");
         assert!(defaulted.build_turn_to.is_none());
 
-        let none = parse_def_core(b"[DefCore]\nid=SITE\nConstructTo=NONE\n")
-            .expect("defcore parsed");
+        let none =
+            parse_def_core(b"[DefCore]\nid=SITE\nConstructTo=NONE\n").expect("defcore parsed");
         assert!(none.build_turn_to.is_none());
     }
 
@@ -7582,31 +7525,21 @@ Default=Ghost
         ];
 
         for (input, expected_raw) in cases {
-            let source = format!(
-                "[DefCore]\nid=TEST\nBurnTo={input}\nConstructTo={input}\n"
-            );
+            let source = format!("[DefCore]\nid=TEST\nBurnTo={input}\nConstructTo={input}\n");
             let parsed = parse_def_core(source.as_bytes()).expect("DefCore turn-to IDs parse");
-            let burn_raw = parsed
-                .burn_turn_to
-                .as_deref()
-                .map(clonk_script::c4_id_raw);
-            let construct_raw = parsed
-                .build_turn_to
-                .as_deref()
-                .map(clonk_script::c4_id_raw);
+            let burn_raw = parsed.burn_turn_to.as_deref().map(clonk_script::c4_id_raw);
+            let construct_raw = parsed.build_turn_to.as_deref().map(clonk_script::c4_id_raw);
 
             assert_eq!(burn_raw, expected_raw, "BurnTo={input}");
             assert_eq!(construct_raw, expected_raw, "ConstructTo={input}");
         }
 
-        let high_byte_after_four =
-            parse_def_core(b"[DefCore]\nid=TEST\nBurnTo=FIRE\x80tail\n")
-                .expect("a suffix after the fixed buffer is ignored");
+        let high_byte_after_four = parse_def_core(b"[DefCore]\nid=TEST\nBurnTo=FIRE\x80tail\n")
+            .expect("a suffix after the fixed buffer is ignored");
         assert_eq!(high_byte_after_four.burn_turn_to.as_deref(), Some("FIRE"));
 
-        let high_byte_before_four =
-            parse_def_core(b"[DefCore]\nid=TEST\nBurnTo=FIR\x80E\n")
-                .expect("a non-identifier byte terminates the token");
+        let high_byte_before_four = parse_def_core(b"[DefCore]\nid=TEST\nBurnTo=FIR\x80E\n")
+            .expect("a non-identifier byte terminates the token");
         assert!(high_byte_before_four.burn_turn_to.is_none());
     }
 
@@ -7614,10 +7547,8 @@ Default=Ghost
     fn parse_def_core_base_sale_flags_like_cpp() {
         // C4Def::CompileFunc reads Rebuy with default 0 and BaseAutoSell
         // with a GOLD-specific default of 1 (src/C4Def.cpp:359,457).
-        let explicit = parse_def_core(
-            b"[DefCore]\nid=ORE1\nRebuy=1\nBaseAutoSell=1\n",
-        )
-        .expect("defcore parsed");
+        let explicit = parse_def_core(b"[DefCore]\nid=ORE1\nRebuy=1\nBaseAutoSell=1\n")
+            .expect("defcore parsed");
         assert!(explicit.rebuyable);
         assert!(explicit.base_auto_sell);
 
@@ -7794,10 +7725,9 @@ Default=Ghost
 
     #[test]
     fn parse_def_core_c4id_lists_skip_only_ascii_space_and_tab() {
-        let accepted = parse_def_core(
-            b"[DefCore]\nid=WSPC\nRequireDef= \tREQ1\nComponents=\t ROCK=2\n",
-        )
-        .expect("space/tab-prefixed C4ID lists parse");
+        let accepted =
+            parse_def_core(b"[DefCore]\nid=WSPC\nRequireDef= \tREQ1\nComponents=\t ROCK=2\n")
+                .expect("space/tab-prefixed C4ID lists parse");
         assert_eq!(accepted.require_defs, ["REQ1"]);
         assert_eq!(
             accepted.components,
@@ -7808,9 +7738,8 @@ Default=Ghost
         );
 
         for prefix in ['\u{000b}', '\u{000c}', '\u{00a0}'] {
-            let source = format!(
-                "[DefCore]\nid=WSPC\nRequireDef={prefix}REQ1\nComponents={prefix}ROCK=2\n"
-            );
+            let source =
+                format!("[DefCore]\nid=WSPC\nRequireDef={prefix}REQ1\nComponents={prefix}ROCK=2\n");
             let parsed = parse_def_core(source.as_bytes()).expect("DefCore parses");
             assert!(parsed.require_defs.is_empty(), "prefix {prefix:?}");
             assert!(parsed.components.is_empty(), "prefix {prefix:?}");
@@ -7834,16 +7763,12 @@ Category=C4D_Object
         fs::write(def_dir.join("Script.c"), b"func Root() {}").unwrap();
         let script_dir = def_dir.join("Helpers");
         fs::create_dir(&script_dir).unwrap();
-        fs::write(
-            script_dir.join("ScriptUS.c"),
-            b"func NestedLocalized() {}",
-        )
-        .unwrap();
+        fs::write(script_dir.join("ScriptUS.c"), b"func NestedLocalized() {}").unwrap();
         fs::write(script_dir.join("Other.c"), b"func NestedOther() {}").unwrap();
 
         let group = Group::open(&def_dir).unwrap();
-        let definition = Definition::load_with_languages(&group, &["US"])
-            .expect("definition load succeeds");
+        let definition =
+            Definition::load_with_languages(&group, &["US"]).expect("definition load succeeds");
         let paths = definition
             .script
             .files()
@@ -7863,21 +7788,15 @@ Category=C4D_Object
         fs::create_dir(&def_dir).unwrap();
         fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=SCRP\n").unwrap();
         fs::write(def_dir.join("Script.c"), b"func Base() {}").unwrap();
-        fs::write(
-            def_dir.join("ScriptUS.c"),
-            b"func Localized() {}\n",
-        )
-        .unwrap();
+        fs::write(def_dir.join("ScriptUS.c"), b"func Localized() {}\n").unwrap();
         fs::write(def_dir.join("ScriptDE.c"), b"func German() {}").unwrap();
         fs::write(def_dir.join("C4ScriptUS.c"), b"func Legacy() {}").unwrap();
         fs::write(def_dir.join("ScriptOld.c"), b"func Obsolete() {}").unwrap();
         fs::write(def_dir.join("Other.c"), b"func Other() {}").unwrap();
 
-        let definition = Definition::load_with_languages(
-            &Group::open(&def_dir).unwrap(),
-            &["US", "DE"],
-        )
-        .expect("definition load succeeds");
+        let definition =
+            Definition::load_with_languages(&Group::open(&def_dir).unwrap(), &["US", "DE"])
+                .expect("definition load succeeds");
         let paths = definition
             .script
             .files()
@@ -7906,11 +7825,7 @@ Category=C4D_Object
     fn definition_script_restarts_language_order_for_each_segment() {
         let temp = tempdir().unwrap();
         fs::write(temp.path().join("ScriptDE.c"), b"func German() {}").unwrap();
-        fs::write(
-            temp.path().join("C4ScriptUS.c"),
-            b"func LegacyUS() {}",
-        )
-        .unwrap();
+        fs::write(temp.path().join("C4ScriptUS.c"), b"func LegacyUS() {}").unwrap();
 
         let script = load_scripts(
             &Group::open(temp.path()).unwrap(),
@@ -7926,20 +7841,13 @@ Category=C4D_Object
             paths,
             vec![Path::new("ScriptDE.c"), Path::new("C4ScriptUS.c")]
         );
-        assert_eq!(
-            script.combined(),
-            "\nfunc German() {}\nfunc LegacyUS() {}"
-        );
+        assert_eq!(script.combined(), "\nfunc German() {}\nfunc LegacyUS() {}");
     }
 
     #[test]
     fn definition_script_loads_c4script_localization_without_script_component() {
         let temp = tempdir().unwrap();
-        fs::write(
-            temp.path().join("C4ScriptUS.c"),
-            b"func LegacyOnly() {}",
-        )
-        .unwrap();
+        fs::write(temp.path().join("C4ScriptUS.c"), b"func LegacyOnly() {}").unwrap();
 
         let script = load_scripts(&Group::open(temp.path()).unwrap(), &["US"])
             .expect("script component loads");
@@ -7982,9 +7890,11 @@ Category=C4D_Object
             env!("CARGO_MANIFEST_DIR"),
             "/../../content/Hazard.c4d/Structural.c4d/Deco.c4d/Screens.c4d/MapScreen.c4d"
         ));
-        if !directory.is_dir() {
-            return;
-        }
+        assert!(
+            directory.is_dir(),
+            "the initialized official content submodule must provide {}",
+            directory.display()
+        );
 
         let definition = Definition::load_with_languages(
             &Group::open(directory).expect("open shipped MapScreen definition"),

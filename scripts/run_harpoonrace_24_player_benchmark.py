@@ -50,8 +50,7 @@ GO_LOG_PATTERN = re.compile(
     re.MULTILINE,
 )
 DEFAULT_SCENARIO = (
-    "content/EkeReloaded.c4f/InterplanetaryCivilwar.c4f/"
-    "HarpoonRace.c4s"
+    "EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s"
 )
 DEFAULT_PROFILE_BIG_ICON = (
     "content/Fantasy.c4f/Drachenfels.c4s/"
@@ -2574,8 +2573,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--scratch-root",
-        default="/private/tmp" if platform.system() == "Darwin" else None,
-        help="parent for disposable isolated process state",
+        default=None,
+        help=(
+            "parent for disposable isolated process state "
+            "(default: the platform temp directory)"
+        ),
     )
     parser.add_argument(
         "--players",

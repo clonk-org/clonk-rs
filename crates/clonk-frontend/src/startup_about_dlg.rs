@@ -1,9 +1,9 @@
 //! Pixel-parity renderer for one C++ startup dialog (see
-//! `rust/target/parity-specs/`). Implemented against the engine's F9
+//! `target/parity-specs/`). Implemented against the engine's F9
 //! reference captures; owned by its implementation agent.
 //!
 //! Dialog: `C4StartupAboutDlg` (C4StartupAboutDlg.cpp). All geometry mirrors
-//! the C++ integer math exactly; see `rust/target/parity-specs/about.md`.
+//! the C++ integer math exactly; see `target/parity-specs/about.md`.
 
 use crate::classic_gui::{
     blacken_transparent_pixels, draw_3d_frame, draw_clipped_text, draw_clipped_text_with_markup,
@@ -146,13 +146,17 @@ pub fn about_layout(w: i32, h: i32) -> AboutLayout {
     let col3_first = dev_h / 3;
     let col3_second = (dev_h - col3_first) * 3 / 10;
     let sections = [
-        section(0, 0, dev_h / 5),                       // Game Design
-        section(0, dev_h / 5, dev_h - dev_h / 5),       // Engine and Tools
-        section(col_w, 0, col2_top),                    // Scripting
-        section(col_w, col2_top, dev_h - col2_top),     // Additional Art
-        section(2 * col_w, 0, col3_first),              // Music
-        section(2 * col_w, col3_first, col3_second),    // Voice
-        section(2 * col_w, col3_first + col3_second, dev_h - col3_first - col3_second), // Web
+        section(0, 0, dev_h / 5),                    // Game Design
+        section(0, dev_h / 5, dev_h - dev_h / 5),    // Engine and Tools
+        section(col_w, 0, col2_top),                 // Scripting
+        section(col_w, col2_top, dev_h - col2_top),  // Additional Art
+        section(2 * col_w, 0, col3_first),           // Music
+        section(2 * col_w, col3_first, col3_second), // Voice
+        section(
+            2 * col_w,
+            col3_first + col3_second,
+            dev_h - col3_first - col3_second,
+        ), // Web
     ];
 
     // LicenseWindow(caMain.GetAll()) followed by ComponentAligner(client,
@@ -301,9 +305,10 @@ pub struct AboutLicense {
     pub text: &'static str,
 }
 
-/// The baseline licenses compiled into LegacyClonk. Optional dependency
-/// licenses are intentionally not fabricated when `deps/licenses.cmake` is
-/// absent.
+/// The baseline source and trademark notices compiled into Clonk Rust.
+/// The ISC entry applies to source only; bundled game content retains its
+/// separate CC BY-NC notices. Optional dependency licenses are intentionally
+/// not fabricated when `deps/licenses.cmake` is absent.
 pub static ABOUT_LICENSES: [AboutLicense; 2] = [
     AboutLicense {
         title: "Clonk Rust",
@@ -472,11 +477,7 @@ impl AboutDlgState {
     pub fn resize(&mut self, width: i32, height: i32, fonts: &ClonkFontSet) {
         let layout = about_layout(width.max(1), height.max(1));
         for (index, section) in layout.sections.iter().enumerate() {
-            let metrics = credit_scroll_metrics(
-                section,
-                fonts,
-                CREDITS_SECTIONS[index].1.len(),
-            );
+            let metrics = credit_scroll_metrics(section, fonts, CREDITS_SECTIONS[index].1.len());
             self.credit_max_scroll[index] = metrics.max_scroll;
             self.credit_scroll_y[index] = metrics.clamp_offset(self.credit_scroll_y[index]);
         }
@@ -487,10 +488,9 @@ impl AboutDlgState {
             self.license_max_scroll[index] =
                 license_scroll_metrics(&layout, fonts, license).max_scroll;
         }
-        self.license_scroll_y = self.license_scroll_y.clamp(
-            0,
-            self.license_max_scroll[self.displayed_license],
-        );
+        self.license_scroll_y = self
+            .license_scroll_y
+            .clamp(0, self.license_max_scroll[self.displayed_license]);
         self.layout = Some(layout);
         for index in 0..CREDITS_SECTIONS.len() {
             self.sync_scrollbar_pin(AboutScrollbar::Credit(index));
@@ -637,11 +637,7 @@ impl AboutDlgState {
                     && !about_rect_contains(&layout.licenses.text, position)
                 {
                     self.focused = Some(AboutFocus::LicenseTabs);
-                    let next = license_tab_at(
-                        &layout,
-                        position,
-                        self.license_tabs_scroll_y,
-                    );
+                    let next = license_tab_at(&layout, position, self.license_tabs_scroll_y);
                     if next != self.selected_license {
                         self.selected_license = next;
                         if let Some(index) = next {
@@ -811,17 +807,14 @@ impl AboutDlgState {
             AboutPage::Credits => {
                 for (index, section) in layout.sections.iter().enumerate().rev() {
                     let viewport = credit_viewport(section);
-                    let metrics = credit_scroll_metrics(
-                        section,
-                        fonts,
-                        CREDITS_SECTIONS[index].1.len(),
-                    );
+                    let metrics =
+                        credit_scroll_metrics(section, fonts, CREDITS_SECTIONS[index].1.len());
                     if about_rect_contains(&viewport, position) {
                         if metrics.max_scroll > 0 {
                             self.credit_max_scroll[index] = metrics.max_scroll;
                             let previous = self.credit_scroll_y[index];
-                            self.credit_scroll_y[index] = metrics
-                                .clamp_offset(previous.saturating_sub(delta));
+                            self.credit_scroll_y[index] =
+                                metrics.clamp_offset(previous.saturating_sub(delta));
                             if self.credit_scroll_y[index] != previous {
                                 self.sync_scrollbar_pin(AboutScrollbar::Credit(index));
                             }
@@ -839,8 +832,7 @@ impl AboutDlgState {
                     );
                     self.license_max_scroll[self.displayed_license] = metrics.max_scroll;
                     let previous = self.license_scroll_y;
-                    self.license_scroll_y =
-                        metrics.clamp_offset(previous.saturating_sub(delta));
+                    self.license_scroll_y = metrics.clamp_offset(previous.saturating_sub(delta));
                     if self.license_scroll_y != previous {
                         self.sync_scrollbar_pin(AboutScrollbar::LicenseText);
                     }
@@ -915,10 +907,9 @@ impl AboutDlgState {
                 credit_scrollbar(layout.sections.get(index)?),
                 *self.credit_max_scroll.get(index)?,
             ),
-            AboutScrollbar::LicenseTabs => (
-                license_tabs_scrollbar(layout),
-                self.license_tabs_max_scroll,
-            ),
+            AboutScrollbar::LicenseTabs => {
+                (license_tabs_scrollbar(layout), self.license_tabs_max_scroll)
+            }
             AboutScrollbar::LicenseText => (
                 license_text_scrollbar(layout),
                 self.license_max_scroll[self.displayed_license],
@@ -932,19 +923,17 @@ impl AboutDlgState {
                 .rev()
                 .map(AboutScrollbar::Credit)
                 .find(|target| {
-                    self.scrollbar_geometry(*target).is_some_and(|(rect, max_scroll)| {
-                        max_scroll > 0 && about_rect_contains(&rect, point)
-                    })
+                    self.scrollbar_geometry(*target)
+                        .is_some_and(|(rect, max_scroll)| {
+                            max_scroll > 0 && about_rect_contains(&rect, point)
+                        })
                 }),
-            AboutPage::Licenses => [
-                AboutScrollbar::LicenseText,
-                AboutScrollbar::LicenseTabs,
-            ]
-            .into_iter()
-            .find(|target| {
-                self.scrollbar_geometry(*target)
-                    .is_some_and(|(rect, _)| about_rect_contains(&rect, point))
-            }),
+            AboutPage::Licenses => [AboutScrollbar::LicenseText, AboutScrollbar::LicenseTabs]
+                .into_iter()
+                .find(|target| {
+                    self.scrollbar_geometry(*target)
+                        .is_some_and(|(rect, _)| about_rect_contains(&rect, point))
+                }),
         }
     }
 
@@ -1060,8 +1049,7 @@ impl AboutDlgState {
         } else {
             let offset = self.scrollbar_offset(target).clamp(0, max_scroll);
             let update_range = rect.h - 3 * SCROLL_BAR_WDT;
-            let raw = (i64::from(update_range) * i64::from(offset)
-                / i64::from(max_scroll)) as i32;
+            let raw = (i64::from(update_range) * i64::from(offset) / i64::from(max_scroll)) as i32;
             cpp_bound_by(raw, 0, update_range)
         };
         self.set_scrollbar_pin(target, pin);
@@ -1073,8 +1061,7 @@ impl AboutDlgState {
         };
         let range = scrollbar_range(rect).max(1);
         let pin = self.scrollbar_pin(target).clamp(0, range);
-        let offset =
-            (i64::from(max_scroll) * i64::from(pin) / i64::from(range)) as i32;
+        let offset = (i64::from(max_scroll) * i64::from(pin) / i64::from(range)) as i32;
         self.set_scrollbar_offset(target, offset);
     }
 
@@ -1082,10 +1069,7 @@ impl AboutDlgState {
         let Some((rect, _)) = self.scrollbar_geometry(target) else {
             return;
         };
-        let pin = (position.y.floor() as i32
-            - rect.y
-            - SCROLL_BAR_WDT
-            - SCROLL_BAR_WDT / 2)
+        let pin = (position.y.floor() as i32 - rect.y - SCROLL_BAR_WDT - SCROLL_BAR_WDT / 2)
             .clamp(0, scrollbar_range(rect));
         self.set_scrollbar_pin(target, pin);
         self.apply_scrollbar_pin(target);
@@ -1164,7 +1148,10 @@ impl AboutDlgState {
     }
 
     const fn is_visible(&self, button: AboutButton) -> bool {
-        !matches!((self.page, button), (AboutPage::Licenses, AboutButton::Licenses))
+        !matches!(
+            (self.page, button),
+            (AboutPage::Licenses, AboutButton::Licenses)
+        )
     }
 
     fn is_pressed(&self, button: AboutButton) -> bool {
@@ -1508,17 +1495,7 @@ fn draw_scrollbar(
         crate::draw_image_strip(surface, x, y + iy, scroll, 0, 16, 16, tile_h, gamma);
         iy += 16;
     }
-    crate::draw_image_strip(
-        surface,
-        x,
-        y + h - 16,
-        scroll,
-        bottom_x,
-        32,
-        16,
-        16,
-        gamma,
-    );
+    crate::draw_image_strip(surface, x, y + h - 16, scroll, bottom_x, 32, 16, 16, gamma);
     if max_scroll > 0 && h > 3 * SCROLL_BAR_WDT {
         let max_pin = h - 3 * SCROLL_BAR_WDT;
         let pin_y = y + SCROLL_BAR_WDT + scroll_pin.clamp(0, max_pin);
@@ -1534,11 +1511,8 @@ fn draw_credits_page(
     layout: &AboutLayout,
     gamma: Option<&GammaRamp>,
 ) {
-    for (section_index, (section, (caption, people))) in layout
-        .sections
-        .iter()
-        .zip(CREDITS_SECTIONS)
-        .enumerate()
+    for (section_index, (section, (caption, people))) in
+        layout.sections.iter().zip(CREDITS_SECTIONS).enumerate()
     {
         fonts.caption.draw_with_gamma(
             surface,
@@ -1622,8 +1596,7 @@ fn draw_license_page(
         let selected_y =
             tab_viewport.y + selected_license as i32 * LICENSE_TAB_PITCH - tab_scroll_y;
         let clipped_y = selected_y.max(tab_viewport.y);
-        let clipped_bottom = (selected_y + TEXT_LINE_HEIGHT)
-            .min(tab_viewport.y + tab_viewport.h);
+        let clipped_bottom = (selected_y + TEXT_LINE_HEIGHT).min(tab_viewport.y + tab_viewport.h);
         if clipped_y < clipped_bottom {
             let selection_color = if state.license_tabs_have_focus() {
                 0xafaf_0000
@@ -1845,7 +1818,7 @@ impl AboutDlgScreen {
 mod tests {
     use super::*;
 
-    // Pins the spec table for 1280x720 (rust/target/parity-specs/about.md;
+    // Pins the spec table for 1280x720 (target/parity-specs/about.md;
     // C4StartupAboutDlg.cpp:262-301 aligner math verified against the C++ F9
     // reference capture).
     #[test]
@@ -1853,7 +1826,12 @@ mod tests {
         let layout = about_layout(1280, 720);
 
         assert_eq!(
-            (layout.client.x, layout.client.y, layout.client.w, layout.client.h),
+            (
+                layout.client.x,
+                layout.client.y,
+                layout.client.w,
+                layout.client.h
+            ),
             (25, 69, 1230, 632)
         );
         assert_eq!(layout.title_anchor, (640, 8));
@@ -1882,12 +1860,12 @@ mod tests {
         assert_eq!(
             sections,
             vec![
-                ((25, 69), (25, 103, 410, 76)),    // Game Design
-                ((25, 179), (25, 213, 410, 409)),  // Engine and Tools
-                ((435, 69), (435, 103, 410, 242)), // Scripting
+                ((25, 69), (25, 103, 410, 76)),     // Game Design
+                ((25, 179), (25, 213, 410, 409)),   // Engine and Tools
+                ((435, 69), (435, 103, 410, 242)),  // Scripting
                 ((435, 345), (435, 379, 410, 243)), // Additional Art
-                ((845, 69), (845, 103, 410, 150)), // Music
-                ((845, 253), (845, 287, 410, 76)), // Voice
+                ((845, 69), (845, 103, 410, 150)),  // Music
+                ((845, 253), (845, 287, 410, 76)),  // Voice
                 ((845, 363), (845, 397, 410, 225)), // Web
             ]
         );
@@ -1923,12 +1901,24 @@ mod tests {
     #[test]
     fn baseline_licenses_preserve_legal_text_under_the_product_name() {
         assert_eq!(ABOUT_LICENSES.len(), 2);
-        assert_eq!(license_display_title(&ABOUT_LICENSES[0]), "Clonk Rust (ISC)");
+        assert_eq!(
+            license_display_title(&ABOUT_LICENSES[0]),
+            "Clonk Rust (ISC)"
+        );
         assert_eq!(license_display_title(&ABOUT_LICENSES[1]), "Clonk Trademark");
         assert_eq!(ABOUT_LICENSES[0].text, include_str!("../../../COPYING"));
         assert_eq!(ABOUT_LICENSES[1].text, include_str!("../../../TRADEMARK"));
-        assert!(ABOUT_LICENSES[0].text.contains("Permission to use, copy, modify"));
+        assert!(ABOUT_LICENSES[0]
+            .text
+            .contains("Permission to use, copy, modify"));
+        assert!(ABOUT_LICENSES[0]
+            .text
+            .contains("Copyright (c) 2025-2026, Clonk Rust contributors"));
+        assert!(!ABOUT_LICENSES[0].text.contains("NonCommercial"));
         assert!(ABOUT_LICENSES[1].text.contains("registered trademark"));
+        assert!(ABOUT_LICENSES[1]
+            .text
+            .contains("The project title 'Clonk Rust' is used with permission."));
     }
 
     // DeveloperList::ToString with color (C4StartupAboutDlg.cpp:71-93):
@@ -1940,7 +1930,10 @@ mod tests {
             "Matthes Bender<c f7f76f> (matthes)</c>"
         );
         assert_eq!(credit_line((None, Some("Raven"))), "<c f7f76f>Raven</c>");
-        assert_eq!(credit_line((Some("Klemens Köhring"), None)), "Klemens Köhring");
+        assert_eq!(
+            credit_line((Some("Klemens Köhring"), None)),
+            "Klemens Köhring"
+        );
     }
 
     // Scrollbar auto-hide on first show (about.md overflow table): only
@@ -2031,10 +2024,7 @@ mod tests {
 
         let bar = credit_scrollbar(&layout.sections[2]);
         let max_pin = scrollbar_range(bar);
-        let bottom_arrow = GuiPoint::new(
-            (bar.x + 8) as f32,
-            (bar.y + bar.h - 1) as f32,
-        );
+        let bottom_arrow = GuiPoint::new((bar.x + 8) as f32, (bar.y + bar.h - 1) as f32);
         assert_eq!(
             state.handle_pointer_down(bottom_arrow),
             vec![AboutDlgAction::GuiSound(AboutDlgSound::ArrowHit)]
@@ -2101,10 +2091,8 @@ mod tests {
         wide.resize(1280, 720, &fonts);
 
         let hidden_credit = credit_scrollbar(&wide_layout.sections[0]);
-        let hidden_point = GuiPoint::new(
-            (hidden_credit.x + 8) as f32,
-            (hidden_credit.y + 1) as f32,
-        );
+        let hidden_point =
+            GuiPoint::new((hidden_credit.x + 8) as f32, (hidden_credit.y + 1) as f32);
         assert_eq!(wide.credit_max_scroll[0], 0);
         assert!(wide.handle_pointer_down(hidden_point).is_empty());
         assert!(wide.scrollbar_arrow.is_none());
@@ -2113,10 +2101,8 @@ mod tests {
 
         wide.activate(AboutButton::Licenses);
         let disabled_tabs = license_tabs_scrollbar(&wide_layout);
-        let disabled_point = GuiPoint::new(
-            (disabled_tabs.x + 8) as f32,
-            (disabled_tabs.y + 1) as f32,
-        );
+        let disabled_point =
+            GuiPoint::new((disabled_tabs.x + 8) as f32, (disabled_tabs.y + 1) as f32);
         assert_eq!(wide.license_tabs_max_scroll, 0);
         assert!(wide.handle_pointer_down(disabled_point).is_empty());
         assert_eq!(wide.focused, Some(AboutFocus::LicenseTabs));
@@ -2174,22 +2160,30 @@ mod tests {
                 let first = license_scroll_metrics(&layout, &fonts, &ABOUT_LICENSES[0]);
                 let second = license_scroll_metrics(&layout, &fonts, &ABOUT_LICENSES[1]);
                 if first.max_scroll > 0 && second.max_scroll == 0 {
-                    fixture = Some((width, height, layout));
+                    fixture = Some((width, height, layout, 0, 1, KeyCode::Down));
+                    break 'search;
+                }
+                if second.max_scroll > 0 && first.max_scroll == 0 {
+                    fixture = Some((width, height, layout, 1, 0, KeyCode::Up));
                     break 'search;
                 }
             }
         }
-        let (width, height, layout) = fixture.expect("one license overflows while the other fits");
+        let (width, height, layout, scrollable, fitting, transition_key) =
+            fixture.expect("one license overflows while the other fits");
         let mut state = AboutDlgState::new();
         state.resize(width, height, &fonts);
         state.activate(AboutButton::Licenses);
-        assert!(state.license_max_scroll[0] > 0);
-        assert_eq!(state.license_max_scroll[1], 0);
+        assert!(state.license_max_scroll[scrollable] > 0);
+        assert_eq!(state.license_max_scroll[fitting], 0);
 
         let tabs = license_tabs_viewport(&layout);
-        let first_tab = GuiPoint::new((tabs.x + 1) as f32, (tabs.y + 1) as f32);
-        state.handle_pointer_down(first_tab);
-        state.handle_pointer_up(first_tab);
+        let scrollable_tab = GuiPoint::new(
+            (tabs.x + 1) as f32,
+            (tabs.y + scrollable as i32 * LICENSE_TAB_PITCH + 1) as f32,
+        );
+        state.handle_pointer_down(scrollable_tab);
+        state.handle_pointer_up(scrollable_tab);
 
         let bar = license_text_scrollbar(&layout);
         let bottom = GuiPoint::new((bar.x + 8) as f32, (bar.y + bar.h - 1) as f32);
@@ -2198,8 +2192,8 @@ mod tests {
             vec![AboutDlgAction::GuiSound(AboutDlgSound::ArrowHit)]
         );
         assert_eq!(
-            state.handle_key_down(KeyCode::Down),
-            vec![AboutDlgAction::LicenseChanged(1)]
+            state.handle_key_down(transition_key),
+            vec![AboutDlgAction::LicenseChanged(fitting)]
         );
         assert!(state.scrollbar_arrow.is_none());
         assert!(!state.tick_scrollbar());
@@ -2283,7 +2277,10 @@ mod tests {
             vec![AboutDlgAction::GuiSound(AboutDlgSound::ArrowHit)]
         );
         assert!(state.tick_scrollbar());
-        assert_eq!((state.credit_scroll_pin[2], state.credit_scroll_y[2]), (1, 0));
+        assert_eq!(
+            (state.credit_scroll_pin[2], state.credit_scroll_y[2]),
+            (1, 0)
+        );
         state.handle_pointer_up(bottom);
 
         let viewport = credit_viewport(&layout.sections[2]);
@@ -2307,7 +2304,10 @@ mod tests {
         tiny.handle_pointer_down(tiny_bottom);
         assert!(tiny.tick_scrollbar());
         tiny.handle_pointer_up(tiny_bottom);
-        assert_eq!((tiny.license_tabs_scroll_pin, tiny.license_tabs_scroll_y), (-3, 0));
+        assert_eq!(
+            (tiny.license_tabs_scroll_pin, tiny.license_tabs_scroll_y),
+            (-3, 0)
+        );
         tiny.scroll_license_tab_into_view(0, &tiny_layout);
         assert_eq!(
             tiny.license_tabs_scroll_pin, -3,
@@ -2328,7 +2328,10 @@ mod tests {
             (layout.licenses.tabs.x + 1) as f32,
             (layout.licenses.tabs.y + 1) as f32,
         );
-        assert!(!about_rect_contains(&license_tabs_viewport(&layout), border));
+        assert!(!about_rect_contains(
+            &license_tabs_viewport(&layout),
+            border
+        ));
         assert!(state.handle_pointer_down(border).is_empty());
         assert_eq!(state.focused, Some(AboutFocus::LicenseTabs));
         state.handle_pointer_up(border);
@@ -2348,11 +2351,11 @@ mod tests {
         );
 
         let back = narrow_layout.buttons[AboutButton::Back.index()];
-        let back_center = GuiPoint::new(
-            (back.x + back.w / 2) as f32,
-            (back.y + back.h / 2) as f32,
-        );
-        assert!(!about_rect_contains(&narrow_layout.licenses.window, back_center));
+        let back_center = GuiPoint::new((back.x + back.w / 2) as f32, (back.y + back.h / 2) as f32);
+        assert!(!about_rect_contains(
+            &narrow_layout.licenses.window,
+            back_center
+        ));
         assert!(narrow.handle_pointer_move(back_center).is_empty());
         assert_eq!(narrow.scrollbar_dragging, Some(AboutScrollbar::LicenseText));
         assert_eq!(narrow.hovered, Some(AboutButton::Back));
@@ -2382,7 +2385,10 @@ mod tests {
         };
         state.layout = Some(layout);
         let button_point = GuiPoint::new(20.0, 20.0);
-        assert_eq!(state.hit_test_button(button_point), Some(AboutButton::Licenses));
+        assert_eq!(
+            state.hit_test_button(button_point),
+            Some(AboutButton::Licenses)
+        );
 
         let shared_textbox = IntRect {
             x: 100,
@@ -2397,7 +2403,10 @@ mod tests {
         state.credit_max_scroll[1] = 1;
         let credit_bar = credit_scrollbar(&layout.sections[0]);
         let credit_point = GuiPoint::new((credit_bar.x + 1) as f32, (credit_bar.y + 1) as f32);
-        assert_eq!(state.scrollbar_at(credit_point), Some(AboutScrollbar::Credit(1)));
+        assert_eq!(
+            state.scrollbar_at(credit_point),
+            Some(AboutScrollbar::Credit(1))
+        );
 
         layout.licenses.window = IntRect {
             x: 0,
@@ -2424,7 +2433,10 @@ mod tests {
         let shared_bar = license_text_scrollbar(&layout);
         assert_eq!(shared_bar, license_tabs_scrollbar(&layout));
         let bar_point = GuiPoint::new((shared_bar.x + 1) as f32, (shared_bar.y + 1) as f32);
-        assert_eq!(state.scrollbar_at(bar_point), Some(AboutScrollbar::LicenseText));
+        assert_eq!(
+            state.scrollbar_at(bar_point),
+            Some(AboutScrollbar::LicenseText)
+        );
 
         let shared_viewport = license_text_viewport(&layout);
         assert_eq!(shared_viewport, license_tabs_viewport(&layout));
@@ -2440,7 +2452,10 @@ mod tests {
 
         state.focused = None;
         assert!(state.handle_pointer_down(wheel_point).is_empty());
-        assert_eq!(state.focused, None, "the later TextWindow blocks ListBox focus");
+        assert_eq!(
+            state.focused, None,
+            "the later TextWindow blocks ListBox focus"
+        );
         state.handle_pointer_up(wheel_point);
     }
 
@@ -2468,10 +2483,7 @@ mod tests {
 
         // x2 is the Licenses button's x0 at 1280px, so step above the row to
         // test the Update rectangle's half-open edge without hitting it.
-        let outside = crate::GuiPoint::new(
-            (update.x + update.w) as f32,
-            (update.y - 1) as f32,
-        );
+        let outside = crate::GuiPoint::new((update.x + update.w) as f32, (update.y - 1) as f32);
         assert!(state.handle_pointer_down(outside).is_empty());
         assert!(state.handle_pointer_up(outside).is_empty());
     }
@@ -2524,7 +2536,10 @@ mod tests {
             vec![AboutDlgAction::PageChanged(AboutPage::Credits)]
         );
         state.handle_pointer_down(back_point);
-        assert_eq!(state.handle_pointer_up(back_point), vec![AboutDlgAction::Back]);
+        assert_eq!(
+            state.handle_pointer_up(back_point),
+            vec![AboutDlgAction::Back]
+        );
     }
 
     #[test]
@@ -2539,10 +2554,7 @@ mod tests {
         state.handle_pointer_up(advance_point);
 
         let tabs = license_tabs_viewport(&layout);
-        let second = GuiPoint::new(
-            (tabs.x + 1) as f32,
-            (tabs.y + TEXT_LINE_HEIGHT + 1) as f32,
-        );
+        let second = GuiPoint::new((tabs.x + 1) as f32, (tabs.y + TEXT_LINE_HEIGHT + 1) as f32);
         assert_eq!(
             state.handle_pointer_down(second),
             vec![AboutDlgAction::LicenseChanged(1)]
@@ -2556,10 +2568,7 @@ mod tests {
         assert!(state.handle_pointer_down(border).is_empty());
         assert_eq!(state.selected_license_index(), Some(1));
         let scrollbar = license_tabs_scrollbar(&layout);
-        let scrollbar_point = GuiPoint::new(
-            (scrollbar.x + 1) as f32,
-            (scrollbar.y + 1) as f32,
-        );
+        let scrollbar_point = GuiPoint::new((scrollbar.x + 1) as f32, (scrollbar.y + 1) as f32);
         assert!(state.handle_pointer_down(scrollbar_point).is_empty());
         assert_eq!(state.selected_license_index(), Some(1));
 
@@ -2571,10 +2580,7 @@ mod tests {
         assert_eq!(state.selected_license_index(), Some(0));
 
         // The 1px C4GUI_DefaultListSpacing gap is not part of either Label.
-        let gap = GuiPoint::new(
-            (tabs.x + 1) as f32,
-            (tabs.y + TEXT_LINE_HEIGHT) as f32,
-        );
+        let gap = GuiPoint::new((tabs.x + 1) as f32, (tabs.y + TEXT_LINE_HEIGHT) as f32);
         assert!(state.handle_pointer_down(gap).is_empty());
         assert_eq!(state.selected_license_index(), None);
         assert_eq!(state.displayed_license_index(), 0);
@@ -2588,13 +2594,7 @@ mod tests {
     fn license_text_keeps_manual_pipe_on_one_literal_row() {
         let fonts = crate::test_support::endeavour_font_set();
         let mut lines = Vec::new();
-        append_license_line(
-            &mut lines,
-            "left|right",
-            &fonts.text,
-            WHITE,
-            i32::MAX,
-        );
+        append_license_line(&mut lines, "left|right", &fonts.text, WHITE, i32::MAX);
 
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "left|right");
@@ -2625,10 +2625,7 @@ mod tests {
         assert_eq!(state.license_scroll_offset(), metrics.max_scroll);
 
         let tabs = license_tabs_viewport(&layout);
-        let second = GuiPoint::new(
-            (tabs.x + 1) as f32,
-            (tabs.y + LICENSE_TAB_PITCH + 1) as f32,
-        );
+        let second = GuiPoint::new((tabs.x + 1) as f32, (tabs.y + LICENSE_TAB_PITCH + 1) as f32);
         let shorter = license_scroll_metrics(&layout, &fonts, &ABOUT_LICENSES[1]);
         assert_eq!(
             state.handle_pointer_down(second),
@@ -2687,12 +2684,11 @@ mod tests {
     #[test]
     fn live_state_keyboard_focus_and_activation_match_about_dialog() {
         let mut state = AboutDlgState::default();
-        state.resize(
-            1280,
-            720,
-            &crate::test_support::endeavour_font_set(),
+        state.resize(1280, 720, &crate::test_support::endeavour_font_set());
+        assert_eq!(
+            state.handle_key_down(crate::KeyCode::Enter),
+            vec![AboutDlgAction::Back]
         );
-        assert_eq!(state.handle_key_down(crate::KeyCode::Enter), vec![AboutDlgAction::Back]);
 
         assert!(state.handle_key_down(crate::KeyCode::Tab).is_empty()); // Back
         assert!(state.handle_key_down(crate::KeyCode::Tab).is_empty()); // Update
@@ -2708,7 +2704,10 @@ mod tests {
             state.handle_key_up(crate::KeyCode::Enter),
             vec![AboutDlgAction::PageChanged(AboutPage::Licenses)]
         );
-        assert_eq!(state.handle_key_down(crate::KeyCode::Escape), vec![AboutDlgAction::Back]);
+        assert_eq!(
+            state.handle_key_down(crate::KeyCode::Escape),
+            vec![AboutDlgAction::Back]
+        );
     }
 
     #[test]
@@ -2867,7 +2866,9 @@ mod tests {
         assert_eq!(render_probe(&pointer, back, true), released);
         assert!(pointer.handle_pointer_down(center(update)).is_empty());
         assert_eq!(render_probe(&pointer, update, true), pressed_highlighted);
-        assert!(pointer.handle_pointer_move(GuiPoint::new(0.0, 0.0)).is_empty());
+        assert!(pointer
+            .handle_pointer_move(GuiPoint::new(0.0, 0.0))
+            .is_empty());
         assert_eq!(
             render_probe(&pointer, update, true),
             released,

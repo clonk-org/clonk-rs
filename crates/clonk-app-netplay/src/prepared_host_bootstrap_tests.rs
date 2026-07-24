@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use clonk_network::{HostInitialResourceSource, NetworkAddress, NetworkProtocol, NETWORK_STATE_LOBBY};
+use clonk_network::{
+    HostInitialResourceSource, NetworkAddress, NetworkProtocol, NETWORK_STATE_LOBBY,
+};
 use clonk_resources::{Group, LanguagePacks, MutableGroup};
 
 use crate::host_game_resource_sources::freeze_host_definition_resource_sources;
@@ -17,12 +19,16 @@ use crate::prepared_host_bootstrap::{
 fn prepare_harpoonrace_host(
     random_seed_unix_seconds: i64,
     league: Option<&PreparedLeagueHostConfig>,
-) -> (prepared_host_bootstrap::PreparedHostBootstrap, tempfile::TempDir) {
+) -> (
+    prepared_host_bootstrap::PreparedHostBootstrap,
+    tempfile::TempDir,
+) {
     let repository = repository_root();
     let content = repository.join("content");
     let planet = repository.join("planet");
-    let scenario_path = content.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
-    let install_roots = vec![content.clone(), planet];
+    let scenario_path =
+        repository.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
+    let install_roots = vec![repository, content.clone(), planet];
     prepare_harpoonrace_host_from_paths(
         random_seed_unix_seconds,
         league,
@@ -38,9 +44,14 @@ fn prepare_harpoonrace_host_from_paths(
     scenario_path: &Path,
     content: &Path,
     install_roots: &[PathBuf],
-) -> (prepared_host_bootstrap::PreparedHostBootstrap, tempfile::TempDir) {
-    let definition_resource_paths =
-        vec![content.join("Objects.c4d"), content.join("EkeReloaded.c4d")];
+) -> (
+    prepared_host_bootstrap::PreparedHostBootstrap,
+    tempfile::TempDir,
+) {
+    let definition_resource_paths = vec![
+        content.join("Objects.c4d"),
+        repository_root().join("EkeReloaded.c4d"),
+    ];
     let effective_definition_modules = vec!["Objects.c4d".to_owned(), "EkeReloaded.c4d".to_owned()];
     let definition_resources = freeze_host_definition_resource_sources(
         &definition_resource_paths,
@@ -221,7 +232,7 @@ fn harpoonrace_league_seed_reload_uses_the_published_scenario_bytes() {
     let content = repository.join("content");
     let planet = repository.join("planet");
     let source_scenario =
-        content.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
+        repository.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
     let isolated = tempfile::tempdir().expect("isolated scenario source");
     let isolated_content = isolated.path().join("content");
     let isolated_scenario = isolated_content.join("HarpoonRace.c4s");
@@ -235,7 +246,7 @@ fn harpoonrace_league_seed_reload_uses_the_published_scenario_bytes() {
         fs::copy(entry.path(), isolated_scenario.join(entry.file_name()))
             .expect("copy isolated HarpoonRace entry");
     }
-    let install_roots = vec![isolated_content, content.clone(), planet];
+    let install_roots = vec![isolated_content, repository, content.clone(), planet];
     let league = PreparedLeagueHostConfig {
         endpoint: "https://league.invalid/".to_owned(),
         transport: clonk_network::LeagueHttpTransportConfig::default(),
@@ -253,7 +264,10 @@ fn harpoonrace_league_seed_reload_uses_the_published_scenario_bytes() {
     let landscape_path = isolated_scenario.join("Landscape.txt");
     let source = fs::read_to_string(&landscape_path).expect("read isolated Landscape");
     let changed = source.replacen("mat=Water", "mat=Earth", 1);
-    assert_ne!(changed, source, "the fixture must contain its water overlay");
+    assert_ne!(
+        changed, source,
+        "the fixture must contain its water overlay"
+    );
     fs::write(&landscape_path, changed).expect("mutate only the isolated source");
 
     let error = prepared
@@ -1370,7 +1384,9 @@ fn native_host_metadata_and_player_filename_prepare_as_c4_bytes() {
         .host_config()
         .resource_files
         .iter()
-        .find(|resource| resource.core.resource_type == clonk_network::HostResourceType::Dynamic as u8)
+        .find(|resource| {
+            resource.core.resource_type == clonk_network::HostResourceType::Dynamic as u8
+        })
         .expect("dynamic resource");
     let dynamic = Group::open(&dynamic_resource.path).expect("open native-maker dynamic");
     assert_eq!(dynamic.maker_bytes(), Some(b"M\xe4ker".as_slice()));
@@ -1447,7 +1463,10 @@ fn one_selected_player_is_published_after_dynamic_and_installed_before_admission
     assert_eq!(player.filename.as_bytes(), b"Players.c4f/Alice.c4p");
     assert_eq!(player.color, 0x00fc_f41c);
     assert_eq!(player.original_color, 0x00fc_f41c);
-    assert_ne!(player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+    assert_ne!(
+        player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+        0
+    );
     let player_core = player.resource.as_ref().expect("player resource core");
     assert_eq!(player_core.resource_type, 3);
     assert_eq!(player_core.id, snapshot.dynamic.id + 1);

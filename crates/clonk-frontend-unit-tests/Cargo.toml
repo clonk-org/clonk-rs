@@ -1,8 +1,13 @@
 [package]
 name = "clonk-frontend-unit-tests"
-version = "0.1.0"
-edition = "2021"
-publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
 autotests = false
 
 [features]
@@ -18,7 +23,7 @@ path = "../clonk-frontend/src/lib.rs"
 
 [dev-dependencies]
 anyhow = "1.0.102"
-freetype-rs = "0.38.0"
+freetype-rs = { version = "0.38.0", features = ["bundled"] }
 image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
 # Match the mandatory workspace gate so a focused frontend run does not build
 # a default-feature engine that Cargo must replace with test-graph moments

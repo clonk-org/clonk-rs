@@ -2245,7 +2245,7 @@ fn highest_loader_tier(registrations: &[LoaderGroupRegistration]) -> Result<Vec<
         return Ok(Vec::new());
     };
     eligible.retain(|entry| entry.priority == priority);
-    eligible.sort_by(|left, right| right.registration_order.cmp(&left.registration_order));
+    eligible.sort_by_key(|entry| std::cmp::Reverse(entry.registration_order));
     Ok(eligible
         .into_iter()
         .map(|entry| entry.group.clone())
@@ -7143,16 +7143,12 @@ impl FrontendAssets {
         };
         if let Some(evaluation) = evaluation {
             for goal in evaluation.goals() {
-                if goal.picture.as_ref().is_some_and(|image| malformed(image)) {
+                if goal.picture.as_ref().is_some_and(malformed) {
                     missing.push(format!("goal definition picture `{}`", goal.definition_id));
                 }
             }
             for player in evaluation.players() {
-                if player
-                    .big_icon
-                    .as_ref()
-                    .is_some_and(|image| malformed(image))
-                {
+                if player.big_icon.as_ref().is_some_and(malformed) {
                     missing.push(format!("player {} BigIcon", player.player_info_id));
                 }
             }
@@ -9245,15 +9241,14 @@ fn main() -> Result<()> {
         // SDL hides the platform pointer throughout the game client area;
         // C4MouseControl/C4GUI draw the selected themed cell themselves.
         window.set_cursor_visible(app.platform_cursor_visible());
-        if matches!(
-            *control_flow,
-            ControlFlow::Exit | ControlFlow::ExitWithCode(_)
-        ) {
-            if !app.configuration_reset_requested && !app.console_mode {
-                if let Some(paths) = app_paths.as_ref() {
-                    display_options.persist_if_dirty(paths.as_ref());
-                }
-            }
+        if let Some(paths) = app_paths.as_ref().filter(|_| {
+            matches!(
+                *control_flow,
+                ControlFlow::Exit | ControlFlow::ExitWithCode(_)
+            ) && !app.configuration_reset_requested
+                && !app.console_mode
+        }) {
+            display_options.persist_if_dirty(paths.as_ref());
         }
     });
 }
@@ -10585,7 +10580,8 @@ impl AudioContext {
         let keys = self
             .active_channels
             .iter()
-            .filter_map(|(key, info)| should_remove(info).then(|| key.clone()))
+            .filter(|(_, info)| should_remove(info))
+            .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         for key in keys {
             if let Some(info) = self.active_channels.remove(&key) {
@@ -16899,7 +16895,7 @@ impl SearchEditState {
     }
 
     fn cursor_visible(&self) -> bool {
-        self.focused && (self.blink_ticks / 18) % 2 == 0
+        self.focused && (self.blink_ticks / 18).is_multiple_of(2)
     }
 
     fn begin_pointer_selection(&mut self, position: usize) {
@@ -17379,8 +17375,8 @@ impl RuntimeKeyChord {
                         || configured_button == 0xff
                         || (configured_button == 0xfc && button < 4)
                         || (configured_button == 0xfb && button >= 4)
-                        || (configured_button == 0xfe && button % 2 == 0)
-                        || (configured_button == 0xfd && button % 2 == 1))
+                        || (configured_button == 0xfe && button.is_multiple_of(2))
+                        || (configured_button == 0xfd && !button.is_multiple_of(2)))
             }
             RuntimePhysicalKey::Keyboard(_)
             | RuntimePhysicalKey::Raw(_)
@@ -18071,9 +18067,7 @@ impl PresentationBenchmark {
             self.measurement = PresentationBenchmarkMeasurement::default();
             return None;
         }
-        let Some(first_presentation) = self.first_successful_presentation else {
-            return None;
-        };
+        let first_presentation = self.first_successful_presentation?;
         let Some(started) = self.measurement.started else {
             if now.saturating_duration_since(first_presentation) >= PRESENTATION_BENCHMARK_WARMUP {
                 self.measurement.started = Some(now);
@@ -18600,9 +18594,11 @@ fn advance_simulation_pass(
         outcome.did_update = true;
 
         let frame_advanced = app.engine.frame() != frame_before;
-        let pacing = frame_advanced
-            .then(|| app.network_control_pacing())
-            .unwrap_or_default();
+        let pacing = if frame_advanced {
+            app.network_control_pacing()
+        } else {
+            NetworkControlPacing::default()
+        };
         let frame_skip = u64::try_from(app.frame_skip).unwrap_or(1);
         let manual_skip =
             frame_advanced && frame_skip > 1 && app.engine.frame().rem_euclid(frame_skip) != 0;
@@ -19181,34 +19177,34 @@ impl NetworkLobbyLayout {
             .find(|button| button.control == LobbyControl::ChatDialog)
             .map(|button| as_gui_rect(button.rect));
         let row_height = text_line_height.max(1).saturating_add(4);
-        let resource_save_buttons = (active_sheet == LobbySheet::Resources)
-            .then(|| {
-                resource_rows
-                    .values()
-                    .enumerate()
-                    .filter(|(_, row)| row.save_possible)
-                    .filter_map(|(index, row)| {
-                        let y = layout.roster_client.y
-                            + i32::try_from(index)
-                                .unwrap_or(i32::MAX)
-                                .saturating_mul(row_height)
-                            - resource_scroll
-                            + 1;
-                        let rect = clonk_frontend::classic_gui::IntRect {
-                            x: layout.roster_client.x + layout.roster_client.w - 18,
-                            y,
-                            w: 16,
-                            h: 16,
-                        };
-                        let visible = rect.x < layout.roster_client.x + layout.roster_client.w
-                            && rect.x + rect.w > layout.roster_client.x
-                            && rect.y < layout.roster_client.y + layout.roster_client.h
-                            && rect.y + rect.h > layout.roster_client.y;
-                        visible.then(|| (row.id, as_gui_rect(rect)))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let resource_save_buttons = if active_sheet == LobbySheet::Resources {
+            resource_rows
+                .values()
+                .enumerate()
+                .filter(|(_, row)| row.save_possible)
+                .filter_map(|(index, row)| {
+                    let y = layout.roster_client.y
+                        + i32::try_from(index)
+                            .unwrap_or(i32::MAX)
+                            .saturating_mul(row_height)
+                        - resource_scroll
+                        + 1;
+                    let rect = clonk_frontend::classic_gui::IntRect {
+                        x: layout.roster_client.x + layout.roster_client.w - 18,
+                        y,
+                        w: 16,
+                        h: 16,
+                    };
+                    let visible = rect.x < layout.roster_client.x + layout.roster_client.w
+                        && rect.x + rect.w > layout.roster_client.x
+                        && rect.y < layout.roster_client.y + layout.roster_client.h
+                        && rect.y + rect.h > layout.roster_client.y;
+                    visible.then(|| (row.id, as_gui_rect(rect)))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Self {
             exit_button: as_gui_rect(layout.exit_button),
             ready_button: as_gui_rect(layout.ready_checkbox),
@@ -24504,34 +24500,39 @@ impl IrcSettings {
                 clonk_resources::decode_legacy_system_text(&clonk_script::c4_string_bytes(&value))
             })
         };
-        let mut settings = Self::default();
-        settings.server = text("IRC", "Server2")
+        let server = text("IRC", "Server2")
             .as_deref()
             .unwrap_or(DEFAULT_IRC_SERVER)
             .to_string();
-        settings.nick = text("IRC", "Nick")
+        let mut nick = text("IRC", "Nick")
             .as_deref()
             .unwrap_or_default()
             .to_string();
-        if settings.nick.is_empty() {
-            settings.nick = text("Network", "Nick")
+        if nick.is_empty() {
+            nick = text("Network", "Nick")
                 .as_deref()
                 .unwrap_or_default()
                 .to_string();
         }
-        settings.real_name = text("IRC", "RealName")
+        let real_name = text("IRC", "RealName")
             .as_deref()
             .unwrap_or_default()
             .to_string();
-        settings.channel = text("IRC", "Channel")
+        let channel = text("IRC", "Channel")
             .as_deref()
             .unwrap_or(DEFAULT_IRC_CHANNELS)
             .to_string();
-        settings.hide_dangerous_warning = text("Startup", "HideMsgIRCDangerous")
+        let hide_dangerous_warning = text("Startup", "HideMsgIRCDangerous")
             .as_deref()
             .and_then(parse_classic_loader_bool)
             .unwrap_or(false);
-        settings
+        Self {
+            server,
+            nick,
+            real_name,
+            channel,
+            hide_dangerous_warning,
+        }
     }
 
     fn login(&self) -> clonk_frontend::startup_netdlg::NetDlgChatLogin {
@@ -25829,7 +25830,11 @@ fn build_network_host_preparation(
             .join("../..")
             .canonicalize()
             .context("resolve repository root for network host")?;
-        install_roots.extend([repository.join("content"), repository.join("planet")]);
+        install_roots.extend([
+            repository.clone(),
+            repository.join("content"),
+            repository.join("planet"),
+        ]);
     }
     if !install_roots
         .iter()
@@ -27528,10 +27533,8 @@ fn lobby_chat_paste_text<E>(
             return Ok(outcome);
         }
     }
-    if !rest.is_empty() {
-        if lobby_chat_insert_pasted_text(view, rest) {
-            scroll_inserted_text(view);
-        }
+    if !rest.is_empty() && lobby_chat_insert_pasted_text(view, rest) {
+        scroll_inserted_text(view);
     }
     Ok(outcome)
 }
@@ -28470,7 +28473,7 @@ impl GameApp {
         let runtime_language_table = load_runtime_language_table(paths);
         let generated_team_name_template = runtime_language_table
             .as_ref()
-            .map(|table| generated_team_name_template(table))
+            .map(generated_team_name_template)
             .unwrap_or_else(|_| {
                 LegacyCString::from_bytes(b"Team %d".to_vec())
                     .expect("the shipped team-name resource contains no NUL")
@@ -28479,7 +28482,7 @@ impl GameApp {
             initial_network_team_assignment(network_mode.as_ref(), &generated_team_name_template);
         let (needed_material_need, needed_material_none) = runtime_language_table
             .as_ref()
-            .map(|table| needed_material_resource_strings(table))
+            .map(needed_material_resource_strings)
             .unwrap_or_else(|_| {
                 (
                     "%s|needs".to_owned(),
@@ -28488,11 +28491,11 @@ impl GameApp {
             });
         let object_no_dig = runtime_language_table
             .as_ref()
-            .map(|table| object_no_dig_resource_string(table))
+            .map(object_no_dig_resource_string)
             .unwrap_or_else(|_| "%s cannot dig.".to_owned());
         let construction_check_feedback = runtime_language_table
             .as_ref()
-            .map(|table| construction_check_resource_strings(table))
+            .map(construction_check_resource_strings)
             .unwrap_or_else(|_| default_construction_check_feedback());
         let default_rank_names = runtime_language_table
             .as_ref()
@@ -30208,9 +30211,7 @@ impl GameApp {
         };
         self.control_player_infos
             .get(opponent.player_info_id())
-            .map_or(true, |info| {
-                info.player_type == clonk_engine::PLAYER_INFO_TYPE_USER
-            })
+            .is_none_or(|info| info.player_type == clonk_engine::PLAYER_INFO_TYPE_USER)
     }
 
     /// `C4Game::Abort(false)`: league rounds vote first; all remaining cases
@@ -31452,24 +31453,17 @@ impl GameApp {
         {
             return None;
         }
-        let Some(pointer) = self.graphics.viewport_output_point_at(point) else {
-            return None;
-        };
+        let pointer = self.graphics.viewport_output_point_at(point)?;
         if pointer.owner != owner {
             return None;
         }
-        let Some(cursor) = self
+        let cursor = self
             .snapshot
             .players
             .iter()
             .find(|player| player.id == pointer.owner)
-            .and_then(|player| player.cursor)
-        else {
-            return None;
-        };
-        let Some(viewport) = self.graphics.viewport_rect(pointer.owner) else {
-            return None;
-        };
+            .and_then(|player| player.cursor)?;
+        let viewport = self.graphics.viewport_rect(pointer.owner)?;
         let context = AppCommandContext {
             engine: &self.engine,
             bindings: &self.bindings,
@@ -31520,13 +31514,12 @@ impl GameApp {
                 })
             })?;
         let target = state.down_target?;
-        let mut selected = if state.motion.region_drag_started {
-            self.ingame_dragged_objects.clone()
-        } else if self.ingame_dragged_objects.contains(&target) {
-            self.ingame_dragged_objects.clone()
-        } else {
-            vec![target]
-        };
+        let mut selected =
+            if state.motion.region_drag_started || self.ingame_dragged_objects.contains(&target) {
+                self.ingame_dragged_objects.clone()
+            } else {
+                vec![target]
+            };
         selected.retain(|object| {
             self.snapshot
                 .object(*object)
@@ -33386,9 +33379,7 @@ impl GameApp {
                         self.classic_record_stream_activation_pending = false;
                     }
                     if let Err(error) = activation {
-                        let message = match error {
-                            ScenarioActivationError::Recoverable(message) => message,
-                        };
+                        let ScenarioActivationError::Recoverable(message) = error;
                         tracing::error!(scenario = %scenario.title, error = %message, "failed to start scenario");
                         self.finish_scenario_loading_failure(message, prepared_go)?;
                     } else if prepared_go {
@@ -35407,9 +35398,8 @@ fn startup_main_logo_geometry(
     let mut logo_w = (0.4 * logo_width as f32) as i32;
     let mut logo_h = (0.4 * logo_height as f32) as i32;
     if logo_h > CLASSIC_LOGO_MAX_HEIGHT {
-        logo_w =
-            (u64::from(logo_width) * CLASSIC_LOGO_MAX_HEIGHT as u64 / u64::from(logo_height))
-                as i32;
+        logo_w = (u64::from(logo_width) * CLASSIC_LOGO_MAX_HEIGHT as u64 / u64::from(logo_height))
+            as i32;
         logo_h = CLASSIC_LOGO_MAX_HEIGHT;
     }
     let logo_x = surface_width * 30 / 31 - logo_w;
@@ -36782,9 +36772,11 @@ fn populate_crew_inventories(
     for player in players {
         let cursor = player.cursor;
         for crew in &mut player.crew {
-            crew.inventory = (cursor == Some(crew.object_id))
-                .then(|| collect_crew_inventory(engine, snapshot, crew.object_id, renderer_config))
-                .unwrap_or_default();
+            crew.inventory = if cursor == Some(crew.object_id) {
+                collect_crew_inventory(engine, snapshot, crew.object_id, renderer_config)
+            } else {
+                Vec::new()
+            };
         }
     }
 }
@@ -38670,7 +38662,7 @@ fn write_folder_save_path(path: &Path, payload: &[u8]) -> Result<()> {
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&path)
+        .open(path)
         .with_context(|| format!("create folder-group entry {}", path.display()))?;
     file.write_all(payload)
         .with_context(|| format!("write folder-group entry {}", path.display()))?;
@@ -39164,6 +39156,20 @@ fn scenario_roots(paths: &AppPaths) -> Vec<ScenarioRoot> {
     if let Some(content) = paths.content_dir() {
         push_root(&mut roots, &mut seen, content.to_path_buf(), "Scenarios");
     }
+    // The classic install root is a flat pack namespace. Discover its direct
+    // `*.c4f` entries without recursively treating build/source directories
+    // beside the executable as scenario folders.
+    let mut install_folders = fs::read_dir(paths.install_root())
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| has_extension(path, "c4f"))
+        .collect::<Vec<_>>();
+    install_folders.sort();
+    for folder in install_folders {
+        push_root(&mut roots, &mut seen, folder, "Scenarios");
+    }
     push_root(
         &mut roots,
         &mut seen,
@@ -39347,7 +39353,7 @@ impl MusicCatalog {
             .filter(|asset| {
                 Self::is_enabled(asset, playlist.as_deref())
                     && most_recently_played
-                        .map_or(true, |recent| !Arc::ptr_eq(&asset.identity, recent))
+                        .is_none_or(|recent| !Arc::ptr_eq(&asset.identity, recent))
             })
             .collect::<Vec<_>>();
         if !candidates.is_empty() {

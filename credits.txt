@@ -1,0 +1,73 @@
+Clonk Rust
+==========
+
+Clonk Rust is a Rust port of LegacyClonk, developed for compatibility with
+the original C++ game engine.
+
+Rust port
+---------
+
+Tyler Ashworth (syb0rg)
+
+The repository history records all additional contributors to the Rust port.
+
+LegacyClonk and Clonk Rage
+--------------------------
+
+Clonk Rust is derived from LegacyClonk and the Clonk Rage source code and game
+content. Copyright remains with the respective authors and contributors,
+including RedWolf Design GmbH and the LegacyClonk Team.
+
+Original engine coders:
+
+Matthes Bender (matthes)
+Sven Eberhardt (Sven2)
+Peter Wortmann (PeterW)
+Günther Brammer (Günther)
+Armin Burgmeier (Clonk-Karl)
+Julian Raschke (survivor)
+Alexander Post (qualle)
+
+The complete LegacyClonk contributor history is available at:
+https://github.com/legacyclonk/LegacyClonk
+
+Core game content
+-----------------
+
+The core bundled game data comes from the LegacyClonk content project.
+Individual scenario and definition groups may contain their own author and
+attribution files. The complete content history is available at:
+https://github.com/legacyclonk/content
+
+Additional game packs distributed by permission
+-----------------------------------------------
+
+The maintainer obtained explicit permission to commit and publicly
+redistribute the exact Eke Reloaded and ClonkMars copies included with this
+repository:
+
+- Eke Reloaded 1.7 (`EkeReloaded.c4d` and `EkeReloaded.c4f`), by Stephan
+  Bednarzik (Mirosch).
+- ClonkMars 1.5 “Spirit” (`ClonkMars.c4d` and `ClonkMars.c4f`), by Luchs and
+  Nachtfalter.
+
+Their original authorship and copyright notices remain in the packs, as do
+the complete ClonkMars contributor and third-party acknowledgements in
+`ClonkMars.c4d/Credits.txt`. This permission applies only to committing and
+publicly redistributing these exact copies. For this distribution only, that
+specific permission applies notwithstanding more restrictive language in the
+preserved notices. It does not amend those notices, is not an ISC or CC BY-NC
+relicensing, and does not grant broader rights in the packs or their assets.
+See `THIRD_PARTY_GAME_CONTENT.md` for the complete notice.
+
+Licenses and trademark
+----------------------
+
+See COPYING, TRADEMARK, and the licenses directory distributed with Clonk
+Rust. Content groups also include their applicable license and attribution
+files.
+
+This software is based in part of the work of the FreeType Team.
+https://freetype.org
+
+'Clonk' is a registered trademark of Matthes Bender.

@@ -603,7 +603,15 @@
             .parent()
             .and_then(Path::parent)
             .expect("repository root");
+        // The production launcher applies C4Config.cpp:1671-1674 before the
+        // app starts, enabling shader gamma for every migrated installation.
+        persist_config_value(&paths, "Graphics", "Shader", "1")
+            .expect("configure post-migration shader renderer");
         let mut app = new_menu_app_with_paths(800, 600, &paths);
+        assert!(
+            app.graphics.fragment_gamma_enabled(),
+            "the exact background comparison requires the post-migration shader-gamma path"
+        );
         let accepted = GameOptionValues {
             master_server_signup: true,
             password: "round secret".to_string(),
@@ -7420,7 +7428,7 @@
         ]);
 
         let saved =
-            Group::open(&player_root.join("UncheckedIcon.c4p")).expect("open saved player group");
+            Group::open(player_root.join("UncheckedIcon.c4p")).expect("open saved player group");
         let encoded_icon = saved
             .read_file("BigIcon.png")
             .expect("read saved lobby icon");

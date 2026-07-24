@@ -2200,6 +2200,13 @@
             .iter()
             .position(|entry| entry.identifier == "B.c4s")
             .expect("Beta row");
+        let expected_next = app
+            .menu_state
+            .visible_entries()
+            .get(index + 1)
+            .expect("scenario following Beta")
+            .identifier
+            .clone();
         app.handle_menu_input(|menu| menu.select_list_index(index))
             .expect("select Beta");
         app.menu_state.set_search_text("pending query that excludes Gamma");
@@ -2221,7 +2228,7 @@
             app.menu_state
                 .selected_scenario()
                 .map(|entry| entry.identifier.as_str()),
-            Some("C.c4s")
+            Some(expected_next.as_str())
         );
         assert_eq!(
             app.menu_state.search_text(),
@@ -3615,10 +3622,7 @@ ScenInfoArea=70,5,25,90
         )
         .expect("open replacement");
         let error = replace_directory_from_same_parent_with_hook(&source, &destination, || {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                "synthetic commit failure",
-            ))
+            Err(io::Error::other("synthetic commit failure"))
         })
         .expect_err("commit failure must roll the original folder group back");
         assert!(format!("{error:#}").contains("synthetic commit failure"));

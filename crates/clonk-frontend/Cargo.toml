@@ -1,7 +1,13 @@
 [package]
 name = "clonk-frontend"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
 
 # The inline unit surface is compiled from this crate root by the lightly optimized
 # clonk-frontend-unit-tests leaf package. Keep the production frontend optimized
@@ -18,7 +24,7 @@ dev-feedback-render = []
 
 [dependencies]
 anyhow = "1.0.102"
-freetype-rs = "0.38.0"
+freetype-rs = { version = "0.38.0", features = ["bundled"] }
 clonk-engine = { path = "../clonk-engine" }
 clonk-graphics = { path = "../clonk-graphics" }
 clonk-gui = { path = "../clonk-gui" }

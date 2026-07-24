@@ -1,7 +1,13 @@
 [package]
 name = "clonk-app"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
 
 [dependencies]
 anyhow = "1.0"
@@ -36,7 +42,7 @@ parking_lot = "0.12"
 png = "0.17"
 image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
-freetype-rs = "0.38.0"
+freetype-rs = { version = "0.38.0", features = ["bundled"] }
 ttf-parser = "0.25.1"
 thiserror = "1"
 gethostname = "1.0"

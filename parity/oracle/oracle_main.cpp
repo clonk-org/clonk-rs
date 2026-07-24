@@ -841,7 +841,7 @@ static void printNetworkRuleGoalPlacementCase(
 
 static void printNetworkRuleGoalPlacementCases()
 {
-    // content/EkeReloaded.c4f/InterplanetaryCivilwar.c4f/
+    // EkeReloaded.c4f/InterplanetaryCivilwar.c4f/
     // HarpoonRace.c4s/Scenario.txt authors RVLR=1 and RACE=1 while omitting
     // StructNeedEnergy. C4Scenario.cpp:233 defaults that field true, and the
     // exact ConvertGoals body (:506-556) appends ENRG before Parameters is

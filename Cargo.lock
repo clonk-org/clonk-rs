@@ -832,13 +832,16 @@ dependencies = [
  "criterion",
  "image",
  "indexmap 2.11.4",
+ "once_cell",
  "proptest",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5612,6 +5615,7 @@ dependencies = [
  "clonk-engine",
  "clonk-logging",
  "clonk-resources",
+ "tempfile",
  "tracing",
  "walkdir",
  "zip",

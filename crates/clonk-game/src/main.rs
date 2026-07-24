@@ -1972,12 +1972,14 @@ fn validate_update_tool(paths: &AppPaths, logger: &LauncherLogger) -> Result<()>
     }
 
     let install_root = paths.install_root();
-    let patcher = locate_update_tool(install_root).with_context(|| {
-        format!(
-            "c4group update tool not found under {}",
-            install_root.display()
-        )
-    })?;
+    let Some(patcher) = locate_update_tool(install_root) else {
+        logger
+            .log_line(
+                "optional c4group updater not found; continuing without legacy update support",
+            )
+            .context("failed to log optional updater availability")?;
+        return Ok(());
+    };
 
     logger
         .log_line(&format!("located updater tool at {}", patcher.display()))
@@ -1995,20 +1997,10 @@ fn validate_update_tool(paths: &AppPaths, logger: &LauncherLogger) -> Result<()>
         .context("failed to record updater probe output")
 }
 
-fn locate_update_tool(install_root: &Path) -> Result<PathBuf> {
-    for candidate in candidate_patcher_paths(install_root) {
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    bail!(
-        "no c4group updater binary found (expected one of: {})",
-        candidate_patcher_paths(install_root)
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+fn locate_update_tool(install_root: &Path) -> Option<PathBuf> {
+    candidate_patcher_paths(install_root)
+        .into_iter()
+        .find(|candidate| candidate.exists())
 }
 
 fn candidate_patcher_paths(install_root: &Path) -> Vec<PathBuf> {
@@ -3109,6 +3101,19 @@ mod tests {
     }
 
     #[test]
+    fn packaged_launcher_resolves_sibling_runtime_from_bin_directory() {
+        let install_dir = TempDir::new().unwrap();
+        let binary = install_dir.path().join("bin").join("clonk-app");
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(&binary, b"stub").unwrap();
+
+        let resolved =
+            resolve_runtime_binary(None, install_dir.path()).expect("locate packaged runtime");
+
+        assert_eq!(resolved, binary);
+    }
+
+    #[test]
     fn respects_override_argument() {
         let temp = TempDir::new().unwrap();
         let override_bin = temp.path().join("custom").join("clonk-app");
@@ -3167,7 +3172,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_update_tool_reports_missing_binary() {
+    fn validate_update_tool_allows_missing_optional_binary() {
         let install_dir = TempDir::new().unwrap();
         let planet_dir = install_dir.path().join("planet");
         fs::create_dir_all(&planet_dir).unwrap();
@@ -3183,10 +3188,13 @@ mod tests {
         paths.ensure_user_dirs().unwrap();
         let logger = LauncherLogger::new(&paths).unwrap();
 
-        let err = validate_update_tool(&paths, &logger).unwrap_err();
+        validate_update_tool(&paths, &logger).unwrap();
+        let log_contents = std::fs::read_to_string(logger.path()).unwrap();
         assert!(
-            err.to_string().contains("c4group"),
-            "expected error about missing c4group, got {err}"
+            log_contents.contains(
+                "optional c4group updater not found; continuing without legacy update support"
+            ),
+            "optional updater notice missing in log:\n{log_contents}"
         );
     }
 
@@ -3366,7 +3374,8 @@ mod tests {
         )
         .unwrap();
 
-        let summary = digest_update_telemetry(&[telemetry_log.clone()], &logger).unwrap();
+        let summary =
+            digest_update_telemetry(std::slice::from_ref(&telemetry_log), &logger).unwrap();
         let failures = summary.failures();
         assert_eq!(failures.len(), 1, "expected one failure event");
         let successes = summary.successes();
@@ -3427,8 +3436,8 @@ mod tests {
             &paths,
             &logger,
             logger.path(),
-            &[runtime_log.clone()],
-            &[crash_log.clone()],
+            std::slice::from_ref(&runtime_log),
+            std::slice::from_ref(&crash_log),
             &telemetry,
         )
         .unwrap()
@@ -3532,8 +3541,8 @@ mod tests {
             &paths,
             &logger,
             logger.path(),
-            &[runtime_log.clone()],
-            &[crash_log.clone()],
+            std::slice::from_ref(&runtime_log),
+            std::slice::from_ref(&crash_log),
             &telemetry,
             Some(&bundle_path),
             None,
@@ -3654,8 +3663,8 @@ mod tests {
             &paths,
             &logger,
             logger.path(),
-            &[runtime_log.clone()],
-            &[crash_log.clone()],
+            std::slice::from_ref(&runtime_log),
+            std::slice::from_ref(&crash_log),
             &telemetry,
             None,
             None,

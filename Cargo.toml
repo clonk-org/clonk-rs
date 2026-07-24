@@ -30,6 +30,16 @@ members = [
 resolver = "2"
 default-members = ["crates/clonk-app"]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+description = "Clonk Rust game engine and application"
+license = "ISC"
+repository = "https://github.com/syb0rg/clonk-rs"
+readme = "README.md"
+publish = false
+
 [patch.crates-io]
 block = { path = "third_party/block" }
 

@@ -5989,7 +5989,7 @@ impl ScenarioValueStore {
         for candidate in self
             .sections
             .iter()
-            .filter(|candidate| section.map_or(true, |name| candidate.name == name))
+            .filter(|candidate| section.is_none_or(|name| candidate.name == name))
         {
             // In the one-name form a root section with the requested name
             // becomes the active match. Its named children are then one
@@ -8894,7 +8894,7 @@ fn load_legacy_scenario_script<S: AsRef<str>>(
             } else {
                 language_codes
                     .iter()
-                    .find_map(|code| group.read_file(segment.replacen("{}", &code, 1)).ok())
+                    .find_map(|code| group.read_file(segment.replacen("{}", code, 1)).ok())
             }
         } else {
             group.read_file(segment).ok()
@@ -14268,10 +14268,8 @@ fn parse_object_compiler_bool(value: &str) -> bool {
         true
     } else if bytes.first() == Some(&b'0') && !bytes.get(1).is_some_and(u8::is_ascii_digit) {
         false
-    } else if value.starts_with("true") {
-        true
     } else {
-        false
+        value.starts_with("true")
     }
 }
 
@@ -20177,9 +20175,10 @@ RandomTeamCount=2
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let scenario_path = repository.join("content/Melees.c4f/Canyon.c4s/Scenario.txt");
         let teams_path = repository.join("content/Melees.c4f/Canyon.c4s/Teams.txt");
-        if !scenario_path.is_file() || !teams_path.is_file() {
-            return;
-        }
+        assert!(
+            scenario_path.is_file() && teams_path.is_file(),
+            "the initialized official content submodule must provide Canyon Scenario.txt and Teams.txt"
+        );
         let scenario_source = decode_legacy_script_text(
             &std::fs::read(&scenario_path).expect("read shipped Scenario.txt"),
         );
@@ -20301,9 +20300,12 @@ RandomTeamCount=2
     #[test]
     fn all_shipped_team_icon_specs_are_retained_recursively() {
         fn collect_team_files(directory: &Path, output: &mut Vec<PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(directory) else {
-                return;
-            };
+            let entries = std::fs::read_dir(directory).unwrap_or_else(|error| {
+                panic!(
+                    "read shipped content directory {}: {error}",
+                    directory.display()
+                )
+            });
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
@@ -20318,9 +20320,10 @@ RandomTeamCount=2
         }
 
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        if !repository.join("content").is_dir() {
-            return;
-        }
+        assert!(
+            repository.join("content").is_dir(),
+            "the official content submodule must be initialized"
+        );
         let mut team_files = Vec::new();
         collect_team_files(&repository.join("content"), &mut team_files);
         collect_team_files(&repository.join("planet"), &mut team_files);
@@ -28307,9 +28310,10 @@ public func ActualizePhase(pClonk)
 
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let content = repository.join("content");
-        if !content.join("Tutorial.c4f/Tutorial01.c4s").is_dir() {
-            return;
-        }
+        assert!(
+            content.join("Tutorial.c4f/Tutorial01.c4s").is_dir(),
+            "the initialized official content submodule must provide Tutorial01"
+        );
         let scenario = Group::open(content.join("Tutorial.c4f/Tutorial01.c4s"))
             .expect("open shipped tutorial");
         let local = Group::open(content.join("Tutorial.c4f/Objects.c4d"))
@@ -35172,9 +35176,10 @@ public func ActualizePhase(pClonk)
     #[test]
     fn shipped_lowercase_landscape_txt_uses_the_s2_creator() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        if !repository.join("content").is_dir() {
-            return;
-        }
+        assert!(
+            repository.join("content").is_dir(),
+            "the official content submodule must be initialized"
+        );
 
         for relative in [
             "content/Worlds.c4f/FoggyCliffs.c4s",
