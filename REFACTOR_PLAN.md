@@ -263,3 +263,13 @@ state extraction remains queued behind wave 2.
   ends. `mod game_start_sync` (854 lines) stays inline. scenario.rs
   36,967 → 18,320 lines; the ~17.3k-line production half (Scenario, the legacy
   C4S parsers, LegacyObjectRecord, the map-pixel classifier) is the next split.
+- lib.rs test extraction landed: 41 of the crate root's 42 inline
+  `#[cfg(test)] mod <name>` regression modules became `#[path]`-mounted files
+  under `crates/clonk-engine/src/lib_tests/`, keeping each module name — and
+  therefore every `<name>::*` test id — identical. Bodies are dedented by one
+  level with a mask-aware pass that leaves any line whose first character sits
+  inside a string literal untouched, so the embedded C4Script raw strings keep
+  their exact contents; the dedent is proved invertible per module.
+  `mod material_colorization_regression` stays inline (file-relative
+  `include_bytes!`). lib.rs 74,930 → 62,458 lines. The remaining bulk is the
+  40,003-line `impl Engine` block — the 6a-style area split is next.
