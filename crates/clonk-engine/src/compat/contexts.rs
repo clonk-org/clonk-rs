@@ -1995,6 +1995,20 @@ pub struct NestedObjectOutcome {
     /// A staged C4Object::AssignDeath request from script Kill. `Some(false)`
     /// is distinct from no request; `true` bypasses effect revival.
     pub assign_death: Option<bool>,
+    /// Callback-final raw contents lists for containers whose links changed
+    /// during this VM invocation. The host preview applies the chronological
+    /// Remove/Insert/MoveToBack/RotateToFront stream immediately, like C++;
+    /// the authoritative copy-out installs these orders only after nested
+    /// child container updates have materialized.
+    #[doc(hidden)]
+    pub contents_orders: Vec<HostContentsOrder>,
+}
+
+#[derive(Debug, Clone)]
+#[doc(hidden)]
+pub struct HostContentsOrder {
+    pub(crate) container: ObjectId,
+    pub(crate) contents: Vec<ObjectId>,
 }
 
 #[derive(Debug, Clone)]
@@ -7037,6 +7051,28 @@ impl EffectHostContext {
             self.global_call_contexts.is_empty(),
             "all global calls must have finished before the context closes"
         );
+        // C++ mutates Contents links synchronously. The Rust host preview
+        // already has the exact callback-final order because
+        // get_world_object replays contents_link_operations in call order.
+        // Retain one final list per touched container so copy-out can restore
+        // that order after outer/spawn/nested object channels materialize.
+        let mut touched_containers = Vec::new();
+        for operation in &self.contents_link_operations {
+            let container = operation.container();
+            if !touched_containers.contains(&container) {
+                touched_containers.push(container);
+            }
+        }
+        let contents_orders = touched_containers
+            .into_iter()
+            .filter_map(|container| {
+                self.get_world_object(container)
+                    .map(|object| HostContentsOrder {
+                        container,
+                        contents: object.contents().to_vec(),
+                    })
+            })
+            .collect::<Vec<_>>();
         // Cross-object LocalN cells fold like any other foreign mutation:
         // merged into the target's outcome locals (cells hold the LATEST
         // value, after any nested calls), with cell-only targets getting a
@@ -7082,6 +7118,7 @@ impl EffectHostContext {
                 commands: scope.queued_commands,
                 command_operations,
                 destroy: scope.destroy,
+                contents_orders: Vec::new(),
             });
         }
         // Cell-only targets (LocalN writes without any nested call): a
@@ -7112,6 +7149,7 @@ impl EffectHostContext {
                 commands: Vec::new(),
                 command_operations: Vec::new(),
                 destroy: false,
+                contents_orders: Vec::new(),
             });
         }
         let (
@@ -7143,10 +7181,28 @@ impl EffectHostContext {
             None => (Vec::new(), None, Vec::new(), Vec::new(), false, None),
         };
 
-        // The outer object update has its dedicated channel. Carry Kill as
-        // a same-id nested operation so every existing scenario,
-        // definition, effect and object-callback batch applies it only after
-        // the object's accumulated writes have folded.
+        // The outer object update has its dedicated channel. Raw list order
+        // must fold after every child container pointer: e.g. Eke's retained
+        // pistol performs Enter(this(), pistol) and then ShiftContents to
+        // select that just-entered C4D_StaticBack object. Applying the outer
+        // contents_front first made the rotation miss and left PT5B at the
+        // inventory tail.
+        if let Some(anchor) = contents_orders.first().map(|order| order.container) {
+            other_objects.push(NestedObjectOutcome {
+                object_id: anchor,
+                assign_death: None,
+                effects: Vec::new(),
+                update: None,
+                commands: Vec::new(),
+                command_operations: Vec::new(),
+                destroy: false,
+                contents_orders,
+            });
+        }
+
+        // Carry Kill as a same-id nested operation so every existing
+        // scenario, definition, effect and object-callback batch applies it
+        // only after the object's accumulated writes have folded.
         if let Some((object_id, forced)) = active_assign_death {
             other_objects.push(NestedObjectOutcome {
                 object_id,
@@ -7156,6 +7212,7 @@ impl EffectHostContext {
                 commands: Vec::new(),
                 command_operations: Vec::new(),
                 destroy: false,
+                contents_orders: Vec::new(),
             });
         }
 

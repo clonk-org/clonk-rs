@@ -18,6 +18,7 @@ mod dev_feedback_replay;
 mod dragon_rock_audio;
 mod elevator_motion_oracle;
 mod eke_flamethrower_particles;
+mod eke_pistol;
 mod engine_snapshots;
 mod effect_negotiation;
 mod far_worlds_arctic_harpoon_drop;

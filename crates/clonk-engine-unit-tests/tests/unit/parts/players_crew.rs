@@ -4915,6 +4915,7 @@ func Initialize() { seen = GetXDir(FindObject(MARK), 100); }
             commands: Vec::new(),
             command_operations: Vec::new(),
             destroy: false,
+            contents_orders: Vec::new(),
         };
         engine
             .process_spawn_queue_with_outcomes(
@@ -4976,6 +4977,7 @@ func Initialize() { seen = FindObject(CHLD)->Read(); }
             commands: Vec::new(),
             command_operations: Vec::new(),
             destroy: false,
+            contents_orders: Vec::new(),
         };
 
         engine
@@ -4999,6 +5001,63 @@ func Initialize() { seen = FindObject(CHLD)->Read(); }
             observer.local_vars.get("seen"),
             Some(&Value::Int(99)),
             "the retained child mutation commits before the observer Initialize"
+        );
+    }
+
+    #[test]
+    fn creation_callback_contents_order_waits_for_parent_and_children() {
+        // C++ links PRNT before Construction, then CreateContents links each
+        // child synchronously. The final ShiftContents therefore rotates the
+        // StaticBack pistol ahead of both ordinary items. Rust materializes
+        // the parent and its callback-created children later, so the raw-list
+        // outcome must remain pending until every referenced id exists.
+        let parent_script = r#"#strict
+func Construction()
+{
+  CreateContents(GOLD);
+  CreateContents(ROCK);
+  CreateContents(PSTL);
+  ShiftContents(0, true, PSTL);
+  return(1);
+}
+"#;
+        let mut engine = Engine::with_seed(0);
+        let mut parent =
+            Definition::from_script("PRNT", "Parent", parent_script).expect("parent compiles");
+        parent.set_category(CATEGORY_OBJECT);
+        engine
+            .register_definition(parent)
+            .expect("parent registers");
+        for id in ["ROCK", "GOLD"] {
+            let mut item = simple_definition(id);
+            item.set_category(CATEGORY_OBJECT);
+            engine.register_definition(item).expect("item registers");
+        }
+        let mut pistol = simple_definition("PSTL");
+        pistol.set_category(CATEGORY_STATIC_BACK);
+        engine
+            .register_definition(pistol)
+            .expect("pistol registers");
+
+        let parent = engine
+            .spawn_object(SpawnConfig::new("PRNT").with_category(CATEGORY_OBJECT))
+            .expect("parent and callback-created contents materialize");
+        let contents = engine
+            .object_snapshot(parent)
+            .expect("parent remains live")
+            .contents
+            .into_iter()
+            .map(|child| {
+                engine
+                    .object_snapshot(child)
+                    .expect("created child remains live")
+                    .definition_id
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contents,
+            ["PSTL", "ROCK", "GOLD"],
+            "the retained callback-final list overrides generic spawn insertion"
         );
     }
 
@@ -6671,4 +6730,3 @@ public func MarkCollection()
         );
         Ok(())
     }
-

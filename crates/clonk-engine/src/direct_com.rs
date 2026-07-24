@@ -18305,6 +18305,93 @@ protected func ContainedDown(pByClonk) { DoDamage(1); return(1); }
     }
 
     #[test]
+    fn enter_then_target_shift_in_one_callback_selects_the_entered_object() {
+        // C++ Enter mutates both the child's Contained pointer and the
+        // container's raw Contents links before returning. A following
+        // ShiftContents in the same callback therefore sees and cyclically
+        // relinks the just-entered object (C4Object.cpp:1572-1642,
+        // 5816-5836; C4ObjectList.cpp:815-831). Eke's retained pistol uses
+        // this exact sequence when it is drawn from the HUD.
+        let script = r#"
+#strict
+public func Redraw(object item)
+{
+  Enter(this(), item);
+  ShiftContents(0, true, GetID(item));
+  return(1);
+}
+"#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", script);
+        for id in ["ROCK", "GOLD"] {
+            let mut definition =
+                Definition::from_script(id, id, "#strict\n").expect("item compiles");
+            definition.set_category(crate::CATEGORY_OBJECT);
+            engine
+                .register_definition(definition)
+                .expect("register carried item");
+        }
+        let mut pistol =
+            Definition::from_script("PSTL", "Pistol", "#strict\n").expect("pistol compiles");
+        pistol.set_category(crate::CATEGORY_STATIC_BACK);
+        engine
+            .register_definition(pistol)
+            .expect("register static-back pistol");
+        let mut holder =
+            Definition::from_script("HOLD", "Holder", "#strict\n").expect("holder compiles");
+        holder.set_category(crate::CATEGORY_STRUCTURE);
+        engine
+            .register_definition(holder)
+            .expect("register pistol holder");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let rock = engine
+            .spawn_object(SpawnConfig::new("ROCK").with_container(crew))
+            .expect("spawn rock");
+        let gold = engine
+            .spawn_object(SpawnConfig::new("GOLD").with_container(crew))
+            .expect("spawn gold");
+        let holder = engine
+            .spawn_object(SpawnConfig::new("HOLD"))
+            .expect("spawn holder");
+        let pistol = engine
+            .spawn_object(SpawnConfig::new("PSTL").with_container(holder))
+            .expect("spawn retained pistol");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.contents = vec![rock, gold];
+
+        assert_eq!(
+            engine
+                .call_object_function(
+                    crew_index,
+                    "Redraw",
+                    vec![Value::Object(pistol.as_u64())],
+                )
+                .expect("redraw callback completes"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(pistol)
+                .expect("pistol survives")
+                .container,
+            Some(crew)
+        );
+        assert_eq!(
+            contents(&engine, crew),
+            vec![pistol, rock, gold],
+            "the callback-final raw list matches synchronous C++ ordering"
+        );
+        assert!(
+            !contents(&engine, holder).contains(&pistol),
+            "Enter unlinks the pistol from its previous container"
+        );
+    }
+
+    #[test]
     fn wheel_down_shifts_contents_to_the_next_different_item() {
         // COM_WheelDown → ShiftContents(false, true) (C4Object.cpp:
         // 3391-3396): walk First->Next for the first item of a DIFFERENT

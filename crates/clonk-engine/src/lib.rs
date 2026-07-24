@@ -35371,7 +35371,26 @@ impl Engine {
         outcomes: Vec<compat::NestedObjectOutcome>,
     ) -> Result<Vec<compat::NestedObjectOutcome>, EngineError> {
         let mut retained = Vec::new();
-        for outcome in outcomes {
+        for mut outcome in outcomes {
+            if !outcome.contents_orders.is_empty() {
+                debug_assert!(
+                    outcome.update.is_none()
+                        && outcome.effects.is_empty()
+                        && outcome.commands.is_empty()
+                        && outcome.command_operations.is_empty()
+                        && !outcome.destroy
+                        && outcome.assign_death.is_none(),
+                    "contents-order carriers must not contain object mutations"
+                );
+                let pending =
+                    self.apply_host_contents_orders(std::mem::take(&mut outcome.contents_orders));
+                if !pending.is_empty() {
+                    outcome.object_id = pending[0].container;
+                    outcome.contents_orders = pending;
+                    retained.push(outcome);
+                }
+                continue;
+            }
             let requested_death = outcome.assign_death;
             let Some(index) = self.find_object_index(outcome.object_id) else {
                 retained.push(outcome);
@@ -35728,6 +35747,64 @@ impl Engine {
             }
         }
         Ok(retained)
+    }
+
+    /// Install callback-final raw contents order after the ordinary
+    /// outer/spawn/nested copy-out has established every child's final
+    /// `Contained` pointer. C++ performed these link mutations immediately;
+    /// this late list-only correction is the copy-in/copy-out equivalent.
+    ///
+    /// Membership is expected to agree with the ordinary container deltas.
+    /// Keep any independently materialized valid child as a fail-safe tail
+    /// rather than losing it if a synthetic command batch mixed host calls
+    /// with deferred spawn commands.
+    fn apply_host_contents_orders(
+        &mut self,
+        orders: Vec<compat::HostContentsOrder>,
+    ) -> Vec<compat::HostContentsOrder> {
+        let mut pending = Vec::new();
+        for order in orders {
+            let Some(container_index) = self.find_object_index(order.container) else {
+                pending.push(order);
+                continue;
+            };
+            let mut contents = Vec::with_capacity(order.contents.len());
+            let mut missing_child = false;
+            for &child in &order.contents {
+                let Some(child_index) = self.find_object_index(child) else {
+                    missing_child = true;
+                    continue;
+                };
+                let child = &self.objects[child_index];
+                if !child.destroyed
+                    && child.state.status != ObjectStatus::Deleted
+                    && child.state.container == Some(order.container)
+                    && !contents.contains(&child.id)
+                {
+                    contents.push(child.id);
+                }
+            }
+
+            let current = self.objects[container_index].state.contents.clone();
+            for child_id in current {
+                let Some(child_index) = self.find_object_index(child_id) else {
+                    continue;
+                };
+                let child = &self.objects[child_index];
+                if !child.destroyed
+                    && child.state.status != ObjectStatus::Deleted
+                    && child.state.container == Some(order.container)
+                    && !contents.contains(&child_id)
+                {
+                    contents.push(child_id);
+                }
+            }
+            self.objects[container_index].state.contents = contents;
+            if missing_child {
+                pending.push(order);
+            }
+        }
+        pending
     }
 
     pub fn queue_object_command(
@@ -38065,6 +38142,7 @@ impl Engine {
             if !spawns.is_empty() {
                 pending_spawns.extend(spawns);
             }
+            let mut active_contents_order = None;
             if !event_other_objects.is_empty() {
                 for nested in &event_other_objects {
                     if let Some(update) = nested.update.as_ref() {
@@ -38072,6 +38150,12 @@ impl Engine {
                     }
                     if nested.destroy {
                         world.preview_object_destroyed(nested.object_id);
+                    }
+                    for order in &nested.contents_orders {
+                        world.preview_contents_order(order.container, &order.contents);
+                        if order.container == object_id {
+                            active_contents_order = Some(order.contents.clone());
+                        }
                     }
                 }
                 pending_other_objects.extend(event_other_objects);
@@ -38155,6 +38239,11 @@ impl Engine {
                         object.record_action_event(change.previous, ActionTransitionKind::Forced);
                     }
                 }
+                state_snapshot = object.script_state_snapshot();
+            }
+
+            if let Some(contents) = active_contents_order {
+                object.state.contents = contents;
                 state_snapshot = object.script_state_snapshot();
             }
 
@@ -58965,6 +59054,9 @@ impl Engine {
                     if nested.destroy {
                         world.preview_object_destroyed(nested.object_id);
                     }
+                    for order in &nested.contents_orders {
+                        world.preview_contents_order(order.container, &order.contents);
+                    }
                 }
                 pending_other_objects.extend(event_other_objects);
             }
@@ -61175,6 +61267,7 @@ fn append_effect_command_target_locals(
         command_operations: Vec::new(),
         destroy: false,
         assign_death: None,
+        contents_orders: Vec::new(),
     });
 }
 
@@ -74160,6 +74253,142 @@ mod pathfinder_host_state_regression {
         assert!(
             engine.find_path(from, to, 1, true).is_none(),
             "the effect batch folds the clear into the authoritative table"
+        );
+    }
+
+    #[test]
+    fn effect_batch_threads_callback_final_contents_order() {
+        // C++ runs both timers against one live object graph. The first
+        // timer moves a StaticBack pistol into BOX and immediately rotates
+        // it to Contents.First; the second timer must observe that raw link
+        // order before the deferred Rust batch folds authoritatively.
+        let mut engine = Engine::with_seed(17);
+        for id in ["BOX_", "HOLD", "ROCK", "GOLD", "PSTL"] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, id, "#strict\n")
+                        .expect("definition compiles"),
+                )
+                .expect("definition registers");
+        }
+        let mut actor_definition = Definition::from_script(
+            "FXCO",
+            "Contents-order observer",
+            r#"
+                #strict 3
+                local box;
+
+                func Arm(object target)
+                {
+                    box = target;
+                    AddEffect("Move", this(), 10, 1, this());
+                    AddEffect("Observe", this(), 20, 1, this());
+                    return(1);
+                }
+
+                func FxMoveTimer()
+                {
+                    Enter(box, FindObject(PSTL));
+                    ShiftContents(box, true, PSTL);
+                    return(0);
+                }
+
+                func FxObserveTimer()
+                {
+                    if (GetID(Contents(0, box)) == PSTL) SetR(17);
+                    else SetR(23);
+                    return(0);
+                }
+            "#,
+        )
+        .expect("effect actor compiles");
+        actor_definition.set_c4_callback_convention(true);
+        engine
+            .register_definition(actor_definition)
+            .expect("effect actor registers");
+
+        let box_id = engine
+            .spawn_object(SpawnConfig::new("BOX_").with_category(CATEGORY_OBJECT))
+            .expect("box spawns");
+        let gold = engine
+            .spawn_object(
+                SpawnConfig::new("GOLD")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(box_id),
+            )
+            .expect("gold spawns");
+        let rock = engine
+            .spawn_object(
+                SpawnConfig::new("ROCK")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_container(box_id),
+            )
+            .expect("rock spawns");
+        let holder = engine
+            .spawn_object(SpawnConfig::new("HOLD").with_category(CATEGORY_OBJECT))
+            .expect("holder spawns");
+        let pistol = engine
+            .spawn_object(
+                SpawnConfig::new("PSTL")
+                    .with_category(CATEGORY_STATIC_BACK)
+                    .with_container(holder),
+            )
+            .expect("retained pistol spawns");
+        let actor = engine
+            .spawn_object(
+                SpawnConfig::new("FXCO")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_rotation(5),
+            )
+            .expect("effect actor spawns");
+        let actor_index = engine.find_object_index(actor).expect("actor exists");
+        engine
+            .call_object_function(actor_index, "Arm", vec![object_reference_value(box_id)])
+            .expect("effects arm");
+        let actor_index = engine.find_object_index(actor).expect("actor remains");
+        let move_effect = engine.objects[actor_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Move")
+            .cloned()
+            .expect("move effect exists");
+        let observe_effect = engine.objects[actor_index]
+            .state
+            .effects
+            .iter()
+            .find(|effect| effect.name == "Observe")
+            .cloned()
+            .expect("observe effect exists");
+        let definition_id = engine.objects[actor_index].definition_id.clone();
+
+        engine
+            .dispatch_object_effect_events(
+                actor_index,
+                &definition_id,
+                vec![
+                    EffectEvent::timer(move_effect),
+                    EffectEvent::timer(observe_effect),
+                ],
+            )
+            .expect("effect batch executes");
+
+        assert_eq!(
+            engine.objects[actor_index].state.rotation, 17,
+            "the second timer sees PSTL at Contents.First"
+        );
+        let box_index = engine.find_object_index(box_id).expect("box remains");
+        assert_eq!(
+            engine.objects[box_index].state.contents,
+            vec![pistol, rock, gold],
+            "the same callback-final list folds to the authoritative box"
+        );
+        assert_eq!(
+            engine
+                .object_snapshot(pistol)
+                .expect("pistol remains")
+                .container,
+            Some(box_id)
         );
     }
 

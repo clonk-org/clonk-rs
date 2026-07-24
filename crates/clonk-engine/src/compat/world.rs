@@ -3189,6 +3189,26 @@ impl HostWorldContext {
         }
     }
 
+    /// Carry one callback-final raw contents list into the threaded preview
+    /// used by a later callback in the same effect batch. C++ mutates these
+    /// links synchronously; the copied host world otherwise sees only the
+    /// child's updated `Contained` pointer.
+    pub(crate) fn preview_contents_order(
+        &mut self,
+        container: ObjectId,
+        contents: &[ObjectId],
+    ) {
+        let _ = self.get(container);
+        let store = Rc::make_mut(self.object_store.get_mut());
+        let Some(object) = store.objects.get_mut(&container) else {
+            return;
+        };
+        object.contents = contents.to_vec();
+        if let Some(state) = object.state.as_mut() {
+            Rc::make_mut(state).contents = contents.to_vec();
+        }
+    }
+
     pub(crate) fn preview_object_destroyed(&mut self, id: ObjectId) {
         let store = Rc::make_mut(self.object_store.get_mut());
         store.objects.remove(&id);
