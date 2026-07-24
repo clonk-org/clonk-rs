@@ -91,7 +91,7 @@ fn format_console_log(raw: &str) -> String {
     formatted
 }
 
-/// Initialise the global tracing subscriber used across the LegacyClonk binaries.
+/// Initialise the global tracing subscriber used across the Clonk Rust binaries.
 ///
 /// Accepts filter directives from the `LC_LOG` environment variable, falling back to `RUST_LOG`
 /// and ultimately to `info` level logging when no directives are provided.

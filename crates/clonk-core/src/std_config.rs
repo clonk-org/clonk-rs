@@ -410,7 +410,7 @@ fn serialized_value(entry: &Entry) -> String {
             entry
                 .escaped_bytes
                 .as_deref()
-                .unwrap_or_else(|| entry.value.as_bytes()),
+                .unwrap_or(entry.value.as_bytes()),
         ),
     }
 }
@@ -651,7 +651,7 @@ mod tests {
         );
 
         let dir = tempdir().unwrap();
-        let path = dir.path().join("legacyclonk.config");
+        let path = dir.path().join("clonk-rust.config");
         cfg.save(&path).unwrap();
         let serialized = std::fs::read_to_string(&path).unwrap();
         assert!(serialized.contains("ServerAddress=\"https://league.clonkspot.org\"\r\n"));

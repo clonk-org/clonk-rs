@@ -44,7 +44,7 @@ mod platform {
         let process_info = NSProcessInfo::processInfo();
         let activity = process_info.beginActivityWithOptions_reason(
             NSActivityOptions::IdleDisplaySleepDisabled,
-            ns_string!("LegacyClonk game window is open"),
+            ns_string!("Clonk Rust game window is open"),
         );
 
         move || {

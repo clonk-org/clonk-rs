@@ -29,7 +29,7 @@ const EMPTY_REFERENCE_LIFETIME: Duration = Duration::from_secs(10);
 
 const DISCOVERY_PROBE: u8 = 0x03;
 const DISCOVERY_REPLY: u8 = 0x04;
-const SCOPED_IPV6_REQUEST_HOST: &str = "legacyclonk-lan.invalid";
+const SCOPED_IPV6_REQUEST_HOST: &str = "clonk-rust-lan.invalid";
 pub(crate) const DISCOVERY_MULTICAST: Ipv6Addr =
     Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
 

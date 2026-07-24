@@ -1031,7 +1031,7 @@
         assert!(startup_config_is_corrupted(bare_hex_prefix));
 
         let dir = tempdir().expect("config root");
-        let path = dir.path().join("legacyclonk.config");
+        let path = dir.path().join("clonk-rust.config");
         fs::write(
             &path,
             "[General]\nConfigResetSafety=\"7\"\nVendor=keep\n\n[Graphics]\nResolutionX=1234junk\n",
@@ -6724,7 +6724,7 @@
         // (C4Config.h:35-38; C4Config.cpp:545-550). The old Rust parser
         // treated `//` as a comment and persisted only the scheme.
         let dir = tempdir().expect("config directory");
-        let path = dir.path().join("legacyclonk.config");
+        let path = dir.path().join("clonk-rust.config");
         fs::write(
             &path,
             "[Network]\nServerAddress = https:\nAlternateServerAddress = http:\n",

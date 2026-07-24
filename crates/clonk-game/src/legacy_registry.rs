@@ -19,6 +19,10 @@ pub(crate) struct LegacyRegistryValue {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+// Production values are constructed only by the Windows registry reader. Keep the
+// serializer available on other platforms for migration tests without warning in
+// non-test release builds.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
 pub(crate) enum LegacyRegistryData {
     Dword(Vec<u8>),
     Qword(Vec<u8>),

@@ -19,7 +19,7 @@ const SSDP_MULTICAST_ADDRESS: SocketAddrV4 =
 const SSDP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_XML_RESPONSE_BYTES: usize = 1024 * 1024;
-const PORT_MAPPING_DESCRIPTION: &str = "LegacyClonk";
+const PORT_MAPPING_DESCRIPTION: &str = "Clonk Rust";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PortMappingProtocol {
@@ -620,6 +620,9 @@ mod tests {
             .body
             .contains("<NewInternalPort>32111</NewInternalPort>"));
         assert!(first_add.body.contains("<NewRemoteHost></NewRemoteHost>"));
+        assert!(first_add
+            .body
+            .contains("<NewPortMappingDescription>Clonk Rust</NewPortMappingDescription>"));
         assert!(first_add
             .body
             .contains("<NewLeaseDuration>0</NewLeaseDuration>"));

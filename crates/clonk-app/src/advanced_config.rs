@@ -261,11 +261,11 @@ fn readonly_row(config: &Config, key: &str, default: &str) -> AdvancedConfigRow 
 }
 
 #[cfg(target_os = "windows")]
-const DEFAULT_USER_PATH: &str = "%APPDATA%\\LegacyClonk";
+const DEFAULT_USER_PATH: &str = "%APPDATA%\\Clonk Rust";
 #[cfg(target_os = "linux")]
-const DEFAULT_USER_PATH: &str = "$HOME/.legacyclonk";
+const DEFAULT_USER_PATH: &str = "$HOME/.local/share/clonk-rust";
 #[cfg(target_os = "macos")]
-const DEFAULT_USER_PATH: &str = "$HOME/Library/Application Support/LegacyClonk";
+const DEFAULT_USER_PATH: &str = "$HOME/Library/Application Support/Clonk Rust";
 
 fn general(config: &Config) -> AdvancedConfigSection {
     let section = "General";

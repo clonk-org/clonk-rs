@@ -5,21 +5,34 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-const APP_NAME: &str = "LegacyClonk";
+pub const PRODUCT_NAME: &str = "Clonk Rust";
+pub const PRODUCT_SLUG: &str = "clonk-rust";
+pub const PRODUCT_COMPACT_NAME: &str = "ClonkRust";
+// Compatibility-only names for profiles created before the product rename.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const LEGACY_STORAGE_NAME: &str = "LegacyClonk";
+#[cfg(all(unix, not(target_os = "macos")))]
+const LEGACY_STORAGE_SLUG: &str = "legacyclonk";
 const SAVE_DEMO_FOLDER_NAME: &str = "Records.c4f";
 const SCREENSHOT_FOLDER_NAME: &str = "Screenshots";
 #[cfg(target_os = "macos")]
-const CONFIG_FILE_NAME: &str = "legacyclonk.config";
+const CONFIG_FILE_NAME: &str = "clonk-rust.config";
+#[cfg(target_os = "macos")]
+const LEGACY_CONFIG_FILE_NAME: &str = "legacyclonk.config";
 #[cfg(target_os = "windows")]
-const CONFIG_FILE_NAME: &str = "LegacyClonk.cfg";
+const CONFIG_FILE_NAME: &str = "ClonkRust.cfg";
+#[cfg(target_os = "windows")]
+const LEGACY_CONFIG_FILE_NAME: &str = "LegacyClonk.cfg";
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 const CONFIG_FILE_NAME: &str = "config";
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+const LEGACY_CONFIG_FILE_NAME: &str = "config";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PathsError {
-    #[error("LegacyClonk install root could not be located (set LC_INSTALL_ROOT to override)")]
+    #[error("Clonk Rust install root could not be located (set LC_INSTALL_ROOT to override)")]
     InstallRootNotFound,
-    #[error("LegacyClonk system group not found at {path} ({probe})")]
+    #[error("Clonk Rust system group not found at {path} ({probe})")]
     SystemGroupMissing { path: PathBuf, probe: String },
 }
 
@@ -234,28 +247,53 @@ fn discover_default_user_data_dir(install_root: &Path) -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         if let Some(local_app_data) = env_path("LOCALAPPDATA") {
-            return local_app_data.join(APP_NAME);
+            return prefer_existing_legacy_path(
+                local_app_data.join(PRODUCT_NAME),
+                local_app_data.join(LEGACY_STORAGE_NAME),
+            );
         }
         if let Some(app_data) = env_path("APPDATA") {
-            return app_data.join(APP_NAME);
+            return prefer_existing_legacy_path(
+                app_data.join(PRODUCT_NAME),
+                app_data.join(LEGACY_STORAGE_NAME),
+            );
         }
     }
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = env_path("HOME") {
-            return home.join("Library/Application Support").join(APP_NAME);
+            let app_support = home.join("Library/Application Support");
+            return prefer_existing_legacy_path(
+                app_support.join(PRODUCT_NAME),
+                app_support.join(LEGACY_STORAGE_NAME),
+            );
         }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         if let Some(xdg) = env_path("XDG_DATA_HOME") {
-            return xdg.join("legacyclonk");
+            return prefer_existing_legacy_path(
+                xdg.join(PRODUCT_SLUG),
+                xdg.join(LEGACY_STORAGE_SLUG),
+            );
         }
         if let Some(home) = env_path("HOME") {
-            return home.join(".local/share/legacyclonk");
+            let local_share = home.join(".local/share");
+            return prefer_existing_legacy_path(
+                local_share.join(PRODUCT_SLUG),
+                local_share.join(LEGACY_STORAGE_SLUG),
+            );
         }
     }
     install_root.join("user-data")
+}
+
+fn prefer_existing_legacy_path(preferred: PathBuf, legacy: PathBuf) -> PathBuf {
+    if !preferred.exists() && legacy.exists() {
+        legacy
+    } else {
+        preferred
+    }
 }
 
 fn discover_configured_user_data_dir(config_file: &Path, install_root: &Path) -> Option<PathBuf> {
@@ -330,7 +368,15 @@ fn discover_cache_dir(user_data_dir: &Path) -> PathBuf {
 fn discover_config_file(user_data_dir: &Path, explicit_config_file: Option<&Path>) -> PathBuf {
     env_path("LC_CONFIG_FILE")
         .or_else(|| explicit_config_file.map(Path::to_path_buf))
-        .unwrap_or_else(|| user_data_dir.join("Config").join(CONFIG_FILE_NAME))
+        .unwrap_or_else(|| default_config_file(user_data_dir))
+}
+
+fn default_config_file(user_data_dir: &Path) -> PathBuf {
+    let config_dir = user_data_dir.join("Config");
+    prefer_existing_legacy_path(
+        config_dir.join(CONFIG_FILE_NAME),
+        config_dir.join(LEGACY_CONFIG_FILE_NAME),
+    )
 }
 
 fn discover_logs_dir(user_data_dir: &Path) -> PathBuf {
@@ -344,7 +390,7 @@ fn discover_temp_dir() -> PathBuf {
     if let Some(temp) = env_path("LC_TEMP_DIR") {
         return temp;
     }
-    env::temp_dir().join(APP_NAME)
+    env::temp_dir().join(PRODUCT_SLUG)
 }
 
 fn discover_content_dir(install_root: &Path) -> Option<PathBuf> {
@@ -425,6 +471,47 @@ mod tests {
         let path = planet.join("System.c4g");
         let mut file = fs::File::create(path).unwrap();
         writeln!(file, "stub").unwrap();
+    }
+
+    #[test]
+    fn product_identity_is_clonk_rust() {
+        assert_eq!(PRODUCT_NAME, "Clonk Rust");
+        assert_eq!(PRODUCT_SLUG, "clonk-rust");
+        assert_eq!(PRODUCT_COMPACT_NAME, "ClonkRust");
+    }
+
+    #[test]
+    fn existing_legacy_profile_is_used_until_clonk_rust_profile_exists() {
+        let profiles = TempDir::new().unwrap();
+        let preferred = profiles.path().join("Clonk Rust");
+        let legacy = profiles.path().join("LegacyClonk");
+        fs::create_dir_all(&legacy).unwrap();
+
+        assert_eq!(
+            prefer_existing_legacy_path(preferred.clone(), legacy.clone()),
+            legacy
+        );
+
+        fs::create_dir_all(&preferred).unwrap();
+        assert_eq!(
+            prefer_existing_legacy_path(preferred.clone(), legacy),
+            preferred
+        );
+    }
+
+    #[test]
+    fn existing_legacy_config_is_used_until_clonk_rust_config_exists() {
+        let profile = TempDir::new().unwrap();
+        let config_dir = profile.path().join("Config");
+        fs::create_dir_all(&config_dir).unwrap();
+        let preferred = config_dir.join(CONFIG_FILE_NAME);
+        let legacy = config_dir.join(LEGACY_CONFIG_FILE_NAME);
+        fs::write(&legacy, b"[General]\n").unwrap();
+
+        assert_eq!(default_config_file(profile.path()), legacy);
+
+        fs::write(&preferred, b"[General]\n").unwrap();
+        assert_eq!(default_config_file(profile.path()), preferred);
     }
 
     #[test]

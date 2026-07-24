@@ -1799,7 +1799,7 @@ mod tests {
         let summary_path = logs_dir.join("launcher-summary.json");
         let launcher_log_path = logs_dir.join("launcher/clonk-launcher.log");
         let runtime_log_path = logs_dir.join("Clonk-session.log");
-        let crash_report_path = logs_dir.join("LegacyClonk-crash.dmp");
+        let crash_report_path = logs_dir.join("ClonkRust-crash.dmp");
         let bundle_path = logs_dir.join("support-bundle.zip");
 
         let summary = LauncherSummary {
@@ -1807,7 +1807,7 @@ mod tests {
             generated_at: "2024-05-01T12:00:00Z".into(),
             launcher_log: "launcher/clonk-launcher.log".into(),
             runtime_logs: vec!["Clonk-session.log".into()],
-            crash_reports: vec!["LegacyClonk-crash.dmp".into()],
+            crash_reports: vec!["ClonkRust-crash.dmp".into()],
             support_bundle: Some("support-bundle.zip".into()),
             update_telemetry: SerializableTelemetrySummary {
                 successes: vec!["Clonk-session.log".into()],

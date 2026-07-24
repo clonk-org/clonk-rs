@@ -9,7 +9,7 @@
 # (src/C4SolidMaskBitmap.h), complete C4Object::DigOutMaterialCast and
 # landscape BlastFree methods, and the bottom/top/side-flight
 # C4Object::ContactAction arms. The Rust side
-# (rust/crates/lc-engine/src/parity_differential.rs) diffs against the committed
+# (crates/clonk-engine/src/parity_differential.rs) diffs against the committed
 # JSON, so this script only needs to run when the C++ primitives or oracle
 # coverage change.
 #

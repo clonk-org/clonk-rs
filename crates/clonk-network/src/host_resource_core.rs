@@ -714,7 +714,7 @@ fn unused_staged_path(parent: &Path, purpose: &str) -> Result<PathBuf, HostResou
 fn next_staged_path(parent: &Path, purpose: &str) -> PathBuf {
     let unique = NEXT_STAGED_PATH.fetch_add(1, Ordering::Relaxed);
     parent.join(format!(
-        ".legacyclonk-{purpose}-{}-{unique}",
+        ".clonk-rust-{purpose}-{}-{unique}",
         std::process::id()
     ))
 }

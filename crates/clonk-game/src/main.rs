@@ -47,12 +47,12 @@ const CLASSIC_UNVERSIONED_CONFIG_VERSION: u32 = 347;
 #[derive(Debug, Parser)]
 #[command(
     name = "clonk-game",
-    about = "LegacyClonk Rust launcher that runs the Rust runtime",
+    about = "Clonk Rust launcher that runs the Rust runtime",
     version,
     author
 )]
 struct Cli {
-    /// Override the detected LegacyClonk Rust runtime binary location
+    /// Override the detected Clonk Rust runtime binary location
     #[arg(long = "binary", value_name = "PATH")]
     binary: Option<PathBuf>,
 
@@ -64,7 +64,7 @@ struct Cli {
     #[arg(long = "automation-report")]
     automation_report: bool,
 
-    /// Arguments forwarded verbatim to the LegacyClonk runtime
+    /// Arguments forwarded verbatim to the Clonk Rust runtime
     #[arg(trailing_var_arg = true)]
     forwarded: Vec<OsString>,
 }
@@ -226,7 +226,7 @@ fn run() -> Result<()> {
     if status.success() {
         Ok(())
     } else {
-        bail!("LegacyClonk exited {}", describe_exit_status(&status));
+        bail!("Clonk Rust exited {}", describe_exit_status(&status));
     }
 }
 
@@ -2293,7 +2293,7 @@ fn collect_crash_reports(
                 let suffix = path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .unwrap_or("LegacyClonk-crash.dmp");
+                    .unwrap_or("ClonkRust-crash.dmp");
                 let dest_name = format!("crash-{}-{:02}-{}", stamp, copies, suffix);
                 let dest_path = logs_dir.join(dest_name);
                 fs::copy(&path, &dest_path).with_context(|| {
@@ -3311,7 +3311,7 @@ mod tests {
         let user_dir = TempDir::new().unwrap();
         let crash_file = user_dir
             .path()
-            .join("LegacyClonk-crash-2024-01-01-00-00-00.dmp");
+            .join("ClonkRust-crash-2024-01-01-00-00-00.dmp");
         fs::write(&crash_file, b"crash").unwrap();
 
         let _guard = EnvGuard::set(&[
@@ -3416,7 +3416,7 @@ mod tests {
 
         let runtime_log = paths.logs_dir().join("Clonk-session.log");
         fs::write(&runtime_log, "runtime log payload").unwrap();
-        let crash_log = paths.logs_dir().join("LegacyClonk-crash-2024.dmp");
+        let crash_log = paths.logs_dir().join("ClonkRust-crash-2024.dmp");
         fs::write(&crash_log, "crash dump payload").unwrap();
 
         let mut telemetry = UpdateTelemetrySummary::default();
@@ -3462,7 +3462,7 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|name| name.starts_with("crash/01_LegacyClonk-crash-2024.dmp")),
+                .any(|name| name.starts_with("crash/01_ClonkRust-crash-2024.dmp")),
             "bundle should include crash artifact, entries: {entries:?}"
         );
         assert!(
@@ -3519,7 +3519,7 @@ mod tests {
 
         let runtime_log = paths.logs_dir().join("Clonk-summary.log");
         fs::write(&runtime_log, "summary runtime log").unwrap();
-        let crash_log = paths.logs_dir().join("LegacyClonk-crash-summary.dmp");
+        let crash_log = paths.logs_dir().join("ClonkRust-crash-summary.dmp");
         fs::write(&crash_log, "summary crash dump").unwrap();
         let bundle_path = paths.logs_dir().join("support-bundle-test.zip");
         fs::write(&bundle_path, b"bundle").unwrap();
@@ -3571,7 +3571,7 @@ mod tests {
         );
         assert_eq!(
             value["crash_reports"][0].as_str(),
-            Some("LegacyClonk-crash-summary.dmp"),
+            Some("ClonkRust-crash-summary.dmp"),
             "summary should include crash artifact relative path"
         );
         assert_eq!(
@@ -3643,7 +3643,7 @@ mod tests {
 
         let runtime_log = paths.logs_dir().join("Clonk-regenerate.log");
         fs::write(&runtime_log, "Done.\n").unwrap();
-        let crash_log = paths.logs_dir().join("LegacyClonk-crash-regenerate.dmp");
+        let crash_log = paths.logs_dir().join("ClonkRust-crash-regenerate.dmp");
         fs::write(&crash_log, "crash dump payload").unwrap();
 
         let mut telemetry = UpdateTelemetrySummary::default();

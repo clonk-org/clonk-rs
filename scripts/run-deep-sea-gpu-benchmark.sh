@@ -2,10 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-RUST_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-REPO_ROOT=$(cd "$RUST_ROOT/.." && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 MEASUREMENT_SECONDS=${1:-20}
-BINARY=${LC_APP_BINARY:-$RUST_ROOT/target/release/lc-app}
+BINARY=${LC_APP_BINARY:-$REPO_ROOT/target/release/clonk-app}
 
 case "$MEASUREMENT_SECONDS" in
   ''|*[!0-9]*|0)
@@ -15,11 +14,11 @@ case "$MEASUREMENT_SECONDS" in
 esac
 if [[ ! -x "$BINARY" ]]; then
   echo "release binary not found: $BINARY" >&2
-  echo "build it with: cargo build --release --offline --locked -p lc-app --bin lc-app" >&2
+  echo "build it with: cargo build --release --offline --locked -p clonk-app --bin clonk-app" >&2
   exit 66
 fi
 
-FIXTURE=$(mktemp -d /private/tmp/lc-deep-sea-gpu-benchmark.XXXXXX)
+FIXTURE=$(mktemp -d /private/tmp/clonk-rust-deep-sea-gpu-benchmark.XXXXXX)
 cleanup() {
   find "$FIXTURE" -depth -delete
 }
@@ -44,4 +43,4 @@ LC_APP_PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK=1 \
   "$BINARY" \
   --config "$FIXTURE/config.ini" \
   "$FIXTURE/Hazard.c4f/CTF_DeepSea.c4s" \
-  "$RUST_ROOT/crates/lc-engine/tests/fixtures/embedded_player.c4p"
+  "$REPO_ROOT/crates/clonk-engine/tests/fixtures/embedded_player.c4p"

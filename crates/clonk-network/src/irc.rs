@@ -169,7 +169,7 @@ impl IrcConnectConfig {
             real_name,
             password: None,
             auto_join: None,
-            ctcp_version: format!("LegacyClonk:{}:{}", IRC_CTCP_ENGINE_VERSION, c4_os_tag())
+            ctcp_version: format!("Clonk Rust:{}:{}", IRC_CTCP_ENGINE_VERSION, c4_os_tag())
                 .into_bytes(),
         }
     }
@@ -1592,7 +1592,7 @@ mod tests {
             real_name: b"Clonk Player".to_vec(),
             password: None,
             auto_join: Some(b"#clonken,#legacyclonk".to_vec()),
-            ctcp_version: b"LegacyClonk:test:unit".to_vec(),
+            ctcp_version: b"Clonk Rust:test:unit".to_vec(),
         }
     }
 
@@ -1655,7 +1655,7 @@ mod tests {
         assert_eq!(
             IrcConnectConfig::new("server", b"Clonker".to_vec(), b"Real Name".to_vec())
                 .ctcp_version,
-            format!("LegacyClonk:{IRC_CTCP_ENGINE_VERSION}:{}", c4_os_tag()).into_bytes()
+            format!("Clonk Rust:{IRC_CTCP_ENGINE_VERSION}:{}", c4_os_tag()).into_bytes()
         );
         let mut config = test_config();
         config.password = Some(b"1234567890123456789012345678901234567890".to_vec());
@@ -1892,7 +1892,7 @@ mod tests {
             state
                 .receive_line(":Alice!ident PRIVMSG Me :\u{1}VERSION\u{1}")
                 .outbound,
-            [b"NOTICE Alice :\x01VERSION LegacyClonk:test:unit\x01".to_vec()]
+            [b"NOTICE Alice :\x01VERSION Clonk Rust:test:unit\x01".to_vec()]
         );
         assert_eq!(
             state
@@ -2226,7 +2226,7 @@ mod tests {
 
             assert_eq!(
                 read_wire_line(&mut reader),
-                b"NOTICE Al\xedce :\x01VERSION LegacyClonk:legacy:\x80\x01"
+                b"NOTICE Al\xedce :\x01VERSION Clonk Rust:legacy:\x80\x01"
             );
             assert_eq!(
                 read_wire_line(&mut reader),
@@ -2245,7 +2245,7 @@ mod tests {
         let mut config =
             IrcConnectConfig::new(address.to_string(), b"M\xe4".to_vec(), b"R\xe9al".to_vec());
         config.password = Some(password);
-        config.ctcp_version = b"LegacyClonk:legacy:\x80".to_vec();
+        config.ctcp_version = b"Clonk Rust:legacy:\x80".to_vec();
         let mut handle = IrcClientHandle::connect_with_timeout(config, Duration::from_secs(2))
             .expect("start byte-exact IRC handle");
         assert_eq!(

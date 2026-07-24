@@ -8055,7 +8055,7 @@ mod tests {
             nick: "Clonker".into(),
             channels: vec![NetDlgChatChannel {
                 name: "#clonken".into(),
-                topic: "Legacy Clonk".into(),
+                topic: "Clonk Rust".into(),
                 users: vec![NetDlgChatUser {
                     prefix: "@".into(),
                     name: "Keeper".into(),
@@ -8212,7 +8212,7 @@ mod tests {
         ));
         let channel = controller.active_chat_sheet().expect("channel tab");
         assert_eq!(channel.kind, NetDlgChatSheetKind::Channel);
-        assert_eq!(channel.topic, "Legacy Clonk");
+        assert_eq!(channel.topic, "Clonk Rust");
         assert_eq!(channel.users[0].name, "Keeper");
         assert_eq!(channel.lines, vec!["<Keeper> Welcome"]);
 
@@ -8484,7 +8484,7 @@ mod tests {
             nick: "Clonker".into(),
             channels: vec![NetDlgChatChannel {
                 name: "#clonken".into(),
-                topic: "Legacy Clonk".into(),
+                topic: "Clonk Rust".into(),
                 users,
             }],
             messages,

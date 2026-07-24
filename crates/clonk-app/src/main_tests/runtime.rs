@@ -1291,7 +1291,7 @@
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempdir().expect("config root");
-        let path = dir.path().join("legacyclonk.config");
+        let path = dir.path().join("clonk-rust.config");
         fs::write(&path, "[General]\nConfigResetSafety=7\n").expect("write corrupt config");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("make config writable");
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500))
@@ -1366,7 +1366,7 @@
     #[test]
     fn l032_missing_integrity_fields_use_typed_defaults() {
         let dir = tempdir().expect("config root");
-        let path = dir.path().join("legacyclonk.config");
+        let path = dir.path().join("clonk-rust.config");
         let original = b"[General]\nName=Keep\n\n[Graphics]\nResolutionY=0\n";
         fs::write(&path, original).expect("write config without integrity fields");
 

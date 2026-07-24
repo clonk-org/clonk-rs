@@ -33,6 +33,12 @@ use std::{cell::RefCell, collections::HashMap};
 /// (src/C4GraphicsSystem.cpp:345).
 pub const UPPER_BOARD_HEIGHT: i32 = 50;
 
+/// The vertical footprint of the classic 960x320 logo at C++'s 0.21 zoom.
+///
+/// Product logos may use a taller aspect ratio, but should not cover more of
+/// the viewport than the classic upper-board artwork did.
+const UPPER_BOARD_LOGO_MAX_HEIGHT: f32 = 320.0 * 0.21;
+
 /// `C4UpperBoard::DisplayMode` (`src/C4UpperBoard.h:26-33`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UpperBoardMode {
@@ -788,6 +794,7 @@ pub(crate) fn draw_upper_board_with_initialized_text_width(
             if logo_w > 0.0 && logo_h > 0.0 {
                 let mut zoom = if logo_w / logo_h != 3.0 { 0.25 } else { 0.21 };
                 zoom *= 960.0 / logo_w;
+                zoom = zoom.min(UPPER_BOARD_LOGO_MAX_HEIGHT / logo_h);
                 if mode == UpperBoardMode::Small {
                     zoom *= 8.0 / 15.0;
                 }
@@ -3956,6 +3963,22 @@ mod tests {
         // dst x = 400/2 - 480*0.21 = 99.2 -> 99, width 201, height 67.
         assert_eq!(target.get_pixel(98, 30), Some(Color::opaque(120, 80, 40)));
         assert_eq!(target.get_pixel(100, 30), Some(Color::opaque(10, 200, 30)));
+        assert_eq!(target.get_pixel(200, 66), Some(Color::opaque(10, 200, 30)));
+        assert_eq!(target.get_pixel(200, 68), Some(Color::opaque(0, 0, 0)));
+    }
+
+    #[test]
+    fn two_line_product_logo_keeps_the_classic_upper_board_height() {
+        let mut target = surface(400, 120);
+        let hud = HudGraphics {
+            upper_board: Some(solid_image(16, 50, [120, 80, 40, 255])),
+            logo: Some(solid_image(972, 440, [10, 200, 30, 255])),
+            ..HudGraphics::default()
+        };
+        let font = bitmap_font();
+        let font = HudFont::Fallback(&font);
+        draw_upper_board(&mut target, &font, &hud, UpperBoardMode::Full, "", 0);
+
         assert_eq!(target.get_pixel(200, 66), Some(Color::opaque(10, 200, 30)));
         assert_eq!(target.get_pixel(200, 68), Some(Color::opaque(0, 0, 0)));
     }

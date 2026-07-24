@@ -2,8 +2,8 @@
 //
 // This program is the GOLDEN ORACLE generator for the Phase-1 differential
 // harness. It exercises the determinism-critical C++ primitives that the Rust
-// port (rust/crates/lc-engine) must reproduce bit-for-bit, and emits the
-// results as JSON to stdout. The Rust side (lc-engine/tests/parity_differential.rs)
+// port (crates/clonk-engine) must reproduce bit-for-bit, and emits the
+// results as JSON to stdout. The Rust side (crates/clonk-engine/src/parity_differential.rs)
 // runs the identical inputs and asserts byte-exact equality against the
 // committed golden (parity/golden/parity_golden.json).
 //

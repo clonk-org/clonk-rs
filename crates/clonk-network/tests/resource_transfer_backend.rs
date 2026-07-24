@@ -752,7 +752,7 @@ impl TestDirectory {
     fn new(label: &str) -> Self {
         let unique = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "legacyclonk-resource-backend-{label}-{}-{unique}",
+            "clonk-rust-resource-backend-{label}-{}-{unique}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&path);

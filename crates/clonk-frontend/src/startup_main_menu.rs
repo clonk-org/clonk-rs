@@ -5,7 +5,7 @@ use clonk_graphics::{Color, Surface, TextFont};
 use clonk_gui::{ButtonTextures, Rect as GuiRect, Size as GuiSize};
 use std::sync::Arc;
 
-const TRADEMARK_TEXT: &str = "LegacyClonk is a fan project based on Clonk Rage.   \
+const TRADEMARK_TEXT: &str = "Clonk Rust is a fan project based on Clonk Rage.   \
                               'Clonk' is a registered trademark of Matthes Bender.";
 
 /// Text attached to one classic startup-dialog tooltip target.

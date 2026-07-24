@@ -2,6 +2,23 @@
 // sequence, not a child module, so test ids stay `tests::<fn>`.
 
     #[test]
+    fn two_line_product_logo_keeps_classic_startup_footprint() {
+        let (_, logo_y, logo_width, logo_height) =
+            startup_main_logo_geometry(800, 600, 972, 440);
+        assert_eq!(
+            (logo_width, logo_height),
+            (282, 128),
+            "the two-line logo keeps the classic 960x320 logo's 0.4x height",
+        );
+
+        let first_button = clonk_frontend::main_menu_layout(800, 600).buttons[0];
+        assert!(
+            logo_y + logo_height < first_button.y,
+            "the startup logo must end above the first main-menu button",
+        );
+    }
+
+    #[test]
     fn hud_graphics_receive_canonical_transparent_pixels_from_the_shared_loader() {
         let directory = tempdir().expect("graphics directory");
         let graphics_dir = directory.path().join("Graphics.c4g");
@@ -3674,7 +3691,7 @@
 
         let trademark = commands
             .iter()
-            .find(|command| command.text.starts_with("LegacyClonk is a fan project"))
+            .find(|command| command.text.starts_with("Clonk Rust is a fan project"))
             .expect("captured trademark footer label");
         assert_eq!(
             (

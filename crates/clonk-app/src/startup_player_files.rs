@@ -793,7 +793,7 @@ fn unused_staged_path(parent: &Path, purpose: &str) -> io::Result<PathBuf> {
 fn next_staged_path(parent: &Path, purpose: &str) -> PathBuf {
     let unique = NEXT_CREW_STAGED_PATH.fetch_add(1, Ordering::Relaxed);
     parent.join(format!(
-        ".legacyclonk-crew-{purpose}-{}-{unique}",
+        ".clonk-rust-crew-{purpose}-{}-{unique}",
         std::process::id()
     ))
 }
@@ -1855,7 +1855,7 @@ mod tests {
         write_player(&install.path().join("Alpha.c4p"), "Alpha", 1);
         write_player(&install.path().join("Bravo.c4p"), "Bravo", 2);
 
-        let config_path = install.path().join("Config/legacyclonk.config");
+        let config_path = install.path().join("Config/clonk-rust.config");
         fs::create_dir_all(config_path.parent().expect("config parent"))
             .expect("create config parent");
         fs::write(
@@ -1886,7 +1886,7 @@ mod tests {
     #[test]
     fn l063_persist_activations_accepts_exact_cpp_buffer_payload() {
         let root = tempdir().expect("config root");
-        let config_path = root.path().join("legacyclonk.config");
+        let config_path = root.path().join("clonk-rust.config");
         let tail = "b".repeat(1022);
         let mut players = vec![
             synthetic_player("A", "Alpha"),
@@ -1909,7 +1909,7 @@ mod tests {
     #[test]
     fn l063_persist_activations_refuses_overflow_and_continues() {
         let root = tempdir().expect("config root");
-        let config_path = root.path().join("legacyclonk.config");
+        let config_path = root.path().join("clonk-rust.config");
         fs::write(
             &config_path,
             "[General]\nParticipants=Stale.c4p\nFairCrew=true\n",

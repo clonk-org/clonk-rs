@@ -643,7 +643,7 @@
     #[test]
     fn l032_default_bad_safety_restores_and_saves_defaults() {
         let dir = tempdir().expect("config root");
-        let path = dir.path().join("legacyclonk.config");
+        let path = dir.path().join("clonk-rust.config");
         fs::write(
             &path,
             "[General]\nConfigResetSafety=7junk\nVendorPoison=keep\n\n[Graphics]\nResolutionX=1234\n\n[Vendor]\nPoison=yes\n",
@@ -675,7 +675,7 @@
     #[test]
     fn l032_default_zero_resolution_restores_and_saves_defaults() {
         let dir = tempdir().expect("config root");
-        let path = dir.path().join("legacyclonk.config");
+        let path = dir.path().join("clonk-rust.config");
         fs::write(
             &path,
             "[General]\nConfigResetSafety=42\n\n[Graphics]\nResolutionX=0junk\nResolutionY=777\n",

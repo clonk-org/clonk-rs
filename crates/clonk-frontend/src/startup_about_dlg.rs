@@ -285,7 +285,7 @@ pub const CREDITS_SECTIONS: [(&str, &[Person]); 7] = [
 
 /// `FANPROJECTTEXT "   " TRADEMARKTEXT` (C4Version.h:21-22,
 /// C4StartupAboutDlg.cpp:274).
-pub const TRADEMARK_TEXT: &str = "LegacyClonk is a fan project based on Clonk Rage.   \
+pub const TRADEMARK_TEXT: &str = "Clonk Rust is a fan project based on Clonk Rage.   \
      'Clonk' is a registered trademark of Matthes Bender.";
 
 /// Bottom-row button captions with `&` hotkey markers (LanguageUS.txt:
@@ -306,7 +306,7 @@ pub struct AboutLicense {
 /// absent.
 pub static ABOUT_LICENSES: [AboutLicense; 2] = [
     AboutLicense {
-        title: "LegacyClonk",
+        title: "Clonk Rust",
         license_title: "ISC",
         text: include_str!("../../../COPYING"),
     },
@@ -1921,9 +1921,9 @@ mod tests {
     }
 
     #[test]
-    fn baseline_licenses_match_generated_cpp_inputs() {
+    fn baseline_licenses_preserve_legal_text_under_the_product_name() {
         assert_eq!(ABOUT_LICENSES.len(), 2);
-        assert_eq!(license_display_title(&ABOUT_LICENSES[0]), "LegacyClonk (ISC)");
+        assert_eq!(license_display_title(&ABOUT_LICENSES[0]), "Clonk Rust (ISC)");
         assert_eq!(license_display_title(&ABOUT_LICENSES[1]), "Clonk Trademark");
         assert_eq!(ABOUT_LICENSES[0].text, include_str!("../../../COPYING"));
         assert_eq!(ABOUT_LICENSES[1].text, include_str!("../../../TRADEMARK"));

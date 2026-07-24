@@ -1337,7 +1337,7 @@ mod tests {
         fn new() -> Self {
             let unique = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
             let root = std::env::temp_dir().join(format!(
-                "legacyclonk-client-bootstrap-{}-{unique}",
+                "clonk-rust-client-bootstrap-{}-{unique}",
                 std::process::id()
             ));
             let _ = fs::remove_dir_all(&root);

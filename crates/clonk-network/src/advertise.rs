@@ -590,7 +590,7 @@ async fn serve_reference(
         "HTTP/1.0 200 OK\r\n\
 Content-Length: {}\r\n\
 Content-Type: text/plain; charset={charset}\r\n\
-Server: LegacyClonk/4.9.11.0 [362]\r\n\r\n",
+Server: ClonkRust/4.9.11.0 [362]\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(header.as_bytes()).await;

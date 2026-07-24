@@ -382,7 +382,7 @@ fn particle_sprite_map(engine: &Engine) -> HashMap<String, ParticleRenderDefinit
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "clonk-app", about = "LegacyClonk Rust runtime", version)]
+#[command(name = "clonk-app", about = "Clonk Rust runtime", version)]
 struct Cli {
     #[arg(
         long = "config",
@@ -8638,7 +8638,7 @@ fn main() -> Result<()> {
     .build(&event_loop)
     .context("failed to create application window")?;
     if classic.console {
-        window.set_title("LegacyClonk Console");
+        window.set_title("Clonk Rust Console");
     }
     let mut display_sleep_inhibitor = DisplaySleepInhibitor::acquire();
     if display_options.maximized && matches!(display_options.mode, DisplayMode::Window) {
@@ -25852,7 +25852,7 @@ fn build_network_host_preparation(
         .as_ref()
         .map(|paths| paths.cache_dir().join("Network"))
         .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("legacyclonk-rust-network-{}", std::process::id()))
+            std::env::temp_dir().join(format!("clonk-rust-network-{}", std::process::id()))
         });
     let (host_name, host_nick) = if let Some((name, nick)) = staged_identity {
         (name.to_owned(), nick.to_owned())
@@ -35395,6 +35395,28 @@ fn render_startup_underlay(
     }
 }
 
+fn startup_main_logo_geometry(
+    surface_width: i32,
+    surface_height: i32,
+    logo_width: u32,
+    logo_height: u32,
+) -> (i32, i32, i32, i32) {
+    // The vertical footprint of the classic 960x320 logo at C++'s 0.4 zoom.
+    const CLASSIC_LOGO_MAX_HEIGHT: i32 = 128;
+
+    let mut logo_w = (0.4 * logo_width as f32) as i32;
+    let mut logo_h = (0.4 * logo_height as f32) as i32;
+    if logo_h > CLASSIC_LOGO_MAX_HEIGHT {
+        logo_w =
+            (u64::from(logo_width) * CLASSIC_LOGO_MAX_HEIGHT as u64 / u64::from(logo_height))
+                as i32;
+        logo_h = CLASSIC_LOGO_MAX_HEIGHT;
+    }
+    let logo_x = surface_width * 30 / 31 - logo_w;
+    let logo_y = surface_height / 21 - 5;
+    (logo_x, logo_y, logo_w, logo_h)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_startup_frame(
     graphics: &mut GraphicsSystem,
@@ -35723,10 +35745,8 @@ fn render_startup_frame(
                 if let Some(logo) = assets.logo() {
                     let width = surface.width() as i32;
                     let height = surface.height() as i32;
-                    let logo_w = (0.4 * logo.width() as f32) as i32;
-                    let logo_h = (0.4 * logo.height() as f32) as i32;
-                    let logo_x = width * 30 / 31 - logo_w;
-                    let logo_y = height / 21 - 5;
+                    let (logo_x, logo_y, logo_w, logo_h) =
+                        startup_main_logo_geometry(width, height, logo.width(), logo.height());
                     let logo_rect = clonk_gui::Rect::new(
                         logo_x as f32,
                         logo_y as f32,

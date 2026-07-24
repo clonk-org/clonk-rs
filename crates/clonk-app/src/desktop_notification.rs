@@ -93,7 +93,7 @@ mod backend {
                 .call(
                     "Notify",
                     &(
-                        "LegacyClonk",
+                        "Clonk Rust",
                         0_u32,
                         "",
                         notification.title.as_str(),
@@ -137,6 +137,8 @@ mod backend {
 
     use super::DesktopNotification;
 
+    // Keep the established opaque notification identity so existing Windows
+    // toast permissions and history continue to apply after the visible rename.
     const APP_USER_MODEL_ID: &str = "LegacyClonkTeam.LegacyClonk";
 
     pub(super) struct Notifier {
@@ -157,10 +159,10 @@ mod backend {
                 if let Err(error) = unsafe {
                     SetCurrentProcessExplicitAppUserModelID(w!("LegacyClonkTeam.LegacyClonk"))
                 } {
-                    tracing::warn!(%error, "failed to set the LegacyClonk application identity");
+                    tracing::warn!(%error, "failed to set the Clonk Rust application identity");
                 }
                 if let Err(error) = register_app_user_model_id() {
-                    tracing::warn!(%error, "failed to register the LegacyClonk application identity");
+                    tracing::warn!(%error, "failed to register the Clonk Rust application identity");
                 }
                 ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(
                     APP_USER_MODEL_ID,
@@ -252,7 +254,7 @@ mod backend {
         }
         .context("failed to create the AppUserModelId registry key")?;
         let key = RegistryKey(key);
-        let display_name = "LegacyClonk\0".encode_utf16().collect::<Vec<_>>();
+        let display_name = "Clonk Rust\0".encode_utf16().collect::<Vec<_>>();
         let display_name_bytes = unsafe {
             slice::from_raw_parts(
                 display_name.as_ptr().cast::<u8>(),

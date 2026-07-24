@@ -1095,12 +1095,12 @@ impl GameApp {
         let user_path = paths.user_data_dir().to_path_buf();
         let program_path = paths.install_root().to_path_buf();
         let mut locations = vec![clonk_frontend::startup_portraitsel::PortraitLocation::new(
-            "LegacyClonk User Path",
+            "Clonk Rust User Path",
             user_path.clone(),
         )];
         if program_path != user_path {
             locations.push(clonk_frontend::startup_portraitsel::PortraitLocation::new(
-                "LegacyClonk Program Directory",
+                "Clonk Rust Program Directory",
                 program_path,
             ));
         }

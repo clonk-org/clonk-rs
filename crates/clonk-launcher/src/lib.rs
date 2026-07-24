@@ -154,7 +154,7 @@ mod tests {
 
         let runtime_log = paths.logs_dir().join("Clonk-session.log");
         fs::write(&runtime_log, "runtime").unwrap();
-        let crash_log = paths.logs_dir().join("LegacyClonk-crash.dmp");
+        let crash_log = paths.logs_dir().join("ClonkRust-crash.dmp");
         fs::write(&crash_log, "crash").unwrap();
         let bundle_path = paths.logs_dir().join("support-bundle.zip");
         fs::write(&bundle_path, b"bundle").unwrap();
@@ -216,7 +216,7 @@ mod tests {
 
         let runtime_log = paths.logs_dir().join("Clonk-regenerate.log");
         fs::write(&runtime_log, "Done.\n").unwrap();
-        let crash_log = paths.logs_dir().join("LegacyClonk-crash-regenerate.dmp");
+        let crash_log = paths.logs_dir().join("ClonkRust-crash-regenerate.dmp");
         fs::write(&crash_log, "crash dump").unwrap();
 
         let mut telemetry = UpdateTelemetrySummary::default();
@@ -346,7 +346,7 @@ mod tests {
 
         let runtime_log = paths.logs_dir().join("Clonk-artifacts.log");
         fs::write(&runtime_log, "runtime").unwrap();
-        let crash_log = paths.logs_dir().join("LegacyClonk-crash-artifacts.dmp");
+        let crash_log = paths.logs_dir().join("ClonkRust-crash-artifacts.dmp");
         fs::write(&crash_log, "crash").unwrap();
         let bundle_path = paths.logs_dir().join("support-bundle.zip");
         fs::write(&bundle_path, b"bundle").unwrap();
@@ -408,7 +408,7 @@ mod tests {
 
         let runtime_log = paths.logs_dir().join("Clonk-provider.log");
         fs::write(&runtime_log, "runtime").unwrap();
-        let crash_log = paths.logs_dir().join("LegacyClonk-crash-provider.dmp");
+        let crash_log = paths.logs_dir().join("ClonkRust-crash-provider.dmp");
         fs::write(&crash_log, "crash").unwrap();
 
         let share_dir = paths.logs_dir().join("support-share");

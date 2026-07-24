@@ -517,7 +517,7 @@ fn default_client_resource_directory() -> PathBuf {
     // callers still need a real ResList backend, so keep their default out of
     // the current source tree while preserving the stock `Network` role.
     std::env::temp_dir()
-        .join(format!("legacyclonk-{}", std::process::id()))
+        .join(format!("clonk-rust-{}", std::process::id()))
         .join("Network")
 }
 

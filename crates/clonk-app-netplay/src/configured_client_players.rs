@@ -624,7 +624,7 @@ mod tests {
         let alpha = install.path().join("Players/Alpha.c4p");
         write_player(&nested, b"Bravo");
         write_player(&alpha, b"Alpha");
-        let config = install.path().join("LegacyClonk.conf");
+        let config = install.path().join("clonk-rust.config");
         fs::write(
             &config,
             b"[General]\nName=\"Maker\"\nParticipants=\"Players/Deep/Bravo.c4p;Players/Alpha.c4p;Players/Deep/Bravo.c4p\"\n",
@@ -683,7 +683,7 @@ mod tests {
             .expect("add non-player file");
         fs::write(&broken, broken_group.pack().expect("pack broken group"))
             .expect("write broken group");
-        let config = install.path().join("LegacyClonk.conf");
+        let config = install.path().join("clonk-rust.config");
         fs::write(
             &config,
             b"[General]\nParticipants=\"Bravo.c4p;Broken.c4p;Alpha.c4p;Bravo.c4p;Excess.c4p\"\n",
@@ -748,7 +748,7 @@ mod tests {
         let alpha = install.path().join("Players/Alpha.c4p");
         write_player(&bravo, b"Bravo");
         write_player(&alpha, b"Alpha");
-        let config = install.path().join("LegacyClonk.conf");
+        let config = install.path().join("clonk-rust.config");
         fs::write(
             &config,
             b"[General]\nParticipants=\"Players/Bravo.c4p;Players/Alpha.c4p\"\n",
@@ -783,7 +783,7 @@ mod tests {
         let install = tempdir().expect("install root");
         let player = install.path().join("Players/Player.c4p");
         write_player(&player, b"Player");
-        let config = install.path().join("LegacyClonk.conf");
+        let config = install.path().join("clonk-rust.config");
         fs::write(
             &config,
             b"[General]\nParticipants=\"Players/P?ayer.c4p;Players/Player.c4p\"\n",
@@ -815,7 +815,7 @@ mod tests {
         // src/C4Strings.cpp:435-440,513-525).
         let install = tempdir().expect("install root");
         write_player(&install.path().join("Alpha.c4p"), b"Alpha");
-        let config = install.path().join("LegacyClonk.conf");
+        let config = install.path().join("clonk-rust.config");
         fs::write(&config, b"[General]\nParticipants=\";Alpha.c4p\"\n").expect("write config");
 
         let loaded = super::load_configured_client_players_from_roots(
@@ -889,7 +889,7 @@ MissionAccess=\"M\\151ss\\x80\"\nMissionAccess=\"Later key\"\n\
         assert_eq!(capped.mission_access, vec![b'A'; super::CFG_MAX_STRING]);
 
         let directory = tempdir().expect("config directory");
-        let config_path = directory.path().join("LegacyClonk.conf");
+        let config_path = directory.path().join("clonk-rust.config");
         fs::write(
             &config_path,
             b"[General]\nMissionAccess=\"M\\151ss\\x80\"\n",
@@ -945,7 +945,7 @@ MissionAccess=\"M\\151ss\\x80\"\nMissionAccess=\"Later key\"\n\
         let install = tempdir().expect("install root");
         let player = install.path().join("Players/Alice.c4p");
         write_player(&player, b"Alice");
-        let config = install.path().join("LegacyClonk.conf");
+        let config = install.path().join("clonk-rust.config");
         fs::write(
             &config,
             b"[General]\nName=\"M\\141ker\\t\\\"Q\\\"\\\\end\"\n\
@@ -999,7 +999,7 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
         let install = tempdir().expect("install root");
         let player = install.path().join("Marked.c4p");
         write_player(&player, b"<i>Al</i><c f>ice</c>{{X}}");
-        let config = install.path().join("LegacyClonk.conf");
+        let config = install.path().join("clonk-rust.config");
         fs::write(&config, b"[General]\nParticipants=\"Marked.c4p\"\n").expect("write config");
 
         let loaded = super::load_configured_client_players_from_roots(
@@ -1077,7 +1077,7 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
             )
             .expect("add Player.txt");
         fs::write(&player, group.pack().expect("pack player")).expect("write player");
-        let config = install.path().join("LegacyClonk.conf");
+        let config = install.path().join("clonk-rust.config");
         fs::write(&config, b"[General]\nParticipants=\"Alice.c4p\"\n").expect("write config");
 
         let loaded = super::load_configured_client_players_from_roots(
@@ -1138,7 +1138,7 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
         let mut config_bytes = b"[General]\nParticipants=\"".to_vec();
         config_bytes.extend_from_slice(&super::path_bytes(&player));
         config_bytes.extend_from_slice(b"\"\n");
-        let config = install.path().join("LegacyClonk.conf");
+        let config = install.path().join("clonk-rust.config");
         fs::write(&config, config_bytes).expect("write config");
 
         let loaded = super::load_configured_client_players_from_roots(
@@ -1168,7 +1168,7 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
         let build = install.path().join("build");
         let player = build.join("Players/Alice.c4p");
         write_player(&player, b"Alice");
-        let config = install.path().join("LegacyClonk.conf");
+        let config = install.path().join("clonk-rust.config");
         fs::write(&config, b"[General]\nParticipants=\"Players/Alice.c4p\"\n")
             .expect("write config");
 
@@ -1193,7 +1193,7 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
         // src/C4PlayerInfo.cpp:70-79,357-395; src/C4Strings.cpp:435-440).
         let install = tempdir().expect("install root");
         write_player(&install.path().join("Players/Deep/Alice.c4p"), b"Alice");
-        let config = install.path().join("LegacyClonk.conf");
+        let config = install.path().join("clonk-rust.config");
         fs::write(&config, b"[General]\nParticipants=\"Alice.c4p\"\n").expect("write config");
 
         let loaded = super::load_configured_client_players_from_roots(
@@ -1238,7 +1238,7 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
         let mut config_bytes = b"[General]\nName=\"M\x81ker\"\nParticipants=\"".to_vec();
         config_bytes.extend_from_slice(module);
         config_bytes.extend_from_slice(b"\"\n");
-        let config = install.path().join("LegacyClonk.conf");
+        let config = install.path().join("clonk-rust.config");
         fs::write(&config, config_bytes).expect("write config");
 
         let loaded = super::load_configured_client_players_from_roots(

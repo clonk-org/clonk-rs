@@ -100,6 +100,7 @@ fn reference_server_answers_cpp_http_get_with_current_reference() {
     let headers = String::from_utf8_lossy(&response[..header_end]);
     assert!(headers.starts_with("HTTP/1.0 200 OK\r\n"));
     assert!(headers.contains("Content-Type: text/plain; charset=CP1252\r\n"));
+    assert!(headers.contains("Server: ClonkRust/4.9.11.0 [362]\r\n"));
     assert_eq!(
         parse_reference_response(&response[header_end..]).unwrap(),
         vec![advertised_game()]

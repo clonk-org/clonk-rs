@@ -896,14 +896,14 @@ fn load_recording(path: &Path) -> Result<Recording> {
 
 fn package() -> Result<()> {
     let paths = WorkspacePaths::detect()?;
-    build_lc_game(&paths)?;
+    build_clonk_game(&paths)?;
     let package_dir = assemble_package_layout(&paths)?;
     let archive = create_archive(&paths, &package_dir)?;
     tracing::info!(path = %archive.display(), "packaged Rust port");
     Ok(())
 }
 
-fn build_lc_game(paths: &WorkspacePaths) -> Result<()> {
+fn build_clonk_game(paths: &WorkspacePaths) -> Result<()> {
     tracing::info!("building clonk-game (release)");
     let status = Command::new("cargo")
         .args(["build", "--release", "-p", "clonk-game"])
@@ -918,7 +918,7 @@ fn build_lc_game(paths: &WorkspacePaths) -> Result<()> {
 
 fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
     let dist_dir = paths.workspace_dir.join("target").join("dist");
-    let package_dir = dist_dir.join("legacyclonk-rs");
+    let package_dir = dist_dir.join("clonk-rust");
 
     if package_dir.exists() {
         fs::remove_dir_all(&package_dir)
@@ -974,7 +974,7 @@ fn create_archive(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf>
     let dist_dir = paths.workspace_dir.join("target").join("dist");
     fs::create_dir_all(&dist_dir)
         .with_context(|| format!("failed to create {}", dist_dir.display()))?;
-    let archive_path = dist_dir.join("legacyclonk-rs.zip");
+    let archive_path = dist_dir.join("clonk-rust.zip");
     if archive_path.exists() {
         fs::remove_file(&archive_path)
             .with_context(|| format!("failed to remove {}", archive_path.display()))?;

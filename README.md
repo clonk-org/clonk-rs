@@ -1,8 +1,8 @@
-# clonk-rs
+# Clonk Rust
 
-A Rust port of the [LegacyClonk](https://github.com/legacyclonk/LegacyClonk)
-engine, developed for bit-for-bit lockstep parity with the original C++
-implementation.
+Clonk Rust is a Rust port of the
+[LegacyClonk](https://github.com/legacyclonk/LegacyClonk) engine, developed
+for bit-for-bit lockstep parity with the original C++ implementation.
 
 The engine, frontend, and tooling form a Cargo workspace of `clonk-*`
 packages at the repository root;  `clonk-app` is the game binary. Game data

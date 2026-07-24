@@ -7866,7 +7866,7 @@ mod tests {
         fn new() -> Self {
             let unique = NEXT_RESOURCE_DIRECTORY.fetch_add(1, Ordering::Relaxed);
             let root = std::env::temp_dir().join(format!(
-                "legacyclonk-session-resource-{}-{unique}",
+                "clonk-rust-session-resource-{}-{unique}",
                 std::process::id()
             ));
             let host = root.join("host");

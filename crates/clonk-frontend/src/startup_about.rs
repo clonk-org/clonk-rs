@@ -142,7 +142,7 @@ const BUTTON_HEIGHT: f32 = 38.0;
 const BUTTON_SPACING: f32 = 12.0;
 const PANEL_PADDING: f32 = 32.0;
 
-const FANPROJECT_TEXT: &str = "LegacyClonk is a fan project based on Clonk Rage.";
+const FANPROJECT_TEXT: &str = "Clonk Rust is a fan project based on Clonk Rage.";
 const TRADEMARK_TEXT: &str = "'Clonk' is a registered trademark of Matthes Bender.";
 
 const ISC_LICENSE: &str = "\

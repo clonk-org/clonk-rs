@@ -42,7 +42,7 @@ fn main() -> Result<()> {
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
-        .with_title("LegacyClonk Launcher")
+        .with_title("Clonk Rust Launcher")
         .with_inner_size(LogicalSize::new(960.0, 640.0))
         .build(&event_loop)
         .context("failed to create launcher window")?;
@@ -397,7 +397,7 @@ impl LauncherApp {
     fn new(window: &Window) -> Result<Self> {
         let size = window.inner_size();
         let (width, height) = enforce_min_size(size);
-        let paths = AppPaths::discover().context("failed to discover LegacyClonk paths")?;
+        let paths = AppPaths::discover().context("failed to discover Clonk Rust paths")?;
         paths
             .ensure_user_dirs()
             .context("failed to prepare launcher directories")?;

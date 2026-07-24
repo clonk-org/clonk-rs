@@ -209,7 +209,7 @@ impl GameApp {
         self.push_message_dialog(
             clonk_frontend::message_dialog::MessageDialogState::regular_ok(
                 message,
-                "LegacyClonk",
+                "Clonk Rust",
                 clonk_frontend::message_dialog::MessageDialogIcon::Standard(44),
             ),
             MessageDialogContinuation::DeveloperConsoleNotice { follow_up },
@@ -382,7 +382,7 @@ impl GameApp {
                     self.developer_console.out("Info component selected");
                 }
                 DeveloperConsoleAction::ShowAbout => {
-                    self.developer_console.out("LegacyClonk developer console");
+                    self.developer_console.out("Clonk Rust developer console");
                 }
             };
         }
