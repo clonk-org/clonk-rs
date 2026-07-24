@@ -273,3 +273,19 @@ state extraction remains queued behind wave 2.
   `mod material_colorization_regression` stays inline (file-relative
   `include_bytes!`). lib.rs 74,930 → 62,458 lines. The remaining bulk is the
   40,003-line `impl Engine` block — the 6a-style area split is next.
+- lib.rs `impl Engine` split landed (the engine's 6a): the single 40,001-line /
+  435-method block became 19 `#[path]`-mounted area files under
+  `crates/clonk-engine/src/engine/`, each `use super::*;` plus its own
+  `impl Engine`, methods moved byte-verbatim in original order: state 4,681 /
+  procedures 4,343 / tick 3,554 / economy 3,425 / players 2,832 /
+  solid_mask 2,726 / landscape_ops 2,671 / command_results 2,046 /
+  movement 1,908 / definitions 1,710 / exec_order 1,514 / spawn_queue 1,411 /
+  script_exec 1,254 / crew 1,242 / host_tables 1,153 / player_view 1,129 /
+  world 909 / config 790 / game_over 512 lines. Only the two constructors
+  (`new`, `with_seed`) stay in the root impl; lib.rs 62,458 → 22,690 lines.
+  260 private method declarations needed `pub(crate)` (statically enumerated
+  from cross-module references, then confirmed by a clean compile). Byte-
+  partition proof: the root impl plus the 19 area impls reconstruct the
+  original 40,001-line body line for line, with every difference being one of
+  the 260 enumerated `pub(crate)` insertions. nextest id list byte-identical
+  (8,861); gate 8,828/8,828, 11 skipped.
