@@ -1918,11 +1918,7 @@ pub(crate) fn blast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
 
     // Resolve both values before any blast callback. FnBlastObjects passes
     // cthr->Obj as pByObj, and C4Game immediately replaces it with pLayer.
-    let (caused_by, by_object) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow
-            .as_ref()
-            .ok_or_else(|| RuntimeError::new("BlastObjects requires an active engine context"))?;
+    let (caused_by, by_object) = try_with_host_context("BlastObjects requires an active engine context", |context| {
         let caller = context.script_object_context;
         let caused_by = if caused_by_plus_one != 0 {
             caused_by_plus_one.wrapping_sub(1)
@@ -2162,11 +2158,7 @@ pub(crate) fn blast_object(args: &[Value]) -> Result<Value, RuntimeError> {
     let caused_by_plus_one =
         parse_optional_i32(args.get(2), "BlastObject", "caused by")?.unwrap_or(0);
 
-    let target_and_cause = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow
-            .as_ref()
-            .ok_or_else(|| RuntimeError::new("BlastObject requires an active engine context"))?;
+    let target_and_cause = try_with_host_context("BlastObject requires an active engine context", |context| {
         // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
         // (C4Script.cpp:2283) — resolved in the caller's scope.
         let caused_by = if caused_by_plus_one != 0 {
@@ -2210,11 +2202,7 @@ pub(crate) fn blast_object(args: &[Value]) -> Result<Value, RuntimeError> {
 /// call, while C4Game::BlastObjects intentionally does not. An already-decoded
 /// `OWNER_NONE` must not be reinterpreted as encoded-zero caller fallback.
 fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<bool, RuntimeError> {
-    let alive = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("BlastObject requires an active engine context"))?;
+    let alive = try_with_host_context_mut("BlastObject requires an active engine context", |context| {
         if !context.ensure_object_scope(target) {
             return Ok(None);
         }
@@ -3220,11 +3208,7 @@ pub(crate) fn create_particle(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("CreateParticle requires an active engine context"))?;
+    try_with_host_context_mut("CreateParticle requires an active engine context", |context| {
 
         let base_position = context
             .object_context()
@@ -3387,11 +3371,7 @@ pub(crate) fn push_particles(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .unwrap_or(0);
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("PushParticles requires an active engine context"))?;
+    try_with_host_context_mut("PushParticles requires an active engine context", |context| {
         if let Some(name) = &definition {
             if context.particle_def_known(name) == Some(false) {
                 return Ok(Value::Bool(false));

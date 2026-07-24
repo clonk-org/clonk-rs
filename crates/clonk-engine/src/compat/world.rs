@@ -4653,11 +4653,7 @@ pub(crate) fn game_over(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("GameOver requires an active engine context"))?;
+    try_with_host_context_mut("GameOver requires an active engine context", |context| {
         let triggered = context.request_game_over();
         Ok(Value::Bool(triggered))
     })

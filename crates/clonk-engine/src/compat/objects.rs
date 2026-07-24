@@ -4743,11 +4743,7 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let registration = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("CreateObject requires an active engine context"))?;
+    let registration = try_with_host_context_mut("CreateObject requires an active engine context", |context| {
 
         // C4Id2Def failure: no object, silent nullptr (C4Game.cpp:1146).
         if context.world.definition_known(&definition) == Some(false) {
@@ -5121,11 +5117,7 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .unwrap_or(0);
 
-    let (creator, base_position, owner, controller) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow
-            .as_ref()
-            .ok_or_else(|| RuntimeError::new("CastObjects requires an active engine context"))?;
+    let (creator, base_position, owner, controller) = try_with_host_context("CastObjects requires an active engine context", |context| {
         let creator = context.object_context().map(ObjectScopeContext::id);
         let base_position = context
             .object_context()
@@ -5797,11 +5789,7 @@ pub(crate) fn place_animal(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Nil);
     };
 
-    let registration = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("PlaceAnimal requires an active engine context"))?;
+    let registration = try_with_host_context_mut("PlaceAnimal requires an active engine context", |context| {
         let Some(metadata) = context.definition_metadata(&definition).cloned() else {
             // C4Id2Def failure precedes the Placement switch and Random
             // (C4Game.cpp:3028-3035).
@@ -7389,11 +7377,7 @@ pub(crate) fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         None => 1,
     };
 
-    let container = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow
-            .as_ref()
-            .ok_or_else(|| RuntimeError::new("CreateContents requires an active engine context"))?;
+    let container = try_with_host_context("CreateContents requires an active engine context", |context| {
         Ok::<_, RuntimeError>(target_id.or(context.script_object_context))
     })?;
     let Some(container) = container else {
@@ -8950,11 +8934,7 @@ pub(crate) fn set_entrance(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_id =
         consume_optional_object_reference_argument(args, &mut index, "SetEntrance", "target")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetEntrance requires an active engine context"))?;
+    try_with_host_context_mut("SetEntrance requires an active engine context", |context| {
         let target = target_id.or(context.script_object_context);
         let Some(target) = target else {
             return Ok(Value::Bool(false));
@@ -9000,11 +8980,7 @@ pub(crate) fn set_category(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetCategory requires an active engine context"))?;
+    try_with_host_context_mut("SetCategory requires an active engine context", |context| {
         let target = target_id.or(context.script_object_context);
         let Some(target) = target else {
             return Ok(Value::Bool(false));

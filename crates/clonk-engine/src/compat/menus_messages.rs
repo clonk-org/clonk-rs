@@ -1327,11 +1327,7 @@ pub(crate) fn custom_message(args: &[Value]) -> Result<Value, RuntimeError> {
         portrait,
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("CustomMessage requires an active engine context"))?;
+    try_with_host_context_mut("CustomMessage requires an active engine context", |context| {
         context.register_message(MessageCommand::Add(spec));
         Ok(Value::Bool(true))
     })
@@ -1481,11 +1477,7 @@ pub(crate) fn message(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let format_args = if args.len() > 2 { &args[2..] } else { &[] };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("Message requires an active engine context"))?;
+    try_with_host_context_mut("Message requires an active engine context", |context| {
 
         let fallback = message_fallback_spec(
             context,
@@ -1552,11 +1544,7 @@ pub(crate) fn player_message(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let format_args = if args.len() > 3 { &args[3..] } else { &[] };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("PlayerMessage requires an active engine context"))?;
+    try_with_host_context_mut("PlayerMessage requires an active engine context", |context| {
 
         let kind = if target_raw.is_some() {
             MessageKind::TargetPlayer
@@ -1618,11 +1606,7 @@ pub(crate) fn add_message(args: &[Value]) -> Result<Value, RuntimeError> {
     let format_args = if args.len() > 2 { &args[2..] } else { &[] };
     let formatted = format_script_string("AddMessage", &raw_message, format_args)?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("AddMessage requires an active engine context"))?;
+    try_with_host_context_mut("AddMessage requires an active engine context", |context| {
 
         let text = formatted.clone();
         if !text.trim().is_empty() {
@@ -1665,11 +1649,7 @@ pub(crate) fn plr_message(args: &[Value]) -> Result<Value, RuntimeError> {
     let player_id = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "PlrMessage", "player")?;
     let format_args = if args.len() > 2 { &args[2..] } else { &[] };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("PlrMessage requires an active engine context"))?;
+    try_with_host_context_mut("PlrMessage requires an active engine context", |context| {
 
         let resolved_player = resolve_target_player(context, player_id);
 

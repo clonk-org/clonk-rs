@@ -480,11 +480,7 @@ pub(crate) fn launch_lightning(args: &[Value]) -> Result<Value, RuntimeError> {
 /// fails (C4Weather.cpp:178-184).
 pub(crate) fn launch_volcano(args: &[Value]) -> Result<Value, RuntimeError> {
     let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "LaunchVolcano", "x")?;
-    let (height, lava) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow
-            .as_ref()
-            .ok_or_else(|| RuntimeError::new("LaunchVolcano requires an active engine context"))?;
+    let (height, lava) = try_with_host_context("LaunchVolcano requires an active engine context", |context| {
         let height = context
             .landscape_ref()
             .map(Landscape::estimated_height)
@@ -1405,11 +1401,7 @@ pub(crate) fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
     let caused_by_plus_one =
         value_to_i32(args.get(3).unwrap_or(&Value::Nil), "BlastFree", "caused by")?;
 
-    let (center, controller) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow
-            .as_ref()
-            .ok_or_else(|| RuntimeError::new("BlastFree requires an active engine context"))?;
+    let (center, controller) = try_with_host_context("BlastFree requires an active engine context", |context| {
 
         let mut controller = if caused_by_plus_one != 0 {
             Some(caused_by_plus_one.wrapping_sub(1))
@@ -1442,11 +1434,7 @@ pub(crate) fn native_blast_free_absolute(
     level: i32,
     controller: Option<i32>,
 ) -> Result<(), RuntimeError> {
-    let counts = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("BlastFree requires an active engine context"))?;
+    let counts = try_with_host_context_mut("BlastFree requires an active engine context", |context| {
         let preview = context.preview_blast_circle(center, level);
         let counts = preview
             .as_ref()
@@ -1486,11 +1474,7 @@ pub(crate) fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Nil);
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("ShakeFree requires an active engine context"))?;
+    try_with_host_context_mut("ShakeFree requires an active engine context", |context| {
         let operation = LandscapeOperation::ShakeCircle {
             center: Vector2::new(x, y),
             radius,
@@ -1570,11 +1554,7 @@ pub(crate) fn set_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
         "back color",
     )? as u32;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetSkyAdjust requires an active engine context"))?;
+    try_with_host_context_mut("SetSkyAdjust requires an active engine context", |context| {
         context.sky_adjustment = SkyAdjustment {
             modulation,
             back_color,
@@ -1655,11 +1635,7 @@ pub(crate) fn set_sky_color(args: &[Value]) -> Result<Value, RuntimeError> {
 /// is independent of `BackClrEnabled` (C4Sky.h:43-46).
 pub(crate) fn get_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
     let back_color = args.first().is_some_and(Value::as_bool);
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow
-            .as_ref()
-            .ok_or_else(|| RuntimeError::new("GetSkyAdjust requires an active engine context"))?;
+    try_with_host_context("GetSkyAdjust requires an active engine context", |context| {
         let raw = if back_color {
             context.sky_adjustment.back_color
         } else {
@@ -1680,11 +1656,7 @@ pub(crate) fn get_sky_color(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(0));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow
-            .as_ref()
-            .ok_or_else(|| RuntimeError::new("GetSkyColor requires an active engine context"))?;
+    try_with_host_context("GetSkyColor requires an active engine context", |context| {
         let color = context.world.sky_fade[1];
         let component = match channel {
             0 => color.r,
@@ -1704,11 +1676,7 @@ pub(crate) fn set_mat_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
         "SetMatAdjust",
         "adjust",
     )? as u32;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetMatAdjust requires an active engine context"))?;
+    try_with_host_context_mut("SetMatAdjust requires an active engine context", |context| {
         if let Some(landscape) = context.world.landscape_mut() {
             landscape.set_modulation(modulation);
         }
@@ -1720,11 +1688,7 @@ pub(crate) fn set_mat_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
 /// FnGetMatAdjust (C4Script.cpp:4638-4642): return the raw landscape blit
 /// modulation. C4Landscape::Default initializes this to zero.
 pub(crate) fn get_mat_adjust(_args: &[Value]) -> Result<Value, RuntimeError> {
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow
-            .as_ref()
-            .ok_or_else(|| RuntimeError::new("GetMatAdjust requires an active engine context"))?;
+    try_with_host_context("GetMatAdjust requires an active engine context", |context| {
         let modulation = context
             .world
             .landscape_ref()
@@ -1780,11 +1744,7 @@ pub(crate) fn set_sky_parallax(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     let [mode, par_x, par_y, xdir, ydir, x, y] = slots;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetSkyParallax requires an active engine context"))?;
+    try_with_host_context_mut("SetSkyParallax requires an active engine context", |context| {
         context.register_landscape_operation(LandscapeOperation::SkyParallax {
             mode,
             par_x,
@@ -1812,11 +1772,7 @@ pub(crate) fn dig_free(args: &[Value]) -> Result<Value, RuntimeError> {
         false
     };
 
-    let (by_object, counts) = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("DigFree requires an active engine context"))?;
+    let (by_object, counts) = try_with_host_context_mut("DigFree requires an active engine context", |context| {
         let by_object = context.object_context().map(|object| object.id());
         let center = Vector2::new(x, y);
         let counts = context.preview_dig_circle(center, radius);
@@ -2350,11 +2306,7 @@ pub(crate) fn dig_free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
         false
     };
 
-    let (by_object, counts) = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("DigFreeRect requires an active engine context"))?;
+    let (by_object, counts) = try_with_host_context_mut("DigFreeRect requires an active engine context", |context| {
         let by_object = context.object_context().map(|object| object.id());
         let origin = Vector2::new(x, y);
         let counts = context.preview_dig_rect(origin, width, height);
@@ -2381,11 +2333,7 @@ pub(crate) fn cast_pxs(args: &[Value]) -> Result<Value, RuntimeError> {
     let x_offset = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "CastPXS", "x")?;
     let y_offset = value_to_i32(args.get(4).unwrap_or(&Value::Nil), "CastPXS", "y")?;
 
-    let (material, position) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow
-            .as_ref()
-            .ok_or_else(|| RuntimeError::new("CastPXS requires an active engine context"))?;
+    let (material, position) = try_with_host_context("CastPXS requires an active engine context", |context| {
         let material = context
             .world
             .materials()
@@ -2418,11 +2366,7 @@ pub(crate) fn cast_pxs(args: &[Value]) -> Result<Value, RuntimeError> {
     })?;
 
     if let Some(material) = material {
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let context = borrow
-                .as_mut()
-                .ok_or_else(|| RuntimeError::new("CastPXS requires an active engine context"))?;
+        try_with_host_context_mut("CastPXS requires an active engine context", |context| {
             context.register_landscape_operation(LandscapeOperation::CastPxs {
                 material,
                 position,

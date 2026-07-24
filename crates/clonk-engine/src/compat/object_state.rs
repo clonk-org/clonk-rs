@@ -757,11 +757,7 @@ pub(crate) fn death_announce(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("DeathAnnounce requires an active engine context"))?;
+    try_with_host_context_mut("DeathAnnounce requires an active engine context", |context| {
         context.register_message(MessageCommand::Add(MessageSpec {
             kind: MessageKind::Target,
             text,
@@ -1030,11 +1026,7 @@ pub(crate) fn do_breath(args: &[Value]) -> Result<Value, RuntimeError> {
     let change = value_to_i32(args.first().unwrap_or(&Value::Nil), "DoBreath", "change")?;
     let target_id =
         parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "DoBreath", "target")?;
-    let target = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("DoBreath requires an active engine context"))?;
+    let target = try_with_host_context_mut("DoBreath requires an active engine context", |context| {
         let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
         else {
             return Ok(None);
@@ -1052,11 +1044,7 @@ pub(crate) fn do_breath(args: &[Value]) -> Result<Value, RuntimeError> {
     else {
         return Ok(Value::Bool(false));
     };
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("DoBreath requires an active engine context"))?;
+    try_with_host_context_mut("DoBreath requires an active engine context", |context| {
         let Some(scope) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
@@ -1432,11 +1420,7 @@ pub(crate) fn set_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    let prepared = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetPhysical requires an active engine context"))?;
+    let prepared = try_with_host_context_mut("SetPhysical requires an active engine context", |context| {
         let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
             return Ok(None);
@@ -1461,11 +1445,7 @@ pub(crate) fn set_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     };
     let base = base.map(PhysicalResolution::resolve);
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetPhysical requires an active engine context"))?;
+    try_with_host_context_mut("SetPhysical requires an active engine context", |context| {
         Ok(Value::Bool(context.object_scope_mut(target).is_some_and(
             |object| object.set_physical(&name, value, mode, base),
         )))
@@ -1486,11 +1466,7 @@ pub(crate) fn train_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("TrainPhysical requires an active engine context"))?;
+    try_with_host_context_mut("TrainPhysical requires an active engine context", |context| {
         let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
             return Ok(Value::Bool(false));
@@ -1541,11 +1517,7 @@ pub(crate) fn reset_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         .flatten();
     let name = physical_name_argument(args, 1, "ResetPhysical")?;
 
-    let prepared = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("ResetPhysical requires an active engine context"))?;
+    let prepared = try_with_host_context_mut("ResetPhysical requires an active engine context", |context| {
         let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
             return Ok(None);
@@ -1691,11 +1663,7 @@ pub(crate) fn do_energy_with_cause_override(
         ));
     }
 
-    let staged = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("DoEnergy requires an active engine context"))?;
+    let staged = try_with_host_context_mut("DoEnergy requires an active engine context", |context| {
         // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
         // (C4Script.cpp:496-497) — resolved in the caller's scope.
         let caused_by = caused_by_override.unwrap_or_else(|| {
@@ -1822,11 +1790,7 @@ pub(crate) fn do_magic_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    let target = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("DoMagicEnergy requires an active engine context"))?;
+    let target = try_with_host_context_mut("DoMagicEnergy requires an active engine context", |context| {
         // `if (!pObj) pObj = cthr->Obj; if (!pObj) return false` (:519).
         let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
             return Ok(None);
@@ -1911,11 +1875,7 @@ pub(crate) fn do_magic_energy(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(cap) = resolve_object_physical(target, false).map(|physical| physical.magic) else {
         return Ok(Value::Bool(false));
     };
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("DoMagicEnergy requires an active engine context"))?;
+    try_with_host_context_mut("DoMagicEnergy requires an active engine context", |context| {
         let Some(scope) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
@@ -1935,11 +1895,7 @@ pub(crate) fn do_magic_energy(args: &[Value]) -> Result<Value, RuntimeError> {
 /// MagicPhysicalFactor; 0 without an object (`return false`).
 pub(crate) fn get_magic_energy(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_id = magic_energy_target(args.first(), "GetMagicEnergy")?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("GetMagicEnergy requires an active engine context"))?;
+    try_with_host_context_mut("GetMagicEnergy requires an active engine context", |context| {
         let Some(target) = target_id.or_else(|| context.object_context().map(|o| o.id())) else {
             return Ok(Value::Int(0));
         };
@@ -2336,11 +2292,7 @@ pub(crate) fn do_damage_with_cause_override(
         ));
     }
 
-    let staged = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("DoDamage requires an active engine context"))?;
+    let staged = try_with_host_context_mut("DoDamage requires an active engine context", |context| {
         // iCausedBy = iCausedByPlusOne - 1, else the CALLER's controller
         // (C4Script.cpp:511) — resolved in the caller's scope.
         let caused_by = caused_by_override.unwrap_or_else(|| {
@@ -2460,11 +2412,7 @@ pub(crate) fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         i32,
         Option<String>,
     )> = None;
-    let staged = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetAction requires an active engine context"))?;
+    let staged = try_with_host_context_mut("SetAction requires an active engine context", |context| {
         // SetActionByName returns false without changing anything when the
         // requested name is absent from the ActMap (C4Object.cpp:4218-4234).
         // "Idle"/"ActIdle" are the one sentinel exception. ChangeDef swaps
@@ -2744,11 +2692,7 @@ pub(crate) fn set_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetActionData requires an active engine context"))?;
+    try_with_host_context_mut("SetActionData requires an active engine context", |context| {
         let bridge_material = clamp_bridge_material(data, context.world.materials());
         let Some(target) = target_id.or(context.script_object_context) else {
             return Ok(Value::Bool(false));
@@ -2990,11 +2934,7 @@ pub(crate) fn set_phase(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetPhase requires an active engine context"))?;
+    try_with_host_context_mut("SetPhase requires an active engine context", |context| {
         let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
             return Ok(Value::Bool(false));
@@ -3955,11 +3895,7 @@ pub(crate) fn native_set_action_by_name_with_target(
     } else {
         name
     };
-    let callbacks = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("native action requires an active engine context"))?;
+    let callbacks = try_with_host_context_mut("native action requires an active engine context", |context| {
         if !context.ensure_object_scope(target) {
             return Ok(None);
         }
@@ -4094,11 +4030,7 @@ pub(crate) fn native_set_action_by_name_with_target(
 
 /// Target-aware `C4Object::SetDir` used by native action helpers.
 pub(crate) fn native_set_dir(target: ObjectId, direction: Direction) -> Result<(), RuntimeError> {
-    let turn_action = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetDir requires an active engine context"))?;
+    let turn_action = try_with_host_context_mut("SetDir requires an active engine context", |context| {
         if !context.ensure_object_scope(target) {
             return Ok(None);
         }
@@ -4153,11 +4085,7 @@ pub(crate) fn native_fling(
     add_speed: bool,
     caused_by: i32,
 ) -> Result<(), RuntimeError> {
-    let available = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("Fling requires an active engine context"))?;
+    let available = try_with_host_context_mut("Fling requires an active engine context", |context| {
         let Some(snapshot) = context.get_world_object(target) else {
             return Ok(false);
         };
@@ -4269,11 +4197,7 @@ pub(crate) fn shake_objects(args: &[Value]) -> Result<Value, RuntimeError> {
     let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "ShakeObjects", "x")?;
     let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "ShakeObjects", "y")?;
     let radius = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "ShakeObjects", "radius")?;
-    let (ids, caused_by) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow
-            .as_ref()
-            .ok_or_else(|| RuntimeError::new("ShakeObjects requires an active engine context"))?;
+    let (ids, caused_by) = try_with_host_context("ShakeObjects requires an active engine context", |context| {
         Ok::<_, RuntimeError>((
             context.master_object_ids(),
             context
@@ -4462,11 +4386,7 @@ pub(crate) fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(turn_action) = turn_action {
             let _ = set_action(&[Value::String(turn_action.into())])?;
         }
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let context = borrow
-                .as_mut()
-                .ok_or_else(|| RuntimeError::new("SetDir requires an active engine context"))?;
+        try_with_host_context_mut("SetDir requires an active engine context", |context| {
             if let Some(object) = context.object_context_mut() {
                 object.set_direction(direction);
             }
@@ -4530,11 +4450,7 @@ pub(crate) fn set_r(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetR requires an active engine context"))?;
+    try_with_host_context_mut("SetR requires an active engine context", |context| {
         let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
             return Ok(Value::Bool(false));
@@ -4622,11 +4538,7 @@ pub(crate) fn set_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetComDir requires an active engine context"))?;
+    try_with_host_context_mut("SetComDir requires an active engine context", |context| {
         let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
             return Ok(Value::Bool(false));
@@ -5112,11 +5024,7 @@ pub(crate) fn set_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetRDir requires an active engine context"))?;
+    try_with_host_context_mut("SetRDir requires an active engine context", |context| {
         let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
             return Ok(Value::Bool(false));
@@ -5361,11 +5269,7 @@ pub(crate) fn set_position(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetPosition requires an active engine context"))?;
+    try_with_host_context_mut("SetPosition requires an active engine context", |context| {
 
         let landscape_snapshot = if check_bounds {
             context.landscape_ref().cloned()
@@ -5558,11 +5462,7 @@ pub(crate) fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetGraphics requires an active engine context"))?;
+    try_with_host_context_mut("SetGraphics requires an active engine context", |context| {
 
         let object_id = if let Some(target) = target_id {
             target
@@ -6187,11 +6087,7 @@ pub(crate) fn set_shape(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_id =
         consume_optional_object_reference_argument(args, &mut index, "SetShape", "target")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetShape requires an active engine context"))?;
+    try_with_host_context_mut("SetShape requires an active engine context", |context| {
         let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
             return Ok(Value::Bool(false));
@@ -6347,11 +6243,7 @@ pub(crate) fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetVertex requires an active engine context"))?;
+    try_with_host_context_mut("SetVertex requires an active engine context", |context| {
         let active = context.object_context().map(|object| object.id());
         // FnSetVertex works on ANY object (`if (!pObj) pObj = cthr->Obj`,
         // C4Script.cpp) — the Gatling aims its crosshair with
@@ -6663,11 +6555,7 @@ pub(crate) fn set_alive(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    let updated = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("SetAlive requires an active engine context"))?;
+    let updated = try_with_host_context_mut("SetAlive requires an active engine context", |context| {
         let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
         else {
             return Ok(Value::Bool(false));

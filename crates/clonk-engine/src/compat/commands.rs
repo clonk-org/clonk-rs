@@ -952,11 +952,7 @@ pub(crate) fn process_preview_blast_reactions(
     controller: Option<i32>,
     counts: &HashMap<crate::MaterialId, i32>,
 ) -> Result<(), RuntimeError> {
-    let materials = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = borrow
-            .as_ref()
-            .ok_or_else(|| RuntimeError::new("BlastFree requires an active engine context"))?;
+    let materials = try_with_host_context("BlastFree requires an active engine context", |context| {
         Ok::<_, RuntimeError>(
             context
                 .world
@@ -1048,11 +1044,7 @@ pub(crate) fn process_preview_dig_reactions(
     let Some(target) = by_object else {
         return Ok(());
     };
-    let (frame, materials) = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("DigFree requires an active engine context"))?;
+    let (frame, materials) = try_with_host_context_mut("DigFree requires an active engine context", |context| {
         if !context.add_dig_material_counts(target, counts) {
             return Ok((context.world.frame, Vec::new()));
         }
@@ -4794,11 +4786,7 @@ pub(crate) fn add_command(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let request = parse_command_request(command_id, args, CommandArgLayout::Add, "AddCommand")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("AddCommand requires an active engine context"))?;
+    try_with_host_context_mut("AddCommand requires an active engine context", |context| {
         let object = match context.object_context_mut() {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
@@ -4863,11 +4851,7 @@ pub(crate) fn append_command(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let request = parse_command_request(command_id, args, CommandArgLayout::Add, "AppendCommand")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("AppendCommand requires an active engine context"))?;
+    try_with_host_context_mut("AppendCommand requires an active engine context", |context| {
         let object = match context.object_context_mut() {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),

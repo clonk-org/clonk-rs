@@ -306,3 +306,37 @@ state extraction remains queued behind wave 2.
   sites), which needs a lazy-error helper so the message is not allocated on
   every call, and the multi-step `and_then` chains, which are real expression
   rewrites rather than a preamble swap.
+- compat host-context collapse, third pass: the 63 `.ok_or_else(|| RuntimeError
+  ::new(".."))?` chain sites now use `try_with_host_context` /
+  `try_with_host_context_mut`, which take the message as `&str` and only build
+  the error on the missing-context path — so the success path still allocates
+  nothing. Net -252 lines. Remaining in this family: the multi-step
+  `and_then` chains (~146 two-line prefixes), which are expression rewrites
+  rather than preamble swaps, and 6 sites whose bodies name `borrow`/`cell`.
+
+## Deferred, with reasons (2026-07-24)
+
+- **Engine field sub-structs** (`struct Engine`, 156 fields): every candidate
+  group — base rules (12 fields), teams (8), crew info (7), pathfinder (3),
+  scenario sections (5) — is read *and written* directly by test code
+  (41/178/62/5/10 references across 7-17 test files). Regrouping them into
+  sub-structs is a field-path rename that necessarily edits those test bodies,
+  which the current landing rule forbids for rename commits. Doing it needs
+  either an explicit exception, or a preparatory commit that migrates the tests
+  onto accessors first — itself a test-touching change. Not attempted.
+- **Dead-code deletion**: the workspace is `dead_code`-clean under
+  `clippy -D warnings`, so nothing is compiler-detectably dead. A cross-crate
+  scan finds 147 `pub` items never named outside their own definition, but
+  spot-checking shows they are deliberate C++-mirror surface — `set_button_text`
+  (C4GUI::Button::SetText), `keep_portrait` (the `Keep` half of a
+  clear/keep pair), `mean_value` (documented as the oracle's misnamed
+  `GetMedianValue`) — not dead code. Deleting them is a decision about the
+  port's intended API surface, not a mechanical tidy, so the inventory is
+  recorded here rather than acted on. Breakdown by crate: engine 55, core 26,
+  frontend 24, network 11, script 8, gui 6, app-menus 5, app 3, resources 3,
+  graphics 2, platform/audio/launcher-ui/app-core 1 each.
+- **clonk-app/src/main.rs** (40,420 lines) is untouched: unlike the engine
+  files it has no single monolith left after step 6a — it is ~1,077 top-level
+  items whose largest block is the 6,441-line root `impl GameApp`. Splitting it
+  is the queued step 6b (per-area state extraction), which is a design change,
+  not a byte-verbatim move.
