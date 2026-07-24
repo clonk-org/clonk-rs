@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub(crate) fn music(args: &[Value]) -> Result<Value, RuntimeError> {
     let song = match args.first().unwrap_or(&Value::Nil) {
         Value::String(name) => Some(name.as_ref().to_owned()),
@@ -41,9 +40,8 @@ pub(crate) fn music_level(args: &[Value]) -> Result<Value, RuntimeError> {
 /// count outside synchronized control modes. The playlist mutation happens
 /// before the sync-safe return gate, just like C++.
 pub(crate) fn set_play_list(args: &[Value]) -> Result<Value, RuntimeError> {
-    let playlist =
-        parse_native_c4_string_argument(args.first(), "SetPlayList", "playlist")?
-            .unwrap_or_default();
+    let playlist = parse_native_c4_string_argument(args.first(), "SetPlayList", "playlist")?
+        .unwrap_or_default();
     let restart = args.get(1).is_some_and(Value::as_bool);
 
     HOST_CONTEXT.with(|cell| {
@@ -51,9 +49,7 @@ pub(crate) fn set_play_list(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(context) = borrow.as_mut() else {
             return Ok(Value::Nil);
         };
-        let count = context
-            .audio_mut()
-            .set_music_playlist(playlist, restart);
+        let count = context.audio_mut().set_music_playlist(playlist, restart);
         if context.world.control_sync_mode {
             Ok(Value::Nil)
         } else {
@@ -443,7 +439,8 @@ impl AudioRegistry {
     pub(crate) fn detach_object_sounds(&mut self, target: ObjectId, position: Vector2) {
         let was_attached = self.attached_targets.remove(&target);
         if was_attached {
-            self.events.push(AudioCommand::DetachObjectSounds { target, position });
+            self.events
+                .push(AudioCommand::DetachObjectSounds { target, position });
         }
     }
 
@@ -585,7 +582,8 @@ fn sound_filename_matches(pattern: &str, file_name: &str) -> bool {
     let pattern = pattern.as_bytes();
     let file_name = file_name.as_bytes();
     pattern.len() == file_name.len()
-        && pattern.iter().zip(file_name).all(|(expected, actual)| {
-            *expected == b'?' || expected.eq_ignore_ascii_case(actual)
-        })
+        && pattern
+            .iter()
+            .zip(file_name)
+            .all(|(expected, actual)| *expected == b'?' || expected.eq_ignore_ascii_case(actual))
 }

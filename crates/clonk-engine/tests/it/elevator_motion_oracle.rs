@@ -140,9 +140,12 @@ fn tutorial07_seed_zero_landscape_matches_cpp_surface8() {
         .and_then(Landscape::pixel_grid)
         .expect("Tutorial07 retains its classic Surface8 plane");
     assert_eq!((grid.width(), grid.height()), (680, 480));
-    let hash = grid.bytes().iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-    });
+    let hash = grid
+        .bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
     assert_eq!(hash, 0x2310_7266_3100_b0cd);
 }
 
@@ -185,7 +188,7 @@ fn tutorial07_elevator_matches_cpp_fixed_motion_and_shaft_contact() -> Result<()
             object.action.name == "Push" && object.action.target == Some(elevator_case)
         })
     })?;
-    while player.engine().frame() % 5 != 0 {
+    while !player.engine().frame().is_multiple_of(5) {
         player.ticks(1)?;
     }
 

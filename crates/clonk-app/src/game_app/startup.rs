@@ -1594,9 +1594,9 @@ impl GameApp {
         let query_count = self.startup_discovery_reference_queries.len()
             + self.startup_direct_reference_queries.len();
         self.startup_discovery_reference_queries
-            .retain(|query| query.expires_at.map_or(true, |expires_at| now < expires_at));
+            .retain(|query| query.expires_at.is_none_or(|expires_at| now < expires_at));
         self.startup_direct_reference_queries
-            .retain(|query| query.expires_at.map_or(true, |expires_at| now < expires_at));
+            .retain(|query| query.expires_at.is_none_or(|expires_at| now < expires_at));
         if self.startup_discovery_reference_queries.len()
             + self.startup_direct_reference_queries.len()
             != query_count
@@ -3060,12 +3060,14 @@ impl GameApp {
         use clonk_frontend::startup_plrproperties::{PlayerPropertiesController, PLAYER_COLORS};
 
         let color_index = color_index % 8;
-        let mut player = PlayerFile::default();
-        player.pref_color = color_index as i32;
-        player.pref_color_dw = PLAYER_COLORS[color_index];
-        player.pref_control = 0;
-        player.pref_control_style = true;
-        player.pref_auto_context_menu = true;
+        let player = PlayerFile {
+            pref_color: color_index as i32,
+            pref_color_dw: PLAYER_COLORS[color_index],
+            pref_control: 0,
+            pref_control_style: true,
+            pref_auto_context_menu: true,
+            ..PlayerFile::default()
+        };
         let comment = self.runtime_resource_text("IDS_PLR_NEWCOMMENT", "I'm new.");
         let portrait = self
             .assets
@@ -3635,7 +3637,7 @@ impl GameApp {
         let is_saved = |player: &StartupPlayerFile| {
             player.path == saved.path || player.file_name.eq_ignore_ascii_case(&saved.file_name)
         };
-        let saved_index = players.iter().position(|player| is_saved(player));
+        let saved_index = players.iter().position(&is_saved);
         for player in &mut players {
             let was_activated = previous_activations
                 .iter()

@@ -1,24 +1,22 @@
 //! Pixel-parity renderer for `C4StartupScenSelDlg` — the scenario-selection
-//! "book" (see `rust/target/parity-specs/scensel.md`). Implemented against the
+//! "book" (see `target/parity-specs/scensel.md`). Implemented against the
 //! engine's F9 reference capture at 1280x720; mirrors
 //! `src/C4StartupScenSelDlg.cpp` (ctor layout, 1302-1382), `src/C4Gui.cpp`
 //! (DrawBar/DrawVBar/Draw3DFrame, 264-345) and `src/C4Startup.cpp:92-116`
 //! (shadowless book fonts).
 
-use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 use crate::classic_gui::{ClassicButtonState, ClassicGuiSkin};
-use crate::startup_main_menu::{
-    centered_label_tooltip_at, draw_bar, IntRect, StartupTooltip,
-};
+use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
+use crate::startup_main_menu::{centered_label_tooltip_at, draw_bar, IntRect, StartupTooltip};
 use crate::{draw_image_bilinear, draw_image_strip, ImageData};
 use anyhow::{ensure, Context, Result};
-use freetype::face::LoadFlag;
-use freetype::Library;
 use clonk_graphics::clonk_font::{line_height_for, ClonkFont, ClonkFontRole, GlyphCell, TextAlign};
 use clonk_graphics::{
     BlitSampling, Color, GammaRamp, Rect as SurfaceRect, Surface, SurfaceDrawTarget,
 };
 use clonk_gui::Rect as GuiRect;
+use freetype::face::LoadFlag;
+use freetype::Library;
 use std::{cell::RefCell, collections::HashMap};
 
 // ---------------------------------------------------------------------------
@@ -121,10 +119,7 @@ fn cp1252_to_char(byte: u8) -> Option<char> {
 /// (no shadow row), `shadowSize = 0` so every atlas pixel is pure white with
 /// alpha = FreeType coverage (`BltAlpha` onto a fully transparent base keeps
 /// the white source, StdColors.h:122-126).
-pub(crate) fn build_shadowless_font(
-    face: &freetype::Face,
-    px_height: u32,
-) -> Result<ClonkFont> {
+pub(crate) fn build_shadowless_font(face: &freetype::Face, px_height: u32) -> Result<ClonkFont> {
     face.set_pixel_sizes(px_height, px_height)
         .context("FT_Set_Pixel_Sizes failed")?;
 
@@ -664,9 +659,9 @@ pub fn scen_sel_map_tooltip_at<'a>(
     }
     for button in scenario_buttons {
         if tooltip_gui_rect_contains(&button.bounds, point) {
-            return button.scenario_name.map(|name| {
-                StartupTooltip::formatted_resource("IDS_MSG_MAP_STARTSCEN", [name])
-            });
+            return button
+                .scenario_name
+                .map(|name| StartupTooltip::formatted_resource("IDS_MSG_MAP_STARTSCEN", [name]));
         }
     }
     picture_bounds
@@ -1170,8 +1165,8 @@ pub fn draw_scen_list_item(
     enabled: bool,
 ) {
     let item_h = scen_list_item_height(book_text_font); // 26
-    // Picture(0,0,26,26, fAspect=true): a 24x24 facet has the same aspect, so
-    // it stretches to the full rect (C4Facet::Draw, C4Facet.cpp:447-467).
+                                                        // Picture(0,0,26,26, fAspect=true): a 24x24 facet has the same aspect, so
+                                                        // it stretches to the full rect (C4Facet::Draw, C4Facet.cpp:447-467).
     let icon_count = icons.width() / icons.height().max(1);
     let src_x = (icon_index.min(icon_count.saturating_sub(1)) * icons.height()) as f32;
     draw_facet_stretch(
@@ -1226,7 +1221,9 @@ impl ScenSelScreen {
         // root caption, "Open" button, disabled unchecked checkbox.
         draw_book_caption(surface, &layout, book_fonts, "Scenarios", gamma);
         draw_open_button(surface, &layout, "Open", assets, gui_fonts, gamma);
-        draw_user_change_checkbox(surface, &layout, assets, gui_fonts, false, false, false, gamma);
+        draw_user_change_checkbox(
+            surface, &layout, assets, gui_fonts, false, false, false, gamma,
+        );
     }
 
     /// The selection-independent part of the frame: everything except the
@@ -1388,7 +1385,14 @@ impl ScenSelScreen {
         // (C4StartupScenSelDlg.cpp:1367-1382); the checkbox and Open button
         // are selection-dependent and drawn by the caller.
         if draw_back {
-            draw_button(surface, &layout.back_button, "Back", assets, gui_fonts, gamma);
+            draw_button(
+                surface,
+                &layout.back_button,
+                "Back",
+                assets,
+                gui_fonts,
+                gamma,
+            );
         }
 
         // Icon buttons (IconButton::DrawElement, C4GuiButton.cpp:205-232):
@@ -1400,10 +1404,30 @@ impl ScenSelScreen {
             let icon_ex = |idx: u32| ((idx % 4) * 64, (idx / 4) * 64);
             let (fc_x, fc_y) = icon_ex(if fair_crew { 2 } else { 3 });
             let fc = &layout.fair_crew_button;
-            draw_image_strip(surface, fc.x, fc.y, &assets.icons_ex, fc_x, fc_y, 64, 64, gamma);
+            draw_image_strip(
+                surface,
+                fc.x,
+                fc.y,
+                &assets.icons_ex,
+                fc_x,
+                fc_y,
+                64,
+                64,
+                gamma,
+            );
             let (rec_x, rec_y) = icon_ex(if record { 1 } else { 0 });
             let rec = &layout.record_button;
-            draw_image_strip(surface, rec.x, rec.y, &assets.icons_ex, rec_x, rec_y, 64, 64, gamma);
+            draw_image_strip(
+                surface,
+                rec.x,
+                rec.y,
+                &assets.icons_ex,
+                rec_x,
+                rec_y,
+                64,
+                64,
+                gamma,
+            );
         }
     }
 }
@@ -1508,11 +1532,9 @@ pub fn draw_search_edit_contents(
             && text.is_char_boundary(selection_start)
             && text.is_char_boundary(selection_end)
         {
-            let x1 = client.x
-                + gui_fonts.text.measure(&text[..selection_start], false).0
+            let x1 = client.x + gui_fonts.text.measure(&text[..selection_start], false).0
                 - horizontal_scroll;
-            let x2 = client.x
-                + gui_fonts.text.measure(&text[..selection_end], false).0
+            let x2 = client.x + gui_fonts.text.measure(&text[..selection_end], false).0
                 - horizontal_scroll;
             let clipped_x1 = x1.max(clip.x);
             let clipped_x2 = (x2 - 1).min(clip.x + clip.w - 1);
@@ -1539,16 +1561,15 @@ pub fn draw_search_edit_contents(
         TextAlign::Left,
         false,
         gamma,
-        (
-            clip.x,
-            clip.y,
-            clip.x + clip.w - 1,
-            clip.y + clip.h - 1,
-        ),
+        (clip.x, clip.y, clip.x + clip.w - 1, clip.y + clip.h - 1),
     );
     if cursor_visible {
         let caret = caret.min(text.len());
-        let caret = if text.is_char_boundary(caret) { caret } else { 0 };
+        let caret = if text.is_char_boundary(caret) {
+            caret
+        } else {
+            0
+        };
         let cursor_x = client.x + gui_fonts.text.measure(&text[..caret], false).0
             - gui_fonts.text.measure("\u{a6}", false).0 / 2
             - horizontal_scroll;
@@ -1670,7 +1691,14 @@ pub fn draw_open_button(
     gamma: Option<&GammaRamp>,
 ) {
     let (text, _) = expand_hotkey_markup(text);
-    draw_button(surface, &layout.open_button, &text, assets, gui_fonts, gamma);
+    draw_button(
+        surface,
+        &layout.open_button,
+        &text,
+        assets,
+        gui_fonts,
+        gamma,
+    );
 }
 
 /// Validates the three exact classic resources needed to render a dynamic
@@ -1795,7 +1823,17 @@ pub fn draw_user_change_checkbox(
 ) {
     let cb = &layout.user_change_checkbox;
     let phase = u32::from(checked) + 2 * u32::from(!enabled);
-    draw_image_strip(surface, cb.x, cb.y, &assets.checkbox, phase * 32, 0, 32, 32, gamma);
+    draw_image_strip(
+        surface,
+        cb.x,
+        cb.y,
+        &assets.checkbox,
+        phase * 32,
+        0,
+        32,
+        32,
+        gamma,
+    );
     let (caption, _) = expand_hotkey_markup("Choose &definitions");
     let color = if enabled {
         [255, 255, 255, 255] // C4GUI_CheckboxFontClr
@@ -2146,16 +2184,11 @@ mod tests {
     // pixels are pure white with alpha = coverage (no shadow kernel).
     #[test]
     fn book_fonts_are_shadowless() {
-        let ttf = std::fs::read(
-            crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"),
-        )
-        .expect("read Endeavour.ttf");
+        let ttf =
+            std::fs::read(crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"))
+                .expect("read Endeavour.ttf");
         let fonts = build_book_font_set(&ttf).expect("build book fonts");
-        for (font, line_height) in [
-            (&fonts.title, 34),
-            (&fonts.caption, 25),
-            (&fonts.text, 22),
-        ] {
+        for (font, line_height) in [(&fonts.title, 34), (&fonts.caption, 25), (&fonts.text, 22)] {
             assert_eq!(font.line_height, line_height);
             assert_eq!(font.cell_height, line_height, "no +1 shadow row");
             assert_eq!(font.h_space, 0, "no shadow overlap indent");
@@ -2297,15 +2330,17 @@ mod tests {
         let commands = surface.take_clonk_text_capture();
         assert_eq!(commands.len(), 1);
         assert_eq!((commands[0].x, commands[0].y), (7, 6));
-        assert_eq!(commands[0].clip, Some(clonk_graphics::Rect::new(5, 4, 7, 10)));
+        assert_eq!(
+            commands[0].clip,
+            Some(clonk_graphics::Rect::new(5, 4, 7, 10))
+        );
     }
 
     #[test]
     fn loading_label_uses_the_classic_book_caption_anchor() {
-        let ttf = std::fs::read(
-            crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"),
-        )
-        .expect("read Endeavour.ttf");
+        let ttf =
+            std::fs::read(crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"))
+                .expect("read Endeavour.ttf");
         let book_fonts = build_book_font_set(&ttf).expect("book fonts");
         let fonts = endeavour_font_set();
         let layout = scen_sel_layout(1280, 720, &fonts);
@@ -2339,7 +2374,12 @@ mod tests {
 
         // Client: margins x = 1280/50 = 25, top = 720/7 = 102, bottom = 19.
         assert_eq!(
-            (layout.client.x, layout.client.y, layout.client.w, layout.client.h),
+            (
+                layout.client.x,
+                layout.client.y,
+                layout.client.w,
+                layout.client.h
+            ),
             (25, 102, 1230, 599)
         );
         // Title label keeps its pre-override offsets: center 640, top 41.
@@ -2348,12 +2388,21 @@ mod tests {
         assert_eq!(layout.caption_anchor, (374, 143));
         // Search row: label (169,564,S+10,22), edit (179+S,564,400-S,22).
         assert_eq!(
-            (layout.search_label.x, layout.search_label.y, layout.search_label.h),
+            (
+                layout.search_label.x,
+                layout.search_label.y,
+                layout.search_label.h
+            ),
             (169, 564, 22)
         );
         assert_eq!(layout.search_label.w, s + 10);
         assert_eq!(
-            (layout.search_edit.x, layout.search_edit.y, layout.search_edit.w, layout.search_edit.h),
+            (
+                layout.search_edit.x,
+                layout.search_edit.y,
+                layout.search_edit.w,
+                layout.search_edit.h
+            ),
             (179 + s, 564, 400 - s, 22)
         );
         // List box (169,187,410,367); scrollbar track (560,190,16,361).
@@ -2383,7 +2432,12 @@ mod tests {
         // Bottom bar: Back (35,648,W,32), Open (1245-W,...), checkbox
         // (1225-2W,...), icon buttons 64x64 at y=632.
         assert_eq!(
-            (layout.back_button.x, layout.back_button.y, layout.back_button.w, layout.back_button.h),
+            (
+                layout.back_button.x,
+                layout.back_button.y,
+                layout.back_button.w,
+                layout.back_button.h
+            ),
             (35, 648, w, 32)
         );
         assert_eq!(
@@ -2399,7 +2453,10 @@ mod tests {
             (479, 632)
         );
         assert_eq!((layout.record_button.x, layout.record_button.y), (563, 632));
-        assert_eq!((layout.fair_crew_button.w, layout.fair_crew_button.h), (64, 64));
+        assert_eq!(
+            (layout.fair_crew_button.w, layout.fair_crew_button.h),
+            (64, 64)
+        );
         assert_eq!(
             layout.game_option_bounds(),
             IntRect {
@@ -2426,10 +2483,7 @@ mod tests {
         );
         let rows = ["<c ff0000>Mission</c>", "Folder"];
         let center = |rect: IntRect| {
-            crate::GuiPoint::new(
-                (rect.x + rect.w / 2) as f32,
-                (rect.y + rect.h / 2) as f32,
-            )
+            crate::GuiPoint::new((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32)
         };
 
         assert_eq!(
@@ -2448,57 +2502,25 @@ mod tests {
         );
         for rect in [layout.search_label, layout.search_edit] {
             assert_eq!(
-                scen_sel_book_tooltip_at(
-                    &layout,
-                    center(rect),
-                    caption_extent,
-                    0,
-                    26,
-                    rows,
-                ),
+                scen_sel_book_tooltip_at(&layout, center(rect), caption_extent, 0, 26, rows,),
                 Some(StartupTooltip::resource("IDS_DLGTIP_SEARCHLIST"))
             );
         }
-        let first_row = crate::GuiPoint::new(
-            (layout.list.x + 10) as f32,
-            (layout.list.y + 3 + 13) as f32,
-        );
+        let first_row =
+            crate::GuiPoint::new((layout.list.x + 10) as f32, (layout.list.y + 3 + 13) as f32);
         assert_eq!(
-            scen_sel_book_tooltip_at(
-                &layout,
-                first_row,
-                caption_extent,
-                0,
-                26,
-                rows,
-            ),
+            scen_sel_book_tooltip_at(&layout, first_row, caption_extent, 0, 26, rows,),
             Some(StartupTooltip::text("<c ff0000>Mission</c>"))
         );
         assert_eq!(
-            scen_sel_book_tooltip_at(
-                &layout,
-                first_row,
-                caption_extent,
-                27,
-                26,
-                rows,
-            ),
+            scen_sel_book_tooltip_at(&layout, first_row, caption_extent, 27, 26, rows,),
             Some(StartupTooltip::text("Folder"))
         );
-        let gap = crate::GuiPoint::new(
-            (layout.list.x + 10) as f32,
-            (layout.list.y + 3 + 26) as f32,
-        );
+        let gap =
+            crate::GuiPoint::new((layout.list.x + 10) as f32, (layout.list.y + 3 + 26) as f32);
         for point in [gap, center(layout.list_scrollbar)] {
             assert_eq!(
-                scen_sel_book_tooltip_at(
-                    &layout,
-                    point,
-                    caption_extent,
-                    0,
-                    26,
-                    rows,
-                ),
+                scen_sel_book_tooltip_at(&layout, point, caption_extent, 0, 26, rows,),
                 Some(StartupTooltip::resource("IDS_DLGTIP_SELECTSCENARIO"))
             );
         }
@@ -2507,14 +2529,7 @@ mod tests {
             (layout.list.y + 3 + 2 * 27 + 13) as f32,
         );
         assert_eq!(
-            scen_sel_book_tooltip_at(
-                &layout,
-                blank_item_band,
-                caption_extent,
-                0,
-                26,
-                rows,
-            ),
+            scen_sel_book_tooltip_at(&layout, blank_item_band, caption_extent, 0, 26, rows,),
             Some(StartupTooltip::resource("IDS_DLGTIP_SELECTSCENARIO"))
         );
         assert_eq!(
@@ -2686,10 +2701,9 @@ mod tests {
     // x = 28, y = 2.
     #[test]
     fn scen_list_item_renders_icon_and_label() {
-        let ttf = std::fs::read(
-            crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"),
-        )
-        .expect("read Endeavour.ttf");
+        let ttf =
+            std::fs::read(crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"))
+                .expect("read Endeavour.ttf");
         let book_fonts = build_book_font_set(&ttf).expect("build book fonts");
         assert_eq!(scen_list_item_height(&book_fonts.text), 26);
 
@@ -2709,8 +2723,19 @@ mod tests {
             .collect();
         let icons = crate::ImageData::new(1248, 24, pixels);
 
-        let mut surface = clonk_graphics::Surface::new(120, 30, clonk_graphics::PixelFormat::Rgba8888);
-        draw_scen_list_item(&mut surface, &icons, &book_fonts.text, None, 0, 0, 1, "I", true);
+        let mut surface =
+            clonk_graphics::Surface::new(120, 30, clonk_graphics::PixelFormat::Rgba8888);
+        draw_scen_list_item(
+            &mut surface,
+            &icons,
+            &book_fonts.text,
+            None,
+            0,
+            0,
+            1,
+            "I",
+            true,
+        );
         // Icon stretched over the full 26x26 picture rect: pure cell-1 green
         // at the center, nothing at column 26.
         assert_eq!(
@@ -2729,8 +2754,19 @@ mod tests {
         });
         assert!(label_hit, "BookFont label pixel at x>=28");
         // Disabled entries use 50% black (ClrScenarioItemDisabled).
-        let mut disabled = clonk_graphics::Surface::new(120, 30, clonk_graphics::PixelFormat::Rgba8888);
-        draw_scen_list_item(&mut disabled, &icons, &book_fonts.text, None, 0, 0, 1, "I", false);
+        let mut disabled =
+            clonk_graphics::Surface::new(120, 30, clonk_graphics::PixelFormat::Rgba8888);
+        draw_scen_list_item(
+            &mut disabled,
+            &icons,
+            &book_fonts.text,
+            None,
+            0,
+            0,
+            1,
+            "I",
+            false,
+        );
         let max_a = (28..40)
             .flat_map(|x| (2..26).map(move |y| (x, y)))
             .filter_map(|(x, y)| disabled.get_pixel(x, y))
@@ -2746,10 +2782,9 @@ mod tests {
     // (C4GuiLabels.cpp:454-489; C4GuiContainers.cpp:493-541).
     #[test]
     fn selection_info_scroll_metrics_cover_wrapped_overflow() {
-        let ttf = std::fs::read(
-            crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"),
-        )
-        .expect("read Endeavour.ttf");
+        let ttf =
+            std::fs::read(crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"))
+                .expect("read Endeavour.ttf");
         let gui_fonts = crate::clonk_fonts::build_font_set(&ttf).expect("build GUI fonts");
         let book_fonts = build_book_font_set(&ttf).expect("build book fonts");
         let layout = scen_sel_layout(800, 600, &gui_fonts);
@@ -2891,12 +2926,9 @@ mod tests {
             },
         );
         options.set_bounds(layout.game_option_bounds());
-        let resources = GameOptionButtonResources::new(
-            &assets.icons_ex,
-            &assets.button_highlight,
-            &fonts.text,
-        )
-        .expect("classic option resources");
+        let resources =
+            GameOptionButtonResources::new(&assets.icons_ex, &assets.button_highlight, &fonts.text)
+                .expect("classic option resources");
         let before_options = composed.snapshot();
         options
             .render(&mut composed, &resources, false, None)
@@ -2959,16 +2991,17 @@ mod tests {
             (
                 layout.back_button,
                 "&Back",
-                draw_back_button_with_state as fn(
-                    &mut Surface,
-                    &ScenSelLayout,
-                    &str,
-                    &ScenSelAssets,
-                    &ImageData,
-                    &ClonkFontSet,
-                    ScenSelButtonState,
-                    Option<&GammaRamp>,
-                ) -> Result<()>,
+                draw_back_button_with_state
+                    as fn(
+                        &mut Surface,
+                        &ScenSelLayout,
+                        &str,
+                        &ScenSelAssets,
+                        &ImageData,
+                        &ClonkFontSet,
+                        ScenSelButtonState,
+                        Option<&GammaRamp>,
+                    ) -> Result<()>,
             ),
             (layout.open_button, "&Start", draw_open_button_with_state),
         ] {
@@ -2992,8 +3025,14 @@ mod tests {
                 assert_eq!(actual.snapshot(), expected.snapshot());
                 snapshots.push(actual.snapshot());
             }
-            assert_ne!(snapshots[0], snapshots[1], "focus must add the highlight facet");
-            assert_ne!(snapshots[1], snapshots[2], "press must select GUIButtonDown");
+            assert_ne!(
+                snapshots[0], snapshots[1],
+                "focus must add the highlight facet"
+            );
+            assert_ne!(
+                snapshots[1], snapshots[2],
+                "press must select GUIButtonDown"
+            );
         }
     }
 
@@ -3026,14 +3065,14 @@ mod tests {
     fn render_matches_reference() {
         let assets = test_assets();
         let gui_fonts = endeavour_font_set();
-        let ttf = std::fs::read(
-            crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"),
-        )
-        .expect("read Endeavour.ttf");
+        let ttf =
+            std::fs::read(crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"))
+                .expect("read Endeavour.ttf");
         let book_fonts = build_book_font_set(&ttf).expect("build book fonts");
         let gamma = crate::test_support::standard_gamma();
 
-        let mut surface = clonk_graphics::Surface::new(1280, 720, clonk_graphics::PixelFormat::Rgba8888);
+        let mut surface =
+            clonk_graphics::Surface::new(1280, 720, clonk_graphics::PixelFormat::Rgba8888);
         // The reference capture ran with Config.General.FairCrew = true and
         // Record = true (verified against the icon-button pixels; see the
         // GUIIcons2 phases 2 and 1 in the F9 capture).

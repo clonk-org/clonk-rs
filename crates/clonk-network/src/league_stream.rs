@@ -1,5 +1,5 @@
-use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 use clonk_engine::{LegacyCString, RCT_CTRL, RCT_CTRL_PKT, RCT_END, RCT_FRAME};
+use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 use thiserror::Error;
 
 use crate::legacy::{
@@ -103,7 +103,7 @@ pub fn decode_classic_record_stream(
 fn inflate_classic_record_stream(
     compressed: &[u8],
 ) -> Result<Vec<u8>, ClassicRecordStreamDecodeError> {
-    let initial_capacity = compressed.len().checked_mul(5).unwrap_or(usize::MAX);
+    let initial_capacity = compressed.len().saturating_mul(5);
     let mut inflated = Vec::new();
     inflated
         .try_reserve(initial_capacity.max(1))

@@ -10,7 +10,19 @@ git submodule update --init --recursive
 
 The workspace and CI pin Rust 1.97.1; CI pins cargo-nextest 0.9.91. Rustup
 selects the checked-in toolchain automatically, which keeps local and CI
-diagnostics comparable.
+diagnostics comparable. Repository script tests require Python 3.10 or newer.
+
+On Debian or Ubuntu, install the native development dependencies used by CI:
+
+```sh
+sudo apt-get update
+sudo apt-get install --yes --no-install-recommends \
+  libasound2-dev \
+  libfreetype6-dev \
+  libxmp4 \
+  libudev-dev \
+  pkg-config
+```
 
 Tracker music and its executable IT/MOD/S3M/XM tests require the libxmp 4
 runtime (`libxmp4` on Debian/Ubuntu, `libxmp` in Homebrew). Set
@@ -133,17 +145,29 @@ GitHub Actions uploads the entire `target/dev-check` tree from the
 ## Full pre-merge gate
 
 Focused feedback answers "what did this edit most likely break?" The full gate
-answers "is the workspace still mergeable?" Run both commands before
+answers "is the workspace still mergeable?" Run the complete gate before
 handoff or merge:
 
 ```sh
-cargo nextest run --workspace --locked
+cargo fmt --all -- --check
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
+cargo test --workspace --locked
 cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
+cargo xtask engine-snapshots verify
+cargo xtask parity verify
 ```
 
-The workspace test run includes deterministic engine snapshots, C++↔Rust
-differential parity, and the focused tutorial and virtual-play tests; running
-those checks again in the full gate only duplicates work.
+The Python unittest discovery covers repository scripts, including public-path
+portability and the 24-player benchmark harness. The explicit engine-tools
+test command exercises the feature-gated packager, archive, release-dependency,
+and release-license checks that the default workspace feature set does not
+build. The workspace
+test run includes the focused tutorial, virtual-play, snapshot, and C++↔Rust
+differential tests. The explicit snapshot and parity commands remain named
+completion gates so both baselines are visible independently in local and CI
+output. The parity wrapper invokes the pinned cargo-nextest 0.9.91 tool listed
+above.
 The explicit Clippy target set covers every production library, binary, and
 test without rebuilding `test = false` libraries as implicit benchmark
 harnesses. The two Criterion benchmarks remain opt-in through their `bench`

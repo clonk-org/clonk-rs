@@ -1,13 +1,18 @@
 use crate::support::real_scenario::{
     join_local_player, prepare_installed_scenario, PreparedInstalledScenario,
 };
+use crate::support::PreparedScenarioSubcase;
 use clonk_engine::{
     CommandDirection, Direction, ObjectId, ObjectUpdate, SpawnConfig, COM_LEFT, COM_RELEASE_OFFSET,
     COM_THROW,
 };
 use clonk_script::Value;
 
-fn fill_kayak(engine: &mut clonk_engine::Engine, kayak: ObjectId, cargo_count: usize) -> Vec<ObjectId> {
+fn fill_kayak(
+    engine: &mut clonk_engine::Engine,
+    kayak: ObjectId,
+    cargo_count: usize,
+) -> Vec<ObjectId> {
     (0..cargo_count)
         .map(|_| {
             engine
@@ -20,7 +25,7 @@ fn fill_kayak(engine: &mut clonk_engine::Engine, kayak: ObjectId, cargo_count: u
 #[test]
 fn arctic_occupied_kayak_rows_with_jump_and_run_direction_updates() {
     let prepared = prepare_installed_scenario("FarWorlds.c4f/Arctic.c4s", 0);
-    let subcases: &[(&str, fn(&PreparedInstalledScenario))] = &[
+    let subcases: &[PreparedScenarioSubcase] = &[
         (
             "rows_with_jump_and_run_direction_updates",
             arctic_occupied_kayak_rows_with_jump_and_run_direction_updates_subcase,
@@ -217,12 +222,17 @@ fn arctic_occupied_kayak_opens_grouped_cargo_only_at_collection_limit(
     assert_eq!(menu.identification, Value::Int(6));
     assert!(!menu.user_menu, "the cargo menu is an internal object menu");
     assert_eq!(menu.refill_object, Some(full));
-    assert_eq!(menu.items.len(), 1, "identical cargo is grouped by definition");
+    assert_eq!(
+        menu.items.len(),
+        1,
+        "identical cargo is grouped by definition"
+    );
     let bone = &menu.items[0];
     assert_eq!(bone.item_id, "BONE");
     assert_eq!(bone.count, 4);
     assert!(
-        bone.picture_object.is_some_and(|object| full_cargo.contains(&object)),
+        bone.picture_object
+            .is_some_and(|object| full_cargo.contains(&object)),
         "the grouped row keeps a live representative from the full kayak"
     );
 }

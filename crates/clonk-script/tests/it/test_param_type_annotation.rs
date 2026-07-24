@@ -196,10 +196,9 @@ fn nonlegacy_parameter_type_extensions_are_rejected() {
         }
     }
 
-    let ordinary_names = Script::compile(
-        "#strict 3\nfunc Names(proplist, effect, Int) { return 1; }",
-    )
-    .expect("non-type words remain ordinary parameter names");
+    let ordinary_names =
+        Script::compile("#strict 3\nfunc Names(proplist, effect, Int) { return 1; }")
+            .expect("non-type words remain ordinary parameter names");
     assert!(
         ordinary_names.parse_diagnostics().is_empty(),
         "unexpected ordinary-name diagnostic: {:?}",
@@ -262,13 +261,7 @@ fn legacy_pipe_parameter_names_are_not_union_annotations() {
         assert!(script.functions().contains_key("Healthy"));
     }
 
-    for declaration in [
-        "|nil",
-        "int|nil",
-        "int &|nil",
-        "int||nil",
-        "int|=nil",
-    ] {
+    for declaration in ["|nil", "int|nil", "int &|nil", "int||nil", "int|=nil"] {
         let source = format!("#strict 2\nfunc Broken({declaration}) {{ return 1; }}");
         let script = Script::compile(&source).expect("the invalid pipe spelling is recovered");
         assert_eq!(
@@ -278,10 +271,9 @@ fn legacy_pipe_parameter_names_are_not_union_annotations() {
         );
     }
 
-    let over_cap = Script::compile(
-        "#strict 2\nfunc Broken(a,b,c,d,e,f,g,h,i,j,|name) { return 1; }",
-    )
-    .expect("the invalid eleventh token is recovered");
+    let over_cap =
+        Script::compile("#strict 2\nfunc Broken(a,b,c,d,e,f,g,h,i,j,|name) { return 1; }")
+            .expect("the invalid eleventh token is recovered");
     assert_eq!(
         over_cap.parse_diagnostics()[0].message(),
         "unexpected character '|' found"
@@ -298,10 +290,9 @@ fn legacy_pipe_parameter_names_are_not_union_annotations() {
         );
     }
 
-    let over_cap_equal = Script::compile(
-        "#strict 2\nfunc Broken(a,b,c,d,e,f,g,h,i,j,=value) { return 1; }",
-    )
-    .expect("the invalid eleventh token is recovered");
+    let over_cap_equal =
+        Script::compile("#strict 2\nfunc Broken(a,b,c,d,e,f,g,h,i,j,=value) { return 1; }")
+            .expect("the invalid eleventh token is recovered");
     assert_eq!(
         over_cap_equal.parse_diagnostics()[0].message(),
         "unexpected character '=' found"
@@ -320,7 +311,10 @@ fn boolean_literals_are_not_parameter_names() {
             !script.parse_diagnostics().is_empty(),
             "boolean literal must not bind as a parameter: {source}"
         );
-        assert!(script.functions().contains_key("Healthy"), "source: {source}");
+        assert!(
+            script.functions().contains_key("Healthy"),
+            "source: {source}"
+        );
     }
 }
 

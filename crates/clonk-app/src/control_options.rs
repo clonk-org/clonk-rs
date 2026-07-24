@@ -1,5 +1,7 @@
 use crate::input::{ControlBindingId, KeyboardBindings};
-use clonk_frontend::{ControlOptionItem, ControlOptionsAction, ControlOptionsView, GuiPoint, KeyCode};
+use clonk_frontend::{
+    ControlOptionItem, ControlOptionsAction, ControlOptionsView, GuiPoint, KeyCode,
+};
 use clonk_graphics::{Surface, TextFont};
 use std::sync::Arc;
 use winit::event::VirtualKeyCode;

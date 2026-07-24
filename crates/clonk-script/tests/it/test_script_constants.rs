@@ -18,7 +18,10 @@ fn registered_constants_resolve_as_identifiers() {
         )
         .expect("script compiles"),
     );
-    assert_eq!(engine.call("Probe", &[]).expect("call succeeds"), Value::Int(0));
+    assert_eq!(
+        engine.call("Probe", &[]).expect("call succeeds"),
+        Value::Int(0)
+    );
 }
 
 #[test]
@@ -33,7 +36,10 @@ fn local_variables_shadow_constants() {
         )
         .expect("script compiles"),
     );
-    assert_eq!(engine.call("Probe", &[]).expect("call succeeds"), Value::Int(9));
+    assert_eq!(
+        engine.call("Probe", &[]).expect("call succeeds"),
+        Value::Int(9)
+    );
 }
 
 #[test]
@@ -101,10 +107,8 @@ fn script_static_consts_are_callable_across_hosts_below_strict2() {
     declarer.set_global_variables(globals.clone());
     declarer.set_global_constants(consts.clone());
     declarer.add_script(
-        Script::compile(
-            "#strict\n\nstatic const MCLK_ComboExtraDataName = \"MCLK_PrefCombo\";\n",
-        )
-        .expect("declaring script compiles"),
+        Script::compile("#strict\n\nstatic const MCLK_ComboExtraDataName = \"MCLK_PrefCombo\";\n")
+            .expect("declaring script compiles"),
     );
     declarer.adopt_statics_into_globals();
 
@@ -112,10 +116,8 @@ fn script_static_consts_are_callable_across_hosts_below_strict2() {
     caller.set_global_variables(globals.clone());
     caller.set_global_constants(consts.clone());
     caller.add_script(
-        Script::compile(
-            "#strict\n\nfunc Probe() { return(MCLK_ComboExtraDataName()); }\n",
-        )
-        .expect("calling script compiles"),
+        Script::compile("#strict\n\nfunc Probe() { return(MCLK_ComboExtraDataName()); }\n")
+            .expect("calling script compiles"),
     );
     caller.adopt_statics_into_globals();
 
@@ -180,11 +182,8 @@ fn static_const_rejects_nonliteral_nonconstant_initializer() {
 
         let globals = clonk_script::new_global_variables();
         let consts = clonk_script::new_global_variables();
-        let registration = clonk_script::register_global_declarations(
-            script.var_decls(),
-            &globals,
-            Some(&consts),
-        );
+        let registration =
+            clonk_script::register_global_declarations(script.var_decls(), &globals, Some(&consts));
         match initializer {
             "RuntimeCall()" => {
                 let error = registration.expect_err("unknown call prefix must fail linking");
@@ -369,8 +368,7 @@ fn signed_static_consts_are_registered_and_not_assignable() {
     declarer.set_global_variables(globals.clone());
     declarer.set_global_constants(consts.clone());
     declarer.add_script(
-        Script::compile("#strict\nstatic const FM_Error = -1;\n")
-            .expect("declaration compiles"),
+        Script::compile("#strict\nstatic const FM_Error = -1;\n").expect("declaration compiles"),
     );
     declarer.adopt_statics_into_globals();
 
@@ -437,7 +435,9 @@ fn constant_calls_reject_parameters_like_cpp() {
         )
         .expect("script compiles"),
     );
-    let error = engine.call("Probe", &[]).expect_err("parameters are rejected");
+    let error = engine
+        .call("Probe", &[])
+        .expect_err("parameters are rejected");
     assert!(
         error.to_string().contains("parameters not allowed"),
         "unexpected error: {error}"

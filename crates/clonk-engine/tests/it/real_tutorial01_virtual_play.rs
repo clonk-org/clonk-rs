@@ -2,11 +2,11 @@
 
 use std::error::Error;
 
+use crate::support::real_scenario::load_tutorial;
+use crate::support::virtual_player::VirtualPlayer;
 use clonk_engine::{
     Engine, JoinPlayerConfig, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_UP,
 };
-use crate::support::real_scenario::load_tutorial;
-use crate::support::virtual_player::VirtualPlayer;
 
 fn load_tutorial01() -> (Engine, i32) {
     let mut engine = load_tutorial(1, 0);

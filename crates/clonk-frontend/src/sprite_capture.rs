@@ -738,11 +738,7 @@ fn draw_image_region_transformed(
             };
             let source_x = source.x + source_x;
             let source_y = source.y + (normalized_y * source.height as f32).floor() as i32;
-            if source_x < 0
-                || source_y < 0
-                || source_x >= image_width
-                || source_y >= image_height
-            {
+            if source_x < 0 || source_y < 0 || source_x >= image_width || source_y >= image_height {
                 continue;
             }
 
@@ -1474,14 +1470,7 @@ pub(crate) fn draw_image_region_rotated(
             if source.alpha() == 0.0 {
                 continue;
             }
-            blend_prepared_sprite_fragment(
-                surface,
-                x as u32,
-                y as u32,
-                source,
-                pixel_blit,
-                gamma,
-            );
+            blend_prepared_sprite_fragment(surface, x as u32, y as u32, source, pixel_blit, gamma);
         }
     }
 }
@@ -1697,9 +1686,7 @@ pub fn draw_image_strip(
                 surface,
                 tx as u32,
                 ty as u32,
-                PreparedSpriteFragment::Legacy(Color::new(
-                    rgba[0], rgba[1], rgba[2], rgba[3],
-                )),
+                PreparedSpriteFragment::Legacy(Color::new(rgba[0], rgba[1], rgba[2], rgba[3])),
                 SpriteBlitState::normal(),
                 gamma,
             );
@@ -1723,7 +1710,7 @@ pub(crate) fn cpp_tex_size(width: u32, height: u32) -> u32 {
 
 fn cpp_last_tex_size(width: u32, height: u32, base: i32) -> i32 {
     let base = base as u32;
-    if width % base == 0 || height % base == 0 {
+    if width.is_multiple_of(base) || height.is_multiple_of(base) {
         return base as i32;
     }
     let needed = (width % base).max(height % base).max(1);
@@ -1991,12 +1978,7 @@ fn bilinear_sample_owner_tile(
         let (p00, p10) = (texel(x0, y0), texel(x0 + 1, y0));
         let (p01, p11) = (texel(x0, y0 + 1), texel(x0 + 1, y0 + 1));
         return FilteredColorByOwnerSample::Overlay(std::array::from_fn(|channel| {
-            interpolate(
-                p00[channel],
-                p10[channel],
-                p01[channel],
-                p11[channel],
-            )
+            interpolate(p00[channel], p10[channel], p01[channel], p11[channel])
         }));
     }
 

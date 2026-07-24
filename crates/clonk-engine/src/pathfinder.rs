@@ -33,19 +33,14 @@ pub struct PathWaypoint {
 /// Presentation-only copy of the most recent `C4PathFinder` search graph.
 /// Native keeps these rays on the game-global pathfinder so the viewport can
 /// draw them after object rendering (C4PathFinder.cpp:253-289,589-593).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PathfinderDebugRayStatus {
+    #[default]
     Launch,
     Crawl,
     Still,
     Failure,
     Deleted,
-}
-
-impl Default for PathfinderDebugRayStatus {
-    fn default() -> Self {
-        Self::Launch
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -468,11 +463,7 @@ impl<'a> PathFinderState<'a> {
     }
 
     fn point_free(&self, x: i32, y: i32) -> bool {
-        x >= 0
-            && x < self.width
-            && y >= 0
-            && y < self.height
-            && !self.landscape.is_solid_at(x, y)
+        x >= 0 && x < self.width && y >= 0 && y < self.height && !self.landscape.is_solid_at(x, y)
     }
 
     fn is_solid(&self, x: i32, y: i32) -> bool {
@@ -545,13 +536,7 @@ impl<'a> PathFinderState<'a> {
             }
             let entry = {
                 let ray = self.rays[index].borrow();
-                self.zones[zone_index].entry_point(
-                    self,
-                    ray.x2,
-                    ray.y2,
-                    ray.target_x,
-                    ray.target_y,
-                )
+                self.zones[zone_index].entry_point(self, ray.x2, ray.y2, ray.target_x, ray.target_y)
             };
             // C++ passes this use-zone ray's X2/Y2 by reference to
             // GetEntryPoint; SetCompletePath later emits that far-side exit
@@ -605,8 +590,8 @@ impl<'a> PathFinderState<'a> {
                 if self.zones[zone_index].contains(ray.x, ray.y) {
                     (ray.x2, ray.y2)
                 } else {
-                    let entry = self.zones[zone_index]
-                        .entry_point(self, ray.x2, ray.y2, ray.x2, ray.y2);
+                    let entry =
+                        self.zones[zone_index].entry_point(self, ray.x2, ray.y2, ray.x2, ray.y2);
                     (entry.x, entry.y)
                 }
             };
@@ -1348,7 +1333,10 @@ mod tests {
                 "ray #{ray_count} must execute before MAX_RAY termination"
             );
             assert_eq!(state.success_ray, Some(winner));
-            assert!(matches!(state.rays[winner].borrow().status, RayStatus::Still));
+            assert!(matches!(
+                state.rays[winner].borrow().status,
+                RayStatus::Still
+            ));
 
             let path = state.into_path(target);
             assert_eq!(
@@ -1375,8 +1363,8 @@ mod tests {
         // C4PathFinder's PointFree callback is LandscapeFree: strict map
         // bounds plus !DensitySolid(GBackDensity(x,y)) (C4Game.cpp:2288-2292).
         // A one-dimensional surface probe misses this cave wall entirely.
-        let mut landscape = Landscape::with_default_material(100, vec![100; 100], None)
-            .expect("cave landscape");
+        let mut landscape =
+            Landscape::with_default_material(100, vec![100; 100], None).expect("cave landscape");
         landscape.set_world_height(100);
         let mut bytes = vec![0; 100 * 100];
         for y in 45..55 {
@@ -1603,13 +1591,8 @@ mod tests {
             height: 2,
             used: false,
         }];
-        let mixed_state = PathFinderState::new(
-            &landscape,
-            &mut mixed_zones,
-            true,
-            1,
-            Vector2::new(1, 1),
-        );
+        let mixed_state =
+            PathFinderState::new(&landscape, &mut mixed_zones, true, 1, Vector2::new(1, 1));
         let mixed_entry = mixed_state.zones[0].entry_point(&mixed_state, 5, 5, 5, 5);
         assert!(mixed_entry.found);
         assert_eq!(mixed_entry.x, 4);

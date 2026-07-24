@@ -2703,14 +2703,15 @@ mod tests {
         host.send_message(ControlMessage::Request { from_tick: 17 })
             .await
             .unwrap();
-        let direct_control =
-            crate::encode_control_entry_payload(&clonk_engine::ControlPacket::ActivateGameGoalMenu(
+        let direct_control = crate::encode_control_entry_payload(
+            &clonk_engine::ControlPacket::ActivateGameGoalMenu(
                 clonk_engine::ActivateGameGoalMenuControlData {
                     player: 0,
                     by_client: 0,
                 },
-            ))
-            .unwrap();
+            ),
+        )
+        .unwrap();
         host.send_message(ControlMessage::Packet {
             delivery: ControlDelivery::Direct,
             data: direct_control,

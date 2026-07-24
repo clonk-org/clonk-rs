@@ -738,13 +738,12 @@ impl EditState {
     }
 
     fn cursor_visible(&self) -> bool {
-        Instant::now()
+        (Instant::now()
             .checked_duration_since(self.last_input)
             .unwrap_or_default()
             .as_millis()
-            / 500
-            % 2
-            == 0
+            / 500)
+            .is_multiple_of(2)
     }
 }
 
@@ -1419,7 +1418,7 @@ impl LeagueSignupController {
         };
         let request = self.edit_context_request(field, point, clipboard_has_text);
         (!request.items.is_empty())
-            .then(|| LeagueSignupAction::OpenEditContextMenu(request))
+            .then_some(LeagueSignupAction::OpenEditContextMenu(request))
             .into_iter()
             .collect()
     }
@@ -1436,7 +1435,7 @@ impl LeagueSignupController {
         let anchor = GuiPoint::new((edit.x + edit.w / 2) as f32, (edit.y + edit.h / 2) as f32);
         let request = self.edit_context_request(field, anchor, clipboard_has_text);
         (!request.items.is_empty())
-            .then(|| LeagueSignupAction::OpenEditContextMenu(request))
+            .then_some(LeagueSignupAction::OpenEditContextMenu(request))
             .into_iter()
             .collect()
     }
@@ -2090,10 +2089,7 @@ impl LeagueSignupController {
     ) -> Vec<LeagueSignupAction> {
         let transformed = clipboard.replace('|', "\u{a6}");
         let mut rest = transformed.as_str();
-        loop {
-            let Some(line_break) = rest.find(['\r', '\n']) else {
-                break;
-            };
+        while let Some(line_break) = rest.find(['\r', '\n']) {
             if line_break == 0 {
                 let skip = rest.chars().next().map_or(0, char::len_utf8);
                 rest = &rest[skip..];
@@ -2278,7 +2274,8 @@ fn truncate_legacy_text(text: &str, limit: usize) -> String {
     let mut output = String::new();
     let mut length = 0usize;
     for character in text.chars() {
-        let Some(encoded) = clonk_resources::encode_legacy_script_text(&character.to_string()) else {
+        let Some(encoded) = clonk_resources::encode_legacy_script_text(&character.to_string())
+        else {
             continue;
         };
         if length + encoded.len() > limit {

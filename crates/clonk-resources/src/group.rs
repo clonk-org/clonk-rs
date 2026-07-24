@@ -9,7 +9,8 @@ use thiserror::Error;
 use walkdir::{Error as WalkDirError, WalkDir};
 
 use crate::group_writer::{
-    MutableGroup, MutableGroupChildMut, MutableGroupEntryData, MutableGroupError,
+    ImportedPackedChildCoreMetadata, MutableGroup, MutableGroupChildMut, MutableGroupEntryData,
+    MutableGroupError,
 };
 
 const GROUP_HEADER_SIZE: usize = 204;
@@ -355,7 +356,7 @@ impl Group {
                     Self::from_child_bytes(path.clone(), fs::read(path)?)
                 }
             }
-            GroupKind::Packed(packed) => packed.open_child(&relative),
+            GroupKind::Packed(packed) => packed.open_child(relative),
         }
     }
 
@@ -511,11 +512,13 @@ impl MutableGroup {
                 mutable.add_imported_packed_child_core_bytes_with_metadata(
                     entry.name_bytes,
                     data,
-                    entry.crc_state,
-                    entry.stored_crc,
-                    child_contents_crc,
-                    entry.time,
-                    entry.executable,
+                    ImportedPackedChildCoreMetadata {
+                        crc_state: entry.crc_state,
+                        stored_crc: entry.stored_crc,
+                        child_contents_crc,
+                        time: entry.time,
+                        executable: entry.executable,
+                    },
                 )?;
             } else {
                 mutable.add_imported_file_core_bytes_with_metadata(

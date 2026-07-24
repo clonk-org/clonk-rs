@@ -98,7 +98,10 @@ fn u32_is_zero(value: &u32) -> bool {
 /// that cannot be reconstructed from the assigned in-round color or slot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerInfoCoreState {
-    #[serde(default = "default_player_name", with = "clonk_script::c4_string_serde")]
+    #[serde(
+        default = "default_player_name",
+        with = "clonk_script::c4_string_serde"
+    )]
     pub pref_name: String,
     #[serde(default, with = "clonk_script::c4_string_serde")]
     pub comment: String,
@@ -1351,7 +1354,9 @@ impl<'a> PersistedC4ValueParser<'a> {
             }),
             b'I' => self.integer().map(|value| {
                 (
-                    clonk_script::Value::C4Id(clonk_script::c4_id_from_raw(value as isize as usize)),
+                    clonk_script::Value::C4Id(clonk_script::c4_id_from_raw(
+                        value as isize as usize,
+                    )),
                     PersistedDirectObjectStatus::NONE,
                 )
             }),
@@ -1740,10 +1745,7 @@ mod tests {
             .fallback
             .as_ref()
             .expect("saved portrait spec evaluates");
-        assert_eq!(
-            portrait.source.as_ref().map(DefinitionId::as_str),
-            Some("TRPR")
-        );
+        assert_eq!(portrait.source.as_deref(), Some("TRPR"));
         assert_eq!(portrait.name, "Captain");
         assert_eq!(wipf.portraits.current.as_ref(), Some(portrait));
         assert_eq!(
@@ -1997,10 +1999,7 @@ mod tests {
             .fallback
             .as_ref()
             .expect("synthesized PortraitFile fallback exists");
-        assert_eq!(
-            fallback.source.as_ref().map(DefinitionId::as_str),
-            Some("CLNK")
-        );
+        assert_eq!(fallback.source.as_deref(), Some("CLNK"));
         assert_eq!(fallback.name, "custom");
         assert_eq!(embedded.core.portrait_file, "custom");
 
@@ -2063,7 +2062,10 @@ mod tests {
         let player = PlayerFile::load_from_path(&root).expect("player file loads");
         assert_eq!(clonk_script::c4_string_bytes(&player.name), b"Andr\xe9");
         assert_eq!(player.crew.len(), 1);
-        assert_eq!(clonk_script::c4_string_bytes(&player.crew[0].name), b"Ren\xe9");
+        assert_eq!(
+            clonk_script::c4_string_bytes(&player.crew[0].name),
+            b"Ren\xe9"
+        );
     }
 
     #[test]

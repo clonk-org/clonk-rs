@@ -17,9 +17,7 @@ use thiserror::Error;
 use crate::advertise::encode_host_game_reference_response;
 use crate::host_game_reference::{HostGameReference, HostGameReferenceError};
 use crate::join_player_registry::{ClientPlayerInfosSnapshot, PlayerInfoListSnapshot};
-use crate::league_round_results_packet::{
-    LeagueRoundPlayerStatus, LeagueRoundResultsPlayer,
-};
+use crate::league_round_results_packet::{LeagueRoundPlayerStatus, LeagueRoundResultsPlayer};
 use crate::name_validation::{validate_name_allow_empty, validate_name_no_empty};
 
 const CHECKSUM_PLACEHOLDER: &[u8; 5] = b"-----";
@@ -1483,11 +1481,7 @@ fn parse_player_info(
     };
     Ok(ControlPlayerInfoEntry {
         name: tree.validated_escaped_value(node, b"Name", validate_name_no_empty),
-        forced_name: tree.validated_escaped_value(
-            node,
-            b"ForcedName",
-            validate_name_allow_empty,
-        ),
+        forced_name: tree.validated_escaped_value(node, b"ForcedName", validate_name_allow_empty),
         filename: tree.escaped_value(node, b"Filename"),
         flags,
         id: int(b"ID", "Player.ID", 0),
@@ -1540,7 +1534,11 @@ fn parse_c4_id(raw: &[u8]) -> [u8; 4] {
         *b"NONE"
     } else {
         let id = raw[..4].try_into().expect("slice length was checked");
-        if id == *b"0000" { *b"NONE" } else { id }
+        if id == *b"0000" {
+            *b"NONE"
+        } else {
+            id
+        }
     }
 }
 
@@ -1550,19 +1548,17 @@ fn parse_network_resource(
 ) -> Result<NetworkResourceCore, LeagueResponseDecodeError> {
     let resource_type = match tree.first_value(node, b"Type") {
         None => NETWORK_RESOURCE_TYPE_NULL,
-        Some(raw) => {
-            match identifier_token(raw) {
-                b"Scenario" => 1,
-                b"Dynamic" => 2,
-                b"Player" => 3,
-                b"Definitions" => 4,
-                b"System" => 5,
-                b"Material" => 6,
-                _ => parse_u32_response(raw, "ResCore.Type")
-                    .map(|value| value.min(u32::from(u8::MAX)) as u8)
-                    .unwrap_or(NETWORK_RESOURCE_TYPE_NULL),
-            }
-        }
+        Some(raw) => match identifier_token(raw) {
+            b"Scenario" => 1,
+            b"Dynamic" => 2,
+            b"Player" => 3,
+            b"Definitions" => 4,
+            b"System" => 5,
+            b"Material" => 6,
+            _ => parse_u32_response(raw, "ResCore.Type")
+                .map(|value| value.min(u32::from(u8::MAX)) as u8)
+                .unwrap_or(NETWORK_RESOURCE_TYPE_NULL),
+        },
     };
     let loadable = tree
         .first_value(node, b"Loadable")
@@ -1753,10 +1749,12 @@ impl LeagueFbidRegistry {
     }
 
     pub fn extend_from(&mut self, other: &Self) {
-        self.entries
-            .extend(other.entries.iter().map(|(account, fbid)| {
-                (account.clone(), fbid.clone())
-            }));
+        self.entries.extend(
+            other
+                .entries
+                .iter()
+                .map(|(account, fbid)| (account.clone(), fbid.clone())),
+        );
     }
 
     /// Returns the number of tracked accounts.
@@ -1776,20 +1774,20 @@ mod tests {
         decode_league_auth_response, decode_league_end_response, decode_league_join_response,
         decode_league_report_disconnect_response, decode_league_start_response,
         decode_league_update_response, decode_player_info_list_ini, encode_league_auth_request,
-        encode_league_auth_request_head,
-        encode_league_join_request_head, encode_league_player_info_section,
-        encode_league_report_disconnect_request, solve_league_checksum, LeagueAuthRequestHead,
-        LeagueDisconnectReason, LeagueFbidRegistry, LeagueHostSession, LeagueHttpPostTransport,
-        LeagueHttpTransportConfig, LeagueHttpTransportError, LeagueJoinRequestHead,
-        LeagueIniTree, LeagueResponseDecodeError, PlayerInfoListIniError,
+        encode_league_auth_request_head, encode_league_join_request_head,
+        encode_league_player_info_section, encode_league_report_disconnect_request,
+        solve_league_checksum, LeagueAuthRequestHead, LeagueDisconnectReason, LeagueFbidRegistry,
+        LeagueHostSession, LeagueHttpPostTransport, LeagueHttpTransportConfig,
+        LeagueHttpTransportError, LeagueIniTree, LeagueJoinRequestHead, LeagueResponseDecodeError,
+        PlayerInfoListIniError,
     };
     use crate::{ClientPlayerInfosSnapshot, LeagueRoundPlayerStatus};
     use clonk_engine::{
         ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
         CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
-        CLIENT_PLAYER_INFO_FLAG_UPDATED, PLAYER_INFO_FLAG_HAS_RESOURCE,
-        PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_IN_SCENARIO_FILE, PLAYER_INFO_FLAG_JOINED,
-        PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
+        CLIENT_PLAYER_INFO_FLAG_UPDATED, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
+        PLAYER_INFO_FLAG_IN_SCENARIO_FILE, PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
+        PLAYER_INFO_TYPE_SCRIPT,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -2041,8 +2039,7 @@ AUID=\"auth-\\200\"\r\n\
             ..Default::default()
         };
 
-        let encoded =
-            encode_league_player_info_section(&player).expect("valid C++ player info");
+        let encoded = encode_league_player_info_section(&player).expect("valid C++ player info");
 
         assert_eq!(encoded, b"[PlrInfo]\r\nClanTag=Cl\xe4n\r\n");
         let tree = LeagueIniTree::parse(&encoded);
@@ -2102,9 +2099,8 @@ FBID=feedback id\r\n",
         // to the host (src/C4League.cpp:423-448;
         // src/C4Network2.cpp:2680-2688).
         let mut player = clonk_engine::ControlPlayerInfoEntry::default();
-        let success = decode_league_auth_response(
-            b"[Response]\r\nStatus=Success\r\nAUID=one-use-token\r\n",
-        );
+        let success =
+            decode_league_auth_response(b"[Response]\r\nStatus=Success\r\nAUID=one-use-token\r\n");
         assert!(success.apply_player_auth(&mut player));
         assert_eq!(player.auth_id.as_bytes(), b"one-use-token");
 
@@ -2112,9 +2108,8 @@ FBID=feedback id\r\n",
         assert!(!empty.apply_player_auth(&mut player));
         assert_eq!(player.auth_id.as_bytes(), b"one-use-token");
 
-        let rejected = decode_league_auth_response(
-            b"[Response]\r\nStatus=Failure\r\nAUID=unused-token\r\n",
-        );
+        let rejected =
+            decode_league_auth_response(b"[Response]\r\nStatus=Failure\r\nAUID=unused-token\r\n");
         assert!(!rejected.apply_player_auth(&mut player));
         assert_eq!(player.auth_id.as_bytes(), b"one-use-token");
     }
@@ -2722,10 +2717,7 @@ Name=\"P\\200\"\r\n"
         registry.insert(legacy(b"A\x80"), legacy(b"FBID-\xff"));
 
         assert_eq!(registry.len(), 1);
-        assert_eq!(
-            registry.get(&legacy(b"A\x80")),
-            Some(&legacy(b"FBID-\xff"))
-        );
+        assert_eq!(registry.get(&legacy(b"A\x80")), Some(&legacy(b"FBID-\xff")));
     }
 
     #[test]

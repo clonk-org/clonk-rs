@@ -97,10 +97,7 @@ mod tests {
         let dirty = LegacyCString::from_bytes(b" {<i>Alice</i>{ ".to_vec()).unwrap();
         assert_eq!(validate_name_no_empty(dirty).as_bytes(), b"Alice");
         let vertical_tab = LegacyCString::from_bytes(b"\x0bAlice\x0b".to_vec()).unwrap();
-        assert_eq!(
-            validate_name_no_empty(vertical_tab).as_bytes(),
-            b"Alice"
-        );
+        assert_eq!(validate_name_no_empty(vertical_tab).as_bytes(), b"Alice");
     }
 
     #[test]

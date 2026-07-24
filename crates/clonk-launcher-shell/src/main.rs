@@ -815,11 +815,9 @@ impl LauncherApp {
                     return Ok(true);
                 }
             }
-            VirtualKeyCode::Down => {
-                if self.report_search.has_matches() {
-                    self.next_report_search_match()?;
-                    return Ok(true);
-                }
+            VirtualKeyCode::Down if self.report_search.has_matches() => {
+                self.next_report_search_match()?;
+                return Ok(true);
             }
             _ => {}
         }

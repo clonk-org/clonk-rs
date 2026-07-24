@@ -361,7 +361,7 @@ impl GameApp {
         let runtime_join_allowed = self
             .classic_host_lobby
             .as_ref()
-            .map_or(false, |lobby| lobby.runtime_join_allowed);
+            .is_some_and(|lobby| lobby.runtime_join_allowed);
         let control_rate = self
             .network_control_clock
             .map(NetworkControlClock::control_rate)
@@ -2291,13 +2291,7 @@ impl GameApp {
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             return None;
         }
-        let Some(metadata) = self
-            .network_team_assignment
-            .as_ref()
-            .map(|assignment| assignment.teams().clone())
-        else {
-            return None;
-        };
+        let metadata = self.network_team_assignment.as_ref()?.teams();
         let (_, packets) = self.control_player_infos.retained_rows_snapshot();
         let active = packets
             .iter()
@@ -3572,15 +3566,21 @@ impl GameApp {
             shift: c4_modifiers.contains(ModifiersState::SHIFT),
             control: c4_modifiers.contains(ModifiersState::CTRL),
         };
-        let clipboard = (c4_modifiers == ModifiersState::CTRL).then(|| match key {
-            VirtualKeyCode::C => Some(LobbyChatClipboardShortcut::Copy),
-            VirtualKeyCode::X => Some(LobbyChatClipboardShortcut::Cut),
-            VirtualKeyCode::V => Some(LobbyChatClipboardShortcut::Paste),
-            VirtualKeyCode::A => Some(LobbyChatClipboardShortcut::SelectAll),
-            _ => None,
-        });
-        let edit = (!c4_modifiers.contains(ModifiersState::ALT))
-            .then(|| match key {
+        let clipboard = if c4_modifiers == ModifiersState::CTRL {
+            match key {
+                VirtualKeyCode::C => Some(LobbyChatClipboardShortcut::Copy),
+                VirtualKeyCode::X => Some(LobbyChatClipboardShortcut::Cut),
+                VirtualKeyCode::V => Some(LobbyChatClipboardShortcut::Paste),
+                VirtualKeyCode::A => Some(LobbyChatClipboardShortcut::SelectAll),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let edit = if c4_modifiers.contains(ModifiersState::ALT) {
+            None
+        } else {
+            match key {
                 VirtualKeyCode::Left => Some(LobbyChatEditKey::Left),
                 VirtualKeyCode::Right => Some(LobbyChatEditKey::Right),
                 VirtualKeyCode::Home => Some(LobbyChatEditKey::Home),
@@ -3588,8 +3588,8 @@ impl GameApp {
                 VirtualKeyCode::Back => Some(LobbyChatEditKey::Backspace),
                 VirtualKeyCode::Delete => Some(LobbyChatEditKey::Delete),
                 _ => None,
-            })
-            .flatten();
+            }
+        };
         let plain_command = c4_modifiers.is_empty()
             && matches!(
                 key,
@@ -3598,7 +3598,7 @@ impl GameApp {
                     | VirtualKeyCode::Up
                     | VirtualKeyCode::Down
             );
-        let recognized = clipboard.flatten().is_some() || edit.is_some() || plain_command;
+        let recognized = clipboard.is_some() || edit.is_some() || plain_command;
         if !recognized {
             return Ok(matches!(
                 key,
@@ -3617,7 +3617,7 @@ impl GameApp {
         if state == ElementState::Released {
             return Ok(true);
         }
-        if let Some(shortcut) = clipboard.flatten() {
+        if let Some(shortcut) = clipboard {
             if shortcut == LobbyChatClipboardShortcut::Paste {
                 self.chat_paste_consumed_keys.insert(key);
             }
@@ -4930,18 +4930,15 @@ impl GameApp {
         &mut self,
         mut artifact: LobbyPreloadArtifact,
     ) -> std::result::Result<(), String> {
-        if artifact.client.is_some() {
-            let current = {
-                let client = artifact.client.as_ref().expect("client artifact");
-                self.pending_network_join_data
-                    .as_ref()
-                    .is_some_and(|join_data| {
-                        join_data.client_id == client.client_id
-                            && join_data.dynamic.id == client.dynamic_resource_id
-                            && u64::from(join_data.parameters.random_seed as u32)
-                                == client.random_seed
-                    })
-            };
+        if let Some(client) = artifact.client.as_mut() {
+            let current = self
+                .pending_network_join_data
+                .as_ref()
+                .is_some_and(|join_data| {
+                    join_data.client_id == client.client_id
+                        && join_data.dynamic.id == client.dynamic_resource_id
+                        && u64::from(join_data.parameters.random_seed as u32) == client.random_seed
+                });
             if !current {
                 if self.client_combined_scenario_path.as_ref() == Some(&artifact.scenario_path) {
                     self.clear_client_preload_projection();
@@ -4950,7 +4947,6 @@ impl GameApp {
                 return Err("client preload completed for stale JoinData".to_string());
             }
             self.client_combined_scenario_path = Some(artifact.scenario_path.clone());
-            let client = artifact.client.as_mut().expect("client artifact");
             self.network_material_resource_groups =
                 Some(std::mem::take(&mut client.material_groups));
         } else if let Some(catalog_host) = artifact.catalog_host.as_ref() {
@@ -5252,7 +5248,7 @@ impl GameApp {
                 .app_paths
                 .as_ref()
                 .and_then(|paths| Config::load(paths.config_file()).ok())
-                .unwrap_or_else(Config::new);
+                .unwrap_or_default();
             let player_path = startup_player_path(&config);
             let wire_path = player_path.join(&filename);
             let source_path = self
@@ -6173,8 +6169,10 @@ impl GameApp {
                     }
                     actions
                 } else {
-                    let edit_key = (!c4_modifiers.contains(ModifiersState::ALT))
-                        .then(|| match key {
+                    let edit_key = if c4_modifiers.contains(ModifiersState::ALT) {
+                        None
+                    } else {
+                        match key {
                             VirtualKeyCode::Left => Some(LobbyChatEditKey::Left),
                             VirtualKeyCode::Right => Some(LobbyChatEditKey::Right),
                             VirtualKeyCode::Home => Some(LobbyChatEditKey::Home),
@@ -6182,8 +6180,8 @@ impl GameApp {
                             VirtualKeyCode::Back => Some(LobbyChatEditKey::Backspace),
                             VirtualKeyCode::Delete => Some(LobbyChatEditKey::Delete),
                             _ => None,
-                        })
-                        .flatten();
+                        }
+                    };
                     edit_key
                         .and_then(|edit_key| {
                             self.classic_host_lobby.as_ref().map(|lobby| {

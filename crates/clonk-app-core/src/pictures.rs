@@ -761,6 +761,9 @@ pub fn object_menu_item_picture_with_text_spec_resources(
     )
 }
 
+// Keep the parity-facing render inputs explicit: grouping the borrowed text resources
+// and renderer capability mask would only hide this boundary's independent inputs.
+#[allow(clippy::too_many_arguments)]
 pub fn object_menu_item_picture_with_renderer_modes(
     engine: &Engine,
     snapshot: &SimulationSnapshot,

@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{
-    ClientId, NetworkStatus, NETWORK_STATE_GO, NETWORK_STATE_LOBBY, NETWORK_STATE_PAUSE,
-};
+use crate::{ClientId, NetworkStatus, NETWORK_STATE_GO, NETWORK_STATE_LOBBY, NETWORK_STATE_PAUSE};
 
 /// Host-side phase corresponding to `fStatusReached`/`fStatusAck` in
 /// `C4Network2` (`src/C4Network2.cpp:1994-2110`).
@@ -150,8 +148,7 @@ impl StatusBarrier {
         }
 
         if self.phase == BarrierPhase::Stable {
-            self.remotes
-                .insert(client_id, RemoteBarrierState::Ready);
+            self.remotes.insert(client_id, RemoteBarrierState::Ready);
             return vec![BarrierEffect::SendStatusAck {
                 client_id,
                 status: acknowledgement,
@@ -164,13 +161,11 @@ impl StatusBarrier {
                 ..self.status
             };
             let effects = self.change_status(status);
-            self.remotes
-                .insert(client_id, RemoteBarrierState::Ready);
+            self.remotes.insert(client_id, RemoteBarrierState::Ready);
             return effects;
         }
 
-        self.remotes
-            .insert(client_id, RemoteBarrierState::Ready);
+        self.remotes.insert(client_id, RemoteBarrierState::Ready);
         self.try_commit()
     }
 
@@ -208,9 +203,7 @@ impl StatusBarrier {
         if matches!(self.phase, BarrierPhase::Waiting { .. }) {
             return self.try_commit();
         }
-        if self.status.state == NETWORK_STATE_LOBBY
-            || self.status.state == NETWORK_STATE_PAUSE
-        {
+        if self.status.state == NETWORK_STATE_LOBBY || self.status.state == NETWORK_STATE_PAUSE {
             return Vec::new();
         }
         self.change_status(NetworkStatus {
@@ -243,9 +236,7 @@ impl StatusBarrier {
         }
 
         self.phase = BarrierPhase::Stable;
-        let sync_control_tick = self
-            .local_reached_tick
-            .unwrap_or(self.status.target_tick);
+        let sync_control_tick = self.local_reached_tick.unwrap_or(self.status.target_tick);
         let mut effects = vec![
             BarrierEffect::ExecutePendingSyncControls(sync_control_tick),
             BarrierEffect::BroadcastStatusAck(self.status),
@@ -376,10 +367,7 @@ mod tests {
             ]
         );
         assert_eq!(barrier.status, next);
-        assert_eq!(
-            barrier.remotes.get(&3),
-            Some(&RemoteBarrierState::NotReady)
-        );
+        assert_eq!(barrier.remotes.get(&3), Some(&RemoteBarrierState::NotReady));
         assert!(!barrier.is_running());
     }
 
@@ -420,14 +408,8 @@ mod tests {
             ]
         );
         assert_eq!(barrier.status, retargeted);
-        assert_eq!(
-            barrier.remotes.get(&1),
-            Some(&RemoteBarrierState::Ready)
-        );
-        assert_eq!(
-            barrier.remotes.get(&2),
-            Some(&RemoteBarrierState::NotReady)
-        );
+        assert_eq!(barrier.remotes.get(&1), Some(&RemoteBarrierState::Ready));
+        assert_eq!(barrier.remotes.get(&2), Some(&RemoteBarrierState::NotReady));
         assert_eq!(
             barrier.phase,
             BarrierPhase::Waiting {
@@ -488,8 +470,14 @@ mod tests {
         barrier.set_remote_state(7, RemoteBarrierState::Ready);
         barrier.change_status(go);
 
-        let wrong_state = NetworkStatus { state: NETWORK_STATE_LOBBY, ..go };
-        let stale_tick = NetworkStatus { target_tick: 19, ..go };
+        let wrong_state = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            ..go
+        };
+        let stale_tick = NetworkStatus {
+            target_tick: 19,
+            ..go
+        };
         assert!(!barrier.remote_ack_is_acceptable(7, wrong_state));
         assert!(!barrier.remote_ack_is_acceptable(7, stale_tick));
         assert!(barrier.remote_ack(7, wrong_state).is_empty());

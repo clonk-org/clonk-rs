@@ -3008,7 +3008,7 @@
         .expect("open raw lookup fixture");
 
         assert!(loader_group_has_content(&group).expect("classify loader group"));
-        let selected = select_loader_source(&[group.clone()], &group, "LoaderGood", |_| 0)
+        let selected = select_loader_source(std::slice::from_ref(&group), &group, "LoaderGood", |_| 0)
             .expect("unrelated opaque sibling does not abort loader selection");
         assert_eq!(selected.filename_bytes(), b"LoaderGood.png");
         assert_eq!(
@@ -3024,7 +3024,12 @@
         assert_eq!(graphic.name_bytes, b"Player.png");
 
         let opaque_specification = clonk_script::c4_string_from_bytes(b"Loader\xff.png");
-        let selected = select_loader_source(&[group.clone()], &group, &opaque_specification, |_| 0)
+        let selected = select_loader_source(
+            std::slice::from_ref(&group),
+            &group,
+            &opaque_specification,
+            |_| 0,
+        )
             .expect("raw wildcard selects an opaque loader filename");
         assert_eq!(selected.filename_bytes(), b"Loader\xff.png");
         assert_eq!(
@@ -3073,7 +3078,8 @@
         let directory = tempdir().expect("loader child group");
         fs::create_dir(directory.path().join("LoaderChild.png")).expect("child group");
         let group = Group::open(directory.path()).expect("loader group");
-        let selected = select_loader_source(&[group.clone()], &group, "LoaderChild", |_| 0)
+        let selected =
+            select_loader_source(std::slice::from_ref(&group), &group, "LoaderChild", |_| 0)
             .expect("child group participates in C4Group search");
         assert!(decode_selected_loader(&selected).is_err());
     }
@@ -3086,7 +3092,8 @@
             [0x11, 0x22, 0x33, 0xff],
         );
         let group = Group::open(directory.path()).expect("loader group");
-        let selected = select_loader_source(&[group.clone()], &group, "LoaderRenamed", |_| 0)
+        let selected =
+            select_loader_source(std::slice::from_ref(&group), &group, "LoaderRenamed", |_| 0)
             .expect("renamed loader candidate");
         assert_eq!(
             selected.entry.relative_path,

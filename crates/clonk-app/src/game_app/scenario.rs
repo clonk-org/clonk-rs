@@ -824,8 +824,7 @@ impl GameApp {
             && offline_startup_error.is_none()
             && replay_startup.is_none())
         .then(|| current_offline_round_random_seed(offline_parameter_seed));
-        let fresh_authority_may_retry =
-            offline_random_seed.is_some() && offline_savegame.is_none();
+        let fresh_authority_may_retry = offline_random_seed.is_some() && offline_savegame.is_none();
         let preloaded_scenario = self
             .lobby_preload_artifact
             .as_mut()
@@ -1334,7 +1333,7 @@ impl GameApp {
         }
 
         let sound_samples =
-            configure_scenario_sound_samples(self.audio.as_mut(), &scenario_data, &path);
+            configure_scenario_sound_samples(self.audio.as_mut(), scenario_data, &path);
         let music_tracks = self
             .audio
             .as_ref()
@@ -1438,7 +1437,7 @@ impl GameApp {
             let prepare_result = match initial_record_game_data.as_ref() {
                 Some(Ok(game_data)) => self.prepare_recording_for(
                     &scenario,
-                    &scenario_data,
+                    scenario_data,
                     Some(InitialRecordingSource::Fresh(game_data)),
                     retained_definition_modules.as_deref(),
                     recording_definition_save_paths,
@@ -1446,7 +1445,7 @@ impl GameApp {
                 Some(Err(error)) => Err(error.clone()),
                 None => self.prepare_recording_for(
                     &scenario,
-                    &scenario_data,
+                    scenario_data,
                     None,
                     retained_definition_modules.as_deref(),
                     recording_definition_save_paths,

@@ -2,8 +2,9 @@
 
 This harness verifies that the Rust port (`crates/clonk-engine`) reproduces the
 determinism-critical C++ primitives **bit-for-bit**. It is a true *differential*
-against the pinned C++ golden oracle (`vendor/legacyclonk-oracle` under the
-workspace's `code/` directory), not a Rust-vs-Rust regression check (that is
+against the C++ source snapshot pinned at
+`7d43b47b7d789b533f32d005e64596e0a07019cd` in this repository's Git history,
+not a Rust-vs-Rust regression check (that is
 `cargo xtask engine-snapshots verify`).
 
 It exists to **gate Theme C** (wiring fixed-point precision through the physics /
@@ -195,10 +196,11 @@ parity/oracle/gen_golden.sh
 cargo xtask parity record
 ```
 
-The generator defaults to the pinned sibling checkout at
-`../../vendor/legacyclonk-oracle` relative to this repository and archives the
-`oracle-src-pinned` tag into its disposable `.gen` directory before extraction
-and compilation. Set `LEGACYCLONK_ORACLE_ROOT` to use another repository, or
+The generator defaults to this repository and archives the pinned C++ source
+snapshot at commit `7d43b47b7d789b533f32d005e64596e0a07019cd` from its Git
+history into the disposable `.gen` directory before extraction and
+compilation. A shallow clone must fetch that history before recording. Set
+`LEGACYCLONK_ORACLE_ROOT` to use a separate C++ checkout, or
 `LEGACYCLONK_ORACLE_REVISION` for an intentional source revision override.
 
 The Rust checker is `crates/clonk-engine/src/parity_differential.rs`. On any

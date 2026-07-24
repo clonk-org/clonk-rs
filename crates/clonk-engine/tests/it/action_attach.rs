@@ -1,4 +1,6 @@
-use clonk_engine::{ActionSpec, ActionState, Definition, Engine, ObjectVertex, SpawnConfig, Vector2};
+use clonk_engine::{
+    ActionSpec, ActionState, Definition, Engine, ObjectVertex, SpawnConfig, Vector2,
+};
 use std::collections::HashMap;
 
 const BASIC_SCRIPT: &str = r#"

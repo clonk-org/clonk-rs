@@ -550,9 +550,7 @@ impl AdvancedConfigController {
     /// the close resource in the active language.
     pub fn tooltip_at(&self, point: GuiPoint) -> Option<StartupTooltip> {
         let routed_pointer = self.pointer?;
-        if routed_pointer.x as i32 != point.x as i32
-            || routed_pointer.y as i32 != point.y as i32
-        {
+        if routed_pointer.x as i32 != point.x as i32 || routed_pointer.y as i32 != point.y as i32 {
             return None;
         }
         match self.hit_test(point) {
@@ -744,7 +742,10 @@ impl AdvancedConfigController {
         let Some(pressed) = self.pointer_pressed.take() else {
             return Vec::new();
         };
-        if matches!(pressed, PressTarget::Decrement(_) | PressTarget::Increment(_)) {
+        if matches!(
+            pressed,
+            PressTarget::Decrement(_) | PressTarget::Increment(_)
+        ) {
             self.sound_events.push(AdvancedConfigSound::ArrowHit);
             return Vec::new();
         }
@@ -818,10 +819,9 @@ impl AdvancedConfigController {
                 && insertion_point == 0
                 && (!active.editor.text().starts_with('-') || selection_covers_minus);
             for character in text.chars() {
-                if character.is_ascii_digit() {
-                    insert.push(character);
-                    can_insert_minus = false;
-                } else if character == '-' && can_insert_minus && insert.is_empty() {
+                if character.is_ascii_digit()
+                    || (character == '-' && can_insert_minus && insert.is_empty())
+                {
                     insert.push(character);
                     can_insert_minus = false;
                 }
@@ -1090,9 +1090,7 @@ impl AdvancedConfigController {
                 AdvancedConfigValue::Integer { .. } => Some(row.value.serialized()),
                 _ => None,
             });
-        if let (Some(active), Some(normalized)) =
-            (self.active_edit.as_mut(), normalized_integer)
-        {
+        if let (Some(active), Some(normalized)) = (self.active_edit.as_mut(), normalized_integer) {
             active.editor.set_text(normalized);
         }
     }
@@ -1101,11 +1099,7 @@ impl AdvancedConfigController {
         let Some(edit) = self.active_edit.as_ref() else {
             return;
         };
-        let (section, row, text) = (
-            edit.section,
-            edit.row,
-            edit.editor.text().to_string(),
-        );
+        let (section, row, text) = (edit.section, edit.row, edit.editor.text().to_string());
         let Some(value) = self
             .sections
             .get_mut(section)
@@ -1654,9 +1648,7 @@ impl AdvancedConfigScreen {
                                 draw_edit_box(
                                     surface,
                                     edit,
-                                    controller
-                                        .active_edit_text(row_layout.index)
-                                        .unwrap_or(""),
+                                    controller.active_edit_text(row_layout.index).unwrap_or(""),
                                     if controller.active_edit_text(row_layout.index).is_some() {
                                         None
                                     } else {
@@ -1912,8 +1904,7 @@ fn advanced_config_layout_with_offset(
     let section_pitch = if sections.is_empty() {
         TAB_HEIGHT
     } else {
-        ((section_list.h - 4).max(1) / sections.len() as i32)
-            .clamp(1, TAB_HEIGHT)
+        ((section_list.h - 4).max(1) / sections.len() as i32).clamp(1, TAB_HEIGHT)
     };
     let section_tabs = sections
         .iter()
@@ -2397,7 +2388,10 @@ mod tests {
         assert!(state.handle_integer_page_step(10));
         assert_eq!(state.value("General", "Retries").unwrap().serialized(), "5");
         assert!(state.handle_integer_page_step(-10));
-        assert_eq!(state.value("General", "Retries").unwrap().serialized(), "-2");
+        assert_eq!(
+            state.value("General", "Retries").unwrap().serialized(),
+            "-2"
+        );
 
         state.handle_pointer_down(center(retries));
         assert!(state.select_all_edit_text());
@@ -2409,7 +2403,10 @@ mod tests {
         assert!(state.select_all_edit_text());
         assert!(state.handle_text_input(&format!("-{}", "9".repeat(200))));
         state.handle_key_down(KeyCode::Enter);
-        assert_eq!(state.value("General", "Retries").unwrap().serialized(), "-2");
+        assert_eq!(
+            state.value("General", "Retries").unwrap().serialized(),
+            "-2"
+        );
 
         assert!(state.select_section_named("Network"));
         let port = state.layout().rows[0].edit.expect("Port edit");
@@ -2450,14 +2447,8 @@ mod tests {
             save: "&Save".into(),
             cancel: "&Cancel".into(),
         });
-        assert_eq!(
-            state.handle_hotkey('s'),
-            vec![AdvancedConfigAction::Save]
-        );
-        assert_eq!(
-            state.handle_hotkey('C'),
-            vec![AdvancedConfigAction::Cancel]
-        );
+        assert_eq!(state.handle_hotkey('s'), vec![AdvancedConfigAction::Save]);
+        assert_eq!(state.handle_hotkey('C'), vec![AdvancedConfigAction::Cancel]);
         assert!(state.handle_hotkey('X').is_empty());
     }
 
@@ -2548,7 +2539,10 @@ mod tests {
         assert!(state.handle_text_input("-"));
         assert!(state.handle_text_input("5"));
         state.handle_key_down(KeyCode::Enter);
-        assert_eq!(state.value("General", "Retries").unwrap().serialized(), "-2");
+        assert_eq!(
+            state.value("General", "Retries").unwrap().serialized(),
+            "-2"
+        );
     }
 
     #[test]
@@ -2619,13 +2613,12 @@ mod tests {
                 max: 5,
             },
         )];
-        rows.extend((0..40)
-            .map(|index| {
-                AdvancedConfigRow::new(
-                    format!("Value{index}"),
-                    AdvancedConfigValue::Text(index.to_string()),
-                )
-            }));
+        rows.extend((0..40).map(|index| {
+            AdvancedConfigRow::new(
+                format!("Value{index}"),
+                AdvancedConfigValue::Text(index.to_string()),
+            )
+        }));
         let mut state = AdvancedConfigController::new(vec![
             AdvancedConfigSection::new("Long", rows),
             AdvancedConfigSection::new("Short", Vec::new()),
@@ -2653,7 +2646,11 @@ mod tests {
         state.select_section(1);
         assert_eq!(state.scroll_y(), 0);
         state.select_section(0);
-        assert_eq!(state.scroll_y(), 62, "each native ListBox retains its offset");
+        assert_eq!(
+            state.scroll_y(),
+            62,
+            "each native ListBox retains its offset"
+        );
     }
 
     #[test]

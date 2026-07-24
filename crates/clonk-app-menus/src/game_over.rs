@@ -2195,6 +2195,9 @@ fn render_settlement_score(
     );
 }
 
+// Keep the classic font draw inputs explicit so parity call sites can be
+// compared directly with C4Font::DrawText.
+#[allow(clippy::too_many_arguments)]
 fn draw_clonk_text(
     surface: &mut Surface,
     font: &clonk_graphics::clonk_font::ClonkFont,
@@ -2224,6 +2227,9 @@ fn point_in_rect(x: f32, y: f32, rect: Rect) -> bool {
         && y < (rect.y + rect.height as i32) as f32
 }
 
+// Each x coordinate is a distinct classic result-table column; bundling them
+// would hide the column mapping at the only call site.
+#[allow(clippy::too_many_arguments)]
 fn draw_header(
     surface: &mut Surface,
     font: &dyn TextFont,
@@ -2306,6 +2312,9 @@ fn draw_stat(
     );
 }
 
+// This small raster helper deliberately exposes the complete text and target
+// span at each call site, matching the other fallback text draw helpers.
+#[allow(clippy::too_many_arguments)]
 fn draw_text_centered(
     surface: &mut Surface,
     font: &dyn TextFont,

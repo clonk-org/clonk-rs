@@ -89,8 +89,9 @@ fn nonstrict_standalone_goto_returns_immediately() {
         "the final origin strictness applies even when its directive is later"
     );
 
-    let malformed = clonk_script::Script::compile("#strict 2\nfunc Probe() { goto(@); return 99; }")
-        .expect("function recovery retains the malformed script");
+    let malformed =
+        clonk_script::Script::compile("#strict 2\nfunc Probe() { goto(@); return 99; }")
+            .expect("function recovery retains the malformed script");
     assert!(
         malformed
             .parse_diagnostics()

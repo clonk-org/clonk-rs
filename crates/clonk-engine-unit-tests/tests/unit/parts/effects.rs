@@ -5282,7 +5282,7 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         let expected_ydir = [13107, 26214, 39321, 52428, 65535];
 
         for raw_ydir in expected_ydir {
-            let _ = engine.tick_without_snapshot().expect("tick succeeds");
+            engine.tick_without_snapshot().expect("tick succeeds");
             let idx = engine.find_object_index(id).expect("object exists");
             assert_eq!(engine.objects[idx].fixed_velocity.y.val(), raw_ydir);
         }
@@ -5835,4 +5835,3 @@ func FxIntFadeOutTimer(pThis, iNumber, iTime) {
         assert_eq!(snapshot.vertices[0].cnat, CNAT_BOTTOM);
         assert_eq!(snapshot.vertices[0].friction, 80);
     }
-

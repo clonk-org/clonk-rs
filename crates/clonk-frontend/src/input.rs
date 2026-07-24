@@ -112,7 +112,6 @@ fn command_com(command: ControlCommand, kind: CommandKind) -> Option<u8> {
     })
 }
 
-
 fn handle_command(
     engine: &mut Engine,
     owner: i32,
@@ -132,15 +131,9 @@ fn handle_command(
                 _ => COM_CURSOR_TOGGLE,
             };
             match kind {
-                CommandKind::Press => {
-                    engine.execute_player_control(owner, i32::from(base), 0)?
-                }
+                CommandKind::Press => engine.execute_player_control(owner, i32::from(base), 0)?,
                 CommandKind::Release => {
-                    engine.execute_player_control(
-                        owner,
-                        i32::from(base + COM_RELEASE_OFFSET),
-                        0,
-                    )?
+                    engine.execute_player_control(owner, i32::from(base + COM_RELEASE_OFFSET), 0)?
                 }
                 // Explicit pre-detected Single/Double events are already
                 // synchronized packet commands. Plain Press still lets
@@ -170,8 +163,8 @@ mod tests {
     use super::*;
     use clonk_engine::ocf;
     use clonk_engine::{
-        ActionSpec, ActionState, Definition, MovementProfile, ObjectId, ObjectUpdate,
-        PhysicalInfo, PlayerConfig, SpawnConfig, Vector2, OWNER_NONE,
+        ActionSpec, ActionState, Definition, MovementProfile, ObjectId, ObjectUpdate, PhysicalInfo,
+        PlayerConfig, SpawnConfig, Vector2, OWNER_NONE,
     };
     use std::collections::HashMap;
 
@@ -568,7 +561,8 @@ global func Step(state, frame, random) { return 0; }
         // and OCF_Container follows from the entrance (C4Object.cpp:658-660).
         structure_definition
             .set_entrance_rect(Some(clonk_engine::DefinitionRect::new(-16, -16, 32, 32)));
-        structure_definition.set_shape_rect(Some(clonk_engine::DefinitionRect::new(-16, -16, 32, 32)));
+        structure_definition
+            .set_shape_rect(Some(clonk_engine::DefinitionRect::new(-16, -16, 32, 32)));
         engine
             .register_definition(structure_definition)
             .expect("register structure definition");

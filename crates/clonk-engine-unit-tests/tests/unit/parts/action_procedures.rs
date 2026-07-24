@@ -3264,11 +3264,10 @@ protected func ControlCommand() { own_control_calls++; return 1; }
             .expect("command stack serializes");
         assert_eq!(stack["commands"][0]["mode"], serde_json::json!("Base"));
         assert!(
-            engine.objects[target_idx]
+            !engine.objects[target_idx]
                 .state
                 .local_vars
-                .get("own_control_calls")
-                .is_none(),
+                .contains_key("own_control_calls"),
             "plain SetCommand skips the target's own ControlCommand"
         );
     }
@@ -3342,11 +3341,10 @@ protected func ControlCommand() { own_control_calls++; return 1; }
             "truthy inside control consumes Exit after clearing the old stack"
         );
         assert!(
-            engine.objects[target_idx]
+            !engine.objects[target_idx]
                 .state
                 .local_vars
-                .get("own_control_calls")
-                .is_none(),
+                .contains_key("own_control_calls"),
             "plain SetCommand skips the target's own ControlCommand"
         );
         let builder_idx = engine.find_object_index(builder).expect("builder remains");
@@ -6595,4 +6593,3 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                 if name == "Trumpet" && *target == Some(fighter_id)
         )));
     }
-

@@ -2,12 +2,12 @@
 
 use std::error::Error;
 
+use crate::support::real_scenario::load_tutorial;
+use crate::support::virtual_player::VirtualPlayer;
 use clonk_engine::{
     ocf, Engine, JoinPlayerConfig, ObjectId, CATEGORY_VEHICLE, COM_DIG, COM_DOWN, COM_LEFT,
     COM_RIGHT, COM_THROW, COM_UP,
 };
-use crate::support::real_scenario::load_tutorial;
-use crate::support::virtual_player::VirtualPlayer;
 
 fn load_tutorial03() -> (Engine, i32) {
     let mut engine = load_tutorial(3, 0);
@@ -80,9 +80,9 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         engine
             .object_snapshot(hut)
             .is_some_and(|object| object.base == owner)
-            && engine.object_snapshot(clonk).is_some_and(|object| {
-                object.container.is_none() && object.action.name == "Walk"
-            })
+            && engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container.is_none() && object.action.name == "Walk")
     })?;
     player.wait_until("Tutorial03 asks the Clonk to enter HUT3", 240, |engine| {
         tutorial_message_contains(engine, "Enter your homebase")
@@ -159,9 +159,11 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     player.wait_until("HUT3 opens its Contents menu", 10, |engine| {
         object_menu_identification(engine, owner) == Some(clonk_script::Value::Int(18))
     })?;
-    player.wait_until("Tutorial03 asks the player to activate LORY", 240, |engine| {
-        tutorial_message_contains(engine, "Activate the lorry")
-    })?;
+    player.wait_until(
+        "Tutorial03 asks the player to activate LORY",
+        240,
+        |engine| tutorial_message_contains(engine, "Activate the lorry"),
+    )?;
     let contents_lorry_index = player
         .engine()
         .cursor_object_menu(owner)
@@ -190,9 +192,11 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             .is_some_and(|object| object.container.is_none())
     })?;
 
-    player.wait_until("Tutorial03 asks for the Lorry to be grabbed", 180, |engine| {
-        tutorial_message_contains(engine, "once to grab the lorry")
-    })?;
+    player.wait_until(
+        "Tutorial03 asks for the Lorry to be grabbed",
+        180,
+        |engine| tutorial_message_contains(engine, "once to grab the lorry"),
+    )?;
 
     // Jump'n'Run Down immediately takes the nearby grab target; while in
     // DFA_PUSH, horizontal controls move both the Clonk and LORY. The script
@@ -204,17 +208,11 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             object.action.name == "Push" && object.action.target == Some(lorry)
         })
     })?;
-    player.hold_until(
-        COM_LEFT,
-        "LORY reaches the sawmill chute",
-        240,
-        |engine| {
-            engine.object_snapshot(lorry).is_some_and(|lorry| {
-                (194..=218).contains(&lorry.position.x)
-                    && (257..=277).contains(&lorry.position.y)
-            })
-        },
-    )?;
+    player.hold_until(COM_LEFT, "LORY reaches the sawmill chute", 240, |engine| {
+        engine.object_snapshot(lorry).is_some_and(|lorry| {
+            (194..=218).contains(&lorry.position.x) && (257..=277).contains(&lorry.position.y)
+        })
+    })?;
     player.wait_until("Tutorial03 asks to release LORY", 180, |engine| {
         tutorial_message_contains(engine, "again to let go of the lorry")
     })?;
@@ -225,9 +223,11 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             .is_some_and(|object| object.action.name == "Walk")
     })?;
 
-    player.wait_until("Tutorial03 asks the Clonk to approach TRE2", 180, |engine| {
-        tutorial_message_contains(engine, "first tree on the left")
-    })?;
+    player.wait_until(
+        "Tutorial03 asks the Clonk to approach TRE2",
+        180,
+        |engine| tutorial_message_contains(engine, "first tree on the left"),
+    )?;
     player.hold_until(
         COM_LEFT,
         "the Clonk stands inside the first TRE2 shape",
@@ -269,12 +269,16 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             .is_some_and(|object| object.category & CATEGORY_VEHICLE != 0)
     })?;
 
-    player.wait_until("Tutorial03 asks the Clonk to grab the felled tree", 180, |engine| {
-        tutorial_message_contains(engine, "grab the felled tree")
-            && engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.action.name == "Walk")
-    })?;
+    player.wait_until(
+        "Tutorial03 asks the Clonk to grab the felled tree",
+        180,
+        |engine| {
+            tutorial_message_contains(engine, "grab the felled tree")
+                && engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk")
+        },
+    )?;
     player.tap(COM_DOWN)?;
     player.wait_until("the Clonk grabs the real felled TRE2", 80, |engine| {
         engine.object_snapshot(clonk).is_some_and(|object| {
@@ -295,8 +299,7 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         240,
         |engine| {
             engine.object_snapshot(tree).is_some_and(|tree| {
-                (239..=259).contains(&tree.position.x)
-                    && (254..=279).contains(&tree.position.y)
+                (239..=259).contains(&tree.position.x) && (254..=279).contains(&tree.position.y)
             })
         },
     )?;
@@ -475,8 +478,7 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         400,
         |engine| {
             engine.object_snapshot(lorry).is_some_and(|lorry| {
-                (356..=376).contains(&lorry.position.x)
-                    && (253..=279).contains(&lorry.position.y)
+                (356..=376).contains(&lorry.position.x) && (253..=279).contains(&lorry.position.y)
             })
         },
     )?;
@@ -489,9 +491,11 @@ fn tutorial03_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     player.wait_until("Tutorial03 observes LORY inside FNDR", 240, |engine| {
         tutorial_message_contains(engine, "foundry processes ore and fuel into metal")
     })?;
-    player.wait_until("FNDR produces real METL from ORE1 and WOOD", 600, |engine| {
-        object_with_definition(engine, "METL").is_some()
-    })?;
+    player.wait_until(
+        "FNDR produces real METL from ORE1 and WOOD",
+        600,
+        |engine| object_with_definition(engine, "METL").is_some(),
+    )?;
     player.wait_until("Tutorial03 explains the produced METL", 240, |engine| {
         tutorial_message_contains(engine, "Metal can be used to build vehicles")
     })?;

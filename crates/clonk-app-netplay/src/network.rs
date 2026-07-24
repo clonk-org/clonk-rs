@@ -99,6 +99,9 @@ impl NetworkEventSender {
         )
     }
 
+    // Preserve `std::sync::mpsc::Sender::send` semantics so callers recover the
+    // exact unsent event when the application-side receiver has gone away.
+    #[allow(clippy::result_large_err)]
     pub fn send(
         &self,
         event: NetworkEvent,
@@ -122,6 +125,9 @@ impl NetworkEventSender {
 }
 
 #[derive(Debug, Clone)]
+// This public mode is destructured throughout the app; boxing just the host
+// configuration would add pervasive indirection to a startup-only value.
+#[allow(clippy::large_enum_variant)]
 pub enum NetworkMode {
     Host(HostSettings),
     Client(ClientSettings),
@@ -520,7 +526,7 @@ impl NetworkControlClock {
     /// This is a non-consuming probe because a network stall retries the same
     /// frame and tick until `CtrlReady` succeeds.
     pub fn tick_for_frame(self, frame: u64) -> Option<i32> {
-        if frame % self.control_rate != 0 {
+        if !frame.is_multiple_of(self.control_rate) {
             return None;
         }
         Some(self.control_tick)
@@ -568,7 +574,7 @@ impl NetworkControlClock {
     /// next-tick cursor as soon as the cadence frame completes; native keeps
     /// displaying the executed tick until the next cadence boundary.
     pub fn display_control_tick_for_frame(self, frame: u64) -> i32 {
-        if frame % self.control_rate == 0 {
+        if frame.is_multiple_of(self.control_rate) {
             self.control_tick
         } else {
             self.control_tick.wrapping_sub(1)
@@ -1493,6 +1499,13 @@ type RuntimeHostJoinResult = (
 );
 
 #[cfg(any(test, feature = "test-hooks"))]
+type SubmittedPlayerInputs = (
+    Vec<(i32, ControlEvent, Tick)>,
+    Vec<(Tick, PlayerCommandControlData)>,
+    Vec<(Tick, PlayerSelectControlData)>,
+);
+
+#[cfg(any(test, feature = "test-hooks"))]
 impl TestNetworkCommands {
     pub fn receive_league_player_auth(&mut self) -> TestLeaguePlayerAuthCommand {
         match self.command_rx.blocking_recv() {
@@ -1883,13 +1896,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub fn take_submitted_player_inputs(
-        &mut self,
-    ) -> (
-        Vec<(i32, ControlEvent, Tick)>,
-        Vec<(Tick, PlayerCommandControlData)>,
-        Vec<(Tick, PlayerSelectControlData)>,
-    ) {
+    pub fn take_submitted_player_inputs(&mut self) -> SubmittedPlayerInputs {
         let mut controls = Vec::new();
         let mut commands = Vec::new();
         let mut selections = Vec::new();
@@ -1930,13 +1937,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub fn take_submitted_mouse_controls(
-        &mut self,
-    ) -> (
-        Vec<(i32, ControlEvent, Tick)>,
-        Vec<(Tick, PlayerCommandControlData)>,
-        Vec<(Tick, PlayerSelectControlData)>,
-    ) {
+    pub fn take_submitted_mouse_controls(&mut self) -> SubmittedPlayerInputs {
         let mut local = Vec::new();
         let mut commands = Vec::new();
         let mut selections = Vec::new();
@@ -2437,6 +2438,9 @@ impl TestNetworkCommands {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+// JoinData is a one-shot event moved through an unbounded channel. Keeping the
+// envelope inline avoids a separate allocation on the compatibility boundary.
+#[allow(clippy::large_enum_variant)]
 pub enum NetworkEvent {
     HostPingMeasured {
         round_trip_ms: i32,
@@ -2815,6 +2819,9 @@ enum NetworkCommand {
     Shutdown,
 }
 
+// Worker modes are moved once into the network thread. Their settings remain
+// inline so startup code can continue to destructure the public mode directly.
+#[allow(clippy::large_enum_variant)]
 enum WorkerMode {
     Host {
         settings: HostSettings,
@@ -4437,10 +4444,10 @@ impl NetworkManager {
                             NetworkEvent::StatusRequested(status) => {
                                 self.client_status.receive_request(*status);
                             }
-                            NetworkEvent::StatusCommitted(status) => {
-                                if !self.client_status.commit(*status) {
-                                    continue;
-                                }
+                            NetworkEvent::StatusCommitted(status)
+                                if !self.client_status.commit(*status) =>
+                            {
+                                continue;
                             }
                             _ => {}
                         }
@@ -5283,6 +5290,9 @@ fn host_registration_addresses(
     addresses
 }
 
+// These independently owned channels form the network-thread boundary; a
+// wrapper would only move the same ownership list into an opaque aggregate.
+#[allow(clippy::too_many_arguments)]
 async fn run_worker(
     mode: WorkerMode,
     mut command_rx: tokio_mpsc::Receiver<NetworkCommand>,
@@ -5335,6 +5345,9 @@ async fn run_worker(
     }
 }
 
+// Keep host worker channels explicit so their ownership and shutdown behavior
+// remain visible at every production and test entry point.
+#[allow(clippy::too_many_arguments)]
 async fn run_host_worker(
     settings: HostSettings,
     local_owner: i32,
@@ -6808,6 +6821,9 @@ async fn wait_for_startup_cancellation(cancellation: Option<&NetworkStartupCance
     }
 }
 
+// Keep client worker channels explicit so their ownership and shutdown behavior
+// remain visible at every production and test entry point.
+#[allow(clippy::too_many_arguments)]
 async fn run_client_worker(
     settings: ClientSettings,
     local_owner: i32,
@@ -7691,6 +7707,9 @@ fn initial_client_status(join_data: &clonk_network::JoinDataEnvelope) -> Network
     }
 }
 
+// Event forwarding deliberately receives each independently mutable state
+// machine; grouping them would obscure which state an event may update.
+#[allow(clippy::too_many_arguments)]
 async fn handle_client_worker_event(
     maybe_event: Option<ClientEvent>,
     client_status: &mut ClientStatusState,
@@ -7750,6 +7769,9 @@ async fn handle_client_worker_event(
     Ok(())
 }
 
+// The forwarding helper mirrors `handle_client_worker_event` while borrowing
+// all state across `select!`; an aggregate borrow would not simplify ownership.
+#[allow(clippy::too_many_arguments)]
 async fn await_client_operation_while_forwarding_events<F>(
     operation: F,
     client_events: &mut tokio_mpsc::Receiver<ClientEvent>,
@@ -9615,7 +9637,7 @@ Message=Server says Andr\xe9\r\n\
             .expect("host worker readiness timeout")
             .expect("host worker readiness");
         assert_eq!(ready.local_client_id, HOST_CLIENT_ID);
-        let local_addresses = &netpuncher_state.lock().local_addresses;
+        let local_addresses = netpuncher_state.lock().local_addresses.clone();
         assert_eq!(local_addresses.len(), 2);
         assert_eq!(local_addresses[0].protocol, NetworkProtocol::Tcp);
         assert_eq!(local_addresses[1].protocol, NetworkProtocol::Udp);
@@ -9852,8 +9874,7 @@ Message=Server says Andr\xe9\r\n\
         };
         let (_command_tx, mut command_rx) = tokio_mpsc::channel(8);
         let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (_control_performance_tx, mut control_performance_rx) =
-            tokio_mpsc::unbounded_channel();
+        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
         let (event_tx, _event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
@@ -10117,8 +10138,7 @@ Message=Server says Andr\xe9\r\n\
         };
         let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
         let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (_control_performance_tx, mut control_performance_rx) =
-            tokio_mpsc::unbounded_channel();
+        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
         let (event_tx, _event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
@@ -10208,11 +10228,9 @@ Message=Server says Andr\xe9\r\n\
         assert!(bodies[1]
             .windows(b"Action=End".len())
             .any(|window| window == b"Action=End"));
-        assert!(
-            bodies[1]
-                .windows(b"RandomSeed=305419896".len())
-                .any(|window| window == b"RandomSeed=305419896")
-        );
+        assert!(bodies[1]
+            .windows(b"RandomSeed=305419896".len())
+            .any(|window| window == b"RandomSeed=305419896"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10846,8 +10864,10 @@ Message=Server says Andr\xe9\r\n\
         let live_address = listener.local_addr().expect("passworded host address");
         let password = clonk_engine::LegacyCString::from_bytes(b"join secret".to_vec())
             .expect("fixture is NUL-free");
-        let mut host_config = HostConfig::default();
-        host_config.password = password.clone();
+        let host_config = HostConfig {
+            password: password.clone(),
+            ..Default::default()
+        };
         let host = start_host(listener, host_config).await.expect("start host");
         let temporary = tempfile::tempdir().expect("temporary client work directory");
         let mut settings = ClientSettings::new(closed_address, "Alice")

@@ -65,7 +65,9 @@ fn dynamic_object_components_keep_cpp_insertion_order_and_zero_entries() {
     )
     .expect("component state deserializes");
     let (mut restored, _) = engine_with_bag();
-    restored.restore_state(&state).expect("restore component list");
+    restored
+        .restore_state(&state)
+        .expect("restore component list");
     let restored = restored.object_snapshot(bag).expect("restored bag");
     assert_eq!(restored.component_order, ["ZERO", "IROC"]);
 }
@@ -144,7 +146,9 @@ func ReadOrder()
     restored
         .register_definition(definition)
         .expect("restore definition registers");
-    restored.restore_state(&state).expect("ordered state restores");
+    restored
+        .restore_state(&state)
+        .expect("ordered state restores");
     assert_eq!(
         restored
             .object_snapshot(object)
@@ -279,9 +283,8 @@ protected func GetCustomComponents(builder)
                 .expect("leading-invalid site compiles"),
         )
         .expect("leading-invalid site registers");
-    let mut empty_custom =
-        Definition::from_script("CEMP", "Empty custom", EMPTY_CUSTOM_SCRIPT)
-            .expect("empty-custom site compiles");
+    let mut empty_custom = Definition::from_script("CEMP", "Empty custom", EMPTY_CUSTOM_SCRIPT)
+        .expect("empty-custom site compiles");
     empty_custom.set_components(vec![DefinitionComponent {
         id: "WOOD".to_owned(),
         count: 2,
@@ -289,9 +292,8 @@ protected func GetCustomComponents(builder)
     engine
         .register_definition(empty_custom)
         .expect("empty-custom site registers");
-    let mut nonarray_custom =
-        Definition::from_script("NARR", "Non-array", NONARRAY_CUSTOM_SCRIPT)
-            .expect("non-array site compiles");
+    let mut nonarray_custom = Definition::from_script("NARR", "Non-array", NONARRAY_CUSTOM_SCRIPT)
+        .expect("non-array site compiles");
     nonarray_custom.set_components(vec![DefinitionComponent {
         id: "ROCK".to_owned(),
         count: 2,
@@ -344,14 +346,12 @@ protected func GetCustomComponents(builder)
         .expect("leading-invalid site spawns");
     let empty_site = engine
         .spawn_object(
-            SpawnConfig::new("CEMP")
-                .with_ordered_components(vec![("WOOD".to_owned(), 0)]),
+            SpawnConfig::new("CEMP").with_ordered_components(vec![("WOOD".to_owned(), 0)]),
         )
         .expect("empty-custom site spawns");
     let nonarray_site = engine
         .spawn_object(
-            SpawnConfig::new("NARR")
-                .with_ordered_components(vec![("ROCK".to_owned(), 0)]),
+            SpawnConfig::new("NARR").with_ordered_components(vec![("ROCK".to_owned(), 0)]),
         )
         .expect("non-array site spawns");
 
@@ -373,7 +373,11 @@ protected func GetCustomComponents(builder)
         Value::Array(vec![
             Value::String("Builder needs|no more material.".to_owned().into()),
             Value::String("Builder needs|no more material.".to_owned().into()),
-            Value::String("Nordwerk|needs|1x Stein|2x Bauholz|1x |1x MISS".to_owned().into()),
+            Value::String(
+                "Nordwerk|needs|1x Stein|2x Bauholz|1x |1x MISS"
+                    .to_owned()
+                    .into()
+            ),
             Value::String("Dynamic|needs|2x Metall|1x Bauholz".to_owned().into()),
             Value::String("Dynamic|needs|1x Stein".to_owned().into()),
             Value::String("Dynamic|needs|3x Bauholz".to_owned().into()),
@@ -399,7 +403,11 @@ protected func GetCustomComponents(builder)
             )
             .expect("localized needed-material probe runs"),
         Value::Array(vec![
-            Value::String("Builder braucht kein|weiteres Baumaterial.".to_owned().into()),
+            Value::String(
+                "Builder braucht kein|weiteres Baumaterial."
+                    .to_owned()
+                    .into()
+            ),
             Value::String(
                 "Nordwerk|braucht noch|1x Stein|2x Bauholz|1x |1x MISS"
                     .to_owned()

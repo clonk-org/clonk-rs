@@ -124,7 +124,7 @@ impl MusicStream {
 }
 
 enum MusicDecoder {
-    Pcm(PcmStream),
+    Pcm(Box<PcmStream>),
     Midi(crate::fluidsynth::MidiStream),
 }
 
@@ -136,38 +136,38 @@ impl MusicDecoder {
         };
         let retry_data = data.clone();
         retry_mpeg_layer3_candidates(data.as_ref(), original_error, move |offset| {
-            Ok(Self::Pcm(PcmStream::new(
+            Ok(Self::Pcm(Box::new(PcmStream::new(
                 PcmSource::Mp3(Mp3MusicStream::new_at(retry_data.clone(), offset)?),
                 output_sample_rate,
-            )?))
+            )?)))
         })
     }
 
     fn open_direct(data: Arc<[u8]>, output_sample_rate: u32) -> Result<Self, AudioDecodeError> {
         match detect_format(data.as_ref())? {
-            AudioFormat::Wav => Ok(Self::Pcm(PcmStream::new(
+            AudioFormat::Wav => Ok(Self::Pcm(Box::new(PcmStream::new(
                 PcmSource::Wav(WavStream::new(data)?),
                 output_sample_rate,
-            )?)),
-            AudioFormat::Ogg => Ok(Self::Pcm(PcmStream::new(
-                PcmSource::Ogg(OggMusicStream::new(data)?),
+            )?))),
+            AudioFormat::Ogg => Ok(Self::Pcm(Box::new(PcmStream::new(
+                PcmSource::Ogg(Box::new(OggMusicStream::new(data)?)),
                 output_sample_rate,
-            )?)),
-            AudioFormat::Mp3 => Ok(Self::Pcm(PcmStream::new(
+            )?))),
+            AudioFormat::Mp3 => Ok(Self::Pcm(Box::new(PcmStream::new(
                 PcmSource::Mp3(Mp3MusicStream::new(data)?),
                 output_sample_rate,
-            )?)),
+            )?))),
             AudioFormat::Midi => Ok(Self::Midi(crate::fluidsynth::MidiStream::new(
                 data.as_ref(),
                 output_sample_rate,
             )?)),
-            AudioFormat::Tracker => Ok(Self::Pcm(PcmStream::new(
-                PcmSource::Tracker(crate::tracker::TrackerStream::new(
+            AudioFormat::Tracker => Ok(Self::Pcm(Box::new(PcmStream::new(
+                PcmSource::Tracker(Box::new(crate::tracker::TrackerStream::new(
                     data.as_ref(),
                     output_sample_rate,
-                )?),
+                )?)),
                 output_sample_rate,
-            )?)),
+            )?))),
         }
     }
 
@@ -317,9 +317,9 @@ impl PcmStream {
 
 enum PcmSource {
     Wav(WavStream),
-    Ogg(OggMusicStream),
+    Ogg(Box<OggMusicStream>),
     Mp3(Mp3MusicStream),
-    Tracker(crate::tracker::TrackerStream),
+    Tracker(Box<crate::tracker::TrackerStream>),
 }
 
 impl PcmSource {
@@ -553,7 +553,7 @@ fn stereo_i16_frame(samples: &[i16]) -> [f32; 2] {
 
 #[cfg(test)]
 fn frame_capacity(sample_capacity: usize, channels: usize) -> usize {
-    sample_capacity / channels + usize::from(sample_capacity % channels != 0)
+    sample_capacity / channels + usize::from(!sample_capacity.is_multiple_of(channels))
 }
 
 // C4AudioSystemSdl bounds its fallback search by the maximum possible MPEG

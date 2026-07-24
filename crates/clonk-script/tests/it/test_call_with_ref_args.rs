@@ -30,7 +30,11 @@ fn ref_params_write_back_to_the_argument_cells() {
         .expect("call succeeds");
     assert_eq!(result, Value::Int(120), "the local copy was mutated");
     assert_eq!(finals[0], Value::Int(11), "&x writes back");
-    assert_eq!(finals[1], Value::Int(20), "plain y stays the caller's value");
+    assert_eq!(
+        finals[1],
+        Value::Int(20),
+        "plain y stays the caller's value"
+    );
     assert_eq!(finals[2], Value::String("swapped".into()), "&z writes back");
 }
 

@@ -272,16 +272,11 @@ impl LoaderResources {
 /// Whether `C4LoaderScreen::Draw` received a log-buffer pointer.  `Visible`
 /// draws the 84px region even when the buffer has no lines; `Hidden` omits it
 /// exactly like a null `pLog` during the loader's initial draw.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum LoaderLog {
+    #[default]
     Hidden,
     Visible(Vec<String>),
-}
-
-impl Default for LoaderLog {
-    fn default() -> Self {
-        Self::Hidden
-    }
 }
 
 /// Mutable app-owned values used for one loader frame.
@@ -610,13 +605,7 @@ impl LoaderScreen {
         logical_height: u32,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
-        self.render_native_text_to(
-            surface,
-            fonts,
-            logical_width,
-            logical_height,
-            gamma,
-        )
+        self.render_native_text_to(surface, fonts, logical_width, logical_height, gamma)
     }
 
     pub fn render_native_text_to<T: SurfaceDrawTarget + ?Sized>(
@@ -1101,7 +1090,7 @@ fn texture_size(width: u32, height: u32) -> i32 {
 
 fn last_texture_size(width: u32, height: u32, base: i32) -> i32 {
     let base = base as u32;
-    if width % base == 0 || height % base == 0 {
+    if width.is_multiple_of(base) || height.is_multiple_of(base) {
         return base as i32;
     }
     let needed = (width % base).max(height % base).max(1);

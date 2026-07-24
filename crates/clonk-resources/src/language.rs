@@ -349,7 +349,7 @@ fn parse_language_info(code_bytes: [u8; 2], bytes: &[u8]) -> LanguageInfo {
         let mut cursor = 0;
         while cursor + 1 < value.len() {
             if value[cursor..].starts_with(b"\\n") {
-                value.splice(cursor..cursor + 2, [b'\r', b'\n']);
+                value.splice(cursor..cursor + 2, *b"\r\n");
                 cursor += 2;
             } else {
                 cursor += 1;

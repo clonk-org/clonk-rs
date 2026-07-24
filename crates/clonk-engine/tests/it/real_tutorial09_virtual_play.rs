@@ -2,11 +2,11 @@
 
 use std::error::Error;
 
+use crate::support::real_scenario::load_tutorial;
+use crate::support::virtual_player::{VirtualPlayer, VirtualPlayerError};
 use clonk_engine::{
     Engine, JoinPlayerConfig, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
 };
-use crate::support::real_scenario::load_tutorial;
-use crate::support::virtual_player::{VirtualPlayer, VirtualPlayerError};
 
 fn load_tutorial09() -> (Engine, i32) {
     let mut engine = load_tutorial(9, 0);
@@ -267,7 +267,10 @@ fn leave_igloo_for_western_ocean(
             Err(error) => return Err(Box::new(error)),
         }
     }
-    player.assert_milestone("the Clonk clears the western slope into the ocean", reaches_ocean)?;
+    player.assert_milestone(
+        "the Clonk clears the western slope into the ocean",
+        reaches_ocean,
+    )?;
     Ok(())
 }
 
@@ -330,13 +333,16 @@ fn catch_and_deposit_another_fish(
                         .object_snapshot(clonk)
                         .zip(engine.object_snapshot(igloo))
                         .is_some_and(|(clonk, igloo)| {
-                            clonk.action.name == "Walk"
-                                && clonk.position.x <= igloo.position.x - 8
+                            clonk.action.name == "Walk" && clonk.position.x <= igloo.position.x - 8
                         })
                 },
             )?;
             player.tap(COM_UP)?;
-            player.wait_until("the Clonk re-enters IGLO after correcting", 60, enters_igloo)?;
+            player.wait_until(
+                "the Clonk re-enters IGLO after correcting",
+                60,
+                enters_igloo,
+            )?;
         }
         Err(error) => return Err(Box::new(error)),
     }

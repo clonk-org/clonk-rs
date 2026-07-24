@@ -125,7 +125,9 @@ fn picture_rect_round_trips_and_zero_width_remains_the_default_sentinel() {
         json!({"x": 1, "y": -2, "width": 30, "height": 40})
     );
 
-    let restored_index = restored.find_object_index(first).expect("restored probe exists");
+    let restored_index = restored
+        .find_object_index(first)
+        .expect("restored probe exists");
     restored
         .call_object_function(restored_index, "ClearOwnPicture", Vec::new())
         .expect("zero rect SetPicture succeeds");
@@ -205,7 +207,11 @@ fn clr_modulation_targets_existing_overlays_without_creating_missing_ones() {
             .call_object_function(
                 first_index,
                 "SetOtherModulation",
-                vec![Value::Int(0x0055_6677), Value::Object(second.as_u64()), Value::Int(9)],
+                vec![
+                    Value::Int(0x0055_6677),
+                    Value::Object(second.as_u64()),
+                    Value::Int(9)
+                ],
             )
             .expect("foreign overlay modulation writes"),
         Value::Bool(true)
@@ -225,7 +231,11 @@ fn clr_modulation_targets_existing_overlays_without_creating_missing_ones() {
             .call_object_function(
                 first_index,
                 "SetOtherModulation",
-                vec![Value::Int(1), Value::Object(second.as_u64()), Value::Int(10)],
+                vec![
+                    Value::Int(1),
+                    Value::Object(second.as_u64()),
+                    Value::Int(10)
+                ],
             )
             .expect("missing overlay fails safely"),
         Value::Bool(false)
@@ -525,8 +535,7 @@ fn fresh_color_by_owner_objects_copy_the_live_player_color() {
     let mut engine = Engine::new();
     engine
         .register_player(
-            PlayerConfig::new(0, "Red")
-                .with_color(Some(RgbColor::new(0xaa, 0x22, 0x44))),
+            PlayerConfig::new(0, "Red").with_color(Some(RgbColor::new(0xaa, 0x22, 0x44))),
         )
         .expect("player registers");
     let mut definition =
@@ -553,9 +562,7 @@ fn object_picture_rect_uses_the_definition_graphics_scale() {
     let mut definition =
         Definition::from_script("SCAL", "Scale probe", "#strict").expect("probe compiles");
     let pixels: Vec<u8> = (0..8)
-        .flat_map(|y| {
-            (0..8).flat_map(move |x| [x as u8, y as u8, (x + y) as u8, 0xff])
-        })
+        .flat_map(|y| (0..8).flat_map(move |x| [x as u8, y as u8, (x + y) as u8, 0xff]))
         .collect();
     definition.set_sprite_image(Some(DefinitionSpriteImage {
         width: 8,

@@ -645,15 +645,16 @@ measurements show where time is spent.
 Build once, then run the real Deep Sea scenario through the windowed GPU path:
 
 ```sh
-cd rust
+# Run from the repository root.
 cargo build --release --offline --locked -p clonk-app --bin clonk-app
 scripts/run-deep-sea-gpu-benchmark.sh 20
 ```
 
-The wrapper creates and removes a self-contained `/private/tmp` fixture. It
-excludes only Hazard's three duplicate process-global GUI sheets and removes
-the copied scenario's `Origin` redirect; all Deep Sea world and gameplay
-resources remain the real checked-in content.
+The wrapper creates and removes a self-contained fixture below the platform
+temporary directory. On macOS and Linux, set `TMPDIR` to place that disposable
+state somewhere else. It excludes only Hazard's three duplicate process-global
+GUI sheets and removes the copied scenario's `Origin` redirect; all Deep Sea
+world and gameplay resources remain the real checked-in content.
 
 The app warms up for two seconds, measures for 20 seconds, prints one
 `LC_APP_PRESENTATION_BENCHMARK` machine line, and exits. The assertion exits

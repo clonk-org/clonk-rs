@@ -44,7 +44,10 @@ fn falsy_operands_compare_as_empty_below_strict_two() {
     engine
         .load_script("func Test() { return ZeroId() S= \"\"; }")
         .expect("script loads");
-    assert_eq!(engine.call("Test", &[]).expect("comparison runs"), Value::Bool(true));
+    assert_eq!(
+        engine.call("Test", &[]).expect("comparison runs"),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -87,9 +90,7 @@ fn string_comparison_stops_at_the_native_nul_terminator() {
 fn truthy_non_strings_raise_operator_type_errors_below_strict_two() {
     for prefix in ["", "#strict\n"] {
         assert_eq!(
-            eval_error(&format!(
-                "{prefix}func Test() {{ return 5 S= \"5\"; }}"
-            )),
+            eval_error(&format!("{prefix}func Test() {{ return 5 S= \"5\"; }}")),
             "operator \"S=\" left side: got \"int\", but expected \"string\"!"
         );
     }
@@ -131,7 +132,9 @@ fn textual_ne_compares_nil_as_empty_string() {
 #[test]
 fn keyword_string_equality_accepts_a_real_host_returned_string() {
     let mut engine = Engine::new();
-    engine.register_host_function("GetAction", |_| Ok(Value::String("Walk".to_string().into())));
+    engine.register_host_function("GetAction", |_| {
+        Ok(Value::String("Walk".to_string().into()))
+    });
     engine
         .load_script("func Test() { return GetAction() eq \"Walk\"; }")
         .expect("script loads");

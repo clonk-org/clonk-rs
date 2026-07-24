@@ -596,10 +596,9 @@ pub fn run_replay_twice(
     // Parsing and I/O are immutable preparation shared by the two fresh
     // engines. Attribute that measured cost to each run's logical load phase
     // so `load_micros` remains comparable with pre-reuse replay artifacts.
-    let first = run_replay_once(replay, &scenario, prepare_elapsed)
-        .map_err(ReplayRunError::new)?;
-    let second = run_replay_once(replay, &scenario, prepare_elapsed)
-        .map_err(ReplayRunError::new)?;
+    let first = run_replay_once(replay, &scenario, prepare_elapsed).map_err(ReplayRunError::new)?;
+    let second =
+        run_replay_once(replay, &scenario, prepare_elapsed).map_err(ReplayRunError::new)?;
     let metrics = ReplayMetricsFileV1 {
         schema_version: REPLAY_SCHEMA_VERSION,
         runs: vec![first.metrics.clone(), second.metrics.clone()],
@@ -768,7 +767,9 @@ fn run_replay_once(
                     if joined.number() != join.expected_owner {
                         return Err(format!(
                             "join `{}` at frame {frame} expected owner {}, got {}",
-                            join.name, join.expected_owner, joined.number()
+                            join.name,
+                            join.expected_owner,
+                            joined.number()
                         ));
                     }
                 }
@@ -1139,7 +1140,7 @@ fn write_logs(directory: &Path, value: &Value) -> Result<(), DevFeedbackError> {
 
 fn write_readme(directory: &Path, scenario: &str) -> Result<(), DevFeedbackError> {
     let contents = format!(
-        "Deterministic Clonk Rust replay artifact\n\nScenario: {scenario}\nReplay: replay.json\nMetrics: replay-metrics.json\n\nReproduce from rust/:\n  LC_CONTENT_ROOT=/path/to/content cargo nextest run -p clonk-engine-integration-tests --test engine_it -- dev_feedback_replay::committed_real_scenario_replays_are_deterministic --exact\n"
+        "Deterministic Clonk Rust replay artifact\n\nScenario: {scenario}\nReplay: replay.json\nMetrics: replay-metrics.json\n\nReproduce from the repository root:\n  LC_CONTENT_ROOT=/path/to/content cargo nextest run -p clonk-engine-integration-tests --test engine_it -- dev_feedback_replay::committed_real_scenario_replays_are_deterministic --exact\n"
     );
     fs::write(directory.join("README.txt"), contents)
         .map_err(|error| io_error("write README.txt", error))

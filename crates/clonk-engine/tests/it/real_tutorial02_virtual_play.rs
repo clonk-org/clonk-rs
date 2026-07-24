@@ -2,9 +2,9 @@
 
 use std::error::Error;
 
-use clonk_engine::{Engine, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP};
 use crate::support::real_scenario::{join_local_player, load_tutorial};
 use crate::support::virtual_player::VirtualPlayer;
+use clonk_engine::{Engine, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP};
 
 fn load_tutorial02() -> (Engine, i32) {
     let mut engine = load_tutorial(2, 0);
@@ -244,11 +244,15 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         )?;
         player.tap(COM_DOWN)?;
         player.press(COM_RIGHT)?;
-        player.wait_until("the stopped Clonk turns toward the island centre", 10, |engine| {
-            engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.direction == clonk_engine::Direction::Right)
-        })?;
+        player.wait_until(
+            "the stopped Clonk turns toward the island centre",
+            10,
+            |engine| {
+                engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.direction == clonk_engine::Direction::Right)
+            },
+        )?;
         player.release(COM_RIGHT)?;
         assert_eq!(
             player
@@ -354,9 +358,9 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     )?;
     player.double_tap(COM_DIG)?;
     player.wait_until("LOAM opens its real construction menu", 10, |engine| {
-        engine
-            .cursor_object_menu(owner)
-            .is_some_and(|(_, menu)| menu.identification == clonk_script::Value::C4Id("LMMS".into()))
+        engine.cursor_object_menu(owner).is_some_and(|(_, menu)| {
+            menu.identification == clonk_script::Value::C4Id("LMMS".into())
+        })
     })?;
     player.wait_until(
         "Tutorial02 observes LMMS and asks for diagonal-left",
@@ -480,9 +484,9 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     // the first span (Loam.c4d/Script.c:31-60,82-97).
     player.double_tap(COM_DIG)?;
     player.wait_until("second LOAM opens LMMS", 20, |engine| {
-        engine
-            .cursor_object_menu(owner)
-            .is_some_and(|(_, menu)| menu.identification == clonk_script::Value::C4Id("LMMS".into()))
+        engine.cursor_object_menu(owner).is_some_and(|(_, menu)| {
+            menu.identification == clonk_script::Value::C4Id("LMMS".into())
+        })
     })?;
     player.menu_navigate_to_caption("Diagonal left")?;
     let second_bridge_start = player
@@ -557,9 +561,9 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     )?;
     player.double_tap(COM_DIG)?;
     player.wait_until("third LOAM opens LMMS", 20, |engine| {
-        engine
-            .cursor_object_menu(owner)
-            .is_some_and(|(_, menu)| menu.identification == clonk_script::Value::C4Id("LMMS".into()))
+        engine.cursor_object_menu(owner).is_some_and(|(_, menu)| {
+            menu.identification == clonk_script::Value::C4Id("LMMS".into())
+        })
     })?;
     player.menu_navigate_to_caption("Diagonal left")?;
     let third_bridge_start = player
@@ -695,11 +699,15 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         player.wait_until("last spare LOAM leaves the Clonk", 30, |engine| {
             !clonk_carries(engine, clonk, "LOAM")
         })?;
-        player.wait_until("Clonk finishes throwing the last spare LOAM", 30, |engine| {
-            engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.action.name == "Walk")
-        })?;
+        player.wait_until(
+            "Clonk finishes throwing the last spare LOAM",
+            30,
+            |engine| {
+                engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        )?;
     }
     let flag_pickup = player.wait_until("FLAG enters the Clonk's inventory", 12, |engine| {
         clonk_carries(engine, clonk, "FLAG")

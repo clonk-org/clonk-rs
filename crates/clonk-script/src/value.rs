@@ -375,7 +375,7 @@ pub fn c4_id_text(id: &str) -> String {
 pub mod c4_id_serde {
     use super::{c4_id_from_raw, c4_id_parse, c4_id_raw, c4_string_from_bytes};
 
-    pub fn serialize<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(value: &str, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {

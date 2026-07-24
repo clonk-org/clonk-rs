@@ -21,8 +21,16 @@ fn nil_coalescing_keeps_falsy_non_nil_values() {
         global func TakeRight() { var a; return a ?? 7; }
     "#;
     assert_eq!(run(source, "KeepZero"), Value::Int(0), "0 is not nil");
-    assert_eq!(run(source, "KeepFalse"), Value::Bool(false), "false is not nil");
-    assert_eq!(run(source, "TakeRight"), Value::Int(7), "nil takes the right side");
+    assert_eq!(
+        run(source, "KeepFalse"),
+        Value::Bool(false),
+        "false is not nil"
+    );
+    assert_eq!(
+        run(source, "TakeRight"),
+        Value::Int(7),
+        "nil takes the right side"
+    );
 }
 
 #[test]

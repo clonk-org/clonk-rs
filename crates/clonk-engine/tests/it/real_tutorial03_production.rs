@@ -37,11 +37,9 @@ fn tutorial03_real_sawmill_processes_a_pure_wood_tree() {
     let resolver = ContentResolver {
         root: content.clone(),
     };
-    let scenario = Scenario::load_from_path_with(
-        content.join("Tutorial.c4f/Tutorial03.c4s"),
-        &resolver,
-    )
-    .expect("Tutorial03 and its real Objects.c4d load");
+    let scenario =
+        Scenario::load_from_path_with(content.join("Tutorial.c4f/Tutorial03.c4s"), &resolver)
+            .expect("Tutorial03 and its real Objects.c4d load");
     let mut engine = Engine::with_seed(0);
     scenario.apply(&mut engine).expect("Tutorial03 applies");
     engine
@@ -111,7 +109,9 @@ fn tutorial03_real_sawmill_processes_a_pure_wood_tree() {
     );
 
     for _ in 0..80 {
-        engine.tick_without_snapshot().expect("real SAWM production frame");
+        engine
+            .tick_without_snapshot()
+            .expect("real SAWM production frame");
         if engine.object_snapshot(tree).is_none() {
             break;
         }

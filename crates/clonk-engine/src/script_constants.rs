@@ -314,12 +314,13 @@ pub(crate) fn register_script_constants(script: &mut ScriptEngine) {
 /// Seed the shared preparser table before any script host is loaded. C++ puts
 /// built-ins and script-declared constants in the same engine map, so a
 /// `static const` initializer may alias a built-in by name.
-pub(crate) fn register_script_constants_in_global_table(
-    constants: &clonk_script::GlobalVariables,
-) {
+pub(crate) fn register_script_constants_in_global_table(constants: &clonk_script::GlobalVariables) {
     let mut constants = constants.borrow_mut();
     for (name, value) in C4_SCRIPT_CONSTANTS {
-        constants.insert((*name).to_owned(), clonk_script::value_cell(Value::Int(*value)));
+        constants.insert(
+            (*name).to_owned(),
+            clonk_script::value_cell(Value::Int(*value)),
+        );
     }
 }
 
@@ -363,17 +364,12 @@ mod tests {
         let globals = clonk_script::new_global_variables();
         let constants = clonk_script::new_global_variables();
         register_script_constants_in_global_table(&constants);
-        let script = clonk_script::Script::compile(
-            "#strict 3\nstatic const RIGHT_ALIAS = DIR_Right;",
-        )
-        .expect("static constant alias compiles");
+        let script =
+            clonk_script::Script::compile("#strict 3\nstatic const RIGHT_ALIAS = DIR_Right;")
+                .expect("static constant alias compiles");
 
-        clonk_script::register_global_declarations(
-            script.var_decls(),
-            &globals,
-            Some(&constants),
-        )
-        .expect("built-in constant resolves during preparse");
+        clonk_script::register_global_declarations(script.var_decls(), &globals, Some(&constants))
+            .expect("built-in constant resolves during preparse");
 
         assert_eq!(
             constants
@@ -400,7 +396,8 @@ mod tests {
             .expect("built-in shared cell exists")
             .borrow_mut() = Value::Int(9);
         assert_eq!(
-            host.call("Probe", &[]).expect("overridden constant resolves"),
+            host.call("Probe", &[])
+                .expect("overridden constant resolves"),
             Value::Array(vec![Value::Int(9), Value::Int(9)]),
             "the canonical shared table wins over each host's stale built-in copy"
         );

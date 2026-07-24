@@ -66,10 +66,9 @@
             entry == &DeveloperConsoleCompletionEntry::Function("EngineProbe()".to_string())
         }));
 
-        let gtk = developer_console_completion_entries(&catalog, DeveloperConsoleCompletionStyle::Gtk);
-        assert!(!gtk
-            .iter()
-            .any(|entry| *entry == DeveloperConsoleCompletionEntry::Separator));
+        let gtk =
+            developer_console_completion_entries(&catalog, DeveloperConsoleCompletionStyle::Gtk);
+        assert!(!gtk.contains(&DeveloperConsoleCompletionEntry::Separator));
         assert_eq!(
             &gtk[gtk.len() - catalog.scenario_functions.len()..],
             &[
@@ -4319,10 +4318,10 @@
             .collect::<Vec<_>>();
 
         assert_eq!(
-                roots,
-                [global.clone()],
-                "the resolver returns the one explicit global resource; InitDefs adds folder-local resources separately"
-            );
+            roots.as_slice(),
+            std::slice::from_ref(&global),
+            "the resolver returns the one explicit global resource; InitDefs adds folder-local resources separately"
+        );
 
         let loaded = Scenario::load_from_path_with(&scenario, &resolver)
             .expect("collision scenario loads through app resolver");

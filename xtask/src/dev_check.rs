@@ -469,13 +469,10 @@ fn plan_checks(changes: &ChangeSet, options: &Options) -> CheckPlan {
 
     for path in &changes.paths {
         let reason = format!("changed {path}");
-        if path.starts_with("snapshots/engine/")
-            || path == "crates/clonk-engine/src/fixtures.rs"
-        {
+        if path.starts_with("snapshots/engine/") || path == "crates/clonk-engine/src/fixtures.rs" {
             add_snapshots(&mut plan, &reason);
         }
-        if path.starts_with("parity/") || path == "crates/clonk-engine/src/parity_differential.rs"
-        {
+        if path.starts_with("parity/") || path == "crates/clonk-engine/src/parity_differential.rs" {
             add_parity(&mut plan, &reason);
         }
         plan_content(&mut plan, path, &reason);

@@ -259,7 +259,10 @@ fn layout_target_message(
     anchor: (i32, i32),
     images: &dyn FontImageProvider,
 ) -> Result<TargetMessageLayout, &'static str> {
-    if !matches!(message.kind, MessageKind::Target | MessageKind::TargetPlayer) {
+    if !matches!(
+        message.kind,
+        MessageKind::Target | MessageKind::TargetPlayer
+    ) {
         return Err("global C4GameMessage requires the global renderer");
     }
 
@@ -267,11 +270,7 @@ fn layout_target_message(
     let draw_text = if message.flags & FLAG_NO_BREAK != 0 {
         text
     } else {
-        metrics.break_message(
-            &text,
-            bound_by(extent_i32(viewport.width), 50, 200),
-            images,
-        )
+        metrics.break_message(&text, bound_by(extent_i32(viewport.width), 50, 200), images)
     };
     // C4GameMessage asks GetTextExtent again after BreakMessage. In
     // particular, the footprint is the broken markup-aware text rather than
@@ -792,11 +791,8 @@ mod tests {
             FLAG_ALIGN_LEFT | FLAG_ALIGN_CENTER | FLAG_ALIGN_RIGHT,
             "AAAA AAAA AAAA AAAA",
         );
-        let expected_text = MessageFontMetrics::Logical(&font).break_message(
-            &message_text(&message),
-            80,
-            &images,
-        );
+        let expected_text =
+            MessageFontMetrics::Logical(&font).break_message(&message_text(&message), 80, &images);
         assert_ne!(expected_text, message_text(&message));
         let expected_extent = font.measure_with_images(&expected_text, true, &images);
 
@@ -874,10 +870,10 @@ mod tests {
         .expect("draw target message");
 
         assert_eq!(surface.clip(), Some(caller_clip));
-        assert!(surface
-            .pixels()
-            .chunks_exact(4)
-            .any(|pixel| pixel[3] != 0), "target glyph was drawn");
+        assert!(
+            surface.pixels().chunks_exact(4).any(|pixel| pixel[3] != 0),
+            "target glyph was drawn"
+        );
     }
 
     #[test]
@@ -908,10 +904,10 @@ mod tests {
         .expect("draw scale-native target message");
 
         assert_eq!(surface.clip(), Some(caller_clip));
-        assert!(surface
-            .pixels()
-            .chunks_exact(4)
-            .any(|pixel| pixel[3] != 0), "native target glyph was drawn");
+        assert!(
+            surface.pixels().chunks_exact(4).any(|pixel| pixel[3] != 0),
+            "native target glyph was drawn"
+        );
     }
 
     #[test]

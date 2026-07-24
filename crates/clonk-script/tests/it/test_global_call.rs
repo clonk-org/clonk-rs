@@ -120,7 +120,9 @@ func Read() { return Global(3); }
         Value::Int(42)
     );
     assert_eq!(
-        engine.call("Read", &[]).expect("Global reads the later call"),
+        engine
+            .call("Read", &[])
+            .expect("Global reads the later call"),
         Value::Int(42)
     );
 }

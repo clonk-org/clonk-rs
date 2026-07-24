@@ -419,7 +419,10 @@ mod tests {
                 external_port: 0,
             },
         ];
-        assert_eq!(&*backend.started.lock().unwrap(), &[expected.clone()]);
+        assert_eq!(
+            &*backend.started.lock().unwrap(),
+            std::slice::from_ref(&expected)
+        );
 
         host.shutdown().await.unwrap();
         assert_eq!(&*backend.released.lock().unwrap(), &[expected]);
@@ -3193,11 +3196,13 @@ mod tests {
     async fn host_queued_client_remove_projects_removing_before_sync_execution() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let mut config = HostConfig::default();
-        config.initial_status = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 0,
-            target_tick: 0,
+        let config = HostConfig {
+            initial_status: NetworkStatus {
+                state: NETWORK_STATE_GO,
+                control_mode: 0,
+                target_tick: 0,
+            },
+            ..HostConfig::default()
         };
         let host = start_host(listener, config).await.unwrap();
         let client = connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
@@ -9034,8 +9039,10 @@ mod tests {
         // prompt loop; ordinary admission failures remain terminal
         // (src/C4Network2.cpp:281-345,1448-1469).
         let secret = clonk_engine::LegacyCString::from_bytes(b"correct horse".to_vec()).unwrap();
-        let mut host_config = HostConfig::default();
-        host_config.password = secret.clone();
+        let host_config = HostConfig {
+            password: secret.clone(),
+            ..HostConfig::default()
+        };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let host = start_host(listener, host_config).await.unwrap();
@@ -9064,8 +9071,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn client_join_flow_keeps_non_password_rejection_terminal() {
-        let mut host_config = HostConfig::default();
-        host_config.allow_join = false;
+        let host_config = HostConfig {
+            allow_join: false,
+            ..HostConfig::default()
+        };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let host = start_host(listener, host_config).await.unwrap();
@@ -11223,12 +11232,10 @@ mod tests {
             ControlMessage::ConnectionReply(crate::ConnectionReply { ok: true, .. })
         ));
 
-        let _delayed_setup = loop {
-            match timeout(EVENT_WAIT, host_rx.recv()).await.unwrap() {
-                Some(HostLoopMessage::ClientAccepted { setup_tx, .. }) => break setup_tx,
-                Some(other) => panic!("unexpected host route event: {other:?}"),
-                None => panic!("host route stopped before acceptance"),
-            }
+        let _delayed_setup = match timeout(EVENT_WAIT, host_rx.recv()).await.unwrap() {
+            Some(HostLoopMessage::ClientAccepted { setup_tx, .. }) => setup_tx,
+            Some(other) => panic!("unexpected host route event: {other:?}"),
+            None => panic!("host route stopped before acceptance"),
         };
         let ping = crate::PingPacket {
             sent_at: 17,
@@ -12165,8 +12172,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn runtime_dynamic_expires_only_after_the_host_advances_past_its_tick() {
         let directories = SessionResourceDirectories::new();
-        let mut config = HostConfig::default();
-        config.resource_directory = Some(directories.host.clone());
+        let config = HostConfig {
+            resource_directory: Some(directories.host.clone()),
+            ..HostConfig::default()
+        };
         let parameters = config
             .initial_join_snapshot
             .as_ref()
@@ -14068,9 +14077,9 @@ mod tests {
         while synchronized_remove.is_none() || !committed {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
                 Some(HostEvent::SyncScheduled {
-                    control_tick,
+                    control_tick: 0,
                     controls,
-                }) if control_tick == 0 => {
+                }) => {
                     assert!(
                         synchronized_remove.replace(controls).is_none(),
                         "ClientRemove synchronized twice"
@@ -14354,9 +14363,9 @@ mod tests {
                     assert!(released.replace(packet).is_none(), "tick released twice");
                 }
                 Some(HostEvent::SyncScheduled {
-                    control_tick,
+                    control_tick: 1,
                     controls,
-                }) if control_tick == 1 => {
+                }) => {
                     assert!(
                         synchronized_remove.replace(controls).is_none(),
                         "ClientRemove synchronized twice"
@@ -14707,9 +14716,9 @@ mod tests {
                     panic!("provisional admission recovery became terminal: {error}");
                 }
                 Some(HostEvent::SyncScheduled {
-                    control_tick,
+                    control_tick: 1,
                     controls,
-                }) if control_tick == 1 => {
+                }) => {
                     assert!(
                         synchronized_remove.replace(controls).is_none(),
                         "provisional ClientRemove synchronized twice"

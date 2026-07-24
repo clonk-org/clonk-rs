@@ -930,9 +930,7 @@ impl Material {
             .int_list("colorx")
             .or_else(|| definition.int_list("color"))
             .unwrap_or_else(|| vec![0; 9]);
-        let alpha = definition
-            .int_list("alpha")
-            .unwrap_or_else(|| vec![0; 6]);
+        let alpha = definition.int_list("alpha").unwrap_or_else(|| vec![0; 6]);
         let normalized_name = material_name_key(definition.name());
         Self {
             id,
@@ -1211,12 +1209,11 @@ impl MaterialSet {
     ) -> Option<usize> {
         let mut ordinal = 0;
         for material in &self.materials {
-            for key in [
-                "blastshiftto",
-                "belowtempconvertto",
-                "abovetempconvertto",
-            ] {
-                let Some(spec) = material.definition.value(key).filter(|spec| !spec.is_empty())
+            for key in ["blastshiftto", "belowtempconvertto", "abovetempconvertto"] {
+                let Some(spec) = material
+                    .definition
+                    .value(key)
+                    .filter(|spec| !spec.is_empty())
                 else {
                     continue;
                 };
@@ -1236,10 +1233,7 @@ impl MaterialSet {
 
     /// `C4MaterialMap::SaveEnumeration`: add/replace root MatMap.txt with the
     /// current runtime material names in numeric-id order.
-    pub fn save_enumeration(
-        &self,
-        group: &mut MutableGroup,
-    ) -> Result<(), MutableGroupError> {
+    pub fn save_enumeration(&self, group: &mut MutableGroup) -> Result<(), MutableGroupError> {
         let enumeration = clonk_resources::material::MaterialEnumeration::from_names(
             self.materials.iter().map(Material::name),
         );
@@ -1542,9 +1536,7 @@ fn execute_mass_move_reaction_kind(
         // mrfConvert meeMassMove (C4Material.cpp:654-657): unconditional
         // conversion-transfer of the MOVER's material to PXS — the convert
         // target (even an invalid one) plays no role on this event.
-        MaterialReactionKind::Convert { .. } => {
-            MaterialReactionExecution::Converted(pxs_material)
-        }
+        MaterialReactionKind::Convert { .. } => MaterialReactionExecution::Converted(pxs_material),
         MaterialReactionKind::Poof => {
             // mrfPoof meeMassMove (C4Material.cpp:669-670): a real
             // ExtractMaterial — FindMatTop + clear here, the
@@ -1884,9 +1876,8 @@ mod tests {
 
     #[test]
     fn compiled_material_core_covers_the_cpp_reflection_schema() {
-        let set = build_material_set(
-            "[Material]\nName=Probe\n\n[Reaction]\nType=Poof\nTargetSpec=Sky\n",
-        );
+        let set =
+            build_material_set("[Material]\nName=Probe\n\n[Reaction]\nType=Poof\nTargetSpec=Sky\n");
         let material = set.get("Probe").expect("probe material exists");
         let actual = material
             .compiled_core
@@ -2457,9 +2448,11 @@ mod tests {
             )
             .expect("target material adds");
         let packed = group.pack_raw().expect("material group packs");
-        let group =
-            clonk_resources::Group::from_raw_memory(std::path::PathBuf::from("Material.c4g"), packed)
-                .expect("material group reopens");
+        let group = clonk_resources::Group::from_raw_memory(
+            std::path::PathBuf::from("Material.c4g"),
+            packed,
+        )
+        .expect("material group reopens");
         let library = MaterialLibrary::from_group(&group).expect("native materials compile");
         let native = MaterialSet::from_resource_library(&library);
         let trailing = native.id_of("Trailing").expect("trailing source exists");
@@ -2743,11 +2736,8 @@ mod tests {
         );
         let mist = set.id_of("Mist").expect("mist material");
         let water = set.id_of("Water").expect("water material");
-        let reaction = set.reaction_for_event(
-            Some(mist),
-            Some(water),
-            MaterialInteractionEvent::PxsMove,
-        );
+        let reaction =
+            set.reaction_for_event(Some(mist), Some(water), MaterialInteractionEvent::PxsMove);
         assert_eq!(reaction.kind, MaterialReactionKind::None);
         assert!(
             reaction.user_defined,
@@ -2779,11 +2769,8 @@ mod tests {
         );
         let mist = set.id_of("Mist").expect("mist material");
         let water = set.id_of("Water").expect("water material");
-        let pxs_move = set.reaction_for_event(
-            Some(mist),
-            Some(water),
-            MaterialInteractionEvent::PxsMove,
-        );
+        let pxs_move =
+            set.reaction_for_event(Some(mist), Some(water), MaterialInteractionEvent::PxsMove);
         assert_eq!(pxs_move.kind, MaterialReactionKind::None);
         assert!(
             pxs_move.user_defined,

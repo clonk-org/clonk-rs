@@ -87,10 +87,7 @@ fn falsy_target_is_an_error_even_for_failsafe_calls() {
         let error = engine
             .call("Probe", &[target])
             .expect_err("falsy target throws");
-        assert!(
-            error.to_string().contains("target is zero"),
-            "got: {error}"
-        );
+        assert!(error.to_string().contains("target is zero"), "got: {error}");
     }
 }
 
@@ -207,7 +204,9 @@ fn arrow_func_ref_result_writes_through_the_dispatch_reference() {
     }
 
     assert_eq!(
-        engine.call("Mark", &[Value::Object(9)]).expect("call succeeds"),
+        engine
+            .call("Mark", &[Value::Object(9)])
+            .expect("call succeeds"),
         Value::Int(7)
     );
     assert_eq!(*slot.borrow(), Value::Int(1));

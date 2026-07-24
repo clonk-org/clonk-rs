@@ -826,7 +826,7 @@ fn cpp_default_raw_keyboard_keys(
 
 #[cfg(target_os = "macos")]
 fn macos_apple_language() -> Option<String> {
-    use objc2_foundation::{NSUserDefaults, ns_string};
+    use objc2_foundation::{ns_string, NSUserDefaults};
 
     NSUserDefaults::standardUserDefaults()
         .stringArrayForKey(ns_string!("AppleLanguages"))?
@@ -845,10 +845,7 @@ fn german_system_from_sources(
     environment_locale: Option<&str>,
 ) -> bool {
     apple_language.map_or_else(
-        || {
-            environment_locale
-                .is_some_and(|value| value.to_ascii_lowercase().contains("de"))
-        },
+        || environment_locale.is_some_and(|value| value.to_ascii_lowercase().contains("de")),
         |language| language == "de",
     )
 }
@@ -883,10 +880,7 @@ pub(super) fn is_german_system() -> bool {
     #[cfg(not(windows))]
     let environment_locale = environment_locale();
     #[cfg(not(windows))]
-    german_system_from_sources(
-        apple_language.as_deref(),
-        environment_locale.as_deref(),
-    )
+    german_system_from_sources(apple_language.as_deref(), environment_locale.as_deref())
 }
 
 /// Raw defaults traversed by the advanced-config compiler before per-key INI
@@ -961,11 +955,7 @@ fn legacy_gamepad_key(physical_slot: u8, key: u8) -> Option<i32> {
     if physical_slot >= GAMEPAD_SET_COUNT as u8 {
         return None;
     }
-    Some(
-        LEGACY_GAMEPAD_KEY_PREFIX
-            + (i32::from(physical_slot) << 8)
-            + i32::from(key),
-    )
+    Some(LEGACY_GAMEPAD_KEY_PREFIX + (i32::from(physical_slot) << 8) + i32::from(key))
 }
 
 pub(crate) fn legacy_gamepad_button_key(physical_slot: u8, physical_button: u8) -> Option<i32> {
@@ -1650,8 +1640,7 @@ mod tests {
         let german_system = german_system_from_sources(Some("de"), None);
         assert!(german_system);
         assert_eq!(
-            cpp_default_keyboard_keys(german_system)[0]
-                [ControlBindingId::PlayerMenu.spec().index],
+            cpp_default_keyboard_keys(german_system)[0][ControlBindingId::PlayerMenu.spec().index],
             VirtualKeyCode::OEM102
         );
         #[cfg(target_os = "macos")]
@@ -1795,18 +1784,12 @@ mod tests {
             legacy_gamepad_axis_alias_key(0, 6, false),
             Some(0x0042_0001)
         );
-        assert_eq!(
-            legacy_gamepad_axis_alias_key(0, 6, true),
-            Some(0x0042_0003)
-        );
+        assert_eq!(legacy_gamepad_axis_alias_key(0, 6, true), Some(0x0042_0003));
         assert_eq!(
             legacy_gamepad_axis_alias_key(0, 7, false),
             Some(0x0042_0002)
         );
-        assert_eq!(
-            legacy_gamepad_axis_alias_key(0, 7, true),
-            Some(0x0042_0004)
-        );
+        assert_eq!(legacy_gamepad_axis_alias_key(0, 7, true), Some(0x0042_0004));
 
         assert_eq!(legacy_gamepad_axis_key(4, 0, false), None);
         assert_eq!(legacy_gamepad_axis_alias_key(4, 0, false), None);
@@ -2568,7 +2551,10 @@ mod tests {
             // their physical distinction.
             let raw = encode_virtual_key_code(VirtualKeyCode::NumpadEnter)
                 .expect("numpad Enter aliases VK_RETURN");
-            assert_eq!(raw, encode_virtual_key_code(VirtualKeyCode::Return).unwrap());
+            assert_eq!(
+                raw,
+                encode_virtual_key_code(VirtualKeyCode::Return).unwrap()
+            );
             assert_eq!(decode_platform_key_code(raw), Some(VirtualKeyCode::Return));
         }
     }

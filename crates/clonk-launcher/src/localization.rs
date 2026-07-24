@@ -307,7 +307,11 @@ mod tests {
 
         assert_eq!(
             discover_language_codes(Some(&config)),
-            vec!["\u{000b}D".to_string(), "\u{000c}U".to_string(), "FR".to_string()]
+            vec![
+                "\u{000b}D".to_string(),
+                "\u{000c}U".to_string(),
+                "FR".to_string()
+            ]
         );
     }
 

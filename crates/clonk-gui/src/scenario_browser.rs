@@ -381,11 +381,9 @@ impl ScenarioBrowser {
                     }
                 }
             }
-            KeyCode::Escape => {
-                if self.selected.is_some() {
-                    captured = true;
-                    let _ = self.clear_selection_ui();
-                }
+            KeyCode::Escape if self.selected.is_some() => {
+                captured = true;
+                let _ = self.clear_selection_ui();
             }
             _ => {}
         }

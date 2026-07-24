@@ -192,8 +192,8 @@ impl DefinitionSelResources<'_> {
         ensure!(
             self.icons.width() >= 40
                 && self.icons.height() >= 40
-                && self.icons.width() % 40 == 0
-                && self.icons.height() % 40 == 0,
+                && self.icons.width().is_multiple_of(40)
+                && self.icons.height().is_multiple_of(40),
             "GUIIcons.png must be a grid of 40x40 classic icons, got {}x{}",
             self.icons.width(),
             self.icons.height()
@@ -418,9 +418,7 @@ impl DefinitionSelController {
         layout: &DefinitionSelLayout,
     ) -> Option<StartupTooltip> {
         let routed_pointer = self.pointer?;
-        if routed_pointer.x as i32 != point.x as i32
-            || routed_pointer.y as i32 != point.y as i32
-        {
+        if routed_pointer.x as i32 != point.x as i32 || routed_pointer.y as i32 != point.y as i32 {
             return None;
         }
         match self.hit_target(point, layout) {

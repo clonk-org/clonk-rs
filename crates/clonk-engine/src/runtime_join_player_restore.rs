@@ -797,7 +797,10 @@ MsgBoardQueries=(43,"Ask\nnow\341",1)
         assert_eq!(state.message_board_queries.len(), 1);
         let query = &state.message_board_queries[0];
         assert_eq!(query.target, Some(ObjectId::new(43)));
-        assert_eq!(clonk_script::c4_string_bytes(&query.prompt), b"Ask\nnow\xe1");
+        assert_eq!(
+            clonk_script::c4_string_bytes(&query.prompt),
+            b"Ask\nnow\xe1"
+        );
         assert!(query.uppercase);
     }
 

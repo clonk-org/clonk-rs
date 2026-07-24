@@ -2868,7 +2868,7 @@ impl HostWorldContext {
             .iter()
             .filter(|(_, script)| script.host_identity() == identity)
             .collect::<Vec<_>>();
-        matches.sort_by(|(left, _), (right, _)| left.cmp(right));
+        matches.sort_by_key(|(definition, _)| *definition);
         matches.first().map(|(definition, script)| {
             (
                 (*definition).clone(),
@@ -2906,7 +2906,7 @@ impl HostWorldContext {
             }
         }
         let mut definitions = self.definition_scripts.iter().collect::<Vec<_>>();
-        definitions.sort_by(|(left, _), (right, _)| left.cmp(right));
+        definitions.sort_by_key(|(definition, _)| *definition);
         definitions
             .into_iter()
             .find_map(|(_, script)| resolve(script))
@@ -2931,7 +2931,7 @@ impl HostWorldContext {
             return Some(Arc::clone(script));
         }
         let mut definitions = self.definition_scripts.iter().collect::<Vec<_>>();
-        definitions.sort_by(|(left, _), (right, _)| left.cmp(right));
+        definitions.sort_by_key(|(definition, _)| *definition);
         definitions
             .into_iter()
             .find_map(|(_, script)| script.has_host_function(name).then(|| Arc::clone(script)))
@@ -3193,11 +3193,7 @@ impl HostWorldContext {
     /// used by a later callback in the same effect batch. C++ mutates these
     /// links synchronously; the copied host world otherwise sees only the
     /// child's updated `Contained` pointer.
-    pub(crate) fn preview_contents_order(
-        &mut self,
-        container: ObjectId,
-        contents: &[ObjectId],
-    ) {
+    pub(crate) fn preview_contents_order(&mut self, container: ObjectId, contents: &[ObjectId]) {
         let _ = self.get(container);
         let store = Rc::make_mut(self.object_store.get_mut());
         let Some(object) = store.objects.get_mut(&container) else {

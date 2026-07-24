@@ -51,10 +51,10 @@ async fn accept_tcp_connection(
             #[cfg(test)]
             {
                 let address = listener.local_addr()?;
-                return tokio::select! {
+                tokio::select! {
                     result = listener.accept() => result,
                     error = next_injected_tcp_accept_failure(address) => Err(error),
-                };
+                }
             }
             #[cfg(not(test))]
             listener.accept().await
@@ -177,6 +177,9 @@ async fn handle_host_puncher_event(
     }
 }
 
+// The host loop owns each listener, channel, resource service, and statistics
+// handle for its full lifetime; explicit arguments document that ownership.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_host(
     mut listener: Option<TcpListener>,
     mut udp_hub: Option<crate::ReliableUdpSessionHub>,
@@ -864,6 +867,9 @@ pub(crate) async fn run_host(
     }
 }
 
+// Admission hands distinct classic connection identity and task channels to
+// the transport task; keeping them explicit prevents accidental ID mixing.
+#[allow(clippy::too_many_arguments)]
 fn spawn_host_accept(
     route_tasks: &mut tokio::task::JoinSet<()>,
     stream: TcpStream,
@@ -894,6 +900,9 @@ fn spawn_host_accept(
     );
 }
 
+// Admission hands distinct classic connection identity and task channels to
+// the transport task; keeping them explicit prevents accidental ID mixing.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_host_transport<S>(
     route_tasks: &mut tokio::task::JoinSet<()>,
     stream: S,
@@ -1103,6 +1112,9 @@ async fn handle_host_admission_request(request: HostAdmissionRequest, state: &mu
     let _ = request.decision_tx.send(decision);
 }
 
+// Acceptance reconciles independent route IDs, protocol metadata, channels,
+// and host state. These are intentionally explicit at the reducer boundary.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_client_accepted(
     connection_id: u32,
     remote_connection_id: u32,

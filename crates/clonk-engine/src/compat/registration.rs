@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Native functions hidden from `C4Console::UpdateInputCtrl` by C++
 /// `GetPublic() == false`. Most use `AddFunc`'s final `false`; the cast helpers
 /// hard-code the same visibility. Rust's VM does not otherwise need native
@@ -977,10 +976,7 @@ fn populate_host_registration_template(script: &mut ScriptEngine) {
     script.register_host_function("GetMatAdjust", get_mat_adjust);
     script.register_host_function("SetLandscapePixel", set_landscape_pixel);
     script.register_host_function("SetTextureIndex", set_texture_index);
-    script.register_host_function(
-        "RemoveUnusedTexMapEntries",
-        remove_unused_texmap_entries,
-    );
+    script.register_host_function("RemoveUnusedTexMapEntries", remove_unused_texmap_entries);
     script.register_host_function("GetSkyAdjust", get_sky_adjust);
     script.register_host_function("GetSkyColor", get_sky_color);
     script.register_host_function("SetGamma", set_gamma);

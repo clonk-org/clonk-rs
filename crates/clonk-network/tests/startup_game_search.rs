@@ -3,12 +3,11 @@ use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, TcpListener};
 use std::time::Duration;
 
 use clonk_network::{
-    fetch_reference_endpoint, fetch_reference_endpoint_with_config,
-    parse_reference_query_response, parse_reference_response, LanProbeTrigger,
-    MasterserverVersion, NetworkAddress, NetworkGameReference, NetworkGameSearch,
-    NetworkGameSearchConfig, NetworkProtocol, ReferenceEndpoint, ReferenceQueryConfig,
-    ReferenceQuerySource, SearchCommand, StartupGameSearch, StartupGameSearchEvent,
-    CURRENT_GAME_BUILD, DEFAULT_MASTER_SERVER_URL,
+    fetch_reference_endpoint, fetch_reference_endpoint_with_config, parse_reference_query_response,
+    parse_reference_response, LanProbeTrigger, MasterserverVersion, NetworkAddress,
+    NetworkGameReference, NetworkGameSearch, NetworkGameSearchConfig, NetworkProtocol,
+    ReferenceEndpoint, ReferenceQueryConfig, ReferenceQuerySource, SearchCommand,
+    StartupGameSearch, StartupGameSearchEvent, CURRENT_GAME_BUILD, DEFAULT_MASTER_SERVER_URL,
 };
 
 #[test]
@@ -351,14 +350,8 @@ Title="Second Game"
     assert_eq!(
         references[0].addresses,
         vec![
-            NetworkAddress::new(
-                NetworkProtocol::Tcp,
-                "203.0.113.10:11112".parse().unwrap(),
-            ),
-            NetworkAddress::new(
-                NetworkProtocol::Udp,
-                "203.0.113.10:11113".parse().unwrap(),
-            ),
+            NetworkAddress::new(NetworkProtocol::Tcp, "203.0.113.10:11112".parse().unwrap(),),
+            NetworkAddress::new(NetworkProtocol::Udp, "203.0.113.10:11113".parse().unwrap(),),
         ]
     );
     assert_eq!(
@@ -372,14 +365,8 @@ Title="Second Game"
     assert_eq!(
         references[1].addresses,
         vec![
-            NetworkAddress::new(
-                NetworkProtocol::Tcp,
-                "[2001:db8::7]:12112".parse().unwrap(),
-            ),
-            NetworkAddress::new(
-                NetworkProtocol::Udp,
-                "[2001:db8::7]:12113".parse().unwrap(),
-            ),
+            NetworkAddress::new(NetworkProtocol::Tcp, "[2001:db8::7]:12112".parse().unwrap(),),
+            NetworkAddress::new(NetworkProtocol::Udp, "[2001:db8::7]:12113".parse().unwrap(),),
         ]
     );
     assert_eq!(
@@ -419,10 +406,7 @@ Title="Visible game"
             build: 400,
         })
     );
-    assert_eq!(
-        response.masterserver.motd,
-        "Welcome ä \\344 \"quoted\"  "
-    );
+    assert_eq!(response.masterserver.motd, "Welcome ä \\344 \"quoted\"  ");
     assert_eq!(
         response.masterserver.motd_url,
         "https://example.invalid/news?a=1&b=2"
@@ -532,10 +516,7 @@ Address=7:"203.0.113.7:11117",TCP:"203.0.113.7:11112"
                 NetworkProtocol::Unknown(7),
                 "203.0.113.7:11117".parse().unwrap(),
             ),
-            NetworkAddress::new(
-                NetworkProtocol::Tcp,
-                "203.0.113.7:11112".parse().unwrap(),
-            ),
+            NetworkAddress::new(NetworkProtocol::Tcp, "203.0.113.7:11112".parse().unwrap(),),
         ]
     );
 }
@@ -561,10 +542,7 @@ NetpuncherAddr="puncher.invalid:11115"
 
     assert_eq!(references[0].netpuncher_ipv4, 0x1234_5678);
     assert_eq!(references[0].netpuncher_ipv6, 0x9abc_def0);
-    assert_eq!(
-        references[0].netpuncher_address,
-        "puncher.invalid:11115"
-    );
+    assert_eq!(references[0].netpuncher_address, "puncher.invalid:11115");
 }
 
 #[test]
@@ -611,16 +589,8 @@ fn cpp_dedupe_matches_any_complete_reference_address_including_udp() {
     };
     let mut search = NetworkGameSearch::new(NetworkGameSearchConfig::default());
 
-    search.merge_references([reference(
-        "203.0.113.1:11112",
-        "203.0.113.1:11113",
-        50,
-    )]);
-    search.merge_references([reference(
-        "203.0.113.2:11112",
-        "203.0.113.1:11113",
-        51,
-    )]);
+    search.merge_references([reference("203.0.113.1:11112", "203.0.113.1:11113", 50)]);
+    search.merge_references([reference("203.0.113.2:11112", "203.0.113.1:11113", 51)]);
 
     assert_eq!(search.references().len(), 1);
     assert_eq!(search.references()[0].start_time, 51);

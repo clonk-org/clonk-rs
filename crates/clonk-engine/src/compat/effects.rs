@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// FnReloadParticle (C4Script.cpp:4992-4996). Particle definitions are static
 /// in Rust, so retain the native nullable-string conversion and report the
 /// unsupported resource reload as C4ValueInt false.
@@ -117,9 +116,7 @@ pub(crate) fn clear_effects_for_assign_removal(target: ObjectId) -> Result<bool,
 /// a `-1` result restores that exact node. Unlike AssignRemoval, dead nodes
 /// stay linked and effects added by Stop callbacks are not part of this walk
 /// (C4Effect.cpp:407-425; C4Object.cpp:1164-1174).
-pub(crate) fn clear_effects_for_assign_death(
-    target: ObjectId,
-) -> Result<bool, RuntimeError> {
+pub(crate) fn clear_effects_for_assign_death(target: ObjectId) -> Result<bool, RuntimeError> {
     let effects = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
@@ -720,11 +717,7 @@ fn add_effect_constructor(
     // priority nil-fills to 0 like C4AulExec, creating NOTHING. The native
     // receives a C4ValueInt, so a C4V_Bool keeps its tag through the CnvOK
     // conversion but `_getInt()` still extracts its shared Data.Int payload.
-    let priority = value_to_i32(
-        args.get(2).unwrap_or(&Value::Nil),
-        "AddEffect",
-        "priority",
-    )?;
+    let priority = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "AddEffect", "priority")?;
 
     if priority == 0 {
         return Ok(Value::Int(0));
@@ -732,11 +725,7 @@ fn add_effect_constructor(
 
     // C++ FnAddEffect: unpassed iTimerIntervall is 0 - no timer callbacks
     // (C4Effect.cpp:342).
-    let interval = value_to_i32(
-        args.get(3).unwrap_or(&Value::Nil),
-        "AddEffect",
-        "interval",
-    )?;
+    let interval = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "AddEffect", "interval")?;
 
     let len = args.len();
     let mut idx = 4;
@@ -998,11 +987,7 @@ pub(crate) fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
-    let index = value_to_i32(
-        args.get(2).unwrap_or(&Value::Nil),
-        "RemoveEffect",
-        "index",
-    )?;
+    let index = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "RemoveEffect", "index")?;
 
     // `bool fDoNoCalls` (FnRemoveEffect, C4Script.cpp:5493): C4Value
     // converts ints freely - CR content passes 1 (the Talker's movie
@@ -1222,22 +1207,14 @@ pub(crate) fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
     // materialized object scope; no script redispatch may intercept this
     // already-resolved native.
     // Unfilled iVarIndex is nil -> 0 (FnEffectVar, C4Script.cpp:5577).
-    let var_index = value_to_i32(
-        args.first().unwrap_or(&Value::Nil),
-        "EffectVar",
-        "index",
-    )?;
+    let var_index = value_to_i32(args.first().unwrap_or(&Value::Nil), "EffectVar", "index")?;
     let Ok(var_index) = usize::try_from(var_index) else {
         return Ok(Value::Nil);
     };
 
     let scope = determine_scope_from_state(args.get(1).unwrap_or(&Value::Nil))?;
 
-    let effect_number = value_to_i32(
-        args.get(2).unwrap_or(&Value::Nil),
-        "EffectVar",
-        "number",
-    )?;
+    let effect_number = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "EffectVar", "number")?;
     let Ok(effect_number) = usize::try_from(effect_number) else {
         return Ok(Value::Nil);
     };
@@ -1394,7 +1371,10 @@ fn effect_script_fx_callback_exists(
         {
             return script.has_function_or_global(function);
         }
-        context.world.resolve_engine_global_script(function).is_some()
+        context
+            .world
+            .resolve_engine_global_script(function)
+            .is_some()
     })
 }
 
@@ -1429,7 +1409,10 @@ fn effect_fx_callback_exists(
         {
             return script.has_function_or_global(function) || script.has_host_function(function);
         }
-        context.world.resolve_engine_global_script(function).is_some()
+        context
+            .world
+            .resolve_engine_global_script(function)
+            .is_some()
             || context.world.resolve_engine_host_script(function).is_some()
     })
 }
@@ -1465,9 +1448,9 @@ fn dispatch_effect_fx_callback(
             (target_exists, resolution)
         });
         if target_exists {
-            if let Some(resolution) = resolution.filter(|resolution| {
-                resolution.scope == clonk_script::ScriptFunctionScope::Global
-            }) {
+            if let Some(resolution) = resolution
+                .filter(|resolution| resolution.scope == clonk_script::ScriptFunctionScope::Global)
+            {
                 let exact_script = HOST_CONTEXT.with(|cell| {
                     cell.borrow().as_ref().and_then(|context| {
                         context
@@ -1702,11 +1685,8 @@ pub(crate) fn dispatch_effects_do_damage(
 /// position while the removed object is still allocated.
 pub(crate) fn explode(args: &[Value]) -> Result<Value, RuntimeError> {
     let level = value_to_i32(args.first().unwrap_or(&Value::Nil), "Explode", "level")?;
-    let explicit_target = parse_object_reference_argument(
-        args.get(1).unwrap_or(&Value::Nil),
-        "Explode",
-        "object",
-    )?;
+    let explicit_target =
+        parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "Explode", "object")?;
     let effect_id = parse_native_c4id_argument(args.get(2), "Explode")?;
     // FnStringPar always passes a non-null pointer to Explosion: a null C4String
     // becomes "". Consequently an omitted string does not activate
@@ -1748,7 +1728,11 @@ pub(crate) fn explode(args: &[Value]) -> Result<Value, RuntimeError> {
         context
             .object_scope(target)
             .map(ObjectScopeContext::effective_position)
-            .or_else(|| context.get_world_object(target).map(|object| object.position()))
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .map(|object| object.position())
+            })
     });
     // A resolved C4Object pointer remains allocated after AssignRemoval. The
     // Rust scope normally remains as well; retain FnExplode's unconditional
@@ -1818,21 +1802,30 @@ fn native_explosion(
     if contain_blast.is_none() {
         if !incinerate_landscape_at(position.x, position.y)?.as_bool()
             && !incinerate_landscape_at(position.x, position.y.wrapping_sub(10))?.as_bool()
-            && !incinerate_landscape_at(
-                position.x.wrapping_sub(5),
-                position.y.wrapping_sub(5),
-            )?
-            .as_bool()
+            && !incinerate_landscape_at(position.x.wrapping_sub(5), position.y.wrapping_sub(5))?
+                .as_bool()
         {
-            let _ = incinerate_landscape_at(
-                position.x.wrapping_add(5),
-                position.y.wrapping_sub(5),
-            )?;
+            let _ =
+                incinerate_landscape_at(position.x.wrapping_add(5), position.y.wrapping_sub(5))?;
         }
-        native_explosion_visual(position, level, caused_by, by_object, effect_id, effect_name)?;
+        native_explosion_visual(
+            position,
+            level,
+            caused_by,
+            by_object,
+            effect_id,
+            effect_name,
+        )?;
     }
 
-    native_blast_objects(position.x, position.y, level, in_object, caused_by, Some(by_object))?;
+    native_blast_objects(
+        position.x,
+        position.y,
+        level,
+        in_object,
+        caused_by,
+        Some(by_object),
+    )?;
     if contain_blast != in_object {
         native_blast_objects(
             position.x,
@@ -1860,11 +1853,9 @@ fn native_explosion_visual(
     let selected_particle = HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let context = borrow.as_ref()?;
-        let default = (context.particle_def_known("Blast") != Some(false))
-            .then(|| "Blast".to_string());
-        if !effect_name.is_empty()
-            && context.particle_def_known(effect_name) != Some(false)
-        {
+        let default =
+            (context.particle_def_known("Blast") != Some(false)).then(|| "Blast".to_string());
+        if !effect_name.is_empty() && context.particle_def_known(effect_name) != Some(false) {
             Some(effect_name.to_string())
         } else {
             default
@@ -2121,9 +2112,7 @@ fn native_blast_objects(
                         .map(ActionProcedure::from_name)
                         .is_some_and(|procedure| procedure == ActionProcedure::Float)
                 });
-            if metadata.fire.grab != 1
-                && (category & crate::CATEGORY_VEHICLE != 0 || floating)
-            {
+            if metadata.fire.grab != 1 && (category & crate::CATEGORY_VEHICLE != 0 || floating) {
                 return None;
             }
             Some(category & crate::CATEGORY_LIVING != 0)
@@ -2184,8 +2173,7 @@ fn native_blast_objects(
         let rnd3 = draw_context_rnd3()?;
         let distance_x = x.wrapping_sub(position.x).wrapping_abs();
         let direction = position.x.wrapping_sub(x).wrapping_add(rnd3).signum();
-        let x_force = itofix(direction.wrapping_mul(level.wrapping_sub(distance_x)))
-            / mass_divisor;
+        let x_force = itofix(direction.wrapping_mul(level.wrapping_sub(distance_x))) / mass_divisor;
         native_fling(id, FixedVec2::new(x_force, y_force), true, caused_by)?;
     }
     Ok(())
@@ -2373,7 +2361,10 @@ fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<b
 
 /// The definition the world currently sees for `target`, honoring a
 /// same-call staged ChangeDef (C++ reads the live C4Object::Def).
-pub(crate) fn effective_definition_id(context: &EffectHostContext, target: ObjectId) -> Option<String> {
+pub(crate) fn effective_definition_id(
+    context: &EffectHostContext,
+    target: ObjectId,
+) -> Option<String> {
     context
         .object_scope(target)
         .and_then(|scope| scope.pending_update.change_def.clone())
@@ -2536,7 +2527,7 @@ fn fire_effect_start_core(
                 .unwrap_or_default();
             // BurnTurnTo: blasts changedef in water too (C4Effect.cpp:579-585).
             let turn_to = (fire_caused || blasted)
-                .then(|| fire_meta.burn_turn_to)
+                .then_some(fire_meta.burn_turn_to)
                 .flatten()
                 .filter(|turn_to| context.world.definition_metadata(turn_to).is_some());
             if !fire_caused {
@@ -2652,12 +2643,10 @@ fn fire_effect_start_core(
                     if let Some(scope) = context.object_scope(*candidate) {
                         return !scope.destroy
                             && scope.status().is_active()
-                            && !scope
-                                .action_library
-                                .is_idle_entry(
-                                    scope.effective_action_name(),
-                                    scope.effective_action_index(),
-                                )
+                            && !scope.action_library.is_idle_entry(
+                                scope.effective_action_name(),
+                                scope.effective_action_index(),
+                            )
                             && (scope.effective_action_target(0) == Some(target)
                                 || scope.effective_action_target(1) == Some(target));
                     }
@@ -2979,7 +2968,7 @@ pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     // C4Object::ExecFire's Tick5 base arm runs immediately after the phase
     // advance and before decay/damage/energy. ValidPlr is only membership in
     // the live player list; the container need not belong to the victim.
-    if frame % 5 == 0 {
+    if frame.is_multiple_of(5) {
         let extinguish_in_base = HOST_CONTEXT.with(|cell| {
             let borrow = cell.borrow();
             let Some(context) = borrow.as_ref() else {
@@ -3018,7 +3007,7 @@ pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     let target_value = object_reference_value(target);
     // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:783)
-    if frame % 10 == 0 && !state.no_burn_damage {
+    if frame.is_multiple_of(10) && !state.no_burn_damage {
         do_damage_with_cause_override(
             &[
                 Value::Int(2),
@@ -3030,7 +3019,7 @@ pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
         )?;
     }
     // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:785)
-    if frame % 5 == 0 {
+    if frame.is_multiple_of(5) {
         do_energy_with_cause_override(
             &[
                 Value::Int(-1),
@@ -3045,7 +3034,7 @@ pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     // Background effects: Tick5 over valid landscape material — extinguish
     // in extinguisher material, then the unconditional Random(3) inflame
     // draw (C4Object.cpp:794-809).
-    if frame % 5 == 0 {
+    if frame.is_multiple_of(5) {
         let material_extinguisher = HOST_CONTEXT.with(|cell| {
             cell.borrow().as_ref().and_then(|context| {
                 context
@@ -3193,11 +3182,7 @@ fn extinguish_effect_target(target: ObjectId, fire_number: i32) -> Result<bool, 
                 .then_some(effect.number)
             });
             let Some(number) = number else { break };
-            let Some(removed) =
-                scope
-                    .effects
-                    .remove_live_effect(None, number.max(0), false)
-            else {
+            let Some(removed) = scope.effects.remove_live_effect(None, number.max(0), false) else {
                 break;
             };
             if removed.name == crate::C4FX_FIRE && engine_fire_stop {
@@ -3458,9 +3443,7 @@ pub(crate) fn cast_back_particles(args: &[Value]) -> Result<Value, RuntimeError>
 /// a named def that is not loaded → false.
 pub(crate) fn push_particles(args: &[Value]) -> Result<Value, RuntimeError> {
     let definition = match args.first() {
-        Some(Value::String(name)) if !name.is_empty() => {
-            Some(name.as_ref().to_owned())
-        }
+        Some(Value::String(name)) if !name.is_empty() => Some(name.as_ref().to_owned()),
         Some(Value::String(_)) | Some(Value::Nil) | None => None,
         Some(other) => {
             return Err(RuntimeError::new(format!(
@@ -3505,9 +3488,7 @@ pub(crate) fn clear_particles(args: &[Value]) -> Result<Value, RuntimeError> {
 
     if let Some(arg) = args.get(index) {
         match arg {
-            Value::String(name) if !name.is_empty() => {
-                definition = Some(name.as_ref().to_owned())
-            }
+            Value::String(name) if !name.is_empty() => definition = Some(name.as_ref().to_owned()),
             Value::String(_) | Value::Nil => definition = None,
             other => {
                 return Err(RuntimeError::new(format!(

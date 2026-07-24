@@ -132,14 +132,7 @@ mod tests {
         assert_eq!(pixel(&surface, 5, 1), Color::opaque(255, 255, 255));
 
         let mut marked_up = Surface::new(11, 10, PixelFormat::Rgba8888);
-        render_flash_message(
-            &mut marked_up,
-            &font,
-            "<c ffff00>A</c>",
-            1,
-            None,
-            &NoImages,
-        );
+        render_flash_message(&mut marked_up, &font, "<c ffff00>A</c>", 1, None, &NoImages);
         assert_eq!(pixel(&marked_up, 5, 1), Color::opaque(254, 254, 0));
     }
 

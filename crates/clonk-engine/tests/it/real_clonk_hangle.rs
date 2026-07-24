@@ -2,6 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 use crate::support::real_scenario::load_installed_scenario;
+use crate::support::ScenarioSubcase;
 use clonk_engine::scenario::LegacyDefinitionResolver;
 use clonk_engine::{
     ocf, CommandDirection, Definition, DefinitionTargetRect, Direction, Engine, JoinPlayerConfig,
@@ -29,7 +30,7 @@ fn tutorial01_real_clonk_subcases_batch() {
     };
     let scenario = Scenario::load_from_path_with(&tutorial, &resolver)
         .expect("Tutorial01 and the real Objects.c4d load");
-    let subcases: &[(&str, fn(&Scenario))] = &[
+    let subcases: &[ScenarioSubcase] = &[
         (
             "clonk_dig_control_starts_the_real_dig_action_like_cpp",
             tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp,

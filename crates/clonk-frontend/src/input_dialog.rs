@@ -568,12 +568,7 @@ impl InputDialogController {
 
     /// Replaces text through the focused Edit input path, which scrolls the
     /// new end caret into view before selecting the replacement.
-    pub fn replace_edit_text(
-        &mut self,
-        text: &str,
-        layout: &InputDialogLayout,
-        font: &ClonkFont,
-    ) {
+    pub fn replace_edit_text(&mut self, text: &str, layout: &InputDialogLayout, font: &ClonkFont) {
         self.set_input_text(text);
         self.ensure_cursor_in_view(layout, font);
     }
@@ -610,12 +605,7 @@ impl InputDialogController {
             let x = base_x + self.dialog_offset.0;
             let y = base_y + self.dialog_offset.1;
             let label_width = font.measure(&self.message, true).0 + 4;
-            let empty = IntRect {
-                x,
-                y,
-                w: 0,
-                h: 0,
-            };
+            let empty = IntRect { x, y, w: 0, h: 0 };
             return InputDialogLayout {
                 bounds: IntRect {
                     x,
@@ -1495,13 +1485,12 @@ impl InputDialogController {
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
         let now = Instant::now();
-        let cursor_visible = now
+        let cursor_visible = (now
             .checked_duration_since(self.last_edit_input)
             .unwrap_or_default()
             .as_millis()
-            / 500
-            % 2
-            == 0;
+            / 500)
+            .is_multiple_of(2);
         self.render_with_cursor_at_activity(
             surface,
             resources,
@@ -2529,17 +2518,17 @@ mod tests {
         state.handle_pointer_up(end, &layout, &fonts.text);
         assert!(!state.has_pointer_capture());
         assert!(state.selected_text().is_some_and(|text| !text.is_empty()));
-        let outcome = state.request_context_menu_at(
-            end,
-            &layout,
-            true,
-            &InputDialogContextLabels::default(),
-        );
+        let outcome =
+            state.request_context_menu_at(end, &layout, true, &InputDialogContextLabels::default());
         let InputDialogAction::OpenContextMenu(request) = &outcome.actions[0] else {
             panic!("chat edit context menu request");
         };
         assert_eq!(
-            request.items.iter().map(|item| item.command).collect::<Vec<_>>(),
+            request
+                .items
+                .iter()
+                .map(|item| item.command)
+                .collect::<Vec<_>>(),
             vec![
                 InputDialogContextCommand::Cut,
                 InputDialogContextCommand::Copy,
@@ -2899,8 +2888,7 @@ mod tests {
         state.replace_edit_text("history", &layout, &fonts.text);
         assert_eq!(
             state.horizontal_scroll,
-            fonts.text.measure("history", false).0
-                + fonts.text.measure("\u{a6}", false).0 / 2
+            fonts.text.measure("history", false).0 + fonts.text.measure("\u{a6}", false).0 / 2
                 - EDIT_SCROLL_OFFSET
         );
         assert_eq!(state.selection, Some((0, "history".len())));

@@ -152,9 +152,7 @@ impl SkyAdjustment {
             };
             // Current C++ starts green from dstG rather than srcG. Preserve
             // that observable legacy quirk exactly (StdColors.h:262).
-            (back(source.r, diff_r) << 16)
-                | (back(target.g, diff_g) << 8)
-                | back(source.b, diff_b)
+            (back(source.r, diff_r) << 16) | (back(target.g, diff_g) << 8) | back(source.b, diff_b)
         } else {
             // Native `back` is uninitialized in this branch, but modulation
             // alpha zero disables the back fill. Use a deterministic raw zero.
@@ -392,11 +390,17 @@ mod tests {
         let mut sky = SkyState::new(settings);
         let environment = EnvironmentSettings::new(0);
         sky.advance(&environment);
-        assert_eq!(sky.snapshot().fixed.map(|fixed| fixed[0]), Some(itofix(64).val()));
+        assert_eq!(
+            sky.snapshot().fixed.map(|fixed| fixed[0]),
+            Some(itofix(64).val())
+        );
         sky.advance(&environment);
         assert_eq!(sky.snapshot().fixed.map(|fixed| fixed[0]), Some(0));
         sky.advance(&environment);
-        assert_eq!(sky.snapshot().fixed.map(|fixed| fixed[0]), Some(itofix(64).val()));
+        assert_eq!(
+            sky.snapshot().fixed.map(|fixed| fixed[0]),
+            Some(itofix(64).val())
+        );
     }
 
     #[test]
@@ -409,7 +413,10 @@ mod tests {
         let environment = EnvironmentSettings::new(0);
         sky.advance(&environment);
         sky.advance(&environment);
-        assert_eq!(sky.snapshot().fixed.map(|fixed| fixed[0]), Some(itofix(-2).val()));
+        assert_eq!(
+            sky.snapshot().fixed.map(|fixed| fixed[0]),
+            Some(itofix(-2).val())
+        );
     }
 
     #[test]

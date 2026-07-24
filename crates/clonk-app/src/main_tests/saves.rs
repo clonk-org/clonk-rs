@@ -31,12 +31,14 @@
         let mut app = new_state_only_menu_app(320, 200);
         app.recordings_dir = Some(directory.path().join("Records.c4f"));
 
-        let mut initial_game_data = clonk_engine::InitialNetworkGameData::default();
-        initial_game_data.frame = 41;
-        initial_game_data.control_tick = 17;
-        initial_game_data.script_go = true;
-        initial_game_data.script_counter = 9;
-        initial_game_data.music_enabled = true;
+        let initial_game_data = clonk_engine::InitialNetworkGameData {
+            frame: 41,
+            control_tick: 17,
+            script_go: true,
+            script_counter: 9,
+            music_enabled: true,
+            ..clonk_engine::InitialNetworkGameData::default()
+        };
 
         app.prepare_recording_for(
             &scenario,
@@ -2906,9 +2908,11 @@
                     filename: &str,
                     total_playing_time: i32,
                     in_action: bool| {
-            let mut core = clonk_engine::CrewInfoCoreFields::default();
-            core.original_filename = filename.to_string();
-            core.portrait_file = "none".to_string();
+            let core = clonk_engine::CrewInfoCoreFields {
+                original_filename: filename.to_string(),
+                portrait_file: "none".to_string(),
+                ..clonk_engine::CrewInfoCoreFields::default()
+            };
             clonk_engine::player_file::CrewInfo {
                 id: "CLNK".to_string(),
                 name: name.to_string(),

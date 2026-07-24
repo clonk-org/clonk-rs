@@ -1,6 +1,5 @@
 use clonk_engine::{
-    Definition, Engine, EngineError, PlayerConfig, ShowCommandsRequestStore, SpawnConfig,
-    COM_THROW,
+    Definition, Engine, EngineError, PlayerConfig, ShowCommandsRequestStore, SpawnConfig, COM_THROW,
 };
 use clonk_script::Value;
 
@@ -36,51 +35,63 @@ func Probe(int player, int command)
         Value::Bool(true)
     );
     assert_eq!(
-        engine.player(3).expect("player remains live").flash_command(),
+        engine
+            .player(3)
+            .expect("player remains live")
+            .flash_command(),
         i32::from(COM_THROW)
     );
     assert!(requests.take_enable_request());
-    assert!(!requests.take_enable_request(), "the config request is one-shot");
+    assert!(
+        !requests.take_enable_request(),
+        "the config request is one-shot"
+    );
 
     assert_eq!(
-        engine.call_object_function(
-            probe_index,
-            "Probe",
-            vec![Value::Int(99), Value::Int(23)],
-        )?,
+        engine.call_object_function(probe_index, "Probe", vec![Value::Int(99), Value::Int(23)],)?,
         Value::Bool(false)
     );
     assert_eq!(
-        engine.player(3).expect("player remains live").flash_command(),
+        engine
+            .player(3)
+            .expect("player remains live")
+            .flash_command(),
         i32::from(COM_THROW),
         "an invalid player leaves the prior flash command unchanged"
     );
     assert!(!requests.take_enable_request());
 
     assert_eq!(
-        engine.call_object_function(
-            probe_index,
-            "Probe",
-            vec![Value::Int(3), Value::Int(0)],
-        )?,
+        engine.call_object_function(probe_index, "Probe", vec![Value::Int(3), Value::Int(0)],)?,
         Value::Bool(true)
     );
-    assert_eq!(engine.player(3).expect("player remains live").flash_command(), 0);
+    assert_eq!(
+        engine
+            .player(3)
+            .expect("player remains live")
+            .flash_command(),
+        0
+    );
     assert!(
         requests.take_enable_request(),
         "COM_None still force-enables ShowCommands"
     );
 
-    engine.call_object_function(
-        probe_index,
-        "Probe",
-        vec![Value::Int(3), Value::Int(17)],
-    )?;
-    assert_eq!(engine.player(3).expect("player remains live").flash_command(), 17);
+    engine.call_object_function(probe_index, "Probe", vec![Value::Int(3), Value::Int(17)])?;
+    assert_eq!(
+        engine
+            .player(3)
+            .expect("player remains live")
+            .flash_command(),
+        17
+    );
     let saved = engine.capture_state();
     engine.restore_state(&saved)?;
     assert_eq!(
-        engine.player(3).expect("restored player exists").flash_command(),
+        engine
+            .player(3)
+            .expect("restored player exists")
+            .flash_command(),
         0,
         "C4Player::FlashCom is NoSave"
     );

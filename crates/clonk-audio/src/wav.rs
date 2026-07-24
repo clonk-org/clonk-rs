@@ -136,7 +136,7 @@ impl RawPcmWavStream {
             .ok_or(AudioDecodeError::InvalidData("WAV byte rate overflow"))?;
         if parsed.block_align != frame_size
             || parsed.byte_rate != expected_byte_rate
-            || (parsed.data_end - parsed.data_start) % frame_size != 0
+            || !(parsed.data_end - parsed.data_start).is_multiple_of(frame_size)
         {
             return Err(AudioDecodeError::InvalidData(
                 "invalid WAV block alignment or byte rate",
@@ -270,11 +270,7 @@ impl AdpcmWavStream {
     }
 
     fn load_block(&mut self) -> Result<(), AudioDecodeError> {
-        let block_end = self
-            .position
-            .checked_add(self.block_align)
-            .unwrap_or(usize::MAX)
-            .min(self.end);
+        let block_end = self.position.saturating_add(self.block_align).min(self.end);
         let block = &self.data[self.position..block_end];
         let mut frames = match &self.codec {
             AdpcmCodec::Ms { coefficients } => {
@@ -588,8 +584,8 @@ fn parse_ima_adpcm_format(parsed: &ParsedWave) -> Result<usize, AudioDecodeError
     let header_len = 4 * parsed.channels;
     let group_len = 4 * parsed.channels;
     if parsed.block_align < header_len
-        || parsed.block_align % 4 != 0
-        || (parsed.block_align - header_len) % group_len != 0
+        || !parsed.block_align.is_multiple_of(4)
+        || !(parsed.block_align - header_len).is_multiple_of(group_len)
     {
         return Err(AudioDecodeError::InvalidData(
             "invalid IMA ADPCM block size",
@@ -620,7 +616,7 @@ fn validate_adpcm_data(
     header_len: usize,
     valid_payload: impl Fn(usize) -> bool,
 ) -> Result<(), AudioDecodeError> {
-    if data_len % block_align != 0 {
+    if !data_len.is_multiple_of(block_align) {
         return Err(AudioDecodeError::InvalidData(
             "partial trailing WAV ADPCM block",
         ));
@@ -717,7 +713,7 @@ fn decode_ima_adpcm_block(
 ) -> Result<Vec<[f32; 2]>, AudioDecodeError> {
     let header_len = 4 * channels;
     let group_len = 4 * channels;
-    if block.len() < header_len || (block.len() - header_len) % group_len != 0 {
+    if block.len() < header_len || !(block.len() - header_len).is_multiple_of(group_len) {
         return Err(AudioDecodeError::InvalidData("invalid IMA ADPCM block"));
     }
     let mut states = Vec::with_capacity(channels);
@@ -748,7 +744,7 @@ fn decode_ima_adpcm_block(
                 }
             }
         }
-        for sample in 0..8 {
+        for (sample, _) in channel_samples[0].iter().enumerate() {
             frames.push(stereo_i16_from(channels, |channel| {
                 channel_samples[channel][sample]
             }));
@@ -821,19 +817,19 @@ fn read_stereo_frame(
     mut next_sample: impl FnMut() -> Result<Option<f32>, AudioDecodeError>,
 ) -> Result<Option<[f32; 2]>, AudioDecodeError> {
     let mut samples = [0.0_f32; MAX_MIXER_CHANNELS];
-    for channel in 0..channels {
+    for output in samples.iter_mut().take(channels) {
         let Some(sample) = next_sample()? else {
             return Ok(None);
         };
-        samples[channel] = sample;
+        *output = sample;
     }
     Ok(Some(sdl_stereo_mix(&samples[..channels])))
 }
 
 fn stereo_i16_from(channels: usize, mut sample: impl FnMut(usize) -> i16) -> [f32; 2] {
     let mut samples = [0.0_f32; MAX_MIXER_CHANNELS];
-    for channel in 0..channels {
-        samples[channel] = f32::from(sample(channel)) / f32::from(i16::MAX);
+    for (channel, output) in samples.iter_mut().enumerate().take(channels) {
+        *output = f32::from(sample(channel)) / f32::from(i16::MAX);
     }
     sdl_stereo_mix(&samples[..channels])
 }
@@ -844,66 +840,65 @@ fn sdl_stereo_mix(samples: &[f32]) -> [f32; 2] {
     match samples {
         [mono] => [*mono, *mono],
         [left, right] => [*left, *right],
-        [front_left, front_right, lfe] => [
-            0.800000012 * front_left + 0.200000003 * lfe,
-            0.800000012 * front_right + 0.200000003 * lfe,
-        ],
+        [front_left, front_right, lfe] => {
+            [0.8 * front_left + 0.2 * lfe, 0.8 * front_right + 0.2 * lfe]
+        }
         [front_left, front_right, back_left, back_right] => [
-            0.421000004 * front_left + 0.358999997 * back_left + 0.219999999 * back_right,
-            0.421000004 * front_right + 0.219999999 * back_left + 0.358999997 * back_right,
+            0.421 * front_left + 0.359 * back_left + 0.22 * back_right,
+            0.421 * front_right + 0.22 * back_left + 0.359 * back_right,
         ],
         [front_left, front_right, lfe, back_left, back_right] => [
-            0.374222219 * front_left
-                + 0.111111112 * lfe
-                + 0.319111109 * back_left
-                + 0.195555553 * back_right,
-            0.374222219 * front_right
-                + 0.111111112 * lfe
-                + 0.195555553 * back_left
-                + 0.319111109 * back_right,
+            0.374_222_22 * front_left
+                + 0.111_111_11 * lfe
+                + 0.319_111_1 * back_left
+                + 0.195_555_55 * back_right,
+            0.374_222_22 * front_right
+                + 0.111_111_11 * lfe
+                + 0.195_555_55 * back_left
+                + 0.319_111_1 * back_right,
         ],
         [front_left, front_right, front_center, lfe, back_left, back_right] => [
-            0.294545442 * front_left
-                + 0.208181813 * front_center
-                + 0.090909094 * lfe
-                + 0.251818180 * back_left
-                + 0.154545456 * back_right,
-            0.294545442 * front_right
-                + 0.208181813 * front_center
-                + 0.090909094 * lfe
-                + 0.154545456 * back_left
-                + 0.251818180 * back_right,
+            0.294_545_44 * front_left
+                + 0.208_181_81 * front_center
+                + 0.090_909_09 * lfe
+                + 0.251_818_18 * back_left
+                + 0.154_545_46 * back_right,
+            0.294_545_44 * front_right
+                + 0.208_181_81 * front_center
+                + 0.090_909_09 * lfe
+                + 0.154_545_46 * back_left
+                + 0.251_818_18 * back_right,
         ],
         [front_left, front_right, front_center, lfe, back_center, side_left, side_right] => [
-            0.247384623 * front_left
-                + 0.174461529 * front_center
-                + 0.076923080 * lfe
-                + 0.174461529 * back_center
-                + 0.226153851 * side_left
-                + 0.100615382 * side_right,
-            0.247384623 * front_right
-                + 0.174461529 * front_center
-                + 0.076923080 * lfe
-                + 0.174461529 * back_center
-                + 0.100615382 * side_left
-                + 0.226153851 * side_right,
+            0.247_384_62 * front_left
+                + 0.174_461_53 * front_center
+                + 0.076_923_08 * lfe
+                + 0.174_461_53 * back_center
+                + 0.226_153_85 * side_left
+                + 0.100_615_38 * side_right,
+            0.247_384_62 * front_right
+                + 0.174_461_53 * front_center
+                + 0.076_923_08 * lfe
+                + 0.174_461_53 * back_center
+                + 0.100_615_38 * side_left
+                + 0.226_153_85 * side_right,
         ],
         [front_left, front_right, front_center, lfe, back_left, back_right, side_left, side_right] => {
             [
-                0.211866662 * front_left
-                    + 0.150266662 * front_center
-                    + 0.066666670 * lfe
-                    + 0.181066677 * back_left
-                    + 0.111066669 * back_right
-                    + 0.194133341 * side_left
-                    + 0.085866667 * side_right,
-                0.211866662 * front_right
-                    + 0.150266662 * front_center
-                    + 0.066666670 * lfe
-                    + 0.111066669 * back_left
-                    + 0.181066677 * back_right
-                    + 0.085866667 * side_left
-                    + 0.194133341 * side_right,
+                0.211_866_66 * front_left
+                    + 0.150_266_66 * front_center
+                    + 0.066_666_67 * lfe
+                    + 0.181_066_68 * back_left
+                    + 0.111_066_67 * back_right
+                    + 0.194_133_34 * side_left
+                    + 0.085_866_67 * side_right,
+                0.211_866_66 * front_right
+                    + 0.150_266_66 * front_center
+                    + 0.066_666_67 * lfe
+                    + 0.111_066_67 * back_left
+                    + 0.181_066_68 * back_right
+                    + 0.085_866_67 * side_left
+                    + 0.194_133_34 * side_right,
             ]
         }
         _ => unreachable!("validated WAV channel count"),
@@ -958,18 +953,21 @@ mod tests {
 
     #[test]
     fn sdl_wav_multichannel_downmix_uses_count_layouts() {
-        assert_mix(&[1.0, 0.0, 0.0], [0.800000012, 0.0]);
-        assert_mix(&[0.0, 0.0, 1.0], [0.200000003, 0.200000003]);
-        assert_mix(&[0.0, 0.0, 1.0, 0.0], [0.358999997, 0.219999999]);
-        assert_mix(&[0.0, 0.0, 1.0, 0.0, 0.0], [0.111111112, 0.111111112]);
-        assert_mix(&[0.0, 0.0, 1.0, 0.0, 0.0, 0.0], [0.208181813, 0.208181813]);
+        assert_mix(&[1.0, 0.0, 0.0], [0.8, 0.0]);
+        assert_mix(&[0.0, 0.0, 1.0], [0.2, 0.2]);
+        assert_mix(&[0.0, 0.0, 1.0, 0.0], [0.359, 0.22]);
+        assert_mix(&[0.0, 0.0, 1.0, 0.0, 0.0], [0.111_111_11, 0.111_111_11]);
+        assert_mix(
+            &[0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            [0.208_181_81, 0.208_181_81],
+        );
         assert_mix(
             &[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-            [0.174461529, 0.174461529],
+            [0.174_461_53, 0.174_461_53],
         );
         assert_mix(
             &[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-            [0.181066677, 0.111066669],
+            [0.181_066_68, 0.111_066_67],
         );
     }
 }

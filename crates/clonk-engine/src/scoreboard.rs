@@ -203,7 +203,7 @@ impl ScoreboardState {
         };
         Some(Self {
             rows,
-            empty_row_columns: (row_count == 0).then_some(column_count).unwrap_or(0),
+            empty_row_columns: if row_count == 0 { column_count } else { 0 },
             show_count,
         })
     }
@@ -315,7 +315,7 @@ const fn is_zero_usize(value: &usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{SCOREBOARD_CAPTION, ScoreboardState};
+    use super::{ScoreboardState, SCOREBOARD_CAPTION};
 
     #[test]
     fn native_text_bytes_survive_state_serialization() {

@@ -648,11 +648,7 @@ impl PlayerPropertiesController {
     /// Returns exactly the tooltips assigned by the native player-properties
     /// dialog. Untipped edits, previews, swatches and OK/Cancel controls do
     /// not inherit descriptions from unrelated siblings.
-    pub fn tooltip_at(
-        &self,
-        point: GuiPoint,
-        book_small: &ClonkFont,
-    ) -> Option<StartupTooltip> {
+    pub fn tooltip_at(&self, point: GuiPoint, book_small: &ClonkFont) -> Option<StartupTooltip> {
         if self.portrait_selector.is_some() {
             return None;
         }
@@ -668,8 +664,9 @@ impl PlayerPropertiesController {
                 PlayerPropertiesControl::Red
                 | PlayerPropertiesControl::Green
                 | PlayerPropertiesControl::Blue => "IDS_DLGTIP_PLAYERCOLORSTGB",
-                PlayerPropertiesControl::ControlPrevious
-                | PlayerPropertiesControl::ControlNext => "IDS_DLGTIP_PLAYERCONTROL",
+                PlayerPropertiesControl::ControlPrevious | PlayerPropertiesControl::ControlNext => {
+                    "IDS_DLGTIP_PLAYERCONTROL"
+                }
                 PlayerPropertiesControl::Mouse => "IDS_DLGTIP_PLAYERCONTROLMOUSE",
                 PlayerPropertiesControl::Picture => "IDS_DESC_SELECTAPICTUREANDORLOBBYI",
                 PlayerPropertiesControl::JumpAndRunMovement => "IDS_DLGTIP_JUMPANDRUN",
@@ -684,8 +681,7 @@ impl PlayerPropertiesController {
         if contains(classic, point) {
             return Some(StartupTooltip::resource("IDS_DLGTIP_CLASSIC"));
         }
-        contains(jump_and_run, point)
-            .then(|| StartupTooltip::resource("IDS_DLGTIP_JUMPANDRUN"))
+        contains(jump_and_run, point).then(|| StartupTooltip::resource("IDS_DLGTIP_JUMPANDRUN"))
     }
 
     pub fn tooltip(&self, book_small: &ClonkFont) -> Option<StartupTooltip> {
@@ -1405,7 +1401,7 @@ mod tests {
         state.set_color(0);
         assert_eq!(state.color(), 1);
 
-        player.pref_color_dw = 0xff_ffff_ff;
+        player.pref_color_dw = 0xffff_ffff;
         state = PlayerPropertiesController::edit(0, player, "", None, None);
         assert_eq!(state.color(), 0xff_ffff);
     }
@@ -1559,10 +1555,9 @@ mod tests {
         let mut state = controller();
         state.resize(800, 600);
         let layout = PlayerPropertiesLayout::for_size(800, 600);
-        let ttf = std::fs::read(
-            crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"),
-        )
-        .expect("read Endeavour.ttf");
+        let ttf =
+            std::fs::read(crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"))
+                .expect("read Endeavour.ttf");
         let book_small = crate::startup_options_dlg::build_book_fonts(&ttf)
             .expect("build book fonts")
             .book_small;
@@ -1600,11 +1595,7 @@ mod tests {
 
         let [classic_label, jump_label] = layout.movement_label_rects(&book_small);
         for (label, button, key) in [
-            (
-                classic_label,
-                layout.classic_movement,
-                "IDS_DLGTIP_CLASSIC",
-            ),
+            (classic_label, layout.classic_movement, "IDS_DLGTIP_CLASSIC"),
             (
                 jump_label,
                 layout.jump_and_run_movement,
@@ -1626,10 +1617,8 @@ mod tests {
             let overlap = IntRect {
                 x: label.x.max(blocker.x),
                 y: label.y.max(blocker.y),
-                w: (label.x + label.w).min(blocker.x + blocker.w)
-                    - label.x.max(blocker.x),
-                h: (label.y + label.h).min(blocker.y + blocker.h)
-                    - label.y.max(blocker.y),
+                w: (label.x + label.w).min(blocker.x + blocker.w) - label.x.max(blocker.x),
+                h: (label.y + label.h).min(blocker.y + blocker.h) - label.y.max(blocker.y),
             };
             assert!(overlap.w > 0 && overlap.h > 0);
             assert_eq!(

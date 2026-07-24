@@ -263,9 +263,7 @@ impl LocalControlRegistry {
     }
 
     pub(crate) fn owners(&self) -> impl Iterator<Item = i32> + '_ {
-        self.assignments
-            .iter()
-            .map(|assignment| assignment.owner)
+        self.assignments.iter().map(|assignment| assignment.owner)
     }
 
     pub(crate) fn remove(&mut self, owner: i32) -> Option<LocalControlAssignment> {
@@ -358,12 +356,9 @@ mod tests {
         ];
 
         assert_eq!(
-            controls.route_keyboard_candidates(
-                candidates,
-                ElementState::Pressed,
-                true,
-                |_| Some(false),
-            ),
+            controls.route_keyboard_candidates(candidates, ElementState::Pressed, true, |_| Some(
+                false
+            ),),
             KeyboardRoutingOutcome::Consumed {
                 owner: Some(80),
                 event: Some(press),
@@ -384,12 +379,7 @@ mod tests {
             "AutoStop repeat consumes without emitting"
         );
         assert_eq!(
-            controls.route_keyboard_candidates(
-                candidates,
-                ElementState::Pressed,
-                false,
-                |_| None,
-            ),
+            controls.route_keyboard_candidates(candidates, ElementState::Pressed, false, |_| None,),
             KeyboardRoutingOutcome::Unhandled,
             "a stale registry owner is equivalent to a missing live player"
         );
@@ -681,10 +671,8 @@ mod tests {
                 true,
             );
         }
-        controls.finalize_restored_mouse_owner([
-            (1, PlayerStatus::Active),
-            (0, PlayerStatus::Active),
-        ]);
+        controls
+            .finalize_restored_mouse_owner([(1, PlayerStatus::Active), (0, PlayerStatus::Active)]);
 
         // Reusing zero after removing the old head can leave native's linked
         // player order [1, 0]. FinalInit follows those links, so zero wins.
@@ -722,20 +710,23 @@ mod tests {
                 true,
             );
         }
-        controls.finalize_restored_mouse_owner([
-            (3, PlayerStatus::Active),
-            (9, PlayerStatus::Active),
-        ]);
+        controls
+            .finalize_restored_mouse_owner([(3, PlayerStatus::Active), (9, PlayerStatus::Active)]);
         assert_eq!(controls.mouse_owner(), Some(9));
 
-        assert_eq!(controls.toggle_mouse(9).map(|value| value.mouse), Some(false));
+        assert_eq!(
+            controls.toggle_mouse(9).map(|value| value.mouse),
+            Some(false)
+        );
         assert_eq!(controls.assignment(3).map(|value| value.mouse), Some(true));
         assert_eq!(controls.mouse_owner(), None);
 
         // The surviving raw flag still makes MouseControlTaken true, so the
         // now-unflagged former owner cannot reacquire the global controller.
-        assert_eq!(controls.toggle_mouse(9).map(|value| value.mouse), Some(false));
+        assert_eq!(
+            controls.toggle_mouse(9).map(|value| value.mouse),
+            Some(false)
+        );
         assert_eq!(controls.mouse_owner(), None);
     }
-
 }

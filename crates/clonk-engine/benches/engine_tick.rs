@@ -1,5 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 use clonk_engine::{Definition, Engine, Landscape, SpawnConfig, Vector2};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
 
 const BOUNCER_SCRIPT: &str = r#"
 #strict 3

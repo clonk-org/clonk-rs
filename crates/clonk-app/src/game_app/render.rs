@@ -1591,8 +1591,10 @@ impl GameApp {
                         let outgoing_opacity = startup_dialog_fade_opacity(
                             100_u8.saturating_sub(fade.step.saturating_mul(10)),
                         );
-                        let mut plan = NativePresentationPlan::default();
-                        plan.monitor_gamma = monitor_gamma.clone();
+                        let mut plan = NativePresentationPlan {
+                            monitor_gamma: monitor_gamma.clone(),
+                            ..NativePresentationPlan::default()
+                        };
                         if retained_fade {
                             plan.batches.push(NativePresentationBatch {
                                 logical_layer: None,
@@ -1684,11 +1686,9 @@ impl GameApp {
                         self.startup_dialog_fade = Some(fade);
                     }
                 }
-                if ordered_native {
-                    if !fade_was_active {
-                        self.commit_pending_native_base(frame);
-                        self.begin_native_text_capture(true);
-                    }
+                if ordered_native && !fade_was_active {
+                    self.commit_pending_native_base(frame);
+                    self.begin_native_text_capture(true);
                 }
                 if let (Some(pending), Some(properties_assets), Some(fonts)) = (
                     self.startup_player_properties_dialog.as_ref(),

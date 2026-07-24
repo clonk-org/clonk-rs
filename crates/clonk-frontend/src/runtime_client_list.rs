@@ -1733,14 +1733,7 @@ impl RuntimeClientListDialog {
         active: bool,
         gamma: Option<&GammaRamp>,
     ) -> Result<()> {
-        self.render_with_activity(
-            surface,
-            preferred,
-            resources,
-            active,
-            active,
-            gamma,
-        )
+        self.render_with_activity(surface, preferred, resources, active, active, gamma)
     }
 
     pub fn render_with_activity(
@@ -1827,15 +1820,7 @@ impl RuntimeClientListDialog {
         gamma: Option<&GammaRamp>,
         now: Instant,
     ) -> Result<()> {
-        self.render_at_with_activity(
-            surface,
-            preferred,
-            resources,
-            active,
-            active,
-            gamma,
-            now,
-        )
+        self.render_at_with_activity(surface, preferred, resources, active, active, gamma, now)
     }
 
     pub fn render_at_with_activity(

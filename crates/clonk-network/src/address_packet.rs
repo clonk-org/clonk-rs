@@ -180,7 +180,7 @@ pub(crate) fn add_addresses_from_puncher(
     let observed_address = NetworkAddress::new(NetworkProtocol::Udp, observed_address).endpoint;
     let mut added = Vec::new();
     let mut add_in_front = |address: NetworkAddress| {
-        if addresses.iter().any(|known| *known == address) {
+        if addresses.contains(&address) {
             return;
         }
         addresses.insert(0, address);

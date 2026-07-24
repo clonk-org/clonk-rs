@@ -32,11 +32,9 @@ fn load_tutorial04() -> (Engine, i32) {
     let resolver = ContentResolver {
         root: content.clone(),
     };
-    let scenario = Scenario::load_from_path_with(
-        content.join("Tutorial.c4f/Tutorial04.c4s"),
-        &resolver,
-    )
-    .expect("Tutorial04 loads");
+    let scenario =
+        Scenario::load_from_path_with(content.join("Tutorial.c4f/Tutorial04.c4s"), &resolver)
+            .expect("Tutorial04 loads");
     let mut engine = Engine::with_seed(0);
     scenario.apply(&mut engine).expect("Tutorial04 applies");
     let player = engine
@@ -85,7 +83,9 @@ fn tutorial04_conkit_opens_the_real_elevator_construction_menu() {
         {
             break;
         }
-        engine.tick_without_snapshot().expect("ready crew Exit frame");
+        engine
+            .tick_without_snapshot()
+            .expect("ready crew Exit frame");
     }
     engine
         .apply_object_update(conkit, ObjectUpdate::new().with_container(clonk))

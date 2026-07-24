@@ -749,14 +749,11 @@ pub(crate) fn parse_complete_packet(body: &[u8]) -> Result<Option<ControlMessage
     }
     // League results are present in C++'s typed packet table and decoded
     // before handler dispatch.
-    match body[0] {
-        PID_LEAGUE_ROUND_RESULTS => {
-            return decode_league_round_results_payload(&body[1..])
-                .map(ControlMessage::LeagueRoundResults)
-                .map(Some)
-                .map_err(TransportError::LeagueRoundResultsDecode);
-        }
-        _ => {}
+    if body[0] == PID_LEAGUE_ROUND_RESULTS {
+        return decode_league_round_results_payload(&body[1..])
+            .map(ControlMessage::LeagueRoundResults)
+            .map(Some)
+            .map_err(TransportError::LeagueRoundResultsDecode);
     }
     parse_control_message(body).map(Some)
 }

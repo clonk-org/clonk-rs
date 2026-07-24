@@ -702,12 +702,9 @@ impl DisplayOptions {
             }
         };
         self.write_config(&mut config);
-        if let Err(err) = crate::save_config_preserving_native_general_booleans(
-            &config,
-            &config_path,
-            None,
-            None,
-        ) {
+        if let Err(err) =
+            crate::save_config_preserving_native_general_booleans(&config, &config_path, None, None)
+        {
             tracing::warn!(
                 error = %err,
                 path = %config_path.display(),

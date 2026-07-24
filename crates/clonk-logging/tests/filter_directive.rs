@@ -13,7 +13,11 @@ fn filter_directives_override_verbose_default_in_priority_order() {
 fn filter_selection_uses_default_for_missing_or_invalid_directive() {
     assert_eq!(select_filter_directive(None, None, "debug"), "debug");
     assert_eq!(
-        select_filter_directive(Some("clonk_app=definitely-not-a-level"), Some("trace"), "info",),
+        select_filter_directive(
+            Some("clonk_app=definitely-not-a-level"),
+            Some("trace"),
+            "info",
+        ),
         "info"
     );
 }

@@ -104,9 +104,7 @@ fn eval_reentry_shares_the_suspended_callers_value_stack() {
         engine
             .call(
                 "Run",
-                &[Value::String(
-                    format!("[{}]", repeated_values(1014)).into(),
-                )],
+                &[Value::String(format!("[{}]", repeated_values(1014)).into())],
             )
             .expect_err("DirectExec must retain its suspended caller and eval parameter"),
     );

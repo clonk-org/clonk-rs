@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-use image::{Rgba, RgbaImage};
 use clonk_engine::{Engine, Scenario};
+use image::{Rgba, RgbaImage};
 
 fn tempdir() -> std::io::Result<tempfile::TempDir> {
     tempfile::Builder::new().prefix("lc-test-").tempdir()

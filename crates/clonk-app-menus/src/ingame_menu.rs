@@ -264,7 +264,10 @@ impl MenuItem {
 pub enum MenuOutcome {
     /// Enter on the selected item (C4Menu::Enter, C4Menu.cpp:498-521): a
     /// non-permanent menu closes before its command runs.
-    Action { action: MenuAction, close_menu: bool },
+    Action {
+        action: MenuAction,
+        close_menu: bool,
+    },
     /// COM_MenuClose (C4Menu::TryClose, C4Menu.cpp:317-334): the menu closes
     /// and the close command (if any) runs after.
     Closed { close_action: Option<MenuAction> },
@@ -569,11 +572,7 @@ impl IngameMenuState {
         self.player
     }
 
-    fn team_menu(
-        teams: &[TeamSelectionEntry],
-        switching: bool,
-        return_to_main: bool,
-    ) -> Self {
+    fn team_menu(teams: &[TeamSelectionEntry], switching: bool, return_to_main: bool) -> Self {
         let items = teams
             .iter()
             .map(|team| {
@@ -675,7 +674,9 @@ impl IngameMenuState {
                 "Join player",
                 MenuSymbol::PlayerColor,
                 MenuAction::ActivateNewPlayer,
-                Some("Have another player join the game (player files from the working directory)."),
+                Some(
+                    "Have another player join the game (player files from the working directory).",
+                ),
             ));
         }
         // Save game (C4MainMenu.cpp:688-692)
@@ -825,10 +826,7 @@ impl IngameMenuState {
     /// (C4MainMenu.cpp:235-273,950-961): Free first, then each visible
     /// runtime player in player-list order. The page is non-permanent, so
     /// Enter closes it before dispatching the selected `Observe:*` action.
-    pub fn observer_menu(
-        players: &[ObserverPlayerEntry],
-        current_target: ObserverTarget,
-    ) -> Self {
+    pub fn observer_menu(players: &[ObserverPlayerEntry], current_target: ObserverTarget) -> Self {
         let mut items = Vec::with_capacity(players.len() + 1);
         items.push(MenuItem::new(
             "free view",
@@ -1011,7 +1009,12 @@ impl IngameMenuState {
             "Surrender",
             MenuSymbol::GuiIcon(ICO_SURRENDER),
             vec![
-                MenuItem::new("Yes", MenuSymbol::OkCancel(3, 0), MenuAction::Surrender, None),
+                MenuItem::new(
+                    "Yes",
+                    MenuSymbol::OkCancel(3, 0),
+                    MenuAction::Surrender,
+                    None,
+                ),
                 MenuItem::new("No", MenuSymbol::OkCancel(1, 0), MenuAction::NoOp, None),
             ],
             false,
@@ -1829,13 +1832,7 @@ impl IngameMenuGraphics {
         }
         if hostile {
             if let Some(menu) = self.menu.as_ref() {
-                draw_image_region(
-                    surface,
-                    menu,
-                    Rect::new(35 * 7, 0, 35, 35),
-                    dest,
-                    gamma,
-                );
+                draw_image_region(surface, menu, Rect::new(35 * 7, 0, 35, 35), dest, gamma);
             }
         }
     }
@@ -1887,6 +1884,9 @@ impl IngameMenuGraphics {
     }
 }
 
+// This is the top-level menu raster boundary; keeping the viewport, fonts,
+// graphics, and gamma inputs flat makes classic render dependencies explicit.
+#[allow(clippy::too_many_arguments)]
 fn draw_menu(
     menu: &IngameMenuState,
     layout: &MenuLayout,
@@ -1992,8 +1992,8 @@ fn draw_menu(
         .unwrap_or(client);
     surface.set_clip(client_clip);
     let first_row = usize::try_from(layout.scroll_y / layout.item_height).unwrap_or_default();
-    let visible_rows = layout.lines as usize
-        + usize::from(layout.scroll_y % layout.item_height != 0);
+    let visible_rows =
+        layout.lines as usize + usize::from(layout.scroll_y % layout.item_height != 0);
     let columns = usize::try_from(layout.columns).unwrap_or(1);
     let first = first_row.saturating_mul(columns);
     let visible = visible_rows.saturating_mul(columns);
@@ -2027,14 +2027,7 @@ fn draw_menu(
                 color,
                 has_participants,
             } => {
-                gfx.draw_team_symbol(
-                    surface,
-                    *id,
-                    *color,
-                    *has_participants,
-                    symbol_rect,
-                    gamma,
-                );
+                gfx.draw_team_symbol(surface, *id, *color, *has_participants, symbol_rect, gamma);
             }
             _ => {
                 if let Some((image, src)) = gfx.symbol_source(&item.symbol) {
@@ -2135,6 +2128,9 @@ fn draw_menu(
 /// `DrawCommandKey` (C4ObjectCom.cpp:930-945): key cap (fctKey, Control.png
 /// (0,100) 64x64) + command symbol (fctCommand, Control.png (0,36) 32x32
 /// phases) + the key name in the small font when ShowCommandKeys is set.
+// The public helper mirrors C4ObjectCom::DrawCommandKey's source phase and
+// destination facet inputs, which are clearer as explicit draw parameters.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_command_key(
     surface: &mut Surface,
     gfx: &IngameMenuGraphics,
@@ -2171,6 +2167,9 @@ pub fn draw_command_key(
 }
 
 /// `GfxR->fctOKCancel.Draw(cgo, true, px, py)` (C4Menu.cpp:860,880).
+// The public helper mirrors C4Facet::Draw's destination facet and source phase
+// inputs, so retain the flat classic-rendering API.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_ok_cancel(
     surface: &mut Surface,
     gfx: &IngameMenuGraphics,
@@ -2373,8 +2372,7 @@ pub fn draw_image_region_aspect(
     if src.width == 0 || src.height == 0 {
         return;
     }
-    let scale = (dest.width as f32 / src.width as f32)
-        .min(dest.height as f32 / src.height as f32);
+    let scale = (dest.width as f32 / src.width as f32).min(dest.height as f32 / src.height as f32);
     let w = ((src.width as f32 * scale) as u32).max(1);
     let h = ((src.height as f32 * scale) as u32).max(1);
     let fitted = Rect::new(
@@ -2835,12 +2833,20 @@ mod tests {
             .collect::<Vec<_>>();
         let mut grid = IngameMenuState::hostility_menu(&entries);
         grid.handle_command(ControlCommand::MenuUp, CommandKind::Press);
-        assert_eq!(grid.selection(), 5, "up wraps to the last row in column zero");
+        assert_eq!(
+            grid.selection(),
+            5,
+            "up wraps to the last row in column zero"
+        );
         grid.handle_command(ControlCommand::MenuDown, CommandKind::Press);
         assert_eq!(grid.selection(), 0);
         grid.set_selection(2);
         grid.handle_command(ControlCommand::MenuUp, CommandKind::Press);
-        assert_eq!(grid.selection(), 2, "an incomplete column has no second row");
+        assert_eq!(
+            grid.selection(),
+            2,
+            "an incomplete column has no second row"
+        );
     }
 
     #[test]
@@ -2869,13 +2875,7 @@ mod tests {
         };
         let draw = |gfx: &IngameMenuGraphics, hostile| {
             let mut surface = Surface::new(1, 1, clonk_graphics::PixelFormat::Rgba8888);
-            gfx.draw_hostility_symbol(
-                &mut surface,
-                opponent,
-                hostile,
-                Rect::new(0, 0, 1, 1),
-                None,
-            );
+            gfx.draw_hostility_symbol(&mut surface, opponent, hostile, Rect::new(0, 0, 1, 1), None);
             surface.get_pixel(0, 0)
         };
 
@@ -3165,10 +3165,7 @@ mod tests {
                 "White Chat",
             ]
         );
-        assert_eq!(
-            menu.close_action(),
-            Some(&MenuAction::ActivateOptions)
-        );
+        assert_eq!(menu.close_action(), Some(&MenuAction::ActivateOptions));
     }
 
     #[test]
@@ -3180,7 +3177,13 @@ mod tests {
         let menu = IngameMenuState::display_menu(&flags, 0);
         assert_eq!(
             captions(&menu),
-            vec!["Player names", "Clonk names", "Portraits", "Commands", "Keys"]
+            vec![
+                "Player names",
+                "Clonk names",
+                "Portraits",
+                "Commands",
+                "Keys"
+            ]
         );
     }
 
@@ -3201,17 +3204,20 @@ mod tests {
         let menu = IngameMenuState::savegame_menu(&slots);
         assert_eq!(menu.items().len(), 10);
         assert!(menu.is_permanent());
-        assert!(menu
-            .items()
-            .iter()
-            .all(|item| item.caption == "Save game"));
+        assert!(menu.items().iter().all(|item| item.caption == "Save game"));
         assert!(matches!(
             menu.items()[0].symbol,
-            MenuSymbol::SaveSlot { slot: 1, free: false }
+            MenuSymbol::SaveSlot {
+                slot: 1,
+                free: false
+            }
         ));
         assert!(matches!(
             menu.items()[9].symbol,
-            MenuSymbol::SaveSlot { slot: 10, free: true }
+            MenuSymbol::SaveSlot {
+                slot: 10,
+                free: true
+            }
         ));
         assert_eq!(menu.items()[4].action, MenuAction::SaveSlot(5));
     }
@@ -3393,7 +3399,12 @@ mod tests {
 
         let mut one_line = l065_long_menu(8);
         one_line.set_selection(4);
-        assert_eq!(one_line.layout(Rect::new(0, 0, 320, 116), &font, &gfx).lines, 1);
+        assert_eq!(
+            one_line
+                .layout(Rect::new(0, 0, 320, 116), &font, &gfx)
+                .lines,
+            1
+        );
         assert_eq!(
             one_line.scroll_y(),
             0,
@@ -3546,10 +3557,7 @@ mod tests {
         // X = C4SymbolSize (C4Menu.cpp:739).
         assert_eq!(layout.bounds.x, 35);
         // Y = area height - C4SymbolSize - menu height (C4Menu.cpp:742).
-        assert_eq!(
-            layout.bounds.y,
-            480 - 35 - layout.bounds.height as i32
-        );
+        assert_eq!(layout.bounds.y, 480 - 35 - layout.bounds.height as i32);
         // Height = lines*itemHeight + title bar + extra bar + frame.
         let expected_height = 7 * layout.item_height + layout.title_height + 16 + 2;
         assert_eq!(layout.bounds.height as i32, expected_height);
@@ -3687,13 +3695,7 @@ mod tests {
         let font = HudFont::Fallback(&font_backend);
         let gfx = IngameMenuGraphics::default();
         let mut surface = Surface::new(640, 480, clonk_graphics::PixelFormat::Rgba8888);
-        menu.render(
-            &mut surface,
-            Rect::new(0, 0, 640, 480),
-            &font,
-            None,
-            &gfx,
-        );
+        menu.render(&mut surface, Rect::new(0, 0, 640, 480), &font, None, &gfx);
         // The selected row (first item) is marked with the CRed box
         // (#c80000, C4Menu.cpp:152-154 + C4.PAL entry 10).
         let area = Rect::new(0, 0, 640, 480);
@@ -3731,5 +3733,4 @@ mod tests {
             Some(crate::tutorial_seven_gamma_color(SELECTION_COLOR)),
         );
     }
-
 }

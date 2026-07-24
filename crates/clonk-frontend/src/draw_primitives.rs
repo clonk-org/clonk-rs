@@ -142,8 +142,8 @@ pub(crate) fn tile_image_on_surface(
     for y in 0..surface_height {
         let source_y = (origin_y + y as i32).rem_euclid(image_height as i32) as usize;
         let source_row = &source[source_y * source_stride..(source_y + 1) * source_stride];
-        let destination_row = &mut destination
-            [y * destination_stride..y * destination_stride + surface_width * 4];
+        let destination_row =
+            &mut destination[y * destination_stride..y * destination_stride + surface_width * 4];
         let mut destination_x = 0;
         let mut source_x = start_x;
         while destination_x < surface_width {
@@ -323,11 +323,7 @@ fn prepared_gpu_solid_color(
     }
 }
 
-fn gpu_solid_vertex(
-    position: (f32, f32),
-    color: Color,
-    blit: SpriteBlitState,
-) -> GpuSolidVertex {
+fn gpu_solid_vertex(position: (f32, f32), color: Color, blit: SpriteBlitState) -> GpuSolidVertex {
     let (color, outer_modulation) = prepared_gpu_solid_color(color, blit);
     GpuSolidVertex {
         position: [position.0, position.1, 1.0],
@@ -397,9 +393,7 @@ pub(crate) fn build_bolt_quad(
     let inside_y = |y| (0..height).contains(&y);
     // Deliberately not a segment/side-aware cull: C++ rejects even a segment
     // spanning the whole facet when both endpoints are outside one axis.
-    if (!inside_x(start.0) && !inside_x(end.0))
-        || (!inside_y(start.1) && !inside_y(end.1))
-    {
+    if (!inside_x(start.0) && !inside_x(end.0)) || (!inside_y(start.1) && !inside_y(end.1)) {
         return None;
     }
 

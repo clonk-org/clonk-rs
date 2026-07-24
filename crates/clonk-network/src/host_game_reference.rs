@@ -178,6 +178,9 @@ impl HostGameReference {
     /// Rebuild `C4Network2Reference::InitLocal`'s game-over projection.
     /// C++ copies live parameters, then overlays the independent global
     /// performance and one performance value per retained PlayerInfo ID.
+    // Keep the C++ projection inputs explicit so callers cannot accidentally
+    // reuse one of the independently refreshed reference fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn replacing_game_over<I>(
         &self,
         parameters: JoinGameParametersEnvelope,

@@ -331,9 +331,7 @@ mod tests {
         let mut output = vec![0xaa];
         assert_eq!(
             encode_join_team_list(&mut output, &wire),
-            Err(LegacyEncodeError::JoinDataTeamNameTooLong(
-                C4_MAX_NAME + 1
-            ))
+            Err(LegacyEncodeError::JoinDataTeamNameTooLong(C4_MAX_NAME + 1))
         );
         assert_eq!(output, [0xaa]);
 
@@ -350,9 +348,7 @@ mod tests {
         );
         assert_eq!(
             decode_join_team_list(&mut Reader::new(&encoded)),
-            Err(LegacyControlError::JoinDataTeamNameTooLong(
-                C4_MAX_NAME + 1
-            ))
+            Err(LegacyControlError::JoinDataTeamNameTooLong(C4_MAX_NAME + 1))
         );
     }
 }

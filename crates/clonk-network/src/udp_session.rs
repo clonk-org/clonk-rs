@@ -789,10 +789,7 @@ impl ReliableUdpSessionHub {
 
     pub fn from_driver(driver: ReliableUdpSocketDriver) -> io::Result<Self> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                "reliable-UDP session hub requires an entered Tokio runtime",
-            )
+            io::Error::other("reliable-UDP session hub requires an entered Tokio runtime")
         })?;
         let local_addr = canonical_reliable_udp_peer_address(driver.local_addr()?);
         let (commands, command_rx) = mpsc::channel(HUB_COMMAND_CAPACITY);
@@ -890,10 +887,7 @@ impl ReliableUdpSessionHub {
         }
         match self.task.take() {
             Some(task) => task.await.map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("reliable-UDP session task failed: {error}"),
-                )
+                io::Error::other(format!("reliable-UDP session task failed: {error}"))
             })?,
             None => Ok(()),
         }
@@ -1279,6 +1273,9 @@ async fn service_peer_inbound(
     .await;
 }
 
+// Event dispatch mutates the driver, independent delivery channels, peer
+// registries, and generation counter in one ordered reducer step.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_events(
     driver: &mut ReliableUdpSocketDriver,
     events: Vec<ReliableUdpEvent>,
@@ -2378,9 +2375,7 @@ mod tests {
         let (commands, _command_rx) = mpsc::channel(1);
         let (incoming, mut incoming_rx) = mpsc::channel(1);
         let (puncher_events, _puncher_event_rx) = mpsc::channel(PUNCHER_EVENT_CAPACITY);
-        assert!(incoming
-            .try_send(Err(io::Error::new(io::ErrorKind::Other, "occupied")))
-            .is_ok());
+        assert!(incoming.try_send(Err(io::Error::other("occupied"))).is_ok());
         let mut peers = BTreeMap::new();
         let mut pending_connects = BTreeMap::new();
         let mut next_peer_generation = 0;

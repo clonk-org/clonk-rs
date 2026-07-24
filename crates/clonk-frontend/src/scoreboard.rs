@@ -314,9 +314,8 @@ pub fn scoreboard_layout_with_title_presence(
             // An allocated empty StdStrBuf still participates, unlike null.
             if (row != 0 || column != 0) && cell.text().is_some() {
                 let text = presentation_text(cell.text().unwrap_or_default());
-                width = width.max(
-                    scoreboard_text_width(&text, font, images).saturating_add(X_INDENT),
-                );
+                width =
+                    width.max(scoreboard_text_width(&text, font, images).saturating_add(X_INDENT));
             }
         }
         column_widths.push(width);
@@ -331,8 +330,8 @@ pub fn scoreboard_layout_with_title_presence(
     // C++ tests the StdStrBuf pointer here, not whether the string is empty.
     if let Some(title) = title {
         let title = presentation_text(title);
-        width =
-            width.max(scoreboard_text_width(&title, font, images).saturating_add(TITLE_EXTRA_WIDTH));
+        width = width
+            .max(scoreboard_text_width(&title, font, images).saturating_add(TITLE_EXTRA_WIDTH));
     }
 
     let title_pointer_present = title.is_some();
@@ -500,16 +499,13 @@ impl ScoreboardPresentationState {
         let (Some(title), Some(caption)) = (self.title.as_deref(), self.layout.caption) else {
             return 0;
         };
-        let max_scroll = scoreboard_text_width(
-            title,
-            &resources.fonts.text,
-            resources.font_images(),
-        )
-        .saturating_add(caption.h)
-        .saturating_add(CAPTION_TEXT_OFFSET)
-        .saturating_add(CAPTION_RIGHT_INDENT)
-        .saturating_sub(caption.w)
-        .max(0);
+        let max_scroll =
+            scoreboard_text_width(title, &resources.fonts.text, resources.font_images())
+                .saturating_add(caption.h)
+                .saturating_add(CAPTION_TEXT_OFFSET)
+                .saturating_add(CAPTION_RIGHT_INDENT)
+                .saturating_sub(caption.w)
+                .max(0);
         let Some(last_change) = self.title_scroll.last_change else {
             self.title_scroll.last_change = Some(now);
             return 0;
@@ -589,9 +585,7 @@ pub fn render_scoreboard_with_layout(
     gamma: Option<&GammaRamp>,
 ) -> Result<()> {
     render_scoreboard_body_with_layout(surface, scoreboard, resources, layout, gamma)?;
-    render_scoreboard_caption_with_layout(
-        surface, scoreboard, resources, layout, state, gamma,
-    )
+    render_scoreboard_caption_with_layout(surface, scoreboard, resources, layout, state, gamma)
 }
 
 /// Draw the dialog background/frame and spreadsheet cells, stopping before
@@ -1081,11 +1075,7 @@ fn markup_rgba(stack: &[ScoreboardMarkupTag]) -> [u8; 4] {
             if color == 0x00ff_ffff {
                 return [255, 255, 255, 255];
             }
-            let rgb = markup_blit_color([
-                (color >> 16) as u8,
-                (color >> 8) as u8,
-                color as u8,
-            ]);
+            let rgb = markup_blit_color([(color >> 16) as u8, (color >> 8) as u8, color as u8]);
             [rgb[0], rgb[1], rgb[2], 255 - (color >> 24) as u8]
         })
         .unwrap_or([255, 255, 255, 255])
@@ -1765,13 +1755,9 @@ mod tests {
         assert_eq!(initial.bounds.h - collapsed.bounds.h, stale_margin);
 
         let null_title = scoreboard(serde_json::json!([[{"value":-1}]]));
-        let null_from_title = scoreboard_layout_with_title_presence(
-            preferred(),
-            &null_title,
-            &resources,
-            true,
-        )
-        .expect("null title removes pTitle before margins");
+        let null_from_title =
+            scoreboard_layout_with_title_presence(preferred(), &null_title, &resources, true)
+                .expect("null title removes pTitle before margins");
         assert_eq!(null_from_title.client.y, null_from_title.bounds.y);
     }
 
@@ -1868,10 +1854,7 @@ mod tests {
             "the attempted negative frame reverses and pauses at the start"
         );
         assert_eq!(
-            presentation.title_scroll_offset_at(
-                returning + TITLE_SCROLL_DELAY,
-                &resources,
-            ),
+            presentation.title_scroll_offset_at(returning + TITLE_SCROLL_DELAY, &resources,),
             1
         );
 
@@ -1880,10 +1863,12 @@ mod tests {
             .update(preferred(), &board, &resources)
             .expect("same-title Update");
         assert_eq!(presentation.title_scroll.position, retained_scroll.position);
-        assert_eq!(presentation.title_scroll.direction, retained_scroll.direction);
         assert_eq!(
-            presentation.title_scroll.last_change,
-            retained_scroll.last_change,
+            presentation.title_scroll.direction,
+            retained_scroll.direction
+        );
+        assert_eq!(
+            presentation.title_scroll.last_change, retained_scroll.last_change,
             "SetTitle returns early for an unchanged title"
         );
 
@@ -1990,7 +1975,10 @@ mod tests {
         let images = HashMap::from([("TEST".to_string(), image)]);
 
         assert_eq!(scoreboard_text_width("XX|X", &font, &images), 10);
-        assert_eq!(scoreboard_text_width("XX|X", &font, &images), font.measure("XX|X", true).0);
+        assert_eq!(
+            scoreboard_text_width("XX|X", &font, &images),
+            font.measure("XX|X", true).0
+        );
         assert_eq!(scoreboard_line_width("XX", &font, &images), 11);
         assert_eq!(scoreboard_text_width("{{TEST}}|", &font, &images), 5);
         assert_eq!(scoreboard_line_width("{{TEST}}", &font, &images), 6);
@@ -2134,9 +2122,8 @@ mod tests {
             sheared_raster_bounds(&surface, 20.0, 5, 6.0, 10, -0.3),
             Some((18, 5, 27, 15))
         );
-        let (sample_x, sample_y) =
-            inverse_sheared_sample(22, 5, 20.0, 5, 6.0, 10, 6, 10, -0.3)
-                .expect("sample inside transformed quad");
+        let (sample_x, sample_y) = inverse_sheared_sample(22, 5, 20.0, 5, 6.0, 10, 6, 10, -0.3)
+            .expect("sample inside transformed quad");
         assert!((sample_x - 0.65).abs() < 0.0001);
         assert!(sample_y.abs() < 0.0001);
     }
@@ -2240,8 +2227,7 @@ mod tests {
         let first_outside_y = (layout.bounds.y + layout.bounds.h).max(0) as u32;
         assert!(
             (first_outside_y..surface.height()).any(|y| {
-                (0..surface.width())
-                    .any(|x| surface.get_pixel(x, y) != Some(background))
+                (0..surface.width()).any(|x| surface.get_pixel(x, y) != Some(background))
             }),
             "C4ScoreboardDlg::DrawElement paints before Window installs its client clip"
         );
@@ -2284,7 +2270,11 @@ mod tests {
         let highlight = ImageData::new(
             2,
             2,
-            highlight_pixel.into_iter().cycle().take(2 * 2 * 4).collect(),
+            highlight_pixel
+                .into_iter()
+                .cycle()
+                .take(2 * 2 * 4)
+                .collect(),
         );
         let resources = ScoreboardResources::new(&caption, &icons, fonts.as_ref())
             .expect("resources")
@@ -2305,7 +2295,10 @@ mod tests {
             )
             .expect("caption");
             surface
-                .get_pixel((close.x + close.w / 2) as u32, (close.y + close.h / 2) as u32)
+                .get_pixel(
+                    (close.x + close.w / 2) as u32,
+                    (close.y + close.h / 2) as u32,
+                )
                 .expect("close center")
         };
 

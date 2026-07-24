@@ -1077,7 +1077,9 @@ mod tests {
     fn ctrl_rec_writer_matches_known_cpp_control_list_bytes() {
         let control = synchronize();
         let mut writer = ControlRecordWriter::new();
-        writer.record_controls(5, &[control.clone()]).unwrap();
+        writer
+            .record_controls(5, std::slice::from_ref(&control))
+            .unwrap();
         let bytes = writer.finish(5);
 
         // RCT_Ctrl head, CID_Synchronize body, PID_None, then C++'s raw
@@ -1102,7 +1104,9 @@ mod tests {
         let queued = synchronize();
         let mut writer = ControlRecordWriter::new();
         writer.record_packet(7, &direct).unwrap();
-        writer.record_controls(7, &[queued.clone()]).unwrap();
+        writer
+            .record_controls(7, std::slice::from_ref(&queued))
+            .unwrap();
         let bytes = writer.finish(7);
 
         assert_eq!(
@@ -1296,7 +1300,9 @@ mod tests {
     fn cpp_record_parser_accepts_clean_eof_and_ignores_after_end() {
         let control = synchronize();
         let mut writer = ControlRecordWriter::new();
-        writer.record_controls(5, &[control.clone()]).unwrap();
+        writer
+            .record_controls(5, std::slice::from_ref(&control))
+            .unwrap();
         let without_end = writer.bytes().to_vec();
         let expected_without_end = vec![ControlRecordChunk::Controls {
             frame: 5,
@@ -1604,7 +1610,9 @@ mod tests {
         let third = script();
         let mut writer = ControlRecordWriter::new();
         writer.record_packet(2, &first).unwrap();
-        writer.record_controls(2, &[second.clone()]).unwrap();
+        writer
+            .record_controls(2, std::slice::from_ref(&second))
+            .unwrap();
         writer.record_packet(4, &third).unwrap();
         let bytes = writer.finish(4);
 
@@ -1629,7 +1637,7 @@ mod tests {
             Ok((control.clone(), entry_len))
         );
 
-        let mut list = encode_control_list_payload(&[control.clone()]).unwrap();
+        let mut list = encode_control_list_payload(std::slice::from_ref(&control)).unwrap();
         let list_len = list.len();
         list.extend_from_slice(&[0, RCT_END]);
         assert_eq!(

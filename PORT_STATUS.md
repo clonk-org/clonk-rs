@@ -1,7 +1,11 @@
 # Rust Port Status
 
-The C++ oracle checkout (`~/Documents/code/vendor/legacyclonk-oracle`, tag `oracle-src-pinned`) and `content/` are read-only parity oracles; commits are the
-record of completed slices.
+The pinned C++ source snapshot at
+`7d43b47b7d789b533f32d005e64596e0a07019cd` and `content/` are read-only parity
+oracles; commits are the record of completed slices. The source snapshot
+remains reachable in this repository's Git history, and
+`LEGACYCLONK_ORACLE_ROOT` selects an external checkout for live differential
+work.
 
 ## Focus
 

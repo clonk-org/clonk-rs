@@ -424,11 +424,7 @@ impl GameApp {
     }
 
     fn activate_running_dialog_stack_only(&mut self, entry: RunningDialogStackEntry) {
-        if !self
-            .running_dialog_stack
-            .iter()
-            .any(|current| *current == entry)
-        {
+        if !self.running_dialog_stack.contains(&entry) {
             return;
         }
         if entry.z_order() != 0 {

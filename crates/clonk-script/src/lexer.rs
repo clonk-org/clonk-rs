@@ -163,8 +163,7 @@ impl<'a> Lexer<'a> {
                     return Ok(Token::new(TokenKind::Eof, self.line, self.column));
                 }
             };
-            let begins_comment = ch == '/'
-                && matches!(self.peek_char(), Some('/' | '*'));
+            let begins_comment = ch == '/' && matches!(self.peek_char(), Some('/' | '*'));
             let split_leading_star = if ch <= ' ' || begins_comment {
                 false
             } else {
@@ -754,11 +753,7 @@ impl<'a> Lexer<'a> {
             Err(error)
         } else {
             self.diagnostics.push(error);
-            Ok(Token::new(
-                TokenKind::Identifier(lexeme),
-                line,
-                column,
-            ))
+            Ok(Token::new(TokenKind::Identifier(lexeme), line, column))
         }
     }
 
@@ -947,11 +942,7 @@ impl<'a> Lexer<'a> {
                     // were tokenized as a new opener, it could swallow this
                     // function's brace and the next top-level declaration.
                     self.skip_string_remainder();
-                    return Err(ParseError::new(
-                        "string not closed",
-                        char_line,
-                        char_column,
-                    ));
+                    return Err(ParseError::new("string not closed", char_line, char_column));
                 }
                 '\\' => {
                     match self.peek_char() {
@@ -982,8 +973,7 @@ impl<'a> Lexer<'a> {
                 }
                 other
                     if (if self.input_is_c4_bytes {
-                        c4_string_byte_len(&value)
-                            + c4_string_byte_len(&other.to_string())
+                        c4_string_byte_len(&value) + c4_string_byte_len(&other.to_string())
                     } else {
                         value.len() + other.len_utf8()
                     }) <= C4AUL_MAX_STRING =>
@@ -1097,10 +1087,7 @@ mod tests {
         lex_all_at_strict_level(source, 0)
     }
 
-    fn lex_all_at_strict_level(
-        source: &str,
-        strict_level: u8,
-    ) -> Result<Vec<Token>, ParseError> {
+    fn lex_all_at_strict_level(source: &str, strict_level: u8) -> Result<Vec<Token>, ParseError> {
         let mut lexer = Lexer::new(source);
         lexer.set_strict_level(strict_level);
         let mut tokens = Vec::new();
@@ -1196,7 +1183,10 @@ mod tests {
     fn nul_terminates_source_before_following_tokens() {
         let tokens = lex_all("1\0+1").expect("NUL-terminated source lexes its prefix");
         assert_eq!(
-            tokens.into_iter().map(|token| token.kind).collect::<Vec<_>>(),
+            tokens
+                .into_iter()
+                .map(|token| token.kind)
+                .collect::<Vec<_>>(),
             vec![TokenKind::Number(1)]
         );
     }
@@ -1367,7 +1357,9 @@ mod tests {
             ("1A(", "1A"),
         ] {
             let mut legacy = Lexer::new(source);
-            let token = legacy.next_token().expect("legacy spelling is warning-only");
+            let token = legacy
+                .next_token()
+                .expect("legacy spelling is warning-only");
             assert_eq!(
                 token.kind,
                 TokenKind::Identifier(identifier.to_string()),

@@ -2,12 +2,12 @@
 
 use std::error::Error;
 
+use crate::support::real_scenario::load_tutorial;
+use crate::support::virtual_player::VirtualPlayer;
 use clonk_engine::{
     Engine, JoinPlayerConfig, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_SPECIAL2,
     COM_THROW, COM_UP,
 };
-use crate::support::real_scenario::load_tutorial;
-use crate::support::virtual_player::VirtualPlayer;
 
 fn load_tutorial08() -> (Engine, i32) {
     // C4Game::InitAnimals uses the scenario RNG and PlaceAnimal for every

@@ -13,10 +13,7 @@ pub enum AccessLevel {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppendTo {
-    Id {
-        id: String,
-        nowarn: bool,
-    },
+    Id { id: String, nowarn: bool },
     Wildcard, // Append to all definitions (*)
 }
 
@@ -41,17 +38,17 @@ pub struct VarDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Script {
     pub functions: Vec<Function>,
-    pub var_decls: Vec<VarDecl>,    // Script-wide local/static declarations
+    pub var_decls: Vec<VarDecl>, // Script-wide local/static declarations
     /// Held C4String operands in parser encounter order: quoted literals plus
     /// identifier-backed map/property keys. Static-constant strings are
     /// excluded because C4Aul registers those through a referenced GlobalConst
     /// value rather than granting parser Hold.
     pub string_literals: Vec<String>,
-    pub includes: Vec<String>,      // List of included definition IDs
+    pub includes: Vec<String>, // List of included definition IDs
     /// `#appendto` targets (C++ `C4AulScript::Appends`, a LIST —
     /// C4AulParse.cpp:1485; scripts may carry several).
     pub appends: Vec<AppendTo>,
-    pub strict_level: Option<u8>,   // Strict mode level (1, 2, or 3)
+    pub strict_level: Option<u8>, // Strict mode level (1, 2, or 3)
 }
 
 impl Script {
@@ -397,8 +394,8 @@ pub enum AssignmentTarget {
     /// A referenced array yields its new last-slot reference; a self-owned
     /// temporary loses that reference with its container and collapses to nil.
     ArrayAppend(Box<Expr>),
-    LocalSlot(Box<Expr>),                    // Local(expr) as lvalue - object-local slot
-    VarSlot(Box<Expr>),                      // Var(expr) as lvalue - function-local slot
+    LocalSlot(Box<Expr>),  // Local(expr) as lvalue - object-local slot
+    VarSlot(Box<Expr>),    // Var(expr) as lvalue - function-local slot
     EffectSlot(Vec<Expr>), // EffectVar(index, target, effect_num) as lvalue - effect variable slot
     MethodSlot {
         // obj->LocalN("key") as lvalue - method-accessed slot

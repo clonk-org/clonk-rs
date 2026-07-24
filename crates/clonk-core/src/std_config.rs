@@ -621,10 +621,7 @@ mod tests {
         let data = b"[Vendor]\nTemplate=\"<i>keep</i>\"\nValue=\"\\101\\x42\\33\"\n";
         let mut cursor = Cursor::new(&data[..]);
         let cfg = Config::from_reader(&mut cursor).unwrap();
-        assert_eq!(
-            cfg.get_in(Some("Vendor"), "Template"),
-            Some("<i>keep</i>")
-        );
+        assert_eq!(cfg.get_in(Some("Vendor"), "Template"), Some("<i>keep</i>"));
         assert_eq!(cfg.get_in(Some("Vendor"), "Value"), Some("AB\u{1b}"));
 
         let serialized = cfg.to_string().unwrap();
@@ -634,10 +631,7 @@ mod tests {
             reloaded.get_in(Some("Vendor"), "Template"),
             Some("<i>keep</i>")
         );
-        assert_eq!(
-            reloaded.get_in(Some("Vendor"), "Value"),
-            Some("AB\u{1b}")
-        );
+        assert_eq!(reloaded.get_in(Some("Vendor"), "Value"), Some("AB\u{1b}"));
     }
 
     #[test]

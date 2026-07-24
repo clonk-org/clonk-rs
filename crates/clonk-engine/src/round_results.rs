@@ -302,10 +302,7 @@ impl RoundResultsState {
             Some(player_infos) => {
                 let player_nodes = tree.children(player_infos, b"Player");
                 if player_nodes.len() > 5_000 {
-                    return Err(format!(
-                        "player count out of range: {}",
-                        player_nodes.len()
-                    ));
+                    return Err(format!("player count out of range: {}", player_nodes.len()));
                 }
                 player_nodes
                     .into_iter()
@@ -370,7 +367,10 @@ struct LegacyRoundResultsIni {
 
 impl LegacyRoundResultsIni {
     fn parse(source: &[u8]) -> Self {
-        let source = &source[..source.iter().position(|byte| *byte == 0).unwrap_or(source.len())];
+        let source = &source[..source
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(source.len())];
         let mut tree = Self {
             nodes: vec![LegacyRoundResultsIniNode {
                 name: Vec::new(),
@@ -403,18 +403,17 @@ impl LegacyRoundResultsIni {
                 .count();
             let mut cursor = indent;
             let section = line.get(cursor) == Some(&b'[')
-                && line
-                    .get(cursor + 1)
-                    .is_some_and(u8::is_ascii_alphabetic);
+                && line.get(cursor + 1).is_some_and(u8::is_ascii_alphabetic);
             if section {
                 cursor += 1;
             } else if !line.get(cursor).is_some_and(u8::is_ascii_alphabetic) {
                 continue;
             }
             let name_start = cursor;
-            while line.get(cursor).is_some_and(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(*byte, b' ' | b'_')
-            }) {
+            while line
+                .get(cursor)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b' ' | b'_'))
+            {
                 cursor += 1;
             }
             let name = &line[name_start..cursor];
@@ -437,7 +436,11 @@ impl LegacyRoundResultsIni {
             let index = tree.nodes.len();
             tree.nodes.push(LegacyRoundResultsIniNode {
                 name: name.to_vec(),
-                value: (!section).then(|| line[cursor..].to_vec()).unwrap_or_default(),
+                value: if !section {
+                    line[cursor..].to_vec()
+                } else {
+                    Default::default()
+                },
                 indent: node_indent,
                 parent: Some(current),
                 children: Vec::new(),
@@ -484,10 +487,7 @@ fn parse_player_result(tree: &LegacyRoundResultsIni, node: usize) -> RoundResult
             .value(node, b"Status", 0)
             .map(parse_player_status)
             .unwrap_or_default(),
-        player_info_id: tree
-            .value(node, b"ID", 0)
-            .and_then(parse_i32)
-            .unwrap_or(0),
+        player_info_id: tree.value(node, b"ID", 0).and_then(parse_i32).unwrap_or(0),
         total_playing_time: tree
             .value(node, b"TotalPlayingTime", 0)
             .and_then(parse_u32)
@@ -536,8 +536,7 @@ fn parse_goal_list(raw: &[u8]) -> Vec<(DefinitionId, i32)> {
         let start = position;
         while position < raw.len()
             && position - start < 4
-            && (raw[position].is_ascii_alphanumeric()
-                || matches!(raw[position], b'_' | b'-'))
+            && (raw[position].is_ascii_alphanumeric() || matches!(raw[position], b'_' | b'-'))
         {
             position += 1;
         }
@@ -584,13 +583,17 @@ fn parse_i32_at(raw: &[u8], position: &mut usize) -> Option<i32> {
         && raw.get(unsigned_start) == Some(&b'0')
         && matches!(raw.get(unsigned_start + 1), Some(b'x' | b'X'));
     let digit_start = unsigned_start + usize::from(hexadecimal) * 2;
-    let digit_length = raw.get(digit_start..)?.iter().take_while(|byte| {
-        if hexadecimal {
-            byte.is_ascii_hexdigit()
-        } else {
-            byte.is_ascii_digit()
-        }
-    }).count();
+    let digit_length = raw
+        .get(digit_start..)?
+        .iter()
+        .take_while(|byte| {
+            if hexadecimal {
+                byte.is_ascii_hexdigit()
+            } else {
+                byte.is_ascii_digit()
+            }
+        })
+        .count();
     if digit_length == 0 {
         return None;
     }
@@ -860,7 +863,10 @@ mod tests {
 
         let encoded = serde_json::to_value(&player)
             .unwrap_or_else(|error| panic!("fresh player result serializes: {error}"));
-        assert_eq!(encoded.get("league_score_gain"), Some(&serde_json::json!(0)));
+        assert_eq!(
+            encoded.get("league_score_gain"),
+            Some(&serde_json::json!(0))
+        );
     }
 
     #[test]
@@ -894,7 +900,14 @@ mod tests {
         );
         assert_eq!(results.network_result_message, b"evaluated");
         let player = &results.players[0];
-        assert_eq!((player.total_playing_time, player.score_old, player.score_new), (90, 10, Some(12)));
+        assert_eq!(
+            (
+                player.total_playing_time,
+                player.score_old,
+                player.score_new
+            ),
+            (90, 10, Some(12))
+        );
         assert_eq!(
             (
                 player.league_score_new,
@@ -904,7 +917,10 @@ mod tests {
             ),
             (80, -5, 3, 4)
         );
-        assert_eq!(player.league_progress_data.as_deref(), Some(&b"progress"[..]));
+        assert_eq!(
+            player.league_progress_data.as_deref(),
+            Some(&b"progress"[..])
+        );
     }
 
     #[test]
@@ -938,17 +954,18 @@ mod tests {
             results.network_result,
             Some(RoundResultsNetworkResult::NetworkError)
         );
-        assert_eq!(
-            results.network_result_message.as_slice(),
-            &b"first"[..]
-        );
+        assert_eq!(results.network_result_message.as_slice(), &b"first"[..]);
         let retained = results
             .players
             .iter()
             .find(|player| player.player_info_id == 7)
             .unwrap();
         assert_eq!(
-            (retained.total_playing_time, retained.score_old, retained.score_new),
+            (
+                retained.total_playing_time,
+                retained.score_old,
+                retained.score_new
+            ),
             (90, 10, Some(12))
         );
         assert_eq!(
@@ -989,37 +1006,29 @@ mod tests {
 
     #[test]
     fn dialog_metadata_keeps_nondefault_results_nonempty() {
-        assert!(
-            !RoundResultsState {
-                hide_settlement_score: true,
-                ..RoundResultsState::default()
-            }
-            .is_empty()
-        );
-        assert!(
-            !RoundResultsState {
-                league_performance: -1,
-                ..RoundResultsState::default()
-            }
-            .is_empty()
-        );
-        assert!(
-            !RoundResultsState {
-                custom_evaluation_strings: "First|Second".to_string(),
-                ..RoundResultsState::default()
-            }
-            .is_empty()
-        );
-        assert!(
-            !RoundResultsState {
-                players: vec![RoundResultsPlayerState {
-                    custom_evaluation_strings: "First   Second".to_string(),
-                    ..RoundResultsPlayerState::default()
-                }],
-                ..RoundResultsState::default()
-            }
-            .is_empty()
-        );
+        assert!(!RoundResultsState {
+            hide_settlement_score: true,
+            ..RoundResultsState::default()
+        }
+        .is_empty());
+        assert!(!RoundResultsState {
+            league_performance: -1,
+            ..RoundResultsState::default()
+        }
+        .is_empty());
+        assert!(!RoundResultsState {
+            custom_evaluation_strings: "First|Second".to_string(),
+            ..RoundResultsState::default()
+        }
+        .is_empty());
+        assert!(!RoundResultsState {
+            players: vec![RoundResultsPlayerState {
+                custom_evaluation_strings: "First   Second".to_string(),
+                ..RoundResultsPlayerState::default()
+            }],
+            ..RoundResultsState::default()
+        }
+        .is_empty());
     }
 
     #[test]
@@ -1145,11 +1154,9 @@ mod tests {
 
         // With only one naming, C++'s first StdStrBuf adapter consumes it;
         // the later enum adapter sees a missing field and takes NR_None.
-        let one = RoundResultsState::from_legacy_ini(
-            b"[RoundResults]\r\nNetResult=LeagueOK\r\n",
-            false,
-        )
-        .expect("single field compiles as result text");
+        let one =
+            RoundResultsState::from_legacy_ini(b"[RoundResults]\r\nNetResult=LeagueOK\r\n", false)
+                .expect("single field compiles as result text");
         assert_eq!(one.network_result_message, b"LeagueOK");
         assert_eq!(one.network_result, None);
     }

@@ -159,9 +159,7 @@ pub fn encode_netpuncher_punch(sent_at_ms: u32) -> [u8; 9] {
 pub fn decode_netpuncher_packet(
     wire: &[u8],
 ) -> Result<NetpuncherPacket, NetpuncherPacketDecodeError> {
-    let packet_type = *wire
-        .first()
-        .ok_or(NetpuncherPacketDecodeError::Truncated)?;
+    let packet_type = *wire.first().ok_or(NetpuncherPacketDecodeError::Truncated)?;
     let version = *wire.get(1).ok_or(NetpuncherPacketDecodeError::Truncated)?;
     if version != NETPUNCHER_PROTOCOL_VERSION {
         return Err(NetpuncherPacketDecodeError::UnsupportedVersion(version));

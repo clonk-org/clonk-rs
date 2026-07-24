@@ -149,8 +149,8 @@ func Open(object target, object witness)
 fn shipped_sub_airlock_toggles_once_per_transition() {
     let group = Group::open(content_root().join("Objects.c4d/Vehicles.c4d/Sub.c4d"))
         .expect("shipped Sub group opens");
-    let resource =
-        clonk_resources::definition::Definition::load(&group).expect("shipped Sub definition loads");
+    let resource = clonk_resources::definition::Definition::load(&group)
+        .expect("shipped Sub definition loads");
     let mut engine = Engine::new();
     engine
         .register_definition(Definition::from_resource(&resource).expect("Sub script compiles"))

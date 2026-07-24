@@ -74,7 +74,7 @@ impl GameApp {
             .and_then(|table| table.entries.get("IDS_LANG_CHARSET"))
             .and_then(|value| std::str::from_utf8(value).ok())
             .unwrap_or_default();
-        let charset_code = classic_rtf_charset_code(&charset_name);
+        let charset_code = classic_rtf_charset_code(charset_name);
         let language = self.save_description_language.clone();
         let mut title = clonk_script::c4_string_from_bytes(title);
         Markup::strip_markup(&mut title);

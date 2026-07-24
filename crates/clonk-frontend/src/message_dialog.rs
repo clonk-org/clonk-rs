@@ -202,21 +202,13 @@ impl MessageDialogIcon {
     pub const CONFIRM: Self = Self::Standard(18);
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MessageDialogPlacement {
+    #[default]
     Centered,
     /// Non-exclusive C++ screens place ordinary dialogs at the preferred
     /// viewport origin plus `(30,30)`.
-    Preferred {
-        x: i32,
-        y: i32,
-    },
-}
-
-impl Default for MessageDialogPlacement {
-    fn default() -> Self {
-        Self::Centered
-    }
+    Preferred { x: i32, y: i32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -560,9 +552,11 @@ impl MessageDialogState {
         self.checkbox
             .as_ref()
             .is_some_and(|checkbox| checkbox.hotkey == Some(character))
-            || self.buttons.ordered().into_iter().any(|button| {
-                expand_hotkey_markup(self.button_label(button)).1 == Some(character)
-            })
+            || self
+                .buttons
+                .ordered()
+                .into_iter()
+                .any(|button| expand_hotkey_markup(self.button_label(button)).1 == Some(character))
     }
 
     pub fn layout(
@@ -698,8 +692,7 @@ impl MessageDialogState {
                 button,
                 rect: IntRect {
                     x: first_button_x
-                        + i32::try_from(index).unwrap_or(i32::MAX)
-                            * (button_width + BUTTON_GAP),
+                        + i32::try_from(index).unwrap_or(i32::MAX) * (button_width + BUTTON_GAP),
                     y: button_y,
                     w: button_width,
                     h: BUTTON_HEIGHT,
@@ -2608,10 +2601,7 @@ mod tests {
         let font = unit_width_font("AB<>/focz ");
         let max_width = font.measure("A", true).0;
 
-        for (message, expected) in [
-            ("</foo>AB", "</foo>A\nB"),
-            ("<c zz>AB", "<c zz>A\nB"),
-        ] {
+        for (message, expected) in [("</foo>AB", "</foo>A\nB"), ("<c zz>AB", "<c zz>A\nB")] {
             assert_eq!(break_message(&font, message, max_width), expected);
         }
     }
@@ -2640,9 +2630,7 @@ mod tests {
         let broken = break_message(&font, "A☃", 5);
         assert_eq!(broken, "A\n☃");
         assert!(
-            broken
-                .lines()
-                .all(|line| font.measure(line, true).0 <= 5),
+            broken.lines().all(|line| font.measure(line, true).0 <= 5),
             "every broken line fits when measured with the rendered fallback"
         );
     }
@@ -2765,10 +2753,7 @@ mod tests {
                 "{text:?} at width {width}"
             );
         }
-        assert_eq!(
-            break_hud_message(&hud, "AAA   BBB", i32::MAX),
-            "AAA   BBB"
-        );
+        assert_eq!(break_hud_message(&hud, "AAA   BBB", i32::MAX), "AAA   BBB");
         assert_eq!(
             break_hud_message(&hud, "AAAA-BBBB", dash_width),
             "AAAA-\nBBBB"

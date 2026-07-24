@@ -158,14 +158,14 @@ pub fn compose_glyph_cell(
                 // Shadow of the upper-left pixel blurred with its eight
                 // neighbors, exactly src/StdFont.cpp:238-247 (shadowSize = 1).
                 let i_shadow = [
-                    (x < cov_w && y < cov_h).then(|| g(x, y)), // :239
-                    (x > 1 && y < cov_h).then(|| g(x - 2, y)), // :240
-                    (x > 0 && y < cov_h).then(|| g(x - 1, y)), // :241
-                    (x < cov_w && y > 1).then(|| g(x, y - 2)), // :242
-                    (x > 1 && y > 1).then(|| g(x - 2, y - 2)), // :243
-                    (x > 0 && y > 1).then(|| g(x - 1, y - 2)), // :244
-                    (x < cov_w && y > 0).then(|| g(x, y - 1)), // :245
-                    (x > 1 && y > 0).then(|| g(x - 2, y - 1)), // :246
+                    (x < cov_w && y < cov_h).then(|| g(x, y)),     // :239
+                    (x > 1 && y < cov_h).then(|| g(x - 2, y)),     // :240
+                    (x > 0 && y < cov_h).then(|| g(x - 1, y)),     // :241
+                    (x < cov_w && y > 1).then(|| g(x, y - 2)),     // :242
+                    (x > 1 && y > 1).then(|| g(x - 2, y - 2)),     // :243
+                    (x > 0 && y > 1).then(|| g(x - 1, y - 2)),     // :244
+                    (x < cov_w && y > 0).then(|| g(x, y - 1)),     // :245
+                    (x > 1 && y > 0).then(|| g(x - 2, y - 1)),     // :246
                     (x > 0 && y > 0).then(|| g(x - 1, y - 1) * 8), // :247
                 ]
                 .into_iter()
@@ -187,8 +187,8 @@ pub fn compose_glyph_cell(
             } else {
                 let a_dst = b_alpha; // source's inverted alpha (src/StdColors.h:128)
                 let a_src = 255 - a_dst; // src/StdColors.h:129
-                // out = min((src*aSrc + dst*aDst) >> 8, 255) with src = white
-                // (src/StdColors.h:130-133).
+                                         // out = min((src*aSrc + dst*aDst) >> 8, 255) with src = white
+                                         // (src/StdColors.h:130-133).
                 let mix = |dst_c: u32| ((255 * a_src + dst_c * a_dst) >> 8).min(255);
                 (
                     mix(base_grey),
@@ -1073,9 +1073,9 @@ fn read_tag(text: &str, stack: Option<&mut Vec<MarkupTag>>) -> Option<usize> {
     } else if name == "c" {
         // Color (src/StdMarkup.cpp:72-98).
         match (pars, stack) {
-            (None, _) => false,                      // :75
-            (Some(p), _) if p.len() > 8 => false,    // :76-79
-            (Some(_), None) => true,                 // skip mode: hex unchecked (:80)
+            (None, _) => false,                   // :75
+            (Some(p), _) if p.len() > 8 => false, // :76-79
+            (Some(_), None) => true,              // skip mode: hex unchecked (:80)
             (Some(p), Some(stack)) => parse_color_tag(p)
                 .map(|clr| stack.push(MarkupTag::TextColor(clr)))
                 .is_some(),
@@ -1898,8 +1898,8 @@ mod tests {
         assert_eq!(cell[0], Color::new(255, 255, 255, 255)); // (0,0)
         assert_eq!(cell[1], Color::new(255, 255, 255, 255)); // (1,0): y=0, no shadow
         assert_eq!(cell[3 + 1], Color::new(254, 254, 254, 255)); // (1,1)
-        // (2,1)/(1,2)/(2,2): iShadow = 3*255 + 8*255 = 2805 → /16 = 175 →
-        // black shadow, normal alpha 175.
+                                                                 // (2,1)/(1,2)/(2,2): iShadow = 3*255 + 8*255 = 2805 → /16 = 175 →
+                                                                 // black shadow, normal alpha 175.
         assert_eq!(cell[3 + 2], Color::new(0, 0, 0, 175)); // (2,1)
         assert_eq!(cell[6 + 1], Color::new(0, 0, 0, 175)); // (1,2)
         assert_eq!(cell[6 + 2], Color::new(0, 0, 0, 175)); // (2,2)
@@ -2078,9 +2078,7 @@ mod tests {
         );
         assert_eq!(font.measure("\u{1f642}", false), (3, 3));
 
-        let gamma = crate::GammaRamp::from_control_points([
-            0x102030, 0x405060, 0x708090,
-        ]);
+        let gamma = crate::GammaRamp::from_control_points([0x102030, 0x405060, 0x708090]);
         let mut sfc = surface();
         font.draw_with_gamma(
             &mut sfc,
@@ -2177,9 +2175,7 @@ mod tests {
     #[test]
     fn capture_suppresses_tagged_pixels_and_owns_draw_state() {
         let font = test_font().with_role(ClonkFontRole::GuiText);
-        let gamma = crate::GammaRamp::from_control_points([
-            0x102030, 0x405060, 0x708090,
-        ]);
+        let gamma = crate::GammaRamp::from_control_points([0x102030, 0x405060, 0x708090]);
         let clip = Rect::new(1, 2, 7, 4);
         let mut sfc = surface();
         sfc.set_clip(clip);
@@ -2475,9 +2471,7 @@ mod tests {
         // Font glyphs use the same three-channel blit shader as sprites
         // (StdFont.cpp:922-925; StdGL.cpp:1068-1087).
         let font = test_font();
-        let gamma = crate::GammaRamp::from_control_points([
-            0x102030, 0x405060, 0x708090,
-        ]);
+        let gamma = crate::GammaRamp::from_control_points([0x102030, 0x405060, 0x708090]);
         let mut sfc = surface();
         font.draw_with_gamma(
             &mut sfc,

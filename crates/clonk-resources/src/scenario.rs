@@ -80,9 +80,7 @@ struct DiscoveryContext<'a> {
 }
 
 impl<'a> DiscoveryContext<'a> {
-    fn new(
-        callback: &'a mut dyn FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>,
-    ) -> Self {
+    fn new(callback: &'a mut dyn FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>) -> Self {
         Self {
             callback,
             current: 0,
@@ -249,12 +247,9 @@ pub fn discover_with_languages_and_packs(
     languages: &[String],
     language_packs: &LanguagePacks,
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
-    discover_with_languages_and_packs_with_progress(
-        root,
-        languages,
-        language_packs,
-        |_| ControlFlow::Continue(()),
-    )
+    discover_with_languages_and_packs_with_progress(root, languages, language_packs, |_| {
+        ControlFlow::Continue(())
+    })
 }
 
 /// Discovers one scenario root while reporting incremental recursive work.
@@ -305,12 +300,9 @@ where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
-    discover_many_with_languages_and_packs_with_progress(
-        roots,
-        languages,
-        language_packs,
-        |_| ControlFlow::Continue(()),
-    )
+    discover_many_with_languages_and_packs_with_progress(roots, languages, language_packs, |_| {
+        ControlFlow::Continue(())
+    })
 }
 
 pub fn discover_many_with_languages_and_packs_with_progress<I, P, F>(
@@ -332,13 +324,7 @@ where
     context.add_work(roots.len())?;
     let mut entries = Vec::new();
     for root in roots {
-        let mut discovered = collect_from_path(
-            &root,
-            "",
-            languages,
-            language_packs,
-            &mut context,
-        )?;
+        let mut discovered = collect_from_path(&root, "", languages, language_packs, &mut context)?;
         entries.append(&mut discovered);
         context.complete_work()?;
     }
@@ -608,7 +594,10 @@ fn legacy_core_info(group: &Group) -> Result<Option<LegacyCoreInfo>, ScenarioDis
     // Mission passwords are opaque native bytes, unlike presentation text.
     // Reparse just this field through the C4 string byte projection so it
     // compares losslessly with Config.General.MissionAccess.
-    let visible_len = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    let visible_len = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
     let native_text = clonk_script::c4_string_from_bytes(&bytes[..visible_len]);
     info.mission_access = parse_legacy_mission_access(&native_text);
 
@@ -649,15 +638,10 @@ fn parse_legacy_mission_access(text: &str) -> Option<String> {
         let bytes = raw_line.as_bytes();
         let mut position = indent;
         let section = bytes.get(position) == Some(&b'[')
-            && bytes
-                .get(position + 1)
-                .is_some_and(u8::is_ascii_alphabetic);
+            && bytes.get(position + 1).is_some_and(u8::is_ascii_alphabetic);
         if section {
             position += 1;
-        } else if !bytes
-            .get(position)
-            .is_some_and(u8::is_ascii_alphabetic)
-        {
+        } else if !bytes.get(position).is_some_and(u8::is_ascii_alphabetic) {
             continue;
         }
         let name_start = position;
@@ -703,9 +687,7 @@ fn parse_legacy_mission_access(text: &str) -> Option<String> {
         .map(|(index, _)| index)?;
     let raw = nodes
         .iter()
-        .find(|node| {
-            node.parent == head && !node.section && node.name == "MissionAccess"
-        })?
+        .find(|node| node.parent == head && !node.section && node.name == "MissionAccess")?
         .value
         .as_deref()?
         .trim_start_matches([' ', '\t']);
@@ -840,9 +822,10 @@ fn stdcompiler_ini_name(raw: &str) -> Option<&str> {
         return None;
     }
     let mut end = 0;
-    while bytes.get(end).is_some_and(|byte| {
-        byte.is_ascii_alphanumeric() || *byte == b' ' || *byte == b'_'
-    }) {
+    while bytes
+        .get(end)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b' ' || *byte == b'_')
+    {
         end += 1;
     }
     bytes[end..]
@@ -1057,9 +1040,7 @@ fn build_scenario_entry(
         kind: ScenarioEntryKind::Scenario,
         is_editable: group.is_directory(),
         is_playable: true,
-        mission_access: legacy
-            .as_ref()
-            .and_then(|info| info.mission_access.clone()),
+        mission_access: legacy.as_ref().and_then(|info| info.mission_access.clone()),
         preview,
         title_picture,
         children: Vec::new(),
@@ -1692,11 +1673,9 @@ mod tests {
         assert_eq!(percentages.last(), Some(&100));
         assert!(percentages.iter().all(|percent| *percent <= 100));
         assert!(percentages.iter().any(|percent| (1..100).contains(percent)));
-        assert!(
-            progress_updates
-                .iter()
-                .all(|progress| progress.current <= progress.total)
-        );
+        assert!(progress_updates
+            .iter()
+            .all(|progress| progress.current <= progress.total));
         assert!(
             percentages.windows(2).all(|pair| pair[0] <= pair[1]),
             "reported percentages must not move backwards as nested work expands the total: {percentages:?}"
@@ -1885,7 +1864,10 @@ mod tests {
                 .find(|entry| entry.title == "ä")
                 .expect("native-byte directory folder is discovered");
             assert_eq!(folder.path.file_name().unwrap().as_bytes(), b"\xe4.c4f");
-            assert_eq!(clonk_script::c4_string_bytes(&folder.identifier), b"\xe4.c4f");
+            assert_eq!(
+                clonk_script::c4_string_bytes(&folder.identifier),
+                b"\xe4.c4f"
+            );
             assert_eq!(folder.children.len(), 1);
             assert_eq!(folder.children[0].title, "Native folder child");
         }
@@ -1967,7 +1949,11 @@ mod tests {
         let scenario_dir = dir.path().join("Tutorial.c4f");
         fs::create_dir(&scenario_dir).unwrap();
         fs::write(scenario_dir.join("Folder.txt"), "[Head]\nIndex=1\n").unwrap();
-        fs::write(scenario_dir.join("Title.txt"), "DE:Lernrunden\r\nUS:Tutorial").unwrap();
+        fs::write(
+            scenario_dir.join("Title.txt"),
+            "DE:Lernrunden\r\nUS:Tutorial",
+        )
+        .unwrap();
 
         let us = discover_with_languages(dir.path(), &langs(&["US", "DE"])).expect("discover");
         assert_eq!(us[0].title, "Tutorial");
@@ -2030,10 +2016,7 @@ mod tests {
 
         let broken_path = dir.path().join("Broken.c4s");
         let mut broken = build_group(&[
-            (
-                "Scenario.txt",
-                b"[Head]\nTitle=Core fallback\n".to_vec(),
-            ),
+            ("Scenario.txt", b"[Head]\nTitle=Core fallback\n".to_vec()),
             ("TitleUS.txt", b"unreadable".to_vec()),
         ]);
         make_group_entry_unreadable(&mut broken, 1);
@@ -2050,11 +2033,7 @@ mod tests {
 
         let sibling_path = dir.path().join("Sibling.c4s");
         fs::create_dir(&sibling_path).unwrap();
-        fs::write(
-            sibling_path.join("Scenario.txt"),
-            "[Head]\nTitle=Sibling\n",
-        )
-        .unwrap();
+        fs::write(sibling_path.join("Scenario.txt"), "[Head]\nTitle=Sibling\n").unwrap();
 
         for path in [&broken_path, &plain_path] {
             let group = Group::open(path).expect("open corrupt-entry fixture");
@@ -2091,7 +2070,11 @@ mod tests {
             "[Head]\nTitle=Goldmine\n",
         )
         .unwrap();
-        fs::write(scenario_dir.join("Title.txt"), "DE:Goldmine\nUS:Gold Mine\n").unwrap();
+        fs::write(
+            scenario_dir.join("Title.txt"),
+            "DE:Goldmine\nUS:Gold Mine\n",
+        )
+        .unwrap();
 
         let entries = discover_with_languages(dir.path(), &langs(&["US", "DE"])).expect("discover");
         assert_eq!(entries[0].title, "Gold Mine");
@@ -2118,7 +2101,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let scenario_dir = dir.path().join("Alpha.c4s");
         fs::create_dir(&scenario_dir).unwrap();
-        fs::write(scenario_dir.join("Scenario.txt"), "[Head]\nTitle=CoreTitle\n").unwrap();
+        fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=CoreTitle\n",
+        )
+        .unwrap();
         fs::write(scenario_dir.join("Title.txt"), "DE:Nur Deutsch\n").unwrap();
 
         let entries = discover_with_languages(dir.path(), &langs(&["US"])).expect("discover");
@@ -2139,8 +2126,7 @@ mod tests {
         fs::write(scenario.join("Scenario.txt"), "[Head]\nTitle=Core title\n").unwrap();
 
         let language_container = install.join("Language.c4g");
-        let packed_scenario =
-            language_container.join("Finnish.c4g/Scenarios/Alpha.c4s");
+        let packed_scenario = language_container.join("Finnish.c4g/Scenarios/Alpha.c4s");
         fs::create_dir_all(&packed_scenario).unwrap();
         fs::write(packed_scenario.join("TitleFI.txt"), "FI:Pack title\n").unwrap();
         let packs = LanguagePacks::discover(
@@ -2148,21 +2134,13 @@ mod tests {
             std::slice::from_ref(&install),
         );
 
-        let packed = discover_with_languages_and_packs(
-            &scenarios,
-            &langs(&["FI", "US"]),
-            &packs,
-        )
-        .expect("discover pack-localized scenario");
+        let packed = discover_with_languages_and_packs(&scenarios, &langs(&["FI", "US"]), &packs)
+            .expect("discover pack-localized scenario");
         assert_eq!(packed[0].title, "Pack title");
 
         fs::write(scenario.join("TitleFI.txt"), "FI:Local title\n").unwrap();
-        let local = discover_with_languages_and_packs(
-            &scenarios,
-            &langs(&["FI", "US"]),
-            &packs,
-        )
-        .expect("discover locally localized scenario");
+        let local = discover_with_languages_and_packs(&scenarios, &langs(&["FI", "US"]), &packs)
+            .expect("discover locally localized scenario");
         assert_eq!(local[0].title, "Local title");
     }
 
@@ -2185,18 +2163,18 @@ mod tests {
         fs::create_dir_all(&actual_scenario).unwrap();
         fs::create_dir_all(&origin_scenario).unwrap();
         fs::write(actual_scenario.join("TitleFI.txt"), "FI:Actual title\n").unwrap();
-        fs::write(origin_scenario.join("TitleFI.txt"), "FI:Wrong Origin title\n").unwrap();
+        fs::write(
+            origin_scenario.join("TitleFI.txt"),
+            "FI:Wrong Origin title\n",
+        )
+        .unwrap();
         let packs = LanguagePacks::discover(
             std::slice::from_ref(&language_container),
             std::slice::from_ref(&install),
         );
 
-        let entries = discover_with_languages_and_packs(
-            &scenarios,
-            &langs(&["FI", "US"]),
-            &packs,
-        )
-        .expect("discover scenario without applying its private Origin");
+        let entries = discover_with_languages_and_packs(&scenarios, &langs(&["FI", "US"]), &packs)
+            .expect("discover scenario without applying its private Origin");
         assert_eq!(entries[0].title, "Actual title");
     }
 
@@ -2261,8 +2239,7 @@ mod tests {
             br"{\rtf1 Later language must not win.\par}",
         )
         .unwrap();
-        let entries =
-            discover_with_languages(dir.path(), &langs(&["US", "DE"])).expect("discover");
+        let entries = discover_with_languages(dir.path(), &langs(&["US", "DE"])).expect("discover");
         assert_eq!(entries[0].description, None);
     }
 
@@ -2360,29 +2337,23 @@ mod tests {
 
     #[test]
     fn mission_access_uses_the_first_head_key_even_when_empty() {
-        let empty_first = parse_legacy_mission_access(
-            "[Head]\nMissionAccess=\nMissionAccess=MustNotWin\n",
-        );
+        let empty_first =
+            parse_legacy_mission_access("[Head]\nMissionAccess=\nMissionAccess=MustNotWin\n");
         assert_eq!(empty_first, None);
 
-        let first = parse_legacy_mission_access(
-            "[Head]\nMissionAccess=Secret\nMissionAccess=Ignored\n",
-        );
+        let first =
+            parse_legacy_mission_access("[Head]\nMissionAccess=Secret\nMissionAccess=Ignored\n");
         assert_eq!(first.as_deref(), Some("Secret"));
     }
 
     #[test]
     fn mission_access_uses_exact_names_and_preserves_rct_all_bytes() {
         assert_eq!(
-            parse_legacy_mission_access(
-                "MissionAccess=Root\n[head]\nMissionAccess=WrongSection\n",
-            ),
+            parse_legacy_mission_access("MissionAccess=Root\n[head]\nMissionAccess=WrongSection\n",),
             None
         );
         assert_eq!(
-            parse_legacy_mission_access(
-                "\u{feff}[Head]\nMissionAccess=BomMustNotOpenHead\n",
-            ),
+            parse_legacy_mission_access("\u{feff}[Head]\nMissionAccess=BomMustNotOpenHead\n",),
             None
         );
         assert_eq!(
@@ -2398,10 +2369,8 @@ mod tests {
             "a dedented key is not a child of an indented Head"
         );
         assert_eq!(
-            parse_legacy_mission_access(
-                "[Head]\n [Nested]\nMissionAccess=BackInHead\n",
-            )
-            .as_deref(),
+            parse_legacy_mission_access("[Head]\n [Nested]\nMissionAccess=BackInHead\n",)
+                .as_deref(),
             Some("BackInHead"),
             "dedenting from a nested section restores Head ownership"
         );
@@ -2693,10 +2662,8 @@ mod tests {
 
     fn gzip_group_image(image: &[u8]) -> Vec<u8> {
         let mut compressed = Vec::new();
-        let mut encoder = flate2::write::GzEncoder::new(
-            &mut compressed,
-            flate2::Compression::default(),
-        );
+        let mut encoder =
+            flate2::write::GzEncoder::new(&mut compressed, flate2::Compression::default());
         encoder.write_all(image).unwrap();
         encoder.finish().unwrap();
         compressed

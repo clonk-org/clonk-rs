@@ -77,7 +77,9 @@ impl ClientStartBarrier {
 
 #[cfg(test)]
 mod tests {
-    use clonk_network::{NetworkStatus, NETWORK_STATE_GO, NETWORK_STATE_LOBBY, NETWORK_STATE_PAUSE};
+    use clonk_network::{
+        NetworkStatus, NETWORK_STATE_GO, NETWORK_STATE_LOBBY, NETWORK_STATE_PAUSE,
+    };
 
     fn status(state: u8, control_mode: i32, target_tick: i32) -> NetworkStatus {
         NetworkStatus {

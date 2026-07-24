@@ -110,10 +110,7 @@ fn comma_nested_inside_a_call_does_not_trigger_legacy_return_parameters() {
 
 #[test]
 fn strict2_does_not_enter_the_legacy_multi_parameter_return_path() {
-    assert_function_quarantined(
-        "#strict 2\nfunc Probe() { return(0, 42); }",
-        "Probe",
-    );
+    assert_function_quarantined("#strict 2\nfunc Probe() { return(0, 42); }", "Probe");
 }
 
 #[test]

@@ -144,12 +144,7 @@ impl MaterialRenderInfo {
         self
     }
 
-    pub fn with_pxs_graphics(
-        mut self,
-        texture: Option<String>,
-        rect: [i32; 6],
-        size: i32,
-    ) -> Self {
+    pub fn with_pxs_graphics(mut self, texture: Option<String>, rect: [i32; 6], size: i32) -> Self {
         self.pxs_gfx = texture;
         self.pxs_gfx_rect = rect;
         self.pxs_gfx_size = size;
@@ -199,19 +194,14 @@ pub(crate) fn apply_material_pattern(
     } else {
         [data[source], data[source + 1], data[source + 2]]
     };
-    pixel.red = lighten_material_channel(
-        ((u16::from(pixel.red) * u16::from(modifiers[0])) >> 8) as u8,
-    );
-    pixel.green = lighten_material_channel(
-        ((u16::from(pixel.green) * u16::from(modifiers[1])) >> 8) as u8,
-    );
-    pixel.blue = lighten_material_channel(
-        ((u16::from(pixel.blue) * u16::from(modifiers[2])) >> 8) as u8,
-    );
+    pixel.red =
+        lighten_material_channel(((u16::from(pixel.red) * u16::from(modifiers[0])) >> 8) as u8);
+    pixel.green =
+        lighten_material_channel(((u16::from(pixel.green) * u16::from(modifiers[1])) >> 8) as u8);
+    pixel.blue =
+        lighten_material_channel(((u16::from(pixel.blue) * u16::from(modifiers[2])) >> 8) as u8);
     let pattern_transparency = 255u8.saturating_sub(data[source + 3]);
-    pixel.transparency = pixel
-        .transparency
-        .saturating_add(pattern_transparency);
+    pixel.transparency = pixel.transparency.saturating_add(pattern_transparency);
 }
 
 #[derive(Clone, Copy)]
@@ -257,8 +247,8 @@ fn apply_indexed_material_pattern(
     }
     let sample_x = if zoom == 0 { x } else { x / zoom };
     let sample_y = if zoom == 0 { y } else { y / zoom };
-    let source = (sample_y as u32 % height) as usize * width as usize
-        + (sample_x as u32 % width) as usize;
+    let source =
+        (sample_y as u32 % height) as usize * width as usize + (sample_x as u32 % width) as usize;
     let Some(&shift) = indices.get(source) else {
         return;
     };

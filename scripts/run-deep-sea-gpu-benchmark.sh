@@ -18,7 +18,8 @@ if [[ ! -x "$BINARY" ]]; then
   exit 66
 fi
 
-FIXTURE=$(mktemp -d /private/tmp/clonk-rust-deep-sea-gpu-benchmark.XXXXXX)
+SCRATCH_ROOT=${TMPDIR:-/tmp}
+FIXTURE=$(mktemp -d "$SCRATCH_ROOT/clonk-rust-deep-sea-gpu-benchmark.XXXXXX")
 cleanup() {
   find "$FIXTURE" -depth -delete
 }
@@ -27,14 +28,16 @@ trap cleanup EXIT HUP INT TERM
 # Hazard inherits three process-global GUI sheets whose duplicate binding is
 # deliberately rejected by the Rust parity guard. They are unrelated to the
 # running viewport; copy the group without them and remove Origin so lookup
-# stays inside this self-contained benchmark fixture.
-rsync -a \
-  --exclude='Graphics.c4g/GUICaption.png' \
-  --exclude='Graphics.c4g/GUIScroll.png' \
-  --exclude='Graphics.c4g/GUIProgress.png' \
-  "$REPO_ROOT/content/Hazard.c4f/" "$FIXTURE/Hazard.c4f/"
-perl -ni -e 'print unless /^Origin=/' \
-  "$FIXTURE/Hazard.c4f/CTF_DeepSea.c4s/Scenario.txt"
+# stays inside this self-contained benchmark fixture. Use tools available by
+# default on both macOS and Linux.
+mkdir -p "$FIXTURE/Hazard.c4f"
+cp -R "$REPO_ROOT/content/Hazard.c4f/." "$FIXTURE/Hazard.c4f/"
+for duplicate_sheet in GUICaption.png GUIScroll.png GUIProgress.png; do
+  rm -f "$FIXTURE/Hazard.c4f/Graphics.c4g/$duplicate_sheet"
+done
+scenario_text="$FIXTURE/Hazard.c4f/CTF_DeepSea.c4s/Scenario.txt"
+awk '!/^Origin=/' "$scenario_text" > "$scenario_text.tmp"
+mv "$scenario_text.tmp" "$scenario_text"
 cp "$SCRIPT_DIR/deep-sea-gpu-benchmark.ini" "$FIXTURE/config.ini"
 
 LC_PIN_SEED=1 \

@@ -150,9 +150,9 @@ fn local_finish_derive_broadcast_matches_the_cpp_codec_fixture() {
         panic!("local FinishDerive did not emit its derive broadcast");
     };
     let expected = [
-        0x32, 0x02, 0xff, 0xff, 0xff, 0xff, 0x04, 0x03, 0x02, 0x01, 0x00, 0x44, 0x33, 0x22,
-        0x11, 0x00, b'S', b'c', b'e', b'n', b'a', b'r', b'i', b'o', b'.', b'c', b'4', b's',
-        0x00, b'A', b'l', b'i', b'c', b'e', 0x00,
+        0x32, 0x02, 0xff, 0xff, 0xff, 0xff, 0x04, 0x03, 0x02, 0x01, 0x00, 0x44, 0x33, 0x22, 0x11,
+        0x00, b'S', b'c', b'e', b'n', b'a', b'r', b'i', b'o', b'.', b'c', b'4', b's', 0x00, b'A',
+        b'l', b'i', b'c', b'e', 0x00,
     ];
 
     assert_eq!(encode_resource_packet(packet).unwrap(), expected);

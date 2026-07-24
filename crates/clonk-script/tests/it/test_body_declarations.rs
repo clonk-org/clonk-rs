@@ -176,10 +176,9 @@ global Healthy:
         Value::Int(9)
     );
 
-    let new_style = Script::compile_global(
-        "#strict\nglobal func Allowed() { local declared; return(1); }",
-    )
-    .expect("new-style global function compiles");
+    let new_style =
+        Script::compile_global("#strict\nglobal func Allowed() { local declared; return(1); }")
+            .expect("new-style global function compiles");
     assert!(
         new_style.parse_diagnostics().is_empty(),
         "the ownerless-local restriction is old-style only: {:?}",
@@ -194,10 +193,9 @@ global Healthy:
         vec![(VarDeclKind::Local, "declared")]
     );
 
-    let malformed = Script::compile_global(
-        "#strict\nglobal Invalid:\n local value = 5;\n return(9);",
-    )
-    .expect("the malformed declaration is quarantined");
+    let malformed =
+        Script::compile_global("#strict\nglobal Invalid:\n local value = 5;\n return(9);")
+            .expect("the malformed declaration is quarantined");
     assert!(
         malformed.parse_diagnostics().iter().any(|error| {
             error

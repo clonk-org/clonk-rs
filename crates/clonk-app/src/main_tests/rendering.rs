@@ -2171,7 +2171,7 @@
                 .gpu_recorder
                 .take()
                 .expect("captured fade command")
-                .into_scene([2, 2], Color::transparent(), &startup_gamma());
+                .into_scene([2, 2], Color::transparent(), startup_gamma());
             let clonk_graphics::GpuCommand::Solid { vertices, .. } = &scene.commands[0] else {
                 panic!("fill did not produce a retained solid command");
             };

@@ -454,17 +454,14 @@ pub fn team_lobby_option_rows(
             }
         })
         .collect();
-    let color_choices = [
-        (1, labels.enabled.clone()),
-        (0, labels.disabled.clone()),
-    ]
-    .into_iter()
-    .map(|(id, label)| LobbyOptionChoice {
-        id,
-        tooltip: labels.select_tooltip(&label),
-        label,
-    })
-    .collect();
+    let color_choices = [(1, labels.enabled.clone()), (0, labels.disabled.clone())]
+        .into_iter()
+        .map(|(id, label)| LobbyOptionChoice {
+            id,
+            tooltip: labels.select_tooltip(&label),
+            label,
+        })
+        .collect();
     let mut rows = vec![
         LobbyOptionRow {
             kind: LobbyOptionKind::TeamDistribution,
@@ -2060,9 +2057,9 @@ impl GameLobby {
                 .iter()
                 .any(|row| row.kind == *kind && row.editable)
         });
-        self.selected_option = self.selected_option.filter(|kind| {
-            self.option_rows.iter().any(|row| row.kind == *kind)
-        });
+        self.selected_option = self
+            .selected_option
+            .filter(|kind| self.option_rows.iter().any(|row| row.kind == *kind));
         if let LobbyControl::Option(kind) = self.focus {
             if !self.option_rows.iter().any(|row| row.kind == kind) {
                 self.focus = LobbyControl::OptionsList;
@@ -2486,8 +2483,7 @@ impl GameLobby {
             layout.roster_client.h = (layout.roster_client.h - 2 * LIST_BOX_MARGIN).max(0);
             layout.roster_scrollbar.x -= LIST_BOX_MARGIN;
             layout.roster_scrollbar.y += LIST_BOX_MARGIN;
-            layout.roster_scrollbar.h =
-                (layout.roster_scrollbar.h - 2 * LIST_BOX_MARGIN).max(0);
+            layout.roster_scrollbar.h = (layout.roster_scrollbar.h - 2 * LIST_BOX_MARGIN).max(0);
         } else if self.active_sheet == LobbySheet::Scenario {
             let bounds = layout.roster;
             layout.roster_client = IntRect {
@@ -2668,14 +2664,12 @@ impl GameLobby {
             .saturating_add(4);
         let row_count = i32::try_from(self.option_rows.len()).unwrap_or(i32::MAX);
         let row_pitch = row_height.saturating_add(DEFAULT_ROW_SPACING);
-        let content_height = row_count
-            .saturating_mul(row_height)
-            .saturating_add(
-                row_count
-                    .saturating_sub(1)
-                    .max(0)
-                    .saturating_mul(DEFAULT_ROW_SPACING),
-            );
+        let content_height = row_count.saturating_mul(row_height).saturating_add(
+            row_count
+                .saturating_sub(1)
+                .max(0)
+                .saturating_mul(DEFAULT_ROW_SPACING),
+        );
         let max_scroll = (content_height - layout.roster_client.h).max(0);
         self.option_scroll = self.option_scroll.clamp(0, max_scroll);
         if max_scroll != self.option_max_scroll {
@@ -2854,10 +2848,9 @@ impl GameLobby {
     ) -> Vec<WrappedLobbyScenarioLine> {
         let text = self.scenario_text.text();
         let title_only = matches!(self.scenario_text, LobbyScenarioText::Title(_));
-        let first_description_line_is_title = matches!(
-            self.scenario_text,
-            LobbyScenarioText::Description(_)
-        ) && (text.contains('\r') || text.contains('\n'));
+        let first_description_line_is_title =
+            matches!(self.scenario_text, LobbyScenarioText::Description(_))
+                && (text.contains('\r') || text.contains('\n'));
         let mut wrapped = Vec::new();
         for (paragraph_index, paragraph) in text
             .split(['\r', '\n'])
@@ -3264,13 +3257,13 @@ impl GameLobby {
                     return actions;
                 }
             }
-            HitTarget::RosterScrollInert => {
-                if self.active_sheet.is_roster() && self.focus != LobbyControl::Roster {
-                    self.change_focus(LobbyControl::Roster, false);
-                    let mut actions = vec![LobbyAction::FocusChanged(LobbyControl::Roster)];
-                    self.append_game_option_focus_clear(previous_focus, &mut actions);
-                    return actions;
-                }
+            HitTarget::RosterScrollInert
+                if self.active_sheet.is_roster() && self.focus != LobbyControl::Roster =>
+            {
+                self.change_focus(LobbyControl::Roster, false);
+                let mut actions = vec![LobbyAction::FocusChanged(LobbyControl::Roster)];
+                self.append_game_option_focus_clear(previous_focus, &mut actions);
+                return actions;
             }
             _ => {}
         }
@@ -4263,20 +4256,16 @@ impl GameLobby {
         if by_user && selected.is_some() {
             self.sounds.push(LobbySound::Command);
         }
-        let Some(index) = selected.and_then(|kind| {
-            self.option_rows
-                .iter()
-                .position(|row| row.kind == kind)
-        }) else {
+        let Some(index) =
+            selected.and_then(|kind| self.option_rows.iter().position(|row| row.kind == kind))
+        else {
             return;
         };
         if let Some(row) = roster.rows.iter().find(|row| row.index == index) {
             let content_top = row.rect.y - layout.roster_client.y + self.option_scroll;
             if content_top < self.option_scroll {
                 self.option_scroll = content_top;
-            } else if content_top + row.rect.h
-                > self.option_scroll + layout.roster_client.h
-            {
+            } else if content_top + row.rect.h > self.option_scroll + layout.roster_client.h {
                 self.option_scroll = content_top + row.rect.h - layout.roster_client.h;
             }
             self.option_scroll = self.option_scroll.clamp(0, roster.max_scroll);
@@ -4297,11 +4286,9 @@ impl GameLobby {
         if self.active_sheet != LobbySheet::Options || self.option_rows.is_empty() {
             return Vec::new();
         }
-        let current = self.selected_option.and_then(|kind| {
-            self.option_rows
-                .iter()
-                .position(|row| row.kind == kind)
-        });
+        let current = self
+            .selected_option
+            .and_then(|kind| self.option_rows.iter().position(|row| row.kind == kind));
         let next = match current {
             Some(current) if direction < 0 => current.saturating_sub(1),
             Some(current) => (current + 1).min(self.option_rows.len() - 1),
@@ -4391,11 +4378,11 @@ impl GameLobby {
             current.checked_sub(1)
         };
         let Some(mut target) = adjacent else {
-            return self
-                .selected_row
-                .is_none()
-                .then(|| self.select_row(Some(current), true, layout, roster))
-                .unwrap_or_default();
+            return if self.selected_row.is_none() {
+                self.select_row(Some(current), true, layout, roster)
+            } else {
+                Vec::new()
+            };
         };
 
         let mut page_scroll = None;
@@ -4606,8 +4593,7 @@ impl GameLobby {
             }
             LobbyControl::Exit => vec![LobbyAction::ExitRequested],
             LobbyControl::Preload
-                if self.active_sheet == LobbySheet::Resources
-                    && self.preload_button_visible() =>
+                if self.active_sheet == LobbySheet::Resources && self.preload_button_visible() =>
             {
                 vec![LobbyAction::PreloadRequested]
             }
@@ -4898,7 +4884,10 @@ impl GameLobby {
         if contains(layout.roster_scrollbar, point) {
             return HitTarget::RosterScrollInert;
         }
-        if layout.preload_button.is_some_and(|rect| contains(rect, point)) {
+        if layout
+            .preload_button
+            .is_some_and(|rect| contains(rect, point))
+        {
             return HitTarget::Preload;
         }
         if contains(layout.ready_square, point) {
@@ -6926,7 +6915,10 @@ mod tests {
         assert_eq!(commands[0].x, 7);
         assert_eq!(commands[0].y, 6);
         assert!(!commands[0].markup);
-        assert_eq!(commands[0].clip, Some(clonk_graphics::Rect::new(5, 4, 7, 10)));
+        assert_eq!(
+            commands[0].clip,
+            Some(clonk_graphics::Rect::new(5, 4, 7, 10))
+        );
     }
 
     #[test]
@@ -7341,10 +7333,7 @@ mod tests {
         let hidden = lobby.layout(1280, 720, &fonts);
         let hidden_resources = lobby.roster_layout(&hidden, fonts.text.line_height);
         assert_eq!(full.roster.h - hidden.roster.h, BUTTON_HEIGHT);
-        assert_eq!(
-            full.roster_client.h - hidden.roster_client.h,
-            BUTTON_HEIGHT
-        );
+        assert_eq!(full.roster_client.h - hidden.roster_client.h, BUTTON_HEIGHT);
         assert_eq!(
             full.roster_scrollbar.h - hidden.roster_scrollbar.h,
             BUTTON_HEIGHT
@@ -7353,7 +7342,10 @@ mod tests {
             hidden_resources.max_scroll - full_resources.max_scroll,
             BUTTON_HEIGHT
         );
-        assert_eq!(hidden_resources.content_height, full_resources.content_height);
+        assert_eq!(
+            hidden_resources.content_height,
+            full_resources.content_height
+        );
         assert_eq!(hidden.preload_button, None);
         assert!(!lobby.focus_order().contains(&LobbyControl::Preload));
 
@@ -7379,13 +7371,7 @@ mod tests {
         );
         lobby.focus = LobbyControl::Preload;
         assert!(lobby
-            .key_down(
-                KeyCode::Enter,
-                false,
-                &visible,
-                &roster,
-                Instant::now()
-            )
+            .key_down(KeyCode::Enter, false, &visible, &roster, Instant::now())
             .is_empty());
         assert_eq!(
             lobby.key_up(KeyCode::Enter),
@@ -7395,21 +7381,12 @@ mod tests {
         // A failed app-side request restores this same presentation.
         lobby.set_preload_button_state(true, true);
         assert!(lobby.preload_button_visible());
-        assert_eq!(
-            lobby.layout(1280, 720, &fonts).roster.h,
-            hidden.roster.h
-        );
+        assert_eq!(lobby.layout(1280, 720, &fonts).roster.h, hidden.roster.h);
 
         // Losing caller eligibility cancels every in-flight interaction.
         lobby.focus = LobbyControl::Preload;
         assert!(lobby
-            .key_down(
-                KeyCode::Space,
-                false,
-                &visible,
-                &roster,
-                Instant::now()
-            )
+            .key_down(KeyCode::Space, false, &visible, &roster, Instant::now())
             .is_empty());
         assert!(lobby.pointer_down(point, &visible, &roster).is_empty());
         assert!(lobby.key_pressed.is_some());
@@ -7427,13 +7404,7 @@ mod tests {
         lobby.set_preload_button_state(true, true);
         lobby.focus = LobbyControl::Preload;
         assert!(lobby
-            .key_down(
-                KeyCode::Enter,
-                false,
-                &visible,
-                &roster,
-                Instant::now()
-            )
+            .key_down(KeyCode::Enter, false, &visible, &roster, Instant::now())
             .is_empty());
         assert!(lobby.pointer_down(point, &visible, &roster).is_empty());
         assert!(lobby.set_resources_loaded(false).is_empty());
@@ -7462,8 +7433,10 @@ mod tests {
 
     #[test]
     fn l085_core_option_rows_follow_host_client_gates_and_choices() {
-        let mut labels = LobbyOptionLabels::default();
-        labels.select_template = "Choose %s".into();
+        let labels = LobbyOptionLabels {
+            select_template: "Choose %s".into(),
+            ..LobbyOptionLabels::default()
+        };
         let host = core_lobby_option_rows(LobbyRole::Host, &labels, 1, 7, true);
         assert_eq!(
             host.iter().map(|row| row.kind).collect::<Vec<_>>(),
@@ -7753,13 +7726,8 @@ mod tests {
 
         lobby.selected_option = Some(LobbyOptionKind::ControlRate);
         lobby.focus = LobbyControl::OptionsList;
-        assert!(lobby
-            .move_option_selection(1, &layout, &options)
-            .is_empty());
-        assert_eq!(
-            lobby.selected_option,
-            Some(LobbyOptionKind::RuntimeJoin)
-        );
+        assert!(lobby.move_option_selection(1, &layout, &options).is_empty());
+        assert_eq!(lobby.selected_option, Some(LobbyOptionKind::RuntimeJoin));
         assert_eq!(lobby.option_scroll(), options.max_scroll);
         lobby.set_option_scroll(0);
         let options = lobby.roster_layout(&layout, line_height);
@@ -7832,9 +7800,7 @@ mod tests {
         assert_eq!(
             lobby.pointer_down(rate_point, &layout, &options),
             [
-                LobbyAction::FocusChanged(LobbyControl::Option(
-                    LobbyOptionKind::ControlRate
-                )),
+                LobbyAction::FocusChanged(LobbyControl::Option(LobbyOptionKind::ControlRate)),
                 expected.clone(),
             ]
         );
@@ -7856,11 +7822,11 @@ mod tests {
         lobby.focus = LobbyControl::Option(LobbyOptionKind::ControlRate);
         assert_eq!(
             lobby.key_down(KeyCode::Down, false, &layout, &options, Instant::now()),
-            [expected.clone()]
+            std::slice::from_ref(&expected)
         );
         assert_eq!(
             lobby.gamepad_low_down(Instant::now(), &layout, &options),
-            [expected.clone()]
+            std::slice::from_ref(&expected)
         );
         assert_eq!(lobby.gamepad_direction(0, 1, &layout, &options), [expected]);
 
@@ -8846,8 +8812,7 @@ mod tests {
     fn outer_button_shared_down_preserves_drag_and_orders_releases_like_cpp() {
         let setup = || {
             let mut lobby = lobby(LobbyRole::Host, vec![]);
-            let layout =
-                game_lobby_layout(1280, 720, 34, 22, LobbyRole::Host, false, false);
+            let layout = game_lobby_layout(1280, 720, 34, 22, LobbyRole::Host, false, false);
             let roster = lobby.roster_layout(&layout, 22);
             let exit = GuiPoint::new(
                 (layout.exit_button.x + 1) as f32,
@@ -8906,8 +8871,7 @@ mod tests {
     fn outer_button_mouse_up_outside_preserves_key_and_key_owned_reentry_is_silent() {
         let setup_outside_key = || {
             let mut lobby = lobby(LobbyRole::Host, vec![]);
-            let layout =
-                game_lobby_layout(1280, 720, 34, 22, LobbyRole::Host, false, false);
+            let layout = game_lobby_layout(1280, 720, 34, 22, LobbyRole::Host, false, false);
             let roster = lobby.roster_layout(&layout, 22);
             let exit = GuiPoint::new(
                 (layout.exit_button.x + 1) as f32,

@@ -330,15 +330,11 @@ pub(crate) const NATIVE_FUNCTION_PARAMETERS: &[NativeFunctionParameterEntry] = &
     ("GetOCF", &[C4Object]),
     (
         "GetObjHeight",
-        &[
-            C4Object, Any, Any, Any, Any, Any, Any, Any, Any, Any,
-        ],
+        &[C4Object, Any, Any, Any, Any, Any, Any, Any, Any, Any],
     ),
     (
         "GetObjWidth",
-        &[
-            C4Object, Any, Any, Any, Any, Any, Any, Any, Any, Any,
-        ],
+        &[C4Object, Any, Any, Any, Any, Any, Any, Any, Any, Any],
     ),
     ("GetObjectBlitMode", &[C4Object, Int]),
     ("GetObjectInfoCoreVal", &[String, String, C4Object, Int]),
@@ -706,7 +702,10 @@ mod tests {
                 _ => {}
             }
         }
-        assert!(depth == 0, "production registration function end brace exists");
+        assert!(
+            depth == 0,
+            "production registration function end brace exists"
+        );
         let registrations = &source[body_start..body_end];
 
         registrations

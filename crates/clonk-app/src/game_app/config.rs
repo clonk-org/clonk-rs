@@ -816,7 +816,7 @@ impl GameApp {
         match option {
             LobbyOptionKind::ControlMode => {
                 if self.engine.is_control_host()
-                    && matches!(value, 0 | 1 | 2)
+                    && matches!(value, 0..=2)
                     && (!self.network_is_league || value != 2)
                 {
                     self.change_running_network_control_mode(value);

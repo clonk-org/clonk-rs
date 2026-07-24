@@ -8,12 +8,12 @@ use crate::support::real_scenario::{
     join_local_player, join_local_player_on_team, load_installed_scenario, load_tutorial,
     prepare_installed_scenario, PreparedInstalledScenario,
 };
+use crate::support::PreparedScenarioSubcase;
 use clonk_engine::{
     math, ActionState, AudioCommand, Definition, Direction, EffectVarValue, EngineError,
     JoinPlayerConfig, Landscape, ObjectId, ObjectUpdate, PlayerStatus, SpawnConfig, TeamInfo,
-    Vector2, COM_DIG, COM_DOWN,
-    COM_MENU_SELECT, COM_RELEASE_OFFSET, COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON,
-    OWNER_NONE,
+    Vector2, COM_DIG, COM_DOWN, COM_MENU_SELECT, COM_RELEASE_OFFSET, COM_RIGHT, COM_SPECIAL,
+    COM_THROW, COM_UP, FULL_CON, OWNER_NONE,
 };
 use clonk_script::Value;
 
@@ -350,11 +350,7 @@ public func Trigger(object target)
     let probe_index = engine.find_object_index(probe).expect("probe index");
     assert_eq!(
         engine
-            .call_object_function(
-                probe_index,
-                "Trigger",
-                vec![Value::Object(clonk.as_u64())],
-            )
+            .call_object_function(probe_index, "Trigger", vec![Value::Object(clonk.as_u64())],)
             .expect("the shipped Sky Race CLNK death callback completes"),
         Value::Int(1)
     );
@@ -424,9 +420,7 @@ public func Trigger(int owner)
         .objects
         .iter()
         .find(|object| {
-            object.id != original
-                && object.definition_id == "CLNK"
-                && object.status.is_active()
+            object.id != original && object.definition_id == "CLNK" && object.status.is_active()
         })
         .map(|object| object.id)
         .expect("RelaunchPlayer creates a replacement CLNK");
@@ -451,9 +445,7 @@ public func Trigger(int owner)
         .snapshot()
         .objects
         .iter()
-        .filter(|object| {
-            object.definition_id == "LOAM" && object.container == Some(replacement)
-        })
+        .filter(|object| object.definition_id == "LOAM" && object.container == Some(replacement))
         .count();
     assert_eq!(
         replacement_loam, 1,
@@ -558,9 +550,7 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
         })
         .expect("RACE::Initialize creates its progress column");
     let winner_row = (1..scoreboard.row_count())
-        .find(|row| {
-            scoreboard.cell(*row, 0).map(|cell| cell.value()) == Some(winner_info_id)
-        })
+        .find(|row| scoreboard.cell(*row, 0).map(|cell| cell.value()) == Some(winner_info_id))
         .expect("RACE::InitializePlayer creates the winner row by player-info ID");
     assert_eq!(
         scoreboard
@@ -588,7 +578,9 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
         if engine.snapshot().game_over {
             break;
         }
-        engine.tick_without_snapshot().expect("advance the normal GOAL controller");
+        engine
+            .tick_without_snapshot()
+            .expect("advance the normal GOAL controller");
     }
     let completed = engine.snapshot();
     assert!(
@@ -604,10 +596,7 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
         "the surviving finisher receives the C++ winner flag"
     );
     assert!(
-        !completed
-            .players
-            .iter()
-            .any(|player| player.id == loser),
+        !completed.players.iter().any(|player| player.id == loser),
         "C4PlayerList retires the eliminated rival after 60 frames"
     );
     assert!(
@@ -746,7 +735,9 @@ fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
             .name,
         "Magic",
         "the real menu command `{spell_command}` starts DoMagic; menu now {:?}, locals {:?}",
-        engine.cursor_object_menu(owner).map(|(_, menu)| menu.clone()),
+        engine
+            .cursor_object_menu(owner)
+            .map(|(_, menu)| menu.clone()),
         engine
             .object_snapshot(mage)
             .expect("mage snapshot for failed cast diagnostics")
@@ -758,7 +749,9 @@ fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
     // Initialize immediately expands into four persistent FBRS segments and
     // removes both temporary bridge/spell objects.
     for _ in 0..8 {
-        engine.tick_without_snapshot().expect("the real magic action advances");
+        engine
+            .tick_without_snapshot()
+            .expect("the real magic action advances");
     }
     let snapshot = engine.snapshot();
     let magic_objects = snapshot
@@ -895,14 +888,14 @@ fn alchemy_real_scenario_subcases_batch_4() {
     ]);
 }
 
-fn run_alchemy_batch(subcases: &[(&'static str, fn(&PreparedInstalledScenario))]) {
+fn run_alchemy_batch(subcases: &[PreparedScenarioSubcase]) {
     run_prepared_scenario_batch("Alchemy", "Fantasy.c4f/Alchemy.c4s", subcases);
 }
 
 fn run_prepared_scenario_batch(
     scenario_name: &str,
     relative_path: &str,
-    subcases: &[(&'static str, fn(&PreparedInstalledScenario))],
+    subcases: &[PreparedScenarioSubcase],
 ) {
     let prepared = prepare_installed_scenario(relative_path, 0);
     let mut failures = Vec::new();
@@ -954,8 +947,7 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
         .objects
         .iter()
         .find(|object| {
-            object.definition_id == "ALC_"
-                && object.components.get("IROC").copied() == Some(3)
+            object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
         })
         .map(|object| object.id)
         .expect("Alchemy InitializePlayer creates its seeded ingredient bag");
@@ -1058,7 +1050,9 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
         "Magic"
     );
     for _ in 0..8 {
-        engine.tick_without_snapshot().expect("the shipped Magic action advances");
+        engine
+            .tick_without_snapshot()
+            .expect("the shipped Magic action advances");
     }
     assert_eq!(
         engine.physics().gravity,
@@ -1096,7 +1090,9 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells(
         .player_in_com(owner, COM_THROW, 0)
         .expect("Throw starts the selected MGDW cast");
     for _ in 0..8 {
-        engine.tick_without_snapshot().expect("the shipped Magic action advances");
+        engine
+            .tick_without_snapshot()
+            .expect("the shipped Magic action advances");
     }
     assert_eq!(
         engine.physics().gravity,
@@ -1306,7 +1302,9 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
     // same C++ base lifecycle rather than manufacturing a shortcut.
     let home = (0..20)
         .find_map(|_| {
-            engine.tick_without_snapshot().expect("Alchemy base lifecycle advances");
+            engine
+                .tick_without_snapshot()
+                .expect("Alchemy base lifecycle advances");
             engine
                 .snapshot()
                 .objects
@@ -1322,7 +1320,9 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         {
             break;
         }
-        engine.tick_without_snapshot().expect("Alchemy ready-crew Exit advances");
+        engine
+            .tick_without_snapshot()
+            .expect("Alchemy ready-crew Exit advances");
     }
     assert!(
         engine
@@ -1409,7 +1409,9 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         .player_in_com(owner, COM_THROW, 0)
         .expect("Throw starts MWP2's Magic action");
     for _ in 0..8 {
-        engine.tick_without_snapshot().expect("MWP2's Magic action advances");
+        engine
+            .tick_without_snapshot()
+            .expect("MWP2's Magic action advances");
     }
 
     let bag_after_cast = engine
@@ -1487,7 +1489,9 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         .expect("place the mage inside the source warp aperture");
 
     let warp_data_observed = (0..30).any(|_| {
-        engine.tick_without_snapshot().expect("the real WARP pair advances");
+        engine
+            .tick_without_snapshot()
+            .expect("the real WARP pair advances");
         let mage = engine
             .object_snapshot(mage)
             .expect("the mage remains live while the source warp pulls it");
@@ -1544,7 +1548,9 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
     );
 
     let transferred = (0..80).any(|_| {
-        engine.tick_without_snapshot().expect("the restored real WARP pair advances");
+        engine
+            .tick_without_snapshot()
+            .expect("the restored real WARP pair advances");
         engine
             .object_snapshot(mage)
             .is_some_and(|object| object.container == Some(home))
@@ -1648,10 +1654,8 @@ fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death(
         .expect("MCLK keeps its attached alchemy bag");
     let extra_ingredients = engine
         .spawn_object(
-            SpawnConfig::new("ALC_").with_ordered_components(vec![
-                ("INEC".to_owned(), 1),
-                ("IASH".to_owned(), 1),
-            ]),
+            SpawnConfig::new("ALC_")
+                .with_ordered_components(vec![("INEC".to_owned(), 1), ("IASH".to_owned(), 1)]),
         )
         .expect("a harvested ingredient bag spawns");
     let attached_bag_index = engine
@@ -1685,7 +1689,9 @@ fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death(
         .player_in_com(owner, COM_THROW, 0)
         .expect("Throw starts XCRS's Magic action");
     for _ in 0..8 {
-        engine.tick_without_snapshot().expect("XCRS's Magic action advances");
+        engine
+            .tick_without_snapshot()
+            .expect("XCRS's Magic action advances");
     }
     let protected = engine
         .object_snapshot(mage)
@@ -1750,9 +1756,7 @@ fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew(
         .objects
         .iter()
         .find(|object| {
-            object.definition_id == "CLNK"
-                && object.owner == owner
-                && object.status.is_active()
+            object.definition_id == "CLNK" && object.owner == owner && object.status.is_active()
         })
         .map(|object| object.id)
         .expect("Alchemy also joins with a regular CLNK");
@@ -1838,7 +1842,9 @@ fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew(
         .player_in_com(owner, COM_THROW, 0)
         .expect("Throw starts GGHG's Magic action");
     for _ in 0..50 {
-        engine.tick_without_snapshot().expect("GGHG's healing effect advances");
+        engine
+            .tick_without_snapshot()
+            .expect("GGHG's healing effect advances");
     }
 
     let caster = engine
@@ -1889,8 +1895,7 @@ fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu(
         .objects
         .iter()
         .find(|object| {
-            object.definition_id == "ALC_"
-                && object.components.get("IGOL").copied() == Some(3)
+            object.definition_id == "ALC_" && object.components.get("IGOL").copied() == Some(3)
         })
         .map(|object| object.id)
         .expect("Alchemy creates its seeded ingredient bag");
@@ -1946,7 +1951,9 @@ fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu(
         .player_in_com(owner, COM_THROW, 0)
         .expect("Throw starts the selected MART cast");
     for _ in 0..8 {
-        engine.tick_without_snapshot().expect("MART's Magic action advances");
+        engine
+            .tick_without_snapshot()
+            .expect("MART's Magic action advances");
     }
 
     let (_, menu) = engine
@@ -2003,8 +2010,7 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw(
         .objects
         .iter()
         .find(|object| {
-            object.definition_id == "ALC_"
-                && object.components.get("IGOL").copied() == Some(3)
+            object.definition_id == "ALC_" && object.components.get("IGOL").copied() == Some(3)
         })
         .map(|object| object.id)
         .expect("Alchemy creates its seeded ingredient bag");
@@ -2059,7 +2065,9 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw(
         .player_in_com(owner, COM_THROW, 0)
         .expect("Throw starts the selected MART cast");
     for _ in 0..8 {
-        engine.tick_without_snapshot().expect("MART's Magic action advances");
+        engine
+            .tick_without_snapshot()
+            .expect("MART's Magic action advances");
     }
 
     // C4Menu::Enter executes AddMenuItem's command on MART's command object
@@ -2141,13 +2149,17 @@ fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw(
     // normal CLNK Throw control and simulation callback, rather than calling
     // Mode0/CastSpell directly.
     for _ in 0..20 {
-        engine.tick_without_snapshot().expect("the mage leaves its Magic action");
+        engine
+            .tick_without_snapshot()
+            .expect("the mage leaves its Magic action");
     }
     engine
         .player_in_com(owner, COM_THROW, 0)
         .expect("MCLK throws the configured ROCK");
     for _ in 0..240 {
-        engine.tick_without_snapshot().expect("the artefact throw advances");
+        engine
+            .tick_without_snapshot()
+            .expect("the artefact throw advances");
         if engine.snapshot().objects.iter().any(|object| {
             object.definition_id == "LGCN"
                 && object
@@ -2177,8 +2189,7 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
         .objects
         .iter()
         .find(|object| {
-            object.definition_id == "ALC_"
-                && object.components.get("IROC").copied() == Some(3)
+            object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
         })
         .map(|object| object.id)
         .expect("InitializePlayer creates the filled loose bag by AHUT");
@@ -2221,7 +2232,9 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
         {
             break;
         }
-        engine.tick_without_snapshot().expect("execute the normal exit command");
+        engine
+            .tick_without_snapshot()
+            .expect("execute the normal exit command");
     }
     assert!(
         engine
@@ -2244,7 +2257,9 @@ fn alchemy_seeded_bag_collects_and_activates_through_player_controls(
         )
         .expect("put MCLK's collection rectangle over the loose bag");
     for _ in 0..3 {
-        engine.tick_without_snapshot().expect("run through the Tick3 collection pass");
+        engine
+            .tick_without_snapshot()
+            .expect("run through the Tick3 collection pass");
     }
     assert_eq!(
         engine
@@ -2378,8 +2393,7 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control(
         .objects
         .iter()
         .find(|object| {
-            object.definition_id == "ALC_"
-                && object.components.get("IROC").copied() == Some(3)
+            object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
         })
         .map(|object| object.id)
         .expect("Alchemy creates its seeded ingredient bag");
@@ -2496,7 +2510,9 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control(
     );
 
     for _ in 0..8 {
-        engine.tick_without_snapshot().expect("the shipped Magic action advances");
+        engine
+            .tick_without_snapshot()
+            .expect("the shipped Magic action advances");
     }
     assert_eq!(
         engine.physics().gravity,
@@ -2582,7 +2598,9 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object(
 
     let aimer = (0..12)
         .find_map(|_| {
-            engine.tick_without_snapshot().expect("MLGT's Magic action advances");
+            engine
+                .tick_without_snapshot()
+                .expect("MLGT's Magic action advances");
             engine
                 .snapshot()
                 .objects
@@ -2616,7 +2634,9 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object(
 
     let vertex_count = lightning.vertices.len();
     for _ in 0..3 {
-        engine.tick_without_snapshot().expect("LGTS advances without a script error");
+        engine
+            .tick_without_snapshot()
+            .expect("LGTS advances without a script error");
     }
     let advanced = engine
         .object_snapshot(lightning.id)
@@ -2683,8 +2703,7 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls(
         .expect("MCLK keeps its attached alchemy bag");
     let extra_sphere = engine
         .spawn_object(
-            SpawnConfig::new("ALC_")
-                .with_ordered_components(vec![("ISPH".to_owned(), 1)]),
+            SpawnConfig::new("ALC_").with_ordered_components(vec![("ISPH".to_owned(), 1)]),
         )
         .expect("a harvested sphere bag spawns");
     let attached_bag_index = engine
@@ -2736,7 +2755,9 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls(
 
     let (aimer, iceball) = (0..12)
         .find_map(|_| {
-            engine.tick_without_snapshot().expect("MICS's Magic action advances");
+            engine
+                .tick_without_snapshot()
+                .expect("MICS's Magic action advances");
             let snapshot = engine.snapshot();
             let aimer = snapshot
                 .objects
@@ -2786,7 +2807,9 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls(
     engine
         .player_in_com(owner, COM_RIGHT, 0)
         .expect("Right steers the launched ICEB");
-    engine.tick_without_snapshot().expect("ICEB applies its steering speed");
+    engine
+        .tick_without_snapshot()
+        .expect("ICEB applies its steering speed");
     assert_eq!(
         engine.crew_cursor(owner),
         Some(iceball),
@@ -2843,7 +2866,9 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls(
             .any(|effect| effect.name == "FrostwaveNSpell"),
         "ICEB impact installs the shipped global frostwave"
     );
-    engine.tick_without_snapshot().expect("the first frostwave radius executes");
+    engine
+        .tick_without_snapshot()
+        .expect("the first frostwave radius executes");
     assert!(
         engine
             .object_snapshot(target)
@@ -2872,8 +2897,7 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
         .objects
         .iter()
         .find(|object| {
-            object.definition_id == "ALC_"
-                && object.components.get("IROC").copied() == Some(3)
+            object.definition_id == "ALC_" && object.components.get("IROC").copied() == Some(3)
         })
         .map(|object| object.id)
         .expect("Alchemy creates its seeded rock bag");
@@ -2898,10 +2922,7 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
         )
         .expect("the shipped bag callback transfers MQKE's rocks");
     engine
-        .apply_object_update(
-            mage,
-            ObjectUpdate::new().with_direction(Direction::Right),
-        )
+        .apply_object_update(mage, ObjectUpdate::new().with_direction(Direction::Right))
         .expect("face the contained mage right without disturbing its cast-ready action");
     let cast_origin = engine
         .object_snapshot(mage)
@@ -2985,7 +3006,10 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
     assert_eq!(quake_effect.var(0), EffectVarValue::Int(level));
     let a = (4 * 10 * level) / (10 * lifetime);
     assert_eq!(quake_effect.var(1), EffectVarValue::Int(a));
-    assert_eq!(quake_effect.var(2), EffectVarValue::Int((100 * a) / lifetime));
+    assert_eq!(
+        quake_effect.var(2),
+        EffectVarValue::Int((100 * a) / lifetime)
+    );
     assert_eq!(
         engine
             .object_snapshot(attached_bag)
@@ -3019,7 +3043,9 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
     // (C4Script.cpp:5676-5687).
     engine.set_film_viewport_available(true);
     let view_offset = (0..8).find_map(|_| {
-        engine.tick_without_snapshot().expect("FXQ1's quake effect advances");
+        engine
+            .tick_without_snapshot()
+            .expect("FXQ1's quake effect advances");
         engine
             .take_viewport_presentation_requests()
             .into_iter()
@@ -3041,7 +3067,9 @@ fn alchemy_earthquake_cast_applies_the_shipped_view_shake(prepared: &PreparedIns
     // iLifeTime, the next successful Random(3) gate removes FXQ1
     // (Earthquake effect Script.c:7-19,31-45; ActMap.txt:3-10).
     let removed = (0..lifetime as usize + 64).any(|_| {
-        engine.tick_without_snapshot().expect("FXQ1 lifecycle advances");
+        engine
+            .tick_without_snapshot()
+            .expect("FXQ1 lifecycle advances");
         engine
             .object_snapshot(quake)
             .is_none_or(|quake| !quake.status.is_active())
@@ -3396,10 +3424,7 @@ fn alchemy_firelump_collects_its_same_call_fireball_into_the_mage(
             .call_object_function(
                 spell_index,
                 "Activate",
-                vec![
-                    Value::Object(mage.as_u64()),
-                    Value::Object(mage.as_u64()),
-                ],
+                vec![Value::Object(mage.as_u64()), Value::Object(mage.as_u64()),],
             )
             .expect("the shipped MFBL Activate callback runs"),
         Value::Int(1)
@@ -3477,7 +3502,7 @@ fn drachenfels_real_scenario_subcases_batch_3() {
     ]);
 }
 
-fn run_drachenfels_batch(subcases: &[(&'static str, fn(&PreparedInstalledScenario))]) {
+fn run_drachenfels_batch(subcases: &[PreparedScenarioSubcase]) {
     run_prepared_scenario_batch("Drachenfels", "Fantasy.c4f/Drachenfels.c4s", subcases);
 }
 
@@ -3610,10 +3635,7 @@ fn dragon_rock_walk_up_enters_the_shipped_tent(prepared: &PreparedInstalledScena
         "the shipped TENT remains targetable through OCF_Entrance"
     );
     // TENT DefCore.txt:17 is Entrance=-10,4,19,20.
-    let entrance_center = Vector2::new(
-        tent.position.x - 10 + 19 / 2,
-        tent.position.y + 4 + 20 / 2,
-    );
+    let entrance_center = Vector2::new(tent.position.x - 10 + 19 / 2, tent.position.y + 4 + 20 / 2);
     engine
         .apply_object_update(
             knight,
@@ -3632,7 +3654,9 @@ fn dragon_rock_walk_up_enters_the_shipped_tent(prepared: &PreparedInstalledScena
         .player_in_com(owner, COM_UP, 0)
         .expect("Up dispatches through the real KNIG control path");
     for _ in 0..3 {
-        engine.tick_without_snapshot().expect("queued Enter command advances");
+        engine
+            .tick_without_snapshot()
+            .expect("queued Enter command advances");
     }
     assert_eq!(
         engine
@@ -3665,17 +3689,15 @@ fn dragon_rock_initialize_player_grants_both_plan_knowledge_sets(
     // rejects an unloaded definition (C4Script.cpp:2646-2649). Thus PNON
     // from Scenario.txt and CODH from WPPL are deliberately absent.
     let expected = [
-        "ADM1", "ADM3", "ANVL", "ARCH", "ARMR", "ARWP", "AXE1", "BALN", "BANP",
-        "BARL", "BAS7", "BED1", "BLMP", "BOW1", "BRDG", "BRED", "BWRC", "CANN",
-        "CATA", "CHEM", "CLD1", "CNDL", "CNKT", "COKI", "CPAL", "CPEL", "CPH1",
-        "CPHC", "CPKT", "CPOF", "CPR1", "CPR2", "CPT1", "CPT2", "CPT3", "CPT4",
-        "CPTL", "CPTR", "CPW1", "CPW2", "CPWK", "CPWL", "CPWR", "DCO3", "DCO4",
-        "DOGH", "DPOT", "DRCK", "EFLN", "ELEV", "FARP", "FBMP", "FDRS", "FLNT",
-        "FNDR", "FRGE", "GUNP", "HUT1", "HUT2", "HUT3", "KSDL", "LANC", "LNKT",
-        "LORY", "OVEN", "PAL2", "PALS", "PFIR", "PHEA", "POWR", "PSTO", "PUMP",
-        "RSRC", "SAWM", "SFLN", "SHIE", "SHRC", "SLBT", "SPER", "SPRC", "STFN",
-        "SWOR", "SWRC", "TABL", "TENP", "TFLN", "THRN", "TWR2", "WDBR", "WGTW",
-        "WMIL", "WODC", "WRKS", "WTWR", "WZKP", "XARP", "XBOW",
+        "ADM1", "ADM3", "ANVL", "ARCH", "ARMR", "ARWP", "AXE1", "BALN", "BANP", "BARL", "BAS7",
+        "BED1", "BLMP", "BOW1", "BRDG", "BRED", "BWRC", "CANN", "CATA", "CHEM", "CLD1", "CNDL",
+        "CNKT", "COKI", "CPAL", "CPEL", "CPH1", "CPHC", "CPKT", "CPOF", "CPR1", "CPR2", "CPT1",
+        "CPT2", "CPT3", "CPT4", "CPTL", "CPTR", "CPW1", "CPW2", "CPWK", "CPWL", "CPWR", "DCO3",
+        "DCO4", "DOGH", "DPOT", "DRCK", "EFLN", "ELEV", "FARP", "FBMP", "FDRS", "FLNT", "FNDR",
+        "FRGE", "GUNP", "HUT1", "HUT2", "HUT3", "KSDL", "LANC", "LNKT", "LORY", "OVEN", "PAL2",
+        "PALS", "PFIR", "PHEA", "POWR", "PSTO", "PUMP", "RSRC", "SAWM", "SFLN", "SHIE", "SHRC",
+        "SLBT", "SPER", "SPRC", "STFN", "SWOR", "SWRC", "TABL", "TENP", "TFLN", "THRN", "TWR2",
+        "WDBR", "WGTW", "WMIL", "WODC", "WRKS", "WTWR", "WZKP", "XARP", "XBOW",
     ];
     let player = engine.player(owner).expect("joined player remains live");
     let mut actual = player
@@ -3855,8 +3877,8 @@ fn dragon_rock_objects_restore_serialized_c4id_named_locals(prepared: &PreparedI
         (
             3893,
             &[
-                "GGHG", "GZ9Z", "ABLA", "MBOT", "MBLS", "MFRB", "MFBL", "FRFS",
-                "MBRG", "EH69", "CMFG",
+                "GGHG", "GZ9Z", "ABLA", "MBOT", "MBLS", "MFRB", "MFBL", "FRFS", "MBRG", "EH69",
+                "CMFG",
             ][..],
         ),
         (
@@ -3866,9 +3888,8 @@ fn dragon_rock_objects_restore_serialized_c4id_named_locals(prepared: &PreparedI
         (
             2550,
             &[
-                "CMFG", "MFFW", "ABLA", "MBRG", "EXTG", "MGHL", "MLGT", "ETFL",
-                "MFRB", "MDBT", "MFBL", "RUND", "MBLS", "CPAN", "CFAL", "MGBW",
-                "MICS", "ELX1", "GZ9Z",
+                "CMFG", "MFFW", "ABLA", "MBRG", "EXTG", "MGHL", "MLGT", "ETFL", "MFRB", "MDBT",
+                "MFBL", "RUND", "MBLS", "CPAN", "CFAL", "MGBW", "MICS", "ELX1", "GZ9Z",
             ][..],
         ),
     ] {
@@ -3949,7 +3970,9 @@ fn dragon_rock_object_lookup_carries_script1_state_into_script3(
     // every-tenth-frame Execute post-increments Counter before calling
     // Script%d (C4ScriptHost.cpp:222-230), so Script1 runs on frame 20.
     for _ in 0..20 {
-        engine.tick_without_snapshot().expect("Dragon Rock reaches shipped Script1");
+        engine
+            .tick_without_snapshot()
+            .expect("Dragon Rock reaches shipped Script1");
     }
 
     // GetEndboss calls Object(EVIL_MAGE_OBJ), where EVIL_MAGE_OBJ is the
@@ -3986,7 +4009,9 @@ fn dragon_rock_object_lookup_carries_script1_state_into_script3(
     // (Drachenfels.c4s/System.c4g/Dragon.c:17,26-32). If Script1 aborted at
     // Object(), this is the original "target is zero" failure instead.
     for _ in 0..20 {
-        engine.tick_without_snapshot().expect("Dragon Rock reaches shipped Script3");
+        engine
+            .tick_without_snapshot()
+            .expect("Dragon Rock reaches shipped Script3");
     }
     let globals = &engine.snapshot().script_globals.named;
     assert_eq!(globals.get("DRGN_ctrl_tx"), Some(&Value::Int(400)));
@@ -4006,7 +4031,9 @@ fn dragon_rock_endboss_death_kills_the_shipped_dragon(prepared: &PreparedInstall
     // (Drachenfels.c4s/Script.c:438-454). C++ routes that native through
     // AssignDeath, including the Dead action and Death callback.
     for _ in 0..20 {
-        engine.tick_without_snapshot().expect("Dragon Rock reaches shipped Script1");
+        engine
+            .tick_without_snapshot()
+            .expect("Dragon Rock reaches shipped Script1");
     }
     let dragon_id = ObjectId::new(202);
     let dragon_before = engine
@@ -4042,13 +4069,17 @@ fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step(
     // Counter 20 is intentionally empty; Script21 runs at frame 180 and
     // Script25 naturally runs at frame 220.
     for _ in 0..160 {
-        engine.tick_without_snapshot().expect("Dragon Rock reaches Script15 pause");
+        engine
+            .tick_without_snapshot()
+            .expect("Dragon Rock reaches Script15 pause");
     }
     engine
         .call_scenario_script_function("OnDragonReachTarget", Vec::new())
         .expect("real dragon arrival resumes the intro counter");
     for _ in 0..59 {
-        engine.tick_without_snapshot().expect("Dragon Rock approaches Script25");
+        engine
+            .tick_without_snapshot()
+            .expect("Dragon Rock approaches Script25");
     }
     assert_eq!(engine.snapshot().frame, 219);
 
@@ -4094,9 +4125,9 @@ fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step(
             princess_before.position.y,
             "Oversize Completion growth preserves the C++ spawn-bottom anchor"
         );
-        let fixed_velocity = spark.fixed_velocity.unwrap_or_else(|| {
-            math::FixedVec2::from_ints(spark.velocity.x, spark.velocity.y)
-        });
+        let fixed_velocity = spark
+            .fixed_velocity
+            .unwrap_or_else(|| math::FixedVec2::from_ints(spark.velocity.x, spark.velocity.y));
         assert!(allowed_velocity.contains(&fixed_velocity.x));
         assert!(allowed_velocity.contains(&fixed_velocity.y));
         assert_eq!(spark.rotation, 0);
@@ -4137,13 +4168,14 @@ fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row(
         .expect("Alchemy loads Earth");
     let (target_x, target_y) = {
         let landscape = engine.landscape().expect("Alchemy keeps its landscape");
-        let grid = landscape.pixel_grid().expect("Alchemy has a raster landscape");
+        let grid = landscape
+            .pixel_grid()
+            .expect("Alchemy has a raster landscape");
         (20..grid.height() as i32 - 20)
             .find_map(|y| {
                 (20..grid.width() as i32 - 20)
                     .find(|&x| {
-                        landscape.material_at(x, y) == Some(earth)
-                            && landscape.is_solid_at(x, y)
+                        landscape.material_at(x, y) == Some(earth) && landscape.is_solid_at(x, y)
                     })
                     .map(|x| (x, y))
             })
@@ -4151,7 +4183,9 @@ fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row(
     };
     let solid_pixels_before = {
         let landscape = engine.landscape().expect("landscape before tunnel");
-        let grid = landscape.pixel_grid().expect("Alchemy raster before tunnel");
+        let grid = landscape
+            .pixel_grid()
+            .expect("Alchemy raster before tunnel");
         (target_y - 2..=target_y + 2)
             .flat_map(|y| (target_x - 17..=target_x + 17).map(move |x| (x, y)))
             .filter(|&(x, y)| landscape.is_solid_at(x, y))
@@ -4193,8 +4227,12 @@ fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row(
         Some(earth)
     );
 
-    engine.tick_without_snapshot().expect("the tunnel effect reaches time zero");
-    engine.tick_without_snapshot().expect("the first tunnel row timer executes");
+    engine
+        .tick_without_snapshot()
+        .expect("the tunnel effect reaches time zero");
+    engine
+        .tick_without_snapshot()
+        .expect("the first tunnel row timer executes");
     let opened_pixels = {
         let landscape = engine.landscape().expect("landscape after tunnel timer");
         let grid = landscape.pixel_grid().expect("Alchemy raster after tunnel");
@@ -4230,7 +4268,9 @@ fn alchemy_firefist_flame_consumes_inflammable_landscape(prepared: &PreparedInst
     );
     let ((fuel_x, fuel_y), (air_x, air_y)) = {
         let landscape = engine.landscape().expect("Alchemy keeps its landscape");
-        let grid = landscape.pixel_grid().expect("Alchemy has a raster landscape");
+        let grid = landscape
+            .pixel_grid()
+            .expect("Alchemy has a raster landscape");
         let air_position = (30..grid.height() as i32 - 30)
             .find_map(|y| {
                 (30..grid.width() as i32 - 30)
@@ -4330,9 +4370,7 @@ public func Paint(int x, int y)
             ObjectUpdate::new().with_position(Vector2::new(air_x, air_y)),
         )
         .expect("place the fire shower in open air");
-    let shower_index = engine
-        .find_object_index(fire_shower)
-        .expect("FSHW index");
+    let shower_index = engine.find_object_index(fire_shower).expect("FSHW index");
     engine
         .call_object_function(shower_index, "Hit", Vec::new())
         .expect("the shipped Hit callback creates FLAM");
@@ -4418,7 +4456,7 @@ fn goldrush_real_scenario_subcases_batch_2() {
     ]);
 }
 
-fn run_goldrush_batch(subcases: &[(&'static str, fn(&PreparedInstalledScenario))]) {
+fn run_goldrush_batch(subcases: &[PreparedScenarioSubcase]) {
     run_prepared_scenario_batch("Goldrush", "Western.c4f/Goldrush.c4s", subcases);
 }
 
@@ -4549,19 +4587,21 @@ func RetargetFade() { return FadeOut(10, 5, this()); }
         )
         .expect("fade driver registers against the installed global table");
     let target = engine
-        .spawn_object(
-            SpawnConfig::new("FDRV").with_position(Vector2::new(320, 120)),
-        )
+        .spawn_object(SpawnConfig::new("FDRV").with_position(Vector2::new(320, 120)))
         .expect("the fade driver spawns");
 
-    let index = engine.find_object_index(target).expect("fade driver exists");
+    let index = engine
+        .find_object_index(target)
+        .expect("fade driver exists");
     assert_eq!(
         engine
             .call_object_function(index, "StartFade", Vec::new())
             .expect("the shipped FadeOut starts"),
         Value::Int(1)
     );
-    let index = engine.find_object_index(target).expect("fade driver remains");
+    let index = engine
+        .find_object_index(target)
+        .expect("fade driver remains");
     assert_eq!(
         engine
             .call_object_function(index, "RetargetFade", Vec::new())
@@ -4625,7 +4665,9 @@ fn gold_rush_scorching_timer_returns_kill_before_playing_sound(
     );
 
     for _ in 0..10 {
-        engine.tick_without_snapshot().expect("the scorching timer approaches");
+        engine
+            .tick_without_snapshot()
+            .expect("the scorching timer approaches");
     }
     assert!(
         engine
@@ -4959,10 +5001,7 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
         Some(math::itofix_prec(12, 10)),
         "rank-five Lancing applies the C++ angular velocity"
     );
-    assert_eq!(
-        aimed_lance.local_vars.get("speed_x"),
-        Some(&Value::Int(31))
-    );
+    assert_eq!(aimed_lance.local_vars.get("speed_x"), Some(&Value::Int(31)));
     assert_eq!(engine.debug_rng_clone(), expected_rng);
 
     // Classic script evaluates both operands of this legacy `||`, so the
@@ -4978,7 +5017,9 @@ fn knights_lance_rank_five_target_collision_matches_cpp() {
             .expect("the shipped Targeting callback completes"),
         Value::Int(1)
     );
-    let hit_victim = engine.object_snapshot(victim).expect("punched victim exists");
+    let hit_victim = engine
+        .object_snapshot(victim)
+        .expect("punched victim exists");
     assert_eq!(hit_victim.energy, 40_000);
     assert_eq!(hit_victim.action.name, "Tumble");
     assert_eq!(

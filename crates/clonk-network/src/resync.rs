@@ -287,11 +287,7 @@ mod tests {
 
         assert_eq!(
             backlog.fulfill_request(5),
-            vec![
-                complete,
-                packet(1, 6, b"next-a"),
-                packet(2, 6, b"next-b"),
-            ]
+            vec![complete, packet(1, 6, b"next-a"), packet(2, 6, b"next-b"),]
         );
     }
 

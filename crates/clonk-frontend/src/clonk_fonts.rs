@@ -6,8 +6,6 @@
 //! Caption 16, Title 22.
 
 use anyhow::{Context, Result};
-use freetype::face::LoadFlag;
-use freetype::{Library, Matrix, Vector};
 use clonk_graphics::clonk_font::{
     compose_glyph_cell, font_image_lookup_tag, inline_image_token, line_height_for,
     markup_blit_color, scaled_font_image_width, skip_markup_tag, CapturedClonkText,
@@ -19,6 +17,8 @@ use clonk_graphics::{
     GpuVertex, Surface, SurfaceDrawTarget,
 };
 use clonk_gui::{ImageData, Rect as GuiRect};
+use freetype::face::LoadFlag;
+use freetype::{Library, Matrix, Vector};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
@@ -2696,7 +2696,7 @@ mod tests {
         // ClrDw2W includes the (inverted) alpha nibble. A transparent red
         // pixel therefore belongs to glyph data rather than ending a cell.
         let mut transparent_delimiter = rgba;
-        transparent_delimiter[(2 * width + 0) * 4 + 3] = 0;
+        transparent_delimiter[(2 * width) * 4 + 3] = 0;
         let font = build_prerendered_font(width as u32, height as u32, &transparent_delimiter, 1)
             .expect("transparent red is not a delimiter");
         assert_eq!(font.cell_height, height as i32);

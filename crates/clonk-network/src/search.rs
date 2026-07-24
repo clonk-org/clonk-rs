@@ -30,8 +30,7 @@ const EMPTY_REFERENCE_LIFETIME: Duration = Duration::from_secs(10);
 const DISCOVERY_PROBE: u8 = 0x03;
 const DISCOVERY_REPLY: u8 = 0x04;
 const SCOPED_IPV6_REQUEST_HOST: &str = "clonk-rust-lan.invalid";
-pub(crate) const DISCOVERY_MULTICAST: Ipv6Addr =
-    Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
+pub(crate) const DISCOVERY_MULTICAST: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
 
 pub const CURRENT_GAME_VERSION: [i32; 4] = [4, 9, 11, 0];
 pub const CURRENT_GAME_BUILD: i32 = 362;
@@ -135,12 +134,7 @@ impl Default for NetworkGameReference {
             version: [0; 4],
             build: -1,
             addresses: Vec::new(),
-            source_address: SocketAddr::V6(SocketAddrV6::new(
-                Ipv6Addr::UNSPECIFIED,
-                0,
-                0,
-                0,
-            )),
+            source_address: SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)),
             netpuncher_ipv4: 0,
             netpuncher_ipv6: 0,
             netpuncher_address: String::new(),
@@ -162,8 +156,7 @@ impl NetworkGameReference {
     }
 
     pub fn is_past_lobby(&self) -> bool {
-        self.state.eq_ignore_ascii_case("paused")
-            || self.state.eq_ignore_ascii_case("running")
+        self.state.eq_ignore_ascii_case("paused") || self.state.eq_ignore_ascii_case("running")
     }
 
     /// Copies and prepares the reference addresses in C++ client join order.
@@ -1090,12 +1083,9 @@ async fn run_game_search(
                             .iter()
                             .position(|reference| reference == selected)
                             .or_else(|| {
-                                search
-                                    .references()
-                                    .iter()
-                                    .position(|reference| {
-                                        reference.is_same_host_and_address(selected)
-                                    })
+                                search.references().iter().position(|reference| {
+                                    reference.is_same_host_and_address(selected)
+                                })
                             })
                     });
                     if let Some(request_id) = query.direct_request_id {
@@ -1203,12 +1193,11 @@ async fn run_game_search(
             .await;
         }
         if let Ok(socket) = discovery.as_ref() {
-            if let Ok(Ok((size, source))) =
-                tokio::time::timeout(
-                    Duration::from_millis(20),
-                    socket.socket.recv_from(&mut datagram),
-                )
-                    .await
+            if let Ok(Ok((size, source))) = tokio::time::timeout(
+                Duration::from_millis(20),
+                socket.socket.recv_from(&mut datagram),
+            )
+            .await
             {
                 if let Some(command) = search.handle_lan_datagram(source, &datagram[..size]) {
                     if register_game_discovery_query(
@@ -1262,6 +1251,9 @@ fn register_game_discovery_query(
     }
 }
 
+// Search execution receives independent generation, transport, result, and
+// presentation channels whose ownership differs across command variants.
+#[allow(clippy::too_many_arguments)]
 async fn execute_search_command(
     command: SearchCommand,
     query_generation: (u64, u64),
@@ -1358,10 +1350,7 @@ fn discovery_socket(port: u16) -> io::Result<DiscoverySocket> {
     })
 }
 
-pub(crate) fn multicast_targets(
-    target: SocketAddrV6,
-    _interfaces: &[u32],
-) -> Vec<SocketAddrV6> {
+pub(crate) fn multicast_targets(target: SocketAddrV6, _interfaces: &[u32]) -> Vec<SocketAddrV6> {
     vec![target]
 }
 
@@ -1555,7 +1544,10 @@ fn reference_ini_section(line: &[u8]) -> Option<(usize, &[u8])> {
 }
 
 fn trim_reference_horizontal_start(mut bytes: &[u8]) -> &[u8] {
-    while bytes.first().is_some_and(|byte| matches!(*byte, b' ' | b'\t')) {
+    while bytes
+        .first()
+        .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+    {
         bytes = &bytes[1..];
     }
     bytes
@@ -2097,18 +2089,12 @@ Title=Recovered game\n"
         // src/C4Network2.cpp:296-303;
         // src/C4Network2Address.cpp:123-128;
         // src/C4NetIO.cpp:232-275, 382-386).
-        let global_v6 = NetworkAddress::new(
-            NetworkProtocol::Tcp,
-            "[2001:db8::1]:11112".parse().unwrap(),
-        );
-        let private_v4 = NetworkAddress::new(
-            NetworkProtocol::Udp,
-            "10.0.0.1:11113".parse().unwrap(),
-        );
-        let global_v4 = NetworkAddress::new(
-            NetworkProtocol::Tcp,
-            "203.0.113.1:11112".parse().unwrap(),
-        );
+        let global_v6 =
+            NetworkAddress::new(NetworkProtocol::Tcp, "[2001:db8::1]:11112".parse().unwrap());
+        let private_v4 =
+            NetworkAddress::new(NetworkProtocol::Udp, "10.0.0.1:11113".parse().unwrap());
+        let global_v4 =
+            NetworkAddress::new(NetworkProtocol::Tcp, "203.0.113.1:11112".parse().unwrap());
         let link_local_v6 = NetworkAddress::new(
             NetworkProtocol::Udp,
             SocketAddr::V6(SocketAddrV6::new(
@@ -2118,18 +2104,10 @@ Title=Recovered game\n"
                 0,
             )),
         );
-        let private_v6 = NetworkAddress::new(
-            NetworkProtocol::Tcp,
-            "[fd00::1]:11112".parse().unwrap(),
-        );
+        let private_v6 =
+            NetworkAddress::new(NetworkProtocol::Tcp, "[fd00::1]:11112".parse().unwrap());
         let reference = NetworkGameReference {
-            addresses: vec![
-                global_v6,
-                private_v4,
-                global_v4,
-                link_local_v6,
-                private_v6,
-            ],
+            addresses: vec![global_v6, private_v4, global_v4, link_local_v6, private_v6],
             source_address: SocketAddr::V6(SocketAddrV6::new(
                 "fe80::1234".parse().unwrap(),
                 11_111,
@@ -2186,18 +2164,12 @@ Title=Recovered game\n"
         // once, and expands every local address across the local interface ID
         // list in order (pristine 9ffa0a5d src/C4Network2.cpp:375-405;
         // src/C4Network2Address.cpp:92-101, 123-128).
-        let global_v4 = NetworkAddress::new(
-            NetworkProtocol::Tcp,
-            "203.0.113.1:11112".parse().unwrap(),
-        );
-        let link_local_v6 = NetworkAddress::new(
-            NetworkProtocol::Udp,
-            "[fe80::beef]:11113".parse().unwrap(),
-        );
-        let link_local_v4 = NetworkAddress::new(
-            NetworkProtocol::Tcp,
-            "169.254.1.2:11112".parse().unwrap(),
-        );
+        let global_v4 =
+            NetworkAddress::new(NetworkProtocol::Tcp, "203.0.113.1:11112".parse().unwrap());
+        let link_local_v6 =
+            NetworkAddress::new(NetworkProtocol::Udp, "[fe80::beef]:11113".parse().unwrap());
+        let link_local_v4 =
+            NetworkAddress::new(NetworkProtocol::Tcp, "169.254.1.2:11112".parse().unwrap());
         let reference = NetworkGameReference {
             addresses: vec![
                 NetworkAddress::new(NetworkProtocol::Tcp, "[::]:0".parse().unwrap()),
@@ -2702,10 +2674,7 @@ Title=Empty\n",
         match event {
             StartupGameSearchEvent::SearchError { source, message } => {
                 assert_eq!(source, Some(ReferenceQuerySource::GameDiscovery));
-                assert_eq!(
-                    message,
-                    "unable to send LAN discovery probe: no route"
-                );
+                assert_eq!(message, "unable to send LAN discovery probe: no route");
             }
             _ => panic!("expected LAN discovery error"),
         }
@@ -2807,7 +2776,10 @@ Build=362\n"
         search.initial_refresh().unwrap();
         loop {
             if matches!(
-                search.events().recv_timeout(Duration::from_secs(5)).unwrap(),
+                search
+                    .events()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap(),
                 StartupGameSearchEvent::Cleared
             ) {
                 break;
@@ -2834,7 +2806,11 @@ Build=362\n"
             StartupGameSearchEvent::GameDiscoveryQueryStarted { address }
                 if address == expected
         ));
-        match search.events().recv_timeout(Duration::from_secs(5)).unwrap() {
+        match search
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+        {
             StartupGameSearchEvent::GameDiscoveryQueryFailed { address, message } => {
                 assert_eq!(address, expected);
                 assert!(!message.is_empty());
@@ -2905,10 +2881,7 @@ Build=362\n";
 
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
-            match search
-                .events()
-                .recv_timeout(Duration::from_millis(100))
-            {
+            match search.events().recv_timeout(Duration::from_millis(100)) {
                 Ok(StartupGameSearchEvent::DirectQueryResolved { request_id, .. })
                 | Ok(StartupGameSearchEvent::DirectQueryFailed { request_id, .. }) => {
                     panic!("refresh deleted direct-query row {request_id}, but it completed")

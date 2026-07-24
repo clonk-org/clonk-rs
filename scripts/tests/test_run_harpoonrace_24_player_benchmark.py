@@ -778,6 +778,14 @@ class ExactReferenceTests(unittest.TestCase):
 
 
 class IsolatedInputTests(unittest.TestCase):
+    def test_scratch_defaults_to_the_platform_temp_directory(self):
+        with mock.patch.object(
+            MODULE.platform, "system", return_value="Darwin"
+        ):
+            arguments = MODULE.build_argument_parser().parse_args([])
+
+        self.assertIsNone(arguments.scratch_root)
+
     def test_controlled_environment_ignores_parent_log_and_config_overrides(self):
         environment = MODULE.controlled_process_environment(
             {

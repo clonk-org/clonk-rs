@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// `FnTestMessageBoard` (C4Script.cpp:3564-3573): invalid players return
 /// nil. The ordinary multi-query availability probe is always true for a
 /// valid player; the explicit in-use form reports whether any query node is
@@ -1467,10 +1466,8 @@ pub(crate) fn stop_script_profiler(_args: &[Value]) -> Result<Value, RuntimeErro
                     Some(host_identity) => HOST_CONTEXT
                         .with(|cell| {
                             cell.borrow().as_ref().and_then(|context| {
-                                context
-                                    .world
-                                    .script_for_host_identity(host_identity)
-                                    .map(|(host, definition, _)| match definition {
+                                context.world.script_for_host_identity(host_identity).map(
+                                    |(host, definition, _)| match definition {
                                         Some(definition) => {
                                             format!("{definition}::{}", entry.function)
                                         }
@@ -1478,7 +1475,8 @@ pub(crate) fn stop_script_profiler(_args: &[Value]) -> Result<Value, RuntimeErro
                                             format!("game {}", entry.function)
                                         }
                                         None => format!("{host}::{}", entry.function),
-                                    })
+                                    },
+                                )
                             })
                         })
                         .unwrap_or(entry.function),

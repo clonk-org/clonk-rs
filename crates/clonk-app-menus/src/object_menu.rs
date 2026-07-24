@@ -1,22 +1,23 @@
 use std::{cell::RefCell, collections::HashMap};
 
 use clonk_engine::{
-    CommandKind, ContextMenuEntry, ControlCommand, Engine, EngineError,
-    OWNER_NONE, ObjectId, ObjectMenuExtra, ObjectMenuSymbol, SimulationSnapshot,
+    CommandKind, ContextMenuEntry, ControlCommand, Engine, EngineError, ObjectId, ObjectMenuExtra,
+    ObjectMenuSymbol, SimulationSnapshot, OWNER_NONE,
 };
 use clonk_frontend::{
-    CommandImage, CommandOverlayIcon, GuiPoint, default_owner_color,
-    hud::{HudFont, draw_command_image_cell_with_gamma},
+    default_owner_color,
+    hud::{draw_command_image_cell_with_gamma, HudFont},
+    CommandImage, CommandOverlayIcon, GuiPoint,
 };
 use clonk_graphics::clonk_font::TextAlign;
 use clonk_graphics::{Color, GammaRamp, PixelFormat, Rect, Surface, TextFont};
 use clonk_gui::ImageData;
 
-use clonk_app_core::pictures::definition_menu_picture;
 use crate::ingame_menu::{
-    IngameMenuGraphics, draw_3d_frame, draw_caption_bar, draw_command_key, draw_image_region,
-    draw_image_region_aspect, draw_ok_cancel, draw_tooltip, tooltip_position, tooltip_wrap_width,
+    draw_3d_frame, draw_caption_bar, draw_command_key, draw_image_region, draw_image_region_aspect,
+    draw_ok_cancel, draw_tooltip, tooltip_position, tooltip_wrap_width, IngameMenuGraphics,
 };
+use clonk_app_core::pictures::definition_menu_picture;
 
 const BACKDROP_COLOR: Color = Color::new(0, 0, 0, 172);
 const PANEL_COLOR: Color = Color::new(18, 28, 48, 240);
@@ -275,9 +276,7 @@ fn relocate_dialog_menu_layout(
         .map(|(index, rect)| (index, translate_rect(rect, dx, dy)));
     for row in &mut layout.rows {
         row.rect = translate_rect(row.rect, dx, dy);
-        row.symbol_rect = row
-            .symbol_rect
-            .map(|rect| translate_rect(rect, dx, dy));
+        row.symbol_rect = row.symbol_rect.map(|rect| translate_rect(rect, dx, dy));
         row.text_rect = translate_rect(row.text_rect, dx, dy);
     }
     layout
@@ -1107,8 +1106,7 @@ pub fn resolve_engine_script_menu_footer(
             .and_then(|selection| menu.items.get_mut(selection))
         {
             if item.value.is_none() {
-                item.value =
-                    engine.calculated_definition_value(&item.item_id, None, OWNER_NONE)?;
+                item.value = engine.calculated_definition_value(&item.item_id, None, OWNER_NONE)?;
             }
         }
     }
@@ -1364,6 +1362,9 @@ fn text_spec_width(font: &HudFont<'_>, text: &str, images: &HashMap<String, Imag
     text_spec_layout(font, text, images).width
 }
 
+// Keep the token layout, inline-image table, draw origin, color, and gamma
+// explicit at this renderer boundary so markup parity remains easy to audit.
+#[allow(clippy::too_many_arguments)]
 fn render_info_text(
     surface: &mut Surface,
     font: &HudFont<'_>,
@@ -1469,6 +1470,9 @@ fn render_text_spec(
     render_info_text(surface, font, &layout, images, x, y, color, gamma);
 }
 
+// Tooltip placement and rich-text resources are independent classic renderer
+// inputs; a parameter bundle would only obscure their parity mapping.
+#[allow(clippy::too_many_arguments)]
 fn draw_text_spec_tooltip(
     surface: &mut Surface,
     font: &HudFont<'_>,
@@ -1546,9 +1550,7 @@ fn collect_inline_image_specs(text: &str, specs: &mut Vec<String>) {
     }
 }
 
-pub fn engine_script_menu_inline_image_specs(
-    menu: &clonk_engine::ObjectMenuState,
-) -> Vec<String> {
+pub fn engine_script_menu_inline_image_specs(menu: &clonk_engine::ObjectMenuState) -> Vec<String> {
     let mut specs = Vec::new();
     collect_inline_image_specs(&engine_script_presentation_text(&menu.caption), &mut specs);
     collect_inline_image_specs(&engine_script_menu_title(menu), &mut specs);
@@ -1850,6 +1852,9 @@ fn engine_script_menu_layout_impl(
 /// Draws a script-created `C4ObjectMenu` from the engine's live runtime
 /// state. The engine remains the sole owner of selection and item state; this
 /// is deliberately a read-only presentation view.
+// Preserve this public non-gamma wrapper's established flat API; it mirrors
+// the full renderer below and forwards the inputs unchanged with gamma off.
+#[allow(clippy::too_many_arguments)]
 pub fn render_engine_script_menu(
     surface: &mut Surface,
     area: Rect,
@@ -1953,6 +1958,9 @@ pub fn render_engine_script_menu_with_gamma(
     }
 }
 
+// Source facet and destination geometry intentionally remain separate to
+// mirror C4Facet's clipped edge/corner drawing operations at each call site.
+#[allow(clippy::too_many_arguments)]
 fn draw_decoration_facet(
     surface: &mut Surface,
     image: &ImageData,
@@ -3327,6 +3335,9 @@ impl ObjectMenuState {
         }
     }
 
+    // This fallback renderer keeps each piece of presentation state explicit;
+    // it is the single boundary shared by every menu mode.
+    #[allow(clippy::too_many_arguments)]
     fn render_entries<E: MenuEntry>(
         surface: &mut Surface,
         font: &dyn TextFont,
@@ -3868,7 +3879,7 @@ fn draw_hv_border(surface: &mut Surface, rect: Rect, color: Color, gamma: Option
 mod tests {
     use super::*;
     use clonk_app_core::pictures::apply_default_menu_owner_color;
-    use clonk_engine::scenario::{LegacyDefinitionResolver, load_system_scripts};
+    use clonk_engine::scenario::{load_system_scripts, LegacyDefinitionResolver};
     use clonk_engine::{
         CommandStackSnapshot, Definition, Engine, JoinPlayerConfig, MovementProfile,
         ObjectSnapshot, ObjectStatus, ObjectUpdate, PlayerConfig, Scenario, ScenarioError,
@@ -3962,10 +3973,7 @@ mod tests {
         )
     }
 
-    fn engine_script_menu_fixture(
-        style: i32,
-        item_count: usize,
-    ) -> clonk_engine::ObjectMenuState {
+    fn engine_script_menu_fixture(style: i32, item_count: usize) -> clonk_engine::ObjectMenuState {
         let script = format!(
             r#"
             func Initialize()
@@ -4387,7 +4395,10 @@ mod tests {
         assert_eq!(item.label(), "Wav\u{e9}");
         assert_eq!(item.description(), Some("Gr\u{fc}\u{df}e"));
         assert_eq!(clonk_script::c4_string_bytes(&raw_label), b"Wav\xe9");
-        assert_eq!(clonk_script::c4_string_bytes(&raw_description), b"Gr\xfc\xdfe");
+        assert_eq!(
+            clonk_script::c4_string_bytes(&raw_description),
+            b"Gr\xfc\xdfe"
+        );
     }
 
     #[test]
@@ -4414,10 +4425,9 @@ mod tests {
         assert_eq!(menu.build[0].available(), 3);
 
         // Switch to build mode.
-        assert!(
-            menu.handle_command(ControlCommand::MenuRight, CommandKind::Press)
-                .is_none()
-        );
+        assert!(menu
+            .handle_command(ControlCommand::MenuRight, CommandKind::Press)
+            .is_none());
         assert_eq!(menu.mode, MenuMode::Build);
         let action = menu
             .handle_command(ControlCommand::MenuSelect, CommandKind::Press)
@@ -4607,10 +4617,7 @@ mod tests {
         );
         let close = layout.close_button_rect();
         assert_eq!(
-            hit(GuiPoint::new(
-                close.x as f32 + 1.0,
-                close.y as f32 + 1.0,
-            )),
+            hit(GuiPoint::new(close.x as f32 + 1.0, close.y as f32 + 1.0,)),
             Some(EngineScriptMenuPointerTarget::Close),
             "close remains topmost over the title drag target"
         );
@@ -4658,13 +4665,18 @@ mod tests {
         let images = HashMap::new();
         let area = Rect::new(0, 0, 640, 480);
         let menu = engine_script_menu_fixture(3, 2);
-        let natural = engine_script_menu_presentation_geometry(
-            area, &font, &menu, false, &images, None, 0,
-        )
-        .expect("dialog geometry");
+        let natural =
+            engine_script_menu_presentation_geometry(area, &font, &menu, false, &images, None, 0)
+                .expect("dialog geometry");
         let location = Some((-17, -23));
         let moved = engine_script_menu_presentation_geometry(
-            area, &font, &menu, false, &images, location, i32::MAX,
+            area,
+            &font,
+            &menu,
+            false,
+            &images,
+            location,
+            i32::MAX,
         )
         .expect("moved dialog geometry");
 
@@ -4737,10 +4749,7 @@ mod tests {
                 &menu,
                 false,
                 true,
-                GuiPoint::new(
-                    visible_title.x as f32 + 1.0,
-                    visible_title.y as f32 + 1.0,
-                ),
+                GuiPoint::new(visible_title.x as f32 + 1.0, visible_title.y as f32 + 1.0,),
                 &images,
                 visible_location,
                 i32::MAX,
@@ -4760,10 +4769,7 @@ mod tests {
                 &menu,
                 false,
                 true,
-                GuiPoint::new(
-                    visible_close.x as f32 + 1.0,
-                    visible_close.y as f32 + 1.0,
-                ),
+                GuiPoint::new(visible_close.x as f32 + 1.0, visible_close.y as f32 + 1.0,),
                 &images,
                 visible_location,
                 i32::MAX,
@@ -5228,8 +5234,8 @@ mod tests {
     fn engine_script_info_menu_wraps_markup_and_inline_images() {
         let font_bytes = std::fs::read(repository_root().join("planet/System.c4g/Endeavour.ttf"))
             .expect("Endeavour.ttf reads");
-        let fonts =
-            clonk_frontend::clonk_fonts::build_font_set(&font_bytes).expect("Endeavour fonts build");
+        let fonts = clonk_frontend::clonk_fonts::build_font_set(&font_bytes)
+            .expect("Endeavour fonts build");
         let font = HudFont::Clonk(&fonts.text);
         let red = Color::opaque(240, 20, 20);
         let blue = Color::opaque(20, 70, 240);
@@ -6056,38 +6062,34 @@ mod tests {
             Some(EngineScriptMenuPointerTarget::Item(0))
         );
 
-        assert!(
-            validate_menu_decoration_for_area(
-                Rect::new(0, 0, 640, 480),
-                menu.decoration.as_ref().expect("decoration"),
-                Some(&image),
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_menu_decoration_for_area(
-                Rect::new(0, 0, 640, 480),
-                menu.decoration.as_ref().expect("decoration"),
-                None,
-            )
-            .is_err()
-        );
+        assert!(validate_menu_decoration_for_area(
+            Rect::new(0, 0, 640, 480),
+            menu.decoration.as_ref().expect("decoration"),
+            Some(&image),
+        )
+        .is_ok());
+        assert!(validate_menu_decoration_for_area(
+            Rect::new(0, 0, 640, 480),
+            menu.decoration.as_ref().expect("decoration"),
+            None,
+        )
+        .is_err());
         let mut background_only = menu.decoration.clone().expect("decoration");
         background_only.top = None;
         background_only.top_left = None;
-        assert!(
-            validate_menu_decoration_for_area(Rect::new(0, 0, 640, 480), &background_only, None,)
-                .is_ok()
-        );
+        assert!(validate_menu_decoration_for_area(
+            Rect::new(0, 0, 640, 480),
+            &background_only,
+            None,
+        )
+        .is_ok());
         menu.decoration.as_mut().expect("decoration").border_left = -1;
-        assert!(
-            validate_menu_decoration_for_area(
-                Rect::new(0, 0, 640, 480),
-                menu.decoration.as_ref().expect("decoration"),
-                Some(&image),
-            )
-            .is_err()
-        );
+        assert!(validate_menu_decoration_for_area(
+            Rect::new(0, 0, 640, 480),
+            menu.decoration.as_ref().expect("decoration"),
+            Some(&image),
+        )
+        .is_err());
     }
 
     #[test]
@@ -6219,8 +6221,8 @@ mod tests {
 
         let font_bytes = std::fs::read(repository.join("planet/System.c4g/Endeavour.ttf"))
             .expect("Endeavour.ttf reads");
-        let fonts =
-            clonk_frontend::clonk_fonts::build_font_set(&font_bytes).expect("Endeavour fonts build");
+        let fonts = clonk_frontend::clonk_fonts::build_font_set(&font_bytes)
+            .expect("Endeavour fonts build");
         let fallback = clonk_graphics::BitmapFont::new();
         let font = HudFont::Clonk(&fonts.text);
         let layout =
@@ -6304,8 +6306,16 @@ mod tests {
         menu.selection = -1;
         menu.items = vec![
             make_item("Put", "HUT3", clonk_engine::ObjectMenuSymbol::Put),
-            make_item("Contents", "HUT3", clonk_engine::ObjectMenuSymbol::Definition),
-            make_item("Buy", "NONE", clonk_engine::ObjectMenuSymbol::Buy { owner: 7 }),
+            make_item(
+                "Contents",
+                "HUT3",
+                clonk_engine::ObjectMenuSymbol::Definition,
+            ),
+            make_item(
+                "Buy",
+                "NONE",
+                clonk_engine::ObjectMenuSymbol::Buy { owner: 7 },
+            ),
             make_item(
                 "Sell",
                 "NONE",
@@ -6572,10 +6582,9 @@ mod tests {
         // item without fOwnValue. Western's TEND is the shipped distinguishing
         // case: DefCore Value=2, while CalcDefValue returns 4.
         let repository = repository_root();
-        let group = Group::open(
-            repository.join("content/Western.c4d/Items.c4d/Materials.c4d/Tendon.c4d"),
-        )
-        .expect("shipped Tendon definition opens");
+        let group =
+            Group::open(repository.join("content/Western.c4d/Items.c4d/Materials.c4d/Tendon.c4d"))
+                .expect("shipped Tendon definition opens");
         let resource = clonk_resources::ResourceDefinition::load(&group)
             .expect("shipped Tendon definition loads");
         let mut engine = Engine::new();
@@ -7091,18 +7100,12 @@ mod tests {
         assert_eq!(&pixels[4..], &[100, 50, 10, 255]);
 
         let mut pixels = vec![0, 255, 0, 255, 100, 50, 10, 255];
-        apply_default_menu_owner_color(
-            &mut pixels,
-            &[128, 128, 128, 128, 0, 0, 255, 255],
-        );
+        apply_default_menu_owner_color(&mut pixels, &[128, 128, 128, 128, 0, 0, 255, 255]);
         assert_eq!(&pixels[..4], &[0, 127, 64, 255]);
         assert_eq!(&pixels[4..], &[0, 0, 255, 255]);
 
         let mut transparent_base = vec![0, 0, 0, 0];
-        apply_default_menu_owner_color(
-            &mut transparent_base,
-            &[128, 128, 128, 128],
-        );
+        apply_default_menu_owner_color(&mut transparent_base, &[128, 128, 128, 128]);
         assert_eq!(
             transparent_base,
             [0, 0, 128, 128],
@@ -7270,8 +7273,8 @@ mod tests {
         };
         let font_bytes = std::fs::read(repository_root().join("planet/System.c4g/Endeavour.ttf"))
             .expect("Endeavour.ttf reads");
-        let fonts =
-            clonk_frontend::clonk_fonts::build_font_set(&font_bytes).expect("Endeavour fonts build");
+        let fonts = clonk_frontend::clonk_fonts::build_font_set(&font_bytes)
+            .expect("Endeavour fonts build");
         let fallback = clonk_graphics::BitmapFont::new();
         let font = HudFont::Clonk(&fonts.text);
         let tiny = HudFont::Clonk(&fonts.mini);

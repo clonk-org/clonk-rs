@@ -1713,21 +1713,25 @@ impl GameApp {
                         },
                     )
                     .collect::<Vec<_>>();
-                let mut addresses = local
-                    .then(|| {
-                        local_addresses
-                            .iter()
-                            .map(|address| {
-                                let protocol = protocol_name(address.protocol);
-                                format!("{protocol}: {}", address.endpoint)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                addresses.extend(connections.iter().filter_map(|connection| {
-                    (connection.peer_address != "???")
-                        .then(|| format!("{}: {}", connection.protocol, connection.peer_address))
-                }));
+                let mut addresses = if local {
+                    local_addresses
+                        .iter()
+                        .map(|address| {
+                            let protocol = protocol_name(address.protocol);
+                            format!("{protocol}: {}", address.endpoint)
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                addresses.extend(
+                    connections
+                        .iter()
+                        .filter(|connection| connection.peer_address != "???")
+                        .map(|connection| {
+                            format!("{}: {}", connection.protocol, connection.peer_address)
+                        }),
+                );
                 addresses.sort();
                 addresses.dedup();
                 let client_state = runtime_client_states
@@ -2177,7 +2181,10 @@ impl GameApp {
         };
         let current_control_tick = clock.current_tick();
         if current_control_tick < pending.status.target_tick
-            || self.engine.frame() % clock.control_rate() as u64 != 0
+            || !self
+                .engine
+                .frame()
+                .is_multiple_of(clock.control_rate() as u64)
         {
             return RuntimeStatusReachOutcome::NotReached;
         }
@@ -2285,7 +2292,10 @@ impl GameApp {
         let behind = match self.network_control_clock {
             Some(clock)
                 if Tick::try_from(clock.current_tick()).is_ok()
-                    && self.engine.frame() % clock.control_rate() as u64 != 0 =>
+                    && !self
+                        .engine
+                        .frame()
+                        .is_multiple_of(clock.control_rate() as u64) =>
             {
                 behind.saturating_add(1)
             }
@@ -2294,7 +2304,7 @@ impl GameApp {
         let overflow = behind > NETWORK_CONTROL_OVERFLOW_LIMIT;
         let skip_render = if overflow && behind >= NETWORK_RENDER_SKIP_BEHIND {
             let divisor = behind.saturating_add(15) / 20;
-            self.engine.frame() % u64::from(divisor) != 0
+            !self.engine.frame().is_multiple_of(u64::from(divisor))
         } else {
             false
         };
@@ -2760,26 +2770,26 @@ impl GameApp {
             &languages,
             &language_packs,
         );
-        let local_client_id = i32::try_from(join_data.client_id)
-            .map_err(|_| "network client ID exceeds the C4 signed range".to_string())?;
-        let runtime_join_players = network_runtime_join
-            .then(|| {
-                restore_player_infos
-                    .clients
-                    .iter()
-                    .flat_map(|client| {
-                        client.players.iter().filter_map(move |info| {
-                            info.is_joined()
-                                .then(|| clonk_engine::RuntimeJoinPlayerSource {
-                                    client_id: client.client_id,
-                                    info: info.clone(),
-                                    load_unnamed_portraits: client.client_id == local_client_id,
-                                })
+        let local_client_id = join_data.client_id;
+        let runtime_join_players = if network_runtime_join {
+            restore_player_infos
+                .clients
+                .iter()
+                .flat_map(|client| {
+                    client
+                        .players
+                        .iter()
+                        .filter(|info| info.is_joined())
+                        .map(move |info| clonk_engine::RuntimeJoinPlayerSource {
+                            client_id: client.client_id,
+                            info: info.clone(),
+                            load_unnamed_portraits: client.client_id == local_client_id,
                         })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         if let Some(material_groups) = material_groups {
             self.network_material_resource_groups = Some(material_groups);
         }
@@ -3001,9 +3011,7 @@ impl GameApp {
         if !self.league_player_auth_lobby_active() {
             return None;
         }
-        let Some(network) = self.network.as_ref() else {
-            return None;
-        };
+        let network = self.network.as_ref()?;
         let league = clonk_engine::LegacyCString::from_bytes(self.network_league_name.clone())
             .unwrap_or_default();
         let refusal_template = self.runtime_resource_text(
@@ -7168,9 +7176,7 @@ impl GameApp {
             Err(error) if !enabled && previous_enabled => {
                 return self.finish_startup_network_failure(
                     StartupNetworkPurpose::StagedHost,
-                    format!(
-                        "Unable to confirm cleanup of the live Internet registration: {error}"
-                    ),
+                    format!("Unable to confirm cleanup of the live Internet registration: {error}"),
                 );
             }
             Err(error) => (if enabled { previous_enabled } else { false }, Some(error)),

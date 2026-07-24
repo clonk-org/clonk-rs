@@ -251,7 +251,9 @@ fn hostile_enter_rejects_before_activate_entrance_and_reports_base_owner() {
         ),
         Value::Bool(true)
     );
-    engine.tick_without_snapshot().expect("hostile Enter executes");
+    engine
+        .tick_without_snapshot()
+        .expect("hostile Enter executes");
 
     assert_eq!(local_int(&engine, base, "activate_count"), 0);
     assert_eq!(
@@ -285,7 +287,9 @@ fn hostile_exit_rejects_before_activate_entrance_and_fails() {
         call(&mut engine, visitor, "StartExit", Vec::new()),
         Value::Bool(true)
     );
-    engine.tick_without_snapshot().expect("hostile Exit asks the native gate");
+    engine
+        .tick_without_snapshot()
+        .expect("hostile Exit asks the native gate");
 
     assert_eq!(local_int(&engine, base, "activate_count"), 0);
     assert_eq!(
@@ -410,7 +414,9 @@ fn closed_exit_without_current_entrance_ocf_skips_callback_and_fails() {
         Value::Bool(true)
     );
 
-    engine.tick_without_snapshot().expect("closed Exit checks current OCF");
+    engine
+        .tick_without_snapshot()
+        .expect("closed Exit checks current OCF");
     assert_eq!(local_int(&engine, base, "activate_count"), 0);
     assert_eq!(
         engine
@@ -454,7 +460,9 @@ fn disabling_base_reject_gate_allows_hostile_activate_entrance() {
     );
     assert!(engine.snapshot().hud.messages.is_empty());
 
-    engine.tick_without_snapshot().expect("opened entrance accepts the visitor");
+    engine
+        .tick_without_snapshot()
+        .expect("opened entrance accepts the visitor");
     assert_eq!(
         engine
             .object_snapshot(visitor)
@@ -488,7 +496,9 @@ fn base_reject_entrance_flag_survives_state_restore() {
         ),
         Value::Bool(true)
     );
-    engine.tick_without_snapshot().expect("restored flag controls activation");
+    engine
+        .tick_without_snapshot()
+        .expect("restored flag controls activation");
     assert_eq!(
         local_int(&engine, base, "activate_count"),
         1,

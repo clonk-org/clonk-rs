@@ -128,15 +128,7 @@ mod tests {
         let mut surface = Surface::new(500, 160, PixelFormat::Rgba8888);
         surface.fill(background);
 
-        render_runtime_help(
-            &mut surface,
-            &font,
-            area,
-            "A\n\nA",
-            "B\nB",
-            None,
-            &NoImages,
-        );
+        render_runtime_help(&mut surface, &font, area, "A\n\nA", "B\nB", None, &NoImages);
 
         assert_eq!(
             pixel(&surface, layout.left_anchor.x, layout.left_anchor.y),

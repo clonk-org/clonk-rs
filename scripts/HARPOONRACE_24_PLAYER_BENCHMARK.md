@@ -11,7 +11,9 @@ PYTHONDONTWRITEBYTECODE=1 \
 
 Use `--dry-run` to inspect the exact commands and port allocation without
 opening windows. `--help` lists timeout, port, duration, resolution, and
-acceptance overrides.
+acceptance overrides. Disposable process state uses Python's platform temp
+directory selection (including `TMPDIR` on macOS and Linux); pass
+`--scratch-root` to choose a specific parent directory.
 
 The runner performs this ordered route:
 

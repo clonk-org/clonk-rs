@@ -3107,8 +3107,7 @@
 
         let mut app = new_classic_menu_app(640, 480);
         app.open_options_menu();
-        app.close_options_menu_with_persist_result(Some(Err(io::Error::new(
-            io::ErrorKind::Other,
+        app.close_options_menu_with_persist_result(Some(Err(io::Error::other(
             "simulated config write failure",
         ))))
         .expect("show config save failure and close Options");

@@ -1,6 +1,6 @@
 use clonk_engine::{
-    LegacyCString, LcgRng, ScriptControlData, ScriptControlPolicy, ScriptStrictness,
-    SpawnConfig, Vector2, SCRIPT_SCOPE_GLOBAL,
+    LcgRng, LegacyCString, ScriptControlData, ScriptControlPolicy, ScriptStrictness, SpawnConfig,
+    Vector2, SCRIPT_SCOPE_GLOBAL,
 };
 use clonk_script::Value;
 
@@ -14,9 +14,7 @@ pub(super) fn gold_rush_do_change_section_loads_ash_city_landscape(
     // A playerless, empty wagon keeps this test focused on the section
     // boundary instead of recursively staging a complete campaign inventory.
     engine
-        .spawn_object(
-            SpawnConfig::new("COAC").with_position(Vector2::new(-10_000, -10_000)),
-        )
+        .spawn_object(SpawnConfig::new("COAC").with_position(Vector2::new(-10_000, -10_000)))
         .expect("the section-transfer wagon spawns");
     // Make the final DoInitializeSection call take its shipped already-run
     // guard. Section-specific setup is independent of the loader boundary.
@@ -66,13 +64,12 @@ fn replay_script(source: &str) -> ScriptControlData {
 fn run_replayed_section_switch(prelude: &str) -> (LcgRng, Vec<(i32, i32)>) {
     let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 23);
     for _ in 0..2 {
-        engine.tick_without_snapshot().expect("pre-switch headless replay tick succeeds");
+        engine
+            .tick_without_snapshot()
+            .expect("pre-switch headless replay tick succeeds");
     }
     engine
-        .execute_script_control(
-            &replay_script(prelude),
-            ScriptControlPolicy::replay(false),
-        )
+        .execute_script_control(&replay_script(prelude), ScriptControlPolicy::replay(false))
         .expect("replayed RNG prelude executes")
         .expect("host replay packet is accepted");
     engine
@@ -96,7 +93,9 @@ fn run_replayed_section_switch(prelude: &str) -> (LcgRng, Vec<(i32, i32)>) {
     for _ in 0..4 {
         let check = engine.sync_check(0);
         sync_ledgers.push((check.random_count, check.random3));
-        engine.tick_without_snapshot().expect("headless replay tick succeeds");
+        engine
+            .tick_without_snapshot()
+            .expect("headless replay tick succeeds");
     }
     (post_load_rng, sync_ledgers)
 }

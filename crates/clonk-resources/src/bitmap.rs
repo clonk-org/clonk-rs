@@ -206,8 +206,7 @@ impl IndexedBitmap {
     }
 
     pub fn index_at(&self, x: u32, y: u32) -> Option<u8> {
-        (x < self.width && y < self.height)
-            .then(|| self.indices[(y * self.width + x) as usize])
+        (x < self.width && y < self.height).then(|| self.indices[(y * self.width + x) as usize])
     }
 }
 

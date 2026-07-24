@@ -1,5 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use clonk_script::{Engine, Value};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 const SCRIPT: &str = r#"
 global func SumLoop(iterations)

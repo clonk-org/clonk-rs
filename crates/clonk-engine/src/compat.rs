@@ -115,6 +115,8 @@ thread_local! {
 const LEGACY_GAME_PALETTE: &[u8; 256 * 3] = include_bytes!("../../../planet/Graphics.c4g/C4.PAL");
 
 #[cfg(test)]
+#[allow(clippy::arc_with_non_send_sync)]
+// Runtime host contexts intentionally share single-threaded script engines by Arc identity.
 mod tests {
     use super::*;
     use crate::command::{CommandId, CommandOperation};
@@ -7478,7 +7480,7 @@ public func CheckGoals()
         )])
         .expect("raw C4ID converts");
         assert_eq!(
-            cast_int(&[id.clone()]).expect("raw C4ID payload casts"),
+            cast_int(std::slice::from_ref(&id)).expect("raw C4ID payload casts"),
             Value::Int(-1),
             "C4Id casts signed char 0xff to unsigned long before OR-ing"
         );
@@ -25343,7 +25345,7 @@ func ChangeAndProbe()
         let (result, outcome) = with_object_host_context_with_world(world, || {
             Ok(Value::Array(vec![
                 set_alive(&[Value::Bool(true), target.clone()])?,
-                get_alive(&[target.clone()])?,
+                get_alive(std::slice::from_ref(&target))?,
                 get_alive(&[])?,
             ]))
         });

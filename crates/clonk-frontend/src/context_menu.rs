@@ -329,8 +329,8 @@ impl ContextMenuResources {
         ensure!(
             icons.width() >= ICON_CELL
                 && icons.height() >= ICON_CELL
-                && icons.width() % ICON_CELL == 0
-                && icons.height() % ICON_CELL == 0,
+                && icons.width().is_multiple_of(ICON_CELL)
+                && icons.height().is_multiple_of(ICON_CELL),
             "GUIIcons.png cannot form the classic 40px icon grid: got {}x{}",
             icons.width(),
             icons.height()
@@ -830,9 +830,7 @@ impl<A: Clone> ClassicContextMenu<A> {
             return false;
         }
         match key {
-            KeyCode::Up | KeyCode::Down | KeyCode::Right | KeyCode::Escape | KeyCode::Enter => {
-                true
-            }
+            KeyCode::Up | KeyCode::Down | KeyCode::Right | KeyCode::Escape | KeyCode::Enter => true,
             KeyCode::Left => self.root.submenu.is_some(),
             KeyCode::Space
             | KeyCode::Tab
@@ -1993,11 +1991,7 @@ mod tests {
         assert!(surface.take_clonk_text_capture().is_empty());
 
         surface.begin_clonk_text_capture();
-        assert!(menu.render_tooltip_at(
-            &mut surface,
-            None,
-            hovered_at + TOOLTIP_DELAY,
-        ));
+        assert!(menu.render_tooltip_at(&mut surface, None, hovered_at + TOOLTIP_DELAY,));
         let commands = surface.take_clonk_text_capture();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].text, "Delayed tip");

@@ -32,8 +32,7 @@ type CallbackId = usize;
 /// while the map creator owns the active C4Landscape::FixRandom ledger.
 /// Passing that ledger through the seam keeps script-side `Random()` calls in
 /// exact render traversal order without coupling this parser to clonk-script.
-pub(crate) type ScriptAlgoCall<'a> =
-    dyn FnMut(&mut LcgRng, &str, [i32; 4]) -> bool + 'a;
+pub(crate) type ScriptAlgoCall<'a> = dyn FnMut(&mut LcgRng, &str, [i32; 4]) -> bool + 'a;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Op {
@@ -300,11 +299,7 @@ impl PostInitMapCallbacks {
             .unwrap_or(0)
     }
 
-    pub(crate) fn invocation_at(
-        &self,
-        array: usize,
-        index: usize,
-    ) -> Option<(String, [i32; 3])> {
+    pub(crate) fn invocation_at(&self, array: usize, index: usize) -> Option<(String, [i32; 3])> {
         let array = self.arrays.get(array)?;
         let enabled = array
             .bits
@@ -324,12 +319,7 @@ impl PostInitMapCallbacks {
     }
 
     fn merge_runtime_clone_prefix_from(&mut self, other: &Self, count: usize) {
-        for (target, source) in self
-            .arrays
-            .iter_mut()
-            .zip(&other.arrays)
-            .take(count)
-        {
+        for (target, source) in self.arrays.iter_mut().zip(&other.arrays).take(count) {
             // A DrawMap clone's overlays still point at arrays owned by the
             // original creator. If such an array has no bitmap yet,
             // EnablePixel consults the ORIGINAL pCurrentMap (null while the
@@ -486,16 +476,14 @@ impl MapCreatorS2State {
 
     pub(crate) fn append_from(&mut self, other: &Self) {
         let callback_offset = self.tree.callbacks.len();
-        self.tree.callbacks.extend(other.tree.callbacks.iter().cloned());
+        self.tree
+            .callbacks
+            .extend(other.tree.callbacks.iter().cloned());
         let node_offset = self.tree.nodes.len().saturating_sub(1);
         let remap_node = |id: NodeId| if id == 0 { 0 } else { id + node_offset };
-        self.tree.nodes[0].children.extend(
-            other.tree.nodes[0]
-                .children
-                .iter()
-                .copied()
-                .map(remap_node),
-        );
+        self.tree.nodes[0]
+            .children
+            .extend(other.tree.nodes[0].children.iter().copied().map(remap_node));
         for source in other.tree.nodes.iter().skip(1) {
             let mut node = source.clone();
             node.owner = node.owner.map(remap_node);
@@ -772,8 +760,8 @@ impl Tree {
                 // when sub.
                 overlay.mat_clr = match &overlay.material {
                     Some(name) => {
-                        let texture = (!overlay.texture.is_empty())
-                            .then_some(overlay.texture.as_str());
+                        let texture =
+                            (!overlay.texture.is_empty()).then_some(overlay.texture.as_str());
                         let clr = classifier.get_index_mat_tex(name, texture);
                         if overlay.sub {
                             clr.wrapping_add(128)
@@ -835,13 +823,11 @@ impl Tree {
                 for _ in 0..=overlay.lambda {
                     let mut d = itofix(2);
                     while d < 6 {
-                        dx += (((dx / 7 + itofix(seed2) / overlay.zoom_x + dy) / j + d)
-                            * rad2grad)
+                        dx += (((dx / 7 + itofix(seed2) / overlay.zoom_x + dy) / j + d) * rad2grad)
                             .sin_deg()
                             * j
                             / 2;
-                        dy += (((dy / 7 + itofix(seed2) / overlay.zoom_y + dx) / j - d)
-                            * rad2grad)
+                        dy += (((dy / 7 + itofix(seed2) / overlay.zoom_y + dx) / j - d) * rad2grad)
                             .cos_deg()
                             * j
                             / 2;
@@ -942,9 +928,7 @@ impl Tree {
                 }
             }
             if do_set && draw {
-                if let (Some(callback), Some(trace)) =
-                    (overlay.eval_callback, trace.as_deref_mut())
-                {
+                if let (Some(callback), Some(trace)) = (overlay.eval_callback, trace) {
                     trace.eval_callbacks.push(callback);
                 }
             }
@@ -984,7 +968,10 @@ impl Tree {
                 break;
             }
             // must be another overlay, since there's an operator
-            match self.next_sibling(current).filter(|&next| self.overlay(next).is_some()) {
+            match self
+                .next_sibling(current)
+                .filter(|&next| self.overlay(next).is_some())
+            {
                 Some(next) => current = next,
                 None => break,
             }
@@ -1124,16 +1111,12 @@ impl Tree {
         let chain = self.first_of_chain(owner);
         let top_overlay = self.overlay(top).expect("top overlay");
         for x in (ix - la)..=(ix + la) {
-            if top_overlay.in_bounds(x, iy)
-                && !self.peek_pix(chain, x, iy, rng, script_algo)
-            {
+            if top_overlay.in_bounds(x, iy) && !self.peek_pix(chain, x, iy, rng, script_algo) {
                 return true;
             }
         }
         for y in (iy - lb)..=(iy + lb) {
-            if top_overlay.in_bounds(ix, y)
-                && !self.peek_pix(chain, ix, y, rng, script_algo)
-            {
+            if top_overlay.in_bounds(ix, y) && !self.peek_pix(chain, ix, y, rng, script_algo) {
                 return true;
             }
         }
@@ -1142,11 +1125,7 @@ impl Tree {
 
     /// AlgoPolygon's backward `u` scan and `pStartChild` selection
     /// (src/C4MapCreatorS2.cpp:1487-1497).
-    fn algo_polygon_start_state(
-        &self,
-        id: NodeId,
-        iy: i32,
-    ) -> Option<(usize, i32, i32, i32)> {
+    fn algo_polygon_start_state(&self, id: NodeId, iy: i32) -> Option<(usize, i32, i32, i32)> {
         let children = &self.nodes[id].children;
         if children.is_empty() {
             return None;
@@ -1510,7 +1489,8 @@ impl Parser<'_, '_> {
                                 let mut map = self.default_map.clone();
                                 map.op = Op::None;
                                 let id =
-                                    self.tree.add(to_node, String::new(), NodeKind::Overlay(map));
+                                    self.tree
+                                        .add(to_node, String::new(), NodeKind::Overlay(map));
                                 new_node = Some(id);
                                 state = State::Keywd1;
                             } else {
@@ -1753,8 +1733,9 @@ impl Parser<'_, '_> {
             NodeKind::Overlay(_) => {
                 // C4MCV_Percent: plain ints count as percent; C4MCV_Pixels:
                 // plain ints count as px (src/C4MapCreatorS2.cpp:329-337).
-                let percent_par =
-                    |value: i32| IntBool::new(value, matches!(val_type, ValType::Percent | ValType::Int));
+                let percent_par = |value: i32| {
+                    IntBool::new(value, matches!(val_type, ValType::Percent | ValType::Int))
+                };
                 let pixels_par = |value: i32| IntBool::new(value, val_type == ValType::Percent);
                 // Field validation that needs &mut self.classifier happens
                 // before re-borrowing the overlay.
@@ -2035,8 +2016,8 @@ pub(crate) fn create_s2_map_for_section_with_state_and_functions_with_script_alg
         Some(callbacks),
         script_algo,
     );
-    creation.creator.skyparcour_water_exposure_guard = skyparcour_water_exposure_guard
-        || source_has_skyparcour_water_exposure_bug(source);
+    creation.creator.skyparcour_water_exposure_guard =
+        skyparcour_water_exposure_guard || source_has_skyparcour_water_exposure_bug(source);
     creation
 }
 
@@ -2343,10 +2324,7 @@ fn render_map_with_callbacks(
     map: NodeId,
     rng: &mut LcgRng,
     script_algo: &mut ScriptAlgoCall<'_>,
-) -> Option<(
-    clonk_resources::bitmap::IndexedBitmap,
-    PostInitMapCallbacks,
-)> {
+) -> Option<(clonk_resources::bitmap::IndexedBitmap, PostInitMapCallbacks)> {
     if tree.callbacks.is_empty() {
         return render_map(tree, map, rng, script_algo)
             .map(|bitmap| (bitmap, PostInitMapCallbacks::default()));
@@ -2355,8 +2333,7 @@ fn render_map_with_callbacks(
         arrays: tree.callbacks.iter().map(CallbackArray::new).collect(),
         map_zoom: 0,
     };
-    let bitmap =
-        render_map_recording_callbacks(tree, map, &mut callbacks, rng, script_algo)?;
+    let bitmap = render_map_recording_callbacks(tree, map, &mut callbacks, rng, script_algo)?;
     Some((bitmap, callbacks))
 }
 
@@ -2468,13 +2445,7 @@ pub(crate) fn render_named_s2_map_with_script_algo(
     map_overlay.hgt = map_height;
     creator.tree.re_evaluate(0, classifier, rng);
     creator.pre_render_rng = Some(rng.clone());
-    render_map_recording_callbacks(
-        &creator.tree,
-        map,
-        &mut creator.callbacks,
-        rng,
-        script_algo,
-    )
+    render_map_recording_callbacks(&creator.tree, map, &mut creator.callbacks, rng, script_algo)
 }
 
 /// Re-run only C4MCMap::RenderTo after the actual scenario host has linked.
@@ -2504,9 +2475,11 @@ mod tests {
             &shipped_skyparcour.replacen("/* Skylands parcour */", "/* copied scenario */", 1)
         ));
         assert!(
-            !source_has_skyparcour_water_exposure_bug(
-                &shipped_skyparcour.replacen("SkyParcour", "Sky Parcour", 1)
-            ),
+            !source_has_skyparcour_water_exposure_bug(&shipped_skyparcour.replacen(
+                "SkyParcour",
+                "Sky Parcour",
+                1
+            )),
             "whitespace that changes token boundaries must change the program identity"
         );
         assert!(
@@ -2643,8 +2616,7 @@ mod tests {
         ix: i32,
         iy: i32,
     ) -> bool {
-        let (tree, node) =
-            algorithm_tree(algorithm, alpha, seed, wdt, hgt, zoom_x, zoom_y);
+        let (tree, node) = algorithm_tree(algorithm, alpha, seed, wdt, hgt, zoom_x, zoom_y);
         let mut rng = LcgRng::seed_from_u64(0);
         let mut missing_script_algo = |_: &mut LcgRng, _: &str, _: [i32; 4]| false;
         tree.run_algorithm(node, ix, iy, &mut rng, &mut missing_script_algo)
@@ -2689,8 +2661,7 @@ mod tests {
     }
 
     fn cpp_random_formula(seed: i32, alpha: i32, ix: i32, iy: i32) -> bool {
-        let mixed = (seed ^ (ix << 2) ^ (iy << 5))
-            ^ ((seed >> 16) + 1 + ix + (iy << 2));
+        let mixed = (seed ^ (ix << 2) ^ (iy << 5)) ^ ((seed >> 16) + 1 + ix + (iy << 2));
         (mixed / 17) % (alpha + 2) == 0
     }
 
@@ -2701,13 +2672,7 @@ mod tests {
         for alpha in [0, 1, 9, 10, 13, 100] {
             for (wdt, hgt) in [(1, 1), (3, 7), (100, 100), (-3, 7), (3, -7)] {
                 for (zoom_x, zoom_y) in [(50, 75), (100, 100), (175, 60)] {
-                    for (ix, iy) in [
-                        (0, 0),
-                        (100, 250),
-                        (3500, 3300),
-                        (4700, 2500),
-                        (-200, 700),
-                    ] {
+                    for (ix, iy) in [(0, 0), (100, 250), (3500, 3300), (4700, 2500), (-200, 700)] {
                         actual.push(u8::from(run_algorithm_case(
                             Algo::Mandel,
                             alpha,
@@ -2746,7 +2711,10 @@ mod tests {
                 expected.push(u8::from(cpp_gradient_formula(wdt, ix, iy)));
             }
         }
-        assert_eq!(actual, expected, "Gradient mask bytes match the C++ formula");
+        assert_eq!(
+            actual, expected,
+            "Gradient mask bytes match the C++ formula"
+        );
 
         actual.clear();
         expected.clear();
@@ -2799,51 +2767,18 @@ mod tests {
             3300,
         ));
 
-        for (wdt, hgt, ix, iy, expected) in [
-            (0, 1, 0, 0, true),
-            (0, 1, 1, 0, false),
-            (1, 0, 0, 0, true),
-        ] {
-            let actual = run_algorithm_case(
-                Algo::Mandel,
-                10,
-                0,
-                wdt,
-                hgt,
-                100,
-                100,
-                ix,
-                iy,
-            );
+        for (wdt, hgt, ix, iy, expected) in
+            [(0, 1, 0, 0, true), (0, 1, 1, 0, false), (1, 0, 0, 0, true)]
+        {
+            let actual = run_algorithm_case(Algo::Mandel, 10, 0, wdt, hgt, 100, 100, ix, iy);
             assert_eq!(
-                actual,
-                expected,
+                actual, expected,
                 "floating zero dimension keeps C++ inf/NaN behavior"
             );
         }
 
-        let gradient_zero = run_algorithm_case(
-            Algo::Gradient,
-            0,
-            0,
-            0,
-            1,
-            100,
-            100,
-            5,
-            3,
-        );
-        let gradient_one = run_algorithm_case(
-            Algo::Gradient,
-            0,
-            0,
-            1,
-            1,
-            100,
-            100,
-            5,
-            3,
-        );
+        let gradient_zero = run_algorithm_case(Algo::Gradient, 0, 0, 0, 1, 100, 100, 5, 3);
+        let gradient_one = run_algorithm_case(Algo::Gradient, 0, 0, 1, 1, 100, 100, 5, 3);
         assert!(gradient_zero);
         assert_eq!(gradient_zero, gradient_one);
         assert!(!algo_random_seeded(17, -2, 5, 3));
@@ -2969,8 +2904,7 @@ mod tests {
         assert!(!encoded.contains("callbacks"));
         assert!(!encoded.contains("eval_callback"));
         assert!(!encoded.contains("draw_callback"));
-        let restored: MapCreatorS2State =
-            serde_json::from_str(&encoded).expect("creator restores");
+        let restored: MapCreatorS2State = serde_json::from_str(&encoded).expect("creator restores");
         assert_eq!(restored, creation.creator);
     }
 
@@ -3525,11 +3459,10 @@ mod tests {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
         let mut calls = Vec::new();
-        let mut script_algo =
-            |_: &mut LcgRng, function: &str, args: [i32; 4]| -> bool {
-                calls.push((function.to_string(), args));
-                true
-            };
+        let mut script_algo = |_: &mut LcgRng, function: &str, args: [i32; 4]| -> bool {
+            calls.push((function.to_string(), args));
+            true
+        };
         let creation = create_s2_map_with_state_and_functions_with_script_algo(
             "map Test { seed=1; wdt=3px; hgt=2px; \
                overlay Probe { seed=2; algo=script; a=17; b=29; \
@@ -3588,7 +3521,10 @@ mod tests {
             "the incomplete top-level map is never re-evaluated after MatNotFound"
         );
         assert_eq!(
-            creation.bitmap.expect("the incomplete map still renders").indices,
+            creation
+                .bitmap
+                .expect("the incomplete map still renders")
+                .indices,
             vec![0, 0],
             "MatNotFound leaves the map subtree unevaluated, so its material colors stay zero"
         );
@@ -3602,10 +3538,8 @@ mod tests {
 
     #[test]
     fn mapgen_mat_sky_resolves_loaded_literal_material() {
-        let library = clonk_resources::MaterialLibrary::parse(
-            "[Material]\nName=Sky\nDensity=0\n",
-        )
-        .expect("Sky material parses");
+        let library = clonk_resources::MaterialLibrary::parse("[Material]\nName=Sky\nDensity=0\n")
+            .expect("Sky material parses");
         let densities = [0; 128];
         let mut names = vec![None; 128];
         names[1] = Some("Sky".to_string());
@@ -3686,10 +3620,16 @@ mod tests {
     fn operator_suppressed_group_never_arms_eval_or_draw_callbacks() {
         let mut classifier = test_classifier();
         let mut rng = LcgRng::seed_from_u64(1);
-        let functions = ["GroupEval", "ChildEval", "ChildDraw", "TailEval", "TailDraw"]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
+        let functions = [
+            "GroupEval",
+            "ChildEval",
+            "ChildDraw",
+            "TailEval",
+            "TailDraw",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
         let creation = create_s2_map_with_state_and_functions(
             "map Test { seed=1; \
                overlay { seed=2; grp=1; evalFn=GroupEval; \
@@ -3815,8 +3755,8 @@ mod tests {
                  InMat { a = 6; mat = Rock; tex = Ridge; };\n\
                };\n\
              };";
-        let map = create_s2_map(source, &mut classifier, w, h, false, 1, &mut rng)
-            .expect("map renders");
+        let map =
+            create_s2_map(source, &mut classifier, w, h, false, 1, &mut rng).expect("map renders");
         let mut histogram = std::collections::BTreeMap::new();
         for &byte in &map.indices {
             *histogram.entry(byte & 0x7f).or_insert(0usize) += 1;

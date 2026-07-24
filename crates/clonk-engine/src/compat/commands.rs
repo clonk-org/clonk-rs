@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Which post-name script argument layout a command function uses.
 #[derive(Clone, Copy)]
 pub(crate) enum CommandArgLayout {
@@ -348,8 +347,8 @@ pub(crate) fn preview_dig_circle_pixels(
     if landscape.pixel_grid().is_some() {
         let mut line_width = 0;
         for ycnt in -radius..radius {
-            let remaining = i64::from(radius) * i64::from(radius)
-                - i64::from(ycnt) * i64::from(ycnt);
+            let remaining =
+                i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
             line_width = (remaining as f64).sqrt() as i32;
             let y = center.y.saturating_add(ycnt);
             let extend = i32::from(line_width == 0);
@@ -397,8 +396,16 @@ pub(crate) fn preview_dig_circle_pixels(
             );
         }
         if let Some((width, _)) = landscape.grid_dimensions() {
-            let start = center.x.saturating_sub(radius).saturating_sub(1).clamp(0, width) as usize;
-            let end = center.x.saturating_add(radius).saturating_add(2).clamp(0, width) as usize;
+            let start = center
+                .x
+                .saturating_sub(radius)
+                .saturating_sub(1)
+                .clamp(0, width) as usize;
+            let end = center
+                .x
+                .saturating_add(radius)
+                .saturating_add(2)
+                .clamp(0, width) as usize;
             landscape.refresh_raster_columns(start..end);
         }
         return counts;
@@ -411,7 +418,9 @@ pub(crate) fn preview_dig_circle_pixels(
                 landscape,
                 materials,
                 center.x.saturating_add(dx),
-                center.y.saturating_add((remaining as f64).sqrt().floor() as i32),
+                center
+                    .y
+                    .saturating_add((remaining as f64).sqrt().floor() as i32),
             ) {
                 *counts.entry(material).or_insert(0) += removed;
             }
@@ -472,8 +481,8 @@ pub(crate) fn preview_shake_circle_pixels(
     }
     if landscape.pixel_grid().is_some() {
         for ycnt in (-radius..radius).rev() {
-            let remaining = i64::from(radius) * i64::from(radius)
-                - i64::from(ycnt) * i64::from(ycnt);
+            let remaining =
+                i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
             let line_width = (remaining as f64).sqrt() as i32;
             let y = center.y.saturating_add(ycnt);
             for xcnt in -line_width..line_width + i32::from(line_width == 0) {
@@ -483,7 +492,11 @@ pub(crate) fn preview_shake_circle_pixels(
         if let Some((width, _)) = landscape.grid_dimensions() {
             landscape.refresh_raster_columns(
                 center.x.saturating_sub(radius).clamp(0, width) as usize
-                    ..center.x.saturating_add(radius).saturating_add(1).clamp(0, width) as usize,
+                    ..center
+                        .x
+                        .saturating_add(radius)
+                        .saturating_add(1)
+                        .clamp(0, width) as usize,
             );
         }
         return;
@@ -502,7 +515,9 @@ pub(crate) fn preview_shake_circle_pixels(
             continue;
         }
         let previous = landscape.surface_height(column).unwrap_or(0);
-        let mut target = center.y.saturating_add((remaining as f64).sqrt().floor() as i32);
+        let mut target = center
+            .y
+            .saturating_add((remaining as f64).sqrt().floor() as i32);
         if target <= previous {
             if previous.saturating_sub(target) > radius {
                 continue;
@@ -522,13 +537,11 @@ pub(crate) fn preview_raster_blast(
 ) -> (BlastPixelReplay, HashMap<crate::MaterialId, i32>) {
     let mut counts = HashMap::new();
     for ycnt in -radius..=radius {
-        let remaining = i64::from(radius) * i64::from(radius)
-            - i64::from(ycnt) * i64::from(ycnt);
+        let remaining = i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
         let line_width = (remaining.max(0) as f64).sqrt() as i32;
         let y = center.y.saturating_add(ycnt);
         for xcnt in -line_width..line_width + i32::from(line_width == 0) {
-            if let Some(material) = landscape.border_material_at(center.x.saturating_add(xcnt), y)
-            {
+            if let Some(material) = landscape.border_material_at(center.x.saturating_add(xcnt), y) {
                 *counts.entry(material).or_insert(0) += 1;
             }
         }
@@ -537,8 +550,7 @@ pub(crate) fn preview_raster_blast(
     let threshold = blast_threshold(radius);
     let mut steps = Vec::new();
     for ycnt in -radius..=radius {
-        let remaining = i64::from(radius) * i64::from(radius)
-            - i64::from(ycnt) * i64::from(ycnt);
+        let remaining = i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
         let line_width = (remaining.max(0) as f64).sqrt() as i32;
         let y = center.y.saturating_add(ycnt);
         for xcnt in -line_width..line_width + i32::from(line_width == 0) {
@@ -546,8 +558,8 @@ pub(crate) fn preview_raster_blast(
             let original_material = landscape.border_material_at(x, y);
             let mut shift_byte = None;
             let mut clear = false;
-            if let Some((material_id, material)) = original_material
-                .and_then(|id| materials.get_by_id(id).map(|entry| (id, entry)))
+            if let Some((material_id, material)) =
+                original_material.and_then(|id| materials.get_by_id(id).map(|entry| (id, entry)))
             {
                 clear = material.blast_free();
                 if let Some(byte) = material
@@ -585,7 +597,11 @@ pub(crate) fn preview_raster_blast(
     if let Some((width, _)) = landscape.grid_dimensions() {
         landscape.refresh_raster_columns(
             center.x.saturating_sub(radius).clamp(0, width) as usize
-                ..center.x.saturating_add(radius).saturating_add(1).clamp(0, width) as usize,
+                ..center
+                    .x
+                    .saturating_add(radius)
+                    .saturating_add(1)
+                    .clamp(0, width) as usize,
         );
     }
     (
@@ -654,8 +670,11 @@ pub(crate) fn preview_captured_blast_pixels(
             if let Some((width, _)) = landscape.grid_dimensions() {
                 landscape.refresh_raster_columns(
                     center.x.saturating_sub(radius).clamp(0, width) as usize
-                        ..center.x.saturating_add(radius).saturating_add(1).clamp(0, width)
-                            as usize,
+                        ..center
+                            .x
+                            .saturating_add(radius)
+                            .saturating_add(1)
+                            .clamp(0, width) as usize,
                 );
             }
         }
@@ -749,7 +768,7 @@ pub(crate) fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
                 .unwrap_or(Value::Nil)),
             5 => Ok(view
                 .legacy_data
-                .or_else(|| match view.data {
+                .or(match view.data {
                     CommandData::Integer(data) => Some(data),
                     CommandData::Text(_) | CommandData::None => None,
                 })
@@ -952,9 +971,9 @@ pub(crate) fn process_preview_blast_reactions(
 ) -> Result<(), RuntimeError> {
     let materials = HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
-        let context = borrow.as_ref().ok_or_else(|| {
-            RuntimeError::new("BlastFree requires an active engine context")
-        })?;
+        let context = borrow
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("BlastFree requires an active engine context"))?;
         Ok::<_, RuntimeError>(
             context
                 .world
@@ -1048,9 +1067,9 @@ pub(crate) fn process_preview_dig_reactions(
     };
     let (frame, materials) = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        let context = borrow.as_mut().ok_or_else(|| {
-            RuntimeError::new("DigFree requires an active engine context")
-        })?;
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("DigFree requires an active engine context"))?;
         if !context.add_dig_material_counts(target, counts) {
             return Ok((context.world.frame, Vec::new()));
         }
@@ -1906,19 +1925,13 @@ fn preview_object_com_put_take(
             Some(item) if actor_state.contents().contains(&item) && is_resolved(item) => {
                 (Some(item), None)
             }
-            Some(item) if is_resolved(item) => {
-                (None, Some(item))
-            }
+            Some(item) if is_resolved(item) => (None, Some(item)),
             Some(_) | None => (
-                actor_state
-                    .contents()
-                    .iter()
-                    .copied()
-                    .find(|item| {
-                        context
-                            .get_world_object(*item)
-                            .is_some_and(|object| object.is_present())
-                    }),
+                actor_state.contents().iter().copied().find(|item| {
+                    context
+                        .get_world_object(*item)
+                        .is_some_and(|object| object.is_present())
+                }),
                 None,
             ),
         };
@@ -3994,11 +4007,7 @@ fn preview_control_transfer(
             call_world_object_script_callback(
                 object_id,
                 &callback,
-                &[
-                    object_reference_value(caller),
-                    tx_value,
-                    Value::Int(ty),
-                ],
+                &[object_reference_value(caller), tx_value, Value::Int(ty)],
             )
         })
         .is_some_and(|result| match result {
@@ -4339,12 +4348,7 @@ pub(crate) fn execute_command(args: &[Value]) -> Result<Value, RuntimeError> {
         preview_command_prelude(event)?;
     }
     for (object_id, caller, on_result, command_instance_id) in entrance_attempts {
-        preview_resolve_activate_entrance(
-            object_id,
-            caller,
-            on_result,
-            command_instance_id,
-        )?;
+        preview_resolve_activate_entrance(object_id, caller, on_result, command_instance_id)?;
     }
     for (object_id, caller, tx_value, ty, command_instance_id) in control_transfers {
         preview_control_transfer(object_id, caller, tx_value, ty, command_instance_id);
@@ -4426,9 +4430,12 @@ fn native_set_command_tx(request: &CommandRequest) -> Value {
     request
         .tx_value
         .clone()
-        .or_else(|| request.tx_definition
-        .as_ref()
-        .map(|id| Value::C4Id(id.as_str().to_string())))
+        .or_else(|| {
+            request
+                .tx_definition
+                .as_ref()
+                .map(|id| Value::C4Id(id.as_str().to_string()))
+        })
         .or_else(|| request.tx.map(Value::Int))
         .unwrap_or(Value::Int(0))
 }

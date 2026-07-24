@@ -77,6 +77,7 @@ pub(crate) struct TiledUnderlayCacheEntry {
 /// The small fixed entry bound covers the fullscreen backing and the stable
 /// split-screen viewport rectangles without letting transient capture sizes or
 /// origins retain unbounded frame-sized allocations.
+#[derive(Default)]
 pub(crate) struct TiledUnderlayCache {
     frame_surface: Option<(u32, u32, PixelFormat)>,
     background: Option<ImageData>,
@@ -85,20 +86,6 @@ pub(crate) struct TiledUnderlayCache {
     pub(crate) entries: Vec<TiledUnderlayCacheEntry>,
     #[cfg(test)]
     pub(crate) rasterizations: usize,
-}
-
-impl Default for TiledUnderlayCache {
-    fn default() -> Self {
-        Self {
-            frame_surface: None,
-            background: None,
-            gamma: None,
-            renderer_config: None,
-            entries: Vec::new(),
-            #[cfg(test)]
-            rasterizations: 0,
-        }
-    }
 }
 
 impl TiledUnderlayCache {
@@ -2324,7 +2311,7 @@ impl GraphicsSystem {
 
         let layout = self.layout_viewports(viewports.len());
         let mut owner_slots = HashMap::<i32, usize>::new();
-        for (input, rect) in viewports.iter().zip(layout.into_iter()) {
+        for (input, rect) in viewports.iter().zip(layout) {
             let slot = owner_slots.entry(input.owner).or_default();
             let camera_slot = *slot;
             *slot += 1;
@@ -2399,7 +2386,7 @@ impl GraphicsSystem {
                 state.stationary_position(view_width, view_height)
             }
         } else {
-            let position = state.update(
+            state.update(
                 input.center.x,
                 input.center.y,
                 view_width,
@@ -2413,8 +2400,7 @@ impl GraphicsSystem {
                 },
                 input.scrolling,
                 self.scroll_smooth,
-            );
-            position
+            )
         };
         if pending_observer_scroll != Vector2::ZERO {
             state.view_x = state.view_x.saturating_add(pending_observer_scroll.x);
@@ -4654,7 +4640,7 @@ impl GraphicsSystem {
             gamma,
             clip: self.surface.clip(),
             #[cfg(test)]
-            destination_samples: LANDSCAPE_DESTINATION_SAMPLES.with(|samples| Arc::clone(samples)),
+            destination_samples: LANDSCAPE_DESTINATION_SAMPLES.with(Arc::clone),
         };
         draw_ground_textured_rows(&row_context, self.surface.pixels_mut(), parallel_rows);
         true

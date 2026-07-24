@@ -434,8 +434,10 @@ async fn run_harpoonrace_shaped_24_player_load(measurement_seconds: u64, topolog
         .await
         .expect("bind HarpoonRace-shaped transport-test host");
     let host_address = listener.local_addr().expect("host listener address");
-    let mut host_config = HostConfig::default();
-    host_config.max_players = PLAYER_COUNT;
+    let mut host_config = HostConfig {
+        max_players: PLAYER_COUNT,
+        ..HostConfig::default()
+    };
     configure_host_transport(&mut host_config, topology);
     let host_name = legacy_string("LoadHost");
     host_config.local_core.name = host_name.clone();
@@ -886,7 +888,7 @@ async fn drive_tick(
 
 fn control_contribution(client_id: u32, tick: Tick) -> ControlPacket {
     let controls = (client_id != HOST_CLIENT_ID)
-        .then(|| {
+        .then_some({
             EngineControlPacket::PlayerControl(PlayerControlData {
                 player: client_id as i32,
                 command: (tick % 16) as i32,

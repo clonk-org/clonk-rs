@@ -117,7 +117,9 @@ pub(crate) fn shipped_invisibility_recast_carries_remaining_time_into_reset_time
 
     cast(&mut engine);
     for _ in 0..7 {
-        engine.tick_without_snapshot().expect("the invisibility timer advances");
+        engine
+            .tick_without_snapshot()
+            .expect("the invisibility timer advances");
     }
     let before = engine
         .object_snapshot(mage)

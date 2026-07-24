@@ -356,8 +356,7 @@ async fn activation_request_reaches_host_with_transport_origin() {
     loop {
         match timeout(EVENT_WAIT, host_events.recv()).await {
             Ok(Some(HostEvent::StatusAck {
-                client_id: actual,
-                ..
+                client_id: actual, ..
             })) if actual == client_id => break,
             Ok(Some(HostEvent::TransportError { error, .. })) => {
                 panic!("transport error before status acknowledgement: {error}")

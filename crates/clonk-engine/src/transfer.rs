@@ -175,7 +175,10 @@ mod tests {
 
         table.set(first, rect(0, 0, -1, 10));
         let states = table.states();
-        assert_eq!(states.iter().map(|zone| zone.owner).collect::<Vec<_>>(), [second, first]);
+        assert_eq!(
+            states.iter().map(|zone| zone.owner).collect::<Vec<_>>(),
+            [second, first]
+        );
         assert_eq!(states[1].width, -1);
 
         table.set(first, rect(0, 0, 10, 10));
@@ -190,6 +193,13 @@ mod tests {
         );
 
         table.set(first, rect(0, 0, 0, 10));
-        assert_eq!(table.states().iter().map(|zone| zone.owner).collect::<Vec<_>>(), [second]);
+        assert_eq!(
+            table
+                .states()
+                .iter()
+                .map(|zone| zone.owner)
+                .collect::<Vec<_>>(),
+            [second]
+        );
     }
 }

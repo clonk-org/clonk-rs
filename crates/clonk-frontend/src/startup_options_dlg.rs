@@ -1,7 +1,7 @@
 //! Pixel-parity renderer/controller for `C4StartupOptionsDlg`, including the
 //! first-shown **Program** tab and the complete **Sound** tab, against the C++
 //! engine's F9 reference capture
-//! (`rust/target/parity-specs/options.md`, `build/Screenshots/ref-options.png`).
+//! (`target/parity-specs/options.md`, `build/Screenshots/ref-options.png`).
 //!
 //! Geometry mirrors the C++ ctor `C4StartupOptionsDlg.cpp:609-985` in exact
 //! integer math; widget rendering mirrors `C4GuiTabular.cpp` (tab strip),
@@ -51,14 +51,14 @@ use crate::{
     KeyCode,
 };
 use anyhow::{Context, Result};
-use freetype::face::LoadFlag;
-use freetype::Library;
 use clonk_graphics::clonk_font::{ClonkFont, ClonkFontRole, GlyphCell, TextAlign};
 use clonk_graphics::{
     BlitSampling, Color, GammaRamp, Rect as SurfaceRect, Surface, SurfaceDrawTarget,
 };
 use clonk_gui::Rect as GuiRect;
 use clonk_resources::LanguageInfo;
+use freetype::face::LoadFlag;
+use freetype::Library;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -332,8 +332,16 @@ impl Aligner {
     ) -> IntRect {
         let size_x_max = (self.area.w - self.mx) / sect_x_max - self.mx;
         let size_y_max = (self.area.h - self.my) / sect_y_max - self.my;
-        let cell_w = if size_x < 0 || center { size_x_max } else { size_x.min(size_x_max) };
-        let cell_h = if size_y < 0 || center { size_y_max } else { size_y.min(size_y_max) };
+        let cell_w = if size_x < 0 || center {
+            size_x_max
+        } else {
+            size_x.min(size_x_max)
+        };
+        let cell_h = if size_y < 0 || center {
+            size_y_max
+        } else {
+            size_y.min(size_y_max)
+        };
         let mut out = IntRect {
             x: sect_x * (cell_w + self.mx) + self.mx + self.area.x,
             y: sect_y * (cell_h + self.my) + self.my + self.area.y,
@@ -443,7 +451,12 @@ pub struct OptionsDlgLayout {
 /// Computes the dialog layout, mirroring C4StartupOptionsDlg.cpp:609-985.
 /// `gui` provides the shadowed GUI fonts (caption measurements), `book` the
 /// startup book fonts (all sheet text).
-pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) -> OptionsDlgLayout {
+pub fn options_dlg_layout(
+    w: i32,
+    h: i32,
+    gui: &ClonkFontSet,
+    book: &BookFonts,
+) -> OptionsDlgLayout {
     // FullscreenDialog margins (C4GuiDialogs.cpp:816-823).
     let margin_x = if w < 500 { 2 } else { w / 50 };
     let margin_y = if h < 320 { 2 } else { h * 2 / 75 };
@@ -475,7 +488,16 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
 
     // Back button (ctor 627-629, 655-657): 3*w("<< BACK") @ CaptionFont.
     let back_w = 3 * gui.caption.measure("<< BACK", true).0;
-    let mut ca_main = Aligner::new(IntRect { x: 0, y: 0, w: client.w, h: client.h }, 0, 0);
+    let mut ca_main = Aligner::new(
+        IntRect {
+            x: 0,
+            y: 0,
+            w: client.w,
+            h: client.h,
+        },
+        0,
+        0,
+    );
     let button_area = ca_main.get_from_bottom(ca_main.height() / if f_small { 20 } else { 7 });
     let mut ca_buttons = Aligner::new(
         Aligner::new(button_area, 0, 0).get_centered(client.w * 7 / 8, 32),
@@ -487,7 +509,11 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
     // Tabular (ctor 652, 660-661): margins from caMain AFTER the button bar.
     let ca_config = Aligner::new(
         ca_main.get_all(),
-        if f_small { 0 } else { ca_main.width() * 69 / 1730 },
+        if f_small {
+            0
+        } else {
+            ca_main.width() * 69 / 1730
+        },
         if f_small { 0 } else { ca_main.height() / 200 },
     );
     let mut tab = ca_config.get_all();
@@ -544,7 +570,9 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
     let sheet = IntRect {
         x: tabular.x + 4 + left_size + (tab.w - left_size) * 13 / 628,
         y: tabular.y + 4 + tab.h * 30 / 483,
-        w: tab.w - (4 + left_size + (tab.w - left_size) * 13 / 628) - (4 + (tab.w - left_size) * 30 / 628),
+        w: tab.w
+            - (4 + left_size + (tab.w - left_size) * 13 / 628)
+            - (4 + (tab.w - left_size) * 30 / 628),
         h: tab.h - (4 + tab.h * 30 / 483) - (4 + tab.h * 32 / 483),
     };
     let sheet_abs = |r: IntRect| IntRect {
@@ -556,13 +584,19 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
     // Program sheet (ctor 675-792): margins caMain w/20, h/20 (post-bar).
     let book_w = |s: &str| book.book.measure(s, true).0;
     let ca_sheet = Aligner::new(
-        IntRect { x: 0, y: 0, w: sheet.w, h: sheet.h },
+        IntRect {
+            x: 0,
+            y: 0,
+            w: sheet.w,
+            h: sheet.h,
+        },
         ca_main.width() / 20,
         ca_main.height() / 20,
     );
 
     // Language rows (678-698).
-    let mut ca_language = Aligner::new(ca_sheet.get_grid_cell(0, 1, 0, 8, -1, -1, true, 1, 2), 0, 4);
+    let mut ca_language =
+        Aligner::new(ca_sheet.get_grid_cell(0, 1, 0, 8, -1, -1, true, 1, 2), 0, 4);
     let mut ca_lang_box = Aligner::new(ca_language.get_from_top(26), 0, 0);
     let lang_label_rect = ca_lang_box.get_from_left(book_w("Language:") + 4, -1);
     let language_label = (sheet.x + lang_label_rect.x, sheet.y + lang_label_rect.y);
@@ -594,7 +628,11 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
     let preloading_check = sheet_abs(ca_sheet.get_grid_cell(0, 1, 5, 9, -1, check_h, true, 1, 1));
 
     // Fair crew group (762-779): h = 2*lh + 2*iIndentY2 + 16.
-    let indent_y2 = if f_small { 1 } else { 1.max(client.h / 200 / 2) };
+    let indent_y2 = if f_small {
+        1
+    } else {
+        1.max(client.h / 200 / 2)
+    };
     let group_h = book.book.line_height * 2 + indent_y2 * 2 + 16;
     let group = sheet_abs(ca_sheet.get_grid_cell(0, 2, 6, 9, -1, group_h, true, 1, 2));
     // Group client: margins l/r/b = 4, top = 4 + title-font line height
@@ -613,7 +651,12 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
         h: group.h - 8 - title_lh,
     };
     let mut ca_group = Aligner::new(
-        IntRect { x: 0, y: 0, w: group_client.w, h: group_client.h },
+        IntRect {
+            x: 0,
+            y: 0,
+            w: group_client.w,
+            h: group_client.h,
+        },
         1,
         0,
     );
@@ -634,10 +677,26 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
         (tw + gui.caption.line_height * 4).min(ca_sheet.inner_width() * 2 / 5)
     };
     let reset_button = sheet_abs(ca_sheet.get_grid_cell(
-        1, 2, 8, 9, btn_w("Reset configuration"), small_btn_h, true, 1, 1,
+        1,
+        2,
+        8,
+        9,
+        btn_w("Reset configuration"),
+        small_btn_h,
+        true,
+        1,
+        1,
     ));
     let advanced_button = sheet_abs(ca_sheet.get_grid_cell(
-        0, 2, 8, 9, btn_w("Advanced settings"), small_btn_h, true, 1, 1,
+        0,
+        2,
+        8,
+        9,
+        btn_w("Advanced settings"),
+        small_btn_h,
+        true,
+        1,
+        1,
     ));
 
     // Sound sheet (ctor 921-985). Its grid deliberately uses the dialog-wide
@@ -646,7 +705,12 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
     let indent_x1 = if f_small { 20 } else { client.w / 40 };
     let indent_y1 = if f_small { 1 } else { client.h / 200 };
     let sound_sheet = Aligner::new(
-        IntRect { x: 0, y: 0, w: sheet.w, h: sheet.h },
+        IntRect {
+            x: 0,
+            y: 0,
+            w: sheet.w,
+            h: sheet.h,
+        },
         indent_x1,
         indent_y1,
     );
@@ -654,15 +718,11 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
     let sound_check_w = lorem_w + sound_check_h + 4;
     let grid_w = sound_check_w * 2;
     let grid_h = sound_check_h * 5 / 2;
-    let frontend_group = sheet_abs(sound_sheet.get_grid_cell(
-        0, 2, 0, 5, grid_w, grid_h, false, 1, 2,
-    ));
-    let game_group = sheet_abs(sound_sheet.get_grid_cell(
-        1, 2, 0, 5, grid_w, grid_h, false, 1, 2,
-    ));
-    let volume_group = sheet_abs(sound_sheet.get_grid_cell(
-        0, 2, 2, 5, grid_w, grid_h, false, 2, 3,
-    ));
+    let frontend_group =
+        sheet_abs(sound_sheet.get_grid_cell(0, 2, 0, 5, grid_w, grid_h, false, 1, 2));
+    let game_group = sheet_abs(sound_sheet.get_grid_cell(1, 2, 0, 5, grid_w, grid_h, false, 1, 2));
+    let volume_group =
+        sheet_abs(sound_sheet.get_grid_cell(0, 2, 2, 5, grid_w, grid_h, false, 2, 3));
 
     // SetTitle relayouts before SetFont, so every group's stored client top
     // margin uses GUI CaptionFont even though its title later draws in BookFont
@@ -681,27 +741,33 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
     let frontend_client = titled_client(frontend_group);
     let game_client = titled_client(game_group);
     let frontend_controls = Aligner::new(
-        IntRect { x: 0, y: 0, w: frontend_client.w, h: frontend_client.h },
+        IntRect {
+            x: 0,
+            y: 0,
+            w: frontend_client.w,
+            h: frontend_client.h,
+        },
         indent_x1,
         indent_y2,
     );
     let game_controls = Aligner::new(
-        IntRect { x: 0, y: 0, w: game_client.w, h: game_client.h },
+        IntRect {
+            x: 0,
+            y: 0,
+            w: game_client.w,
+            h: game_client.h,
+        },
         indent_x1,
         indent_y2,
     );
     let checkboxes = [
         child_abs(
             frontend_client,
-            frontend_controls.get_grid_cell(
-                0, 1, 0, 2, -1, sound_check_h, true, 1, 1,
-            ),
+            frontend_controls.get_grid_cell(0, 1, 0, 2, -1, sound_check_h, true, 1, 1),
         ),
         child_abs(
             frontend_client,
-            frontend_controls.get_grid_cell(
-                0, 1, 1, 2, -1, sound_check_h, true, 1, 1,
-            ),
+            frontend_controls.get_grid_cell(0, 1, 1, 2, -1, sound_check_h, true, 1, 1),
         ),
         child_abs(
             game_client,
@@ -715,7 +781,12 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
 
     let volume_client = titled_client(volume_group);
     let volume_controls = Aligner::new(
-        IntRect { x: 0, y: 0, w: volume_client.w, h: volume_client.h },
+        IntRect {
+            x: 0,
+            y: 0,
+            w: volume_client.w,
+            h: volume_client.h,
+        },
         indent_x1,
         indent_y2,
     );
@@ -925,14 +996,8 @@ pub type GuiSound = SoundSheetSound;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoundSheetAction {
     GuiSound(SoundSheetSound),
-    CheckboxChanged {
-        id: SoundCheckboxId,
-        checked: bool,
-    },
-    VolumeChanged {
-        id: SoundVolumeId,
-        value: u8,
-    },
+    CheckboxChanged { id: SoundCheckboxId, checked: bool },
+    VolumeChanged { id: SoundVolumeId, value: u8 },
     TestSound(SoundSheetSound),
 }
 
@@ -1440,13 +1505,7 @@ impl OptionsDlgState {
     }
 
     /// Refreshes the cached C++ integer layout used for pointer hit-testing.
-    pub fn resize(
-        &mut self,
-        width: i32,
-        height: i32,
-        gui: &ClonkFontSet,
-        book: &BookFonts,
-    ) {
+    pub fn resize(&mut self, width: i32, height: i32, gui: &ClonkFontSet, book: &BookFonts) {
         self.layout = Some(options_dlg_layout(width.max(1), height.max(1), gui, book));
         self.captured_fair_crew_slider = false;
         self.pressed_fair_crew_arrow = None;
@@ -2064,9 +2123,11 @@ impl OptionsDlgState {
                     OptionsFocus::Graphics(OptionsGraphicsFocusTarget::ApplyScale),
                     OptionsFocus::Graphics(OptionsGraphicsFocusTarget::ScaleEdit),
                 ]);
-                order.extend(GraphicsCheckboxId::ALL.into_iter().map(|id| {
-                    OptionsFocus::Graphics(OptionsGraphicsFocusTarget::Checkbox(id))
-                }));
+                order.extend(
+                    GraphicsCheckboxId::ALL
+                        .into_iter()
+                        .map(|id| OptionsFocus::Graphics(OptionsGraphicsFocusTarget::Checkbox(id))),
+                );
             }
             OptionsSheet::Sound => order.extend(
                 SoundCheckboxId::ALL
@@ -2109,9 +2170,7 @@ impl OptionsDlgState {
                     OptionsFocus::Network(NetworkSheetHit::Checkbox(
                         NetworkCheckboxId::AutomaticUpdate,
                     )),
-                    OptionsFocus::Network(NetworkSheetHit::Checkbox(
-                        NetworkCheckboxId::EnableUpnp,
-                    )),
+                    OptionsFocus::Network(NetworkSheetHit::Checkbox(NetworkCheckboxId::EnableUpnp)),
                     OptionsFocus::Network(NetworkSheetHit::Text(NetworkTextField::LocalName)),
                     OptionsFocus::Network(NetworkSheetHit::Text(NetworkTextField::Nick)),
                 ]);
@@ -2191,7 +2250,10 @@ impl OptionsDlgState {
     /// `Ctrl+Tab`/`Ctrl+Shift+Tab` changes sheets at control priority and is
     /// independent of which child currently has focus.
     pub fn handle_ctrl_tab(&mut self, backwards: bool) -> Vec<OptionsDlgAction> {
-        self.select_sheet(self.active_sheet.wrapping_offset(if backwards { -1 } else { 1 }))
+        self.select_sheet(
+            self.active_sheet
+                .wrapping_offset(if backwards { -1 } else { 1 }),
+        )
     }
 
     pub fn handle_gamepad_horizontal(&mut self, backwards: bool) -> Vec<OptionsDlgAction> {
@@ -2591,8 +2653,8 @@ impl OptionsDlgState {
                     SpinboxDirection::Decrement => -1,
                 });
                 if action.is_some() {
-                    self.graphics_slider_positions[graphics_slider_index(GraphicsSliderId::Scale)] =
-                        None;
+                    self.graphics_slider_positions
+                        [graphics_slider_index(GraphicsSliderId::Scale)] = None;
                 }
                 action
             }
@@ -2685,18 +2747,12 @@ impl OptionsDlgState {
         let (minimum, maximum) = graphics_slider_range(id);
         let value = minimum + scroll_pos * (maximum - minimum) / max_scroll;
         let action = match id {
-            GraphicsSliderId::Scale => self
-                .graphics
-                .set_scale_slider_value(value)
-                .unwrap_or(GraphicsSheetAction::ScaleProposalChanged(
-                    self.graphics.proposed_scale_percent,
-                )),
-            GraphicsSliderId::SmokeLevel => self
-                .graphics
-                .set_smoke_slider_value(value)
-                .unwrap_or(GraphicsSheetAction::SmokeLevelChanged(
-                    self.graphics.smoke_level,
-                )),
+            GraphicsSliderId::Scale => self.graphics.set_scale_slider_value(value).unwrap_or(
+                GraphicsSheetAction::ScaleProposalChanged(self.graphics.proposed_scale_percent),
+            ),
+            GraphicsSliderId::SmokeLevel => self.graphics.set_smoke_slider_value(value).unwrap_or(
+                GraphicsSheetAction::SmokeLevelChanged(self.graphics.smoke_level),
+            ),
         };
         vec![OptionsDlgAction::Graphics(action)]
     }
@@ -3492,7 +3548,15 @@ fn engine_opacity(clr: u32) -> f32 {
 }
 
 /// `DrawBoxDw` (StdDDraw2.cpp:1401-1404): fills (x0,y0)-(x1,y1) INCLUSIVE.
-fn fill_box_dw(surface: &mut Surface, x0: i32, y0: i32, x1: i32, y1: i32, clr: u32, gamma: Option<&GammaRamp>) {
+fn fill_box_dw(
+    surface: &mut Surface,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    clr: u32,
+    gamma: Option<&GammaRamp>,
+) {
     if crate::active_advanced_renderer_config()
         .is_some_and(|config| config.blit_offset != 0 || config.no_box_fades)
     {
@@ -3602,7 +3666,15 @@ fn draw_line_dw(
 }
 
 /// `DrawFrameDw` (StdDDraw2.cpp:1181-1187): outline of the inclusive rect.
-fn draw_frame_dw(surface: &mut Surface, x0: i32, y0: i32, x1: i32, y1: i32, clr: u32, gamma: Option<&GammaRamp>) {
+fn draw_frame_dw(
+    surface: &mut Surface,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    clr: u32,
+    gamma: Option<&GammaRamp>,
+) {
     draw_line_dw(surface, x0, y0, x1, y0, clr, gamma);
     draw_line_dw(surface, x1, y0, x1, y1, clr, gamma);
     draw_line_dw(surface, x1, y1, x0, y1, clr, gamma);
@@ -3738,7 +3810,12 @@ fn texel_or_white(image: &ImageData, x: i32, y: i32) -> [f32; 4] {
         .get(idx..idx + 4)
         .map(|p| match p[3] {
             0 => [0.0, 0.0, 0.0, 0.0],
-            a => [f32::from(p[0]), f32::from(p[1]), f32::from(p[2]), f32::from(a)],
+            a => [
+                f32::from(p[0]),
+                f32::from(p[1]),
+                f32::from(p[2]),
+                f32::from(a),
+            ],
         })
         .unwrap_or([255.0, 255.0, 255.0, 0.0])
 }
@@ -3886,7 +3963,11 @@ fn draw_image_bilinear_white_pad(
                     let (x0, y0) = (u.floor() as i32, v.floor() as i32);
                     let (fx, fy) = (u - x0 as f32, v - y0 as f32);
                     let tap = |xr: i32, yr: i32| {
-                        texel_or_white(image, blit_x + xr.clamp(0, ts - 1), blit_y + yr.clamp(0, ts - 1))
+                        texel_or_white(
+                            image,
+                            blit_x + xr.clamp(0, ts - 1),
+                            blit_y + yr.clamp(0, ts - 1),
+                        )
                     };
                     let (p00, p10) = (tap(x0, y0), tap(x0 + 1, y0));
                     let (p01, p11) = (tap(x0, y0 + 1), tap(x0 + 1, y0 + 1));
@@ -3926,8 +4007,11 @@ fn draw_rotated_vfacet(
         || renderer_config.tex_indent != 0
         || renderer_config.blit_offset != 0
     {
-        let transform =
-            clonk_graphics::Transform::set_rotate(-90 * 100, dest_x as f32 + 8.0, dest_y as f32 + 8.0);
+        let transform = clonk_graphics::Transform::set_rotate(
+            -90 * 100,
+            dest_x as f32 + 8.0,
+            dest_y as f32 + 8.0,
+        );
         crate::draw_image_region_transformed_float_source(
             surface,
             (dest_x as f32, dest_y as f32, 16.0, src_h as f32),
@@ -3973,10 +4057,9 @@ fn draw_rotated_vfacet(
 /// facet phase: each 32x32 phase is its own GL texture tile in C++, so a
 /// crop + whole-image stretch reproduces the engine's sampling exactly).
 fn crop_image(image: &ImageData, x: u32, y: u32, w: u32, h: u32) -> ImageData {
+    type CroppedImageCache = HashMap<(clonk_graphics::GpuTextureId, u32, u32, u32, u32), ImageData>;
     thread_local! {
-        static CROPPED_IMAGES: RefCell<
-            HashMap<(clonk_graphics::GpuTextureId, u32, u32, u32, u32), ImageData>,
-        > = RefCell::new(HashMap::new());
+        static CROPPED_IMAGES: RefCell<CroppedImageCache> = RefCell::new(HashMap::new());
     }
     CROPPED_IMAGES.with(|images| {
         let key = (image.gpu_texture_id(), x, y, w, h);
@@ -4197,7 +4280,16 @@ impl OptionsDlgScreen {
         let program = state.program();
         let black = STARTUP_FONT_RGBA;
         let draw_book_left = |surface: &mut Surface, pos: (i32, i32), text: &str| {
-            book.book.draw_with_gamma(surface, pos.0, pos.1, text, black, TextAlign::Left, true, gamma);
+            book.book.draw_with_gamma(
+                surface,
+                pos.0,
+                pos.1,
+                text,
+                black,
+                TextAlign::Left,
+                true,
+                gamma,
+            );
         };
         draw_book_left(surface, layout.language_label, "Language:");
         Self::draw_combo(
@@ -4313,7 +4405,17 @@ impl OptionsDlgScreen {
         let (cx, cy) = layout.tab_clips[index];
         draw_image_strip(surface, cx, cy, &assets.tab_clip, 0, 0, 120, 80, gamma);
         let (ix, iy) = layout.tab_icons[index];
-        draw_image_strip(surface, ix, iy, &assets.option_icons, 32 * index as u32, 0, 32, 32, gamma);
+        draw_image_strip(
+            surface,
+            ix,
+            iy,
+            &assets.option_icons,
+            32 * index as u32,
+            0,
+            32,
+            32,
+            gamma,
+        );
         let (tx, ty) = layout.tab_captions[index];
         book.book_small.draw_with_gamma(
             surface,
@@ -4342,7 +4444,15 @@ impl OptionsDlgScreen {
         let (x0, y0) = (rect.x, rect.y);
         let (x2, y2) = (x0 + rect.w, y0 + rect.h);
         draw_frame_dw(surface, x0, y0, x2, y2 - 1, EDIT_BORDER_COLOR, gamma);
-        draw_frame_dw(surface, x0 + 1, y0 + 1, x2 - 1, y2 - 2, EDIT_BORDER_COLOR, gamma);
+        draw_frame_dw(
+            surface,
+            x0 + 1,
+            y0 + 1,
+            x2 - 1,
+            y2 - 2,
+            EDIT_BORDER_COLOR,
+            gamma,
+        );
         // Side arrow: startup fctContext phase 0, 16x16 (C4Startup.cpp:64-65).
         draw_image_strip(
             surface,
@@ -4456,7 +4566,10 @@ impl OptionsDlgScreen {
         }
 
         Self::draw_group_box(surface, book, &layout.game_group, "Game", gamma);
-        for id in [SoundCheckboxId::GameMusic, SoundCheckboxId::GameSoundEffects] {
+        for id in [
+            SoundCheckboxId::GameMusic,
+            SoundCheckboxId::GameSoundEffects,
+        ] {
             Self::draw_checkbox(
                 surface,
                 assets,
@@ -4482,7 +4595,10 @@ impl OptionsDlgScreen {
                 true,
                 gamma,
             );
-            for (rect, text) in [(&layout.quiet_labels[i], "quiet"), (&layout.loud_labels[i], "loud")] {
+            for (rect, text) in [
+                (&layout.quiet_labels[i], "quiet"),
+                (&layout.loud_labels[i], "loud"),
+            ] {
                 book.book.draw_with_gamma(
                     surface,
                     rect.x + rect.w / 2,
@@ -4545,9 +4661,7 @@ impl OptionsDlgScreen {
             &layout.display_mode_combo,
             graphics.display_mode.label(),
             draw_focus
-                && state.graphics_control_highlighted(
-                    OptionsGraphicsFocusTarget::DisplayModeCombo,
-                ),
+                && state.graphics_control_highlighted(OptionsGraphicsFocusTarget::DisplayModeCombo),
             gamma,
         );
         Self::draw_edit(
@@ -4569,8 +4683,7 @@ impl OptionsDlgScreen {
             &layout.apply_button,
             "Apply",
             draw_focus
-                && state
-                    .graphics_control_highlighted(OptionsGraphicsFocusTarget::ApplyScale),
+                && state.graphics_control_highlighted(OptionsGraphicsFocusTarget::ApplyScale),
             false,
             gamma,
         );
@@ -4598,9 +4711,7 @@ impl OptionsDlgScreen {
                 id.label(),
                 graphics.checkbox(id),
                 draw_focus
-                    && state.graphics_control_highlighted(
-                        OptionsGraphicsFocusTarget::Checkbox(id),
-                    ),
+                    && state.graphics_control_highlighted(OptionsGraphicsFocusTarget::Checkbox(id)),
                 gamma,
             );
         }
@@ -4642,13 +4753,16 @@ impl OptionsDlgScreen {
                 book,
                 &layout.set_buttons[set],
                 &label,
-                draw_focus
-                    && state.control_sheet_control_highlighted(ControlSheetHit::Set(set)),
+                draw_focus && state.control_sheet_control_highlighted(ControlSheetHit::Set(set)),
                 false,
                 gamma,
             );
         }
-        for control in 0..CONTROL_KEY_COUNT {
+        for (control, label) in CONTROL_KEY_LABELS
+            .iter()
+            .enumerate()
+            .take(CONTROL_KEY_COUNT)
+        {
             let rect = layout.key_buttons[control];
             let binding = state
                 .controls()
@@ -4669,7 +4783,7 @@ impl OptionsDlgScreen {
                 surface,
                 rect.x + rect.w / 2,
                 rect.y - book.book_small.line_height,
-                CONTROL_KEY_LABELS[control],
+                label,
                 STARTUP_FONT_RGBA,
                 TextAlign::Center,
                 true,
@@ -4694,8 +4808,7 @@ impl OptionsDlgScreen {
                 &layout.gamepad_gui_check,
                 "GUI control",
                 state.controls().gamepad_gui_control(),
-                draw_focus
-                    && state.control_sheet_control_highlighted(ControlSheetHit::GamepadGui),
+                draw_focus && state.control_sheet_control_highlighted(ControlSheetHit::GamepadGui),
                 gamma,
             );
         }
@@ -4727,8 +4840,7 @@ impl OptionsDlgScreen {
                 &layout.port_check(id),
                 "Enabled",
                 network.port(id).enabled,
-                draw_focus
-                    && state.network_control_highlighted(NetworkSheetHit::PortCheck(id)),
+                draw_focus && state.network_control_highlighted(NetworkSheetHit::PortCheck(id)),
                 gamma,
             );
             if network.port(id).enabled {
@@ -4908,11 +5020,51 @@ impl OptionsDlgScreen {
         let (x1, y1) = (group.x, group.y + book.book.line_height / 2);
         let (x2, y2) = (group.x + group.w, y1 + group.h - book.book.line_height / 2);
         for i in 0..2 {
-            draw_line_dw(surface, x1 + i, y1, x1 + i, y2 - 1, EDIT_BORDER_COLOR, gamma);
-            draw_line_dw(surface, x1 + 2, y1 + i, x1 + 7, y1 + i, EDIT_BORDER_COLOR, gamma);
-            draw_line_dw(surface, x1 + 7 + gap_w, y1 + i, x2 - 3, y1 + i, EDIT_BORDER_COLOR, gamma);
-            draw_line_dw(surface, x2 - 1 - i, y1, x2 - 1 - i, y2 - 1, EDIT_BORDER_COLOR, gamma);
-            draw_line_dw(surface, x1 + 2, y2 - 1 - i, x2 - 3, y2 - 1 - i, EDIT_BORDER_COLOR, gamma);
+            draw_line_dw(
+                surface,
+                x1 + i,
+                y1,
+                x1 + i,
+                y2 - 1,
+                EDIT_BORDER_COLOR,
+                gamma,
+            );
+            draw_line_dw(
+                surface,
+                x1 + 2,
+                y1 + i,
+                x1 + 7,
+                y1 + i,
+                EDIT_BORDER_COLOR,
+                gamma,
+            );
+            draw_line_dw(
+                surface,
+                x1 + 7 + gap_w,
+                y1 + i,
+                x2 - 3,
+                y1 + i,
+                EDIT_BORDER_COLOR,
+                gamma,
+            );
+            draw_line_dw(
+                surface,
+                x2 - 1 - i,
+                y1,
+                x2 - 1 - i,
+                y2 - 1,
+                EDIT_BORDER_COLOR,
+                gamma,
+            );
+            draw_line_dw(
+                surface,
+                x1 + 2,
+                y2 - 1 - i,
+                x2 - 3,
+                y2 - 1 - i,
+                EDIT_BORDER_COLOR,
+                gamma,
+            );
         }
     }
 
@@ -4999,11 +5151,51 @@ impl OptionsDlgScreen {
         let (x1, y1) = (g.x, g.y + book.book.line_height / 2);
         let (x2, y2) = (g.x + g.w, y1 + g.h - book.book.line_height / 2);
         for i in 0..2 {
-            draw_line_dw(surface, x1 + i, y1, x1 + i, y2 - 1, EDIT_BORDER_COLOR, gamma); // left
-            draw_line_dw(surface, x1 + 2, y1 + i, x1 + 7, y1 + i, EDIT_BORDER_COLOR, gamma); // top-left
-            draw_line_dw(surface, x1 + 7 + gap_w, y1 + i, x2 - 3, y1 + i, EDIT_BORDER_COLOR, gamma); // top-right
-            draw_line_dw(surface, x2 - 1 - i, y1, x2 - 1 - i, y2 - 1, EDIT_BORDER_COLOR, gamma); // right
-            draw_line_dw(surface, x1 + 2, y2 - 1 - i, x2 - 3, y2 - 1 - i, EDIT_BORDER_COLOR, gamma); // bottom
+            draw_line_dw(
+                surface,
+                x1 + i,
+                y1,
+                x1 + i,
+                y2 - 1,
+                EDIT_BORDER_COLOR,
+                gamma,
+            ); // left
+            draw_line_dw(
+                surface,
+                x1 + 2,
+                y1 + i,
+                x1 + 7,
+                y1 + i,
+                EDIT_BORDER_COLOR,
+                gamma,
+            ); // top-left
+            draw_line_dw(
+                surface,
+                x1 + 7 + gap_w,
+                y1 + i,
+                x2 - 3,
+                y1 + i,
+                EDIT_BORDER_COLOR,
+                gamma,
+            ); // top-right
+            draw_line_dw(
+                surface,
+                x2 - 1 - i,
+                y1,
+                x2 - 1 - i,
+                y2 - 1,
+                EDIT_BORDER_COLOR,
+                gamma,
+            ); // right
+            draw_line_dw(
+                surface,
+                x1 + 2,
+                y2 - 1 - i,
+                x2 - 3,
+                y2 - 1 - i,
+                EDIT_BORDER_COLOR,
+                gamma,
+            ); // bottom
         }
         // Children: weak label, strong label, slider (add order, ctor 769-779).
         let center_label = |surface: &mut Surface, r: &IntRect, text: &str| {
@@ -5053,10 +5245,30 @@ impl OptionsDlgScreen {
         } else {
             (BTN_BORDER_COLOR1, BTN_BORDER_COLOR2)
         };
-        fill_quad_dw(surface, &[(x0, y0), (x1, y0), (x1 - i, y0 + i), (x0, y0 + i)], high, gamma);
-        fill_quad_dw(surface, &[(x0, y0), (x0 + i, y0), (x0 + i, y1 - i), (x0, y1)], high, gamma);
-        fill_quad_dw(surface, &[(x1, y0), (x1, y1), (x1 - i, y1), (x1 - i, y0 + i)], low, gamma);
-        fill_quad_dw(surface, &[(x1, y1), (x0, y1), (x0 + i, y1 - i), (x1, y1 - i)], low, gamma);
+        fill_quad_dw(
+            surface,
+            &[(x0, y0), (x1, y0), (x1 - i, y0 + i), (x0, y0 + i)],
+            high,
+            gamma,
+        );
+        fill_quad_dw(
+            surface,
+            &[(x0, y0), (x0 + i, y0), (x0 + i, y1 - i), (x0, y1)],
+            high,
+            gamma,
+        );
+        fill_quad_dw(
+            surface,
+            &[(x1, y0), (x1, y1), (x1 - i, y1), (x1 - i, y0 + i)],
+            low,
+            gamma,
+        );
+        fill_quad_dw(
+            surface,
+            &[(x1, y1), (x0, y1), (x0 + i, y1 - i), (x1, y1 - i)],
+            low,
+            gamma,
+        );
         let text_offset = if pressed { i } else { 0 };
         if highlighted {
             draw_image_bilinear_additive(
@@ -5092,7 +5304,9 @@ impl OptionsDlgScreen {
 mod tests {
     use super::*;
     use crate::startup_options_controls::CONTROL_SET_COUNT;
-    use crate::test_support::{endeavour_font_set, load_graphics_png, repo_root, standard_gamma, write_ppm};
+    use crate::test_support::{
+        endeavour_font_set, load_graphics_png, repo_root, standard_gamma, write_ppm,
+    };
     use clonk_graphics::PixelFormat;
 
     fn book_fonts() -> BookFonts {
@@ -5185,7 +5399,10 @@ mod tests {
         else {
             panic!("options primitives were not retained as solid geometry");
         };
-        assert_eq!(*topology, clonk_graphics::GpuPrimitiveTopology::TriangleList);
+        assert_eq!(
+            *topology,
+            clonk_graphics::GpuPrimitiveTopology::TriangleList
+        );
         assert_eq!(*alpha_mode, clonk_graphics::GpuSolidAlphaMode::SourceOver);
         assert_eq!(vertices.len(), 12, "adjacent compatible quads coalesce");
     }
@@ -5251,7 +5468,10 @@ mod tests {
     fn book_glyphs_are_white_with_coverage_alpha() {
         let fonts = book_fonts();
         let cell = fonts.book.glyph('A').expect("glyph A");
-        assert!(cell.pixels.iter().all(|p| p.r == 255 && p.g == 255 && p.b == 255 || p.a == 0));
+        assert!(cell
+            .pixels
+            .iter()
+            .all(|p| p.r == 255 && p.g == 255 && p.b == 255 || p.a == 0));
         assert!(cell.pixels.iter().any(|p| p.a == 255));
         // Shadowed GUI font of the same size has +1 shadow column.
         let gui = endeavour_font_set();
@@ -5269,15 +5489,27 @@ mod tests {
         let book = book_fonts();
         let l = options_dlg_layout(1280, 720, &gui, &book);
 
-        assert_eq!((l.client.x, l.client.y, l.client.w, l.client.h), (25, 69, 1230, 632));
+        assert_eq!(
+            (l.client.x, l.client.y, l.client.w, l.client.h),
+            (25, 69, 1230, 632)
+        );
         assert_eq!(l.title_center, (640, 8));
         // Back button: (77,571) client -> (102,640); h = C4GUI_ButtonHgt.
-        assert_eq!((l.back_button.x, l.back_button.y, l.back_button.h), (102, 640, 32));
+        assert_eq!(
+            (l.back_button.x, l.back_button.y, l.back_button.h),
+            (102, 640, 32)
+        );
         assert_eq!(l.back_button.w, 3 * gui.caption.measure("<< BACK", true).0);
 
         // Tabular after aspect fix: (218,2,794,538) client -> abs.
-        assert_eq!((l.tabular.x, l.tabular.y, l.tabular.w, l.tabular.h), (243, 71, 794, 538));
-        assert_eq!((l.paper.x, l.paper.y, l.paper.w, l.paper.h), (338, 71, 699, 538));
+        assert_eq!(
+            (l.tabular.x, l.tabular.y, l.tabular.w, l.tabular.h),
+            (243, 71, 794, 538)
+        );
+        assert_eq!(
+            (l.paper.x, l.paper.y, l.paper.w, l.paper.h),
+            (338, 71, 699, 538)
+        );
         for i in 0..6 {
             let i32i = i as i32;
             assert_eq!(l.tab_clips[i], (253, 86 + 72 * i32i), "clip {i}");
@@ -5287,36 +5519,70 @@ mod tests {
         // Width 85: DrawCaption clamps iMaxWdt to the 95px clip caption size
         // (C4GuiTabular.cpp:393), not iMaxTabWidth = 115.
         assert_eq!(
-            (l.focus_highlight.x, l.focus_highlight.y, l.focus_highlight.w, l.focus_highlight.h),
+            (
+                l.focus_highlight.x,
+                l.focus_highlight.y,
+                l.focus_highlight.w,
+                l.focus_highlight.h
+            ),
             (258, 89, 85, 74)
         );
         // Sheet client: margins 113/37/37/39 (C4GuiTabular.h:108-111).
-        assert_eq!((l.sheet.x, l.sheet.y, l.sheet.w, l.sheet.h), (356, 108, 644, 462));
+        assert_eq!(
+            (l.sheet.x, l.sheet.y, l.sheet.w, l.sheet.h),
+            (356, 108, 644, 462)
+        );
 
         // Language rows: box at sheet-local (61,31); combo x pinned by the
         // reference frame pixels at x=484.
         assert_eq!(l.language_label, (417, 139));
-        assert_eq!((l.language_combo.x, l.language_combo.y, l.language_combo.h), (484, 139, 26));
+        assert_eq!(
+            (l.language_combo.x, l.language_combo.y, l.language_combo.h),
+            (484, 139, 26)
+        );
         assert_eq!(l.language_info, (417, 173));
         // Font row at local y=121.
         assert_eq!(l.font_label, (417, 229));
         assert_eq!(l.font_face_combo.y, 229);
         assert_eq!(l.font_size_combo.y, 229);
-        assert_eq!(l.font_size_combo.x, l.font_face_combo.x + l.font_face_combo.w + 4);
+        assert_eq!(
+            l.font_size_combo.x,
+            l.font_face_combo.x + l.font_face_combo.w + 4
+        );
         // White chat row at local y=169; checks are 26px boxes.
         assert_eq!(l.white_chat_label, (417, 277));
         assert_eq!(l.ingame_check.h, 26);
         assert_eq!(l.lobby_check.h, 26);
         // Timestamps local (61,219), preloading (61,267), 22px boxes.
-        assert_eq!((l.timestamps_check.x, l.timestamps_check.y, l.timestamps_check.h), (417, 327, 22));
-        assert_eq!((l.preloading_check.x, l.preloading_check.y, l.preloading_check.h), (417, 375, 22));
+        assert_eq!(
+            (
+                l.timestamps_check.x,
+                l.timestamps_check.y,
+                l.timestamps_check.h
+            ),
+            (417, 327, 22)
+        );
+        assert_eq!(
+            (
+                l.preloading_check.x,
+                l.preloading_check.y,
+                l.preloading_check.h
+            ),
+            (417, 375, 22)
+        );
         // Fair crew group local (61,295,230,62) -> abs. Client top margin is
         // 4 + CaptionFont lh (25) = 29 (SetTitle-before-SetFont, see layout
         // fn), so the client is (421,432,222,29): weak/strong y = 432 +
         // (29-22)/2 = 435, slider y = 432 + (29-16)/2 = 438 — both verified
         // against ref-options.png rows.
-        assert_eq!((l.group.x, l.group.y, l.group.w, l.group.h), (417, 403, 230, 62));
-        assert_eq!((l.weak_label.x, l.weak_label.y, l.weak_label.h), (422, 435, 22));
+        assert_eq!(
+            (l.group.x, l.group.y, l.group.w, l.group.h),
+            (417, 403, 230, 62)
+        );
+        assert_eq!(
+            (l.weak_label.x, l.weak_label.y, l.weak_label.h),
+            (422, 435, 22)
+        );
         assert_eq!(l.slider.y, 438);
         assert_eq!(l.slider.h, 16);
         assert_eq!(
@@ -5623,7 +5889,8 @@ mod tests {
             "IDS_DESC_UPNP",
         );
 
-        let local_label = labeled_edit_bounds(layout.network.local_name_edit, book.book.line_height);
+        let local_label =
+            labeled_edit_bounds(layout.network.local_name_edit, book.book.line_height);
         let nick_label = labeled_edit_bounds(layout.network.nick_edit, book.book.line_height);
         for point in [
             GuiPoint::new((local_label.x + 1) as f32, (local_label.y + 1) as f32),
@@ -5755,10 +6022,14 @@ mod tests {
         assert!(state.handle_pointer_down(increment).is_empty());
         assert_eq!(
             state.pressed_graphics_arrow,
-            Some((GraphicsSliderId::SmokeLevel, GraphicsSliderDirection::Increment))
+            Some((
+                GraphicsSliderId::SmokeLevel,
+                GraphicsSliderDirection::Increment
+            ))
         );
         let before = state.graphics().smoke_level;
-        let mut previous_position = state.graphics_slider_position(GraphicsSliderId::SmokeLevel, smoke);
+        let mut previous_position =
+            state.graphics_slider_position(GraphicsSliderId::SmokeLevel, smoke);
         for _ in 0..4 {
             assert!(!state.advance_frame().is_empty());
             let position = state.graphics_slider_position(GraphicsSliderId::SmokeLevel, smoke);
@@ -6021,9 +6292,11 @@ mod tests {
             OptionsFocus::Graphics(OptionsGraphicsFocusTarget::ApplyScale),
             OptionsFocus::Graphics(OptionsGraphicsFocusTarget::ScaleEdit),
         ];
-        controls.extend(GraphicsCheckboxId::ALL.into_iter().map(|id| {
-            OptionsFocus::Graphics(OptionsGraphicsFocusTarget::Checkbox(id))
-        }));
+        controls.extend(
+            GraphicsCheckboxId::ALL
+                .into_iter()
+                .map(|id| OptionsFocus::Graphics(OptionsGraphicsFocusTarget::Checkbox(id))),
+        );
 
         assert_options_focus_cycle(&mut state, &controls);
         assert_eq!(state.focused_graphics_control(), None);
@@ -6108,9 +6381,7 @@ mod tests {
             OptionsFocus::Network(NetworkSheetHit::Checkbox(
                 NetworkCheckboxId::AutomaticUpdate,
             )),
-            OptionsFocus::Network(NetworkSheetHit::Checkbox(
-                NetworkCheckboxId::EnableUpnp,
-            )),
+            OptionsFocus::Network(NetworkSheetHit::Checkbox(NetworkCheckboxId::EnableUpnp)),
             OptionsFocus::Network(NetworkSheetHit::Text(NetworkTextField::LocalName)),
             OptionsFocus::Network(NetworkSheetHit::Text(NetworkTextField::Nick)),
         ]);
@@ -6147,9 +6418,7 @@ mod tests {
             assert_eq!(
                 state.handle_gamepad_low_down(),
                 vec![
-                    OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
-                        SoundSheetSound::ArrowHit,
-                    )),
+                    OptionsDlgAction::Sound(SoundSheetAction::GuiSound(SoundSheetSound::ArrowHit,)),
                     OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
                         id,
                         checked: false,
@@ -6207,9 +6476,7 @@ mod tests {
         assert_eq!(
             state.handle_pointer_up(square),
             vec![
-                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
-                    SoundSheetSound::ArrowHit,
-                )),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(SoundSheetSound::ArrowHit,)),
                 OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
                     id: SoundCheckboxId::FrontendSoundEffects,
                     checked: false,
@@ -6220,9 +6487,7 @@ mod tests {
         assert_eq!(
             state.handle_pointer_up(inclusive_right_edge),
             vec![
-                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
-                    SoundSheetSound::ArrowHit,
-                )),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(SoundSheetSound::ArrowHit,)),
                 OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
                     id: SoundCheckboxId::FrontendSoundEffects,
                     checked: true,
@@ -6236,10 +6501,7 @@ mod tests {
     fn back_pointer_ownership_blocks_sliders_and_rearms_only_over_back() {
         let (mut state, layout) = live_sound_state(SoundSheetState::default());
         let back = layout.back_button;
-        let back_point = GuiPoint::new(
-            (back.x + back.w / 2) as f32,
-            (back.y + back.h / 2) as f32,
-        );
+        let back_point = GuiPoint::new((back.x + back.w / 2) as f32, (back.y + back.h / 2) as f32);
         let slider = layout.sound.slider(SoundVolumeId::Music);
         let slider_track = GuiPoint::new(
             (slider.x + slider.w / 2) as f32,
@@ -6255,8 +6517,14 @@ mod tests {
         assert_eq!(state.captured_sound_slider, None);
         assert_eq!(state.sound().music_volume, 100);
         assert!(state.handle_pointer_move(back_point).is_empty());
-        assert!(state.pressed_back, "MouseEnter rearms the owned Back button");
-        assert_eq!(state.handle_pointer_up(back_point), vec![OptionsDlgAction::Back]);
+        assert!(
+            state.pressed_back,
+            "MouseEnter rearms the owned Back button"
+        );
+        assert_eq!(
+            state.handle_pointer_up(back_point),
+            vec![OptionsDlgAction::Back]
+        );
 
         assert!(state.handle_pointer_down(back_point).is_empty());
         assert!(state.handle_pointer_move(slider_track).is_empty());
@@ -6275,9 +6543,7 @@ mod tests {
         assert_eq!(
             state.handle_pointer_up(checkbox_square),
             vec![
-                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
-                    SoundSheetSound::ArrowHit,
-                )),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(SoundSheetSound::ArrowHit,)),
                 OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
                     id: SoundCheckboxId::FrontendMusic,
                     checked: false,
@@ -6301,10 +6567,9 @@ mod tests {
             (checkbox.x + checkbox.h / 2) as f32,
             (checkbox.y + checkbox.h / 2) as f32,
         );
-        let expected_pos =
-            (release.x.floor() as i32 - slider.x - 16 - 8).clamp(0, sound_slider_max_scroll(slider));
-        let expected_value =
-            (expected_pos * 100 / sound_slider_max_scroll(slider).max(1)) as u8;
+        let expected_pos = (release.x.floor() as i32 - slider.x - 16 - 8)
+            .clamp(0, sound_slider_max_scroll(slider));
+        let expected_value = (expected_pos * 100 / sound_slider_max_scroll(slider).max(1)) as u8;
         assert_eq!(
             state.handle_pointer_up(release),
             vec![
@@ -6312,12 +6577,8 @@ mod tests {
                     id: SoundVolumeId::SoundEffects,
                     value: expected_value,
                 }),
-                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
-                    SoundSheetSound::ArrowHit,
-                )),
-                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
-                    SoundSheetSound::ArrowHit,
-                )),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(SoundSheetSound::ArrowHit,)),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(SoundSheetSound::ArrowHit,)),
                 OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
                     id: SoundCheckboxId::FrontendMusic,
                     checked: false,
@@ -6346,9 +6607,7 @@ mod tests {
                     id: SoundVolumeId::Music,
                     value: expected_value,
                 }),
-                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
-                    SoundSheetSound::Command,
-                )),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(SoundSheetSound::Command,)),
             ]
         );
         // Track down captured the slider: dragging outside its rectangle still
@@ -6382,21 +6641,16 @@ mod tests {
                     id: SoundVolumeId::SoundEffects,
                     ..
                 }),
-                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
-                    SoundSheetSound::ArrowHit
-                )),
-                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
-                    SoundSheetSound::Command
-                )),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(SoundSheetSound::ArrowHit)),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(SoundSheetSound::Command)),
             ]
         ));
     }
 
     #[test]
     fn cross_slider_arrow_transitions_keep_mouseleave_and_bar_state_separate() {
-        let (mut state, layout) = live_sound_state(SoundSheetState::new(
-            true, true, true, true, 50, 50,
-        ));
+        let (mut state, layout) =
+            live_sound_state(SoundSheetState::new(true, true, true, true, 50, 50));
         let music = layout.sound.slider(SoundVolumeId::Music);
         let effects = layout.sound.slider(SoundVolumeId::SoundEffects);
         let music_arrow = GuiPoint::new((music.x + 2) as f32, (music.y + 2) as f32);
@@ -6426,22 +6680,15 @@ mod tests {
                     id: SoundVolumeId::SoundEffects,
                     ..
                 }),
-                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
-                    SoundSheetSound::ArrowHit
-                )),
-                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
-                    SoundSheetSound::Command
-                )),
-                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
-                    SoundSheetSound::ArrowHit
-                )),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(SoundSheetSound::ArrowHit)),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(SoundSheetSound::Command)),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(SoundSheetSound::ArrowHit)),
             ]
         ));
         assert!(!state.handle_pointer_up(effects_track).is_empty());
 
-        let (mut direct, _) = live_sound_state(SoundSheetState::new(
-            true, true, true, true, 50, 50,
-        ));
+        let (mut direct, _) =
+            live_sound_state(SoundSheetState::new(true, true, true, true, 50, 50));
         assert!(!direct.handle_pointer_down(music_arrow).is_empty());
         assert!(matches!(
             direct.handle_pointer_move(effects_track).as_slice(),
@@ -6450,12 +6697,8 @@ mod tests {
                     id: SoundVolumeId::SoundEffects,
                     ..
                 }),
-                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
-                    SoundSheetSound::ArrowHit
-                )),
-                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
-                    SoundSheetSound::Command
-                )),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(SoundSheetSound::ArrowHit)),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(SoundSheetSound::Command)),
             ]
         ));
     }
@@ -6480,9 +6723,7 @@ mod tests {
                     id: SoundVolumeId::SoundEffects,
                     ..
                 }),
-                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
-                    SoundSheetSound::ArrowHit
-                )),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(SoundSheetSound::ArrowHit)),
             ]
         ));
         assert_eq!(
@@ -6537,12 +6778,8 @@ mod tests {
                     id: SoundVolumeId::SoundEffects,
                     ..
                 }),
-                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
-                    SoundSheetSound::ArrowHit
-                )),
-                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
-                    SoundSheetSound::Command
-                )),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(SoundSheetSound::ArrowHit)),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(SoundSheetSound::Command)),
             ]
         ));
         assert!(matches!(
@@ -6552,9 +6789,7 @@ mod tests {
                     id: SoundVolumeId::SoundEffects,
                     ..
                 }),
-                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
-                    SoundSheetSound::ArrowHit
-                )),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(SoundSheetSound::ArrowHit)),
             ]
         ));
 
@@ -6586,7 +6821,10 @@ mod tests {
             state.sound().frontend_sound_effects,
             old_sound.frontend_sound_effects
         );
-        assert_eq!(state.sound().sound_effects_volume, old_sound.sound_effects_volume);
+        assert_eq!(
+            state.sound().sound_effects_volume,
+            old_sound.sound_effects_volume
+        );
     }
 
     #[test]
@@ -6623,8 +6861,7 @@ mod tests {
         );
         assert!((checkbox.y..checkbox.y + checkbox.h).any(|y| {
             (checkbox.x..checkbox.x + checkbox.h).any(|x| {
-                active.get_pixel(x as u32, y as u32)
-                    != covered.get_pixel(x as u32, y as u32)
+                active.get_pixel(x as u32, y as u32) != covered.get_pixel(x as u32, y as u32)
             })
         }));
     }
@@ -6666,18 +6903,23 @@ mod tests {
         });
         let group = layout.sound.frontend_group;
         assert_eq!(
-            at_half.get_pixel(group.x as u32, (group.y + book.book.line_height / 2 + 3) as u32),
+            at_half.get_pixel(
+                group.x as u32,
+                (group.y + book.book.line_height / 2 + 3) as u32
+            ),
             Some(Color::new(frame_rgb[0], frame_rgb[1], frame_rgb[2], 255)),
             "the two-pixel GroupBox frame uses C4StartupEditBorderColor"
         );
 
         let checkbox = layout.sound.checkbox(SoundCheckboxId::FrontendMusic);
-        assert!((checkbox.y..checkbox.y + checkbox.h).any(|y| {
-            (checkbox.x..checkbox.x + checkbox.h).any(|x| {
-                at_half.get_pixel(x as u32, y as u32)
-                    != unchecked.get_pixel(x as u32, y as u32)
-            })
-        }), "checked and unchecked GUICheckbox phases must differ");
+        assert!(
+            (checkbox.y..checkbox.y + checkbox.h).any(|y| {
+                (checkbox.x..checkbox.x + checkbox.h).any(|x| {
+                    at_half.get_pixel(x as u32, y as u32) != unchecked.get_pixel(x as u32, y as u32)
+                })
+            }),
+            "checked and unchecked GUICheckbox phases must differ"
+        );
 
         let pin_anchor = (0..16)
             .flat_map(|y| (0..16).map(move |x| (x, y)))
@@ -6686,10 +6928,8 @@ mod tests {
                 assets.book_scroll.pixels()[index + 3] == 255
             })
             .expect("StartupBookScroll pin has an opaque pixel");
-        let source_index = (((16 + pin_anchor.1) * assets.book_scroll.width()
-            + 16
-            + pin_anchor.0)
-            * 4) as usize;
+        let source_index =
+            (((16 + pin_anchor.1) * assets.book_scroll.width() + 16 + pin_anchor.0) * 4) as usize;
         let source = &assets.book_scroll.pixels()[source_index..source_index + 4];
         let expected_pin = Color::new(
             encode(Some(gamma), f32::from(source[0])).round() as u8,
@@ -6721,10 +6961,8 @@ mod tests {
         state.resize(1280, 720, &gui, &book);
         let layout = options_dlg_layout(1280, 720, &gui, &book);
 
-        let second_tab = crate::GuiPoint::new(
-            layout.tabular.x as f32,
-            (layout.tabular.y + 92) as f32,
-        );
+        let second_tab =
+            crate::GuiPoint::new(layout.tabular.x as f32, (layout.tabular.y + 92) as f32);
         assert_eq!(
             state.handle_pointer_down(second_tab),
             vec![OptionsDlgAction::SheetChanged(OptionsSheet::Graphics)]
@@ -6733,19 +6971,14 @@ mod tests {
         assert!(state.handle_pointer_up(second_tab).is_empty());
 
         // One-pixel gap between first [20,90] and second [92,162] bands.
-        let gap = crate::GuiPoint::new(
-            layout.tabular.x as f32,
-            (layout.tabular.y + 91) as f32,
-        );
+        let gap = crate::GuiPoint::new(layout.tabular.x as f32, (layout.tabular.y + 91) as f32);
         assert!(state.handle_pointer_down(gap).is_empty());
         assert_eq!(state.active_sheet(), OptionsSheet::Graphics);
 
         assert!(state.handle_tab(true).is_empty());
         assert_eq!(state.focus, OptionsFocus::Back);
-        let third_tab = crate::GuiPoint::new(
-            layout.tabular.x as f32,
-            (layout.tabular.y + 164) as f32,
-        );
+        let third_tab =
+            crate::GuiPoint::new(layout.tabular.x as f32, (layout.tabular.y + 164) as f32);
         assert_eq!(
             state.handle_pointer_down(third_tab),
             vec![OptionsDlgAction::SheetChanged(OptionsSheet::Sound)]
@@ -6776,12 +7009,21 @@ mod tests {
             state.handle_key_down(crate::KeyCode::Down),
             vec![OptionsDlgAction::SheetChanged(OptionsSheet::Program)]
         );
-        assert_eq!(state.handle_key_down(crate::KeyCode::Left), vec![OptionsDlgAction::Back]);
-        assert_eq!(state.handle_key_down(crate::KeyCode::Escape), vec![OptionsDlgAction::Back]);
+        assert_eq!(
+            state.handle_key_down(crate::KeyCode::Left),
+            vec![OptionsDlgAction::Back]
+        );
+        assert_eq!(
+            state.handle_key_down(crate::KeyCode::Escape),
+            vec![OptionsDlgAction::Back]
+        );
 
         assert!(state.handle_tab(true).is_empty());
         assert!(state.handle_key_down(crate::KeyCode::Enter).is_empty());
-        assert_eq!(state.handle_key_up(crate::KeyCode::Enter), vec![OptionsDlgAction::Back]);
+        assert_eq!(
+            state.handle_key_up(crate::KeyCode::Enter),
+            vec![OptionsDlgAction::Back]
+        );
     }
 
     // Dialog::AdvanceFocus walks nested controls in construction order. The
@@ -7163,7 +7405,10 @@ mod tests {
             "Button::IsFocusOnClick is false, so a cancelled Back click retains Tabular focus"
         );
         assert!(state.handle_pointer_down(inside).is_empty());
-        assert_eq!(state.handle_pointer_up(inside), vec![OptionsDlgAction::Back]);
+        assert_eq!(
+            state.handle_pointer_up(inside),
+            vec![OptionsDlgAction::Back]
+        );
     }
 
     // The Program sheet binds this checkbox directly to
@@ -7238,7 +7483,12 @@ mod tests {
     #[test]
     fn engine_quad_fills_beveled_trapezoid() {
         let mut sfc = Surface::new(12, 6, PixelFormat::Rgba8888);
-        fill_quad_dw(&mut sfc, &[(0, 0), (12, 0), (12 - 3, 3), (0, 3)], 0x00ffffff, None);
+        fill_quad_dw(
+            &mut sfc,
+            &[(0, 0), (12, 0), (12 - 3, 3), (0, 3)],
+            0x00ffffff,
+            None,
+        );
         let lit = |y: u32| {
             (0..12u32)
                 .filter(|&x| sfc.get_pixel(x, y).unwrap().r > 0)
@@ -7252,7 +7502,12 @@ mod tests {
         // The adjoining right quad (12,0),(12,6),(9,6),(9,3) owns the seam:
         // its diagonal is a LEFT edge, so the on-edge center (11,0) is in.
         let mut sfc2 = Surface::new(12, 6, PixelFormat::Rgba8888);
-        fill_quad_dw(&mut sfc2, &[(12, 0), (12, 6), (9, 6), (9, 3)], 0x00ffffff, None);
+        fill_quad_dw(
+            &mut sfc2,
+            &[(12, 0), (12, 6), (9, 6), (9, 3)],
+            0x00ffffff,
+            None,
+        );
         assert_eq!(sfc2.get_pixel(11, 0).unwrap().r, 255);
         assert_eq!(sfc2.get_pixel(10, 0).unwrap().r, 0);
     }

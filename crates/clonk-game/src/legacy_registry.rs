@@ -488,7 +488,7 @@ pub(crate) fn serialize_legacy_registry_config(
             }
             output.extend_from_slice(b"\r\n");
             let indent = (key.path.len() - 1) * 2;
-            output.extend(std::iter::repeat(b' ').take(indent));
+            output.extend(std::iter::repeat_n(b' ', indent));
             output.push(b'[');
             output.extend_from_slice(key.path[key.path.len() - 1].as_bytes());
             output.extend_from_slice(b"]\r\n");
@@ -496,7 +496,7 @@ pub(crate) fn serialize_legacy_registry_config(
 
         let indent = (key.path.len() - 1) * 2;
         for (name, serialized) in key.values {
-            output.extend(std::iter::repeat(b' ').take(indent));
+            output.extend(std::iter::repeat_n(b' ', indent));
             output.extend_from_slice(name.as_bytes());
             output.push(b'=');
             output.extend_from_slice(&serialized);

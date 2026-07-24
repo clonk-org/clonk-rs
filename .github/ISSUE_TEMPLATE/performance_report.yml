@@ -1,0 +1,61 @@
+name: Performance regression
+description: Report a reproducible latency, frame-rate, memory, or build regression
+title: "[Performance]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use a repeatable workload and report measurements according to `PERFORMANCE.md`. Performance work must preserve C++ behavior and lockstep determinism.
+  - type: input
+    id: revision
+    attributes:
+      label: Clonk Rust revision
+      placeholder: 0123456789abcdef
+    validations:
+      required: true
+  - type: textarea
+    id: system
+    attributes:
+      label: System details
+      description: Include operating system, CPU, GPU, RAM, and relevant driver versions.
+    validations:
+      required: true
+  - type: textarea
+    id: workload
+    attributes:
+      label: Workload
+      description: Include scenario, player count, seed, duration, build profile, and exact command.
+    validations:
+      required: true
+  - type: textarea
+    id: measurements
+    attributes:
+      label: Measurements
+      description: Provide before/after samples and distinguish cold builds from warm builds.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: State the baseline or acceptance target and how it was established.
+    validations:
+      required: true
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: Profiling artifacts
+      description: Link or attach minimal profiles and metrics after removing personal data and secrets.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I used the same workload and build state for comparison.
+          required: true
+        - label: I searched for an existing report of this regression.
+          required: true
+        - label: This report does not disclose a security vulnerability.
+          required: true

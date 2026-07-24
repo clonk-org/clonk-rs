@@ -5,14 +5,14 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use clonk_engine::LegacyCString;
 use clonk_network::{
     build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec, HostResourcePublication,
     HostResourceType, ResourceFileOwnership,
 };
 use clonk_resources::{c4group_file_crc, Group, MutableGroup};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 
 #[test]
 fn calculate_file_sha_prefers_standalone_and_is_idempotent() {
@@ -222,9 +222,7 @@ fn cpp_keeps_a_definition_when_standalone_packing_fails() {
             LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap(),
             "Host Player",
         )
-        .with_standalone_name(
-            LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap(),
-        ),
+        .with_standalone_name(LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap()),
     )
     .expect("fAllowUnloadable retains definitions after GetStandalone failure");
 

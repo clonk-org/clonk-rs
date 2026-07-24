@@ -93,10 +93,8 @@ mod tests {
         assert_eq!(layout.buttons[0].button, MessageDialogButton::Cancel);
         assert_eq!(layout.buttons[0].rect.w, 140);
         assert_eq!(layout.buttons[0].rect.y, bounds.y + 144);
-        let progress_point = GuiPoint::new(
-            (progress_bar.x + 1) as f32,
-            (progress_bar.y + 1) as f32,
-        );
+        let progress_point =
+            GuiPoint::new((progress_bar.x + 1) as f32, (progress_bar.y + 1) as f32);
         progress
             .dialog_mut()
             .handle_pointer_move(progress_point, &layout);

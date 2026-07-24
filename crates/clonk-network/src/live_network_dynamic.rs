@@ -15,6 +15,10 @@ const GROUP_MAKER_MAX_BYTES: usize = 30;
 const C4FLS_SCENARIO: &str = "Loader*.bmp|Loader*.png|Loader*.jpeg|Loader*.jpg|Fonts.txt|Scenario.txt|Title*.txt|Info.txt|Desc*.rtf|Icon.png|Icon.bmp|Game.txt|StringTbl*.txt|Teams.txt|Parameters.txt|Info.txt|Sect*.c4g|Music.c4g|*.mid|*.wav|Desc*.rtf|Title.bmp|Title.png|*.c4d|Material.c4g|MatMap.txt|Landscape.bmp|Landscape.png|DiffLandscape.bmp|Sky.bmp|Sky.png|Sky.jpeg|Sky.jpg|PXS.c4b|MassMover.c4b|CtrlRec.c4b|Strings.txt|Objects.txt|RoundResults.txt|Author.txt|Version.txt|Names.txt|*.c4d|Script.c|Script*.c|System.c4g";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// This is a public, construction-oriented API. Boxing `MutableGroup` would
+// break callers and add an allocation to every composed child solely to make
+// the enum's uncommon variants closer in size.
+#[allow(clippy::large_enum_variant)]
 pub enum LiveNetworkDynamicComponent {
     File {
         name: String,

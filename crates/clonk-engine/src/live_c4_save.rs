@@ -9,10 +9,10 @@ use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::PathBuf;
 
-use image::{DynamicImage, ImageOutputFormat, Rgba, RgbaImage};
 use clonk_resources::bitmap::{BitmapError, IndexedBitmap};
 use clonk_resources::{Group, GroupError, MutableGroup, MutableGroupEntryKind, MutableGroupError};
 use clonk_script::{C4StringValue, Value};
+use image::{DynamicImage, ImageOutputFormat, Rgba, RgbaImage};
 use thiserror::Error;
 
 use crate::command::{CommandData, LegacyCommandSave};
@@ -609,9 +609,11 @@ impl Engine {
         // Filter out dead registrations exactly as C4StringTable::EnumStrings
         // does, but include values in player groups saved after the scenario.
         let referenced_strings = collect_live_referenced_strings(self, &state);
-        let mut strings = LegacyStringTable::from_enumerated_values(
-            clonk_script::enumerate_c4_strings(&self.script_string_registrations, &referenced_strings),
-        );
+        let mut strings =
+            LegacyStringTable::from_enumerated_values(clonk_script::enumerate_c4_strings(
+                &self.script_string_registrations,
+                &referenced_strings,
+            ));
         let game_object_numbers = self.live_object_numbers_for_save();
         strings.set_object_numbers(game_object_numbers.clone());
         // C4GameSave::SaveRuntimeData writes Strings.txt immediately after
@@ -1457,7 +1459,7 @@ fn serialize_scenario_for_policy(
 
 fn savegame_icon(target_group_name: &str) -> i32 {
     let file_name = target_group_name
-        .rsplit(|character| character == '/' || character == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(target_group_name);
     let stem = file_name
@@ -2488,7 +2490,7 @@ fn format_legacy_float(value: f32) -> String {
     let exponent = exponent
         .parse::<i32>()
         .expect("Rust scientific exponent is an integer");
-    if exponent < -4 || exponent >= 6 {
+    if !(-4..6).contains(&exponent) {
         let mantissa = trim_decimal_zeroes(mantissa);
         let sign = if exponent < 0 { '-' } else { '+' };
         return format!("{mantissa}e{sign}{:02}", exponent.unsigned_abs());
@@ -3686,8 +3688,8 @@ fn serialize_teams(
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(script_player_names.len())];
-    let has_compiled_value = configuration.active != true
-        || configuration.custom != true
+    let has_compiled_value = !configuration.active
+        || !configuration.custom
         || configuration.allow_hostility_change
         || configuration.allow_team_switch
         || configuration.auto_generate_teams
@@ -4437,10 +4439,9 @@ mod tests {
 
         let state = engine.capture_state();
         let referenced = collect_live_referenced_strings(&engine, &state);
-        let strings = LegacyStringTable::from_enumerated_values(clonk_script::enumerate_c4_strings(
-            &engine.script_string_registrations,
-            &referenced,
-        ));
+        let strings = LegacyStringTable::from_enumerated_values(
+            clonk_script::enumerate_c4_strings(&engine.script_string_registrations, &referenced),
+        );
         assert_eq!(
             strings.encoded().unwrap(),
             b"loaded zero\r\nloaded one\r\nconstant value\r\n"

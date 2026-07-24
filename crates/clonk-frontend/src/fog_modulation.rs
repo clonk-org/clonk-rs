@@ -51,7 +51,13 @@ impl ClrModMap {
         })
     }
 
-    pub(crate) fn reduce_modulation(&mut self, center_x: i32, center_y: i32, radius1: i32, radius2: i32) {
+    pub(crate) fn reduce_modulation(
+        &mut self,
+        center_x: i32,
+        center_y: i32,
+        radius1: i32,
+        radius2: i32,
+    ) {
         let radius1_sq = i64::from(radius1) * i64::from(radius1);
         let radius2_sq = i64::from(radius2) * i64::from(radius2);
         let denominator = radius2_sq - radius1_sq;
@@ -312,7 +318,12 @@ pub(crate) fn interpolate_quad_color(colors: [Color; 4], weights: [f32; 4]) -> C
 }
 
 impl FogSpriteSampler {
-    pub(crate) fn axis_ranges(origin: f32, extent: f32, chunk_size: f32, flipped: bool) -> Vec<(f32, f32)> {
+    pub(crate) fn axis_ranges(
+        origin: f32,
+        extent: f32,
+        chunk_size: f32,
+        flipped: bool,
+    ) -> Vec<(f32, f32)> {
         let mut ranges = Vec::new();
         let end = origin + extent;
         let mut position = origin;
@@ -398,8 +409,7 @@ impl FogSpriteSampler {
         else {
             return None;
         };
-        let Some(estimated_rows) =
-            ((source_height / chunk_size.1).ceil() as usize).checked_add(2)
+        let Some(estimated_rows) = ((source_height / chunk_size.1).ceil() as usize).checked_add(2)
         else {
             return None;
         };
@@ -429,10 +439,7 @@ impl FogSpriteSampler {
                     target(left, bottom),
                     target(right, bottom),
                 ];
-                if !points
-                    .iter()
-                    .all(|(x, y)| x.is_finite() && y.is_finite())
-                {
+                if !points.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
                     return None;
                 }
                 quads.push(FogColorQuad {
@@ -452,21 +459,13 @@ impl FogSpriteSampler {
         })
     }
 
-    fn quad_and_weights(
-        &self,
-        normalized_x: f32,
-        normalized_y: f32,
-    ) -> (FogColorQuad, [f32; 4]) {
+    fn quad_and_weights(&self, normalized_x: f32, normalized_y: f32) -> (FogColorQuad, [f32; 4]) {
         let x = Self::axis_sample(&self.x_ranges, self.source_width, normalized_x);
         let y = Self::axis_sample(&self.y_ranges, self.source_height, normalized_y);
         self.quad_and_weights_for_axes(x, y)
     }
 
-    fn axis_sample(
-        ranges: &[(f32, f32)],
-        source_extent: f32,
-        normalized: f32,
-    ) -> FogAxisSample {
+    fn axis_sample(ranges: &[(f32, f32)], source_extent: f32, normalized: f32) -> FogAxisSample {
         let local = normalized.clamp(0.0, 1.0) * source_extent;
         let chunk = ranges
             .iter()
@@ -479,7 +478,11 @@ impl FogSpriteSampler {
         }
     }
 
-    pub(crate) fn raster_axes(&self, width: u32, height: u32) -> (Vec<FogAxisSample>, Vec<FogAxisSample>) {
+    pub(crate) fn raster_axes(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> (Vec<FogAxisSample>, Vec<FogAxisSample>) {
         self.raster_axes_with_destination_offset(width, height, 0.0, 0.0)
     }
 
@@ -530,7 +533,8 @@ impl FogSpriteSampler {
     }
 
     pub(crate) fn modulation_at(&self, normalized_x: f32, normalized_y: f32) -> u32 {
-        self.modulation_sample(normalized_x, normalized_y).interpolate()
+        self.modulation_sample(normalized_x, normalized_y)
+            .interpolate()
     }
 
     pub(crate) fn modulation_sample(
@@ -712,7 +716,7 @@ pub(crate) fn blend_prepared_sprite_fragment_target<T: SurfaceDrawTarget + ?Size
             f32::from(color.b),
             f32::from(color.a),
         ],
-        PreparedSpriteFragment::Shader { rgb, alpha } => [rgb[0], rgb[1], rgb[2], f32::from(alpha)],
+        PreparedSpriteFragment::Shader { rgb, alpha } => [rgb[0], rgb[1], rgb[2], alpha],
         PreparedSpriteFragment::Layers { .. } => unreachable!("layers were split above"),
     };
     let _ = if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
@@ -819,8 +823,7 @@ impl SurfaceDrawTarget for PremultipliedTextLayer<'_> {
                     source[2],
                     destination.b,
                 ),
-                (source[3].clamp(0.0, 255.0)
-                    + f32::from(destination.a) * (1.0 - opacity))
+                (source[3].clamp(0.0, 255.0) + f32::from(destination.a) * (1.0 - opacity))
                     .round()
                     .clamp(0.0, 255.0) as u8,
             ),
@@ -1012,12 +1015,7 @@ pub(crate) fn draw_fogged_cursor_text_line(
             }
             let sampler = FogSpriteSampler::new(
                 fog,
-                (
-                    origin_x as f32,
-                    y as f32,
-                    width as f32,
-                    height as f32,
-                ),
+                (origin_x as f32, y as f32, width as f32, height as f32),
                 (0.0, 0.0, width as f32, height as f32),
                 (width, height),
                 false,
@@ -1150,12 +1148,7 @@ pub(crate) fn draw_fogged_markup_text(
     }
     let sampler = FogSpriteSampler::new(
         fog,
-        (
-            origin_x as f32,
-            y as f32,
-            width as f32,
-            height as f32,
-        ),
+        (origin_x as f32, y as f32, width as f32, height as f32),
         (0.0, 0.0, width as f32, height as f32),
         (width, height),
         false,
@@ -1172,9 +1165,8 @@ pub(crate) fn draw_fogged_markup_text(
             // Text was source-over blended onto transparent black. Recover
             // straight-alpha RGB before submitting the final fogged fragment.
             let alpha = u32::from(source_color.a);
-            let unpremultiply = |channel: u8| {
-                ((u32::from(channel) * 255 + alpha / 2) / alpha).min(255) as u8
-            };
+            let unpremultiply =
+                |channel: u8| ((u32::from(channel) * 255 + alpha / 2) / alpha).min(255) as u8;
             source_color.r = unpremultiply(source_color.r);
             source_color.g = unpremultiply(source_color.g);
             source_color.b = unpremultiply(source_color.b);
@@ -1194,8 +1186,7 @@ pub(crate) fn draw_fogged_markup_text(
             if source.alpha() == 0.0 {
                 continue;
             }
-            let (Ok(target_x), Ok(target_y)) =
-                (u32::try_from(target_x), u32::try_from(target_y))
+            let (Ok(target_x), Ok(target_y)) = (u32::try_from(target_x), u32::try_from(target_y))
             else {
                 continue;
             };
@@ -1245,22 +1236,24 @@ pub(crate) fn build_fog_modulation_map(
     // hand-built presentation fixtures fall back to PlrFoWActualize's owner
     // rule so they remain useful without fabricating a private player list.
     let fow_player = snapshot.fow_players.get(&owner);
-    let view_objects = fow_player.map(|frame| frame.view_objects.clone()).unwrap_or_else(|| {
-        snapshot
-            .objects
-            .iter()
-            .filter(|object| {
-                object.status != ObjectStatus::Deleted
-                    && object.plr_view_range != 0
-                    && (object.owner == owner
-                        || !snapshot
-                            .players
-                            .iter()
-                            .any(|player| player.id == object.owner))
-            })
-            .map(|object| object.id)
-            .collect()
-    });
+    let view_objects = fow_player
+        .map(|frame| frame.view_objects.clone())
+        .unwrap_or_else(|| {
+            snapshot
+                .objects
+                .iter()
+                .filter(|object| {
+                    object.status != ObjectStatus::Deleted
+                        && object.plr_view_range != 0
+                        && (object.owner == owner
+                            || !snapshot
+                                .players
+                                .iter()
+                                .any(|player| player.id == object.owner))
+                })
+                .map(|object| object.id)
+                .collect()
+        });
 
     let offset_x = -target_x;
     let offset_y = -target_y;
@@ -1350,7 +1343,11 @@ pub(crate) fn modulate_surface_color(color: Color, modulation: u32) -> Color {
 pub(crate) fn object_color_by_owner_tint(object: &ObjectSnapshot) -> u32 {
     // C4Surface::SetClr substitutes the legacy blue value 0xff for zero
     // (C4Surface.h:110).
-    if object.color == 0 { 0xff } else { object.color }
+    if object.color == 0 {
+        0xff
+    } else {
+        object.color
+    }
 }
 
 /// CPU-side `ModulateClr` used to fold global ColorMod into ClrByOwnerClr
@@ -1360,10 +1357,7 @@ pub(crate) fn modulate_c4_colors(dst: u32, src: u32) -> u32 {
     let src = split_c4_color(src);
     let mul = |a: u8, b: u8| (u32::from(a) * u32::from(b)) >> 8;
     let alpha = (u32::from(dst[3]) + u32::from(src[3]) - mul(dst[3], src[3])).min(255);
-    (alpha << 24)
-        | (mul(dst[0], src[0]) << 16)
-        | (mul(dst[1], src[1]) << 8)
-        | mul(dst[2], src[2])
+    (alpha << 24) | (mul(dst[0], src[0]) << 16) | (mul(dst[1], src[1]) << 8) | mul(dst[2], src[2])
 }
 
 fn surface_color_to_c4(color: Color) -> u32 {
@@ -1474,7 +1468,7 @@ fn prepare_color_by_owner_fragment(
     }
     let uses_mod2 = blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0;
     let quad_modulation_is_nonzero = if modulation != 0 {
-        blit.fog_modulation.map_or(true, |fog| {
+        blit.fog_modulation.is_none_or(|fog| {
             let any_nonzero = !uses_mod2 || fog.combined_quad_is_nonzero(modulation);
             modulation = fog.combine_with(modulation);
             any_nonzero
@@ -1499,15 +1493,12 @@ pub(crate) fn prepare_sprite_fragment(
     {
         if overlay.a != 0 {
             let base = prepare_sprite_fragment(source, None, None, blit).into_layer();
-            let overlay =
-                prepare_color_by_owner_fragment(overlay, modulation, blit).into_layer();
+            let overlay = prepare_color_by_owner_fragment(overlay, modulation, blit).into_layer();
             return PreparedSpriteFragment::Layers { base, overlay };
         }
     }
 
-    if let (Some(ColorByOwnerSample::Scalar(mask)), Some(modulation)) =
-        (owner_mask, owner_color)
-    {
+    if let (Some(ColorByOwnerSample::Scalar(mask)), Some(modulation)) = (owner_mask, owner_color) {
         if mask == 0 {
             return prepare_sprite_fragment(source, None, None, blit);
         }
@@ -1521,9 +1512,7 @@ pub(crate) fn prepare_sprite_fragment(
         );
     }
 
-    if blit.modulation.is_none()
-        && blit.fog_modulation.is_none()
-        && blit.mode & C4GFXBLIT_MOD2 == 0
+    if blit.modulation.is_none() && blit.fog_modulation.is_none() && blit.mode & C4GFXBLIT_MOD2 == 0
     {
         return PreparedSpriteFragment::Legacy(source);
     }
@@ -1531,7 +1520,7 @@ pub(crate) fn prepare_sprite_fragment(
     let mut modulation = blit.modulation.unwrap_or(0x00ff_ffff);
     let uses_mod2 = blit.mode & C4GFXBLIT_MOD2 != 0;
     let quad_modulation_is_nonzero = if modulation != 0 {
-        blit.fog_modulation.map_or(true, |fog| {
+        blit.fog_modulation.is_none_or(|fog| {
             let any_nonzero = !uses_mod2 || fog.combined_quad_is_nonzero(modulation);
             modulation = fog.combine_with(modulation);
             any_nonzero
@@ -1580,7 +1569,7 @@ pub(crate) fn prepare_filtered_sprite_fragment(
     let mut modulation = blit.modulation.unwrap_or(0x00ff_ffff);
     let uses_mod2 = blit.mode & C4GFXBLIT_MOD2 != 0;
     let quad_modulation_is_nonzero = if modulation != 0 {
-        blit.fog_modulation.map_or(true, |fog| {
+        blit.fog_modulation.is_none_or(|fog| {
             let any_nonzero = !uses_mod2 || fog.combined_quad_is_nonzero(modulation);
             modulation = fog.combine_with(modulation);
             any_nonzero
@@ -1604,7 +1593,7 @@ fn prepare_filtered_color_by_owner_fragment(
     }
     let uses_mod2 = blit.mode & C4GFXBLIT_CLRSFC_MOD2 != 0;
     let quad_modulation_is_nonzero = if modulation != 0 {
-        blit.fog_modulation.map_or(true, |fog| {
+        blit.fog_modulation.is_none_or(|fog| {
             let any_nonzero = !uses_mod2 || fog.combined_quad_is_nonzero(modulation);
             modulation = fog.combine_with(modulation);
             any_nonzero
@@ -1636,8 +1625,7 @@ pub(crate) fn prepare_liquid_animation_fragment(
     }
     let modulation = split_c4_color(modulation);
     let channel = |source: u8, modulation: u8| {
-        (f32::from(source) / 255.0 + liquid_delta).clamp(0.0, 1.0)
-            * f32::from(modulation)
+        (f32::from(source) / 255.0 + liquid_delta).clamp(0.0, 1.0) * f32::from(modulation)
     };
     PreparedSpriteFragment::Shader {
         rgb: [

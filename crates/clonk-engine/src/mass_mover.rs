@@ -182,12 +182,7 @@ impl MassMoverSet {
     /// `C4MassMover::Cease` (C4MassMover.cpp:103-112): free the slot and
     /// decrement `Count`.
     pub(crate) fn cease(&mut self, index: usize) {
-        if self
-            .slots
-            .get_mut(index)
-            .and_then(Option::take)
-            .is_some()
-        {
+        if self.slots.get_mut(index).and_then(Option::take).is_some() {
             self.count -= 1;
         }
     }
@@ -207,7 +202,7 @@ impl MassMoverSet {
     /// `Count` is the file record count, and `CreatePtr` remains zero after
     /// `Default` (C4MassMover.cpp:204-217).
     pub(crate) fn from_c4b(bytes: &[u8]) -> Result<Self, MassMoverComponentError> {
-        if bytes.len() % MASS_MOVER_RECORD_BYTES != 0 {
+        if !bytes.len().is_multiple_of(MASS_MOVER_RECORD_BYTES) {
             return Err(MassMoverComponentError::InvalidSize(bytes.len()));
         }
         let record_count = bytes.len() / MASS_MOVER_RECORD_BYTES;
@@ -299,12 +294,7 @@ impl MassMoverSet {
         instable && self.create_for_landscape(landscape, x, y).is_some()
     }
 
-    fn create_for_landscape(
-        &mut self,
-        landscape: &Landscape,
-        x: i32,
-        y: i32,
-    ) -> Option<usize> {
+    fn create_for_landscape(&mut self, landscape: &Landscape, x: i32, y: i32) -> Option<usize> {
         if self.count() == MASS_MOVER_CHUNK {
             return None;
         }
@@ -364,12 +354,8 @@ impl Engine {
         let Some(landscape) = self.landscape.as_ref() else {
             return false;
         };
-        self.mass_movers.check_instability_for_landscape(
-            landscape,
-            &self.materials,
-            tx,
-            ty,
-        )
+        self.mass_movers
+            .check_instability_for_landscape(landscape, &self.materials, tx, ty)
     }
 
     /// `C4Landscape::CheckInstabilityRange` (C4Landscape.cpp:869-878): try
@@ -395,10 +381,7 @@ impl Engine {
         let Some(landscape) = self.landscape.as_ref() else {
             return false;
         };
-        let Some(index) = self
-            .mass_movers
-            .create_for_landscape(landscape, x, y)
-        else {
+        let Some(index) = self.mass_movers.create_for_landscape(landscape, x, y) else {
             return false;
         };
         if execute {
@@ -467,7 +450,10 @@ impl Engine {
                     // mrfConvert meeMassMove (C4Material.cpp:654-657):
                     // conversion-transfer — the mover's material spawns as
                     // a PXS at the mover position before the extraction.
-                    if matches!(result, crate::material::MaterialReactionExecution::Converted(_)) {
+                    if matches!(
+                        result,
+                        crate::material::MaterialReactionExecution::Converted(_)
+                    ) {
                         self.pxs_system.create(
                             mat,
                             crate::math::itofix(x),
@@ -506,8 +492,7 @@ impl Engine {
                     // the target pixel is overwritten and never restored.
                     if !landscape.insert_material_pix(tx, ty, extracted) {
                         // column-model fixture worlds keep the column write
-                        let _ =
-                            landscape.insert_material_pixel_at(tx, ty, extracted, materials);
+                        let _ = landscape.insert_material_pixel_at(tx, ty, extracted, materials);
                     }
                 }
             }
@@ -847,7 +832,10 @@ mod tests {
         // Fallback order is up, up-up, LEFT, RIGHT: slot 1 = (1,4), slot 2 = (3,4).
         let first = engine.mass_movers.slot(1).expect("left probe fired first");
         assert_eq!((first.x, first.y), (1, 4));
-        let second = engine.mass_movers.slot(2).expect("right probe fired second");
+        let second = engine
+            .mass_movers
+            .slot(2)
+            .expect("right probe fired second");
         assert_eq!((second.x, second.y), (3, 4));
 
         // Case 3: water above at (tx, ty-1) — probed before the sides.
@@ -901,7 +889,11 @@ mod tests {
         let mut engine = engine_with(materials, landscape);
         assert!(engine.mass_mover_create(1, 4, false));
         let mover = engine.mass_movers.slot(1).expect("mover created");
-        assert_eq!((mover.x, mover.y), (1, 4), "no snap to the surface at creation");
+        assert_eq!(
+            (mover.x, mover.y),
+            (1, 4),
+            "no snap to the surface at creation"
+        );
         engine.tick_mass_movers();
         // The mover may have moved material, but its own coordinates are
         // immutable for its whole life.
@@ -998,7 +990,10 @@ mod tests {
         let extracted = engine.extract_material(2, 4);
         assert_eq!(extracted, Some(water));
         // (2,4) is now dry; the (tx-1,ty) fallback probe finds (1,4).
-        let mover = engine.mass_movers.slot(1).expect("range probe created a mover");
+        let mover = engine
+            .mass_movers
+            .slot(1)
+            .expect("range probe created a mover");
         assert_eq!((mover.x, mover.y), (1, 4));
     }
 
@@ -1045,8 +1040,7 @@ mod tests {
         let (mut open, open_goo) = bottom_border_reaction_engine(true);
         assert_eq!(open_goo, goo);
         assert_eq!(
-            open
-                .landscape
+            open.landscape
                 .as_ref()
                 .and_then(|landscape| landscape.border_material_at(1, 3)),
             None,
@@ -1210,7 +1204,11 @@ mod tests {
             Some(oil),
             "an unhandled reaction leaves the Oil pixel in place"
         );
-        assert_eq!(engine.mass_movers.live_movers(), 0, "the blocked mover ceases");
+        assert_eq!(
+            engine.mass_movers.live_movers(),
+            0,
+            "the blocked mover ceases"
+        );
         assert_eq!(
             (engine.rng.count, engine.rng.hold, engine.rng.rnd3_ptr()),
             rng_before,
@@ -1255,7 +1253,10 @@ mod tests {
 
         engine.tick_mass_movers();
 
-        assert_eq!(engine.rng, expected, "Poof still consumes exactly two Rnd3 draws");
+        assert_eq!(
+            engine.rng, expected,
+            "Poof still consumes exactly two Rnd3 draws"
+        );
         let smoke: Vec<_> = engine
             .particle_system()
             .particles()
@@ -1392,7 +1393,10 @@ mod tests {
             &mut pos_changed,
         ));
 
-        assert_eq!(engine.rng, expected, "Poof still consumes exactly two Rnd3 draws");
+        assert_eq!(
+            engine.rng, expected,
+            "Poof still consumes exactly two Rnd3 draws"
+        );
         assert_eq!(
             engine.pending_audio,
             vec![crate::AudioCommand::PlaySoundAt {
@@ -1555,8 +1559,7 @@ mod tests {
         let mut names: Vec<Option<String>> = vec![None; 128];
         names[20] = Some("Water".into());
         names[30] = Some("Earth".into());
-        let grid =
-            crate::landscape::PixelGrid::new(5, 5, bytes, densities, names, vec![None; 128]);
+        let grid = crate::landscape::PixelGrid::new(5, 5, bytes, densities, names, vec![None; 128]);
         let mut landscape = Landscape::new(5, vec![5, 5, 5, 5, 5]).expect("landscape builds");
         landscape.set_pixel_grid(grid);
         let mut engine = Engine::with_seed(2);
@@ -1638,11 +1641,15 @@ mod tests {
             "DigFree earth cleared"
         );
         assert_eq!(
-            dug.and_then(|id| engine.materials.get_by_id(id)).map(|m| m.density()),
+            dug.and_then(|id| engine.materials.get_by_id(id))
+                .map(|m| m.density()),
             Some(50),
             "DigFreePix returns the dug material"
         );
-        let mover = engine.mass_movers.slot(1).expect("side probe armed the water");
+        let mover = engine
+            .mass_movers
+            .slot(1)
+            .expect("side probe armed the water");
         assert_eq!((mover.mat, mover.x, mover.y), (water, 1, 2));
     }
 
@@ -1656,7 +1663,10 @@ mod tests {
         let mut engine = grid_engine(bytes);
         let dug = engine.dig_free_pix(2, 2);
         assert_eq!(dug, None);
-        let mover = engine.mass_movers.slot(1).expect("probe fired on a sky dig");
+        let mover = engine
+            .mass_movers
+            .slot(1)
+            .expect("probe fired on a sky dig");
         assert_eq!((mover.x, mover.y), (1, 2));
     }
 
@@ -1689,8 +1699,7 @@ mod tests {
         let mut bytes = vec![0u8; 25];
         bytes[3 * 5 + 2] = 30; // lava at (2,3)
         bytes[3 * 5 + 1] = 20; // water at (1,3)
-        let grid =
-            crate::landscape::PixelGrid::new(5, 5, bytes, densities, names, vec![None; 128]);
+        let grid = crate::landscape::PixelGrid::new(5, 5, bytes, densities, names, vec![None; 128]);
         let mut landscape = Landscape::new(5, vec![5, 5, 5, 5, 5]).expect("landscape builds");
         landscape.set_pixel_grid(grid);
         let water = materials.id_of("Water").expect("water");
@@ -1708,7 +1717,10 @@ mod tests {
             None,
             "the lava pixel was extracted"
         );
-        let mover = engine.mass_movers.slot(1).expect("instability armed the water");
+        let mover = engine
+            .mass_movers
+            .slot(1)
+            .expect("instability armed the water");
         assert_eq!((mover.mat, mover.x, mover.y), (water, 1, 3));
     }
 
@@ -1746,7 +1758,10 @@ mod tests {
             MaterialInteractionEvent::MassMove,
         );
         assert_eq!(reaction.kind, crate::material::MaterialReactionKind::None);
-        assert!(reaction.user_defined, "masked MassMove still owns the pair slot");
+        assert!(
+            reaction.user_defined,
+            "masked MassMove still owns the pair slot"
+        );
 
         let mut landscape = Landscape::flat_with_material(3, 5, Some(lava));
         landscape.set_default_liquid_material(Some(water));
@@ -1778,7 +1793,11 @@ mod tests {
             "the contacted landscape material is not poofed"
         );
         assert_eq!(engine.pxs_system.count(), 0);
-        assert_eq!(engine.mass_movers.live_movers(), 0, "blocked mover simply ceases");
+        assert_eq!(
+            engine.mass_movers.live_movers(),
+            0,
+            "blocked mover simply ceases"
+        );
     }
 
     #[test]
@@ -1820,8 +1839,7 @@ mod tests {
         bytes[2 * 5 + 2] = 30; // rock at (2,2) — above the corroded pixel
         bytes[3 * 5 + 2] = 30; // rock at (2,3) — the corroded pixel
         bytes[3 * 5 + 1] = 25; // water at (1,3)
-        let grid =
-            crate::landscape::PixelGrid::new(5, 5, bytes, densities, names, vec![None; 128]);
+        let grid = crate::landscape::PixelGrid::new(5, 5, bytes, densities, names, vec![None; 128]);
         let mut landscape = Landscape::new(5, vec![5, 5, 5, 5, 5]).expect("landscape builds");
         landscape.set_pixel_grid(grid);
         let acid = materials.id_of("Acid").expect("acid");
@@ -1878,13 +1896,20 @@ mod tests {
                 .as_ref()
                 .and_then(|landscape| landscape.material_at(x, y))
         };
-        assert_eq!(at(&engine, 2, 3), None, "the corroded pixel cleared IN PLACE");
+        assert_eq!(
+            at(&engine, 2, 3),
+            None,
+            "the corroded pixel cleared IN PLACE"
+        );
         assert_eq!(
             at(&engine, 2, 2),
             Some(rock),
             "no FindMatTop: the rock above the corroded pixel survives"
         );
-        let mover = engine.mass_movers.slot(1).expect("instability armed the water");
+        let mover = engine
+            .mass_movers
+            .slot(1)
+            .expect("instability armed the water");
         assert_eq!((mover.mat, mover.x, mover.y), (water, 1, 3));
     }
 
@@ -1905,7 +1930,10 @@ mod tests {
         let mut engine = engine_with(materials, landscape);
         assert_eq!(engine.mass_movers.live_movers(), 0);
         let _ = engine.blast_circle(crate::Vector2::new(2, 2), 1, None);
-        let mover = engine.mass_movers.slot(1).expect("blast probe armed the water");
+        let mover = engine
+            .mass_movers
+            .slot(1)
+            .expect("blast probe armed the water");
         assert_eq!((mover.mat, mover.x, mover.y), (water, 1, 2));
     }
 
@@ -1924,7 +1952,10 @@ mod tests {
         );
         let mut engine = engine_with(materials, landscape);
         engine.execute_shake_circle_operation(crate::Vector2::new(2, 2), 1);
-        let mover = engine.mass_movers.slot(1).expect("shake probe armed the water");
+        let mover = engine
+            .mass_movers
+            .slot(1)
+            .expect("shake probe armed the water");
         assert_eq!((mover.mat, mover.x, mover.y), (water, 1, 2));
     }
 
@@ -1934,7 +1965,14 @@ mod tests {
         // (C4Game.cpp:3700) = Consolidate (C4MassMover.cpp:249-252).
         let mut engine = water_drop_engine();
         let water = engine.materials.id_of("Water").expect("water");
-        engine.mass_movers.fill_slot(4, MassMover { mat: water, x: 1, y: 0 });
+        engine.mass_movers.fill_slot(
+            4,
+            MassMover {
+                mat: water,
+                x: 1,
+                y: 0,
+            },
+        );
         engine
             .game_start_synchronize()
             .expect("game-start synchronization succeeds");
@@ -2006,7 +2044,14 @@ mod tests {
         // CreatePtr/Count ledger.
         let mut engine = water_drop_engine();
         let water = engine.materials.id_of("Water").expect("water");
-        engine.mass_movers.fill_slot(5, MassMover { mat: water, x: 1, y: 0 });
+        engine.mass_movers.fill_slot(
+            5,
+            MassMover {
+                mat: water,
+                x: 1,
+                y: 0,
+            },
+        );
         engine.mass_movers.bump_count();
         let json = serde_json::to_string(&engine.mass_movers).expect("serializes");
         let restored: MassMoverSet = serde_json::from_str(&json).expect("deserializes");
@@ -2028,8 +2073,22 @@ mod tests {
         assert_eq!(restored.create_ptr(), 0);
         assert_eq!(restored.count(), 2);
         assert_eq!(restored.live_movers(), 2);
-        assert_eq!(restored.slot(0), Some(MassMover { mat: mat(3), x: -7, y: 12 }));
-        assert_eq!(restored.slot(1), Some(MassMover { mat: mat(5), x: 99, y: -4 }));
+        assert_eq!(
+            restored.slot(0),
+            Some(MassMover {
+                mat: mat(3),
+                x: -7,
+                y: 12
+            })
+        );
+        assert_eq!(
+            restored.slot(1),
+            Some(MassMover {
+                mat: mat(5),
+                x: 99,
+                y: -4
+            })
+        );
         assert_eq!(restored.slot(9), None);
         assert_eq!(restored.to_c4b(), Some(bytes));
     }
@@ -2050,8 +2109,22 @@ mod tests {
     #[test]
     fn c4b_save_retains_cpp_consolidate_gap_quirk() {
         let mut source = MassMoverSet::new();
-        source.fill_slot(1, MassMover { mat: mat(3), x: 10, y: 20 });
-        source.fill_slot(2, MassMover { mat: mat(4), x: 30, y: 40 });
+        source.fill_slot(
+            1,
+            MassMover {
+                mat: mat(3),
+                x: 10,
+                y: 20,
+            },
+        );
+        source.fill_slot(
+            2,
+            MassMover {
+                mat: mat(4),
+                x: 30,
+                y: 40,
+            },
+        );
 
         let bytes = source.to_c4b().expect("component saves");
         assert_eq!(bytes.len(), 2 * MASS_MOVER_RECORD_BYTES);
@@ -2059,6 +2132,10 @@ mod tests {
         assert_eq!(read_component_i32(&bytes[12..16]), M_NONE);
         let restored = MassMoverSet::from_c4b(&bytes).expect("component reloads");
         assert_eq!(restored.count(), 2, "Load uses the raw record count");
-        assert_eq!(restored.live_movers(), 1, "the second live slot lay beyond Count");
+        assert_eq!(
+            restored.live_movers(),
+            1,
+            "the second live slot lay beyond Count"
+        );
     }
 }

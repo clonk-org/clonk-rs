@@ -231,6 +231,7 @@ fn case_fold(name: &[u8]) -> Vec<u8> {
 mod tests {
     use std::path::PathBuf;
 
+    use crate::group_writer::ImportedPackedChildCoreMetadata;
     use crate::MutableGroupEntryKind;
 
     use super::*;
@@ -242,11 +243,13 @@ mod tests {
             .add_imported_packed_child_core_bytes_with_metadata(
                 b"Broken.c4g".to_vec(),
                 b"not a raw group image".to_vec(),
-                0,
-                0,
-                None,
-                123,
-                false,
+                ImportedPackedChildCoreMetadata {
+                    crc_state: 0,
+                    stored_crc: 0,
+                    child_contents_crc: None,
+                    time: 123,
+                    executable: false,
+                },
             )
             .unwrap();
         let initial =

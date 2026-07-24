@@ -894,7 +894,12 @@
 
         let initial_generation = lock_unpoisoned(&audio.music_control).generation;
         let mut runtime_music_enabled = false;
-        audio.handle_events(&[event.clone()], &snapshot, &[], &mut runtime_music_enabled);
+        audio.handle_events(
+            std::slice::from_ref(&event),
+            &snapshot,
+            &[],
+            &mut runtime_music_enabled,
+        );
         assert_eq!(
             lock_unpoisoned(&audio.music_control).generation,
             initial_generation,
@@ -910,7 +915,12 @@
         );
 
         runtime_music_enabled = true;
-        audio.handle_events(&[event.clone()], &snapshot, &[], &mut runtime_music_enabled);
+        audio.handle_events(
+            std::slice::from_ref(&event),
+            &snapshot,
+            &[],
+            &mut runtime_music_enabled,
+        );
         assert_ne!(
             lock_unpoisoned(&audio.music_control).generation,
             initial_generation,
@@ -6478,9 +6488,11 @@
                 .into_iter()
                 .map(|player_info_id| clonk_engine::RoundResultsPlayerState {
                     player_info_id,
-                    custom_evaluation_strings: (player_info_id == 101)
-                        .then_some("Personal note".to_string())
-                        .unwrap_or_default(),
+                    custom_evaluation_strings: if player_info_id == 101 {
+                        "Personal note".to_string()
+                    } else {
+                        String::new()
+                    },
                     ..clonk_engine::RoundResultsPlayerState::default()
                 })
                 .collect(),

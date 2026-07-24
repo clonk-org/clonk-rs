@@ -1,5 +1,5 @@
 //! Pixel-parity renderer for one C++ startup dialog (see
-//! `rust/target/parity-specs/`). Implemented against the engine's F9
+//! `target/parity-specs/`). Implemented against the engine's F9
 //! reference captures; owned by its implementation agent.
 //!
 //! This file renders `C4StartupPlrSelDlg` (player selection) in its
@@ -12,14 +12,14 @@ use crate::rename_edit::RenameEdit;
 use crate::startup_main_menu::{draw_bar, IntRect, StartupTooltip};
 use crate::{GuiPoint, ImageData, KeyCode};
 use anyhow::{Context, Result};
-use freetype::face::LoadFlag;
-use freetype::Library;
 use clonk_graphics::clonk_font::{line_height_for, ClonkFont, ClonkFontRole, GlyphCell, TextAlign};
 use clonk_graphics::{
     BlitSampling, Color, GammaRamp, Rect as SurfaceRect, Surface, SurfaceDrawTarget,
 };
 use clonk_gui::Rect as GuiRect;
 use clonk_resources::{PhysicalInfo, C4_MAX_PHYSICAL};
+use freetype::face::LoadFlag;
+use freetype::Library;
 use std::{cell::RefCell, collections::HashMap};
 
 const SCROLLBAR_WIDTH: i32 = 16;
@@ -984,10 +984,10 @@ fn draw_image_bilinear_modulated(
 /// 32px tiles), so sampling the standalone copy is bit-identical to sampling
 /// the original tile with GL_CLAMP_TO_EDGE.
 fn extract_region(image: &ImageData, x: u32, y: u32, w: u32, h: u32) -> ImageData {
+    type ExtractedRegionCache =
+        HashMap<(clonk_graphics::GpuTextureId, u32, u32, u32, u32), ImageData>;
     thread_local! {
-        static EXTRACTED_REGIONS: RefCell<
-            HashMap<(clonk_graphics::GpuTextureId, u32, u32, u32, u32), ImageData>,
-        > = RefCell::new(HashMap::new());
+        static EXTRACTED_REGIONS: RefCell<ExtractedRegionCache> = RefCell::new(HashMap::new());
     }
     EXTRACTED_REGIONS.with(|regions| {
         let key = (image.gpu_texture_id(), x, y, w, h);
@@ -2185,9 +2185,7 @@ impl PlrSelController {
             .unwrap_or(i32::MAX)
             .saturating_mul(layout.item_pitch);
         self.list_scroll_y <= top
-            && self
-                .list_scroll_y
-                .saturating_add(layout.list_viewport.h)
+            && self.list_scroll_y.saturating_add(layout.list_viewport.h)
                 >= top.saturating_add(layout.item_height)
     }
 
@@ -3424,7 +3422,7 @@ mod tests {
     // Pixel-exact C4StartupPlrSelDlg geometry at 1280x720, derived from
     // C4StartupPlrSelDlg.cpp:550-562/636-657, C4GuiDialogs.cpp:819-820 and
     // C4StartupPlrSelDlg.h:221, verified against an F9 screenshot of the C++
-    // engine at 1280x720 (see rust/target/parity-specs/plrsel.md).
+    // engine at 1280x720 (see target/parity-specs/plrsel.md).
     #[test]
     fn layout_matches_cpp_plrsel_dlg_at_1280x720() {
         let l = plrsel_layout(1280, 720);
@@ -3759,9 +3757,7 @@ mod tests {
     #[test]
     fn tooltip_targets_follow_scrolled_player_rows() {
         let layout = plrsel_layout(1280, 720);
-        let names: Vec<String> = (0..20)
-            .map(|index| format!("Player {index}"))
-            .collect();
+        let names: Vec<String> = (0..20).map(|index| format!("Player {index}")).collect();
         let mut controller = PlrSelController::new(names.len());
         controller.resize(1280, 720);
         let viewport_point = GuiPoint::new(
@@ -4069,9 +4065,8 @@ mod tests {
                 3,
                 GuiPoint::new(
                     (layout.list_viewport.x + layout.item_width / 2) as f32,
-                    (layout.list_viewport.y
-                        + 3 * layout.item_pitch
-                        + layout.item_height / 2) as f32,
+                    (layout.list_viewport.y + 3 * layout.item_pitch + layout.item_height / 2)
+                        as f32,
                 ),
             ))
         );
@@ -4112,7 +4107,7 @@ mod tests {
         assert!(controller.player_activations()[..19]
             .iter()
             .all(|activated| !activated));
-        assert_eq!(controller.player_activations()[19], true);
+        assert!(controller.player_activations()[19]);
 
         let last_name = crate::GuiPoint::new(
             (layout.list_viewport.x + layout.item_height * 3) as f32,

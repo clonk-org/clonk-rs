@@ -9,19 +9,22 @@ pub enum ProviderPathStatus {
     Inaccessible(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderAutomationState {
+    #[default]
     Idle,
-    Submitted { detail: String },
-    Stale { reason: String },
-    Skipped { reason: String },
-    Failed { error: String },
-}
-
-impl Default for ProviderAutomationState {
-    fn default() -> Self {
-        Self::Idle
-    }
+    Submitted {
+        detail: String,
+    },
+    Stale {
+        reason: String,
+    },
+    Skipped {
+        reason: String,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

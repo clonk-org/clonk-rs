@@ -117,7 +117,9 @@ fn expectations_for(path: &Path) -> Result<ScenarioExpectations> {
         no_initialize: section_value(&sections, "head", "noinitialize")
             .map(|v| v.trim() != "0")
             .unwrap_or(false),
-        vegetation: parse_id_list(section_value(&sections, "landscape", "vegetation").unwrap_or("")),
+        vegetation: parse_id_list(
+            section_value(&sections, "landscape", "vegetation").unwrap_or(""),
+        ),
         // C4SVal(50, 30, 0, 100) — C4Scenario.cpp:340.
         vegetation_level_std: c4sval_std(
             section_value(&sections, "landscape", "vegetationlevel"),
@@ -205,7 +207,10 @@ fn measure_world(
         ..WorldReport::default()
     };
     if let Some(landscape) = engine.landscape() {
-        report.landscape = Some((landscape.width(), landscape.estimated_height().max(0) as u32));
+        report.landscape = Some((
+            landscape.width(),
+            landscape.estimated_height().max(0) as u32,
+        ));
         if let Some(grid) = landscape.pixel_grid() {
             report.pixel_grid = true;
             let mut by_slot = [0u64; 128];
@@ -225,7 +230,7 @@ fn measure_world(
                 *by_material.entry(name).or_default() += count;
             }
             let mut materials: Vec<(String, u64)> = by_material.into_iter().collect();
-            materials.sort_by(|a, b| b.1.cmp(&a.1));
+            materials.sort_by_key(|entry| std::cmp::Reverse(entry.1));
             report.materials = materials;
         }
     }
@@ -264,7 +269,10 @@ fn flags_for(expect: &ScenarioExpectations, world: &WorldReport) -> Vec<String> 
     // a REGISTERED definition (C4Id2Def semantics); ids absent from the
     // loaded packs fail in C++ too.
     let has_any = |ids: &[String]| {
-        let known: Vec<&String> = ids.iter().filter(|id| world.known_defs.contains(*id)).collect();
+        let known: Vec<&String> = ids
+            .iter()
+            .filter(|id| world.known_defs.contains(*id))
+            .collect();
         known.is_empty()
             || known
                 .iter()
@@ -366,11 +374,12 @@ pub fn scenario_audit_command(args: &[String]) -> Result<()> {
         let worker_repo = repo_root.clone();
         let worker_content = content_root.clone();
         std::thread::spawn(move || {
-            let report = measure_world(&worker_path, &worker_repo, &worker_content)
-                .unwrap_or_else(|error| WorldReport {
+            let report = measure_world(&worker_path, &worker_repo, &worker_content).unwrap_or_else(
+                |error| WorldReport {
                     error: Some(error.to_string()),
                     ..WorldReport::default()
-                });
+                },
+            );
             let _ = sender.send(report);
         });
         let world = receiver
@@ -454,7 +463,7 @@ pub fn scenario_audit_command(args: &[String]) -> Result<()> {
     if !flag_totals.is_empty() {
         report.push_str("flag totals:\n");
         let mut totals: Vec<_> = flag_totals.into_iter().collect();
-        totals.sort_by(|a, b| b.1.cmp(&a.1));
+        totals.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         for (flag, count) in totals {
             report.push_str(&format!("  {count:3}x {flag}\n"));
         }

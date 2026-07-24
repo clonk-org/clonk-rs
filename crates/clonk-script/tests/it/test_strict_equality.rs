@@ -62,7 +62,9 @@ fn strict1_strings_compare_raw_identity() {
         Value::Bool(true)
     );
     assert_eq!(
-        eval("#strict\nfunc Literal() { return \"a\"; } func Test() { return Literal() == \"a\"; }"),
+        eval(
+            "#strict\nfunc Literal() { return \"a\"; } func Test() { return Literal() == \"a\"; }"
+        ),
         Value::Bool(true)
     );
     assert_eq!(
@@ -139,18 +141,13 @@ fn strict1_arrays_compare_raw_identity() {
     );
     let mut engine = Engine::new();
     engine
-        .load_script(
-            "#strict\nfunc Test(a) { var b = a; b[\"x\"] = 1; return a == b; }",
-        )
+        .load_script("#strict\nfunc Test(a) { var b = a; b[\"x\"] = 1; return a == b; }")
         .expect("map identity probe loads");
     assert_eq!(
         engine
             .call(
                 "Test",
-                &[Value::Proplist(ValueMap::from([(
-                    "x",
-                    Value::Int(1),
-                )]))],
+                &[Value::Proplist(ValueMap::from([("x", Value::Int(1),)]))],
             )
             .expect("map identity probe runs"),
         Value::Bool(false)

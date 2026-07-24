@@ -2259,10 +2259,10 @@ fn first_enabled_index(entries: &[ConsoleMenuEntry]) -> Option<usize> {
         .position(|entry| entry.item().is_some_and(|item| item.enabled))
 }
 
-fn path_request_description<'a>(
+fn path_request_description(
     purpose: ConsolePathPurpose,
-    strings: &'a ConsoleStrings,
-) -> (&'a str, &'a str, &'a str, bool, bool, Vec<&'static str>) {
+    strings: &ConsoleStrings,
+) -> (&str, &str, &str, bool, bool, Vec<&'static str>) {
     match purpose {
         ConsolePathPurpose::OpenScenario => (
             &strings.path_load_title,

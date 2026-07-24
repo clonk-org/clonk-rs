@@ -1,5 +1,6 @@
 use crate::far_worlds_deep_lorry_acquire::deep_hydroclonk_finds_coral_inside_a_submerged_lorry;
 use crate::support::real_scenario::{prepare_installed_scenario, PreparedInstalledScenario};
+use crate::support::PreparedScenarioSubcase;
 use clonk_engine::landscape::PixelGrid;
 use clonk_engine::{Landscape, MaterialId, SpawnConfig, Vector2};
 
@@ -55,7 +56,7 @@ fn live_material_count(engine: &clonk_engine::Engine, material: MaterialId) -> u
 #[test]
 fn far_worlds_deep_shared_scenario_subcases() {
     let prepared = prepare_installed_scenario("FarWorlds.c4f/Deep.c4s", 0);
-    let subcases: &[(&str, fn(&PreparedInstalledScenario))] = &[
+    let subcases: &[PreparedScenarioSubcase] = &[
         (
             "deep_sea_airlock_pumping_does_not_duplicate_repeatedly_sampled_liquid",
             deep_sea_airlock_pumping_does_not_duplicate_repeatedly_sampled_liquid,

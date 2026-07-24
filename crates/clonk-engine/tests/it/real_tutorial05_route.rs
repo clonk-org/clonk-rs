@@ -128,12 +128,15 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
         .engine()
         .crew_cursor(owner)
         .expect("physical CursorRight selects the valley CLNK");
-    player.assert_milestone("physical CursorRight selects the real valley CLNK", |engine| {
-        valley != constructor
-            && engine.object_snapshot(valley).is_some_and(|object| {
-                (200..300).contains(&object.position.x) && object.position.y >= 350
-            })
-    })?;
+    player.assert_milestone(
+        "physical CursorRight selects the real valley CLNK",
+        |engine| {
+            valley != constructor
+                && engine.object_snapshot(valley).is_some_and(|object| {
+                    (200..300).contains(&object.position.x) && object.position.y >= 350
+                })
+        },
+    )?;
 
     player.wait_until(
         "Tutorial05 asks the valley CLNK to collect material",
@@ -172,11 +175,15 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
         },
     )?;
     player.tap(COM_DOWN)?;
-    player.wait_until("single AutoStop Down grabs the real valley CATA", 80, |engine| {
-        engine.object_snapshot(valley).is_some_and(|object| {
-            object.action.name == "Push" && object.action.target == Some(valley_cata)
-        })
-    })?;
+    player.wait_until(
+        "single AutoStop Down grabs the real valley CATA",
+        80,
+        |engine| {
+            engine.object_snapshot(valley).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(valley_cata)
+            })
+        },
+    )?;
 
     // DirectCom normally copies the operator Controller when the grab input
     // arrives, masking ExecAction's independent C++ assignment. Clear it,
@@ -206,11 +213,15 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
         |engine| tutorial_message_contains(engine, "Press 'throw' to load the catapult"),
     )?;
     player.tap(COM_THROW)?;
-    player.wait_until("physical Throw loads the exact METL into CATA", 80, |engine| {
-        engine
-            .object_snapshot(metal)
-            .is_some_and(|object| object.container == Some(valley_cata))
-    })?;
+    player.wait_until(
+        "physical Throw loads the exact METL into CATA",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(metal)
+                .is_some_and(|object| object.container == Some(valley_cata))
+        },
+    )?;
     player.wait_until(
         "Tutorial05 asks the AutoStop CLNK to tension CATA",
         300,
@@ -458,8 +469,7 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
         "cursor/HUD focus remains the selected valley CLNK"
     );
     assert_eq!(
-        reset.viewports[0].center,
-        valley_position,
+        reset.viewports[0].center, valley_position,
         "the next player phase returns ViewX/ViewY from METL to the selected CLNK"
     );
     player.release(COM_LEFT)?;
@@ -699,7 +709,9 @@ fn tutorial05_cnmt_rule_stalls_the_unfed_elevator_at_eighty_percent(
     // Script1 naturally commands the first CLNK to build. No controls or
     // state injection supply the missing fourth WOOD or second METL.
     for _ in 0..240 {
-        engine.tick_without_snapshot().expect("Tutorial05 opening frame");
+        engine
+            .tick_without_snapshot()
+            .expect("Tutorial05 opening frame");
     }
 
     let stalled = engine
@@ -1130,8 +1142,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     player.wait_until("ELEV consumes METL and stalls for WOOD", 600, |engine| {
         engine.object_snapshot(elevator).is_some_and(|object| {
             object.construction == 80_000
-                && object.components.get(first_definition.as_str())
-                    == Some(&first_component_total)
+                && object.components.get(first_definition.as_str()) == Some(&first_component_total)
                 && engine.object_snapshot(wood).is_none()
         })
     })?;

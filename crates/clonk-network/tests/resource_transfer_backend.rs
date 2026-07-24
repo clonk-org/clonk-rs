@@ -368,13 +368,7 @@ fn cpp_delayed_expiry_clears_backend_state_and_only_unlinks_temporary_files() {
     fs::write(&persistent_path, b"local").unwrap();
     backend
         .register_local_complete(
-            core(
-                persistent_id,
-                b"persistent.c4s",
-                5,
-                2,
-                0x8bd6_88e8,
-            ),
+            core(persistent_id, b"persistent.c4s", 5, 2, 0x8bd6_88e8),
             &persistent_path,
             ResourceFileOwnership::Persistent,
             true,
@@ -612,12 +606,17 @@ fn cpp_resource_chunk_failure_retains_load_until_timeout_refill() {
     });
     let mut safe_random = |_| 0;
 
-    let initial = requests_from(
-        backend
-            .on_packet(7, &status, 10, &mut safe_random)
-            .unwrap(),
+    let initial = requests_from(backend.on_packet(7, &status, 10, &mut safe_random).unwrap());
+    assert_eq!(
+        initial,
+        [(
+            7,
+            ResourceRequestPacket {
+                resource_id: 13,
+                chunk: 0
+            }
+        )]
     );
-    assert_eq!(initial, [(7, ResourceRequestPacket { resource_id: 13, chunk: 0 })]);
     assert_eq!(backend.catalog().outstanding_load_count(13), 1);
 
     let dropped = backend
@@ -646,11 +645,20 @@ fn cpp_resource_chunk_failure_retains_load_until_timeout_refill() {
             ResourceTransferEvent::Transport(ResourceCatalogAction::SendToPeer {
                 peer_id,
                 packet: ResourcePacket::Request(request),
-            }) => Some((*peer_id, request.clone())),
+            }) => Some((*peer_id, *request)),
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(retries, [(7, ResourceRequestPacket { resource_id: 13, chunk: 0 })]);
+    assert_eq!(
+        retries,
+        [(
+            7,
+            ResourceRequestPacket {
+                resource_id: 13,
+                chunk: 0
+            }
+        )]
+    );
     assert_eq!(backend.catalog().outstanding_load_count(13), 1);
 }
 

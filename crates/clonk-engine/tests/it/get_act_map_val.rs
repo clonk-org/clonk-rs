@@ -2,9 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::support::real_scenario::content_root;
-use clonk_engine::{
-    ActionState, Definition, Engine, SpawnConfig, physical_action_graphics_key,
-};
+use clonk_engine::{physical_action_graphics_key, ActionState, Definition, Engine, SpawnConfig};
 use clonk_resources::{Group, ResourceDefinition};
 use clonk_script::Value;
 use tempfile::tempdir;
@@ -198,7 +196,9 @@ fn duplicate_actions_keep_cpp_first_name_and_last_next_action_semantics() {
     assert_eq!(snapshot.action.name, "Dup");
     assert_eq!(snapshot.action.act_map_index, Some(2));
     for _ in 0..3 {
-        engine.tick_without_snapshot().expect("later duplicate advances");
+        engine
+            .tick_without_snapshot()
+            .expect("later duplicate advances");
     }
     assert_eq!(
         engine
@@ -210,7 +210,9 @@ fn duplicate_actions_keep_cpp_first_name_and_last_next_action_semantics() {
         "the last duplicate's Length=5 remains active after the transition"
     );
 
-    let index = engine.find_object_index(object).expect("object remains indexed");
+    let index = engine
+        .find_object_index(object)
+        .expect("object remains indexed");
     assert_eq!(
         engine
             .call_object_function(index, "FirstLength", vec![])

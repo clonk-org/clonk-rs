@@ -722,11 +722,10 @@ impl GpuSceneRecorder {
                 entry.insert(resource);
             }
             std::collections::hash_map::Entry::Occupied(mut entry) => {
-                if entry.get().revision < resource.revision {
-                    entry.insert(resource);
-                } else if entry.get().revision == resource.revision
-                    && entry.get().dirty.is_empty()
-                    && !resource.dirty.is_empty()
+                if entry.get().revision < resource.revision
+                    || (entry.get().revision == resource.revision
+                        && entry.get().dirty.is_empty()
+                        && !resource.dirty.is_empty())
                 {
                     entry.insert(resource);
                 }

@@ -28,8 +28,8 @@ pub fn endeavour_font_set() -> Arc<ClonkFontSet> {
     static FONTS: OnceLock<Arc<ClonkFontSet>> = OnceLock::new();
     Arc::clone(FONTS.get_or_init(|| {
         let path = repo_root().join("planet/System.c4g/Endeavour.ttf");
-        let bytes = std::fs::read(&path)
-            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
         Arc::new(build_font_set(&bytes).expect("build Endeavour font set"))
     }))
 }

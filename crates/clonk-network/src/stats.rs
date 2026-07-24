@@ -784,7 +784,7 @@ mod tests {
         );
 
         let cpp_sum = (16_777_217_i32 + 1) as f32;
-        let separately_cast = 16_777_217_i32 as f32 + 1_i32 as f32;
+        let separately_cast = 16_777_217_i32 as f32 + 1_f32;
         assert_eq!(
             stats.net_input_graph().value(0).to_bits(),
             cpp_sum.to_bits()

@@ -1,6 +1,5 @@
 use std::fs;
 
-use image::{Rgba, RgbaImage};
 use clonk_engine::effect::EffectVarValue;
 use clonk_engine::scenario::LegacyDefinitionResolver;
 use clonk_engine::{
@@ -8,6 +7,7 @@ use clonk_engine::{
 };
 use clonk_resources::Group;
 use clonk_script::Value;
+use image::{Rgba, RgbaImage};
 
 fn tempdir() -> std::io::Result<tempfile::TempDir> {
     tempfile::Builder::new().prefix("lc-test-").tempdir()
@@ -76,9 +76,9 @@ fn empty_def_core_name_survives_both_engine_load_paths() -> Result<(), Box<dyn s
         write_definition_graphics(&definition_dir)?;
     }
 
-    let empty_group = Group::open(&scenario_dir.join("Empty.ocd"))?;
+    let empty_group = Group::open(scenario_dir.join("Empty.ocd"))?;
     let empty_resource = clonk_resources::definition::Definition::load(&empty_group)?;
-    let missing_group = Group::open(&scenario_dir.join("Missing.ocd"))?;
+    let missing_group = Group::open(scenario_dir.join("Missing.ocd"))?;
     let missing_resource = clonk_resources::definition::Definition::load(&missing_group)?;
     assert_eq!(empty_resource.core.name.as_deref(), Some(""));
     assert_eq!(missing_resource.core.name, None);
@@ -185,10 +185,17 @@ fn legacy_scenario_loads_map_objects_and_definitions() -> Result<(), Box<dyn std
     // No MapZoom key → the C4S default of 10 (C4Scenario.cpp:307,353):
     // the rendered map is 40x40 and ground starts at map row 1 → y=10;
     // C4Landscape::Init pads both dimensions to the 100px minimum.
-    assert_eq!((landscape.width(), landscape.estimated_height()), (100, 100));
+    assert_eq!(
+        (landscape.width(), landscape.estimated_height()),
+        (100, 100)
+    );
     assert_eq!(landscape.surface_height(0), Some(10));
     assert_eq!(landscape.surface_height(39), Some(10));
-    assert_eq!(landscape.surface_height(40), Some(100), "right padding is sky");
+    assert_eq!(
+        landscape.surface_height(40),
+        Some(100),
+        "right padding is sky"
+    );
 
     assert!(engine.definition_ids().any(|id| id == "TEST"));
     let snapshot = engine.snapshot();
@@ -313,13 +320,11 @@ fn legacy_objects_names_are_exact_case_like_cpp() -> Result<(), Box<dyn std::err
     assert!(wrong_nested_names.physical_changes.is_empty());
     assert!(wrong_nested_names.command_stack.is_empty());
 
-    assert!(
-        engine
-            .object_snapshot(ObjectId::new(3))
-            .expect("object with wrong-case command names loads")
-            .command_stack
-            .is_empty()
-    );
+    assert!(engine
+        .object_snapshot(ObjectId::new(3))
+        .expect("object with wrong-case command names loads")
+        .command_stack
+        .is_empty());
 
     let exact = engine
         .object_snapshot(ObjectId::new(4))
@@ -538,12 +543,7 @@ fn initial_network_global_effect_refreshes_resolved_target_id(
         b"[Effects]\r\nGlobalEffects=Probe(9,100,4,0,2,WRNG)[1;O1]\r\n",
     );
     let mut engine = Engine::with_seed(0);
-    scenario.apply_before_network_final_init_with_game_data(
-        &mut engine,
-        &game_data,
-        None,
-        None,
-    )?;
+    scenario.apply_before_network_final_init_with_game_data(&mut engine, &game_data, None, None)?;
 
     let effects = engine.capture_state().global_effects;
     assert_eq!(effects.len(), 1);
@@ -700,10 +700,7 @@ fn legacy_scenario_landscape_insert_thrust_zero_controls_script_insert_material(
     // set_materials alone is intended for pre-script synthetic fixtures.
     engine.configure_materials_from_library(&library);
     let source = engine.materials().id_of("Source").expect("Source exists");
-    let support = engine
-        .materials()
-        .id_of("Support")
-        .expect("Support exists");
+    let support = engine.materials().id_of("Support").expect("Support exists");
 
     let mut densities = vec![0i32; 128];
     densities[10] = 50;
@@ -716,14 +713,8 @@ fn legacy_scenario_landscape_insert_thrust_zero_controls_script_insert_material(
     let mut bytes = vec![0u8; 7 * 10];
     bytes[5 * 7 + 3] = 20;
     bytes[6 * 7 + 3] = 30;
-    let grid = clonk_engine::landscape::PixelGrid::new(
-        7,
-        10,
-        bytes,
-        densities,
-        names,
-        vec![None; 128],
-    );
+    let grid =
+        clonk_engine::landscape::PixelGrid::new(7, 10, bytes, densities, names, vec![None; 128]);
     let mut landscape = Landscape::new(7, vec![10; 7])?;
     landscape.set_world_height(10);
     landscape.set_pixel_grid(grid);

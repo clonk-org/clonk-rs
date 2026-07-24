@@ -303,7 +303,9 @@ pub(crate) fn draw_chunk(
         && (40..=120).contains(&tx)
         && (250..=300).contains(&ty)
     {
-        eprintln!("RCHUNK tx={tx} ty={ty} w={wdt} h={hgt} col={col} shape={shape:?} v={vertices:?}");
+        eprintln!(
+            "RCHUNK tx={tx} ty={ty} w={wdt} h={hgt} col={col} shape={shape:?} v={vertices:?}"
+        );
     }
     polygon(surface, &vertices, col);
 }

@@ -691,11 +691,7 @@ mod tests {
             "[General]\nUserPath=\"$HOME/Legacy Data\"\n",
         )
         .unwrap();
-        fs::write(
-            &explicit_file,
-            "[General]\nUserPath=\"$HOME/Wrong Data\"\n",
-        )
-        .unwrap();
+        fs::write(&explicit_file, "[General]\nUserPath=\"$HOME/Wrong Data\"\n").unwrap();
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(install_dir.path())),
             ("LC_USER_DATA_DIR", None),

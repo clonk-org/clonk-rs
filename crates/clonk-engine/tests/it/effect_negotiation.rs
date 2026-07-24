@@ -52,8 +52,14 @@ global func FxBirthGlobalStart(object target, int number, int temp)
         .expect("construction effect object remains");
 
     assert_eq!(snapshot.rotation, 37);
-    assert_eq!(snapshot.local_vars.get("local_started"), Some(&Value::Int(1)));
-    assert_eq!(snapshot.local_vars.get("global_started"), Some(&Value::Int(1)));
+    assert_eq!(
+        snapshot.local_vars.get("local_started"),
+        Some(&Value::Int(1))
+    );
+    assert_eq!(
+        snapshot.local_vars.get("global_started"),
+        Some(&Value::Int(1))
+    );
     assert_eq!(snapshot.effects.len(), 2);
     assert!(snapshot.effects.iter().all(|effect| {
         effect.priority == 100
@@ -306,11 +312,7 @@ func FxStartDeniedStop() { ++iDeniedStops; }
         .expect("checker installs");
     assert_eq!(
         engine
-            .call_object_function(
-                start_denied_index,
-                "AddStartDeniedThenAfter",
-                Vec::new(),
-            )
+            .call_object_function(start_denied_index, "AddStartDeniedThenAfter", Vec::new(),)
             .expect("Start-denied AddEffect completes"),
         Value::Int(304),
         "the denied #3 remains linked through the script call, so the next add gets #4"

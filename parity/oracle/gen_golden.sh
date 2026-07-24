@@ -18,12 +18,21 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-oracle_repo="${LEGACYCLONK_ORACLE_ROOT:-$repo/../../vendor/legacyclonk-oracle}"
-oracle_revision="${LEGACYCLONK_ORACLE_REVISION:-oracle-src-pinned}"
+# The pinned C++ tree remains reachable in this repository's history even
+# though it is no longer present in the working tree. An external oracle
+# checkout may be selected for differential development.
+default_oracle_revision="7d43b47b7d789b533f32d005e64596e0a07019cd"
+oracle_repo="${LEGACYCLONK_ORACLE_ROOT:-$repo}"
+oracle_revision="${LEGACYCLONK_ORACLE_REVISION:-$default_oracle_revision}"
 out="$repo/parity/golden/parity_golden.json"
 gen="$here/.gen" # working dir for generated build inputs
 if ! oracle_commit="$(git -C "$oracle_repo" rev-parse --verify "$oracle_revision^{commit}")"; then
-  echo "C++ oracle revision $oracle_revision not found in $oracle_repo" >&2
+  {
+    echo "C++ oracle revision $oracle_revision not found in $oracle_repo"
+    echo "The default revision is stored in this repository's full Git history."
+    echo "For a shallow clone, fetch the missing history; for an external checkout,"
+    echo "set LEGACYCLONK_ORACLE_ROOT and optionally LEGACYCLONK_ORACLE_REVISION."
+  } >&2
   exit 1
 fi
 mkdir -p "$gen"

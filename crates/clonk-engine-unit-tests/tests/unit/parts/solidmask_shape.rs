@@ -306,7 +306,7 @@
 
         // Collection runs on Tick3 frames only (C4GameObjects.cpp:144-148).
         for _ in 0..3 {
-            let _ = engine.tick_without_snapshot()?;
+            engine.tick_without_snapshot()?;
         }
 
         let item_snapshot = engine.object_snapshot(item).expect("item snapshot");

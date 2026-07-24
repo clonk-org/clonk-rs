@@ -116,7 +116,7 @@ func StrictMap() { return CaptureObject({ answer = 42 }); }
 fn native_host_boundary_applies_the_strict_cpp_conversion_matrix() {
     use C4VType::{Any, Array, Bool, C4Id, C4Object, Int, Map, String as C4String};
 
-    let sources = vec![
+    let sources = [
         Value::Nil,
         Value::Int(7),
         Value::Bool(true),

@@ -1,6 +1,6 @@
 use clonk_engine::{
-    ControlPlayerInfoEntry, ControlPlayerInfoRegistry, InitialNetworkTeamDistribution,
-    InitialHostTeamAssignmentOracle, InitialNetworkTeamMetadata, LegacyCString, PlayerInfoAdmission,
+    ControlPlayerInfoEntry, ControlPlayerInfoRegistry, InitialHostTeamAssignmentOracle,
+    InitialNetworkTeamDistribution, InitialNetworkTeamMetadata, LegacyCString, PlayerInfoAdmission,
     PlayerInfoControlData, PlayerInfoUpdateRequest, TeamColorUpdateError,
 };
 use thiserror::Error;
@@ -78,9 +78,8 @@ impl NetworkTeamAssignmentState {
         if target_id <= self.teams.last_team_id {
             return false;
         }
-        let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
-            self.generated_team_name_template.clone(),
-        );
+        let mut oracle =
+            ProcessInitialHostTeamAssignmentOracle::new(self.generated_team_name_template.clone());
         while self.teams.last_team_id < target_id {
             let id = self.teams.last_team_id.wrapping_add(1);
             let generated = oracle.generate_team(id, &self.teams.teams);
@@ -97,9 +96,8 @@ impl NetworkTeamAssignmentState {
         &mut self,
         player_infos: &mut ControlPlayerInfoRegistry,
     ) -> Vec<PlayerInfoControlData> {
-        let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
-            self.generated_team_name_template.clone(),
-        );
+        let mut oracle =
+            ProcessInitialHostTeamAssignmentOracle::new(self.generated_team_name_template.clone());
         player_infos.recheck_random_teams(&mut self.teams, &mut oracle)
     }
 
@@ -130,14 +128,9 @@ impl NetworkTeamAssignmentState {
         }
 
         self.teams.team_distribution = distribution;
-        let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
-            self.generated_team_name_template.clone(),
-        );
-        Ok(player_infos.reassign_all_teams(
-            &mut self.teams,
-            &mut oracle,
-            has_or_will_have_lobby,
-        ))
+        let mut oracle =
+            ProcessInitialHostTeamAssignmentOracle::new(self.generated_team_name_template.clone());
+        Ok(player_infos.reassign_all_teams(&mut self.teams, &mut oracle, has_or_will_have_lobby))
     }
 
     /// Execute the network host's direct `C4TeamList::SetRandomTeamCount`.
@@ -155,14 +148,9 @@ impl NetworkTeamAssignmentState {
         ) {
             return Vec::new();
         }
-        let mut oracle = ProcessInitialHostTeamAssignmentOracle::new(
-            self.generated_team_name_template.clone(),
-        );
-        player_infos.reassign_all_teams(
-            &mut self.teams,
-            &mut oracle,
-            has_or_will_have_lobby,
-        )
+        let mut oracle =
+            ProcessInitialHostTeamAssignmentOracle::new(self.generated_team_name_template.clone());
+        player_infos.reassign_all_teams(&mut self.teams, &mut oracle, has_or_will_have_lobby)
     }
 
     /// Execute the host half of `C4TeamList::SetTeamColors`. Equal values are
@@ -254,32 +242,31 @@ mod tests {
 
     #[test]
     fn random_recheck_regenerates_cpp_default_team_metadata() {
-        let mut assignment =
-            NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
-                InitialNetworkTeamMetadata {
-                    active: true,
-                    custom: true,
-                    allow_hostility_change: false,
-                    allow_team_switch: false,
-                    auto_generate_teams: true,
-                    last_team_id: 7,
-                    team_distribution: InitialNetworkTeamDistribution::Random,
-                    team_colors: true,
-                    max_script_players: 0,
-                    script_player_names: LegacyCString::default(),
-                    random_team_count: 2,
-                    teams: vec![clonk_engine::InitialNetworkTeam {
-                        id: 7,
-                        name: LegacyCString::from_bytes(b"Old".to_vec()).unwrap(),
-                        player_start_index: 0,
-                        player_ids: Vec::new(),
-                        color: 0,
-                        icon_spec: LegacyCString::default(),
-                        max_players: 0,
-                    }],
-                },
-                LegacyCString::from_bytes(b"Mannschaft %d".to_vec()).unwrap(),
-            );
+        let mut assignment = NetworkTeamAssignmentState::from_prepared_host_with_team_name_template(
+            InitialNetworkTeamMetadata {
+                active: true,
+                custom: true,
+                allow_hostility_change: false,
+                allow_team_switch: false,
+                auto_generate_teams: true,
+                last_team_id: 7,
+                team_distribution: InitialNetworkTeamDistribution::Random,
+                team_colors: true,
+                max_script_players: 0,
+                script_player_names: LegacyCString::default(),
+                random_team_count: 2,
+                teams: vec![clonk_engine::InitialNetworkTeam {
+                    id: 7,
+                    name: LegacyCString::from_bytes(b"Old".to_vec()).unwrap(),
+                    player_start_index: 0,
+                    player_ids: Vec::new(),
+                    color: 0,
+                    icon_spec: LegacyCString::default(),
+                    max_players: 0,
+                }],
+            },
+            LegacyCString::from_bytes(b"Mannschaft %d".to_vec()).unwrap(),
+        );
         let mut player_infos = ControlPlayerInfoRegistry::default();
 
         assert!(assignment

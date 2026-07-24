@@ -430,7 +430,7 @@ mod tests {
     use crate::rng::LcgRng;
     use crate::{
         ActionState, CommandDirection, CommandStackSnapshot, Direction, EnvironmentFrame,
-        HudSnapshot, OWNER_NONE, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2,
+        HudSnapshot, ObjectSnapshot, ObjectStatus, SimulationSnapshot, Vector2, OWNER_NONE,
     };
     use std::collections::HashMap;
 

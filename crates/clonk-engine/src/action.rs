@@ -4,8 +4,8 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use crate::{math::C4Fixed, ObjectId};
-use clonk_resources::ActionDefinition as ResourceActionDefinition;
 use clonk_resources::definition::ACT_HOLD;
+use clonk_resources::ActionDefinition as ResourceActionDefinition;
 use clonk_script::{ScriptFunctionResolution, Value};
 
 pub const DEFAULT_ACTION_NAME: &str = "Idle";
@@ -146,7 +146,9 @@ impl C4ActionReflection {
             ("Name", vec![Value::String(name.to_string().into())]),
             (
                 "Procedure",
-                vec![Value::String(action.procedure.clone().unwrap_or_default().into())],
+                vec![Value::String(
+                    action.procedure.clone().unwrap_or_default().into(),
+                )],
             ),
             (
                 "Directions",
@@ -157,10 +159,7 @@ impl C4ActionReflection {
             ),
             (
                 "FlipDir",
-                vec![Value::Int(raw(
-                    "FlipDir",
-                    action.flip_dir.unwrap_or(0),
-                ))],
+                vec![Value::Int(raw("FlipDir", action.flip_dir.unwrap_or(0)))],
             ),
             (
                 "Length",
@@ -218,23 +217,33 @@ impl C4ActionReflection {
             ),
             (
                 "StartCall",
-                vec![Value::String(action.start_call.clone().unwrap_or_default().into())],
+                vec![Value::String(
+                    action.start_call.clone().unwrap_or_default().into(),
+                )],
             ),
             (
                 "EndCall",
-                vec![Value::String(action.end_call.clone().unwrap_or_default().into())],
+                vec![Value::String(
+                    action.end_call.clone().unwrap_or_default().into(),
+                )],
             ),
             (
                 "AbortCall",
-                vec![Value::String(action.abort_call.clone().unwrap_or_default().into())],
+                vec![Value::String(
+                    action.abort_call.clone().unwrap_or_default().into(),
+                )],
             ),
             (
                 "PhaseCall",
-                vec![Value::String(action.phase_call.clone().unwrap_or_default().into())],
+                vec![Value::String(
+                    action.phase_call.clone().unwrap_or_default().into(),
+                )],
             ),
             (
                 "Sound",
-                vec![Value::String(action.sound.clone().unwrap_or_default().into())],
+                vec![Value::String(
+                    action.sound.clone().unwrap_or_default().into(),
+                )],
             ),
             (
                 "ObjectDisabled",
@@ -775,11 +784,7 @@ impl ActionLibrary {
             .unwrap_or(0)
     }
 
-    pub(crate) fn energy_usage_for_entry(
-        &self,
-        action: &str,
-        physical_index: Option<u32>,
-    ) -> i32 {
+    pub(crate) fn energy_usage_for_entry(&self, action: &str, physical_index: Option<u32>) -> i32 {
         self.spec_for_entry(action, physical_index)
             .map_or(0, |spec| spec.energy_usage)
     }
@@ -899,20 +904,12 @@ impl ActionLibrary {
     /// deterministic declared-name order.
     pub(crate) fn link_callbacks(
         &mut self,
-        mut resolve: impl FnMut(
-            &str,
-            &'static str,
-            &str,
-        ) -> Option<ScriptCallbackTarget>,
+        mut resolve: impl FnMut(&str, &'static str, &str) -> Option<ScriptCallbackTarget>,
     ) {
         fn link_spec(
             action: &str,
             spec: &ActionSpec,
-            resolve: &mut impl FnMut(
-                &str,
-                &'static str,
-                &str,
-            ) -> Option<ScriptCallbackTarget>,
+            resolve: &mut impl FnMut(&str, &'static str, &str) -> Option<ScriptCallbackTarget>,
         ) -> ActionCallbackLinks {
             let mut links = ActionCallbackLinks::default();
             links.start.set_linked(
@@ -1085,12 +1082,7 @@ impl ActionLibrary {
         phase_end: &ActionPhaseEnd,
         current_library: &ActionLibrary,
     ) -> bool {
-        self.finish_phase_end_against_with_activity(
-            state,
-            phase_end,
-            current_library,
-            true,
-        )
+        self.finish_phase_end_against_with_activity(state, phase_end, current_library, true)
     }
 
     /// Activity-aware form of the phase-end `SetAction(int)`. C++ first
@@ -1161,11 +1153,7 @@ impl ActionLibrary {
             .unwrap_or(1)
     }
 
-    pub(crate) fn directions_for_entry(
-        &self,
-        action: &str,
-        physical_index: Option<u32>,
-    ) -> i32 {
+    pub(crate) fn directions_for_entry(&self, action: &str, physical_index: Option<u32>) -> i32 {
         self.spec_for_entry(action, physical_index)
             .and_then(|spec| spec.directions)
             .unwrap_or(1)
@@ -1218,11 +1206,7 @@ impl ActionLibrary {
         self.specs.get(action).map(|spec| spec.attach).unwrap_or(0)
     }
 
-    pub(crate) fn attach_for_entry(
-        &self,
-        action: &str,
-        physical_index: Option<u32>,
-    ) -> u32 {
+    pub(crate) fn attach_for_entry(&self, action: &str, physical_index: Option<u32>) -> u32 {
         self.spec_for_entry(action, physical_index)
             .map_or(0, |spec| spec.attach)
     }
@@ -1360,8 +1344,7 @@ impl ActionLibrary {
         let current_index = state
             .act_map_index
             .or_else(|| library.named_action_index(&state.name));
-        let requested_action_changed =
-            requested != state.name || requested_index != current_index;
+        let requested_action_changed = requested != state.name || requested_index != current_index;
 
         // Phase end calls ordinary non-forced SetAction. The LIVE old slot
         // may differ from the stale pAction after TurnAction/PhaseCall, and
@@ -1578,11 +1561,7 @@ impl ActionState {
         library: &ActionLibrary,
     ) -> ActionUpdateResult {
         let mut resolved = update.clone();
-        if resolved
-            .name
-            .as_deref()
-            .is_some_and(is_builtin_idle_name)
-        {
+        if resolved.name.as_deref().is_some_and(is_builtin_idle_name) {
             resolved.name = Some(DEFAULT_ACTION_NAME.to_string());
         }
         if let Some(name) = resolved.name.as_ref() {
@@ -1622,8 +1601,8 @@ impl ActionState {
             .name
             .as_deref()
             .and_then(|name| library.named_action_index(name));
-        let previous_resolved_index = previous_index
-            .or_else(|| library.named_action_index(previous_name.as_str()));
+        let previous_resolved_index =
+            previous_index.or_else(|| library.named_action_index(previous_name.as_str()));
         let entry_changed = resolved.name.as_ref().is_some_and(|name| {
             name != &previous_name || requested_index != previous_resolved_index
         });
@@ -1644,10 +1623,7 @@ impl ActionState {
             .and_then(|spec| spec.procedure.as_deref())
             .map(ActionProcedure::from_name)
             .unwrap_or_default();
-        if entry_changed
-            && previous_procedure != next_procedure
-            && resolved.data.is_none()
-        {
+        if entry_changed && previous_procedure != next_procedure && resolved.data.is_none() {
             self.data = 0;
         }
         self.reconcile_with_library(library);
@@ -2000,19 +1976,30 @@ mod tests {
         state.reconcile_with_library(&library);
         library.advance_state(&mut state);
         assert_eq!(state.name, "Dup");
-        assert_eq!(state.act_map_index, Some(2), "CrossMap target is physical slot 2");
+        assert_eq!(
+            state.act_map_index,
+            Some(2),
+            "CrossMap target is physical slot 2"
+        );
 
         for _ in 0..3 {
             library.advance_state(&mut state);
         }
-        assert_eq!(state.phase, 3, "later frames keep using the last duplicate's Length=5");
-
-        state.apply_update_with_library(
-            &ActionUpdate::default().with_name("Dup"),
-            &library,
+        assert_eq!(
+            state.phase, 3,
+            "later frames keep using the last duplicate's Length=5"
         );
-        assert_eq!(state.act_map_index, Some(1), "SetActionByName scans from slot zero");
-        assert_eq!(state.phase, 0, "switching duplicate slots is a real action change");
+
+        state.apply_update_with_library(&ActionUpdate::default().with_name("Dup"), &library);
+        assert_eq!(
+            state.act_map_index,
+            Some(1),
+            "SetActionByName scans from slot zero"
+        );
+        assert_eq!(
+            state.phase, 0,
+            "switching duplicate slots is a real action change"
+        );
     }
 
     #[test]
@@ -2182,7 +2169,10 @@ mod tests {
         state.advance_with_library_by(&library, 0);
 
         assert_eq!(state.phase, 1);
-        assert_eq!(state.ticks, 0, "the successful comparison resets PhaseDelay");
+        assert_eq!(
+            state.ticks, 0,
+            "the successful comparison resets PhaseDelay"
+        );
     }
 
     #[test]
@@ -2199,7 +2189,10 @@ mod tests {
         for _ in 0..4 {
             frozen.advance_state(&mut frozen_state);
         }
-        assert_eq!(frozen_state.phase, 0, "Step=0 must not be normalized to one");
+        assert_eq!(
+            frozen_state.phase, 0,
+            "Step=0 must not be normalized to one"
+        );
 
         let backwards = library_with(vec![(
             "Backwards",
@@ -2213,7 +2206,10 @@ mod tests {
         for _ in 0..3 {
             backwards.advance_state(&mut backwards_state);
         }
-        assert_eq!(backwards_state.phase, -6, "negative Step runs the phase backwards");
+        assert_eq!(
+            backwards_state.phase, -6,
+            "negative Step runs the phase backwards"
+        );
     }
 
     #[test]
@@ -2237,10 +2233,7 @@ mod tests {
 
     #[test]
     fn signed_directions_are_retained_for_the_set_dir_gate() {
-        let library = library_with(vec![(
-            "Odd",
-            ActionSpec::default().with_directions(-2),
-        )]);
+        let library = library_with(vec![("Odd", ActionSpec::default().with_directions(-2))]);
         assert_eq!(library.directions_for("Odd"), -2);
     }
 
@@ -2258,13 +2251,7 @@ mod tests {
             ("Done", ActionSpec::default()),
         ]);
         let mut state = ActionState::new("Loop");
-        let mut outcome = library.advance_state_from_entry_by(
-            &mut state,
-            "Loop",
-            None,
-            1,
-            true,
-        );
+        let mut outcome = library.advance_state_from_entry_by(&mut state, "Loop", None, 1, true);
 
         assert_eq!(state.name, "Loop", "NextAction waits for PhaseCall");
         assert_eq!(state.phase, 1);
@@ -2331,27 +2318,20 @@ mod tests {
         let mut state = ActionState::new("Idle");
         state.phase = 1;
         state.data = 77;
-        assert!(stale_library.finish_phase_end_against(
-            &mut state,
-            &phase_end,
-            &live_library,
-        ));
-        assert_eq!((state.name.as_str(), state.act_map_index), ("NewOne", Some(1)));
+        assert!(stale_library.finish_phase_end_against(&mut state, &phase_end, &live_library,));
+        assert_eq!(
+            (state.name.as_str(), state.act_map_index),
+            ("NewOne", Some(1))
+        );
         assert_eq!(state.data, 0, "the live target procedure owns Data reset");
 
         let only = ActionSpec::default();
-        let mut short_library = ActionLibrary::new(
-            None,
-            HashMap::from([("Only".to_string(), only.clone())]),
-        );
+        let mut short_library =
+            ActionLibrary::new(None, HashMap::from([("Only".to_string(), only.clone())]));
         short_library.set_physical_actions(vec![("Only".to_string(), only)]);
         let mut invalid = ActionState::new("Idle");
         invalid.phase = 1;
-        assert!(!stale_library.finish_phase_end_against(
-            &mut invalid,
-            &phase_end,
-            &short_library,
-        ));
+        assert!(!stale_library.finish_phase_end_against(&mut invalid, &phase_end, &short_library,));
         assert_eq!(invalid.name, "Idle", "invalid SetAction(int) is a no-op");
         assert_eq!(invalid.phase, 1);
 
@@ -2373,11 +2353,7 @@ mod tests {
             phase: 1,
             ..ActionState::new("Locked")
         };
-        assert!(!stale_library.finish_phase_end_against(
-            &mut blocked,
-            &phase_end,
-            &locked_library,
-        ));
+        assert!(!stale_library.finish_phase_end_against(&mut blocked, &phase_end, &locked_library,));
         assert_eq!(blocked.name, "Locked", "live NoOtherAction owns the gate");
         assert_eq!(blocked.phase, 1);
     }
@@ -2403,13 +2379,8 @@ mod tests {
         ]);
         let mut state = ActionState::new("Source");
         state.act_map_index = Some(0);
-        let mut outcome = library.advance_state_from_entry_by(
-            &mut state,
-            "Source",
-            Some(0),
-            1,
-            true,
-        );
+        let mut outcome =
+            library.advance_state_from_entry_by(&mut state, "Source", Some(0), 1, true);
 
         assert!(outcome.phase_event.is_some(), "PhaseCall is now due");
         let phase_end = outcome.phase_end.take().expect("phase end is pending");
@@ -2418,12 +2389,8 @@ mod tests {
         // after the synchronous PhaseCall returns. Simulate that callback
         // making active actions illegal without invoking DoCon (which has
         // its own immediate SetAction(ActIdle) side effect).
-        assert!(library.finish_phase_end_against_with_activity(
-            &mut state,
-            &phase_end,
-            &library,
-            false,
-        ));
+        assert!(library
+            .finish_phase_end_against_with_activity(&mut state, &phase_end, &library, false,));
         assert_eq!((state.name.as_str(), state.act_map_index), ("Idle", None));
         assert_eq!(state.phase, 0);
         assert_eq!(state.ticks, 0);

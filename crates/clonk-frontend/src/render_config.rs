@@ -46,7 +46,11 @@ impl AdvancedRendererConfig {
         self.tex_indent != 0 || self.blit_offset != 0
     }
 
-    pub(crate) fn changes_generic_textured_blit(self, requested_mode: u32, modulated: bool) -> bool {
+    pub(crate) fn changes_generic_textured_blit(
+        self,
+        requested_mode: u32,
+        modulated: bool,
+    ) -> bool {
         self.has_adjusted_quad_geometry()
             || self.masked_blit_mode(requested_mode) != requested_mode
             || (modulated && !self.shader && self.no_alpha_add)

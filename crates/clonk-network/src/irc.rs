@@ -981,7 +981,7 @@ impl ParsedLine {
     }
 }
 
-fn extract_parameter<'a>(parameters: &mut Option<&'a [u8]>) -> Vec<u8> {
+fn extract_parameter(parameters: &mut Option<&[u8]>) -> Vec<u8> {
     let Some(remaining) = *parameters else {
         return Vec::new();
     };
@@ -1337,6 +1337,9 @@ fn connect_irc_addresses(
     Err(IrcClientError::Connect(detail))
 }
 
+// These are the independent channels and cancellation flags owned by the
+// blocking IRC worker; grouping them would only hide its thread boundary.
+#[allow(clippy::too_many_arguments)]
 fn run_irc_worker<R>(
     state: Arc<Mutex<IrcClientState>>,
     server: String,
@@ -1585,6 +1588,8 @@ mod tests {
 
     use super::*;
 
+    type MessageTuple = (IrcMessageType, Vec<u8>, Vec<u8>, Vec<u8>);
+
     fn test_config() -> IrcConnectConfig {
         IrcConnectConfig {
             server: "127.0.0.1".to_owned(),
@@ -1603,7 +1608,7 @@ mod tests {
         state
     }
 
-    fn message_tuples(state: &IrcClientState) -> Vec<(IrcMessageType, Vec<u8>, Vec<u8>, Vec<u8>)> {
+    fn message_tuples(state: &IrcClientState) -> Vec<MessageTuple> {
         state
             .messages()
             .map(|message| {

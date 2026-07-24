@@ -350,17 +350,14 @@ impl ResourceTransferBackend {
         )?;
         let mut core = publication.core;
         core.derived_id = derivation.parent_resource_id;
-        let path = publication
-            .standalone_path
-            .ok_or(ResourceTransferError::DerivedResourceNotLoadable(resource_id))?;
-        let ownership = publication
-            .standalone_ownership
-            .ok_or(ResourceTransferError::DerivedResourceNotLoadable(resource_id))?;
-        self.files.replace_pending_derived_file(
-            derivation.parent_resource_id,
-            path,
-            ownership,
+        let path = publication.standalone_path.ok_or(
+            ResourceTransferError::DerivedResourceNotLoadable(resource_id),
         )?;
+        let ownership = publication.standalone_ownership.ok_or(
+            ResourceTransferError::DerivedResourceNotLoadable(resource_id),
+        )?;
+        self.files
+            .replace_pending_derived_file(derivation.parent_resource_id, path, ownership)?;
         let actions = self.catalog.finish_local_derived(&core);
         if actions.is_empty() {
             return Err(ResourceTransferError::CatalogDerivationMissing(
@@ -422,9 +419,8 @@ impl ResourceTransferBackend {
     where
         F: FnMut(usize) -> usize,
     {
-        let (actions, expired_resource_ids) = self
-            .catalog
-            .on_timer_with_expired_resource_ids(now_seconds);
+        let (actions, expired_resource_ids) =
+            self.catalog.on_timer_with_expired_resource_ids(now_seconds);
         let events = self.process_actions(actions, now_seconds, safe_random)?;
         for resource_id in expired_resource_ids {
             self.clear_expired_resource(resource_id)?;
@@ -483,23 +479,23 @@ impl ResourceTransferBackend {
                     // AddTo writes first; OnChunk only records and schedules
                     // after that succeeds (src/C4Network2Res.cpp:911-940,
                     // 1263-1318).
-                    let write_outcome = match self.files.write_chunk(
-                        packet.resource_id,
-                        packet.chunk,
-                        &packet.data,
-                    ) {
-                        Ok(outcome) => outcome,
-                        Err(error) if is_discarded_store_error(&error) => {
-                            // AddTo failure leaves the matching load wait and
-                            // timestamp untouched, but OnChunk still calls
-                            // StartNewLoads for other free slots.
-                            pending.push_front(ResourceCatalogAction::RefillRequests {
-                                resource_id: packet.resource_id,
-                            });
-                            continue;
-                        }
-                        Err(error) => return Err(error.into()),
-                    };
+                    let write_outcome =
+                        match self
+                            .files
+                            .write_chunk(packet.resource_id, packet.chunk, &packet.data)
+                        {
+                            Ok(outcome) => outcome,
+                            Err(error) if is_discarded_store_error(&error) => {
+                                // AddTo failure leaves the matching load wait and
+                                // timestamp untouched, but OnChunk still calls
+                                // StartNewLoads for other free slots.
+                                pending.push_front(ResourceCatalogAction::RefillRequests {
+                                    resource_id: packet.resource_id,
+                                });
+                                continue;
+                            }
+                            Err(error) => return Err(error.into()),
+                        };
                     if matches!(write_outcome, ChunkWriteOutcome::WrittenOutsideChunkRange) {
                         pending.push_front(ResourceCatalogAction::RefillRequests {
                             resource_id: packet.resource_id,
@@ -601,11 +597,9 @@ impl ResourceTransferBackend {
                 ResourceCatalogAction::RefillRequests { resource_id } => {
                     // StartNewLoads shuffles peers and fills all available slots
                     // (src/C4Network2Res.cpp:1017-1064).
-                    let refill = self.catalog.refill_requests(
-                        resource_id,
-                        now_seconds,
-                        &mut *safe_random,
-                    );
+                    let refill =
+                        self.catalog
+                            .refill_requests(resource_id, now_seconds, &mut *safe_random);
                     // StartNewLoads sends every generated request before
                     // OnChunk returns to later packet/action work.
                     refill
@@ -639,10 +633,7 @@ impl ResourceTransferBackend {
         }
     }
 
-    fn clear_expired_resource(
-        &mut self,
-        resource_id: i32,
-    ) -> Result<(), ResourceTransferError> {
+    fn clear_expired_resource(&mut self, resource_id: i32) -> Result<(), ResourceTransferError> {
         let file_result = if self.files.path(resource_id).is_some() {
             self.files.remove(resource_id).map(|_| ())
         } else {

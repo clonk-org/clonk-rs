@@ -363,9 +363,7 @@ impl ColorByOwnerMask {
                 .pixels
                 .get(idx..idx + 4)
                 .map(|pixel| {
-                    ColorByOwnerSample::Overlay(Color::new(
-                        pixel[0], pixel[1], pixel[2], pixel[3],
-                    ))
+                    ColorByOwnerSample::Overlay(Color::new(pixel[0], pixel[1], pixel[2], pixel[3]))
                 })
                 .unwrap_or(ColorByOwnerSample::Scalar(0));
         }

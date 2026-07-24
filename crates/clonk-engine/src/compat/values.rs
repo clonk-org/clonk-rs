@@ -113,7 +113,11 @@ pub(crate) fn consume_optional_object_reference_argument(
     Ok(object_id)
 }
 
-pub(crate) fn value_to_i32(value: &Value, function: &str, parameter: &str) -> Result<i32, RuntimeError> {
+pub(crate) fn value_to_i32(
+    value: &Value,
+    function: &str,
+    parameter: &str,
+) -> Result<i32, RuntimeError> {
     match value {
         Value::Int(int) => Ok(*int),
         // Unfilled parameter slots are nil and convert to 0; bools convert
@@ -181,7 +185,11 @@ pub(crate) fn parse_native_c4_string_argument(
     }
 }
 
-pub(crate) fn value_to_bool(value: &Value, _function: &str, _parameter: &str) -> Result<bool, RuntimeError> {
+pub(crate) fn value_to_bool(
+    value: &Value,
+    _function: &str,
+    _parameter: &str,
+) -> Result<bool, RuntimeError> {
     Ok(match value {
         Value::Bool(flag) => *flag,
         Value::RawBool(raw) => (*raw as u32 as i32) != 0,
@@ -344,10 +352,7 @@ pub(crate) fn strip_failsafe(name: &str) -> &str {
     once.strip_prefix('~').unwrap_or(once)
 }
 
-fn value_to_data_string_with_context(
-    value: &Value,
-    context: Option<&EffectHostContext>,
-) -> String {
+fn value_to_data_string_with_context(value: &Value, context: Option<&EffectHostContext>) -> String {
     match value {
         Value::Nil => "nil".to_string(),
         Value::Int(i) => i.to_string(),
@@ -359,7 +364,11 @@ fn value_to_data_string_with_context(
         Value::Object(id) => {
             let target = ObjectId::new(*id);
             let Some((context, object)) = context
-                .and_then(|context| context.get_world_object(target).map(|object| (context, object)))
+                .and_then(|context| {
+                    context
+                        .get_world_object(target)
+                        .map(|object| (context, object))
+                })
                 .filter(|(_, object)| object.status() != ObjectStatus::Deleted)
             else {
                 return id.to_string();
@@ -423,7 +432,11 @@ pub(crate) fn diagnostic_object_data_string(id: u64) -> Option<(String, Option<S
                     scope.status()
                 }
             })
-            .or_else(|| context.get_world_object(target).map(|object| object.status()))?;
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .map(|object| object.status())
+            })?;
         if status == ObjectStatus::Deleted && scoped_object.is_none() {
             return None;
         }
@@ -1407,9 +1420,7 @@ pub(crate) fn dec_var(args: &[Value]) -> Result<Value, RuntimeError> {
         return Err(RuntimeError::new("out of memory"));
     }
 
-    let decremented = Value::Int(
-        cast_stable_raw_i32(&slots.get(index), "DecVar")?.wrapping_sub(1),
-    );
+    let decremented = Value::Int(cast_stable_raw_i32(&slots.get(index), "DecVar")?.wrapping_sub(1));
     slots.set(index, decremented.clone());
     Ok(decremented)
 }
@@ -1425,9 +1436,7 @@ pub(crate) fn inc_var(args: &[Value]) -> Result<Value, RuntimeError> {
         return Err(RuntimeError::new("out of memory"));
     }
 
-    let incremented = Value::Int(
-        cast_stable_raw_i32(&slots.get(index), "IncVar")?.wrapping_add(1),
-    );
+    let incremented = Value::Int(cast_stable_raw_i32(&slots.get(index), "IncVar")?.wrapping_add(1));
     slots.set(index, incremented.clone());
     Ok(incremented)
 }
@@ -1648,20 +1657,16 @@ pub(crate) fn modulo(args: &[Value]) -> Result<Value, RuntimeError> {
 pub(crate) fn c4_id(args: &[Value]) -> Result<Value, RuntimeError> {
     let name = parse_optional_string(args.first(), "C4Id", "id")?;
     Ok(match name {
-        Some(name) if clonk_script::c4_id_parse(&name) != 0 => {
-            Value::C4Id(clonk_script::c4_id_from_raw(clonk_script::c4_id_parse(&name)))
-        }
+        Some(name) if clonk_script::c4_id_parse(&name) != 0 => Value::C4Id(
+            clonk_script::c4_id_from_raw(clonk_script::c4_id_parse(&name)),
+        ),
         _ => Value::Nil,
     })
 }
 
 pub(crate) fn pow_func(args: &[Value]) -> Result<Value, RuntimeError> {
     let base = value_to_i32(args.first().unwrap_or(&Value::Nil), "Pow", "base")?;
-    let exponent = value_to_i32(
-        args.get(1).unwrap_or(&Value::Nil),
-        "Pow",
-        "exponent",
-    )?;
+    let exponent = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "Pow", "exponent")?;
 
     if exponent < 0 {
         return Ok(Value::Int(0)); // Match C++ behavior for negative exponents
@@ -1838,7 +1843,11 @@ pub(crate) fn cos_func(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(result))
 }
 
-pub(crate) fn int_argument(args: &[Value], index: usize, fn_name: &str) -> Result<i32, RuntimeError> {
+pub(crate) fn int_argument(
+    args: &[Value],
+    index: usize,
+    fn_name: &str,
+) -> Result<i32, RuntimeError> {
     match args.get(index) {
         Some(Value::Int(value)) => Ok(*value),
         Some(Value::Nil) | None => Ok(0),
@@ -1978,7 +1987,13 @@ pub(crate) fn rects_overlap_cpp(a: DefinitionRect, b: DefinitionRect) -> bool {
 /// (C4Rect.cpp:131-155). In particular this is not a rasterized line walk:
 /// the native two edge probes and truncating divisions can accept a segment
 /// that never visits an integer point inside the rectangle.
-pub(crate) fn rect_intersects_line_cpp(rect: DefinitionRect, x1: i32, y1: i32, x2: i32, y2: i32) -> bool {
+pub(crate) fn rect_intersects_line_cpp(
+    rect: DefinitionRect,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+) -> bool {
     if rect_contains_point_cpp(rect, x1, y1) || rect_contains_point_cpp(rect, x2, y2) {
         return true;
     }

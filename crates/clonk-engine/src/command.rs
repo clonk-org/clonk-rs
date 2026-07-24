@@ -4,10 +4,10 @@ use crate::math::{self, FixedVec2};
 use crate::pathfinder::{PathFinder, PathfinderDebugSnapshot};
 use crate::transfer::{TransferZone, TransferZoneTable};
 use crate::{
-    ActionProcedure, ActionUpdate, CATEGORY_SORT_LIMIT, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE,
-    CATEGORY_VEHICLE, CommandDirection, DefinitionId, DefinitionRect, Direction, FULL_CON,
-    LINE_CONNECT_POWER_INPUT, OWNER_NONE, ObjectId, ObjectStatus, ObjectUpdate, PlayerStatus,
-    Vector2, minimum_con_activation_denied, ocf,
+    minimum_con_activation_denied, ocf, ActionProcedure, ActionUpdate, CommandDirection,
+    DefinitionId, DefinitionRect, Direction, ObjectId, ObjectStatus, ObjectUpdate, PlayerStatus,
+    Vector2, CATEGORY_SORT_LIMIT, CATEGORY_STATIC_BACK, CATEGORY_STRUCTURE, CATEGORY_VEHICLE,
+    FULL_CON, LINE_CONNECT_POWER_INPUT, OWNER_NONE,
 };
 use clonk_resources::PhysicalInfo;
 use serde::{Deserialize, Serialize};
@@ -458,8 +458,8 @@ mod tests {
     #[test]
     fn command_experience_gain_matches_every_cpp_bucket() {
         let expected = [
-            1, 1, 1, 1, 1, 5, 1, 5, 1, 1, 0, 1, 1, 1, 1, 1, 1, 5, 0, 15, 1, 1, 1, 2,
-            5, 0, 2, 0, 1, 1,
+            1, 1, 1, 1, 1, 5, 1, 5, 1, 1, 0, 1, 1, 1, 1, 1, 1, 5, 0, 15, 1, 1, 1, 2, 5, 0, 2, 0, 1,
+            1,
         ];
         for (raw, expected) in (1..=30).zip(expected) {
             let command = CommandId::from_raw(raw).expect("all C4CMD values are covered");
@@ -472,16 +472,13 @@ mod tests {
         let mut acquire = CommandStack::new();
         acquire
             .push_front(
-                CommandRequest::new(CommandId::Acquire)
-                    .with_data(CommandData::Text("WOOD".into())),
+                CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".into())),
             )
             .expect("Acquire queues");
         let acquire_instance = acquire.entries.front().unwrap().instance_id;
         acquire.clear();
-        assert!(!acquire.resolve_acquire_script_result(
-            acquire_instance,
-            AcquireScriptResult::Complete,
-        ));
+        assert!(!acquire
+            .resolve_acquire_script_result(acquire_instance, AcquireScriptResult::Complete,));
         assert_eq!(acquire.take_successful_finishes(), [CommandId::Acquire]);
 
         let mut construct = CommandStack::new();
@@ -493,14 +490,9 @@ mod tests {
             .expect("Construct queues");
         let construct_instance = construct.entries.front().unwrap().instance_id;
         construct.clear();
-        assert!(!construct.resolve_construct_script_result(
-            construct_instance,
-            AcquireScriptResult::Complete,
-        ));
-        assert_eq!(
-            construct.take_successful_finishes(),
-            [CommandId::Construct]
-        );
+        assert!(!construct
+            .resolve_construct_script_result(construct_instance, AcquireScriptResult::Complete,));
+        assert_eq!(construct.take_successful_finishes(), [CommandId::Construct]);
     }
 
     #[test]
@@ -2348,9 +2340,7 @@ mod tests {
 
         let mut stack = CommandStack::new();
         stack
-            .push_back(
-                CommandRequest::new(CommandId::Follow).with_target(Some(follower_id)),
-            )
+            .push_back(CommandRequest::new(CommandId::Follow).with_target(Some(follower_id)))
             .expect("self-Follow queues");
         stack
             .push_back(CommandRequest::new(CommandId::Wait))
@@ -2620,7 +2610,9 @@ mod tests {
             .expect("Follow queues");
         assert!(cleared.clear_object_reference(target_id));
         assert_eq!(
-            cleared.execute_front(&removed_ctx).map(|result| result.status),
+            cleared
+                .execute_front(&removed_ctx)
+                .map(|result| result.status),
             Some(CommandStatus::Failed)
         );
     }
@@ -4266,9 +4258,6 @@ mod tests {
 
         let players = HashMap::new();
         let definitions = HashMap::new();
-        let actor_snapshot = objects.get(&actor_id).expect("actor present");
-        let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 0);
-
         let mut state = PutState::from_request(
             &CommandRequest::new(CommandId::Put)
                 .with_target(Some(container_id))
@@ -4276,13 +4265,16 @@ mod tests {
         )
         .expect("state created");
 
-        for _ in 0..2 {
-            let waiting = state.step(&ctx);
-            assert_eq!(waiting.status, CommandStatus::Running);
-            assert!(waiting.operations.is_empty());
-            assert!(waiting.events.is_empty());
+        {
+            let actor_snapshot = objects.get(&actor_id).expect("actor present");
+            let ctx = move_to_ctx_at_frame(actor_snapshot, &objects, &players, &definitions, 0);
+            for _ in 0..2 {
+                let waiting = state.step(&ctx);
+                assert_eq!(waiting.status, CommandStatus::Running);
+                assert!(waiting.operations.is_empty());
+                assert!(waiting.events.is_empty());
+            }
         }
-        drop(ctx);
 
         for (position, contained, hit_speed) in [
             (Vector2::new(80, 0), None, true),
@@ -4457,36 +4449,37 @@ mod tests {
             .get_mut("TARG")
             .expect("target definition present")
             .collection_rect = Some(DefinitionRect::new(0, -39, 12, 20));
-        let equal_distance_ctx = CommandRuntimeContext {
-            landscape: Some(&landscape),
-            frame: 1,
-            position: actor.position,
-            object: equal_distance_objects
-                .get(&actor_id)
-                .expect("actor present"),
-            objects: &equal_distance_objects,
-            players: &players,
-            definitions: &equal_distance_definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
-        let mut equal_distance = PutState::from_request(&request).expect("Put state");
-        let strict_fallback =
-            equal_distance.step_with_gravity(&equal_distance_ctx, math::fixed100(20));
-        assert_eq!(
-            strict_fallback.operations,
-            vec![CommandOperation::PushFront(
-                CommandRequest::new(CommandId::Enter)
-                    .with_target(Some(target_id))
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::SilentSub)
-            )],
-            "a throwing position equally far from the actor is not closer"
-        );
-        drop(equal_distance_ctx);
+        {
+            let equal_distance_ctx = CommandRuntimeContext {
+                landscape: Some(&landscape),
+                frame: 1,
+                position: actor.position,
+                object: equal_distance_objects
+                    .get(&actor_id)
+                    .expect("actor present"),
+                objects: &equal_distance_objects,
+                players: &players,
+                definitions: &equal_distance_definitions,
+                structures_need_energy: false,
+                base_buy_enabled: true,
+                base_sell_enabled: true,
+                transfer_zones: &EMPTY_TRANSFER_ZONES,
+                rng: None,
+            };
+            let mut equal_distance = PutState::from_request(&request).expect("Put state");
+            let strict_fallback =
+                equal_distance.step_with_gravity(&equal_distance_ctx, math::fixed100(20));
+            assert_eq!(
+                strict_fallback.operations,
+                vec![CommandOperation::PushFront(
+                    CommandRequest::new(CommandId::Enter)
+                        .with_target(Some(target_id))
+                        .with_update_interval(50)
+                        .with_mode(CommandMode::SilentSub)
+                )],
+                "a throwing position equally far from the actor is not closer"
+            );
+        }
 
         equal_distance_objects
             .get_mut(&target_id)
@@ -4560,39 +4553,39 @@ mod tests {
         ]);
         let mut landscape = crate::Landscape::flat(200, 100);
         landscape.set_world_height(150);
-        let ctx = CommandRuntimeContext {
-            landscape: Some(&landscape),
-            frame: 0,
-            position: objects.get(&actor_id).expect("actor present").position,
-            object: objects.get(&actor_id).expect("actor present"),
-            objects: &objects,
-            players: &players,
-            definitions: &definitions,
-            structures_need_energy: false,
-            base_buy_enabled: true,
-            base_sell_enabled: true,
-            transfer_zones: &EMPTY_TRANSFER_ZONES,
-            rng: None,
-        };
-
         let mut state = PutState::from_request(
             &CommandRequest::new(CommandId::Put)
                 .with_target(Some(target_id))
                 .with_target2(Some(item_id)),
         )
         .expect("Put state");
-        let grab = state.step_with_gravity(&ctx, math::fixed100(20));
-        assert_eq!(
-            grab.operations,
-            vec![CommandOperation::PushFront(
-                CommandRequest::new(CommandId::Grab)
-                    .with_target(Some(target_id))
-                    .with_update_interval(50)
-                    .with_mode(CommandMode::SilentSub)
-            )]
-        );
-        assert_eq!(state.put_ty, 1);
-        drop(ctx);
+        {
+            let ctx = CommandRuntimeContext {
+                landscape: Some(&landscape),
+                frame: 0,
+                position: objects.get(&actor_id).expect("actor present").position,
+                object: objects.get(&actor_id).expect("actor present"),
+                objects: &objects,
+                players: &players,
+                definitions: &definitions,
+                structures_need_energy: false,
+                base_buy_enabled: true,
+                base_sell_enabled: true,
+                transfer_zones: &EMPTY_TRANSFER_ZONES,
+                rng: None,
+            };
+            let grab = state.step_with_gravity(&ctx, math::fixed100(20));
+            assert_eq!(
+                grab.operations,
+                vec![CommandOperation::PushFront(
+                    CommandRequest::new(CommandId::Grab)
+                        .with_target(Some(target_id))
+                        .with_update_interval(50)
+                        .with_mode(CommandMode::SilentSub)
+                )]
+            );
+            assert_eq!(state.put_ty, 1);
+        }
 
         let actor = objects.get_mut(&actor_id).expect("actor present");
         actor.action_procedure = ActionProcedure::Push;
@@ -4877,7 +4870,10 @@ mod tests {
 
         stack.entries.retain(|entry| entry.instance_id != original);
         assert!(!stack.fail_command_instance(CommandId::Exit, original));
-        assert_eq!(stack.entries.front().expect("replacement remains").failures, 0);
+        assert_eq!(
+            stack.entries.front().expect("replacement remains").failures,
+            0
+        );
     }
 
     #[test]
@@ -4990,7 +4986,11 @@ mod tests {
             .expect("advance the allocator");
         restored.clear();
         restored.restore_from_snapshot(&decoded);
-        let fresh_id = restored.entries.front().expect("Throw restored").instance_id;
+        let fresh_id = restored
+            .entries
+            .front()
+            .expect("Throw restored")
+            .instance_id;
         assert_ne!(fresh_id, 0);
         assert_ne!(fresh_id, original_id);
         assert_eq!(
@@ -5027,18 +5027,13 @@ mod tests {
         let exact_throw = throws.entries.front().expect("inner Throw").instance_id;
         throws.entries.front_mut().unwrap().finished = Some(CommandStatus::Completed);
         assert_eq!(
-            throws.resolve_event_instance_id(
-                CommandEventInstanceKind::Exact(CommandId::Throw),
-                0,
-            ),
+            throws.resolve_event_instance_id(CommandEventInstanceKind::Exact(CommandId::Throw), 0,),
             exact_throw,
             "Exact includes a still-linked finished command"
         );
         assert_eq!(
-            throws.resolve_event_instance_id(
-                CommandEventInstanceKind::PutTake(CommandId::Throw),
-                0,
-            ),
+            throws
+                .resolve_event_instance_id(CommandEventInstanceKind::PutTake(CommandId::Throw), 0,),
             pending_throw,
             "PutTake skips a same-kind command without its in-flight marker"
         );
@@ -5060,19 +5055,15 @@ mod tests {
         );
 
         let mut gets = CommandStack::new();
-        gets.push_front(
-            CommandRequest::new(CommandId::Get).with_target(Some(ObjectId::new(91))),
-        )
-        .expect("outer Get queues");
+        gets.push_front(CommandRequest::new(CommandId::Get).with_target(Some(ObjectId::new(91))))
+            .expect("outer Get queues");
         let pending_get = gets.entries.front().expect("outer Get").instance_id;
         let CommandState::Get(state) = &mut gets.entries.front_mut().unwrap().state else {
             panic!("outer command should be Get");
         };
         state.enter_pending = true;
-        gets.push_front(
-            CommandRequest::new(CommandId::Get).with_target(Some(ObjectId::new(92))),
-        )
-        .expect("replacement Get queues");
+        gets.push_front(CommandRequest::new(CommandId::Get).with_target(Some(ObjectId::new(92))))
+            .expect("replacement Get queues");
         assert_eq!(
             gets.resolve_event_instance_id(CommandEventInstanceKind::Get, 0),
             pending_get,
@@ -5080,8 +5071,7 @@ mod tests {
         );
 
         let acquire_request = || {
-            CommandRequest::new(CommandId::Acquire)
-                .with_data(CommandData::Text("WOOD".to_owned()))
+            CommandRequest::new(CommandId::Acquire).with_data(CommandData::Text("WOOD".to_owned()))
         };
         let mut acquires = CommandStack::new();
         acquires
@@ -5142,10 +5132,7 @@ mod tests {
         state.stop_continuation = true;
         exits.clear();
         assert_eq!(
-            exits.resolve_event_instance_id(
-                CommandEventInstanceKind::Prelude(CommandId::Exit),
-                0,
-            ),
+            exits.resolve_event_instance_id(CommandEventInstanceKind::Prelude(CommandId::Exit), 0,),
             detached_exit
         );
         exits
@@ -5157,10 +5144,7 @@ mod tests {
         };
         state.stop_continuation = true;
         assert_eq!(
-            exits.resolve_event_instance_id(
-                CommandEventInstanceKind::Prelude(CommandId::Exit),
-                0,
-            ),
+            exits.resolve_event_instance_id(CommandEventInstanceKind::Prelude(CommandId::Exit), 0,),
             attached_exit,
             "an attached pending command takes precedence over retained bodies"
         );
@@ -5178,10 +5162,8 @@ mod tests {
             .push(ThrowContinuation::AfterObjectComStop);
         throws.clear();
         assert_eq!(
-            throws.resolve_event_instance_id(
-                CommandEventInstanceKind::Prelude(CommandId::Throw),
-                0,
-            ),
+            throws
+                .resolve_event_instance_id(CommandEventInstanceKind::Prelude(CommandId::Throw), 0,),
             detached_throw
         );
 
@@ -5198,10 +5180,7 @@ mod tests {
             .push(DropContinuation::AfterObjectComStop);
         drops.clear();
         assert_eq!(
-            drops.resolve_event_instance_id(
-                CommandEventInstanceKind::Prelude(CommandId::Drop),
-                0,
-            ),
+            drops.resolve_event_instance_id(CommandEventInstanceKind::Prelude(CommandId::Drop), 0,),
             detached_drop
         );
 
@@ -5209,7 +5188,11 @@ mod tests {
         activation
             .push_front(CommandRequest::new(CommandId::Exit))
             .expect("Exit queues");
-        let detached_activation = activation.entries.front().expect("Exit remains").instance_id;
+        let detached_activation = activation
+            .entries
+            .front()
+            .expect("Exit remains")
+            .instance_id;
         let CommandState::Exit(state) = &mut activation.entries.front_mut().unwrap().state else {
             panic!("command should be Exit");
         };
@@ -5268,7 +5251,11 @@ mod tests {
         throws
             .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(item_id)))
             .expect("replacement Throw queues");
-        let replacement_throw = throws.entries.front().expect("replacement Throw").instance_id;
+        let replacement_throw = throws
+            .entries
+            .front()
+            .expect("replacement Throw")
+            .instance_id;
         let resumed_throw = throws
             .execute_pending_throw_prelude(
                 &walking_ctx,
@@ -5285,7 +5272,10 @@ mod tests {
         };
         assert_eq!(*command_instance_id, original_throw);
         assert!(!throws.finish_command_instance(CommandId::Throw, *command_instance_id));
-        assert_eq!(throws.entries.front().unwrap().instance_id, replacement_throw);
+        assert_eq!(
+            throws.entries.front().unwrap().instance_id,
+            replacement_throw
+        );
         assert_eq!(throws.entries.front().unwrap().finished, None);
 
         let mut drops = CommandStack::new();
@@ -5499,12 +5489,10 @@ mod tests {
             )
             .expect("inner Throw resumes");
         assert_eq!(result.status, CommandStatus::Failed);
-        assert!(
-            result
-                .events
-                .iter()
-                .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. }))
-        );
+        assert!(result
+            .events
+            .iter()
+            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
 
         let mut skipped = CommandStack::new();
         skipped
@@ -5535,12 +5523,10 @@ mod tests {
             )
             .expect("detached inner Throw resumes");
         assert_eq!(result.status, CommandStatus::Failed);
-        assert!(
-            result
-                .events
-                .iter()
-                .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. }))
-        );
+        assert!(result
+            .events
+            .iter()
+            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
         let base1 = skipped
             .entries
             .iter()
@@ -6612,12 +6598,7 @@ mod tests {
         actor.action_procedure = ActionProcedure::Walk;
         actor.physical.can_chop = 1;
         actor.physical.can_construct = 1;
-        actor.contents = vec![
-            deleted_conkit_id,
-            conkit_id,
-            deleted_linekit_id,
-            linekit_id,
-        ];
+        actor.contents = vec![deleted_conkit_id, conkit_id, deleted_linekit_id, linekit_id];
 
         let mut target = snapshot_with_id(target_id.as_u64());
         target.status = ObjectStatus::Inactive;
@@ -6820,8 +6801,7 @@ mod tests {
         );
 
         let construct = ConstructState::from_request(
-            &CommandRequest::new(CommandId::Construct)
-                .with_data(CommandData::Text("HUT1".into())),
+            &CommandRequest::new(CommandId::Construct).with_data(CommandData::Text("HUT1".into())),
         );
         assert_eq!(construct.builder_has_conkit(&ctx), Some(conkit_id));
 
@@ -6894,10 +6874,13 @@ mod tests {
         assert_eq!(acquire.step(&ctx).status, CommandStatus::Completed);
 
         let mut drop_state = DropState::from_request(&CommandRequest::new(CommandId::Drop));
-        assert_eq!(drop_state.resolve_item(&ctx).map(|(id, _)| id), Some(conkit_id));
+        assert_eq!(
+            drop_state.resolve_item(&ctx).map(|(id, _)| id),
+            Some(conkit_id)
+        );
 
-        let throw_state = ThrowState::from_request(&CommandRequest::new(CommandId::Throw))
-            .expect("Throw state");
+        let throw_state =
+            ThrowState::from_request(&CommandRequest::new(CommandId::Throw)).expect("Throw state");
         let throw_result = throw_state.step_object_com_throw(&ctx, false);
         assert!(matches!(
             throw_result.events.as_slice(),
@@ -6905,13 +6888,14 @@ mod tests {
         ));
         let mut cleared_throw_stack = CommandStack::new();
         cleared_throw_stack
-            .push_front(
-                CommandRequest::new(CommandId::Throw).with_target(Some(deleted_content_id)),
-            )
+            .push_front(CommandRequest::new(CommandId::Throw).with_target(Some(deleted_content_id)))
             .expect("removed-target Throw queues");
         assert!(cleared_throw_stack.clear_object_reference(deleted_content_id));
-        let CommandState::Throw(cleared_throw) =
-            &mut cleared_throw_stack.entries.front_mut().expect("Throw remains").state
+        let CommandState::Throw(cleared_throw) = &mut cleared_throw_stack
+            .entries
+            .front_mut()
+            .expect("Throw remains")
+            .state
         else {
             panic!("Throw remains at the front");
         };
@@ -6929,10 +6913,9 @@ mod tests {
             object: &contained_actor,
             ..ctx.clone()
         };
-        let mut exit = ExitState::from_request(
-            &CommandRequest::new(CommandId::Exit).with_evaluated(true),
-        )
-        .expect("Exit state");
+        let mut exit =
+            ExitState::from_request(&CommandRequest::new(CommandId::Exit).with_evaluated(true))
+                .expect("Exit state");
         let exit_result = exit.step(&contained_ctx);
         assert_eq!(exit_result.status, CommandStatus::Running);
         assert!(matches!(
@@ -6940,8 +6923,8 @@ mod tests {
             [CommandEvent::ActivateEntrance { object_id, .. }] if *object_id == container_id
         ));
 
-        let mut take2 = Take2State::from_request(&CommandRequest::new(CommandId::Take2))
-            .expect("Take2 state");
+        let mut take2 =
+            Take2State::from_request(&CommandRequest::new(CommandId::Take2)).expect("Take2 state");
         let take2_result = take2.step(&contained_ctx);
         assert_eq!(take2_result.status, CommandStatus::Completed);
         assert!(matches!(
@@ -10965,7 +10948,9 @@ mod tests {
             .push_front(CommandRequest::new(CommandId::Exit).with_evaluated(true))
             .expect("original Exit queues");
         let original_instance_id = stack.entries.front().expect("original Exit").instance_id;
-        let stop = stack.execute_front(&ctx).expect("original Exit stops Build");
+        let stop = stack
+            .execute_front(&ctx)
+            .expect("original Exit stops Build");
         assert!(matches!(
             stop.events.as_slice(),
             [CommandEvent::ObjectComStopExit {
@@ -11326,7 +11311,10 @@ mod tests {
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
         assert!(result.operations.is_empty());
-        assert!(result.update.is_none(), "successful Call does not stop ComDir");
+        assert!(
+            result.update.is_none(),
+            "successful Call does not stop ComDir"
+        );
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
             CommandEvent::CallObjectFunction {
@@ -11893,10 +11881,13 @@ mod tests {
         }
 
         let repeated_same_tick = state.step(&ctx);
-        assert!(matches!(
-            repeated_same_tick.events.as_slice(),
-            [CommandEvent::ControlTransfer { .. }]
-        ), "Tick5 is a frame predicate, not a per-command cooldown");
+        assert!(
+            matches!(
+                repeated_same_tick.events.as_slice(),
+                [CommandEvent::ControlTransfer { .. }]
+            ),
+            "Tick5 is a frame predicate, not a per-command cooldown"
+        );
 
         let ctx_next = CommandRuntimeContext {
             landscape: None,
@@ -12263,13 +12254,13 @@ mod tests {
 
         let mut cleared = CommandStack::new();
         cleared
-            .push_front(
-                CommandRequest::new(CommandId::Activate).with_target2(Some(container_id)),
-            )
+            .push_front(CommandRequest::new(CommandId::Activate).with_target2(Some(container_id)))
             .expect("Activate queues");
         assert!(cleared.clear_object_reference(container_id));
         assert_eq!(
-            cleared.execute_front(&deleted_ctx).map(|result| result.status),
+            cleared
+                .execute_front(&deleted_ctx)
+                .map(|result| result.status),
             Some(CommandStatus::Failed)
         );
     }
@@ -15420,12 +15411,10 @@ mod tests {
         let result = stack.execute_front(&ctx).expect("Build fails");
         assert_eq!(result.status, CommandStatus::Failed);
         assert!(result.update.is_none());
-        assert!(
-            result
-                .events
-                .iter()
-                .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. }))
-        );
+        assert!(result
+            .events
+            .iter()
+            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
     }
 
     #[test]
@@ -15471,12 +15460,10 @@ mod tests {
         let result = get.execute_front(&ctx).expect("Get fails");
         assert_eq!(result.status, CommandStatus::Failed);
         assert!(result.update.is_none());
-        assert!(
-            result
-                .events
-                .iter()
-                .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. }))
-        );
+        assert!(result
+            .events
+            .iter()
+            .all(|event| !matches!(event, CommandEvent::FailureFeedback { .. })));
     }
 
     #[test]
@@ -15510,9 +15497,7 @@ mod tests {
         state.enter_pending = true;
         detached.clear();
         detached
-            .push_front(
-                CommandRequest::new(CommandId::Get).with_target(Some(ObjectId::new(99))),
-            )
+            .push_front(CommandRequest::new(CommandId::Get).with_target(Some(ObjectId::new(99))))
             .expect("replacement Get queues");
         let CommandState::Get(state) = &mut detached.entries.front_mut().unwrap().state else {
             panic!("replacement command should be Get");
@@ -15555,8 +15540,8 @@ mod tests {
         state.enter_pending = true;
         assert!(cleared_then_detached.clear_object_reference(target));
         cleared_then_detached.clear();
-        let rebound_cleared_id = cleared_then_detached
-            .resolve_event_instance_id(CommandEventInstanceKind::Get, 0);
+        let rebound_cleared_id =
+            cleared_then_detached.resolve_event_instance_id(CommandEventInstanceKind::Get, 0);
         assert_eq!(rebound_cleared_id, cleared_id);
         assert_eq!(
             cleared_then_detached.get_event_target_after_callback(rebound_cleared_id, target),
@@ -15668,10 +15653,7 @@ mod tests {
 
         let snapshot = stack.snapshot();
         assert_eq!(snapshot.command_names(), vec!["Call", "Wait"]);
-        assert!(matches!(
-            snapshot.commands[0].state,
-            CommandState::Call(_)
-        ));
+        assert!(matches!(snapshot.commands[0].state, CommandState::Call(_)));
         assert_eq!(snapshot.command_views()[0].data, call.data);
 
         // The materialized Call and its native command identity
@@ -16127,7 +16109,10 @@ mod tests {
         replacement_state.put_pending = true;
 
         engine_stack.restore_from_snapshot(&callback_stack.snapshot());
-        assert_eq!(engine_stack.entries.front().unwrap().instance_id, replacement_id);
+        assert_eq!(
+            engine_stack.entries.front().unwrap().instance_id,
+            replacement_id
+        );
         assert_eq!(engine_stack.detached_put_attempts.len(), 1);
         assert_eq!(
             engine_stack.resolve_event_instance_id(CommandEventInstanceKind::Put, 0),
@@ -16181,8 +16166,7 @@ mod tests {
             callback_stack.clear();
             callback_stack
                 .push_front(
-                    CommandRequest::new(CommandId::Get)
-                        .with_target(Some(replacement_target)),
+                    CommandRequest::new(CommandId::Get).with_target(Some(replacement_target)),
                 )
                 .expect("replacement Get queues");
             let replacement_id = callback_stack.entries.front().unwrap().instance_id;
@@ -16194,7 +16178,10 @@ mod tests {
             replacement_state.enter_pending = true;
 
             engine_stack.restore_from_snapshot(&callback_stack.snapshot());
-            assert_eq!(engine_stack.entries.front().unwrap().instance_id, replacement_id);
+            assert_eq!(
+                engine_stack.entries.front().unwrap().instance_id,
+                replacement_id
+            );
             assert_eq!(engine_stack.detached_get_attempts.len(), 1);
             assert_eq!(
                 engine_stack.get_event_target_after_callback(outer_id, target),
@@ -18220,7 +18207,7 @@ fn c4id_to_definition_string(id: i32) -> Option<DefinitionId> {
 
 pub(crate) fn definition_id_to_c4id(definition: &str) -> Option<i32> {
     let raw = clonk_script::c4_id_raw(definition);
-    (raw != 0).then(|| raw as u32 as i32)
+    (raw != 0).then_some(raw as u32 as i32)
 }
 
 fn command_data_to_definition_id(data: &CommandData) -> Option<DefinitionId> {
@@ -18653,8 +18640,7 @@ impl CommandStackSnapshot {
         let mut snapshots = Vec::with_capacity(commands.len());
         for command in commands {
             let id = CommandId::from_name(&command.view.name).ok_or(CommandError::Unsupported)?;
-            let mode =
-                CommandMode::from_i32(command.base_mode).ok_or(CommandError::Unsupported)?;
+            let mode = CommandMode::from_i32(command.base_mode).ok_or(CommandError::Unsupported)?;
             let data = if id == CommandId::Call {
                 CommandData::Text(command.text.clone())
             } else {
@@ -18689,7 +18675,7 @@ impl CommandStackSnapshot {
             };
             let mut active = ActiveCommand::from_request(request)?;
             if let CommandState::Call(state) = &mut active.state {
-                state.legacy_data = command.view.legacy_data.unwrap_or_else(|| {
+                state.legacy_data = command.view.legacy_data.unwrap_or({
                     match command.view.data {
                         CommandData::Integer(value) => value,
                         CommandData::Text(_) | CommandData::None => 0,
@@ -18699,8 +18685,8 @@ impl CommandStackSnapshot {
             active.retries = command.retries;
             active.failures = command.failures;
             active.evaluated = command.evaluated != 0;
-            active.path_checked = !matches!(active.state, CommandState::MoveTo(_))
-                && command.path_checked != 0;
+            active.path_checked =
+                !matches!(active.state, CommandState::MoveTo(_)) && command.path_checked != 0;
             active.permit = command.permit;
             active.legacy_evaluated_word =
                 (!matches!(command.evaluated, 0 | 1)).then_some(command.evaluated);
@@ -18708,14 +18694,13 @@ impl CommandStackSnapshot {
                 (!matches!(command.path_checked, 0 | 1)).then_some(command.path_checked);
             active.legacy_finished_word =
                 (!matches!(command.finished, 0 | 1)).then_some(command.finished);
-            active.legacy_text = (id != CommandId::Call && !command.text.is_empty())
-                .then_some(command.text);
+            active.legacy_text =
+                (id != CommandId::Call && !command.text.is_empty()).then_some(command.text);
             active.update_interval = command.update_interval;
             active.finished = (command.finished != 0).then_some(CommandStatus::Completed);
-            active.state.restore_legacy_evaluation(
-                command.evaluated != 0,
-                command.path_checked != 0,
-            );
+            active
+                .state
+                .restore_legacy_evaluation(command.evaluated != 0, command.path_checked != 0);
             snapshots.push(CommandSnapshot::new(&active));
         }
         Ok(Self {
@@ -19185,7 +19170,7 @@ impl CommandStack {
         let request_retained = entry
             .request
             .as_ref()
-            .map_or(true, |request| request.target == Some(state.target));
+            .is_none_or(|request| request.target == Some(state.target));
         Some(DetachedGrabAttempt {
             target: state.target,
             target_retained: !state.target_cleared && request_retained,
@@ -19457,20 +19442,20 @@ impl CommandStack {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
+            .filter(|(_, entry)| {
                 matches!(
                     &entry.state,
                     CommandState::MoveTo(state) if state.flight_continuation.is_some()
                 )
-                .then(|| DetachedMoveToFlight {
-                    entry: entry.clone(),
-                    base_chain: self
-                        .entries
-                        .iter()
-                        .skip(index + 1)
-                        .map(DetachedCommandBase::from)
-                        .collect(),
-                })
+            })
+            .map(|(index, entry)| DetachedMoveToFlight {
+                entry: entry.clone(),
+                base_chain: self
+                    .entries
+                    .iter()
+                    .skip(index + 1)
+                    .map(DetachedCommandBase::from)
+                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_move_to_flights.extend(move_to_flights);
@@ -19558,18 +19543,17 @@ impl CommandStack {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
-                matches!(&entry.state, CommandState::Get(state) if state.enter_pending).then(|| {
-                    DetachedGetAttempt {
-                        entry: entry.clone(),
-                        base_chain: self
-                            .entries
-                            .iter()
-                            .skip(index + 1)
-                            .map(DetachedCommandBase::from)
-                            .collect(),
-                    }
-                })
+            .filter(|(_, entry)| {
+                matches!(&entry.state, CommandState::Get(state) if state.enter_pending)
+            })
+            .map(|(index, entry)| DetachedGetAttempt {
+                entry: entry.clone(),
+                base_chain: self
+                    .entries
+                    .iter()
+                    .skip(index + 1)
+                    .map(DetachedCommandBase::from)
+                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_get_attempts.extend(get_attempts);
@@ -19577,18 +19561,17 @@ impl CommandStack {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
-                matches!(&entry.state, CommandState::Put(state) if state.put_pending).then(|| {
-                    DetachedPutAttempt {
-                        entry: entry.clone(),
-                        base_chain: self
-                            .entries
-                            .iter()
-                            .skip(index + 1)
-                            .map(DetachedCommandBase::from)
-                            .collect(),
-                    }
-                })
+            .filter(
+                |(_, entry)| matches!(&entry.state, CommandState::Put(state) if state.put_pending),
+            )
+            .map(|(index, entry)| DetachedPutAttempt {
+                entry: entry.clone(),
+                base_chain: self
+                    .entries
+                    .iter()
+                    .skip(index + 1)
+                    .map(DetachedCommandBase::from)
+                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_put_attempts.extend(put_attempts);
@@ -19596,20 +19579,20 @@ impl CommandStack {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
+            .filter(|(_, entry)| {
                 matches!(
                     &entry.state,
                     CommandState::Put(state) if state.stop_continuation.is_some()
                 )
-                .then(|| DetachedPutStop {
-                    entry: entry.clone(),
-                    base_chain: self
-                        .entries
-                        .iter()
-                        .skip(index + 1)
-                        .map(DetachedCommandBase::from)
-                        .collect(),
-                })
+            })
+            .map(|(index, entry)| DetachedPutStop {
+                entry: entry.clone(),
+                base_chain: self
+                    .entries
+                    .iter()
+                    .skip(index + 1)
+                    .map(DetachedCommandBase::from)
+                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_put_stops.extend(put_stops);
@@ -19617,7 +19600,7 @@ impl CommandStack {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
+            .filter(|(_, entry)| {
                 matches!(
                     &entry.state,
                     CommandState::Construct(state)
@@ -19625,15 +19608,15 @@ impl CommandStack {
                             || state.script_pending
                             || (state.spawn_requested && state.construction_id.is_none())
                 )
-                .then(|| DetachedConstructCommand {
-                    entry: entry.clone(),
-                    base_chain: self
-                        .entries
-                        .iter()
-                        .skip(index + 1)
-                        .map(DetachedCommandBase::from)
-                        .collect(),
-                })
+            })
+            .map(|(index, entry)| DetachedConstructCommand {
+                entry: entry.clone(),
+                base_chain: self
+                    .entries
+                    .iter()
+                    .skip(index + 1)
+                    .map(DetachedCommandBase::from)
+                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_construct_commands.extend(construct_commands);
@@ -19641,19 +19624,15 @@ impl CommandStack {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
-                entry
-                    .state
-                    .has_physical_continuation()
-                    .then(|| DetachedPhysicalCommand {
-                        entry: entry.clone(),
-                        base_chain: self
-                            .entries
-                            .iter()
-                            .skip(index + 1)
-                            .map(DetachedCommandBase::from)
-                            .collect(),
-                    })
+            .filter(|(_, entry)| entry.state.has_physical_continuation())
+            .map(|(index, entry)| DetachedPhysicalCommand {
+                entry: entry.clone(),
+                base_chain: self
+                    .entries
+                    .iter()
+                    .skip(index + 1)
+                    .map(DetachedCommandBase::from)
+                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_physical_commands.extend(physical_commands);
@@ -19739,20 +19718,20 @@ impl CommandStack {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
-                (matches!(
+            .filter(|(_, entry)| {
+                matches!(
                     &entry.state,
                     CommandState::MoveTo(state) if state.flight_continuation.is_some()
-                ) && !retained_move_to_flight_ids.contains(&entry.instance_id))
-                .then(|| DetachedMoveToFlight {
-                    entry: entry.clone(),
-                    base_chain: self
-                        .entries
-                        .iter()
-                        .skip(index + 1)
-                        .map(DetachedCommandBase::from)
-                        .collect(),
-                })
+                ) && !retained_move_to_flight_ids.contains(&entry.instance_id)
+            })
+            .map(|(index, entry)| DetachedMoveToFlight {
+                entry: entry.clone(),
+                base_chain: self
+                    .entries
+                    .iter()
+                    .skip(index + 1)
+                    .map(DetachedCommandBase::from)
+                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_move_to_flights
@@ -19772,20 +19751,20 @@ impl CommandStack {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
-                (matches!(
+            .filter(|(_, entry)| {
+                matches!(
                     &entry.state,
                     CommandState::Build(state) if state.stop_continuation
-                ) && !retained_build_ids.contains(&entry.instance_id))
-                .then(|| DetachedBuildStop {
-                    entry: entry.clone(),
-                    base_chain: self
-                        .entries
-                        .iter()
-                        .skip(index + 1)
-                        .map(DetachedCommandBase::from)
-                        .collect(),
-                })
+                ) && !retained_build_ids.contains(&entry.instance_id)
+            })
+            .map(|(index, entry)| DetachedBuildStop {
+                entry: entry.clone(),
+                base_chain: self
+                    .entries
+                    .iter()
+                    .skip(index + 1)
+                    .map(DetachedCommandBase::from)
+                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_build_stops.extend(build_stops);
@@ -19823,8 +19802,7 @@ impl CommandStack {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        self.detached_exit_preludes
-            .extend(detached_exit_preludes);
+        self.detached_exit_preludes.extend(detached_exit_preludes);
         let retained_throw_ids = snapshot
             .commands
             .iter()
@@ -19918,18 +19896,18 @@ impl CommandStack {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
-                (matches!(&entry.state, CommandState::Get(state) if state.enter_pending)
-                    && !retained_get_ids.contains(&entry.instance_id))
-                .then(|| DetachedGetAttempt {
-                    entry: entry.clone(),
-                    base_chain: self
-                        .entries
-                        .iter()
-                        .skip(index + 1)
-                        .map(DetachedCommandBase::from)
-                        .collect(),
-                })
+            .filter(|(_, entry)| {
+                matches!(&entry.state, CommandState::Get(state) if state.enter_pending)
+                    && !retained_get_ids.contains(&entry.instance_id)
+            })
+            .map(|(index, entry)| DetachedGetAttempt {
+                entry: entry.clone(),
+                base_chain: self
+                    .entries
+                    .iter()
+                    .skip(index + 1)
+                    .map(DetachedCommandBase::from)
+                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_get_attempts.extend(detached_get_attempts);
@@ -19960,18 +19938,18 @@ impl CommandStack {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
-                (matches!(&entry.state, CommandState::Put(state) if state.put_pending)
-                    && !retained_put_ids.contains(&entry.instance_id))
-                .then(|| DetachedPutAttempt {
-                    entry: entry.clone(),
-                    base_chain: self
-                        .entries
-                        .iter()
-                        .skip(index + 1)
-                        .map(DetachedCommandBase::from)
-                        .collect(),
-                })
+            .filter(|(_, entry)| {
+                matches!(&entry.state, CommandState::Put(state) if state.put_pending)
+                    && !retained_put_ids.contains(&entry.instance_id)
+            })
+            .map(|(index, entry)| DetachedPutAttempt {
+                entry: entry.clone(),
+                base_chain: self
+                    .entries
+                    .iter()
+                    .skip(index + 1)
+                    .map(DetachedCommandBase::from)
+                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_put_attempts.extend(detached_put_attempts);
@@ -19990,20 +19968,20 @@ impl CommandStack {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
-                (matches!(
+            .filter(|(_, entry)| {
+                matches!(
                     &entry.state,
                     CommandState::Put(state) if state.stop_continuation.is_some()
-                ) && !retained_put_stop_ids.contains(&entry.instance_id))
-                .then(|| DetachedPutStop {
-                    entry: entry.clone(),
-                    base_chain: self
-                        .entries
-                        .iter()
-                        .skip(index + 1)
-                        .map(DetachedCommandBase::from)
-                        .collect(),
-                })
+                ) && !retained_put_stop_ids.contains(&entry.instance_id)
+            })
+            .map(|(index, entry)| DetachedPutStop {
+                entry: entry.clone(),
+                base_chain: self
+                    .entries
+                    .iter()
+                    .skip(index + 1)
+                    .map(DetachedCommandBase::from)
+                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_put_stops.extend(detached_put_stops);
@@ -20025,23 +20003,23 @@ impl CommandStack {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
-                (matches!(
+            .filter(|(_, entry)| {
+                matches!(
                     &entry.state,
                     CommandState::Construct(state)
                         if state.stop_continuation
                             || state.script_pending
                             || (state.spawn_requested && state.construction_id.is_none())
-                ) && !retained_construct_ids.contains(&entry.instance_id))
-                .then(|| DetachedConstructCommand {
-                    entry: entry.clone(),
-                    base_chain: self
-                        .entries
-                        .iter()
-                        .skip(index + 1)
-                        .map(DetachedCommandBase::from)
-                        .collect(),
-                })
+                ) && !retained_construct_ids.contains(&entry.instance_id)
+            })
+            .map(|(index, entry)| DetachedConstructCommand {
+                entry: entry.clone(),
+                base_chain: self
+                    .entries
+                    .iter()
+                    .skip(index + 1)
+                    .map(DetachedCommandBase::from)
+                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_construct_commands
@@ -20060,18 +20038,18 @@ impl CommandStack {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| {
-                (entry.state.has_physical_continuation()
-                    && !retained_physical_ids.contains(&entry.instance_id))
-                .then(|| DetachedPhysicalCommand {
-                    entry: entry.clone(),
-                    base_chain: self
-                        .entries
-                        .iter()
-                        .skip(index + 1)
-                        .map(DetachedCommandBase::from)
-                        .collect(),
-                })
+            .filter(|(_, entry)| {
+                entry.state.has_physical_continuation()
+                    && !retained_physical_ids.contains(&entry.instance_id)
+            })
+            .map(|(index, entry)| DetachedPhysicalCommand {
+                entry: entry.clone(),
+                base_chain: self
+                    .entries
+                    .iter()
+                    .skip(index + 1)
+                    .map(DetachedCommandBase::from)
+                    .collect(),
             })
             .collect::<Vec<_>>();
         self.detached_physical_commands
@@ -20130,10 +20108,7 @@ impl CommandStack {
     /// Target and Target2 wrappers which are outside Game.Objects, but Tx is
     /// an ordinary C4Value and is only compiled through ObjectNumber without
     /// mutating the live value.
-    pub(crate) fn denumerate_compiled_pointer_fields(
-        &mut self,
-        object_numbers: &HashSet<u64>,
-    ) {
+    pub(crate) fn denumerate_compiled_pointer_fields(&mut self, object_numbers: &HashSet<u64>) {
         for entry in &mut self.entries {
             if let Some(request) = &mut entry.request {
                 denumerate_object_reference(&mut request.target, object_numbers);
@@ -20433,8 +20408,7 @@ impl CommandStack {
             result
         } else {
             let detached_index = self.detached_exit_preludes.iter().position(|detached| {
-                (command_instance_id == 0
-                    || detached.entry.instance_id == command_instance_id)
+                (command_instance_id == 0 || detached.entry.instance_id == command_instance_id)
                     && matches!(
                         &detached.entry.state,
                         CommandState::Exit(state) if state.stop_continuation
@@ -21485,7 +21459,7 @@ impl CommandStack {
         let request_retained = self.entries[index]
             .request
             .as_ref()
-            .map_or(true, |request| request.target == Some(target));
+            .is_none_or(|request| request.target == Some(target));
         let target_retained = state_retained && request_retained;
         if !rejected {
             if let CommandState::Grab(state) = &mut self.entries[index].state {
@@ -21559,7 +21533,7 @@ impl CommandStack {
         let request_retained = self.entries[index]
             .request
             .as_ref()
-            .map_or(true, |request| request.target == Some(target));
+            .is_none_or(|request| request.target == Some(target));
         if state_retained && request_retained {
             return false;
         }
@@ -22398,7 +22372,11 @@ fn c4_angle(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
     let angle =
         (180.0_f64 * f64::from(dy.atan2(dx)) * f64::from(std::f32::consts::FRAC_1_PI)) as i32;
     if x2 > x1 {
-        if y2 < y1 { 90 - angle } else { 90 + angle }
+        if y2 < y1 {
+            90 - angle
+        } else {
+            90 + angle
+        }
     } else if y2 < y1 {
         270 + angle
     } else {
@@ -22851,7 +22829,7 @@ impl MoveToState {
                 }
             }
         }
-        if ctx.frame % 35 == 0 {
+        if ctx.frame.is_multiple_of(35) {
             self.path_checked = false;
         }
 
@@ -23011,7 +22989,7 @@ impl MoveToState {
             // range; !Tick2 frames steer vertically toward Ty with no
             // range. ComDir is left alone when no condition hits.
             ActionProcedure::Swim => {
-                if ctx.frame % 2 != 0 {
+                if !ctx.frame.is_multiple_of(2) {
                     if dx > target_range {
                         Some(CommandDirection::Right)
                     } else if dx < -target_range {
@@ -23668,13 +23646,13 @@ impl ExitState {
             // the old-container Exit callbacks, the target Status gate and
             // Collection2/Entrance may all change the final containment
             // (C4Command.cpp:629-632; C4Object.cpp:1566-1636).
-            return CommandStepResult::running(None).with_events(vec![
+            CommandStepResult::running(None).with_events(vec![
                 CommandEvent::CommandExitIntoParent {
                     object_id: ctx.object.id,
                     container_id: parent_id,
                     command_instance_id: 0,
                 },
-            ]);
+            ])
         } else {
             let entrance_position = if container_snapshot.entrance_status
                 && container_snapshot.ocf & ocf::ENTRANCE != 0
@@ -23718,15 +23696,13 @@ impl ExitState {
                 // fCopyMotion=false or direct repositioning.
                 (ctx.position, false)
             };
-            CommandStepResult::running(None).with_events(vec![
-                CommandEvent::CommandExitObject {
-                    object_id: ctx.object.id,
-                    previous_container: container_id,
-                    position,
-                    jump_after,
-                    command_instance_id: 0,
-                },
-            ])
+            CommandStepResult::running(None).with_events(vec![CommandEvent::CommandExitObject {
+                object_id: ctx.object.id,
+                previous_container: container_id,
+                position,
+                jump_after,
+                command_instance_id: 0,
+            }])
         }
     }
 }
@@ -24099,8 +24075,7 @@ impl ConstructState {
         ctx.object.contents.iter().copied().find(|id| {
             ctx.resolve(*id)
                 .map(|snapshot| {
-                    snapshot.definition_id == CONKIT_DEFINITION
-                        && snapshot.has_nonzero_status()
+                    snapshot.definition_id == CONKIT_DEFINITION && snapshot.has_nonzero_status()
                 })
                 .unwrap_or(false)
         })
@@ -24108,7 +24083,7 @@ impl ConstructState {
 
     fn at_site(&self, ctx: &CommandRuntimeContext<'_>, site: Vector2) -> bool {
         const APPROACH_VERTICAL: i32 = 20;
-        let approach_horizontal = self.execute_move_to_range.unwrap_or_else(|| {
+        let approach_horizontal = self.execute_move_to_range.unwrap_or({
             if ctx.object.move_to_range > 0 {
                 ctx.object.move_to_range
             } else {
@@ -24708,7 +24683,7 @@ impl TransferState {
     }
 
     fn should_call_script(frame: u64) -> bool {
-        frame % 5 == 0
+        frame.is_multiple_of(5)
     }
 
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
@@ -25343,8 +25318,7 @@ impl ActivateState {
                 result.status = CommandStatus::Failed;
                 return result;
             };
-            if target.container != Some(container_id) || !self.check_minimum_con(target)
-            {
+            if target.container != Some(container_id) || !self.check_minimum_con(target) {
                 result.status = CommandStatus::Failed;
                 return result;
             }
@@ -28116,11 +28090,7 @@ impl EnergyState {
             .map(|snapshot| snapshot.id)
     }
 
-    fn target_has_power_line(
-        &self,
-        ctx: &CommandRuntimeContext<'_>,
-        target_id: ObjectId,
-    ) -> bool {
+    fn target_has_power_line(&self, ctx: &CommandRuntimeContext<'_>, target_id: ObjectId) -> bool {
         ctx.objects.values().any(|snapshot| {
             snapshot.definition_id == POWERLINE_DEFINITION
                 && snapshot.is_status_active()
@@ -28691,10 +28661,9 @@ impl CommandState {
             CommandState::Follow(state) => clear(&mut state.target),
             CommandState::MoveTo(state) => clear(&mut state.target),
             CommandState::Enter(state) => clear(&mut state.target),
-            CommandState::Build(state) => clear_required_object_reference(
-                &mut state.target,
-                removed,
-            ),
+            CommandState::Build(state) => {
+                clear_required_object_reference(&mut state.target, removed)
+            }
             CommandState::Transfer(state) => {
                 let tx_changed = state
                     .tx_value
@@ -28702,10 +28671,9 @@ impl CommandState {
                     .is_some_and(|value| clear_value_object_reference(value, removed));
                 clear_required_object_reference(&mut state.target, removed) | tx_changed
             }
-            CommandState::Chop(state) => clear_required_object_reference(
-                &mut state.target,
-                removed,
-            ),
+            CommandState::Chop(state) => {
+                clear_required_object_reference(&mut state.target, removed)
+            }
             CommandState::Grab(state) if state.target == removed => {
                 let changed = !state.target_cleared;
                 state.target_cleared = true;
@@ -28737,10 +28705,9 @@ impl CommandState {
                 clear(&mut state.target) | clear(&mut state.fallback_container)
             }
             CommandState::Throw(state) => clear(&mut state.target),
-            CommandState::Attack(state) => clear_required_object_reference(
-                &mut state.target,
-                removed,
-            ),
+            CommandState::Attack(state) => {
+                clear_required_object_reference(&mut state.target, removed)
+            }
             CommandState::Call(state) => {
                 let tx_changed = state
                     .tx_value
@@ -28760,10 +28727,9 @@ impl CommandState {
                     | clear(&mut state.linekit)
                     | clear(&mut state.line)
             }
-            CommandState::Context(state) => clear_required_object_reference(
-                &mut state.target,
-                removed,
-            ),
+            CommandState::Context(state) => {
+                clear_required_object_reference(&mut state.target, removed)
+            }
             _ => false,
         }
     }
@@ -28781,9 +28747,7 @@ impl CommandState {
             CommandState::Grab(state) => state.update_interval,
             CommandState::Throw(state) => state.update_interval,
             CommandState::UnGrab(state) => state.update_interval,
-            CommandState::Wait(state) => {
-                positive_helper_interval(state.remaining.unwrap_or(0))
-            }
+            CommandState::Wait(state) => positive_helper_interval(state.remaining.unwrap_or(0)),
             CommandState::Put(state) => state.update_interval,
             CommandState::Drop(state) => state.update_interval,
             CommandState::Get(state) => state.update_interval,

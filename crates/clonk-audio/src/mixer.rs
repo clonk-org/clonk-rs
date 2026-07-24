@@ -80,16 +80,11 @@ pub enum AudioError {
 /// Selects the sample-rate converter used when decoded audio does not match
 /// the output device. `Default` leaves the backend's established choice in
 /// place; `Linear` explicitly pins the inexpensive two-point interpolator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ResamplingMode {
+    #[default]
     Default,
     Linear,
-}
-
-impl Default for ResamplingMode {
-    fn default() -> Self {
-        Self::Default
-    }
 }
 
 /// Unloads the mixer sound when the last `SoundHandle` clone drops.

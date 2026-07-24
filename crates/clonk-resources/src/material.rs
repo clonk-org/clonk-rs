@@ -1,7 +1,7 @@
 use crate::{
     definition::{
-        ini_section_name, ini_value, parse_action_i32_prefix, parse_action_u64_prefix,
-        parse_bool, parse_int_array,
+        ini_section_name, ini_value, parse_action_i32_prefix, parse_action_u64_prefix, parse_bool,
+        parse_int_array,
     },
     Group, GroupError,
 };
@@ -98,10 +98,7 @@ impl MaterialEnumeration {
     pub fn parse(source: &[u8]) -> Result<Self, MaterialEnumerationError> {
         // LoadEntryString exposes a C string to SSearch/SCopyIdentifier;
         // bytes after the first NUL are not visible to the native parser.
-        let source = source
-            .split(|byte| *byte == 0)
-            .next()
-            .unwrap_or_default();
+        let source = source.split(|byte| *byte == 0).next().unwrap_or_default();
         let Some(header) = source
             .windows(Self::HEADER.len())
             .position(|window| window == Self::HEADER)
@@ -111,7 +108,10 @@ impl MaterialEnumeration {
         let mut remaining = &source[header + Self::HEADER.len()..];
         skip_enumeration_whitespace(&mut remaining);
         let mut names = Vec::new();
-        while remaining.first().is_some_and(|byte| enumeration_identifier(*byte)) {
+        while remaining
+            .first()
+            .is_some_and(|byte| enumeration_identifier(*byte))
+        {
             // SCopyIdentifier caps each token at C4M_MaxName. A longer raw
             // identifier therefore continues as another token, because the
             // unconsumed suffix still begins with an identifier byte.
@@ -219,9 +219,9 @@ impl MaterialLibrary {
             let fresh: Vec<MaterialDefinition> = load
                 .iter()
                 .filter(|definition| {
-                    !merged.iter().any(|existing| {
-                        c4_names_equal(existing.name(), definition.name())
-                    })
+                    !merged
+                        .iter()
+                        .any(|existing| c4_names_equal(existing.name(), definition.name()))
                 })
                 .cloned()
                 .collect();
@@ -251,11 +251,8 @@ impl MaterialLibrary {
         &mut self,
         enumeration: &MaterialEnumeration,
     ) -> Result<(), MaterialEnumerationError> {
-        let result = enumeration
-            .names
-            .iter()
-            .enumerate()
-            .try_for_each(|(requested_index, requested_name)| {
+        let result = enumeration.names.iter().enumerate().try_for_each(
+            |(requested_index, requested_name)| {
                 let found_index = self
                     .materials
                     .get(requested_index..)
@@ -270,7 +267,8 @@ impl MaterialLibrary {
                     })?;
                 self.materials.swap(requested_index, found_index);
                 Ok(())
-            });
+            },
+        );
 
         // Keep name lookup coherent even on the fatal partial-sort path.
         self.by_name = first_name_indices(&self.materials);
@@ -577,14 +575,8 @@ fn native_ini_name_tree(source: &str) -> Vec<NativeIniNode<'_>> {
             .count();
         let line = &raw_line[indent..];
         let section = line.as_bytes().first() == Some(&b'[')
-            && line
-                .as_bytes()
-                .get(1)
-                .is_some_and(u8::is_ascii_alphabetic);
-        let value = line
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphabetic);
+            && line.as_bytes().get(1).is_some_and(u8::is_ascii_alphabetic);
+        let value = line.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
         if !section && !value {
             continue;
         }
@@ -729,19 +721,16 @@ fn native_fixed_array(
 fn native_compiled_string(name: &str, value: &str) -> String {
     match name {
         "Name" => truncate_c4m_name(value.trim_start_matches([' ', '\t'])),
-        "TextureOverlay"
-        | "PXSGfx"
-        | "BlastShiftTo"
-        | "InMatConvert"
-        | "InMatConvertTo"
-        | "AboveTempConvertTo"
-        | "BelowTempConvertTo" => native_identifier(value, usize::MAX),
+        "TextureOverlay" | "PXSGfx" | "BlastShiftTo" | "InMatConvert" | "InMatConvertTo"
+        | "AboveTempConvertTo" | "BelowTempConvertTo" => native_identifier(value, usize::MAX),
         "Blast2Object" | "Dig2Object" => {
             let identifier = native_identifier(value, 4);
             let bytes = clonk_script::c4_string_bytes(&identifier);
-            (bytes.len() == 4 && bytes != b"NONE" && bytes != b"0000")
-                .then_some(identifier)
-                .unwrap_or_default()
+            if bytes.len() == 4 && bytes != b"NONE" && bytes != b"0000" {
+                identifier
+            } else {
+                String::default()
+            }
         }
         "Type" | "TargetSpec" | "ScriptFunc" | "ConvertMat" => native_escaped_string(value),
         _ => value.to_string(),
@@ -825,9 +814,7 @@ fn native_escaped_string(value: &str) -> String {
                     if !matches!(digit, b'0'..=b'7') {
                         break;
                     }
-                    code = code
-                        .wrapping_mul(8)
-                        .wrapping_add(i32::from(digit - b'0'));
+                    code = code.wrapping_mul(8).wrapping_add(i32::from(digit - b'0'));
                     cursor += 1;
                 }
                 output.push(code as u8);
@@ -1003,10 +990,10 @@ fn find_comment_start(bytes: &[u8]) -> Option<usize> {
                     return Some(idx);
                 }
             }
-            b'/' if bytes[idx + 1] == b'/' => {
-                if idx == 0 || bytes[idx - 1].is_ascii_whitespace() {
-                    return Some(idx);
-                }
+            b'/' if bytes[idx + 1] == b'/'
+                && (idx == 0 || bytes[idx - 1].is_ascii_whitespace()) =>
+            {
+                return Some(idx);
             }
             _ => {}
         }
@@ -1157,16 +1144,10 @@ mod tests {
             )
             .expect("add ignored Material.txt");
         packed
-            .add_file(
-                "A.C4M",
-                b"[Material]\nName=Dup\nDensity=21\n".to_vec(),
-            )
+            .add_file("A.C4M", b"[Material]\nName=Dup\nDensity=21\n".to_vec())
             .expect("add first duplicate");
         packed
-            .add_file(
-                "B.c4m",
-                b"[Material]\nName=dUp\nDensity=22\n".to_vec(),
-            )
+            .add_file("B.c4m", b"[Material]\nName=dUp\nDensity=22\n".to_vec())
             .expect("add second duplicate");
         let group = Group::from_raw_memory(
             std::path::PathBuf::from("Material.c4g"),
@@ -1187,7 +1168,9 @@ mod tests {
         assert_eq!(first.reactions().len(), 1);
         assert_eq!(first.reactions()[0].value("type"), Some("Poof"));
         assert_eq!(
-            library.get("DUP").and_then(|material| material.int("density")),
+            library
+                .get("DUP")
+                .and_then(|material| material.int("density")),
             Some(21),
             "case-insensitive lookup resolves the lower duplicate index"
         );
@@ -1204,7 +1187,9 @@ mod tests {
             vec!["Global", "First", "Dup", "dUp"]
         );
         assert_eq!(
-            merged.get("dup").and_then(|material| material.int("density")),
+            merged
+                .get("dup")
+                .and_then(|material| material.int("density")),
             Some(21)
         );
 
@@ -1310,14 +1295,8 @@ CheckSlide=0x
             material.int_list("ColorX"),
             Some(vec![4, 6, 0, 0, 0, 0, 0, 0, 0])
         );
-        assert_eq!(
-            material.int_list("Alpha"),
-            Some(vec![-1, 2, 0, 0, 0, 0])
-        );
-        assert_eq!(
-            material.int_list("PXSGfxRt"),
-            Some(vec![1, 2, 0, 0, 0, 0])
-        );
+        assert_eq!(material.int_list("Alpha"), Some(vec![-1, 2, 0, 0, 0, 0]));
+        assert_eq!(material.int_list("PXSGfxRt"), Some(vec![1, 2, 0, 0, 0, 0]));
         assert_eq!(material.value("Blast2Object"), Some("ABCD"));
         assert_eq!(material.value("Dig2Object"), Some(""));
         assert_eq!(material.value("TextureOverlay"), Some("Smooth"));
@@ -1355,11 +1334,9 @@ CheckSlide=0x
         assert_eq!(shadowed.reactions().len(), 1);
         assert!(shadowed.reactions()[0].raw_properties().is_empty());
 
-        let absent = MaterialParser::new(
-            "[material]\nName=Wrong\n[Material ]\nName=AlsoWrong\n",
-        )
-        .parse_first()
-        .expect("absent exact Material namespace compiles defaults");
+        let absent = MaterialParser::new("[material]\nName=Wrong\n[Material ]\nName=AlsoWrong\n")
+            .parse_first()
+            .expect("absent exact Material namespace compiles defaults");
         assert_eq!(absent.name(), "");
         assert!(absent.raw_properties().is_empty());
 
@@ -1439,19 +1416,22 @@ CheckSlide=0x
             "[Material A]\nName=A\n\n[Material B]\nName=B\n\n[Material C]\nName=C\n",
         )
         .expect("materials parse");
-        let enumeration = MaterialEnumeration::parse(b"[Enumeration]\r\nC\r\n")
-            .expect("enumeration parses");
+        let enumeration =
+            MaterialEnumeration::parse(b"[Enumeration]\r\nC\r\n").expect("enumeration parses");
 
         library
             .sort_enumeration(&enumeration)
             .expect("enumeration sorts");
 
         assert_eq!(
-            library.iter().map(MaterialDefinition::name).collect::<Vec<_>>(),
+            library
+                .iter()
+                .map(MaterialDefinition::name)
+                .collect::<Vec<_>>(),
             vec!["C", "B", "A"]
         );
-        let wrong_case = MaterialEnumeration::parse(b"[Enumeration] c")
-            .expect("lowercase enumeration parses");
+        let wrong_case =
+            MaterialEnumeration::parse(b"[Enumeration] c").expect("lowercase enumeration parses");
         assert_eq!(
             library.sort_enumeration(&wrong_case),
             Err(MaterialEnumerationError::MissingMaterial("c".to_string()))

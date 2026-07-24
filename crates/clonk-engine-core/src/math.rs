@@ -576,10 +576,7 @@ mod tests {
         assert_eq!((-C4Fixed::from_raw(i32::MIN)).val(), i32::MIN);
         assert_eq!(C4Fixed::from_raw(i32::MIN).abs().val(), i32::MIN);
         assert_eq!((max * 2).val(), -2);
-        assert_eq!(
-            fixed256(i32::MAX).val(),
-            i32::MAX.wrapping_mul(FPF) / 256
-        );
+        assert_eq!(fixed256(i32::MAX).val(), i32::MAX.wrapping_mul(FPF) / 256);
         assert_eq!(
             (itofix(100_000) + itofix(100_000)).val(),
             100_000i32

@@ -1892,7 +1892,7 @@ func Arm()
             .spawn_object(SpawnConfig::new("Miner"))
             .expect("spawn succeeds");
 
-        let _ = engine.tick_without_snapshot().expect("first tick succeeds");
+        engine.tick_without_snapshot().expect("first tick succeeds");
         let surface = engine
             .landscape()
             .expect("landscape present")
@@ -1901,7 +1901,7 @@ func Arm()
         assert_eq!(surface[4], 10);
         assert_eq!(surface[6], 10);
 
-        let _ = engine.tick_without_snapshot().expect("second tick succeeds");
+        engine.tick_without_snapshot().expect("second tick succeeds");
         let surface = engine
             .landscape()
             .expect("landscape present")
@@ -1958,18 +1958,18 @@ func Arm()
 
         assert_eq!(engine.frame(), 0);
 
-        let _ = engine.tick_without_snapshot().expect("first tick succeeds");
+        engine.tick_without_snapshot().expect("first tick succeeds");
         assert!(engine.landscape().expect("landscape present").liquids()[3]
             .segments()
             .is_empty());
 
-        let _ = engine.tick_without_snapshot().expect("second tick succeeds");
+        engine.tick_without_snapshot().expect("second tick succeeds");
         assert_eq!(
             engine.landscape().expect("landscape present").liquids()[3].segments(),
             &[LiquidSegment::new(5, 8)]
         );
 
-        let _ = engine.tick_without_snapshot().expect("third tick succeeds");
+        engine.tick_without_snapshot().expect("third tick succeeds");
         assert!(engine.landscape().expect("landscape present").liquids()[3]
             .segments()
             .is_empty());
@@ -4181,7 +4181,7 @@ func OnOwnerChanged()
         )?;
 
         // Process removal and allow periodic polling to run.
-        let _ = engine.tick_without_snapshot()?;
+        engine.tick_without_snapshot()?;
 
         let mut triggered = false;
         for _ in 0..40 {

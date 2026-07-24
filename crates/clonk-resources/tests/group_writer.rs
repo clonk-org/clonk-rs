@@ -3,8 +3,8 @@
 #[path = "../src/group_writer.rs"]
 mod group_writer;
 
-use group_writer::{c4group_entry_crc, c4group_file_crc, compress_c4group_for_test};
 use clonk_resources::{Group, MutableGroup, MutableGroupChildMut, MutableGroupError};
+use group_writer::{c4group_entry_crc, c4group_file_crc, compress_c4group_for_test};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
@@ -90,7 +90,7 @@ fn mutable_group_rename_is_collision_safe_and_preserves_entry_metadata() {
         .entries()
         .unwrap()
         .into_iter()
-        .find(|entry| entry.relative_path == PathBuf::from("Renamed.c4s"))
+        .find(|entry| entry.relative_path == std::path::Path::new("Renamed.c4s"))
         .unwrap();
     assert_eq!(renamed.time, 0xa0b0_c0d0);
     assert!(renamed.executable);

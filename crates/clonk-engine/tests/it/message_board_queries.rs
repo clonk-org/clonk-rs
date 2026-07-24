@@ -437,9 +437,7 @@ fn restored_query_denumerates_a_missing_callback_object() {
         Value::Bool(true)
     );
     let mut state = engine.capture_state();
-    state
-        .objects
-        .retain(|object| object.snapshot.id != target);
+    state.objects.retain(|object| object.snapshot.id != target);
 
     engine
         .restore_state(&state)
@@ -863,7 +861,9 @@ fn message_board_answer_control_preserves_escaped_and_raw_text_in_the_same_frame
         open(&mut engine, target, false, "escaped answer", PLAYER),
         Value::Bool(true)
     );
-    engine.tick_without_snapshot().expect("advance to a nonzero control frame");
+    engine
+        .tick_without_snapshot()
+        .expect("advance to a nonzero control frame");
     let frame = i32::try_from(engine.frame()).expect("fixture frame fits i32");
 
     let gravity = engine.physics().gravity;
@@ -999,8 +999,7 @@ fn message_board_answer_submission_applies_cpp_uppercase_bytes_before_queueing()
 
     let control = engine
         .prepare_message_board_answer_control(
-            LegacyCString::from_bytes(vec![b'a', 0xe4, 0xf6, 0xfc])
-                .expect("answer is NUL-free"),
+            LegacyCString::from_bytes(vec![b'a', 0xe4, 0xf6, 0xfc]).expect("answer is NUL-free"),
             7,
         )
         .expect("uppercase input produces a control");
@@ -1020,7 +1019,13 @@ fn message_board_answer_control_preserves_cpp_internal_script_parse_failures() {
             .expect("message-board player remains")
             .set_at_client(PlayerAtClient::new(7));
         assert_eq!(
-            open(&mut engine, target, false, "invalid internal source", PLAYER),
+            open(
+                &mut engine,
+                target,
+                false,
+                "invalid internal source",
+                PLAYER
+            ),
             Value::Bool(true)
         );
 

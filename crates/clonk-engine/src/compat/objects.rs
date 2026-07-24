@@ -3333,9 +3333,9 @@ pub(crate) fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow.as_mut()?;
         let shifted = context.rotate_contents_link_to_front(container, new_front);
         if shifted {
-            context
-                .object_context_mut()
-                .map(|object| object.shift_contents_front(new_front));
+            if let Some(object) = context.object_context_mut() {
+                object.shift_contents_front(new_front);
+            }
         }
         Some(shifted)
     });
@@ -7742,13 +7742,13 @@ fn resolve_component_list(
                     instance,
                     script,
                     "GetCustomComponents",
-                    &[builder.clone()],
+                    std::slice::from_ref(&builder),
                 ),
                 None => call_scoped_definition_function(
                     script,
                     definition,
                     "GetCustomComponents",
-                    &[builder.clone()],
+                    std::slice::from_ref(&builder),
                 ),
             }
             .and_then(|result| match result {
@@ -9166,7 +9166,7 @@ pub(crate) fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeE
             return Ok(Value::Nil);
         }
         Ok(match entry.as_str() {
-            "id" if info.definition_id.as_str().is_empty() => Value::Nil,
+            "id" if info.definition_id.is_empty() => Value::Nil,
             "id" => Value::C4Id(info.definition_id.as_str().to_string()),
             "Name" => Value::String(info.name.clone().into()),
             "DeathMessage" => Value::String(

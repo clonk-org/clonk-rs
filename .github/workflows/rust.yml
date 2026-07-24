@@ -1,10 +1,11 @@
-name: Rust port
+name: Clonk Rust CI
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
-    branches: ['**']
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -26,9 +27,10 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
           submodules: recursive
 
       - name: Install native Rust dependencies
@@ -42,30 +44,50 @@ jobs:
             pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
         with:
           components: clippy, rustfmt
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2
         with:
           tool: cargo-nextest@0.9.91
 
       - name: Restore Rust build cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          workspaces: rust -> target
+          workspaces: . -> target
           shared-key: focused-feedback
           cache-on-failure: true
 
+      - name: Select comparison revision
+        id: comparison
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$PULL_REQUEST_BASE"
+          elif [[ -n "$PUSH_BEFORE" ]] &&
+            [[ ! "$PUSH_BEFORE" =~ ^0+$ ]] &&
+            git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
+            base="$PUSH_BEFORE"
+          elif base="$(git rev-parse HEAD^ 2>/dev/null)"; then
+            :
+          else
+            base="$(git rev-parse HEAD)"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
       - name: Run change-aware checks
         env:
-          LC_DEV_CHECK_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: cargo dev-check --base "$LC_DEV_CHECK_BASE" --budget-seconds 60
+          COMPARISON_BASE: ${{ steps.comparison.outputs.base }}
+        run: cargo dev-check --base "$COMPARISON_BASE" --budget-seconds 60
 
       - name: Upload developer-feedback artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rust-dev-check-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/dev-check
@@ -75,14 +97,15 @@ jobs:
   full-parity:
     name: Full Rust parity gate
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
           submodules: recursive
 
       - name: Install native Rust dependencies
@@ -96,24 +119,39 @@ jobs:
             pkg-config
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2
         with:
           tool: cargo-nextest@0.9.91
 
       - name: Restore Rust build cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          workspaces: rust -> target
+          workspaces: . -> target
           shared-key: full-parity
           cache-on-failure: true
 
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run repository script tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+
+      - name: Run packaging and release-tool tests
+        run: cargo test -p xtask --features engine-tools --bin xtask-engine-tools --locked
+
       - name: Run workspace tests
-        run: cargo nextest run --workspace --locked
+        run: cargo test --workspace --locked
 
       - name: Run workspace lints
         run: cargo clippy --profile test --workspace --lib --bins --tests --features xtask/engine-tools --locked -- -D warnings
+
+      - name: Verify deterministic engine snapshots
+        run: cargo xtask engine-snapshots verify
+
+      - name: Verify pinned C++ oracle parity
+        run: cargo xtask parity verify

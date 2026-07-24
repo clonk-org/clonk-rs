@@ -1,19 +1,16 @@
 use clonk_engine::{
     ActivateGameGoalMenuControlData, ActivateGameGoalRuleControlData, ClientCoreControlData,
     ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
-    ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, DebugRecordControlData,
-    EmMoveObjectControlData,
-    CustomCommandControlData, EliminatePlayerControlData, EmDrawToolControlData,
-    EmDropDefControlData,
-    InitScenarioPlayerControlData,
+    ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, CustomCommandControlData,
+    DebugRecordControlData, EliminatePlayerControlData, EmDrawToolControlData,
+    EmDropDefControlData, EmMoveObjectControlData, InitScenarioPlayerControlData,
     JoinPlayerControlData, JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData,
     MessageControlData, NetworkResourceCore, PlayerCommandControlData, PlayerControlData,
-    PlayerInfoControlData,
-    PlayerInfoUpdateRequest, PlayerSelectControlData, RemovePlayerControlData, ScriptControlData,
-    ScriptStrictness, SetControlData, SetPlayerTeamControlData, SurrenderPlayerControlData,
-    SyncCheckPacket, SynchronizeControlData, ToggleHostilityControlData, VoteControlData,
-    EMMO_SCRIPT, MESSAGE_TYPE_PRIVATE,
-    CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
+    PlayerInfoControlData, PlayerInfoUpdateRequest, PlayerSelectControlData,
+    RemovePlayerControlData, ScriptControlData, ScriptStrictness, SetControlData,
+    SetPlayerTeamControlData, SurrenderPlayerControlData, SyncCheckPacket, SynchronizeControlData,
+    ToggleHostilityControlData, VoteControlData, CLIENT_UPDATE_ACTIVATE, EMMO_SCRIPT,
+    MESSAGE_TYPE_PRIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
 
@@ -713,9 +710,7 @@ fn decode_control_set(reader: &mut Reader<'_>) -> Result<EngineControlPacket, Le
     .into_control_packet())
 }
 
-fn decode_debug_record(
-    reader: &mut Reader<'_>,
-) -> Result<EngineControlPacket, LegacyControlError> {
+fn decode_debug_record(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
     // StdBuf casts its size to uint32_t before applying mkIntPackAdapt.
     let size = reader.read_uint32()? as usize;
     Ok(EngineControlPacket::DebugRecord(DebugRecordControlData {
@@ -822,11 +817,13 @@ fn decode_activate_game_goal_rule(
 fn decode_set_player_team(
     reader: &mut Reader<'_>,
 ) -> Result<EngineControlPacket, LegacyControlError> {
-    Ok(EngineControlPacket::SetPlayerTeam(SetPlayerTeamControlData {
-        team: reader.read_int32()?,
-        player: reader.read_int32()?,
-        by_client: reader.read_int32()?,
-    }))
+    Ok(EngineControlPacket::SetPlayerTeam(
+        SetPlayerTeamControlData {
+            team: reader.read_int32()?,
+            player: reader.read_int32()?,
+            by_client: reader.read_int32()?,
+        },
+    ))
 }
 
 fn decode_eliminate_player(
@@ -1047,17 +1044,19 @@ fn decode_player_select(
 fn decode_player_command(
     reader: &mut Reader<'_>,
 ) -> Result<EngineControlPacket, LegacyControlError> {
-    Ok(EngineControlPacket::PlayerCommand(PlayerCommandControlData {
-        player: reader.read_int32()?,
-        command: reader.read_int32()?,
-        x: reader.read_raw_i32()?,
-        y: reader.read_raw_i32()?,
-        target: reader.read_raw_i32()?,
-        target2: reader.read_raw_i32()?,
-        data: reader.read_raw_i32()?,
-        add_mode: reader.read_int32()?,
-        by_client: reader.read_int32()?,
-    }))
+    Ok(EngineControlPacket::PlayerCommand(
+        PlayerCommandControlData {
+            player: reader.read_int32()?,
+            command: reader.read_int32()?,
+            x: reader.read_raw_i32()?,
+            y: reader.read_raw_i32()?,
+            target: reader.read_raw_i32()?,
+            target2: reader.read_raw_i32()?,
+            data: reader.read_raw_i32()?,
+            add_mode: reader.read_int32()?,
+            by_client: reader.read_int32()?,
+        },
+    ))
 }
 
 fn decode_message(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
@@ -1120,9 +1119,7 @@ fn decode_em_move_object(
     }))
 }
 
-fn decode_em_draw_tool(
-    reader: &mut Reader<'_>,
-) -> Result<EngineControlPacket, LegacyControlError> {
+fn decode_em_draw_tool(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
     Ok(EngineControlPacket::EmDrawTool(EmDrawToolControlData {
         action: reader.read_u8()?,
         mode: reader.read_int32()?,
@@ -1138,9 +1135,7 @@ fn decode_em_draw_tool(
     }))
 }
 
-fn decode_em_drop_def(
-    reader: &mut Reader<'_>,
-) -> Result<EngineControlPacket, LegacyControlError> {
+fn decode_em_drop_def(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
     let raw_id = reader.read_c_string()?;
     let id = match raw_id.as_bytes() {
         bytes if bytes.len() < 4 => *b"NONE",
@@ -1693,9 +1688,8 @@ fn encode_player_select(
     buffer: &mut Vec<u8>,
     data: &PlayerSelectControlData,
 ) -> Result<(), LegacyEncodeError> {
-    let object_count = i32::try_from(data.objects.len()).map_err(|_| {
-        LegacyEncodeError::PlayerSelectObjectCountTooLarge(data.objects.len())
-    })?;
+    let object_count = i32::try_from(data.objects.len())
+        .map_err(|_| LegacyEncodeError::PlayerSelectObjectCountTooLarge(data.objects.len()))?;
     buffer.push(CID_PLR_SELECT);
     append_raw_i32(buffer, data.player);
     append_raw_i32(buffer, object_count);
@@ -1905,10 +1899,7 @@ fn encode_custom_command(buffer: &mut Vec<u8>, data: &CustomCommandControlData) 
     append_int32(buffer, data.by_client);
 }
 
-fn encode_activate_game_goal_menu(
-    buffer: &mut Vec<u8>,
-    data: &ActivateGameGoalMenuControlData,
-) {
+fn encode_activate_game_goal_menu(buffer: &mut Vec<u8>, data: &ActivateGameGoalMenuControlData) {
     buffer.push(CID_ACTIVATE_GAME_GOAL_MENU);
     append_int32(buffer, data.player);
     append_int32(buffer, data.by_client);
@@ -1921,10 +1912,7 @@ fn encode_toggle_hostility(buffer: &mut Vec<u8>, data: &ToggleHostilityControlDa
     append_int32(buffer, data.by_client);
 }
 
-fn encode_activate_game_goal_rule(
-    buffer: &mut Vec<u8>,
-    data: &ActivateGameGoalRuleControlData,
-) {
+fn encode_activate_game_goal_rule(buffer: &mut Vec<u8>, data: &ActivateGameGoalRuleControlData) {
     buffer.push(CID_ACTIVATE_GAME_GOAL_RULE);
     append_int32(buffer, data.object);
     append_int32(buffer, data.player);
@@ -2232,16 +2220,17 @@ mod tests {
     fn init_scenario_player_uses_general_control_codec() {
         // C4Player::DoTeamSelection queues CID_InitScenarioPlayer into the
         // ordinary synchronized C4Control list (src/C4Player.cpp:1775-1780).
-        let expected = EngineControlPacket::InitScenarioPlayer(
-            InitScenarioPlayerControlData {
-                team: 130,
-                player: -4,
-                by_client: 7,
-            },
-        );
+        let expected = EngineControlPacket::InitScenarioPlayer(InitScenarioPlayerControlData {
+            team: 130,
+            player: -4,
+            by_client: 7,
+        });
         let encoded = [0xd2, 0x82, 0x01, 0xfc, 0x07];
 
-        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected));
     }
 
@@ -2249,12 +2238,10 @@ mod tests {
     fn internal_player_script_entries_match_cpp_packed_field_order() {
         let cases = [
             (
-                EngineControlPacket::ActivateGameGoalMenu(
-                    ActivateGameGoalMenuControlData {
-                        player: -4,
-                        by_client: 7,
-                    },
-                ),
+                EngineControlPacket::ActivateGameGoalMenu(ActivateGameGoalMenuControlData {
+                    player: -4,
+                    by_client: 7,
+                }),
                 vec![0xd3, 0xfc, 0x07],
             ),
             (
@@ -2266,13 +2253,11 @@ mod tests {
                 vec![0xd4, 0x82, 0x01, 0xfc, 0x07],
             ),
             (
-                EngineControlPacket::ActivateGameGoalRule(
-                    ActivateGameGoalRuleControlData {
-                        object: 130,
-                        player: -4,
-                        by_client: 7,
-                    },
-                ),
+                EngineControlPacket::ActivateGameGoalRule(ActivateGameGoalRuleControlData {
+                    object: 130,
+                    player: -4,
+                    by_client: 7,
+                }),
                 vec![0xd6, 0x82, 0x01, 0xfc, 0x07],
             ),
             (
@@ -2364,25 +2349,28 @@ mod tests {
             ift: true,
             material: LegacyCString::from_bytes(b"Earth\x80".to_vec())
                 .expect("fixture is NUL-free"),
-            texture: LegacyCString::from_bytes(b"Rough".to_vec())
-                .expect("fixture is NUL-free"),
+            texture: LegacyCString::from_bytes(b"Rough".to_vec()).expect("fixture is NUL-free"),
             by_client: -4,
         });
         let encoded = [
-            0xb1, 0x04, 0x82, 0x01, 0x44, 0x33, 0x22, 0x11, 0xfe, 0xff, 0xff, 0xff, 0x04,
-            0x03, 0x02, 0x01, 0xfc, 0xff, 0xff, 0xff, 0x82, 0x01, 0x01, b'E', b'a', b'r',
-            b't', b'h', 0x80, 0x00, b'R', b'o', b'u', b'g', b'h', 0x00, 0xfc,
+            0xb1, 0x04, 0x82, 0x01, 0x44, 0x33, 0x22, 0x11, 0xfe, 0xff, 0xff, 0xff, 0x04, 0x03,
+            0x02, 0x01, 0xfc, 0xff, 0xff, 0xff, 0x82, 0x01, 0x01, b'E', b'a', b'r', b't', b'h',
+            0x80, 0x00, b'R', b'o', b'u', b'g', b'h', 0x00, 0xfc,
         ];
 
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
-        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
 
         let EngineControlPacket::EmDrawTool(mut unknown) = expected else {
             unreachable!("fixture variant is known")
         };
         unknown.action = u8::MAX;
         let unknown = EngineControlPacket::EmDrawTool(unknown);
-        let encoded_unknown = encode_control_entry_payload(&unknown).expect("unknown action encodes");
+        let encoded_unknown =
+            encode_control_entry_payload(&unknown).expect("unknown action encodes");
         assert_eq!(encoded_unknown[1], u8::MAX);
         assert_eq!(decode_control_entry_payload(&encoded_unknown), Ok(unknown));
     }
@@ -2390,9 +2378,9 @@ mod tests {
     #[test]
     fn em_draw_tool_entry_rejects_every_truncated_body() {
         let complete = [
-            0xb1, 0x04, 0x82, 0x01, 0x44, 0x33, 0x22, 0x11, 0xfe, 0xff, 0xff, 0xff, 0x04,
-            0x03, 0x02, 0x01, 0xfc, 0xff, 0xff, 0xff, 0x82, 0x01, 0x01, b'E', b'a', b'r',
-            b't', b'h', 0x80, 0x00, b'R', b'o', b'u', b'g', b'h', 0x00, 0xfc,
+            0xb1, 0x04, 0x82, 0x01, 0x44, 0x33, 0x22, 0x11, 0xfe, 0xff, 0xff, 0xff, 0x04, 0x03,
+            0x02, 0x01, 0xfc, 0xff, 0xff, 0xff, 0x82, 0x01, 0x01, b'E', b'a', b'r', b't', b'h',
+            0x80, 0x00, b'R', b'o', b'u', b'g', b'h', 0x00, 0xfc,
         ];
 
         for end in 1..complete.len() {
@@ -2418,7 +2406,10 @@ mod tests {
         ];
 
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
-        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
 
         let default = EngineControlPacket::EmDropDef(EmDropDefControlData::default());
         assert_eq!(
@@ -2529,12 +2520,15 @@ mod tests {
             by_client: 3,
         });
         let encoded = [
-            0xa0, 0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x03, 0x02, 0x01,
-            0xfe, 0xff, 0xff, 0xff, 0x03,
+            0xa0, 0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x03, 0x02, 0x01, 0xfe,
+            0xff, 0xff, 0xff, 0x03,
         ];
 
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
-        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
 
         let empty = EngineControlPacket::PlayerSelect(PlayerSelectControlData {
             player: -1,
@@ -2542,8 +2536,14 @@ mod tests {
             by_client: -1,
         });
         let empty_bytes = [0xa0, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0xff];
-        assert_eq!(decode_control_entry_payload(&empty_bytes), Ok(empty.clone()));
-        assert_eq!(encode_control_entry_payload(&empty), Ok(empty_bytes.to_vec()));
+        assert_eq!(
+            decode_control_entry_payload(&empty_bytes),
+            Ok(empty.clone())
+        );
+        assert_eq!(
+            encode_control_entry_payload(&empty),
+            Ok(empty_bytes.to_vec())
+        );
     }
 
     #[test]
@@ -2574,12 +2574,15 @@ mod tests {
             by_client: 7,
         });
         let encoded = [
-            0xa2, 0xfc, 0x82, 0x01, 0x44, 0x33, 0x22, 0x11, 0xfe, 0xff, 0xff, 0xff, 0x04,
-            0x03, 0x02, 0x01, 0xff, 0xff, 0xff, 0xff, 0x88, 0x77, 0x66, 0x55, 0x04, 0x07,
+            0xa2, 0xfc, 0x82, 0x01, 0x44, 0x33, 0x22, 0x11, 0xfe, 0xff, 0xff, 0xff, 0x04, 0x03,
+            0x02, 0x01, 0xff, 0xff, 0xff, 0xff, 0x88, 0x77, 0x66, 0x55, 0x04, 0x07,
         ];
 
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
-        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
     }
 
     #[test]
@@ -2708,7 +2711,10 @@ mod tests {
         ];
 
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
-        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
     }
 
     #[test]
@@ -2735,38 +2741,36 @@ mod tests {
     fn message_board_answer_entry_matches_cpp_packed_field_order() {
         // C4ControlMessageBoardAnswer writes packed Object, a NUL-terminated
         // Answer, inherited packed Plr, then inherited packed ByClient.
-        let expected = EngineControlPacket::MessageBoardAnswer(
-            MessageBoardAnswerControlData {
-                object: 130,
-                answer: LegacyCString::from_bytes(b"a\"\\b".to_vec())
-                    .expect("fixture is NUL-free"),
-                player: -4,
-                by_client: 7,
-            },
-        );
-        let encoded = [
-            0xd0, 0x82, 0x01, b'a', b'"', b'\\', b'b', 0x00, 0xfc, 0x07,
-        ];
+        let expected = EngineControlPacket::MessageBoardAnswer(MessageBoardAnswerControlData {
+            object: 130,
+            answer: LegacyCString::from_bytes(b"a\"\\b".to_vec()).expect("fixture is NUL-free"),
+            player: -4,
+            by_client: 7,
+        });
+        let encoded = [0xd0, 0x82, 0x01, b'a', b'"', b'\\', b'b', 0x00, 0xfc, 0x07];
 
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
-        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
     }
 
     #[test]
     fn message_board_answer_preserves_non_utf8_answer_bytes() {
-        let expected = EngineControlPacket::MessageBoardAnswer(
-            MessageBoardAnswerControlData {
-                object: 0,
-                answer: LegacyCString::from_bytes(vec![0x80, 0xff])
-                    .expect("fixture is NUL-free"),
-                player: -1,
-                by_client: 130,
-            },
-        );
+        let expected = EngineControlPacket::MessageBoardAnswer(MessageBoardAnswerControlData {
+            object: 0,
+            answer: LegacyCString::from_bytes(vec![0x80, 0xff]).expect("fixture is NUL-free"),
+            player: -1,
+            by_client: 130,
+        });
         let encoded = [0xd0, 0x00, 0x80, 0xff, 0x00, 0xff, 0x82, 0x01];
 
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
-        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
     }
 
     #[test]
@@ -2791,10 +2795,8 @@ mod tests {
         // C4ControlCustomCommand writes NUL-terminated Command and Argument,
         // inherited packed Plr, then inherited packed ByClient.
         let expected = EngineControlPacket::CustomCommand(CustomCommandControlData {
-            command: LegacyCString::from_bytes(b"push".to_vec())
-                .expect("fixture is NUL-free"),
-            argument: LegacyCString::from_bytes(b"+130".to_vec())
-                .expect("fixture is NUL-free"),
+            command: LegacyCString::from_bytes(b"push".to_vec()).expect("fixture is NUL-free"),
+            argument: LegacyCString::from_bytes(b"+130".to_vec()).expect("fixture is NUL-free"),
             player: -4,
             by_client: 7,
         });
@@ -2803,23 +2805,27 @@ mod tests {
         ];
 
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
-        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
     }
 
     #[test]
     fn custom_command_preserves_non_utf8_string_bytes() {
         let expected = EngineControlPacket::CustomCommand(CustomCommandControlData {
-            command: LegacyCString::from_bytes(vec![0x80, 0xff])
-                .expect("fixture is NUL-free"),
-            argument: LegacyCString::from_bytes(vec![0xfe, 0x81])
-                .expect("fixture is NUL-free"),
+            command: LegacyCString::from_bytes(vec![0x80, 0xff]).expect("fixture is NUL-free"),
+            argument: LegacyCString::from_bytes(vec![0xfe, 0x81]).expect("fixture is NUL-free"),
             player: -1,
             by_client: 130,
         });
         let encoded = [0xd1, 0x80, 0xff, 0x00, 0xfe, 0x81, 0x00, 0xff, 0x82, 0x01];
 
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
-        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
     }
 
     #[test]
@@ -2853,7 +2859,10 @@ mod tests {
         let encoded = [0x92, 0x82, 0x01, 0x01, 0x07];
 
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
-        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
     }
 
     #[test]
@@ -2863,15 +2872,17 @@ mod tests {
         // by inherited packed ByClient (pristine 9ffa0a5d
         // src/C4MainMenu.cpp:790-795; src/C4Control.cpp:1566-1570,53-57;
         // src/C4PacketBase.h:181).
-        let expected = EngineControlPacket::SurrenderPlayer(
-            clonk_engine::SurrenderPlayerControlData {
+        let expected =
+            EngineControlPacket::SurrenderPlayer(clonk_engine::SurrenderPlayerControlData {
                 player: -4,
                 by_client: 7,
-            },
-        );
+            });
         let encoded = [0xd5, 0xfc, 0x07];
 
-        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected));
     }
 

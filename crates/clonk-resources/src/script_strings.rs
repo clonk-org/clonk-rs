@@ -69,11 +69,9 @@ pub fn localize_script_source_with_components<S: AsRef<str>>(
     let (table, table_path) = load_script_string_table(components, languages)?;
     let entries = parse_string_table(&table);
     let source = clonk_script::c4_string_bytes(source);
-    Ok(clonk_script::c4_string_from_bytes(&replace_localization_keys(
-        &source,
-        &entries,
-        &table_path,
-    )))
+    Ok(clonk_script::c4_string_from_bytes(
+        &replace_localization_keys(&source, &entries, &table_path),
+    ))
 }
 
 fn load_script_string_table<S: AsRef<str>>(

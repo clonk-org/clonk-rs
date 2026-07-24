@@ -8,9 +8,9 @@ use std::sync::{Arc, OnceLock};
 use std::cell::Cell;
 
 use crate::material::TemperatureDirection;
-use crate::{math, C4Fixed, FixedVec2, MaterialId, MaterialSet, Vector2};
 #[cfg(test)]
 use crate::EnvironmentSettings;
+use crate::{math, C4Fixed, FixedVec2, MaterialId, MaterialSet, Vector2};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -436,9 +436,7 @@ impl PixelGrid {
             .iter()
             .position(|name| {
                 name.as_deref()
-                    .is_some_and(|name| {
-                        clonk_resources::material::c4_names_equal(name, "Vehicle")
-                    })
+                    .is_some_and(|name| clonk_resources::material::c4_names_equal(name, "Vehicle"))
             })
             .map(|index| index as u8)
     }
@@ -561,8 +559,8 @@ impl PixelGrid {
         {
             return None;
         }
-        let same_surface8 = (self.revision, self.render_token)
-            == (previous.revision, previous.render_token);
+        let same_surface8 =
+            (self.revision, self.render_token) == (previous.revision, previous.render_token);
         if same_surface8
             && !Arc::ptr_eq(&self.bytes, &previous.bytes)
             && self.bytes.as_slice() != previous.bytes.as_slice()
@@ -578,10 +576,7 @@ impl PixelGrid {
             true,
         )?;
         let same_surface32 = (self.surface32_revision, self.surface32_render_token)
-            == (
-                previous.surface32_revision,
-                previous.surface32_render_token,
-            );
+            == (previous.surface32_revision, previous.surface32_render_token);
         if same_surface32
             && !Arc::ptr_eq(&self.surface32_pixels, &previous.surface32_pixels)
             && self.surface32_pixels.as_ref() != previous.surface32_pixels.as_ref()
@@ -999,12 +994,7 @@ impl PixelGrid {
             );
         }
         self.surface32_render_token = token;
-        self.record_surface32_change(
-            base_revision,
-            base_token,
-            bounds.into(),
-            storage_was_shared,
-        );
+        self.record_surface32_change(base_revision, base_token, bounds.into(), storage_was_shared);
     }
 
     fn schedule_surface32_relight_around(&mut self, x: i32, y: i32) {
@@ -1083,11 +1073,8 @@ impl PixelGrid {
         let base_token = self.render_token;
         self.adjust_material_counts_in_rect(rect, false);
         let bytes = mem::take(Arc::make_mut(&mut self.bytes));
-        let mut surface = crate::chunky::Surface8::from_bytes(
-            self.width as i32,
-            self.height as i32,
-            bytes,
-        );
+        let mut surface =
+            crate::chunky::Surface8::from_bytes(self.width as i32, self.height as i32, bytes);
         crate::chunky::polygon(&mut surface, vertices, byte);
         self.bytes = Arc::new(surface.into_bytes());
         self.adjust_material_counts_in_rect(rect, true);
@@ -1126,11 +1113,8 @@ impl PixelGrid {
         let base_token = self.render_token;
         self.adjust_material_counts_in_rect(rect, false);
         let bytes = mem::take(Arc::make_mut(&mut self.bytes));
-        let mut surface = crate::chunky::Surface8::from_bytes(
-            self.width as i32,
-            self.height as i32,
-            bytes,
-        );
+        let mut surface =
+            crate::chunky::Surface8::from_bytes(self.width as i32, self.height as i32, bytes);
         surface.clip(
             clip.x,
             clip.y,
@@ -1148,12 +1132,8 @@ impl PixelGrid {
                     .expect("validated DrawMatChunks random offset count");
                 crate::chunky::draw_chunk(
                     &mut surface,
-                    origin
-                        .x
-                        .wrapping_add(width.wrapping_mul(x) / count_x),
-                    origin
-                        .y
-                        .wrapping_add(height.wrapping_mul(y) / count_y),
+                    origin.x.wrapping_add(width.wrapping_mul(x) / count_x),
+                    origin.y.wrapping_add(height.wrapping_mul(y) / count_y),
                     chunk_width,
                     chunk_height,
                     byte,
@@ -1185,7 +1165,11 @@ impl PixelGrid {
         self.material_names
             .iter()
             .zip(&self.materials)
-            .find_map(|(name, slot)| (*slot == Some(material)).then_some(name.as_deref()).flatten())
+            .find_map(|(name, slot)| {
+                (*slot == Some(material))
+                    .then_some(name.as_deref())
+                    .flatten()
+            })
     }
 
     /// Any solid texmap byte (fallback fill when no material is known).
@@ -1222,8 +1206,7 @@ impl PixelGrid {
         let mut last_column = -1;
         for y in to.y..from.y {
             let center_x = from.x.wrapping_add(
-                to.x
-                    .wrapping_sub(from.x)
+                to.x.wrapping_sub(from.x)
                     .wrapping_mul(y.wrapping_sub(from.y))
                     .wrapping_div(denominator),
             );
@@ -1298,9 +1281,7 @@ impl PixelGrid {
             .iter()
             .position(|name| {
                 name.as_deref()
-                    .is_some_and(|name| {
-                        clonk_resources::material::c4_names_equal(name, "Tunnel")
-                    })
+                    .is_some_and(|name| clonk_resources::material::c4_names_equal(name, "Tunnel"))
             })
             .map(|index| index as u8)
             .unwrap_or(0)
@@ -1317,7 +1298,11 @@ impl PixelGrid {
             return;
         };
         if byte & 0x80 != 0 {
-            self.set_byte(x, y, tunnel_byte.unwrap_or_else(|| self.tunnel_byte()) | 0x80);
+            self.set_byte(
+                x,
+                y,
+                tunnel_byte.unwrap_or_else(|| self.tunnel_byte()) | 0x80,
+            );
         } else {
             self.set_byte(x, y, 0);
         }
@@ -1362,11 +1347,7 @@ impl PixelGrid {
             match (liquid_material, liquid_run) {
                 (Some(material), None) => liquid_run = Some((y, material)),
                 (Some(material), Some((start, previous))) if material != previous => {
-                    liquid_segments.push(LiquidSegment::with_material(
-                        start,
-                        y - 1,
-                        previous,
-                    ));
+                    liquid_segments.push(LiquidSegment::with_material(start, y - 1, previous));
                     liquid_run = Some((y, material));
                 }
                 (None, Some((start, material))) => {
@@ -1476,10 +1457,8 @@ impl RuntimeTexMapState {
     ) -> (Self, [u8; 128]) {
         let mut remap = std::array::from_fn(|slot| slot as u8);
         for lookup in lookups {
-            let destination = live.get_index_mat_tex(
-                &lookup.material_texture,
-                lookup.default_texture.as_deref(),
-            );
+            let destination =
+                live.get_index_mat_tex(&lookup.material_texture, lookup.default_texture.as_deref());
             let source = usize::from(lookup.eager_index & 0x7f);
             if source != 0 {
                 remap[source] = destination & 0x7f;
@@ -1533,16 +1512,11 @@ impl RuntimeTexMapState {
                 .skip(1)
                 .take(C4M_MAX_TEX_INDEX - 1)
                 .find(|(_, (slot_material, slot_texture))| {
-                    slot_material
-                        .as_deref()
-                        .is_some_and(|name| {
-                            clonk_resources::material::c4_names_equal(name, material)
-                        })
-                        && slot_texture
-                            .as_deref()
-                            .is_some_and(|name| {
-                                clonk_resources::material::c4_names_equal(name, texture)
-                            })
+                    slot_material.as_deref().is_some_and(|name| {
+                        clonk_resources::material::c4_names_equal(name, material)
+                    }) && slot_texture.as_deref().is_some_and(|name| {
+                        clonk_resources::material::c4_names_equal(name, texture)
+                    })
                 })
                 .map_or(0, |(slot, _)| slot as u8);
         }
@@ -1606,8 +1580,8 @@ impl RuntimeTexMapState {
                 return 0;
             }
         }
-        let Some(slot) = (1..C4M_MAX_TEX_INDEX)
-            .find(|&slot| self.material_names[slot].is_none()) else {
+        let Some(slot) = (1..C4M_MAX_TEX_INDEX).find(|&slot| self.material_names[slot].is_none())
+        else {
             return 0;
         };
         self.material_names[slot] = Some(material_name);
@@ -1682,10 +1656,7 @@ impl RuntimeTexMapState {
     /// the synchronous removal without replacing unrelated state. The
     /// authoritative fold recomputes this list at the operation's ordered
     /// position because earlier deferred pixel writes may change usage.
-    pub(crate) fn remove_unused_entries(
-        &mut self,
-        mut texture_usage: [bool; 128],
-    ) -> Vec<u8> {
+    pub(crate) fn remove_unused_entries(&mut self, mut texture_usage: [bool; 128]) -> Vec<u8> {
         // Native code sets fEntriesAdded after the removal scan even when no
         // slot was cleared.
         self.entries_added = true;
@@ -1971,10 +1942,7 @@ impl LandscapeRasterState {
         &mut self.texmap
     }
 
-    pub(crate) fn set_surface_palette(
-        &mut self,
-        palette: clonk_resources::bitmap::RgbPalette,
-    ) {
+    pub(crate) fn set_surface_palette(&mut self, palette: clonk_resources::bitmap::RgbPalette) {
         self.surface_palette = palette.to_vec();
     }
 
@@ -2045,13 +2013,13 @@ impl LandscapeRasterState {
 
     pub(crate) fn map(&self) -> Option<clonk_resources::bitmap::IndexedBitmap> {
         let expected = (self.map_width as usize).checked_mul(self.map_height as usize)?;
-        (self.map_width > 0 && self.map_height > 0 && self.map_indices.len() == expected).then(|| {
-            clonk_resources::bitmap::IndexedBitmap {
+        (self.map_width > 0 && self.map_height > 0 && self.map_indices.len() == expected).then(
+            || clonk_resources::bitmap::IndexedBitmap {
                 width: self.map_width,
                 height: self.map_height,
                 indices: self.map_indices.clone(),
-            }
-        })
+            },
+        )
     }
 
     fn has_map(&self) -> bool {
@@ -2210,12 +2178,8 @@ impl RasterChangeRect {
         let y0 = i64::from(self.y).clamp(0, i64::from(height));
         let x1 = (i64::from(self.x) + i64::from(self.width)).clamp(0, i64::from(width));
         let y1 = (i64::from(self.y) + i64::from(self.height)).clamp(0, i64::from(height));
-        (x1 > x0 && y1 > y0).then(|| Self::new(
-            x0 as i32,
-            y0 as i32,
-            (x1 - x0) as i32,
-            (y1 - y0) as i32,
-        ))
+        (x1 > x0 && y1 > y0)
+            .then(|| Self::new(x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32))
     }
 
     fn columns(self) -> Range<usize> {
@@ -2225,16 +2189,10 @@ impl RasterChangeRect {
     fn intersection(self, x: i32, y: i32, width: i32, height: i32) -> Option<Self> {
         let x0 = i64::from(self.x).max(i64::from(x));
         let y0 = i64::from(self.y).max(i64::from(y));
-        let x1 = (i64::from(self.x) + i64::from(self.width))
-            .min(i64::from(x) + i64::from(width));
-        let y1 = (i64::from(self.y) + i64::from(self.height))
-            .min(i64::from(y) + i64::from(height));
-        (x1 > x0 && y1 > y0).then(|| Self::new(
-            x0 as i32,
-            y0 as i32,
-            (x1 - x0) as i32,
-            (y1 - y0) as i32,
-        ))
+        let x1 = (i64::from(self.x) + i64::from(self.width)).min(i64::from(x) + i64::from(width));
+        let y1 = (i64::from(self.y) + i64::from(self.height)).min(i64::from(y) + i64::from(height));
+        (x1 > x0 && y1 > y0)
+            .then(|| Self::new(x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32))
     }
 }
 
@@ -2257,14 +2215,8 @@ fn material_chunk_raster_bounds(
 
     // CSurface8::Clip clamps each inclusive endpoint independently instead
     // of intersecting a rectangle with the surface.
-    let clip_x = origin
-        .x
-        .saturating_sub(5)
-        .clamp(0, landscape_width - 1);
-    let clip_y = origin
-        .y
-        .saturating_sub(5)
-        .clamp(0, landscape_height - 1);
+    let clip_x = origin.x.saturating_sub(5).clamp(0, landscape_width - 1);
+    let clip_y = origin.y.saturating_sub(5).clamp(0, landscape_height - 1);
     let clip_x2 = origin
         .x
         .saturating_add(width)
@@ -2275,14 +2227,8 @@ fn material_chunk_raster_bounds(
         .saturating_add(height)
         .saturating_add(5)
         .clamp(0, landscape_height - 1);
-    let changed_bounds = (clip_x2 >= clip_x && clip_y2 >= clip_y).then(|| {
-        RasterChangeRect::new(
-            clip_x,
-            clip_y,
-            clip_x2 - clip_x + 1,
-            clip_y2 - clip_y + 1,
-        )
-    });
+    let changed_bounds = (clip_x2 >= clip_x && clip_y2 >= clip_y)
+        .then(|| RasterChangeRect::new(clip_x, clip_y, clip_x2 - clip_x + 1, clip_y2 - clip_y + 1));
     (prepare_bounds, changed_bounds)
 }
 
@@ -2524,7 +2470,7 @@ fn surface_palette_is_default(palette: &Vec<[u8; 3]>) -> bool {
     palette.as_slice() == default_surface_palette()
 }
 
-fn surface_palette_materials_are_empty(materials: &Vec<Option<String>>) -> bool {
+fn surface_palette_materials_are_empty(materials: &[Option<String>]) -> bool {
     materials.iter().all(Option::is_none)
 }
 
@@ -2903,15 +2849,8 @@ impl Landscape {
             } else {
                 &raster.surface_palette_materials
             };
-            let palette = store_surface_palette(
-                &source_palette,
-                painted_materials,
-                materials,
-            );
-            group.add_file(
-                "DiffLandscape.bmp",
-                diff.encode_with_palette(&palette)?,
-            )?;
+            let palette = store_surface_palette(&source_palette, painted_materials, materials);
+            group.add_file("DiffLandscape.bmp", diff.encode_with_palette(&palette)?)?;
             true
         } else {
             false
@@ -3182,8 +3121,7 @@ impl Landscape {
             let Some(state) = raster_state.as_mut() else {
                 return false;
             };
-            let (merged, remap) =
-                RuntimeTexMapState::replay_section_lookups(live, lookups);
+            let (merged, remap) = RuntimeTexMapState::replay_section_lookups(live, lookups);
             let remap_byte = |byte: &mut u8| {
                 *byte = (*byte & 0x80) | remap[usize::from(*byte & 0x7f)];
             };
@@ -3231,10 +3169,8 @@ impl Landscape {
         let Some(state) = raster_state.as_mut() else {
             return None;
         };
-        let (replayed, remap) = RuntimeTexMapState::replay_section_lookups(
-            state.texmap().clone(),
-            lookups,
-        );
+        let (replayed, remap) =
+            RuntimeTexMapState::replay_section_lookups(state.texmap().clone(), lookups);
         state.replace_texmap(replayed, false);
         if let Some(pixels) = pixels {
             pixels.sync_runtime_texmap(state.texmap());
@@ -3248,18 +3184,19 @@ impl Landscape {
     /// the section's sparse DiffLandscape overlay relative to the new base.
     pub(crate) fn resynthesize_retained_map_for_section(&mut self) -> bool {
         let diff = self.save_diff(false).ok().flatten();
-        let Some((map, map_zoom, map_seed, shapes)) = self.raster_state.as_ref().and_then(|state| {
-            Some((
-                state.map()?,
-                state.map_zoom(),
-                state.map_seed(),
-                state.texmap().shapes.clone(),
-            ))
-        }) else {
+        let Some((map, map_zoom, map_seed, shapes)) =
+            self.raster_state.as_ref().and_then(|state| {
+                Some((
+                    state.map()?,
+                    state.map_zoom(),
+                    state.map_seed(),
+                    state.texmap().shapes.clone(),
+                ))
+            })
+        else {
             return false;
         };
-        let (Ok(map_width), Ok(map_height)) =
-            (i32::try_from(map.width), i32::try_from(map.height))
+        let (Ok(map_width), Ok(map_height)) = (i32::try_from(map.width), i32::try_from(map.height))
         else {
             return false;
         };
@@ -3389,13 +3326,8 @@ impl Landscape {
         let Some((landscape_width, landscape_height)) = self.grid_dimensions() else {
             return true;
         };
-        let (prepare_bounds, changed_bounds) = material_chunk_raster_bounds(
-            origin,
-            width,
-            height,
-            landscape_width,
-            landscape_height,
-        );
+        let (prepare_bounds, changed_bounds) =
+            material_chunk_raster_bounds(origin, width, height, landscape_width, landscape_height);
         if count_x <= 0 || count_y <= 0 {
             let _ = self.raster_transaction(prepare_bounds, |_, _| {});
             return true;
@@ -3466,9 +3398,7 @@ impl Landscape {
             for &index in mask_indices.iter().rev() {
                 let bake = bakes[index].1.clone();
                 let overlap = mask_bounds
-                    .and_then(|bounds| {
-                        bounds.intersection(bake.x, bake.y, bake.width, bake.height)
-                    })
+                    .and_then(|bounds| bounds.intersection(bake.x, bake.y, bake.width, bake.height))
                     .expect("selected preview mask still overlaps");
                 for y in overlap.y..overlap.y + overlap.height {
                     for x in overlap.x..overlap.x + overlap.width {
@@ -3488,9 +3418,7 @@ impl Landscape {
             for &index in &mask_indices {
                 let bake = &mut bakes[index].1;
                 let overlap = mask_bounds
-                    .and_then(|bounds| {
-                        bounds.intersection(bake.x, bake.y, bake.width, bake.height)
-                    })
+                    .and_then(|bounds| bounds.intersection(bake.x, bake.y, bake.width, bake.height))
                     .expect("selected preview mask still overlaps");
                 for y in overlap.y..overlap.y + overlap.height {
                     for x in overlap.x..overlap.x + overlap.width {
@@ -3631,11 +3559,7 @@ impl Landscape {
         let start = columns.start.min(end);
         self.ensure_liquid_capacity();
         for x in start..end {
-            let Some(summary) = self
-                .pixels
-                .as_ref()
-                .and_then(|grid| grid.derived_column(x))
-            else {
+            let Some(summary) = self.pixels.as_ref().and_then(|grid| grid.derived_column(x)) else {
                 continue;
             };
             self.surface[x] = summary.surface;
@@ -3711,11 +3635,12 @@ impl Landscape {
             .iter()
             .map(Option::is_some)
             .collect::<Vec<_>>();
-        let slot = state
-            .texmap_mut()
-            .get_index_mat_tex(material_texture, None);
+        let slot = state.texmap_mut().get_index_mat_tex(material_texture, None);
         if slot != 0 {
-            if !occupied_before.get(usize::from(slot)).copied().unwrap_or(false)
+            if !occupied_before
+                .get(usize::from(slot))
+                .copied()
+                .unwrap_or(false)
                 && state
                     .texmap()
                     .material_names
@@ -3750,13 +3675,14 @@ impl Landscape {
             .iter()
             .map(Option::is_some)
             .collect::<Vec<_>>();
-        let slot = state
-            .texmap_mut()
-            .get_index(material, Some(texture), true);
+        let slot = state.texmap_mut().get_index(material, Some(texture), true);
         if slot == 0 {
             return None;
         }
-        if !occupied_before.get(usize::from(slot)).copied().unwrap_or(false)
+        if !occupied_before
+            .get(usize::from(slot))
+            .copied()
+            .unwrap_or(false)
             && state
                 .texmap()
                 .material_names
@@ -3901,9 +3827,7 @@ impl Landscape {
                 let byte = state
                     .texmap()
                     .frozen_crossmap_entry(materials, source_material, material_texture)
-                    .unwrap_or_else(|| {
-                        state.texmap().resolved_index_mat_tex(material_texture)
-                    });
+                    .unwrap_or_else(|| state.texmap().resolved_index_mat_tex(material_texture));
                 (byte != 0).then_some(byte)
             }
             None => self
@@ -4213,13 +4137,12 @@ impl Landscape {
     }
 
     pub fn estimated_height(&self) -> i32 {
-        self.world_height
-            .unwrap_or_else(|| {
-                *self
-                    .estimated_height_cache
-                    .0
-                    .get_or_init(|| self.estimate_world_height())
-            })
+        self.world_height.unwrap_or_else(|| {
+            *self
+                .estimated_height_cache
+                .0
+                .get_or_init(|| self.estimate_world_height())
+        })
     }
 
     /// Pin the real landscape height (`GBackHgt`). The legacy loader knows
@@ -4236,11 +4159,9 @@ impl Landscape {
         temperature: i32,
     ) -> Vec<(i32, i32)> {
         let mut probes = Vec::new();
-        self.apply_temperature_conversions_with(
-            materials,
-            temperature,
-            &mut |_landscape, x, y| probes.push((x, y)),
-        );
+        self.apply_temperature_conversions_with(materials, temperature, &mut |_landscape, x, y| {
+            probes.push((x, y))
+        });
         probes
     }
 
@@ -4260,11 +4181,7 @@ impl Landscape {
         self.apply_column_temperature_conversions(materials, temperature);
     }
 
-    fn apply_column_temperature_conversions(
-        &mut self,
-        materials: &MaterialSet,
-        temperature: i32,
-    ) {
+    fn apply_column_temperature_conversions(&mut self, materials: &MaterialSet, temperature: i32) {
         if self.surface.is_empty() || materials.is_empty() {
             return;
         }
@@ -4290,12 +4207,8 @@ impl Landscape {
             let Some(material_id) = material_id else {
                 continue;
             };
-            column_actions[index] = find_column_conversion(
-                materials,
-                material_id,
-                temperature,
-                temperature,
-            );
+            column_actions[index] =
+                find_column_conversion(materials, material_id, temperature, temperature);
             if is_default {
                 if let Some(TemperatureConversionAction::ChangeMaterial { target, .. }) =
                     column_actions[index]
@@ -4426,13 +4339,7 @@ impl Landscape {
         let mut scanned_columns = Vec::with_capacity(scan_speed as usize);
         for _ in 0..scan_speed {
             let x = (self.scan_x % width as u32) as i32;
-            self.execute_temperature_scan_column(
-                x,
-                height,
-                materials,
-                temperature,
-                on_instability,
-            );
+            self.execute_temperature_scan_column(x, height, materials, temperature, on_instability);
             scanned_columns.push(x as usize);
             self.scan_x = (self.scan_x + 1) % width as u32;
         }
@@ -4605,8 +4512,7 @@ impl Landscape {
                         && self.temperature_scan_material_at(search_x, search_y) == Some(material)
                     {
                         search_y -= y_direction;
-                        remaining =
-                            remaining.min(action.strength - (search_y - y).abs());
+                        remaining = remaining.min(action.strength - (search_y - y).abs());
                         if remaining < 0 {
                             return 0;
                         }
@@ -4625,9 +4531,7 @@ impl Landscape {
                             break;
                         }
                     }
-                    if !(0..height).contains(&search_y)
-                        || (search_y - y).abs() > search_range
-                    {
+                    if !(0..height).contains(&search_y) || (search_y - y).abs() > search_range {
                         break;
                     }
                 }
@@ -4650,11 +4554,7 @@ impl Landscape {
             let Some(old_byte) = self.grid_byte_at(x, converted_y) else {
                 break;
             };
-            self.grid_set_byte(
-                x,
-                converted_y,
-                action.target_byte | (old_byte & 0x80),
-            );
+            self.grid_set_byte(x, converted_y, action.target_byte | (old_byte & 0x80));
             on_instability(self, x, converted_y);
             converted_y += y_direction;
             remaining -= 1;
@@ -4719,11 +4619,7 @@ impl Landscape {
     /// counts only complete vertical runs reaching `MinHeightCount`
     /// (C4Landscape.cpp:2904-2967). The value wraps as the C++ `uint32_t`
     /// counters do (C4Landscape.h:59-60).
-    pub fn material_pixel_count(
-        &self,
-        material: MaterialId,
-        minimum_height: Option<i32>,
-    ) -> u32 {
+    pub fn material_pixel_count(&self, material: MaterialId, minimum_height: Option<i32>) -> u32 {
         let (width, height) = self
             .pixels
             .as_ref()
@@ -4831,7 +4727,13 @@ impl Landscape {
 
     /// C4Landscape::ScenarioInit border-open assignment
     /// (C4Landscape.cpp:67-71) from the Scenario.txt keys.
-    pub fn set_border_open(&mut self, left_open: i32, right_open: i32, top_open: bool, bottom_open: bool) {
+    pub fn set_border_open(
+        &mut self,
+        left_open: i32,
+        right_open: i32,
+        top_open: bool,
+        bottom_open: bool,
+    ) {
         self.left_open = left_open;
         self.right_open = right_open;
         self.top_open = top_open;
@@ -5057,7 +4959,10 @@ impl Landscape {
             for x_offset in -line_width..line_width + extend {
                 let x = center.x.saturating_add(x_offset);
                 if let Some(material_id) = self.material_at(x, y) {
-                    *result.pixel_count_by_material.entry(material_id).or_insert(0) += 1;
+                    *result
+                        .pixel_count_by_material
+                        .entry(material_id)
+                        .or_insert(0) += 1;
                     if let Some(material) = materials.get_by_id(material_id) {
                         if let Some(target) = material.blast_shift_to_target() {
                             // Preserve BlastFreePix's y/x scan order. One
@@ -5071,9 +4976,7 @@ impl Landscape {
                                 pixel_count: 1,
                                 apply_column_shift: !material.blast_free()
                                     && target != material_id
-                                    && self
-                                        .surface_height(x)
-                                        .is_some_and(|surface| y >= surface)
+                                    && self.surface_height(x).is_some_and(|surface| y >= surface)
                                     && self.solid_material_at(x) == Some(material_id),
                             });
                         }
@@ -5262,8 +5165,7 @@ impl Landscape {
                 return false;
             }
             return grid.material_for_byte(byte).is_some_and(|material| {
-                material.index() >= C4M_SOLID as usize
-                    && Some(material) != self.vehicle_material
+                material.index() >= C4M_SOLID as usize && Some(material) != self.vehicle_material
             });
         }
 
@@ -5369,9 +5271,7 @@ impl Landscape {
             {
                 return closest;
             }
-            closest = closest.min(math::integer_distance(
-                pixel.x, pixel.y, target.x, target.y,
-            ));
+            closest = closest.min(math::integer_distance(pixel.x, pixel.y, target.x, target.y));
             position.x += velocity.x;
             position.y += velocity.y;
             velocity.y += gravity;
@@ -5880,29 +5780,23 @@ impl Landscape {
         if density == mdens {
             let mut radius = 0;
             loop {
-                if x - radius - 1 < left
-                    || self.density_at(x - radius - 1, y, materials) != mdens
-                {
+                if x - radius - 1 < left || self.density_at(x - radius - 1, y, materials) != mdens {
                     x -= radius;
                     direction = LEFT;
                     break;
                 }
-                if y - radius - 1 < top
-                    || self.density_at(x, y - radius - 1, materials) != mdens
-                {
+                if y - radius - 1 < top || self.density_at(x, y - radius - 1, materials) != mdens {
                     y -= radius;
                     direction = UP;
                     break;
                 }
-                if x + radius + 1 > right
-                    || self.density_at(x + radius + 1, y, materials) != mdens
+                if x + radius + 1 > right || self.density_at(x + radius + 1, y, materials) != mdens
                 {
                     x += radius;
                     direction = RIGHT;
                     break;
                 }
-                if y + radius + 1 > bottom
-                    || self.density_at(x, y + radius + 1, materials) != mdens
+                if y + radius + 1 > bottom || self.density_at(x, y + radius + 1, materials) != mdens
                 {
                     y += radius;
                     direction = DOWN;
@@ -5963,8 +5857,7 @@ impl Landscape {
                 UP => next_y -= 1,
                 _ => unreachable!("FindMatPathPush direction"),
             }
-            let in_bounds =
-                next_x >= left && next_y >= top && next_x <= right && next_y <= bottom;
+            let in_bounds = next_x >= left && next_y >= top && next_x <= right && next_y <= bottom;
             let density = self.density_at(next_x, next_y, materials);
             if density < mdens {
                 let vertical = if liquid {
@@ -6025,14 +5918,7 @@ impl Landscape {
         }
         if landscape_push_pull {
             if self.density_at(x, y, materials) >= density
-                && !self.find_mat_path_push(
-                    &mut x,
-                    &mut y,
-                    density,
-                    max_slide,
-                    liquid,
-                    materials,
-                )
+                && !self.find_mat_path_push(&mut x, &mut y, density, max_slide, liquid, materials)
             {
                 return None;
             }
@@ -6415,8 +6301,8 @@ impl EditorMapSurface<'_> {
             return;
         }
         for y_offset in -radius..radius {
-            let remaining = i64::from(radius) * i64::from(radius)
-                - i64::from(y_offset) * i64::from(y_offset);
+            let remaining =
+                i64::from(radius) * i64::from(radius) - i64::from(y_offset) * i64::from(y_offset);
             let half_width = (remaining as f32).sqrt() as i32;
             for x_counter in (0..half_width.saturating_mul(2)).rev() {
                 self.write(
@@ -6438,15 +6324,7 @@ impl EditorMapSurface<'_> {
         }
     }
 
-    fn line(
-        &mut self,
-        mut x1: i32,
-        mut y1: i32,
-        mut x2: i32,
-        mut y2: i32,
-        radius: i32,
-        byte: u8,
-    ) {
+    fn line(&mut self, mut x1: i32, mut y1: i32, mut x2: i32, mut y2: i32, radius: i32, byte: u8) {
         if x2.wrapping_sub(x1).abs() < y2.wrapping_sub(y1).abs() {
             if y1 > y2 {
                 std::mem::swap(&mut x1, &mut x2);
@@ -6609,8 +6487,7 @@ impl crate::Engine {
         if let Some(vehicle) = vehicle {
             for &index in mask_indices.iter().rev() {
                 let bake = self.objects[index].solid_mask_bake.clone()?;
-                let overlap = mask_bounds?
-                    .intersection(bake.x, bake.y, bake.width, bake.height)?;
+                let overlap = mask_bounds?.intersection(bake.x, bake.y, bake.width, bake.height)?;
                 let landscape = self.landscape.as_mut()?;
                 for y in overlap.y..overlap.y + overlap.height {
                     for x in overlap.x..overlap.x + overlap.width {
@@ -6635,8 +6512,7 @@ impl crate::Engine {
             for &index in &mask_indices {
                 let (objects, landscape) = (&mut self.objects, &mut self.landscape);
                 let bake = objects[index].solid_mask_bake.as_mut()?;
-                let overlap = mask_bounds?
-                    .intersection(bake.x, bake.y, bake.width, bake.height)?;
+                let overlap = mask_bounds?.intersection(bake.x, bake.y, bake.width, bake.height)?;
                 let landscape = landscape.as_mut()?;
                 for y in overlap.y..overlap.y + overlap.height {
                     for x in overlap.x..overlap.x + overlap.width {
@@ -6664,11 +6540,7 @@ impl crate::Engine {
         let (width, height) = self.landscape.as_ref()?.grid_dimensions()?;
         let changed_bounds = changed_bounds.clipped_to(width, height);
         self.landscape_solid_mask_transaction(prepare_bounds, |landscape| {
-            landscape.raster_transaction_with_bounds(
-                Some(prepare_bounds),
-                changed_bounds,
-                change,
-            )
+            landscape.raster_transaction_with_bounds(Some(prepare_bounds), changed_bounds, change)
         })
         .flatten()
     }
@@ -6749,73 +6621,61 @@ impl crate::Engine {
                 let Some((width, height, indices)) = state.map_mut() else {
                     return false;
                 };
-                let mut map = EditorMapSurface {
-                    width: width as i32,
-                    height: height as i32,
-                    bytes: indices,
+                let segment = {
+                    let mut map = EditorMapSurface {
+                        width: width as i32,
+                        height: height as i32,
+                        bytes: indices,
+                    };
+                    match action {
+                        crate::control::EMDT_BRUSH => {
+                            let radius = grade.wrapping_mul(2).wrapping_div(zoom).max(1);
+                            let map_x = x / zoom;
+                            let map_y = y / zoom;
+                            map.stamp(map_x, map_y, radius, byte);
+                            (
+                                map_x.wrapping_sub(radius).wrapping_sub(1),
+                                map_y.wrapping_sub(radius).wrapping_sub(1),
+                                radius.wrapping_mul(2).wrapping_add(2),
+                                radius.wrapping_mul(2).wrapping_add(2),
+                            )
+                        }
+                        crate::control::EMDT_LINE => {
+                            let radius = grade.wrapping_mul(2).wrapping_div(zoom).max(1);
+                            let (map_x, map_y, map_x2, map_y2) =
+                                (x / zoom, y / zoom, x2 / zoom, y2 / zoom);
+                            map.line(map_x, map_y, map_x2, map_y2, radius, byte);
+                            (
+                                map_x.min(map_x2).wrapping_sub(radius).wrapping_sub(1),
+                                map_y.min(map_y2).wrapping_sub(radius).wrapping_sub(1),
+                                map_x
+                                    .wrapping_sub(map_x2)
+                                    .abs()
+                                    .wrapping_add(radius.wrapping_mul(2))
+                                    .wrapping_add(2),
+                                map_y
+                                    .wrapping_sub(map_y2)
+                                    .abs()
+                                    .wrapping_add(radius.wrapping_mul(2))
+                                    .wrapping_add(2),
+                            )
+                        }
+                        crate::control::EMDT_RECT => {
+                            let (map_x, map_y, map_x2, map_y2) =
+                                (x / zoom, y / zoom, x2 / zoom, y2 / zoom);
+                            map.box_fill(map_x, map_y, map_x2, map_y2, byte);
+                            let left = map_x.min(map_x2);
+                            let top = map_y.min(map_y2);
+                            (
+                                left.wrapping_sub(1),
+                                top.wrapping_sub(1),
+                                map_x.wrapping_sub(map_x2).abs().wrapping_add(3),
+                                map_y.wrapping_sub(map_y2).abs().wrapping_add(3),
+                            )
+                        }
+                        _ => return true,
+                    }
                 };
-                let segment = match action {
-                    crate::control::EMDT_BRUSH => {
-                        let radius = grade.wrapping_mul(2).wrapping_div(zoom).max(1);
-                        let map_x = x / zoom;
-                        let map_y = y / zoom;
-                        map.stamp(map_x, map_y, radius, byte);
-                        (
-                            map_x.wrapping_sub(radius).wrapping_sub(1),
-                            map_y.wrapping_sub(radius).wrapping_sub(1),
-                            radius.wrapping_mul(2).wrapping_add(2),
-                            radius.wrapping_mul(2).wrapping_add(2),
-                        )
-                    }
-                    crate::control::EMDT_LINE => {
-                        let radius = grade.wrapping_mul(2).wrapping_div(zoom).max(1);
-                        let (map_x, map_y, map_x2, map_y2) =
-                            (x / zoom, y / zoom, x2 / zoom, y2 / zoom);
-                        map.line(
-                            map_x,
-                            map_y,
-                            map_x2,
-                            map_y2,
-                            radius,
-                            byte,
-                        );
-                        (
-                            map_x.min(map_x2).wrapping_sub(radius).wrapping_sub(1),
-                            map_y.min(map_y2).wrapping_sub(radius).wrapping_sub(1),
-                            map_x
-                                .wrapping_sub(map_x2)
-                                .abs()
-                                .wrapping_add(radius.wrapping_mul(2))
-                                .wrapping_add(2),
-                            map_y
-                                .wrapping_sub(map_y2)
-                                .abs()
-                                .wrapping_add(radius.wrapping_mul(2))
-                                .wrapping_add(2),
-                        )
-                    }
-                    crate::control::EMDT_RECT => {
-                        let (map_x, map_y, map_x2, map_y2) =
-                            (x / zoom, y / zoom, x2 / zoom, y2 / zoom);
-                        map.box_fill(map_x, map_y, map_x2, map_y2, byte);
-                        let left = map_x.min(map_x2);
-                        let top = map_y.min(map_y2);
-                        (
-                            left.wrapping_sub(1),
-                            top.wrapping_sub(1),
-                            map_x
-                                .wrapping_sub(map_x2)
-                                .abs()
-                                .wrapping_add(3),
-                            map_y
-                                .wrapping_sub(map_y2)
-                                .abs()
-                                .wrapping_add(3),
-                        )
-                    }
-                    _ => return true,
-                };
-                drop(map);
                 state.set_map_changed();
                 state
                     .map()
@@ -6824,14 +6684,8 @@ impl crate::Engine {
             let Some((map, texmap, (map_x, map_y, map_width, map_height))) = redraw else {
                 return false;
             };
-            return self.redraw_retained_map_segment(
-                &map,
-                map_x,
-                map_y,
-                map_width,
-                map_height,
-                texmap,
-            );
+            return self
+                .redraw_retained_map_segment(&map, map_x, map_y, map_width, map_height, texmap);
         }
 
         if mode != LANDSCAPE_MODE_EXACT {
@@ -6957,13 +6811,8 @@ impl crate::Engine {
             .as_ref()
             .and_then(Landscape::grid_dimensions)
             .unwrap_or_default();
-        let (prepare_bounds, changed_bounds) = material_chunk_raster_bounds(
-            origin,
-            width,
-            height,
-            landscape_width,
-            landscape_height,
-        );
+        let (prepare_bounds, changed_bounds) =
+            material_chunk_raster_bounds(origin, width, height, landscape_width, landscape_height);
 
         // Non-positive counts enter neither C++ loop, but resolution and a
         // possible texmap allocation still succeed without any RNG draw.
@@ -6985,18 +6834,18 @@ impl crate::Engine {
             prepare_bounds,
             changed_bounds,
             |grid, _state| {
-            grid.draw_material_chunks(
-                changed_bounds,
-                origin,
-                width,
-                height,
-                count_x,
-                count_y,
-                byte,
-                shape,
-                random_offsets,
-                map_seed,
-            );
+                grid.draw_material_chunks(
+                    changed_bounds,
+                    origin,
+                    width,
+                    height,
+                    count_x,
+                    count_y,
+                    byte,
+                    shape,
+                    random_offsets,
+                    map_seed,
+                );
             },
         );
         // Once material/texture resolution succeeds, C++ returns true even
@@ -7063,9 +6912,7 @@ impl crate::Engine {
         else {
             return false;
         };
-        let Some(expected_len) =
-            (full_width as usize).checked_mul(full_height as usize)
-        else {
+        let Some(expected_len) = (full_width as usize).checked_mul(full_height as usize) else {
             return false;
         };
         if map_zoom <= 0
@@ -7555,10 +7402,9 @@ mod tests {
 
     #[test]
     fn landscape_without_raster_state_remains_backward_compatible() {
-        let landscape: Landscape = serde_json::from_str(
-            r#"{"width":2,"surface":[3,4],"top_open":true}"#,
-        )
-        .expect("pre-raster-state landscape deserializes");
+        let landscape: Landscape =
+            serde_json::from_str(r#"{"width":2,"surface":[3,4],"top_open":true}"#)
+                .expect("pre-raster-state landscape deserializes");
         assert!(landscape.raster_state().is_none());
 
         let serialized = serde_json::to_value(&landscape).expect("landscape serializes");
@@ -7758,7 +7604,10 @@ mod tests {
 
         landscape.set_shade_materials(false);
         let disabled_json = serde_json::to_value(&landscape).expect("landscape serializes");
-        assert_eq!(disabled_json.get("shade_materials"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            disabled_json.get("shade_materials"),
+            Some(&serde_json::json!(false))
+        );
         let restored: Landscape =
             serde_json::from_value(disabled_json).expect("disabled landscape restores");
         assert!(!restored.shade_materials());
@@ -7994,14 +7843,7 @@ mod tests {
 
     #[test]
     fn set_pix_dirty_rects_use_cpp_lighting_overlap_distances() {
-        let mut live = PixelGrid::new(
-            20,
-            40,
-            vec![1; 20 * 40],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
+        let mut live = PixelGrid::new(20, 40, vec![1; 20 * 40], Vec::new(), Vec::new(), Vec::new());
         let snapshot = live.clone();
 
         for (x, y) in [(2, 2), (4, 2), (7, 2), (15, 2), (15, 18), (15, 35)] {
@@ -8261,8 +8103,14 @@ mod tests {
             Some("Ridge")
         );
         let grid = landscape.pixel_grid().expect("pixel grid");
-        assert_eq!(grid.material_names()[slot as usize].as_deref(), Some("Earth"));
-        assert_eq!(grid.texture_names()[slot as usize].as_deref(), Some("Ridge"));
+        assert_eq!(
+            grid.material_names()[slot as usize].as_deref(),
+            Some("Earth")
+        );
+        assert_eq!(
+            grid.texture_names()[slot as usize].as_deref(),
+            Some("Ridge")
+        );
         assert_eq!(grid.revision(), revision, "texmap sync writes no pixels");
     }
 
@@ -8332,10 +8180,7 @@ mod tests {
             Some("Smooth"),
             "the entry retains the raw name used by GetIndex matching"
         );
-        assert_eq!(
-            liquid_only.get_index("water", Some("smooth"), false),
-            slot
-        );
+        assert_eq!(liquid_only.get_index("water", Some("smooth"), false), slot);
         liquid_only.texture_inventory.clear();
         assert_eq!(
             liquid_only.get_index("WATER", Some("SMOOTH"), true),
@@ -8372,10 +8217,12 @@ mod tests {
         assert_eq!(texmap.texture_names[4].as_deref(), Some("Ridge"));
 
         let serialized = texmap.serialize_added_entries();
-        assert!(serialized.windows(b"4=Earth-Ridge\r\n".len()).any(|line| {
-            line == b"4=Earth-Ridge\r\n"
-        }));
-        assert!(!serialized.windows(b"ignored".len()).any(|part| part == b"ignored"));
+        assert!(serialized
+            .windows(b"4=Earth-Ridge\r\n".len())
+            .any(|line| { line == b"4=Earth-Ridge\r\n" }));
+        assert!(!serialized
+            .windows(b"ignored".len())
+            .any(|part| part == b"ignored"));
 
         let material_texture = clonk_script::c4_string_from_bytes(b"Earth\0-Missing");
         assert_eq!(
@@ -8434,8 +8281,8 @@ mod tests {
         texmap.set_default_material_entry("Earth", 1);
         texmap.set_default_material_entry("Vehicle", 2);
         texmap.set_default_material_entry("Water", 3);
-        let mut landscape = Landscape::new(width, vec![height as i32; width as usize])
-            .expect("landscape builds");
+        let mut landscape =
+            Landscape::new(width, vec![height as i32; width as usize]).expect("landscape builds");
         landscape.set_world_height(height as i32);
         landscape.set_pixel_grid(grid);
         landscape.set_raster_state(LandscapeRasterState::new(1, 0, texmap));
@@ -8541,11 +8388,21 @@ func MoveMask(int x, int y)
             3,
             5,
             vec![
-                0, 0, 0, // y=0
-                1, 0, 1, // y=1
-                1, 3, 1, // y=2
-                1, 3 | 0x80, 1, // y=3
-                1, 1, 1, // y=4
+                0,
+                0,
+                0, // y=0
+                1,
+                0,
+                1, // y=1
+                1,
+                3,
+                1, // y=2
+                1,
+                3 | 0x80,
+                1, // y=3
+                1,
+                1,
+                1, // y=4
             ],
         );
         assert_eq!(landscape.surface(), &[1, 4, 1]);
@@ -8716,11 +8573,7 @@ func MoveMask(int x, int y)
         // saved background (C4SolidMask.cpp:323-363). Those temporary mask
         // bytes are collision truth while put, but are not a landscape
         // change: the Rust-only surface/liquid/IFT summaries stay untouched.
-        let mut landscape = raster_grid_landscape(
-            1,
-            4,
-            vec![0, 0, 3 | 0x80, 1],
-        );
+        let mut landscape = raster_grid_landscape(1, 4, vec![0, 0, 3 | 0x80, 1]);
         let surface = landscape.surface().to_vec();
         let liquids = landscape.liquids().to_vec();
         let was_tunnel = landscape.is_tunnel_at(0, 2);
@@ -8930,7 +8783,9 @@ protected func Construction()
 
         let mut engine = crate::Engine::with_seed(19);
         engine.set_landscape(raster_grid_landscape(4, 5, vec![0; 20]));
-        engine.register_definition(definition).expect("definition registers");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
         let spawn = || crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1));
         let foreign = engine.spawn_object(spawn()).expect("foreign mask spawns");
         let mut config = spawn().with_local_vars(std::collections::HashMap::from([(
@@ -8953,8 +8808,8 @@ protected func Construction()
 
     #[test]
     fn solid_mask_direct_spawn_replays_after_same_call_children_materialize() {
-        let mut mask = crate::Definition::from_script("MASK", "Mask", "")
-            .expect("mask definition compiles");
+        let mut mask =
+            crate::Definition::from_script("MASK", "Mask", "").expect("mask definition compiles");
         mask.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
         mask.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
         let mut parent = crate::Definition::from_script(
@@ -8978,11 +8833,17 @@ protected func Construction()
         let mut engine = crate::Engine::with_seed(17);
         engine.set_landscape(raster_grid_landscape(4, 5, vec![0; 20]));
         engine.register_definition(mask).expect("mask registers");
-        engine.register_definition(parent).expect("parent registers");
+        engine
+            .register_definition(parent)
+            .expect("parent registers");
         let mut mask_spawn = crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1));
         mask_spawn.position_adjusted = true;
-        let oldest = engine.spawn_object(mask_spawn.clone()).expect("oldest mask spawns");
-        let survivor = engine.spawn_object(mask_spawn).expect("survivor mask spawns");
+        let oldest = engine
+            .spawn_object(mask_spawn.clone())
+            .expect("oldest mask spawns");
+        let survivor = engine
+            .spawn_object(mask_spawn)
+            .expect("survivor mask spawns");
 
         let mut parent_spawn = crate::SpawnConfig::new("PARN")
             .with_position(Vector2::ZERO)
@@ -8991,14 +8852,14 @@ protected func Construction()
                 clonk_script::Value::Object(oldest.as_u64()),
             )]));
         parent_spawn.position_adjusted = true;
-        let parent_id = engine.spawn_object(parent_spawn).expect("parent and child spawn");
+        let parent_id = engine
+            .spawn_object(parent_spawn)
+            .expect("parent and child spawn");
         let child = engine
             .objects
             .iter()
             .find(|object| {
-                object.definition_id == "MASK"
-                    && object.id != oldest
-                    && object.id != survivor
+                object.definition_id == "MASK" && object.id != oldest && object.id != survivor
             })
             .map(|object| object.id)
             .expect("Construction child materialized");
@@ -9308,7 +9169,9 @@ func FxMoveForeignTimer(object target, int number, int time)
 
         let mut engine = crate::Engine::with_seed(18);
         engine.set_landscape(raster_grid_landscape(4, 5, vec![0; 20]));
-        engine.register_definition(definition).expect("definition registers");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
         let spawn = || crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1));
         let outer = engine.spawn_object(spawn()).expect("outer mask spawns");
         let foreign = engine.spawn_object(spawn()).expect("foreign mask spawns");
@@ -9341,7 +9204,10 @@ func FxMoveForeignTimer(object target, int number, int time)
             )
             .expect("effect batch executes");
 
-        assert_eq!(engine.objects[foreign_index].state.position, Vector2::new(2, 1));
+        assert_eq!(
+            engine.objects[foreign_index].state.position,
+            Vector2::new(2, 1)
+        );
         assert!(engine.objects[foreign_index].solid_mask_bake.is_none());
         assert!(engine.objects[foreign_index]
             .solid_mask_instance_sequence
@@ -9666,7 +9532,10 @@ func TransactionThenRaw()
             .solid_mask_bake
             .as_ref()
             .expect("same-position call leaves the bake put");
-        assert_eq!(after_same_position.instance_sequence, before_same_position.instance_sequence);
+        assert_eq!(
+            after_same_position.instance_sequence,
+            before_same_position.instance_sequence
+        );
         assert_eq!(after_same_position.buffer, before_same_position.buffer);
 
         engine.remove_solid_mask(indices[0]);
@@ -9858,14 +9727,16 @@ func TransactionThenRaw()
         // C4SolidMask::Repair records the changed background before putting
         // MCVehic back (C4SolidMask.cpp:365-383), so removing the mask later
         // must reveal the new water+IFT byte, not the old sky.
-        let mut definition = crate::Definition::from_script("MASK", "Mask", "")
-            .expect("definition compiles");
+        let mut definition =
+            crate::Definition::from_script("MASK", "Mask", "").expect("definition compiles");
         definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
         definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
 
         let mut engine = crate::Engine::with_seed(7);
         engine.set_landscape(raster_grid_landscape(4, 4, vec![0; 16]));
-        engine.register_definition(definition).expect("definition registers");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
         let id = engine
             .spawn_object(crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1)))
             .expect("mask spawns");
@@ -9924,8 +9795,8 @@ func TransactionThenRaw()
         // PrepareChange/FinishChange must also repair an intersecting solid
         // mask over the newly written background (C4Landscape.cpp:2851-2880;
         // C4SolidMask.cpp:323-342,365-385).
-        let mut definition = crate::Definition::from_script("MASK", "Mask", "")
-            .expect("definition compiles");
+        let mut definition =
+            crate::Definition::from_script("MASK", "Mask", "").expect("definition compiles");
         definition.set_shape_rect(Some(crate::DefinitionRect::new(0, 0, 1, 1)));
         definition.set_solid_mask(Some(crate::DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
 
@@ -9939,7 +9810,9 @@ func TransactionThenRaw()
         landscape.set_raster_state(LandscapeRasterState::new(2, 0, texmap.clone()));
         let mut engine = crate::Engine::with_seed(11);
         engine.set_landscape(landscape);
-        engine.register_definition(definition).expect("definition registers");
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
         let id = engine
             .spawn_object(crate::SpawnConfig::new("MASK").with_position(Vector2::new(1, 1)))
             .expect("mask spawns");
@@ -9956,19 +9829,16 @@ func TransactionThenRaw()
             height: 1,
             indices: vec![3 | 0x80, 0, 3 | 0x80],
         };
-        assert!(engine.draw_indexed_map(
-            Vector2::new(mask_x, mask_y),
-            &bitmap,
-            2,
-            1,
-            texmap
-        ));
+        assert!(engine.draw_indexed_map(Vector2::new(mask_x, mask_y), &bitmap, 2, 1, texmap));
 
         let landscape = engine.landscape().expect("landscape");
         assert_eq!(landscape.grid_byte_at(mask_x, mask_y), Some(2));
         assert_eq!(landscape.grid_byte_at(mask_x + 1, mask_y), Some(3 | 0x80));
         assert_eq!(landscape.grid_byte_at(mask_x, mask_y + 1), Some(3 | 0x80));
-        assert_eq!(landscape.grid_byte_at(mask_x + 1, mask_y + 1), Some(3 | 0x80));
+        assert_eq!(
+            landscape.grid_byte_at(mask_x + 1, mask_y + 1),
+            Some(3 | 0x80)
+        );
         assert_eq!(
             landscape.grid_byte_at(mask_x + 3, mask_y),
             Some(0),
@@ -10656,14 +10526,7 @@ func TransactionThenRaw()
         }
         let landscape = find_mat_path_push_landscape(7, 7, bytes);
         let (mut x, mut y) = origin;
-        assert!(landscape.find_mat_path_push(
-            &mut x,
-            &mut y,
-            25,
-            1,
-            false,
-            &MaterialSet::new(),
-        ));
+        assert!(landscape.find_mat_path_push(&mut x, &mut y, 25, 1, false, &MaterialSet::new(),));
         assert_eq!((x, y), (2, 3));
     }
 
@@ -10678,7 +10541,8 @@ func TransactionThenRaw()
                 bytes[y * 7 + x] = 2;
             }
         }
-        bytes[1 * 7 + 3] = 0;
+        let upper_exit_y = 1;
+        bytes[upper_exit_y * 7 + 3] = 0;
         bytes[5 * 7 + 4] = 0;
         let landscape = find_mat_path_push_landscape(7, 7, bytes);
         let mut stable = (3, 3);
@@ -10737,7 +10601,8 @@ func TransactionThenRaw()
 
         // The greater-density ray tests radii 1..499; radius 500 is excluded.
         let mut bytes = vec![1; 1001 * 3];
-        bytes[1 * 1001 + 1] = 0;
+        let exit_y = 1;
+        bytes[exit_y * 1001 + 1] = 0;
         let landscape = find_mat_path_push_landscape(1001, 3, bytes);
         let mut within = (500, 1);
         assert!(landscape.find_mat_path_push(
@@ -10751,7 +10616,7 @@ func TransactionThenRaw()
         assert_eq!(within, (1, 1));
 
         let mut bytes = vec![1; 1001 * 3];
-        bytes[1 * 1001] = 0;
+        bytes[exit_y * 1001] = 0;
         let landscape = find_mat_path_push_landscape(1001, 3, bytes);
         let mut at_limit = (500, 1);
         assert!(!landscape.find_mat_path_push(
@@ -10889,8 +10754,7 @@ func TransactionThenRaw()
             .expect("raster state exists")
             .texmap()
             .clone();
-        let (success, indices) =
-            moved_texmap.set_texture_index("Target-Smooth", 5, false);
+        let (success, indices) = moved_texmap.set_texture_index("Target-Smooth", 5, false);
         assert!(success);
         assert_eq!(indices, Some((40, 5)));
         assert!(moved.apply_runtime_texture_index_move(moved_texmap, 40, 5));
@@ -10914,12 +10778,7 @@ func TransactionThenRaw()
         grid.resolve_materials(|name| materials.id_of(name));
         assert_eq!(grid.material_for_byte(40), Some(stale));
         let action = stale_cache
-            .temperature_scan_action(
-                &materials,
-                hot,
-                TemperatureDirection::Downwards,
-                0,
-            )
+            .temperature_scan_action(&materials, hot, TemperatureDirection::Downwards, 0)
             .expect("above conversion applies");
         assert_eq!(action.target, target);
         assert_eq!(action.target_byte, 40);
@@ -11530,14 +11389,7 @@ func TransactionThenRaw()
     #[test]
     fn dig_free_pix_uses_get_pix_border_material() {
         let (materials, vehicle, _earth) = vehicle_earth_materials();
-        let grid = PixelGrid::new(
-            3,
-            2,
-            vec![0; 6],
-            vec![0],
-            vec![None],
-            vec![None],
-        );
+        let grid = PixelGrid::new(3, 2, vec![0; 6], vec![0], vec![None], vec![None]);
         let mut landscape = Landscape::new(3, vec![0; 3]).expect("landscape builds");
         landscape.set_world_height(2);
         landscape.set_pixel_grid(grid);

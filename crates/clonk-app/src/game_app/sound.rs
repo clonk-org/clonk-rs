@@ -408,25 +408,21 @@ impl GameApp {
                     outcome.sound_attempted = true;
                     outcome.sound_played = play_sound(self, &message);
                 }
-                if muted || outcome.sound_played {
-                    if self.control_message_has_lobby() {
-                        self.note_control_message_sound(control.by_client, muted);
-                        outcome.lobby_sound = true;
-                    }
+                if (muted || outcome.sound_played) && self.control_message_has_lobby() {
+                    self.note_control_message_sound(control.by_client, muted);
+                    outcome.lobby_sound = true;
                 }
             }
             MESSAGE_TYPE_ALERT => {
                 outcome.attention_requested = self.request_control_message_attention();
             }
-            MESSAGE_TYPE_SYSTEM => {
-                if control.by_client == 0 {
-                    self.append_control_message_log(
-                        format!("Network: {message}"),
-                        CONTROL_LOG_COLOR,
-                        None,
-                    );
-                    outcome.displayed = true;
-                }
+            MESSAGE_TYPE_SYSTEM if control.by_client == 0 => {
+                self.append_control_message_log(
+                    format!("Network: {message}"),
+                    CONTROL_LOG_COLOR,
+                    None,
+                );
+                outcome.displayed = true;
             }
             _ => {}
         }
@@ -559,7 +555,7 @@ impl GameApp {
                     let control_rate = u64::try_from(self.engine.control_rate())
                         .unwrap_or(1)
                         .max(1);
-                    if self.engine.frame() % control_rate == 0
+                    if self.engine.frame().is_multiple_of(control_rate)
                         && !self.offline_control_input.is_empty()
                     {
                         let tick = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
@@ -623,9 +619,7 @@ impl GameApp {
                             // synchronized SetPreSend affects this frame's
                             // subsequent performance calculation.
                             let pacing_result = self.apply_engine_network_target_fps_requests();
-                            if let Err(error) = control_result {
-                                return Err(error);
-                            }
+                            control_result?;
                             pacing_result?;
                             if let Some(network) = self.network.as_ref() {
                                 network.reset_client_performance();
@@ -815,7 +809,7 @@ impl GameApp {
                     repeated_mouse_move = true;
                     self.advance_ingame_mouse_caption_lifetime();
                     self.apply_ingame_edge_scroll()?
-                } else if self.engine.frame() % 5 == 0 {
+                } else if self.engine.frame().is_multiple_of(5) {
                     if self.initialize_ingame_mouse_center()? {
                         false
                     } else {
@@ -862,7 +856,7 @@ impl GameApp {
                 // C4Menu::Execute refills permanent hostility pages whenever
                 // Game.iTick35 wraps, picking up joins, removals and changed
                 // visibility even when no hostility control just executed.
-                if self.engine.frame() % 35 == 0 {
+                if self.engine.frame().is_multiple_of(35) {
                     self.refresh_hostility_menus();
                 }
                 // Tooltip delay counter (C4Menu::Draw, C4Menu.cpp:805).

@@ -106,8 +106,7 @@ fn strict_engine_scope_global_function_is_the_native_callers_frame() {
     let mut engine = Engine::new();
     engine.register_host_function("Probe", |_args| Ok(Value::Int(caller_strictness_code())));
     engine.add_script(
-        Script::compile("global func Run() { return Probe(); }\n")
-            .expect("script compiles"),
+        Script::compile("global func Run() { return Probe(); }\n").expect("script compiles"),
     );
     assert_eq!(
         engine.call("Run", &[]).expect("global function runs"),

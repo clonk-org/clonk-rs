@@ -11,8 +11,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn endeavour_bytes() -> Vec<u8> {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../planet/System.c4g/Endeavour.ttf");
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../planet/System.c4g/Endeavour.ttf");
         std::fs::read(path).expect("read Endeavour.ttf")
     }
 
@@ -44,9 +44,7 @@ mod tests {
         );
         // And the shadow: some dark, partially transparent pixel.
         assert!(
-            cell.pixels
-                .iter()
-                .any(|p| p.r == 0 && p.a > 0 && p.a < 255),
+            cell.pixels.iter().any(|p| p.r == 0 && p.a > 0 && p.a < 255),
             "expected a translucent black shadow pixel in 'A'"
         );
     }

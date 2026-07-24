@@ -675,8 +675,7 @@ fn draw_graph(
         plot_width -= legend_width + 1;
         let legend_height = fonts.mini.line_height.max(1);
         let mut legend_y = plot_y
-            + (plot_height
-                - i32::try_from(graph.series.len()).unwrap_or(i32::MAX) * legend_height)
+            + (plot_height - i32::try_from(graph.series.len()).unwrap_or(i32::MAX) * legend_height)
                 / 2;
         for series in &graph.series {
             draw_clipped_text(

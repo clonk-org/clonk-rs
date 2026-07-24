@@ -592,9 +592,11 @@ impl<'engine> VirtualPlayer<'engine> {
             })
             .collect::<Vec<_>>();
         let omitted_effects = snapshot.global_effects.len().saturating_sub(effects.len());
-        let effect_suffix = (omitted_effects != 0)
-            .then(|| format!(",...+{omitted_effects}"))
-            .unwrap_or_default();
+        let effect_suffix = if omitted_effects != 0 {
+            format!(",...+{omitted_effects}")
+        } else {
+            String::new()
+        };
         format!(
             "recent=[{}]; hud={{{hud}}}; global-effects=[{}{}]",
             recent.into_iter().collect::<Vec<_>>().join(" | "),
@@ -611,8 +613,10 @@ fn compact_ids(ids: &[ObjectId]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     let omitted = ids.len().saturating_sub(shown.len());
-    let suffix = (omitted != 0)
-        .then(|| format!(",...+{omitted}"))
-        .unwrap_or_default();
+    let suffix = if omitted != 0 {
+        format!(",...+{omitted}")
+    } else {
+        String::new()
+    };
     format!("[{}{}]", shown.join(","), suffix)
 }

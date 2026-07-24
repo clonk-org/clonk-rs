@@ -711,7 +711,10 @@ TitleFont=LaterTitle
             let ResolvedFontSpec::Vector { face, .. } = candidate else {
                 panic!("expected registered vector candidate")
             };
-            assert_eq!(clonk_script::c4_string_bytes(face), truncated_registered_face);
+            assert_eq!(
+                clonk_script::c4_string_bytes(face),
+                truncated_registered_face
+            );
         }
         assert!(matches!(
             &candidates[0],

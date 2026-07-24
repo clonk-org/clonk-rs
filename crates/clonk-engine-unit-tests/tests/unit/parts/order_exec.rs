@@ -704,7 +704,7 @@ func ResortSwapRankProbe(object pLeft, object pRight)
                     .with_loaded(true),
             )
             .expect("inactive ledger hole spawns");
-        let physical_master = vec![ids[&4], inactive, ids[&1], ids[&3], ids[&2]];
+        let physical_master = [ids[&4], inactive, ids[&1], ids[&3], ids[&2]];
         engine.exec_list = std::iter::once(logger)
             .chain(physical_master.iter().rev().copied())
             .collect();
@@ -747,7 +747,7 @@ func ResortSwapRankProbe(object pLeft, object pRight)
                     .with_loaded(true),
             )
             .expect("inactive ledger hole spawns");
-        let physical_master = vec![
+        let physical_master = [
             ids[&1], inactive, ids[&2], ids[&3], ids[&4], ids[&5],
         ];
         engine.exec_list = std::iter::once(logger)
@@ -2782,7 +2782,7 @@ private func Sitting()
             object_id,
             QueuedCommand::new(1, ObjectUpdate::new().with_velocity(Vector2::new(2, -3))),
         )?;
-        let _ = engine.tick_without_snapshot()?;
+        engine.tick_without_snapshot()?;
 
         let state = engine.capture_state();
         let temp_file = NamedTempFile::new().expect("create temp state file");
@@ -3107,7 +3107,7 @@ func ProbeSetSkyFade() {
                 .with_action(ActionState::new("Helper"))]),
         )?;
 
-        let _ = engine.tick_without_snapshot()?;
+        engine.tick_without_snapshot()?;
 
         let state = engine.capture_state();
         assert_eq!(state.environment, engine.environment());
@@ -3183,7 +3183,7 @@ func ProbeSetSkyFade() {
         let environment = EnvironmentSettings::new(0).with_temperature(10);
         engine.set_environment(environment);
 
-        let _ = engine.tick_without_snapshot()?;
+        engine.tick_without_snapshot()?;
 
         let water = engine
             .materials()
@@ -4943,7 +4943,7 @@ protected func Entrance(pTarget)
 
         // Collection runs on Tick3 frames only (C4GameObjects.cpp:144-148).
         for _ in 0..3 {
-            let _ = engine.tick_without_snapshot()?;
+            engine.tick_without_snapshot()?;
         }
 
         let item_snapshot = engine.object_snapshot(item).expect("item snapshot");
@@ -5646,7 +5646,7 @@ protected func RejectCollect(object_id, pObject) { return(1); }
 
         // Collection runs on Tick3 frames only (C4GameObjects.cpp:144-148).
         for _ in 0..3 {
-            let _ = engine.tick_without_snapshot()?;
+            engine.tick_without_snapshot()?;
         }
 
         let first_snapshot = engine.object_snapshot(first).expect("first item snapshot");

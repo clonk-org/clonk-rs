@@ -490,9 +490,7 @@ fn draw_ground_textured_row(
         } else {
             #[cfg(test)]
             if context.gamma.is_some() {
-                context
-                    .destination_samples
-                    .fetch_add(1, Ordering::Relaxed);
+                context.destination_samples.fetch_add(1, Ordering::Relaxed);
             }
             Color::new(
                 row[destination_offset],
@@ -501,8 +499,7 @@ fn draw_ground_textured_row(
                 row[destination_offset + 3],
             )
         };
-        let output =
-            composite_sprite_fragment(source, destination, pixel_blit, context.gamma);
+        let output = composite_sprite_fragment(source, destination, pixel_blit, context.gamma);
         row[destination_offset..destination_offset + 4]
             .copy_from_slice(&[output.r, output.g, output.b, output.a]);
     }
@@ -522,9 +519,7 @@ pub(crate) fn draw_ground_textured_rows(
     if parallel && row_count > 1 {
         rows.par_chunks_mut(row_bytes)
             .enumerate()
-            .for_each(|(screen_y, row)| {
-                draw_ground_textured_row(context, screen_y as u32, row)
-            });
+            .for_each(|(screen_y, row)| draw_ground_textured_row(context, screen_y as u32, row));
     } else {
         for (screen_y, row) in rows.chunks_mut(row_bytes).enumerate() {
             draw_ground_textured_row(context, screen_y as u32, row);
@@ -623,9 +618,9 @@ impl SkyTileRegion {
                 |x, y| (x, y),
             )
         });
-        let fog_axes = fog_sampler.as_ref().map(|sampler| {
-            sampler.raster_axes(bounds.width() as u32, bounds.height() as u32)
-        });
+        let fog_axes = fog_sampler
+            .as_ref()
+            .map(|sampler| sampler.raster_axes(bounds.width() as u32, bounds.height() as u32));
         Self {
             bounds,
             fog_sampler,
@@ -685,11 +680,7 @@ pub(crate) struct RetainedLitSkyTexture {
     pub(crate) revision: u64,
 }
 
-fn draw_sky_tile_row(
-    context: &SkyTileRowRenderContext<'_>,
-    screen_y: u32,
-    row: &mut [u8],
-) {
+fn draw_sky_tile_row(context: &SkyTileRowRenderContext<'_>, screen_y: u32, row: &mut [u8]) {
     let row_bytes = context.surface_width as usize * 4;
     if row.len() < row_bytes {
         return;
@@ -733,10 +724,8 @@ fn draw_sky_tile_row(
                         None,
                         context.fog,
                         context.base_blit,
-                        (source_x as f32 + 0.5 - bounds.source_left as f32)
-                            / bounds.width() as f32,
-                        (source_y as f32 + 0.5 - bounds.source_top as f32)
-                            / bounds.height() as f32,
+                        (source_x as f32 + 0.5 - bounds.source_left as f32) / bounds.width() as f32,
+                        (source_y as f32 + 0.5 - bounds.source_top as f32) / bounds.height() as f32,
                         target_x as i32,
                         screen_y as i32,
                     ),
@@ -759,8 +748,7 @@ fn draw_sky_tile_row(
                     row[destination_offset + 3],
                 )
             };
-            let output =
-                composite_sprite_fragment(source, destination, pixel_blit, context.gamma);
+            let output = composite_sprite_fragment(source, destination, pixel_blit, context.gamma);
             row[destination_offset..destination_offset + 4]
                 .copy_from_slice(&[output.r, output.g, output.b, output.a]);
         }

@@ -23,7 +23,8 @@ pub(crate) fn object_set_action(args: &[Value]) -> Result<Value, RuntimeError> {
     else {
         return Ok(Value::Bool(false));
     };
-    let Some(action) = parse_optional_string_value(args.get(1), "ObjectSetAction", "action")? else {
+    let Some(action) = parse_optional_string_value(args.get(1), "ObjectSetAction", "action")?
+    else {
         return Ok(Value::Bool(false)); // !szAction
     };
     let mut forwarded: Vec<Value> = vec![Value::String(action)];
@@ -91,10 +92,7 @@ pub(crate) fn kill(args: &[Value]) -> Result<Value, RuntimeError> {
 /// scopes. This is shared by script Kill and host DoEnergy so every callback
 /// and same-call read observes the native ordering before the invoking script
 /// resumes (oracle-src-pinned src/C4Object.cpp:1164-1205).
-pub(crate) fn assign_death_live(
-    target: ObjectId,
-    forced: bool,
-) -> Result<bool, RuntimeError> {
+pub(crate) fn assign_death_live(target: ObjectId, forced: bool) -> Result<bool, RuntimeError> {
     let death_causing_player = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
@@ -669,9 +667,7 @@ pub(crate) fn compute_vertex_contact(
     }
     let world_x = position.x.saturating_add(vertex.x);
     let world_y = position.y.saturating_add(vertex.y);
-    let mut has_contact = |x, y| {
-        density_at(x, y).is_some_and(|density| density >= contact_density)
-    };
+    let mut has_contact = |x, y| density_at(x, y).is_some_and(|density| density >= contact_density);
     let mut contact = 0;
     if (mask & CNAT_CENTER) != 0 && has_contact(world_x, world_y) {
         contact |= CNAT_CENTER;
@@ -1419,9 +1415,7 @@ fn physical_name_argument(
     fn_name: &str,
 ) -> Result<Option<String>, RuntimeError> {
     match args.get(index) {
-        Some(Value::String(name)) if !name.is_empty() => {
-            Ok(Some(name.as_ref().to_owned()))
-        }
+        Some(Value::String(name)) if !name.is_empty() => Ok(Some(name.as_ref().to_owned())),
         Some(Value::String(_)) | Some(Value::Nil) | None => Ok(None),
         Some(other) => Err(RuntimeError::new(format!(
             "{fn_name}: expected string for physical name, got {}",
@@ -2607,8 +2601,7 @@ pub(crate) fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             .or_else(|| object.definition_id.clone());
         let requested_index = object.action_library.named_action_index(&name);
         let blocks_other_actions = object.effective_blocks_other_actions();
-        let requested_action_changed =
-            name != current_action || requested_index != current_index;
+        let requested_action_changed = name != current_action || requested_index != current_index;
         if blocks_other_actions && requested_action_changed && !force {
             return Ok(Value::Bool(false));
         }
@@ -2624,8 +2617,7 @@ pub(crate) fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             name.as_str()
         };
         let actual_index = object.action_library.named_action_index(actual_name);
-        let changed_action =
-            actual_name != current_action || actual_index != current_index;
+        let changed_action = actual_name != current_action || actual_index != current_index;
 
         let update = object
             .pending_update
@@ -2709,13 +2701,7 @@ pub(crate) fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
     // (SetActionByName defaults SAC_StartCall|SAC_AbortCall) — the
     // coach's Drive0 StartCall reads the PRE-SetDir facing for its seat
     // vertex, so deferral changes the result.
-    if let Some((
-        id,
-        start_call,
-        abort_call,
-        previous_phase,
-        callback_definition,
-    )) = sync_callbacks
+    if let Some((id, start_call, abort_call, previous_phase, callback_definition)) = sync_callbacks
     {
         // C++ has no SetAction-specific recursion guard. Nested callbacks
         // keep dispatching synchronously until they terminate or the shared
@@ -2736,8 +2722,7 @@ pub(crate) fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
                 cell.borrow().as_ref().is_some_and(|context| {
                     context.object_status_present(id)
                         && callback_definition.as_deref().is_none_or(|expected| {
-                            context.object_effective_definition_id(id).as_deref()
-                                == Some(expected)
+                            context.object_effective_definition_id(id).as_deref() == Some(expected)
                         })
                 })
             });
@@ -2874,7 +2859,7 @@ pub(crate) fn set_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
                 next_data = encode_bridge_action_data(0, false, false, bridge_material);
             }
             ActionProcedure::Attach => {
-                let primary_vertex = (data & 0xFF) as i32;
+                let primary_vertex = data & 0xFF;
                 let secondary_vertex = data >> 8;
                 if primary_vertex >= MAX_VERTEX_COUNT || secondary_vertex >= MAX_VERTEX_COUNT {
                     return Ok(Value::Bool(false));
@@ -3494,11 +3479,7 @@ pub(crate) fn fling(args: &[Value]) -> Result<Value, RuntimeError> {
     let prec = parse_optional_i32(args.get(3), "Fling", "precision")?
         .filter(|&prec| prec != 0)
         .unwrap_or(1);
-    let add_speed = value_to_bool(
-        args.get(4).unwrap_or(&Value::Nil),
-        "Fling",
-        "add speed",
-    )?;
+    let add_speed = value_to_bool(args.get(4).unwrap_or(&Value::Nil), "Fling", "add speed")?;
     // FnFling requires an explicit target — `if (!pObj) return false;`
     // (C4Script.cpp:347-349), NO caller fallback (unlike FnJump, :358).
     // The horse/wipf `Fling(GetRider(), ...)` with no rider is a no-op.
@@ -4004,7 +3985,11 @@ pub(crate) fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
         None | Some(Value::Nil) => 0u32,
         Some(value) => {
             let raw = value_to_i32(value, "GetContact", "mask")?;
-            if raw > 0 { raw as u32 } else { 0 }
+            if raw > 0 {
+                raw as u32
+            } else {
+                0
+            }
         }
     };
 
@@ -4029,13 +4014,10 @@ pub(crate) fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
             }
             let mut result = 0u32;
             for vertex in &vertices {
-                result |= compute_vertex_contact(
-                    position,
-                    vertex,
-                    mask,
-                    contact_density,
-                    |x, y| context.movement_density_at(&pending_masks, x, y),
-                );
+                result |=
+                    compute_vertex_contact(position, vertex, mask, contact_density, |x, y| {
+                        context.movement_density_at(&pending_masks, x, y)
+                    });
             }
             return Ok(Value::Int(result as i32));
         }
@@ -4129,7 +4111,10 @@ pub(crate) fn fight_with(args: &[Value]) -> Result<Value, RuntimeError> {
 /// Native `C4Object::SetActionByName` staging for engine helpers such as
 /// `C4Object::Fling`. This deliberately bypasses script-level function
 /// resolution: C++ calls the object method directly.
-pub(crate) fn native_set_action_by_name(target: ObjectId, name: &str) -> Result<bool, RuntimeError> {
+pub(crate) fn native_set_action_by_name(
+    target: ObjectId,
+    name: &str,
+) -> Result<bool, RuntimeError> {
     native_set_action_by_name_with_target(target, name, None)
 }
 
@@ -4267,11 +4252,8 @@ pub(crate) fn native_set_action_by_name_with_target(
     });
     if callbacks_continue {
         if let Some(callback) = abort_call {
-            if let Some(Err(error)) = call_world_object_script_callback(
-                target,
-                &callback,
-                &[Value::Int(previous_phase)],
-            )
+            if let Some(Err(error)) =
+                call_world_object_script_callback(target, &callback, &[Value::Int(previous_phase)])
             {
                 tracing::warn!(
                     %error,
@@ -4303,11 +4285,9 @@ pub(crate) fn native_set_dir(target: ObjectId, direction: Direction) -> Result<(
             .action_library
             .directions_for_entry(action, action_index);
         let raw_direction = direction.to_script_value();
-        if object
-            .action_library
-            .is_idle_entry(action, action_index)
+        if object.action_library.is_idle_entry(action, action_index)
             || raw_direction < 0
-            || raw_direction >= directions as i32
+            || raw_direction >= directions
         {
             return Ok(None);
         }
@@ -4593,17 +4573,16 @@ pub(crate) fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
                 }
                 let directions = scope
                     .action_library
-                    .directions_for_entry(&action_name, action_index)
-                    as i32;
+                    .directions_for_entry(&action_name, action_index);
                 if direction.to_script_value() < 0 || direction.to_script_value() >= directions {
                     return Ok(Value::Bool(true));
                 }
                 let turn_action = (scope.direction() != direction)
                     .then(|| {
                         scope
-                        .action_library
-                        .turn_action_for_entry(&action_name, action_index)
-                        .map(str::to_string)
+                            .action_library
+                            .turn_action_for_entry(&action_name, action_index)
+                            .map(str::to_string)
                     })
                     .flatten();
                 drop(borrow);
@@ -4641,8 +4620,7 @@ pub(crate) fn set_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         }
         let directions = object
             .action_library
-            .directions_for_entry(&action_name, action_index)
-            as i32;
+            .directions_for_entry(&action_name, action_index);
         if direction.to_script_value() < 0 || direction.to_script_value() >= directions {
             return Ok(Value::Bool(true));
         }
@@ -5859,15 +5837,13 @@ pub(crate) fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
                     return Ok(Value::Bool(false));
                 };
                 let own_definition = target_definition.as_deref().unwrap_or_default();
-                let same_name = |left: Option<&str>, right: Option<&str>| {
-                    match (
-                        left.filter(|name| !name.is_empty()),
-                        right.filter(|name| !name.is_empty()),
-                    ) {
-                        (None, None) => true,
-                        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
-                        _ => false,
-                    }
+                let same_name = |left: Option<&str>, right: Option<&str>| match (
+                    left.filter(|name| !name.is_empty()),
+                    right.filter(|name| !name.is_empty()),
+                ) {
+                    (None, None) => true,
+                    (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+                    _ => false,
                 };
                 let same_graphics = match (object.base_graphics.as_ref(), base_graphics.as_ref()) {
                     (None, None) => true,
@@ -5895,8 +5871,7 @@ pub(crate) fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
             };
             if changed {
                 if let Some(mask) = active_solid_mask {
-                    if let Some(checked) =
-                        context.check_solid_mask_rect_for_object(object_id, mask)
+                    if let Some(checked) = context.check_solid_mask_rect_for_object(object_id, mask)
                     {
                         if checked != mask {
                             if let Some(object) = context.object_scope_mut(object_id) {
@@ -6057,10 +6032,8 @@ pub(crate) fn set_obj_draw_transform(args: &[Value]) -> Result<Value, RuntimeErr
                 .overlay_transform(overlay_id)
                 .flatten()
                 .map_or(1, |transform| transform.flip_dir());
-            let changed = object.set_overlay_transform(
-                overlay_id,
-                Some(transform.with_flip_dir(flip_dir)),
-            );
+            let changed =
+                object.set_overlay_transform(overlay_id, Some(transform.with_flip_dir(flip_dir)));
             Ok(Value::Bool(changed))
         }
     })
@@ -6226,9 +6199,7 @@ pub(crate) fn get_act_map_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "Name" => Value::String(action.clone()),
             "Procedure" => Value::String(spec.procedure.clone().unwrap_or_default().into()),
             "Directions" => Value::Int(spec.directions.unwrap_or(1)),
-            "FlipDir" => {
-                Value::Int(graphics.and_then(|graphics| graphics.flip_dir).unwrap_or(0))
-            },
+            "FlipDir" => Value::Int(graphics.and_then(|graphics| graphics.flip_dir).unwrap_or(0)),
             "Length" => Value::Int(spec.length.unwrap_or(1)),
             "Delay" => Value::Int(spec.delay.unwrap_or(0)),
             "Attach" => Value::Int(spec.attach as i32),
@@ -6264,7 +6235,10 @@ pub(crate) fn get_act_map_val(args: &[Value]) -> Result<Value, RuntimeError> {
 
 /// The live `C4Object::Shape` reflected by GetObjectVal. Same-call SetShape
 /// and persisted shape overrides win over the definition-derived shape.
-pub(crate) fn live_object_shape(context: &EffectHostContext, target: ObjectId) -> Option<DefinitionRect> {
+pub(crate) fn live_object_shape(
+    context: &EffectHostContext,
+    target: ObjectId,
+) -> Option<DefinitionRect> {
     let pending_override = context
         .object_scope(target)
         .and_then(|scope| scope.pending_update.shape_override);
@@ -6338,9 +6312,7 @@ fn get_obj_dimension(target: Option<&Value>, entry: &str) -> Result<Value, Runti
 /// `FColors[FPlayer..FPlayer + C4MaxColor]` (StdColors.h:32,
 /// C4Surface.cpp:1304, C4Constants.h:38). The referenced entries in C4.PAL
 /// have no alpha, so FnSetColor packs only their expanded 24-bit RGB value.
-const LEGACY_PLAYER_COLOR_INDICES: [usize; 12] = [
-    39, 47, 55, 63, 71, 79, 87, 95, 23, 30, 99, 103,
-];
+const LEGACY_PLAYER_COLOR_INDICES: [usize; 12] = [39, 47, 55, 63, 71, 79, 87, 95, 23, 30, 99, 103];
 
 fn legacy_player_color(index: i32) -> Option<u32> {
     let palette_index = usize::try_from(index)
@@ -6703,14 +6675,11 @@ pub(crate) fn act_idle(args: &[Value]) -> Result<Value, RuntimeError> {
                         || context
                             .definition_metadata(other.definition_id())
                             .map(|metadata| {
-                                metadata.action_library.is_idle_entry(
-                                    &other.action_name,
-                                    other.action_index,
-                                )
+                                metadata
+                                    .action_library
+                                    .is_idle_entry(&other.action_name, other.action_index)
                             })
-                            .unwrap_or(
-                                other.action_index.is_none() && other.action_name == "Idle",
-                            )
+                            .unwrap_or(other.action_index.is_none() && other.action_name == "Idle")
                 }),
             }
         } else {
@@ -6757,8 +6726,7 @@ fn set_owner_live(target: ObjectId, new_owner: i32) -> bool {
         let color_by_owner = context
             .world
             .definition_color_by_owner(&graphics_definition_id);
-        let owner_color = (new_owner != OWNER_NONE && color_by_owner)
-        .then(|| {
+        let owner_color = (new_owner != OWNER_NONE && color_by_owner).then(|| {
             context
                 .player_state(new_owner)
                 .and_then(|player| player.color)

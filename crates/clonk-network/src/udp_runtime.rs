@@ -951,10 +951,7 @@ pub(crate) enum ReliableUdpPollReady {
 impl ReliableUdpSocketDriver {
     pub fn bind(bind_address: SocketAddr) -> io::Result<Self> {
         tokio::runtime::Handle::try_current().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                "reliable-UDP driver requires an entered Tokio runtime",
-            )
+            io::Error::other("reliable-UDP driver requires an entered Tokio runtime")
         })?;
         let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_only_v6(false)?;
@@ -2407,7 +2404,7 @@ mod tests {
                 let packet_number = decode_reliable_udp_data_fragment(&datagram.payload)
                     .unwrap()
                     .packet_number;
-                if packet_number % 37 != 0 && packet_number != 599 {
+                if !packet_number.is_multiple_of(37) && packet_number != 599 {
                     network.push_back((a_address, datagram));
                 }
             }

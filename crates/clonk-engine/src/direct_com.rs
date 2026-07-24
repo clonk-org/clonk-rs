@@ -760,10 +760,7 @@ pub(crate) fn build_activate_menu_state<S: InternalObjectMenuSource>(
     } else {
         InternalObjectMenuSafeCursor::at(&initial_links, 0, Some(refill_token))
     };
-    loop {
-        let Some(live_container) = source.object(container_id) else {
-            break;
-        };
+    while let Some(live_container) = source.object(container_id) {
         let live_contents = live_container.contents;
         let live_links = internal_object_menu_links(source, &live_contents);
         let Some((seed, count)) = internal_object_menu_iterator_next(
@@ -953,10 +950,7 @@ pub(crate) fn build_container_contents_menu_state<S: InternalObjectMenuSource>(
     // multi-count rows. Preserve the legacy stale secondary command on a
     // later singleton row (C4ObjectMenu.cpp:314-318).
     let mut command2 = String::new();
-    loop {
-        let Some(live_container) = source.object(container_id) else {
-            break;
-        };
+    while let Some(live_container) = source.object(container_id) {
         let live_contents = live_container.contents;
         let live_links = internal_object_menu_links(source, &live_contents);
         let Some((seed, count)) = internal_object_menu_iterator_next(
@@ -1756,7 +1750,7 @@ impl Engine {
         {
             return Ok(());
         }
-        let periodic_refill = self.frame % 35 == 0;
+        let periodic_refill = self.frame.is_multiple_of(35);
         let Some(crew_id) = self.crew_cursor(owner) else {
             return Ok(());
         };
@@ -6623,13 +6617,12 @@ impl Engine {
             return Ok(());
         }
 
-        if stopped_for_grab {
-            if self.objects[actor_index]
+        if stopped_for_grab
+            && self.objects[actor_index]
                 .commands
                 .fail_pending_grab_if_target_cleared(target_id)
-            {
-                return Ok(());
-            }
+        {
+            return Ok(());
         }
 
         let target_at_actor = self
@@ -9729,11 +9722,10 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
             .expect("DigDouble without a tree returns normally");
         let crew_index = no_tree.find_object_index(crew).expect("clonk remains live");
         assert!(
-            no_tree.objects[crew_index]
+            !no_tree.objects[crew_index]
                 .state
                 .local_vars
-                .get("own_activations")
-                .is_none(),
+                .contains_key("own_activations"),
             "failed line construction does not fall through to own Activate"
         );
     }
@@ -9765,7 +9757,7 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
         );
         assert!(crew_state.commands.is_empty(), "no Chop command queued");
         assert!(
-            crew_state.state.local_vars.get("own_activations").is_none(),
+            !crew_state.state.local_vars.contains_key("own_activations"),
             "fresh LNKT consumes DigDouble before own Activate"
         );
         assert!(crew_state.state.contents.iter().any(|id| {
@@ -16486,7 +16478,7 @@ public func GetCustomComponents(object builder)
         assert_eq!((main.width(), main.height()), (2, 1));
         assert_eq!(
             main.pixels().len(),
-            2 * 1 * 4,
+            2 * 4,
             "Shape x/y and GraphicsScale are ignored; raw width/height crop from Graphics origin"
         );
         let picture = engine
@@ -18365,11 +18357,7 @@ public func Redraw(object item)
 
         assert_eq!(
             engine
-                .call_object_function(
-                    crew_index,
-                    "Redraw",
-                    vec![Value::Object(pistol.as_u64())],
-                )
+                .call_object_function(crew_index, "Redraw", vec![Value::Object(pistol.as_u64())],)
                 .expect("redraw callback completes"),
             Value::Int(1)
         );

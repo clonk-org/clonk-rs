@@ -3218,12 +3218,12 @@ impl GameApp {
                 .runtime_running_chat_open_mode(key)
                 .filter(|mode| !matches!(mode, RunningChatMode::All))
                 .filter(|_| !self.running_chat_key_has_higher_priority_route(key));
-            if replacement_mode.is_some() {
+            if let Some(replacement_mode) = replacement_mode {
                 if state == ElementState::Pressed
                     && self.running_chat_text().is_some_and(str::is_empty)
                 {
                     self.close_running_chat()?;
-                    self.start_running_chat(replacement_mode.expect("checked replacement mode"));
+                    self.start_running_chat(replacement_mode);
                 }
                 return Ok(());
             }
@@ -3334,14 +3334,15 @@ impl GameApp {
                 // empty; custom lists replace the three default chords here
                 // just as they do without the popup.
                 let replacement_mode = self.runtime_running_chat_open_mode(key);
-                if state == ElementState::Pressed
-                    && replacement_mode.is_some()
-                    && self.running_chat_text().is_some_and(str::is_empty)
-                {
+                let no_replacement_mode = replacement_mode.is_none();
+                if let Some(replacement_mode) = replacement_mode.filter(|_| {
+                    state == ElementState::Pressed
+                        && self.running_chat_text().is_some_and(str::is_empty)
+                }) {
                     self.close_running_chat()?;
-                    self.start_running_chat(replacement_mode.expect("checked replacement mode"));
+                    self.start_running_chat(replacement_mode);
                 }
-                if replacement_mode.is_none()
+                if no_replacement_mode
                     && self.handle_scoreboard_key_after_higher_priority(key, state)?
                 {
                     return Ok(());
@@ -3756,15 +3757,13 @@ impl GameApp {
                     }
                 }
                 (VirtualKeyCode::Escape, modifiers, ElementState::Pressed)
-                    if modifiers.is_empty() =>
+                    if modifiers.is_empty()
+                        && self
+                            .game_over_dialog
+                            .as_ref()
+                            .is_some_and(GameOverState::allows_escape_close) =>
                 {
-                    if self
-                        .game_over_dialog
-                        .as_ref()
-                        .is_some_and(GameOverState::allows_escape_close)
-                    {
-                        self.handle_game_over_action(GameOverAction::End)?;
-                    }
+                    self.handle_game_over_action(GameOverAction::End)?;
                 }
                 _ => {}
             }
@@ -4955,11 +4954,10 @@ impl GameApp {
                                     }
                                 } else if self.game_over_dialog_is_active() {
                                     ClusterOwner::GameOver
-                                } else if self.startup_dialog_fade_active()
-                                    && self.startup_player_properties_dialog.is_none()
+                                } else if (self.startup_dialog_fade_active()
+                                    && self.startup_player_properties_dialog.is_none())
+                                    || self.external_irc_dialog_visible
                                 {
-                                    ClusterOwner::Suppressed
-                                } else if self.external_irc_dialog_visible {
                                     ClusterOwner::Suppressed
                                 } else if eligible_gamepad_gui
                                     && self.network_chart_is_active_dialog()
@@ -7127,12 +7125,9 @@ impl GameApp {
             }
             AppMode::Running => self.running_gui_mouse_owned,
         };
-        let Some(position) = (gui_owned && self.window_active && self.pointer_inside_window)
+        let position = (gui_owned && self.window_active && self.pointer_inside_window)
             .then_some(self.window_mouse_position)
-            .flatten()
-        else {
-            return None;
-        };
+            .flatten()?;
         Some((
             position,
             self.mode == AppMode::Running && self.ingame_mouse_help,
@@ -7543,7 +7538,7 @@ impl GameApp {
     }
 
     pub(crate) fn refresh_ingame_region_drag_cursor_for_execute(&mut self) {
-        if self.engine.frame() % 5 != 0 {
+        if !self.engine.frame().is_multiple_of(5) {
             return;
         }
         let refresh_left = self
@@ -10480,10 +10475,10 @@ impl GameApp {
                             }
                             match button_state {
                                 ElementState::Pressed => {
-                                    if !self.handle_scensel_search_pointer_down(point) {
-                                        if !self.handle_scensel_scrollbar_down(point) {
-                                            self.handle_scensel_map_pointer_down(point);
-                                        }
+                                    if !self.handle_scensel_search_pointer_down(point)
+                                        && !self.handle_scensel_scrollbar_down(point)
+                                    {
+                                        self.handle_scensel_map_pointer_down(point);
                                     }
                                 }
                                 ElementState::Released => {
@@ -11476,10 +11471,10 @@ impl GameApp {
                 }
                 match phase {
                     TouchPhase::Started => {
-                        if !self.handle_scensel_search_pointer_down(position) {
-                            if !self.handle_scensel_scrollbar_down(position) {
-                                self.handle_scensel_map_pointer_down(position);
-                            }
+                        if !self.handle_scensel_search_pointer_down(position)
+                            && !self.handle_scensel_scrollbar_down(position)
+                        {
+                            self.handle_scensel_map_pointer_down(position);
                         }
                         self.restore_scensel_rename_pointer_focus();
                         Ok(())

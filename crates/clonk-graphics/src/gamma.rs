@@ -323,8 +323,7 @@ mod tests {
         assert!((samples[1] - f32::from(0x6465_u16) / 257.0).abs() < f32::EPSILON);
         assert!((samples[2] - f32::from(0x96d8_u16) / 257.0).abs() < f32::EPSILON);
 
-        let over_opaque_200 =
-            |value: f32| (value * alpha + 200.0 * (1.0 - alpha)).round() as u8;
+        let over_opaque_200 = |value: f32| (value * alpha + 200.0 * (1.0 - alpha)).round() as u8;
         let pre_blend = crate::Color::new(
             over_opaque_200(samples[0]),
             over_opaque_200(samples[1]),

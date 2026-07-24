@@ -178,15 +178,13 @@ fn effect_var_private_write_argument_bypasses_public_arity() {
     let mut engine = Engine::new();
 
     let captured = value.clone();
-    engine.register_host_function_with_arity("EffectVar", 3, move |args| {
-        match args {
-            [_, _, _, replacement] => {
-                *captured.lock().unwrap() = replacement.clone();
-                Ok(replacement.clone())
-            }
-            [_, _, _] => Ok(captured.lock().unwrap().clone()),
-            _ => panic!("EffectVar received an invalid public or private frame"),
+    engine.register_host_function_with_arity("EffectVar", 3, move |args| match args {
+        [_, _, _, replacement] => {
+            *captured.lock().unwrap() = replacement.clone();
+            Ok(replacement.clone())
         }
+        [_, _, _] => Ok(captured.lock().unwrap().clone()),
+        _ => panic!("EffectVar received an invalid public or private frame"),
     });
     let mark_events = marks.clone();
     engine.register_host_function_with_arity("Mark", 1, move |args| {

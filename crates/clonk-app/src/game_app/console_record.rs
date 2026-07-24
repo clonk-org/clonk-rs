@@ -504,7 +504,7 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running)
             || self.network_stats.is_none()
             || control_rate <= 0
-            || self.engine.frame() % control_rate as u64 != 0
+            || !self.engine.frame().is_multiple_of(control_rate as u64)
         {
             return;
         }
@@ -1967,9 +1967,7 @@ impl GameApp {
     pub(crate) fn finish_recording(&mut self) -> Option<LeagueEndRecord> {
         self.runtime_record_requested = false;
         self.engine.set_recording_active(false);
-        if self.recording.is_none() {
-            return None;
-        }
+        self.recording.as_ref()?;
         let (league_streaming, stream_delta) = {
             let session = self.recording.as_mut().expect("recording checked above");
             (session.league_streaming, session.take_stream_delta())

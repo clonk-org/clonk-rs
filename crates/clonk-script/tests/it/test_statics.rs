@@ -20,9 +20,7 @@ fn statics_share_one_table_across_script_hosts() {
     );
     let mut reader = Engine::new();
     reader.set_global_variables(table.clone());
-    reader.add_script(
-        Script::compile("public func Read() { return counter; }").expect("compiles"),
-    );
+    reader.add_script(Script::compile("public func Read() { return counter; }").expect("compiles"));
 
     assert_eq!(writer.call("Bump", &[]).expect("bump"), Value::Int(1));
     assert_eq!(writer.call("Bump", &[]).expect("bump"), Value::Int(2));

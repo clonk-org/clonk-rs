@@ -25,11 +25,7 @@ fn nonstrict_inherited_is_rejected() {
              func Healthy() {{ return 7; }}"
         );
         let script = Script::compile(&source).expect("body error is recovered");
-        assert_eq!(
-            script.parse_diagnostics().len(),
-            1,
-            "source: {source}"
-        );
+        assert_eq!(script.parse_diagnostics().len(), 1, "source: {source}");
         assert_eq!(
             script.parse_diagnostics()[0].message(),
             "inherited disabled; use #strict syntax!",
@@ -39,7 +35,9 @@ fn nonstrict_inherited_is_rejected() {
         let mut engine = Engine::new();
         engine.add_script(script);
         assert_eq!(
-            engine.call("Healthy", &[]).expect("recovery keeps sibling functions"),
+            engine
+                .call("Healthy", &[])
+                .expect("recovery keeps sibling functions"),
             Value::Int(7)
         );
         let error = engine
@@ -116,7 +114,9 @@ fn inherited_forwards_arguments() {
         "#strict\nglobal func F(a, b) { return inherited(a, b) * 2; }",
     ));
     assert_eq!(
-        engine.call("F", &[Value::Int(2), Value::Int(3)]).expect("call succeeds"),
+        engine
+            .call("F", &[Value::Int(2), Value::Int(3)])
+            .expect("call succeeds"),
         Value::Int(10)
     );
 }
@@ -135,10 +135,7 @@ fn include_parent_function_is_reachable_via_inherited() {
         "#strict\npublic func F() { return _inherited() + 1; }",
     ));
     child.merge_from(&parent);
-    assert_eq!(
-        child.call("F", &[]).expect("call succeeds"),
-        Value::Int(6)
-    );
+    assert_eq!(child.call("F", &[]).expect("call succeeds"), Value::Int(6));
 
     // A global func in the parent is NOT copied into the child.
     let mut global_parent = Engine::new();

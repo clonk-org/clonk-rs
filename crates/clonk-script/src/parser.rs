@@ -84,10 +84,7 @@ impl<'a> Parser<'a> {
         parser
     }
 
-    pub(crate) fn with_strict_level_c4_string(
-        source: &'a str,
-        strict_level: Option<u8>,
-    ) -> Self {
+    pub(crate) fn with_strict_level_c4_string(source: &'a str, strict_level: Option<u8>) -> Self {
         let mut parser = Self::new(source);
         parser.lexer = Lexer::new_c4_string(source);
         parser.strict_level = strict_level.unwrap_or(0);
@@ -585,8 +582,7 @@ impl<'a> Parser<'a> {
                     if let Some(name) = self.consume_legacy_pipe_parameter_name()? {
                         (type_annotation, false, Some(name))
                     } else {
-                        let is_reference =
-                            self.consume_if_symbol(Symbol::Ampersand)?.is_some();
+                        let is_reference = self.consume_if_symbol(Symbol::Ampersand)?.is_some();
                         self.reject_parameter_disabled_operator()?;
                         let legacy_name = self.consume_legacy_pipe_parameter_name()?;
                         (type_annotation, is_reference, legacy_name)
@@ -611,10 +607,7 @@ impl<'a> Parser<'a> {
                     // remain legal. Boolean literals and strict-3 `nil` are
                     // distinct native tokens and cannot be parameter names.
                     TokenKind::Keyword(keyword)
-                        if !matches!(
-                            *keyword,
-                            Keyword::Nil | Keyword::True | Keyword::False
-                        ) =>
+                        if !matches!(*keyword, Keyword::Nil | Keyword::True | Keyword::False) =>
                     {
                         let name = keyword.lexeme().to_string();
                         self.consume()?;
@@ -1452,9 +1445,7 @@ impl<'a> Parser<'a> {
                 let base_target = Self::expression_to_assignment_target(*base, eq_token)?;
                 Ok(AssignmentTarget::Index(Box::new(base_target), index))
             }
-            Expr::ArrayAppend(base) => {
-                Ok(AssignmentTarget::ArrayAppend(base))
-            }
+            Expr::ArrayAppend(base) => Ok(AssignmentTarget::ArrayAppend(base)),
             // Special case: Local(expr), Var(expr), and EffectVar(args...) are assignable lvalues
             // Local() and Var() without arguments default to slot 0
             Expr::Call {
@@ -2064,8 +2055,7 @@ impl<'a> Parser<'a> {
                 self.consume()?;
                 return Ok(Some(NavigationOperation::ArrayAppend));
             }
-            let starts_with_string_token =
-                matches!(&self.peek()?.kind, TokenKind::String(_));
+            let starts_with_string_token = matches!(&self.peek()?.kind, TokenKind::String(_));
             let index = self.parse_expression()?;
             let index = match (starts_with_string_token, index) {
                 (true, Expr::Literal(Literal::String(value))) => {
@@ -2198,11 +2188,9 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::This) => Ok(Expr::Variable("this".to_string())),
             TokenKind::GlobalCall => {
                 let failsafe = self.consume_if_symbol(Symbol::Tilde)?.is_some();
-                let (name, _) = self.expect_identifier("expected function name after 'global->'")?;
-                self.expect_symbol(
-                    Symbol::LParen,
-                    "expected '(' after global function name",
-                )?;
+                let (name, _) =
+                    self.expect_identifier("expected function name after 'global->'")?;
+                self.expect_symbol(Symbol::LParen, "expected '(' after global function name")?;
                 let (args, forward_rest) = self.parse_argument_list()?;
                 self.expect_symbol(Symbol::RParen, "expected ')' after arguments")?;
                 Ok(Expr::GlobalCall {
@@ -2218,8 +2206,7 @@ impl<'a> Parser<'a> {
                 // least STRICT1 before either form can be parsed
                 // (C4AulParse.cpp:2775-2798). Arrow and `global->` calls take
                 // separate parser paths and remain ordinary named calls.
-                if self.strict_level == 0 && matches!(name.as_str(), "inherited" | "_inherited")
-                {
+                if self.strict_level == 0 && matches!(name.as_str(), "inherited" | "_inherited") {
                     return Err(ParseError::new(
                         "inherited disabled; use #strict syntax!",
                         token.line,
@@ -2451,10 +2438,7 @@ impl<'a> Parser<'a> {
         Ok((name, token))
     }
 
-    fn expect_identifier_or_c4id(
-        &mut self,
-        message: &str,
-    ) -> Result<(String, Token), ParseError> {
+    fn expect_identifier_or_c4id(&mut self, message: &str) -> Result<(String, Token), ParseError> {
         let token = self.peek()?.clone();
         let name = match &token.kind {
             TokenKind::Identifier(name) | TokenKind::C4Id(name) => name.clone(),
@@ -2804,18 +2788,18 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
-#[test]
-fn static_const_multi_declarators_parse() {
-    // Talker.c4d:5-6: static const _TLK_ID = _TLK,\n _TLK_TimerInterval = 1;
-    let source = "#strict\n\nstatic const    _TLK_ID                  = _TLK,\n        _TLK_TimerInterval   = 1;\n";
-    let script = crate::Script::compile(source).expect("compiles");
-    let names: Vec<&str> = script
-        .var_decls()
-        .iter()
-        .map(|decl| decl.name.as_str())
-        .collect();
-    assert_eq!(names, vec!["_TLK_ID", "_TLK_TimerInterval"]);
-}
+    #[test]
+    fn static_const_multi_declarators_parse() {
+        // Talker.c4d:5-6: static const _TLK_ID = _TLK,\n _TLK_TimerInterval = 1;
+        let source = "#strict\n\nstatic const    _TLK_ID                  = _TLK,\n        _TLK_TimerInterval   = 1;\n";
+        let script = crate::Script::compile(source).expect("compiles");
+        let names: Vec<&str> = script
+            .var_decls()
+            .iter()
+            .map(|decl| decl.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["_TLK_ID", "_TLK_TimerInterval"]);
+    }
 
     use super::*;
 
@@ -2901,8 +2885,15 @@ func Ok() { return 1; }
         for source in ["#appendto**", "#appendto*=", "#appendto**="] {
             assert!(parse_script(source).is_err(), "source: {source}");
             let recovered = crate::Script::compile(source).expect("operator tail recovers");
-            assert_eq!(recovered.appends(), [AppendTo::Wildcard], "source: {source}");
-            assert!(!recovered.parse_diagnostics().is_empty(), "source: {source}");
+            assert_eq!(
+                recovered.appends(),
+                [AppendTo::Wildcard],
+                "source: {source}"
+            );
+            assert!(
+                !recovered.parse_diagnostics().is_empty(),
+                "source: {source}"
+            );
         }
 
         let wrong_case = "#Include CLNK";
@@ -2997,7 +2988,10 @@ func Ok() { return 1; }
             assert!(parse_script(source).is_err(), "source: {source}");
             let recovered = crate::Script::compile(source).expect("adjacency error recovers");
             assert_eq!(recovered.strict_level(), Some(1), "source: {source}");
-            assert!(!recovered.parse_diagnostics().is_empty(), "source: {source}");
+            assert!(
+                !recovered.parse_diagnostics().is_empty(),
+                "source: {source}"
+            );
         }
 
         for (source, function_name) in [("#strict 2:", "2"), ("#strict 0x2:", "0x2")] {
@@ -3007,7 +3001,10 @@ func Ok() { return 1; }
             let recovered = crate::Script::compile(source).expect("legacy function compiles");
             assert_eq!(recovered.strict_level(), Some(1), "source: {source}");
             assert!(recovered.functions().contains_key(function_name));
-            assert!(!recovered.parse_diagnostics().is_empty(), "source: {source}");
+            assert!(
+                !recovered.parse_diagnostics().is_empty(),
+                "source: {source}"
+            );
         }
 
         for (spelling, expected) in [("2", 2), ("3", 3), ("02", 2), ("0x2", 2)] {
@@ -3103,9 +3100,7 @@ func Ok() { return 1; }
     #[test]
     fn strict_two_rejects_textual_string_comparison_operators() {
         for operator in ["eq", "ne"] {
-            let source = format!(
-                "#strict 2\nfunc Test() {{ return \"a\" {operator} \"a\"; }}"
-            );
+            let source = format!("#strict 2\nfunc Test() {{ return \"a\" {operator} \"a\"; }}");
             assert!(
                 parse_script(&source).is_err(),
                 "{operator} must be an identifier rather than an operator at strict two"
@@ -3641,8 +3636,7 @@ func Ok() { return 1; }
 
     #[test]
     fn statement_map_probe_discards_lookahead_string_operands() {
-        let mut parser =
-            Parser::new("#strict 3\nfunc Broken() { { var = \"\\q\"; } }");
+        let mut parser = Parser::new("#strict 3\nfunc Broken() { { var = \"\\q\"; } }");
         let error = parser
             .parse_script()
             .expect_err("the malformed declaration must stop before its string operand");
@@ -3659,9 +3653,7 @@ func Ok() { return 1; }
 
     #[test]
     fn statement_map_probe_lexer_error_keeps_cpp_cursor_progress() {
-        let mut parser = Parser::new(
-            "#strict 3\nfunc Broken() { { key = \"discarded\" @ }; }",
-        );
+        let mut parser = Parser::new("#strict 3\nfunc Broken() { { key = \"discarded\" @ }; }");
         let error = parser
             .parse_script()
             .expect_err("invalid lookahead character must abort the statement probe");
@@ -3669,7 +3661,10 @@ func Ok() { return 1; }
         assert_eq!(error.message(), "unexpected character '@'");
         assert!(parser.lexer.take_string_literals().is_empty());
         assert!(matches!(
-            parser.peek().expect("cursor remains after the bad byte").kind,
+            parser
+                .peek()
+                .expect("cursor remains after the bad byte")
+                .kind,
             TokenKind::Symbol(Symbol::RBrace)
         ));
     }
@@ -3799,10 +3794,9 @@ func Ok() { return 1; }
 
     #[test]
     fn map_foreach_accepts_contextual_keywords_as_binders() {
-        let script = parse_script(
-            "func Test() { var func, while, map; for (var func, while in map) {} }",
-        )
-        .expect("contextual-keyword map binders parse");
+        let script =
+            parse_script("func Test() { var func, while, map; for (var func, while in map) {} }")
+                .expect("contextual-keyword map binders parse");
 
         assert!(matches!(
             &script.functions[0].body[1],
@@ -3816,10 +3810,8 @@ func Ok() { return 1; }
 
     #[test]
     fn foreach_probe_keeps_declaration_commas_but_not_comma_expressions() {
-        let script = parse_script(
-            "func Test() { for (var i = 0, j = 1; i < 3; ++i) {} }",
-        )
-        .expect("C-style declaration loop parses");
+        let script = parse_script("func Test() { for (var i = 0, j = 1; i < 3; ++i) {} }")
+            .expect("C-style declaration loop parses");
 
         assert!(matches!(
             &script.functions[0].body[0],
@@ -3828,16 +3820,13 @@ func Ok() { return 1; }
                 ..
             } if declarations.len() == 2
         ));
-        assert!(parse_script(
-            "func Test() { for (i = 0, j = 1; i < 3; ++i) {} }"
-        )
-        .is_err());
+        assert!(parse_script("func Test() { for (i = 0, j = 1; i < 3; ++i) {} }").is_err());
     }
 
     #[test]
     fn only_raw_string_indexes_use_the_embedded_operand_ast() {
-        let embedded = parse_expression_at_strict(r#"map["key"]"#, 3)
-            .expect("raw string index parses");
+        let embedded =
+            parse_expression_at_strict(r#"map["key"]"#, 3).expect("raw string index parses");
         assert!(matches!(
             embedded,
             Expr::Index(_, IndexOperand::EmbeddedString(key)) if key == "key"
@@ -3856,10 +3845,12 @@ func Ok() { return 1; }
             )
         ));
 
-        let assignment = parse_script(r#"#strict 3
+        let assignment = parse_script(
+            r#"#strict 3
             func Test() { map["key"] = 1; map[("key")] = 2; }
-            "#)
-            .expect("string-index assignments parse");
+            "#,
+        )
+        .expect("string-index assignments parse");
         assert!(matches!(
             &assignment.functions[0].body[..],
             [

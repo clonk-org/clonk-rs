@@ -184,12 +184,7 @@ fn array_append_reads_self_owned_temporary_arrays_as_nil() {
 
     assert_eq!(
         call(source, &[]).expect("temporary append reads collapse to nil"),
-        Value::Array(vec![
-            Value::Nil,
-            Value::Nil,
-            Value::Nil,
-            Value::Int(1),
-        ])
+        Value::Array(vec![Value::Nil, Value::Nil, Value::Nil, Value::Int(1),])
     );
 }
 
@@ -397,10 +392,7 @@ fn ordinary_index_reads_do_not_resize_or_detach_the_array() {
 #[test]
 fn array_append_rejects_non_array_temporary_values_with_cpp_errors() {
     assert_eq!(
-        runtime_error(
-            "#strict\nfunc Test() { var value; return value[]; }",
-            &[],
-        ),
+        runtime_error("#strict\nfunc Test() { var value; return value[]; }", &[],),
         "array append accesss: can't access nil as an array!"
     );
     assert_eq!(

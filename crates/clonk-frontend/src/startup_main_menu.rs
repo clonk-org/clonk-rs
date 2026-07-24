@@ -139,10 +139,7 @@ pub fn main_menu_layout(w: i32, h: i32) -> MainMenuLayout {
     MainMenuLayout {
         client,
         buttons,
-        participants_anchor: (
-            client.x + client.w * 39 / 40,
-            client.y + client.h * 9 / 10,
-        ),
+        participants_anchor: (client.x + client.w * 39 / 40, client.y + client.h * 9 / 10),
         trademark_anchor_x: client.x + client.w,
     }
 }
@@ -173,7 +170,17 @@ pub fn draw_bar(
         let mut ix = border as i32;
         while ix < bar_w - end_show {
             let tile_w = (mid_w as i32).min(bar_w - end_show - ix).max(0) as u32;
-            crate::draw_image_strip(surface, x0 + ix, y0, image, border, 0, tile_w, border, gamma);
+            crate::draw_image_strip(
+                surface,
+                x0 + ix,
+                y0,
+                image,
+                border,
+                0,
+                tile_w,
+                border,
+                gamma,
+            );
             ix += mid_w as i32;
         }
     }
@@ -364,11 +371,7 @@ impl StartupMainMenu {
 
     /// Returns the native tooltip target at `point`, without applying the
     /// screen-wide CMouse delay.
-    pub fn tooltip_at(
-        &self,
-        participants_label: &str,
-        point: GuiPoint,
-    ) -> Option<StartupTooltip> {
+    pub fn tooltip_at(&self, participants_label: &str, point: GuiPoint) -> Option<StartupTooltip> {
         if self.trademark_contains(point) {
             return None;
         }
@@ -569,7 +572,11 @@ impl StartupMainMenu {
         for (index, rect) in self.layout.iter().enumerate() {
             let state = ButtonVisualState::from_indices(
                 index,
-                if draw_focus { self.selected_index } else { None },
+                if draw_focus {
+                    self.selected_index
+                } else {
+                    None
+                },
                 pressed_index,
                 self.buttons[index].enabled,
             );
@@ -813,7 +820,12 @@ impl StartupMainMenu {
                     rect.size.width - 10.0,
                     rect.size.height - 6.0,
                 );
-                crate::draw_image_bilinear_additive(surface, &overlay, highlight, self.gamma.as_deref());
+                crate::draw_image_bilinear_additive(
+                    surface,
+                    &overlay,
+                    highlight,
+                    self.gamma.as_deref(),
+                );
             }
         }
 
@@ -884,7 +896,10 @@ impl StartupMainMenu {
             return Vec::new();
         }
 
-        let layout = main_menu_layout(self.size.width.max(1.0) as i32, self.size.height.max(1.0) as i32);
+        let layout = main_menu_layout(
+            self.size.width.max(1.0) as i32,
+            self.size.height.max(1.0) as i32,
+        );
         layout
             .buttons
             .iter()
@@ -970,10 +985,18 @@ mod tests {
         // middle = cols 2-3 (30,40), end = cols 4-5 (50,60).
         let image = column_coded_image(6, 2);
         let mut surface = clonk_graphics::Surface::new(7, 2, PixelFormat::Rgba8888);
-        draw_bar(&mut surface, &GuiRect::new(0.0, 0.0, 7.0, 2.0), &image, None);
+        draw_bar(
+            &mut surface,
+            &GuiRect::new(0.0, 0.0, 7.0, 2.0),
+            &image,
+            None,
+        );
         // iRightShowLength = 2/3 = 0; tiles at x=2 (30,40), x=4 (30,40), x=6 (30);
         // end drawn last right-aligned at x=5 -> overwrites cols 5,6 with 50,60.
-        assert_eq!(column_values(&surface, 0, 7), vec![10, 20, 30, 40, 30, 50, 60]);
+        assert_eq!(
+            column_values(&surface, 0, 7),
+            vec![10, 20, 30, 40, 30, 50, 60]
+        );
     }
 
     // Pixel-exact C4StartupMainDlg geometry at 1280x720, derived from
@@ -1032,10 +1055,7 @@ mod tests {
                 h: height,
             }
         );
-        assert!(menu.participants_contains(
-            label,
-            GuiPoint::new(rect.x as f32, rect.y as f32),
-        ));
+        assert!(menu.participants_contains(label, GuiPoint::new(rect.x as f32, rect.y as f32),));
         assert!(!menu.participants_contains(
             label,
             GuiPoint::new((rect.x + rect.w) as f32, rect.y as f32),
@@ -1111,12 +1131,7 @@ mod tests {
             }
         );
         assert_eq!(
-            centered_label_tooltip_at(
-                GuiPoint::new(90.0, 8.0),
-                (100, 8),
-                (21, 34),
-                target.clone(),
-            ),
+            centered_label_tooltip_at(GuiPoint::new(90.0, 8.0), (100, 8), (21, 34), target.clone(),),
             Some(target)
         );
         assert_eq!(
@@ -1133,11 +1148,7 @@ mod tests {
     #[test]
     fn context_focus_suppression_keeps_pointer_hover_only() {
         let mut menu = main_menu();
-        menu.set_highlight_texture(Some(ImageData::new(
-            2,
-            2,
-            vec![0xff; 2 * 2 * 4],
-        )));
+        menu.set_highlight_texture(Some(ImageData::new(2, 2, vec![0xff; 2 * 2 * 4])));
         assert_eq!(menu.selected_index, Some(0));
         assert_eq!(menu.hover_index, None);
 
@@ -1146,11 +1157,7 @@ mod tests {
         let mut focused_surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
         let mut suppressed_surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
         focused.render_with_draw_focus(&mut focused_surface, "Players: none selected", true);
-        suppressed.render_with_draw_focus(
-            &mut suppressed_surface,
-            "Players: none selected",
-            false,
-        );
+        suppressed.render_with_draw_focus(&mut suppressed_surface, "Players: none selected", false);
         assert!(focused_surface.pixels() != suppressed_surface.pixels());
 
         menu.handle_pointer_move(button_center(1));

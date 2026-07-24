@@ -194,10 +194,8 @@ pub fn viewport_edge_scroll_at(
     let top = y == 0;
     let right = x == max_x;
     let bottom = y == max_y;
-    let edge_mask = u8::from(left)
-        | (u8::from(top) << 1)
-        | (u8::from(right) << 2)
-        | (u8::from(bottom) << 3);
+    let edge_mask =
+        u8::from(left) | (u8::from(top) << 1) | (u8::from(right) << 2) | (u8::from(bottom) << 3);
 
     // UpdateScrolling executes all four independent axis checks in this
     // order. Preserve that behavior even for degenerate one-pixel extents.
@@ -305,10 +303,9 @@ pub(crate) fn c4_particle_angle(x: i32, y: i32) -> i32 {
 }
 
 pub(crate) fn lower_bounded_surface_clip(surface: &Surface, left: i32, top: i32) -> SurfaceRect {
-    let width = (i64::from(surface.width()) - i64::from(left))
-        .clamp(0, i64::from(u32::MAX)) as u32;
-    let height = (i64::from(surface.height()) - i64::from(top))
-        .clamp(0, i64::from(u32::MAX)) as u32;
+    let width = (i64::from(surface.width()) - i64::from(left)).clamp(0, i64::from(u32::MAX)) as u32;
+    let height =
+        (i64::from(surface.height()) - i64::from(top)).clamp(0, i64::from(u32::MAX)) as u32;
     SurfaceRect::new(left, top, width, height)
 }
 
@@ -361,7 +358,12 @@ impl FloatSourceRect {
         self
     }
 
-    pub(crate) fn source_edge(self, normalized_x: f32, normalized_y: f32, flip_x: bool) -> (f32, f32) {
+    pub(crate) fn source_edge(
+        self,
+        normalized_x: f32,
+        normalized_y: f32,
+        flip_x: bool,
+    ) -> (f32, f32) {
         let x = if flip_x {
             self.x + self.width * (1.0 - normalized_x)
         } else {
@@ -392,7 +394,12 @@ pub(crate) struct CameraState {
 impl CameraState {
     /// `CreateViewport` calls `CenterPosition` after setting the output size,
     /// while dViewX/Y retain C4Viewport's negative initialization sentinel.
-    pub(crate) fn new(world_width: i32, world_height: i32, view_width: i32, view_height: i32) -> Self {
+    pub(crate) fn new(
+        world_width: i32,
+        world_height: i32,
+        view_width: i32,
+        view_height: i32,
+    ) -> Self {
         Self {
             d_view_x: itofix(CAMERA_UNINITIALIZED),
             d_view_y: itofix(CAMERA_UNINITIALIZED),
@@ -575,11 +582,7 @@ impl CursorAtlas {
     /// Select the resolution-dependent cursor sheet like
     /// `C4GraphicsResource::ReloadResolutionDependentFiles`
     /// (src/C4GraphicsResource.cpp:468-504).
-    pub fn image_for_scaled_resolution(
-        &self,
-        logical_width: u32,
-        scale: f32,
-    ) -> Option<ImageData> {
+    pub fn image_for_scaled_resolution(&self, logical_width: u32, scale: f32) -> Option<ImageData> {
         let index = Self::index_for_scaled_resolution(logical_width, scale);
         self.images.get(index).and_then(Clone::clone)
     }
@@ -630,10 +633,7 @@ impl SkyRenderState {
                 return false;
             };
             image.pixels().len() == expected_len
-                && image
-                    .pixels()
-                    .chunks_exact(4)
-                    .all(|pixel| pixel[3] == 255)
+                && image.pixels().chunks_exact(4).all(|pixel| pixel[3] == 255)
         });
         Self {
             settings,

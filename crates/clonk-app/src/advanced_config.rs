@@ -23,8 +23,7 @@ const U64_MAX: i128 = u64::MAX as i128;
 const C4_MAX_NAME: usize = 30;
 const C4_MAX_COMMENT: usize = 256;
 
-const UPPER_BOARD_VALUES: &[(&str, i32)] =
-    &[("Hide", 0), ("Full", 1), ("Small", 2), ("Mini", 3)];
+const UPPER_BOARD_VALUES: &[(&str, i32)] = &[("Hide", 0), ("Full", 1), ("Small", 2), ("Mini", 3)];
 const DISPLAY_MODE_VALUES: &[(&str, i32)] = &[("Fullscreen", 0), ("Window", 1)];
 const SCRIPT_STRICTNESS_VALUES: &[(&str, i32)] = &[
     ("NonStrict", 0),
@@ -105,7 +104,10 @@ fn is_native_markup_tag(tag: &str) -> bool {
 fn strip_native_name_markup(value: &str) -> String {
     // C4InVal first removes every opening brace, then CMarkup strips its
     // recognized tags and any now-unpaired closing inline-image marker.
-    let without_open_braces: String = value.chars().filter(|character| *character != '{').collect();
+    let without_open_braces: String = value
+        .chars()
+        .filter(|character| *character != '{')
+        .collect();
     let mut stripped = String::with_capacity(without_open_braces.len());
     let mut remaining = without_open_braces.as_str();
     while !remaining.is_empty() {
@@ -239,14 +241,7 @@ fn int_row(
 }
 
 fn i32_row(config: &Config, section: &str, key: &str, default: i32) -> AdvancedConfigRow {
-    int_row(
-        config,
-        section,
-        key,
-        i128::from(default),
-        I32_MIN,
-        I32_MAX,
-    )
+    int_row(config, section, key, i128::from(default), I32_MIN, I32_MAX)
 }
 
 fn readonly_row(config: &Config, key: &str, default: &str) -> AdvancedConfigRow {
@@ -302,7 +297,12 @@ fn general(config: &Config) -> AdvancedConfigSection {
         bool_row(config, section, "UseWhiteIngameChat", false),
         bool_row(config, section, "UseWhiteLobbyChat", false),
         bool_row(config, section, "ShowLogTimestamps", false),
-        bool_row(config, section, "Preloading", cfg!(not(target_os = "macos"))),
+        bool_row(
+            config,
+            section,
+            "Preloading",
+            cfg!(not(target_os = "macos")),
+        ),
     ];
     #[cfg(not(target_os = "windows"))]
     rows.push(int_row(
@@ -363,12 +363,7 @@ fn gamepad(config: &Config, index: usize) -> AdvancedConfigSection {
         ));
     }
     for button in 1..=12 {
-        rows.push(i32_row(
-            config,
-            &section,
-            &format!("Button{button}"),
-            -1,
-        ));
+        rows.push(i32_row(config, &section, &format!("Button{button}"), -1));
     }
     AdvancedConfigSection::new(section, rows)
 }
@@ -390,13 +385,7 @@ fn graphics(config: &Config) -> AdvancedConfigSection {
         bool_row(config, section, "ColorAnimation", false),
         i32_row(config, section, "SmokeLevel", 200),
         i32_row(config, section, "VerboseObjectLoading", 0),
-        enum_row(
-            config,
-            section,
-            "UpperBoard",
-            "Full",
-            UPPER_BOARD_VALUES,
-        ),
+        enum_row(config, section, "UpperBoard", "Full", UPPER_BOARD_VALUES),
         bool_row(config, section, "ShowClock", false),
         bool_row(config, section, "ShowCrewNames", true),
         bool_row(config, section, "ShowCrewCNames", true),
@@ -478,13 +467,7 @@ fn network(config: &Config) -> AdvancedConfigSection {
             text_row(config, section, "WorkPath", "Network"),
             bool_row(config, section, "NoRuntimeJoin", true),
             i32_row(config, section, "MaxResSearchRecursion", 1),
-            validated_text_row(
-                config,
-                section,
-                "Comment",
-                "",
-                validate_network_comment,
-            ),
+            validated_text_row(config, section, "Comment", "", validate_network_comment),
             i32_row(config, section, "PortTCP", 11_112),
             i32_row(config, section, "PortUDP", 11_113),
             i32_row(config, section, "PortDiscovery", 11_114),
@@ -583,22 +566,8 @@ fn simple_sections(config: &Config) -> Vec<AdvancedConfigSection> {
         AdvancedConfigSection::new(
             "Cooldowns",
             vec![
-                int_row(
-                    config,
-                    "Cooldowns",
-                    "SoundCommand",
-                    0,
-                    I64_MIN,
-                    I64_MAX,
-                ),
-                int_row(
-                    config,
-                    "Cooldowns",
-                    "ReadyCheck",
-                    10,
-                    5,
-                    I64_MAX,
-                ),
+                int_row(config, "Cooldowns", "SoundCommand", 0, I64_MIN, I64_MAX),
+                int_row(config, "Cooldowns", "ReadyCheck", 10, 5, I64_MAX),
             ],
         ),
         AdvancedConfigSection::new(
@@ -665,11 +634,7 @@ pub fn canonicalize_existing(config: &mut Config) {
                 .get_in(Some(section.name.as_str()), row.name.as_str())
                 .is_some()
             {
-                config.set_in(
-                    Some(section.name.as_str()),
-                    row.name.as_str(),
-                    value,
-                );
+                config.set_in(Some(section.name.as_str()), row.name.as_str(), value);
             } else if section.name == "General" && config.get(row.name.as_str()).is_some() {
                 // Retain the location used by older Rust-generated fixtures.
                 config.set(row.name.as_str(), value);
@@ -707,11 +672,7 @@ pub fn apply_changes(config: &mut Config, changes: &[AdvancedConfigChange]) {
         } else {
             change.value.clone()
         };
-        config.set_in(
-            Some(change.section.as_str()),
-            change.key.as_str(),
-            value,
-        );
+        config.set_in(Some(change.section.as_str()), change.key.as_str(), value);
     }
 }
 
@@ -824,7 +785,10 @@ mod tests {
         );
         assert!(matches!(
             controller.value("Graphics", "Gamma2"),
-            Some(AdvancedConfigValue::Integer { value: 0x80_80_80, .. })
+            Some(AdvancedConfigValue::Integer {
+                value: 0x80_80_80,
+                ..
+            })
         ));
         assert!(matches!(
             controller.value("Graphics", "AllowedBlitModes"),
@@ -841,11 +805,7 @@ mod tests {
         let mut config = Config::new();
         config.set_in(Some("Graphics"), "UpperBoard", "3");
         config.set_in(Some("Graphics"), "DisplayMode", "Window");
-        config.set_in(
-            Some("Developer"),
-            "ConsoleScriptStrictness",
-            "Strict2",
-        );
+        config.set_in(Some("Developer"), "ConsoleScriptStrictness", "Strict2");
         config.set_in(Some("Logging"), "LogLevelStdout", "4");
 
         let controller = AdvancedConfigController::new(sections(&config));
@@ -884,10 +844,7 @@ mod tests {
             config.get_in(Some("Developer"), "ConsoleScriptStrictness"),
             Some("Strict2")
         );
-        assert_eq!(
-            config.get_in(Some("Logging"), "LogLevelStdout"),
-            Some("4")
-        );
+        assert_eq!(config.get_in(Some("Logging"), "LogLevelStdout"), Some("4"));
 
         apply_changes(
             &mut config,
@@ -898,10 +855,7 @@ mod tests {
                 change("Logging", "LogLevelStdout", "critical"),
             ],
         );
-        assert_eq!(
-            config.get_in(Some("Graphics"), "UpperBoard"),
-            Some("Small")
-        );
+        assert_eq!(config.get_in(Some("Graphics"), "UpperBoard"), Some("Small"));
         assert_eq!(
             config.get_in(Some("Graphics"), "DisplayMode"),
             Some("Fullscreen")
@@ -956,10 +910,7 @@ mod tests {
                 .len(),
             C4_MAX_COMMENT
         );
-        assert_eq!(
-            config.get_in(Some("Network"), "LocalName"),
-            Some("Unknown")
-        );
+        assert_eq!(config.get_in(Some("Network"), "LocalName"), Some("Unknown"));
         assert_eq!(config.get_in(Some("Network"), "Nick"), Some("Bob"));
     }
 
@@ -986,14 +937,8 @@ mod tests {
             config.get_in(Some("General"), "VendorExtension"),
             Some("keep")
         );
-        assert_eq!(
-            config.get_in(Some("Graphics"), "Gamma2"),
-            Some("8421504")
-        );
-        assert_eq!(
-            config.get_in(Some("Graphics"), "UpperBoard"),
-            Some("Mini")
-        );
+        assert_eq!(config.get_in(Some("Graphics"), "Gamma2"), Some("8421504"));
+        assert_eq!(config.get_in(Some("Graphics"), "UpperBoard"), Some("Mini"));
         assert_eq!(
             config
                 .get_in(Some("Network"), "Comment")
@@ -1001,10 +946,6 @@ mod tests {
                 .len(),
             C4_MAX_COMMENT
         );
-        assert_eq!(
-            config.get_in(Some("Network"), "LocalName"),
-            Some("Alice")
-        );
+        assert_eq!(config.get_in(Some("Network"), "LocalName"), Some("Alice"));
     }
-
 }

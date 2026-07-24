@@ -101,7 +101,9 @@ impl Engine {
                 *ry = cy1;
                 return true;
             }
-            if cy2 + 1 < gback_hgt && !self.gback_semi_solid(rx, cy2) && self.gback_solid(rx, cy2 + 1)
+            if cy2 + 1 < gback_hgt
+                && !self.gback_semi_solid(rx, cy2)
+                && self.gback_solid(rx, cy2 + 1)
             {
                 *ry = cy2;
                 return true;
@@ -350,10 +352,8 @@ impl Engine {
             .with_position(Vector2::new(x, y))
             .with_rotation(rotation)
             .with_owner(OWNER_NONE);
-        match self.spawn_object_with_initial_lifecycle(config, None) {
-            Ok(object) => object,
-            Err(_) => None,
-        }
+        self.spawn_object_with_initial_lifecycle(config, None)
+            .unwrap_or_default()
     }
 
     /// `Game.CreateObjectConstruction(id, nullptr, NO_OWNER, x, by, con)`
@@ -372,10 +372,8 @@ impl Engine {
             .with_position(Vector2::new(x, bottom_y))
             .with_owner(OWNER_NONE)
             .with_construction(con);
-        match self.spawn_object_with_initial_lifecycle(config, None) {
-            Ok(object) => object,
-            Err(_) => None,
-        }
+        self.spawn_object_with_initial_lifecycle(config, None)
+            .unwrap_or_default()
     }
 
     /// C4Game::PlaceInEarth (C4Game.cpp:2949-2960): 35 cheap tries at a
@@ -432,8 +430,7 @@ impl Engine {
                         ty -= 1;
                     }
                     // Above semi solid.
-                    if !self.above_semi_solid(tx, &mut ty) || !(50..=gback_hgt - 50).contains(&ty)
-                    {
+                    if !self.above_semi_solid(tx, &mut ty) || !(50..=gback_hgt - 50).contains(&ty) {
                         continue;
                     }
                     // Free above.
@@ -456,8 +453,12 @@ impl Engine {
                             if def_growth == 0 {
                                 growth = FULL_CON;
                             }
-                            return self
-                                .init_create_object_construction(id, tx, ty_probe + 5, growth);
+                            return self.init_create_object_construction(
+                                id,
+                                tx,
+                                ty_probe + 5,
+                                growth,
+                            );
                         }
                     }
                 }
@@ -531,7 +532,10 @@ impl Engine {
     fn list_expand_valids(&self, list: &[(String, i32)]) -> Vec<String> {
         let mut expanded = Vec::new();
         for (id, count) in list {
-            if !self.definitions.contains_key(&DefinitionId::from(id.as_str())) {
+            if !self
+                .definitions
+                .contains_key(&DefinitionId::from(id.as_str()))
+            {
                 continue;
             }
             for _ in 0..*count {
@@ -559,9 +563,8 @@ impl Engine {
 
         // InitVegetation (C4Game.cpp:3078-3091): the VegLevel evaluate
         // draws even when the list is empty.
-        let veg_amount = (self.gback_wdt() / 50)
-            * placement.vegetation_level.evaluate(&mut self.rng)
-            / 100;
+        let veg_amount =
+            (self.gback_wdt() / 50) * placement.vegetation_level.evaluate(&mut self.rng) / 100;
         let vidlist = self.list_expand_valids(&placement.vegetation);
         if !vidlist.is_empty() {
             let gback_wdt = self.gback_wdt();
@@ -620,16 +623,12 @@ impl Engine {
         // (C4Game.cpp:4016-4025,4038-4044).
         self.refresh_flag_removeable_rule();
         if self.objects.iter().any(|object| {
-            object.definition_id == "CNMT"
-                && !object.destroyed
-                && object.state.status.is_active()
+            object.definition_id == "CNMT" && !object.destroyed && object.state.status.is_active()
         }) {
             self.set_construction_needs_material(true);
         }
         if self.objects.iter().any(|object| {
-            object.definition_id == "ENRG"
-                && !object.destroyed
-                && object.state.status.is_active()
+            object.definition_id == "ENRG" && !object.destroyed && object.state.status.is_active()
         }) {
             self.set_structures_need_energy(true);
         }

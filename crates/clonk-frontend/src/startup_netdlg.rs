@@ -1,6 +1,6 @@
 //! Pixel-parity renderer for the C++ `C4StartupNetDlg` startup dialog
 //! ("Start Network Game"), mirroring the engine's first-shown state
-//! (see `rust/target/parity-specs/net.md`). Implemented against the
+//! (see `target/parity-specs/net.md`). Implemented against the
 //! engine's F9 reference capture at 1280x720; owned by its
 //! implementation agent.
 //!
@@ -1266,13 +1266,12 @@ impl NetDlgEditState {
     }
 
     fn cursor_visible(&self) -> bool {
-        Instant::now()
+        (Instant::now()
             .checked_duration_since(self.last_input)
             .unwrap_or_default()
             .as_millis()
-            / 500
-            % 2
-            == 0
+            / 500)
+            .is_multiple_of(2)
     }
 }
 
@@ -1722,9 +1721,8 @@ impl NetDlgController {
         if new_connection {
             self.chat_initial_messages_received = false;
             self.chat_page = NetDlgChatPage::Chats;
-        } else if snapshot.connection_state != NetDlgChatConnectionState::Disconnected {
-            self.chat_page = NetDlgChatPage::Chats;
-        } else if has_error {
+        } else if snapshot.connection_state != NetDlgChatConnectionState::Disconnected || has_error
+        {
             self.chat_page = NetDlgChatPage::Chats;
         }
         if previous_page != NetDlgChatPage::Chats && self.chat_page == NetDlgChatPage::Chats {
@@ -1947,7 +1945,10 @@ impl NetDlgController {
         if self.mode == NetDlgMode::Chat {
             let chat = self.chat_layout();
             if self.chat_bounds_override.is_some()
-                && contains(Self::chat_dialog_close_rect(self.chat_caption_and_group().0), point)
+                && contains(
+                    Self::chat_dialog_close_rect(self.chat_caption_and_group().0),
+                    point,
+                )
             {
                 return Some(StartupTooltip::resource("IDS_MNU_CLOSE"));
             }
@@ -2989,10 +2990,7 @@ impl NetDlgController {
     fn paste_join_address(&mut self, clipboard: &str, font: &ClonkFont) -> Vec<NetDlgAction> {
         let transformed = clipboard.replace('|', "\u{a6}");
         let mut rest = transformed.as_str();
-        loop {
-            let Some(line_break) = rest.find(['\r', '\n']) else {
-                break;
-            };
+        while let Some(line_break) = rest.find(['\r', '\n']) {
             if line_break == 0 {
                 let skip = rest.chars().next().map_or(0, char::len_utf8);
                 rest = &rest[skip..];
@@ -3138,11 +3136,7 @@ impl NetDlgController {
         // TextWindow::AddTextLine always ScrollToBottom, even on an inactive
         // tab. The inactive caption is then marked unread.
         sheet.transcript_follow_bottom = true;
-        if active {
-            sheet.unread = false;
-        } else {
-            sheet.unread = true;
-        }
+        sheet.unread = !active;
     }
 
     const fn chat_line_kind(kind: NetDlgChatMessageKind) -> NetDlgChatLineKind {
@@ -3515,7 +3509,7 @@ impl NetDlgController {
 
     pub fn chat_transcript_follows_bottom(&self) -> bool {
         self.active_chat_sheet()
-            .map_or(true, |sheet| sheet.transcript_follow_bottom)
+            .is_none_or(|sheet| sheet.transcript_follow_bottom)
     }
 
     fn clamp_active_chat_scroll(&mut self) {
@@ -4155,10 +4149,7 @@ impl NetDlgController {
         }
     }
 
-    fn change_list_selection(
-        &mut self,
-        selection: Option<NetDlgSelection>,
-    ) -> Vec<NetDlgAction> {
+    fn change_list_selection(&mut self, selection: Option<NetDlgSelection>) -> Vec<NetDlgAction> {
         if self.selection == selection {
             return Vec::new();
         }
@@ -4177,15 +4168,10 @@ impl NetDlgController {
         self.change_list_selection(selection)
     }
 
-    fn list_row_fully_visible(
-        row: &NetDlgRowLayout,
-        scroll_y: i32,
-        layout: &NetDlgLayout,
-    ) -> bool {
+    fn list_row_fully_visible(row: &NetDlgRowLayout, scroll_y: i32, layout: &NetDlgLayout) -> bool {
         let top = row.rect.y - layout.list_viewport.y;
         scroll_y <= top
-            && scroll_y.saturating_add(layout.list_viewport.h)
-                >= top.saturating_add(row.rect.h)
+            && scroll_y.saturating_add(layout.list_viewport.h) >= top.saturating_add(row.rect.h)
     }
 
     /// Exact adjacent-first paging from `C4GUI::ListBox::KeyPageDown/KeyPageUp`.
@@ -4219,11 +4205,7 @@ impl NetDlgController {
                     self.scroll_list_by(layout.list_viewport.h, &layout);
                     target = rows.len() - 1;
                     while target > 0
-                        && !Self::list_row_fully_visible(
-                            &rows[target],
-                            self.list_scroll_y,
-                            &layout,
-                        )
+                        && !Self::list_row_fully_visible(&rows[target], self.list_scroll_y, &layout)
                     {
                         target -= 1;
                     }
@@ -4233,11 +4215,7 @@ impl NetDlgController {
             target -= 1;
             if Self::list_row_fully_visible(&rows[target], self.list_scroll_y, &layout) {
                 while target > 0
-                    && Self::list_row_fully_visible(
-                        &rows[target - 1],
-                        self.list_scroll_y,
-                        &layout,
-                    )
+                    && Self::list_row_fully_visible(&rows[target - 1], self.list_scroll_y, &layout)
                 {
                     target -= 1;
                 }
@@ -4245,11 +4223,7 @@ impl NetDlgController {
                 self.scroll_list_by(layout.list_viewport.h.saturating_neg(), &layout);
                 target = 0;
                 while target + 1 < rows.len()
-                    && !Self::list_row_fully_visible(
-                        &rows[target],
-                        self.list_scroll_y,
-                        &layout,
-                    )
+                    && !Self::list_row_fully_visible(&rows[target], self.list_scroll_y, &layout)
                 {
                     target += 1;
                 }
@@ -5555,27 +5529,29 @@ impl NetDlgScreen {
         );
         if show_dialog_close {
             let close = NetDlgController::chat_dialog_close_rect(caption);
-            let hovered = controller
-                .pointer_position
-                .is_some_and(|point| controller.chat_hit(point) == Some(NetDlgChatHit::DialogClose));
-            let pressed = hovered
-                && controller.chat_pressed == Some(NetDlgChatHit::DialogClose);
+            let hovered = controller.pointer_position.is_some_and(|point| {
+                controller.chat_hit(point) == Some(NetDlgChatHit::DialogClose)
+            });
+            let pressed = hovered && controller.chat_pressed == Some(NetDlgChatHit::DialogClose);
             if hovered {
                 if let Some(highlight) = button_highlight {
-                    crate::draw_image_bilinear_additive(surface, &gui_rect(close), highlight, gamma);
+                    crate::draw_image_bilinear_additive(
+                        surface,
+                        &gui_rect(close),
+                        highlight,
+                        gamma,
+                    );
                 }
             }
-            Self::draw_icon_phase(
-                surface,
-                &assets.gui_icons,
-                40,
-                34,
-                close,
-                gamma,
-            );
+            Self::draw_icon_phase(surface, &assets.gui_icons, 40, 34, close, gamma);
             if pressed {
                 if let Some(highlight) = button_highlight {
-                    crate::draw_image_bilinear_additive(surface, &gui_rect(close), highlight, gamma);
+                    crate::draw_image_bilinear_additive(
+                        surface,
+                        &gui_rect(close),
+                        highlight,
+                        gamma,
+                    );
                 }
             }
         }
@@ -5683,14 +5659,7 @@ impl NetDlgScreen {
                 controller.chat_hit(point) == Some(NetDlgChatHit::TabClose(index))
             });
             if close_hovered {
-                Self::draw_icon_phase(
-                    surface,
-                    &assets.gui_icons,
-                    40,
-                    34,
-                    tab.close,
-                    gamma,
-                );
+                Self::draw_icon_phase(surface, &assets.gui_icons, 40, 34, tab.close, gamma);
             } else {
                 Self::draw_icon_phase_rgb_modulated(
                     surface,
@@ -6300,9 +6269,7 @@ mod tests {
             (rows[0].rect.y + rows[0].rect.h + 2) as f32,
         );
         assert_eq!(controller.game_index_at(gap), None);
-        assert!(controller
-            .handle_pointer_down(gap, text_font())
-            .is_empty());
+        assert!(controller.handle_pointer_down(gap, text_font()).is_empty());
         assert_eq!(controller.selected_game(), None);
 
         assert!(controller.focus_game(1).is_empty());
@@ -7012,11 +6979,7 @@ mod tests {
         controller.join_edit.last_input = stale;
         controller.join_edit.horizontal_scroll = 13;
 
-        controller.apply_context_command(
-            NetDlgEditContextCommand::SelectAll,
-            None,
-            text_font(),
-        );
+        controller.apply_context_command(NetDlgEditContextCommand::SelectAll, None, text_font());
         assert_eq!(controller.join_edit.last_input, stale);
         assert_eq!(controller.join_edit.horizontal_scroll, 13);
 
@@ -7348,7 +7311,10 @@ mod tests {
         assert_eq!(controller.list_scroll_offset(), 0);
         assert_eq!(controller.handle_key_down(KeyCode::End), command);
         assert_eq!(controller.selected_game(), Some(19));
-        assert_eq!(controller.list_scroll_offset(), controller.list_max_scroll());
+        assert_eq!(
+            controller.list_scroll_offset(),
+            controller.list_max_scroll()
+        );
         assert_eq!(controller.handle_key_down(KeyCode::Home), command);
         assert_eq!(controller.selected_game(), Some(0));
         assert_eq!(controller.list_scroll_offset(), 0);
@@ -8858,7 +8824,10 @@ mod tests {
             click(&mut controller, close),
             vec![NetDlgAction::ChatDialogCloseRequested]
         );
-        assert_eq!(controller.chat_connection_state(), NetDlgChatConnectionState::Disconnected);
+        assert_eq!(
+            controller.chat_connection_state(),
+            NetDlgChatConnectionState::Disconnected
+        );
     }
 
     #[test]
@@ -8870,9 +8839,8 @@ mod tests {
             Vec::new(),
             0,
         ));
-        controller.set_chat_bounds_override(Some(NetDlgController::standalone_chat_bounds(
-            1000, 800,
-        )));
+        controller
+            .set_chat_bounds_override(Some(NetDlgController::standalone_chat_bounds(1000, 800)));
         controller.force_chat_mode_and_default_focus();
 
         let chat = controller.chat_layout();
@@ -8892,7 +8860,9 @@ mod tests {
 
         let hidden_startup_control = net_dlg_layout(1000, 800, &metrics()).buttons[0];
         assert!(!contains(
-            controller.chat_bounds_override().expect("standalone bounds"),
+            controller
+                .chat_bounds_override()
+                .expect("standalone bounds"),
             center(hidden_startup_control),
         ));
         assert_eq!(controller.tooltip_at(center(hidden_startup_control)), None);
@@ -8914,7 +8884,9 @@ mod tests {
 
         let caption = controller.chat_caption_and_group().0;
         let close = NetDlgController::chat_dialog_close_rect(caption);
-        assert!(controller.handle_pointer_down(center(close), text_font()).is_empty());
+        assert!(controller
+            .handle_pointer_down(center(close), text_font())
+            .is_empty());
         assert!(!controller.chat_dialog_drag_active());
         assert_eq!(
             controller.handle_pointer_up(center(close), text_font()),
@@ -8923,20 +8895,34 @@ mod tests {
         assert_eq!(controller.chat_bounds_override(), Some(initial));
 
         let start = GuiPoint::new((caption.x + 12) as f32, (caption.y + 8) as f32);
-        assert!(controller.handle_pointer_down(start, text_font()).is_empty());
+        assert!(controller
+            .handle_pointer_down(start, text_font())
+            .is_empty());
         assert!(controller.chat_dialog_drag_active());
         let moved = GuiPoint::new(start.x - 325.0, start.y + 41.0);
-        assert!(controller.handle_pointer_move(moved, text_font()).is_empty());
+        assert!(controller
+            .handle_pointer_move(moved, text_font())
+            .is_empty());
         assert_eq!(
             controller.chat_bounds_override(),
-            Some(IntRect { x: initial.x - 325, y: initial.y + 41, ..initial })
+            Some(IntRect {
+                x: initial.x - 325,
+                y: initial.y + 41,
+                ..initial
+            })
         );
 
         let released = GuiPoint::new(moved.x - 7.0, moved.y + 3.0);
-        assert!(controller.handle_pointer_up(released, text_font()).is_empty());
+        assert!(controller
+            .handle_pointer_up(released, text_font())
+            .is_empty());
         assert_eq!(
             controller.chat_bounds_override(),
-            Some(IntRect { x: initial.x - 332, y: initial.y + 44, ..initial })
+            Some(IntRect {
+                x: initial.x - 332,
+                y: initial.y + 44,
+                ..initial
+            })
         );
         assert!(!controller.chat_dialog_drag_active());
         let retained = controller.chat_bounds_override();
@@ -8955,13 +8941,20 @@ mod tests {
     fn standalone_chat_drag_capture_is_cleared_by_leave_resize_and_cancel() {
         let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
         controller.resize(1000, 800);
-        controller.set_chat_bounds_override(Some(IntRect { x: 100, y: 80, w: 800, h: 640 }));
+        controller.set_chat_bounds_override(Some(IntRect {
+            x: 100,
+            y: 80,
+            w: 800,
+            h: 640,
+        }));
         controller.force_chat_mode_and_default_focus();
 
         let start_drag = |controller: &mut NetDlgController| {
             let caption = controller.chat_caption_and_group().0;
             let point = GuiPoint::new((caption.x + 10) as f32, (caption.y + 8) as f32);
-            assert!(controller.handle_pointer_down(point, text_font()).is_empty());
+            assert!(controller
+                .handle_pointer_down(point, text_font())
+                .is_empty());
             assert!(controller.chat_dialog_drag_active());
         };
 
@@ -9000,7 +8993,9 @@ mod tests {
         ));
         controller.force_chat_mode_and_default_focus();
         assert!(!controller.chat_connect_focused);
-        assert!(controller.handle_text_input("live input", text_font()).is_empty());
+        assert!(controller
+            .handle_text_input("live input", text_font())
+            .is_empty());
         assert_eq!(
             controller.handle_key_down(KeyCode::Enter),
             vec![

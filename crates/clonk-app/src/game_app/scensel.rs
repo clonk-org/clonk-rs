@@ -750,14 +750,11 @@ impl GameApp {
     pub(crate) fn poll_scenario_selector_discovery(&mut self) -> Result<(), EngineError> {
         let mut finished = None;
         let mut disconnected = false;
-        loop {
-            let Some(event) = self
-                .scenario_selector_discovery
-                .as_ref()
-                .map(|state| state.receiver.try_recv())
-            else {
-                break;
-            };
+        while let Some(event) = self
+            .scenario_selector_discovery
+            .as_ref()
+            .map(|state| state.receiver.try_recv())
+        {
             match event {
                 Ok(ScenarioSelectorDiscoveryEvent::Progress(percent)) => {
                     let state = self

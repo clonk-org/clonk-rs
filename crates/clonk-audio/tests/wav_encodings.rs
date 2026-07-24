@@ -18,7 +18,7 @@ fn append_chunk(wav: &mut Vec<u8>, name: &[u8; 4], payload: &[u8]) {
     wav.extend_from_slice(name);
     wav.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
     wav.extend_from_slice(payload);
-    if payload.len() % 2 != 0 {
+    if !payload.len().is_multiple_of(2) {
         wav.push(0);
     }
 }

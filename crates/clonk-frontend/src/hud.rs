@@ -110,10 +110,7 @@ pub enum HudFont<'a> {
 }
 
 impl HudFont<'_> {
-    pub fn from_set<'a>(
-        set: Option<&'a ClonkFontSet>,
-        fallback: &'a dyn TextFont,
-    ) -> HudFont<'a> {
+    pub fn from_set<'a>(set: Option<&'a ClonkFontSet>, fallback: &'a dyn TextFont) -> HudFont<'a> {
         set.map(|fonts| HudFont::Clonk(&fonts.text))
             .unwrap_or(HudFont::Fallback(fallback))
     }
@@ -158,17 +155,14 @@ impl HudFont<'_> {
         match self {
             HudFont::Clonk(font) => font.measure(text, true),
             HudFont::Fallback(font) => {
-                let (width, lines) = text.split('|').fold(
-                    (0_i32, 0_i32),
-                    |(width, lines), line| {
-                        let plain = strip_font_markup(line);
-                        let line_width = font
-                            .measure_text(&plain, FALLBACK_FONT_SIZE)
-                            .width
-                            .ceil() as i32;
-                        (width.max(line_width), lines + 1)
-                    },
-                );
+                let (width, lines) =
+                    text.split('|')
+                        .fold((0_i32, 0_i32), |(width, lines), line| {
+                            let plain = strip_font_markup(line);
+                            let line_width =
+                                font.measure_text(&plain, FALLBACK_FONT_SIZE).width.ceil() as i32;
+                            (width.max(line_width), lines + 1)
+                        });
                 (width, self.line_height().saturating_mul(lines.max(1)))
             }
         }
@@ -581,8 +575,7 @@ fn clr_by_owner_gray(r: i32, g: i32, b: i32) -> Option<u8> {
     let s = if l <= HLSMAX / 2 {
         ((c_max - c_min) * HLSMAX + (c_max + c_min) / 2) / (c_max + c_min)
     } else {
-        ((c_max - c_min) * HLSMAX + (2 * RGBMAX - c_max - c_min) / 2)
-            / (2 * RGBMAX - c_max - c_min)
+        ((c_max - c_min) * HLSMAX + (2 * RGBMAX - c_max - c_min) / 2) / (2 * RGBMAX - c_max - c_min)
     };
     let rdelta = ((c_max - r) * (HLSMAX / 6) + (c_max - c_min) / 2) / (c_max - c_min);
     let gdelta = ((c_max - g) * (HLSMAX / 6) + (c_max - c_min) / 2) / (c_max - c_min);
@@ -855,8 +848,7 @@ pub(crate) fn draw_upper_board_with_initialized_text_width(
         );
     }
     if mode != UpperBoardMode::Mini {
-        let title_y =
-            upper_board_output_height(mode, hud) / 2 - font.line_height() / 2;
+        let title_y = upper_board_output_height(mode, hud) / 2 - font.line_height() / 2;
         font.draw_with_gamma(
             surface,
             10,
@@ -1108,13 +1100,7 @@ pub(crate) fn draw_cursor_info_with_gamma(
             );
             draw_image_aspect(surface, portrait, rect, gamma);
             if let Some(owner_overlay) = portrait_owner_overlay {
-                draw_image_aspect_owner(
-                    surface,
-                    owner_overlay,
-                    rect,
-                    portrait_owner_color,
-                    gamma,
-                );
+                draw_image_aspect_owner(surface, owner_overlay, rect, portrait_owner_color, gamma);
             }
             ix += 4 * SYMBOL_SIZE / 3;
         }
@@ -1159,15 +1145,16 @@ pub(crate) fn draw_cursor_info_with_gamma(
                 let rank = rank.max(0) as u32;
                 let mut base_rank = rank % base_count;
                 let extension_level = rank / base_count;
-                let extension_phase = (extension_level > 0 && total_count > base_count).then(|| {
-                    let requested = base_count + extension_level - 1;
-                    if requested >= total_count {
-                        base_rank = base_count - 1;
-                        total_count - 1
-                    } else {
-                        requested
-                    }
-                });
+                let extension_phase =
+                    (extension_level > 0 && total_count > base_count).then(|| {
+                        let requested = base_count + extension_level - 1;
+                        if requested >= total_count {
+                            base_rank = base_count - 1;
+                            total_count - 1
+                        } else {
+                            requested
+                        }
+                    });
                 draw_hud_image_strip(
                     surface,
                     cgo.x + ix,
@@ -1517,18 +1504,18 @@ pub enum CommandOverlayIcon {
 fn com_control_index(com: i32) -> (i32, bool) {
     let double = com & 128 != 0; // COM_Double
     let control = match com & !(64 | 128) {
-        12 => 0,     // COM_CursorLeft   -> CON_CursorLeft
-        14 => 1,     // COM_CursorToggle -> CON_CursorToggle
-        13 => 2,     // COM_CursorRight  -> CON_CursorRight
-        5 => 3,      // COM_Throw        -> CON_Throw
-        3 => 4,      // COM_Up           -> CON_Up
-        6 => 5,      // COM_Dig          -> CON_Dig
-        1 => 6,      // COM_Left         -> CON_Left
-        4 => 7,      // COM_Down         -> CON_Down
-        2 => 8,      // COM_Right        -> CON_Right
-        7 => 10,     // COM_Special      -> CON_Special
-        8 => 11,     // COM_Special2     -> CON_Special2
-        _ => 9,      // default          -> CON_Menu
+        12 => 0, // COM_CursorLeft   -> CON_CursorLeft
+        14 => 1, // COM_CursorToggle -> CON_CursorToggle
+        13 => 2, // COM_CursorRight  -> CON_CursorRight
+        5 => 3,  // COM_Throw        -> CON_Throw
+        3 => 4,  // COM_Up           -> CON_Up
+        6 => 5,  // COM_Dig          -> CON_Dig
+        1 => 6,  // COM_Left         -> CON_Left
+        4 => 7,  // COM_Down         -> CON_Down
+        2 => 8,  // COM_Right        -> CON_Right
+        7 => 10, // COM_Special      -> CON_Special
+        8 => 11, // COM_Special2     -> CON_Special2
+        _ => 9,  // default          -> CON_Menu
     };
     (control, double)
 }
@@ -1587,7 +1574,12 @@ fn draw_scaled_region(
                 continue;
             }
             let idx = ((sy * img_w + sx) * 4) as usize;
-            let color = Color::new(pixels[idx], pixels[idx + 1], pixels[idx + 2], pixels[idx + 3]);
+            let color = Color::new(
+                pixels[idx],
+                pixels[idx + 1],
+                pixels[idx + 2],
+                pixels[idx + 3],
+            );
             if color.a == 0 {
                 continue;
             }
@@ -1845,10 +1837,7 @@ fn draw_viewport_button_cell(
             );
         }
     }
-    if button == ViewportButton::PlayerMenu
-        && show_command_keys
-        && !menu_key_label.is_empty()
-    {
+    if button == ViewportButton::PlayerMenu && show_command_keys && !menu_key_label.is_empty() {
         font.draw_with_gamma(
             surface,
             cell.x + cell.width as i32 / 2,
@@ -2070,12 +2059,7 @@ pub fn command_region_hit(
                 continue;
             }
             side_hgt -= size;
-            SurfaceRect::new(
-                side_x,
-                viewport.y + side_hgt,
-                size2 as u32,
-                size as u32,
-            )
+            SurfaceRect::new(side_x, viewport.y + side_hgt, size2 as u32, size as u32)
         } else {
             if bottom_wdt < size {
                 continue;
@@ -2085,12 +2069,7 @@ pub fn command_region_hit(
                 continue;
             }
             bottom_wdt -= size;
-            SurfaceRect::new(
-                viewport.x + bottom_wdt,
-                bottom_y,
-                size2 as u32,
-                size as u32,
-            )
+            SurfaceRect::new(viewport.x + bottom_wdt, bottom_y, size2 as u32, size as u32)
         };
         if px >= pair.x
             && px < pair.x + pair.width as i32
@@ -2543,7 +2522,10 @@ pub(crate) fn draw_player_controls_with_gamma(
             );
         }
         if show_text {
-            if let Some(label) = key_labels.get(control as usize).filter(|label| !label.is_empty()) {
+            if let Some(label) = key_labels
+                .get(control as usize)
+                .filter(|label| !label.is_empty())
+            {
                 let font = if cell_height <= SYMBOL_SIZE {
                     regular_font
                 } else {
@@ -2649,8 +2631,7 @@ pub(crate) fn draw_message_board_with_gamma(
             let distance = y
                 .saturating_sub(message_y)
                 .saturating_add(screen_fader.max(0));
-            let fade = i64::from(distance)
-                .saturating_mul(256)
+            let fade = i64::from(distance).saturating_mul(256)
                 / i64::from(message_fader.max(1))
                 / i64::from(line_height);
             255_i64.saturating_sub(fade.clamp(0, 255)) as u8
@@ -3027,35 +3008,11 @@ mod tests {
         let width = 256;
         let height = 164;
         let mut pixels = vec![0; (width * height * 4) as usize];
-        paint_rect(
-            &mut pixels,
-            width,
-            0,
-            100,
-            64,
-            64,
-            [10, 10, 200, 255],
-        );
+        paint_rect(&mut pixels, width, 0, 100, 64, 64, [10, 10, 200, 255]);
         // Leave each symbol's left half transparent so the blue key cap
         // proves the base facet was drawn before the symbol facet.
-        paint_rect(
-            &mut pixels,
-            width,
-            144,
-            132,
-            16,
-            32,
-            [200, 20, 20, 255],
-        );
-        paint_rect(
-            &mut pixels,
-            width,
-            176,
-            132,
-            16,
-            32,
-            [20, 200, 20, 255],
-        );
+        paint_rect(&mut pixels, width, 144, 132, 16, 32, [200, 20, 20, 255]);
+        paint_rect(&mut pixels, width, 176, 132, 16, 32, [20, 200, 20, 255]);
         ImageData::new(width, height, pixels)
     }
 
@@ -3063,15 +3020,7 @@ mod tests {
         let width = 256;
         let height = 256;
         let mut pixels = vec![0; (width * height * 4) as usize];
-        paint_rect(
-            &mut pixels,
-            width,
-            224,
-            192,
-            32,
-            64,
-            [200, 200, 20, 255],
-        );
+        paint_rect(&mut pixels, width, 224, 192, 32, 64, [200, 200, 20, 255]);
         ImageData::new(width, height, pixels)
     }
 
@@ -3092,13 +3041,7 @@ mod tests {
         );
 
         let at = |x, y, mouse, chat| {
-            viewport_button_region(
-                viewport,
-                clonk_gui::Point::new(x, y),
-                true,
-                mouse,
-                chat,
-            )
+            viewport_button_region(viewport, clonk_gui::Point::new(x, y), true, mouse, chat)
         };
         assert_eq!(at(187.0, 65.0, true, false), Some(ViewportButton::Help));
         assert_eq!(
@@ -3164,7 +3107,10 @@ mod tests {
 
         let keyboard = render(true, false, true);
         assert_eq!(keyboard.get_pixel(207, 76), Some(Color::opaque(0, 0, 0)));
-        assert_eq!(keyboard.get_pixel(207, 99), Some(Color::opaque(20, 200, 20)));
+        assert_eq!(
+            keyboard.get_pixel(207, 99),
+            Some(Color::opaque(20, 200, 20))
+        );
         assert_eq!(keyboard.get_pixel(207, 122), Some(Color::opaque(0, 0, 0)));
         assert_eq!(
             keyboard.get_pixel(198, 108),
@@ -3280,8 +3226,8 @@ mod tests {
         // labels and their blinking layer. StringBitEval preserves each
         // character position (C4Script.cpp:209-216), so use the shipped
         // script string rather than reconstructing the mask.
-        let script_path = crate::test_support::repo_root()
-            .join("content/Tutorial.c4f/Tutorial01.c4s/Script.c");
+        let script_path =
+            crate::test_support::repo_root().join("content/Tutorial.c4f/Tutorial01.c4s/Script.c");
         let script = std::fs::read_to_string(&script_path)
             .unwrap_or_else(|error| panic!("read {}: {error}", script_path.display()));
         let script21 = script
@@ -3309,10 +3255,14 @@ mod tests {
         // CON_* order (C4Config.cpp:624-633). PlrControlKeyName returns those
         // short configured names; in the guide's spatial order this is S
         // above Z/X/C, with no arrow-key aliases.
-        let labels = ["Q", "W", "E", "A", "S", "D", "Z", "X", "C", "R"]
-            .map(str::to_string);
+        let labels = ["Q", "W", "E", "A", "S", "D", "Z", "X", "C", "R"].map(str::to_string);
         assert_eq!(
-            [labels[6].as_str(), labels[4].as_str(), labels[7].as_str(), labels[8].as_str()],
+            [
+                labels[6].as_str(),
+                labels[4].as_str(),
+                labels[7].as_str(),
+                labels[8].as_str()
+            ],
             ["Z", "S", "X", "C"]
         );
         assert!(labels.iter().all(|label| !label.contains("Arrow")));
@@ -3809,10 +3759,7 @@ mod tests {
         };
         let mut target = surface(400, 60);
         let long_line = "X".repeat(136);
-        assert_eq!(
-            message_board_tail_line(&font, &long_line, 274),
-            "  XX"
-        );
+        assert_eq!(message_board_tail_line(&font, &long_line, 274), "  XX");
         assert_eq!(
             message_board_physical_lines(&font, &format!("{} ", "X".repeat(68)), 274),
             vec!["X".repeat(68)]
@@ -3823,13 +3770,7 @@ mod tests {
             back_scroll: 0,
             ..MessageBoardOverlay::default()
         };
-        draw_message_board_with_gamma(
-            &mut target,
-            &font,
-            &hud,
-            &board,
-            None,
-        );
+        draw_message_board_with_gamma(&mut target, &font, &hud, &board, None);
         assert_eq!(target.get_pixel(0, 54), Some(MESSAGE_COLOR));
         assert_eq!(target.get_pixel(273, 54), Some(Color::opaque(30, 50, 70)));
         assert_eq!(target.get_pixel(274, 54), Some(Color::opaque(30, 50, 70)));
@@ -3840,13 +3781,7 @@ mod tests {
             back_scroll: 0,
             ..MessageBoardOverlay::default()
         };
-        draw_message_board_with_gamma(
-            &mut unclipped,
-            &font,
-            &hud,
-            &unclipped_board,
-            None,
-        );
+        draw_message_board_with_gamma(&mut unclipped, &font, &hud, &unclipped_board, None);
         assert_eq!(
             unclipped.get_pixel(275, 54),
             Some(MESSAGE_COLOR),
@@ -4048,7 +3983,8 @@ mod tests {
             .save(definition_dir.join("Graphics.png"))
             .expect("graphics");
         let group = clonk_resources::Group::open(&definition_dir).expect("open definition");
-        let definition = clonk_resources::ResourceDefinition::load(&group).expect("load definition");
+        let definition =
+            clonk_resources::ResourceDefinition::load(&group).expect("load definition");
         let mask = definition
             .color_by_owner_mask
             .expect("sample sweep contains blue shades");
@@ -4340,8 +4276,14 @@ mod tests {
             hidden_portrait.get_pixel(11, 20),
             Some(Color::opaque(10, 200, 30))
         );
-        assert_eq!(hidden_portrait.get_pixel(5, 6), Some(Color::opaque(220, 30, 20)));
-        assert_eq!(hidden_portrait.get_pixel(11, 6), Some(Color::opaque(220, 220, 0)));
+        assert_eq!(
+            hidden_portrait.get_pixel(5, 6),
+            Some(Color::opaque(220, 30, 20))
+        );
+        assert_eq!(
+            hidden_portrait.get_pixel(11, 6),
+            Some(Color::opaque(220, 220, 0))
+        );
         assert_eq!(
             white_pixels(&hidden_portrait)
                 .iter()
@@ -4352,7 +4294,10 @@ mod tests {
         );
 
         let hidden_captain = render(clonk_engine::HIDE_HUD_ELEMENT_CAPTAIN);
-        assert_eq!(hidden_captain.get_pixel(51, 6), Some(Color::opaque(220, 220, 0)));
+        assert_eq!(
+            hidden_captain.get_pixel(51, 6),
+            Some(Color::opaque(220, 220, 0))
+        );
         assert_eq!(
             white_pixels(&hidden_captain)
                 .iter()
@@ -4385,7 +4330,10 @@ mod tests {
         assert!(hidden_rank.iter().all(|(_, y)| *y < second_line));
         assert!(!hidden_name.is_empty(), "rank title survives HH_Name");
         assert!(hidden_name.iter().all(|(_, y)| *y < second_line));
-        assert!(hidden_rank.len() > hidden_name.len(), "WW remains while I is hidden");
+        assert!(
+            hidden_rank.len() > hidden_name.len(),
+            "WW remains while I is hidden"
+        );
         assert!(hidden_text.is_empty());
     }
 
@@ -4577,12 +4525,7 @@ mod tests {
         ];
 
         let font = bitmap_font();
-        draw_inventory(
-            &mut target,
-            &HudFont::Fallback(&font),
-            viewport,
-            &inventory,
-        );
+        draw_inventory(&mut target, &HudFont::Fallback(&font), viewport, &inventory);
 
         // Origin = (10+5, 20+100-5-35) = (15,80); the second section starts
         // at x=50. Pixels immediately above/left remain untouched.
@@ -4647,7 +4590,10 @@ mod tests {
         assert_eq!(
             inventory_region_index(
                 viewport,
-                clonk_gui::Point::new((15 + SYMBOL_SIZE - 1) as f32, (top + SYMBOL_SIZE - 1) as f32),
+                clonk_gui::Point::new(
+                    (15 + SYMBOL_SIZE - 1) as f32,
+                    (top + SYMBOL_SIZE - 1) as f32
+                ),
                 2,
             ),
             Some(0),
@@ -4697,7 +4643,7 @@ mod tests {
 
         assert_eq!(rect.x, viewport.x + 1, "left edge is clamped inside");
         assert!(
-            rect.x + rect.width as i32 <= viewport.x + viewport.width as i32 - 1,
+            rect.x + (rect.width as i32) < viewport.x + viewport.width as i32,
             "right edge remains inside the viewport"
         );
         assert_eq!(
@@ -4849,8 +4795,7 @@ mod tests {
         // samples a scaled portrait. At the 25%-opaque tap, transparent
         // black produces 191 over white; hidden white would produce 239.
         let canonical = ImageData::new(2, 1, vec![0, 0, 0, 255, 0, 0, 0, 0]);
-        let hidden_white =
-            ImageData::new(2, 1, vec![0, 0, 0, 255, 255, 255, 255, 0]);
+        let hidden_white = ImageData::new(2, 1, vec![0, 0, 0, 255, 255, 255, 255, 0]);
         let mut canonical_target = surface(4, 2);
         canonical_target.fill(Color::opaque(255, 255, 255));
         let mut dirty_target = surface(4, 2);
@@ -4881,12 +4826,7 @@ mod tests {
         let font = bitmap_font();
         let font = HudFont::Fallback(&font);
         let strip_height = font.line_height();
-        draw_message_board(
-            &mut target,
-            &font,
-            &hud,
-            &MessageBoardOverlay::default(),
-        );
+        draw_message_board(&mut target, &font, &hud, &MessageBoardOverlay::default());
         assert_eq!(
             target.get_pixel(50, 64 - 1),
             Some(Color::opaque(20, 24, 28))
@@ -4904,21 +4844,14 @@ mod tests {
             background: Some(ImageData::new(
                 1,
                 3,
-                vec![
-                    200, 0, 0, 255, 0, 200, 0, 255, 0, 0, 200, 255,
-                ],
+                vec![200, 0, 0, 255, 0, 200, 0, 255, 0, 0, 200, 255],
             )),
             ..HudGraphics::default()
         };
         let fallback = FixedWidthMarkerFont;
         let font = HudFont::Fallback(&fallback);
 
-        draw_message_board(
-            &mut target,
-            &font,
-            &hud,
-            &MessageBoardOverlay::default(),
-        );
+        draw_message_board(&mut target, &font, &hud, &MessageBoardOverlay::default());
 
         // Output.Y is 4, so the first board row continues screen row 4 of
         // the three-row tile instead of restarting at source row zero.
@@ -5027,9 +4960,7 @@ mod tests {
         target.fill(Color::opaque(200, 200, 200));
         let source = Color::new(64, 128, 192, 128);
         let image = solid_image(1, 1, [source.r, source.g, source.b, source.a]);
-        let gamma = clonk_graphics::GammaRamp::from_control_points([
-            0x000000, 0x646464, 0xc8c8c8,
-        ]);
+        let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
 
         fill_hud_rect(
             &mut target,
@@ -5052,10 +4983,7 @@ mod tests {
             Some(&gamma),
         );
 
-        assert_eq!(
-            target.get_pixel(0, 0),
-            Some(Color::new(50, 100, 150, 255))
-        );
+        assert_eq!(target.get_pixel(0, 0), Some(Color::new(50, 100, 150, 255)));
         let expected = Some(Color::new(125, 150, 175, 255));
         for x in [3, 6, 9] {
             assert_eq!(target.get_pixel(x, 0), expected, "HUD leaf at x={x}");
@@ -5064,9 +4992,7 @@ mod tests {
 
     #[test]
     fn hud_clonk_and_fallback_text_use_independent_gamma_channels() {
-        let gamma = clonk_graphics::GammaRamp::from_control_points([
-            0x102030, 0x405060, 0x708090,
-        ]);
+        let gamma = clonk_graphics::GammaRamp::from_control_points([0x102030, 0x405060, 0x708090]);
         let encoded = [17, 33, 49, 255];
 
         let mut fallback_surface = surface(24, 16);
@@ -5105,7 +5031,10 @@ mod tests {
             TextAlign::Left,
             Some(&gamma),
         );
-        assert_eq!(clonk_surface.get_pixel(0, 0), Some(Color::new(17, 33, 49, 255)));
+        assert_eq!(
+            clonk_surface.get_pixel(0, 0),
+            Some(Color::new(17, 33, 49, 255))
+        );
     }
 
     #[test]
@@ -5123,11 +5052,8 @@ mod tests {
             ..HudGraphics::default()
         };
         let fonts = crate::test_support::endeavour_font_set();
-        let labels = ["Z", "S", "X", "C", "A", "D", "Q", "W", "E", "R"]
-            .map(str::to_string);
-        let gamma = clonk_graphics::GammaRamp::from_control_points([
-            0x000000, 0x646464, 0xc8c8c8,
-        ]);
+        let labels = ["Z", "S", "X", "C", "A", "D", "Q", "W", "E", "R"].map(str::to_string);
+        let gamma = clonk_graphics::GammaRamp::from_control_points([0x000000, 0x646464, 0xc8c8c8]);
         let render = |gamma| {
             let mut target = surface(320, 240);
             target.fill(Color::opaque(200, 200, 200));

@@ -2841,17 +2841,12 @@ pub struct SurfaceSnapshot {
     pub hash: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkPacketDirection {
+    #[default]
     Inbound,
     Outbound,
-}
-
-impl Default for NetworkPacketDirection {
-    fn default() -> Self {
-        Self::Inbound
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -3777,7 +3772,7 @@ impl EnvironmentSettings {
     /// (C4SVal::Evaluate, C4Scenario.cpp:43-46); the wind itself steps ±1
     /// toward the target on Tick10 frames.
     pub fn advance_frame(&mut self, rng: &mut LcgRng, frame: u64) -> Option<[u32; 3]> {
-        let season_gamma_update = if frame % 35 == 0 {
+        let season_gamma_update = if frame.is_multiple_of(35) {
             let season_changed = self.update_season();
             // C4Weather::Execute refreshes the season curve inside the
             // rollover branch, before this frame's temperature step
@@ -3790,7 +3785,7 @@ impl EnvironmentSettings {
         } else {
             None
         };
-        if frame % 1000 == 0 {
+        if frame.is_multiple_of(1000) {
             let rnd = self.wind_variation;
             let range = rnd.wrapping_mul(2).wrapping_add(1);
             let target = self
@@ -3799,7 +3794,7 @@ impl EnvironmentSettings {
                 .wrapping_sub(rnd);
             self.wind_target = bound_by_ordered(target, self.wind_min, self.wind_max);
         }
-        if frame % 10 == 0 {
+        if frame.is_multiple_of(10) {
             let stepped = self
                 .wind
                 .wrapping_add(self.wind_target.wrapping_sub(self.wind).signum());
@@ -5256,13 +5251,7 @@ impl ObjectState {
         ApplyDeltaOutcome {
             energy_died,
             container_change,
-            action_change: action_change.and_then(|change| {
-                if change.should_record(&self.action) {
-                    Some(change)
-                } else {
-                    None
-                }
-            }),
+            action_change: action_change.filter(|change| change.should_record(&self.action)),
         }
     }
 }
@@ -8644,7 +8633,7 @@ fn apply_fair_crew_physical_script(
                         error = %error,
                         "script error in fair-crew physical callback; retaining numeric value"
                     );
-                    log_runtime_call_frames(&definition_id, error.call_frames());
+                    log_runtime_call_frames(definition_id, error.call_frames());
                 }
             }
         }
@@ -10702,7 +10691,7 @@ fn denumerate_loaded_effect(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct FogOfWarPlayerFrame {
     /// Ordered runtime `C4Player::FoWViewObjs` projection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -10711,15 +10700,6 @@ pub struct FogOfWarPlayerFrame {
     /// even though native player save data deliberately omits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_target: Option<ObjectId>,
-}
-
-impl Default for FogOfWarPlayerFrame {
-    fn default() -> Self {
-        Self {
-            view_objects: Vec::new(),
-            view_target: None,
-        }
-    }
 }
 
 /// Presentation-only requests emitted while advancing one simulation frame.
@@ -13968,7 +13948,7 @@ impl Definition {
 
     pub fn set_collection_rect(&mut self, rect: Option<DefinitionRect>) {
         self.def_core_collection_rect = rect;
-        self.collection_rect = rect.and_then(|r| if r.is_positive() { Some(r) } else { None });
+        self.collection_rect = rect.filter(DefinitionRect::is_positive);
     }
 
     pub fn collection_limit(&self) -> i32 {
@@ -20091,10 +20071,10 @@ fn apply_walk_command_movement(
                 velocity.x += accel;
             }
         }
-        CommandDirection::Stop | CommandDirection::Up | CommandDirection::Down => {
-            if accel > C4Fixed::ZERO {
-                velocity.x = decelerate_fixed_toward_zero(velocity.x, accel);
-            }
+        CommandDirection::Stop | CommandDirection::Up | CommandDirection::Down
+            if accel > C4Fixed::ZERO =>
+        {
+            velocity.x = decelerate_fixed_toward_zero(velocity.x, accel);
         }
         _ => {}
     }
@@ -20288,10 +20268,10 @@ fn apply_scale_command_movement(
                 velocity.y += accel;
             }
         }
-        CommandDirection::Left | CommandDirection::Right | CommandDirection::Stop => {
-            if accel > C4Fixed::ZERO {
-                velocity.y = decelerate_fixed_toward_zero(velocity.y, accel);
-            }
+        CommandDirection::Left | CommandDirection::Right | CommandDirection::Stop
+            if accel > C4Fixed::ZERO =>
+        {
+            velocity.y = decelerate_fixed_toward_zero(velocity.y, accel);
         }
         _ => {}
     }
@@ -20391,10 +20371,8 @@ fn apply_hangle_command_movement(
                 }
             }
         }
-        CommandDirection::Stop | CommandDirection::Down => {
-            if accel > C4Fixed::ZERO {
-                velocity.x = decelerate_fixed_toward_zero(velocity.x, accel);
-            }
+        CommandDirection::Stop | CommandDirection::Down if accel > C4Fixed::ZERO => {
+            velocity.x = decelerate_fixed_toward_zero(velocity.x, accel);
         }
         _ => {}
     }
@@ -21312,11 +21290,11 @@ impl Engine {
                         post_init_map_callbacks: section.post_init_map_callbacks.clone(),
                         keep_map_creator: section.keep_map_creator,
                         no_initialize: section.no_initialize,
-                        initial_objects: section
-                            .source_group
-                            .is_none()
-                            .then(|| section.objects.clone())
-                            .unwrap_or_default(),
+                        initial_objects: if section.source_group.is_none() {
+                            section.objects.clone()
+                        } else {
+                            Vec::new()
+                        },
                         saved_objects: None,
                         saved_object_order: Vec::new(),
                         scenario_values: section.scenario_values.clone(),
@@ -25712,8 +25690,7 @@ impl Engine {
                     .unwrap_or_else(|| object.definition_id.clone());
                 Some((name, object.state.color))
             });
-            let (speaker, color) =
-                cursor_presentation.unwrap_or_else(|| (player_name, player_color));
+            let (speaker, color) = cursor_presentation.unwrap_or((player_name, player_color));
             (
                 format!("<{speaker}> {raw_message}"),
                 if color == 0 { 0xff } else { color },
@@ -27922,12 +27899,11 @@ impl Engine {
         let first_local_player = self
             .player_ids_in_order()
             .into_iter()
-            .filter(|player| {
+            .find(|player| {
                 self.local_players
                     .as_ref()
                     .is_none_or(|local| local.contains(player))
             })
-            .next()
             .unwrap_or(OWNER_NONE);
         self.evaluate_goals_for_player(first_local_player)
     }
@@ -30887,11 +30863,11 @@ impl Engine {
     ) -> Result<ObjectId, EngineError> {
         if self.use_fair_crew && !config.loaded {
             let object_definition_id = config.definition_id.clone();
-            let info_definition_id = self
-                .definitions
-                .contains_key(&info.definition_id)
-                .then(|| info.definition_id.clone())
-                .unwrap_or_else(|| object_definition_id.clone());
+            let info_definition_id = if self.definitions.contains_key(&info.definition_id) {
+                info.definition_id.clone()
+            } else {
+                object_definition_id.clone()
+            };
             let projection_source = self.definitions.get(&info_definition_id).map(|definition| {
                 (
                     *definition.physical(),
@@ -31151,7 +31127,7 @@ impl Engine {
             // Playerless engine fixtures predate runtime C4Player records but
             // still project crew-owner elimination. Preserve that import/test
             // compatibility on the same Tick35 boundary as the old path.
-            if self.frame % 35 == 0 {
+            if self.frame.is_multiple_of(35) {
                 let crew_owners = self.refresh_elimination_state();
                 let mut known = self.known_crew_owners.iter().copied().collect::<Vec<_>>();
                 known.sort_unstable();
@@ -31314,7 +31290,7 @@ impl Engine {
                 PlayerStatus::Active | PlayerStatus::Eliminated | PlayerStatus::Surrendered
             )
         });
-        if self.frame % 35 == 0 && normal_status {
+        if self.frame.is_multiple_of(35) && normal_status {
             let team = self.players.get(&id).and_then(Player::team);
             let valid_team_home_base = team.filter(|team| {
                 self.team_home_base_rule && self.teams.iter().any(|candidate| candidate.id == *team)
@@ -31359,7 +31335,7 @@ impl Engine {
         // C4Player::ExecMsgBoardQueries runs after Tick35 production/value/
         // elimination work, and only for a normal local player. One global
         // C4ChatInputDialog serializes prompts across all local players.
-        if self.frame % 35 == 0 && normal_status {
+        if self.frame.is_multiple_of(35) && normal_status {
             self.open_next_message_board_input(id);
         }
 
@@ -31640,7 +31616,7 @@ impl Engine {
     /// Wind audio from `C4Weather::Execute` (C4Weather.cpp:94-104), after
     /// the Tick10 wind step and before any disaster RNG draws.
     fn tick_weather_wind_audio(&mut self, frame: u64) {
-        if frame % 10 != 0 {
+        if !frame.is_multiple_of(10) {
             return;
         }
         let volume = self.environment.wind.abs().saturating_sub(30) * 2;
@@ -31654,7 +31630,7 @@ impl Engine {
     /// RNG stream advances identically whether or not disasters are enabled.
     #[doc(hidden)]
     pub fn tick_weather_events(&mut self, frame: u64) -> Result<(), EngineError> {
-        if frame % 10 != 0 {
+        if !frame.is_multiple_of(10) {
             return Ok(());
         }
         let width = self
@@ -33141,7 +33117,7 @@ impl Engine {
                     // Static objects stabilize every frame
                     // (C4Movement.cpp:579).
                     self.stabilize_object(idx, &solid_mask_indices)?;
-                    if frame % 10 == 0 {
+                    if frame.is_multiple_of(10) {
                         // Gravity mobilization (C4Movement.cpp:581-586).
                         let object = &mut self.objects[idx];
                         object.fixed_velocity = FixedVec2::ZERO;
@@ -33796,7 +33772,7 @@ impl Engine {
                     collectible,
                 },
             );
-            spawn_requests.extend(spawns.into_iter());
+            spawn_requests.extend(spawns);
         }
         self.exec_cursor = None;
 
@@ -33860,7 +33836,7 @@ impl Engine {
         // ExecObjects and Messages.Execute in the C++ frame
         // (C4Game.cpp:810-822): effects it adds first execute NEXT frame
         // (the intro Divinity markers compare at t=0 on their add frame).
-        if self.scenario_script_go && frame % 10 == 0 && self.scenario_script.is_some() {
+        if self.scenario_script_go && frame.is_multiple_of(10) && self.scenario_script.is_some() {
             let section = format!("Script{}", self.scenario_script_counter);
             self.scenario_script_counter += 1;
             tolerate_script_error(self.call_scenario_script_function(&section, Vec::new()))?;
@@ -33869,7 +33845,7 @@ impl Engine {
         self.prune_selection();
         // C4Game::UpdateRules follows Script.Execute and refreshes only on
         // Tick255 (plus frame one) (C4Game.cpp:845,4038-4047).
-        if frame == 1 || frame % 255 == 0 {
+        if frame == 1 || frame.is_multiple_of(255) {
             self.refresh_structures_snow_in_rule();
             self.refresh_flag_removeable_rule();
         }
@@ -35873,12 +35849,16 @@ impl Engine {
             precipitation: self.environment.precipitation(),
             sky_color: Some(sky_color),
             gamma: self.gamma,
-            fow_color: has_fog_player
-                .then(|| self.scenario_values.fow_color())
-                .unwrap_or(0),
-            fow_resolution: has_fog_player
-                .then(|| self.scenario_values.fow_resolution())
-                .unwrap_or(DEFAULT_FOW_RESOLUTION),
+            fow_color: if has_fog_player {
+                self.scenario_values.fow_color()
+            } else {
+                0
+            },
+            fow_resolution: if has_fog_player {
+                self.scenario_values.fow_resolution()
+            } else {
+                DEFAULT_FOW_RESOLUTION
+            },
         };
         let sky_snapshot = self.sky.as_ref().map(SkyState::snapshot);
         let weather_events = self.weather_events.clone();
@@ -36148,10 +36128,10 @@ impl Engine {
     /// ControlTick every ControlRate frames and request a sync check every
     /// SyncRate frames (C4SyncCheckRate = 100, C4GameControl.h:38).
     fn control_ticks(&mut self) {
-        if self.frame % self.control_rate.max(1) as u64 == 0 {
+        if self.frame.is_multiple_of(self.control_rate.max(1) as u64) {
             self.control_tick += 1;
         }
-        if self.frame % self.sync_rate.max(1) as u64 == 0 {
+        if self.frame.is_multiple_of(self.sync_rate.max(1) as u64) {
             self.do_sync = true;
         }
     }
@@ -36313,7 +36293,7 @@ impl Engine {
                     })
                 })
                 .collect::<Vec<_>>();
-            overlapping.sort_unstable_by(|left, right| right.1.cmp(&left.1));
+            overlapping.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.1));
             for (other_index, _) in overlapping {
                 if let Some(other) = bakes[other_index].as_mut() {
                     other.reput_after_removal(&removed, &mut landscape, vehicle);
@@ -37624,9 +37604,11 @@ impl Engine {
                         // C4Effects.h:38): the Add runs inside a temp
                         // remove/readd bracket of the effects above the
                         // ACCEPTOR (C4Effect.cpp:297-304).
-                        let uppers = do_temp_calls
-                            .then(|| upper_effects_of(&object.state.effects, &acceptor))
-                            .unwrap_or_default();
+                        let uppers = if do_temp_calls {
+                            upper_effects_of(&object.state.effects, &acceptor)
+                        } else {
+                            Vec::new()
+                        };
                         let mut sequence: Vec<EffectEvent> = uppers
                             .iter()
                             .rev()
@@ -38547,10 +38529,8 @@ impl Engine {
         pending.retain(|spawn| spawn.config.id.is_none_or(|id| !retained_ids.contains(&id)));
         let contents_specs = pending
             .iter()
-            .filter_map(|spawn| {
-                (!spawn.contents_handles.is_empty())
-                    .then(|| (spawn.handle.clone(), spawn.contents_handles.clone()))
-            })
+            .filter(|spawn| !spawn.contents_handles.is_empty())
+            .map(|spawn| (spawn.handle.clone(), spawn.contents_handles.clone()))
             .collect::<Vec<_>>();
 
         let max_explicit_id = pending
@@ -38699,16 +38679,16 @@ impl Engine {
                 .iter()
                 .map(|object| object.snapshot.id)
                 .collect::<HashSet<_>>();
-            let saved_order = (flags & 2 != 0)
-                .then(|| {
-                    state
-                        .object_order
-                        .iter()
-                        .copied()
-                        .filter(|id| saved_object_ids.contains(id))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let saved_order = if flags & 2 != 0 {
+                state
+                    .object_order
+                    .iter()
+                    .copied()
+                    .filter(|id| saved_object_ids.contains(id))
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             let mut current = self
                 .scenario_sections
                 .get(&departing_key)
@@ -41873,18 +41853,16 @@ impl Engine {
             }
         }
 
-        if matches!(procedure, ActionProcedure::Bridge) {
-            if !self.apply_bridge_procedure(idx, command_direction, &definition_id)? {
-                // `if (!DoBridge(this)) return;` skips the phase tail
-                // (C4Object.cpp:4998-4999).
-                return Ok(true);
-            }
+        if matches!(procedure, ActionProcedure::Bridge)
+            && !self.apply_bridge_procedure(idx, command_direction, &definition_id)?
+        {
+            // `if (!DoBridge(this)) return;` skips the phase tail
+            // (C4Object.cpp:4998-4999).
+            return Ok(true);
         }
 
-        if matches!(procedure, ActionProcedure::Build) {
-            if !self.apply_build_procedure(idx)? {
-                return Ok(true);
-            }
+        if matches!(procedure, ActionProcedure::Build) && !self.apply_build_procedure(idx)? {
+            return Ok(true);
         }
 
         if matches!(procedure, ActionProcedure::Chop)
@@ -41968,7 +41946,7 @@ impl Engine {
         // this frame under the captured FLIGHT procedure so gravity/mobile
         // still run after the callbacks, just as the stale pAction does.
         if matches!(procedure, ActionProcedure::Flight)
-            && self.frame % 10 == 0
+            && self.frame.is_multiple_of(10)
             && self.objects[idx].state.container.is_some()
         {
             let object_id = self.objects[idx].id;
@@ -41990,19 +41968,19 @@ impl Engine {
             // Tick5 (C4Object.cpp:4810-4812), Hangle Tick5 (:4844-4846),
             // Swim Tick10 (:4924-4926).
             match procedure {
-                ActionProcedure::Scale if physical.scale != 0 && self.frame % 5 == 0 => {
+                ActionProcedure::Scale if physical.scale != 0 && self.frame.is_multiple_of(5) => {
                     let ydir = self.objects[idx].fixed_velocity.y;
                     if ydir.abs() == math::val_by_physical(200, physical.scale) {
                         self.train_physical(idx, "Scale", 1, C4_MAX_PHYSICAL);
                     }
                 }
-                ActionProcedure::Hang if physical.hangle != 0 && self.frame % 5 == 0 => {
+                ActionProcedure::Hang if physical.hangle != 0 && self.frame.is_multiple_of(5) => {
                     let xdir = self.objects[idx].fixed_velocity.x;
                     if xdir.abs() == math::val_by_physical(160, physical.hangle) {
                         self.train_physical(idx, "Hangle", 1, C4_MAX_PHYSICAL);
                     }
                 }
-                ActionProcedure::Swim if physical.swim != 0 && self.frame % 10 == 0 => {
+                ActionProcedure::Swim if physical.swim != 0 && self.frame.is_multiple_of(10) => {
                     let xdir = self.objects[idx].fixed_velocity.x;
                     if xdir.abs() == math::val_by_physical(160, physical.swim) {
                         self.train_physical(idx, "Swim", 1, C4_MAX_PHYSICAL);
@@ -42314,10 +42292,8 @@ impl Engine {
                         object.fixed_velocity = FixedVec2::ZERO;
                     }
                 }
-                ActionProcedure::Pull => {
-                    if !pull_handled {
-                        object.fixed_velocity = FixedVec2::ZERO;
-                    }
+                ActionProcedure::Pull if !pull_handled => {
+                    object.fixed_velocity = FixedVec2::ZERO;
                 }
                 _ => {}
             }
@@ -42745,7 +42721,7 @@ impl Engine {
         let delta_time = if move_clonk {
             0
         } else {
-            (action_time / step_interval) as i32
+            action_time / step_interval
         };
 
         // The target formulas are the DoBridge switch verbatim
@@ -42765,7 +42741,7 @@ impl Engine {
                     let x0 = if move_clonk {
                         -3
                     } else {
-                        (parameters.duration / step_interval) as i32 / -2
+                        (parameters.duration / step_interval) / -2
                     };
                     let direction = if facing == Direction::Right { 1 } else { -1 };
                     target_x += (x0 + delta_time) * direction;
@@ -43329,7 +43305,7 @@ impl Engine {
             return Ok(false);
         }
 
-        if self.frame % 3 == 0 && self.frame % 10 == 0 {
+        if self.frame.is_multiple_of(3) && self.frame.is_multiple_of(10) {
             let caused_by = self.objects[idx].state.owner;
             self.change_object_damage(target_idx, 10, C4FX_CALL_DMG_CHOP, caused_by)?;
         }
@@ -43846,8 +43822,8 @@ impl Engine {
             return Ok(false);
         }
 
-        let reduce_segments = self.frame % 35 == 0;
-        let alternate_reduction = self.frame % 2 == 0;
+        let reduce_segments = self.frame.is_multiple_of(35);
+        let alternate_reduction = self.frame.is_multiple_of(2);
         let movement_broke = {
             let landscape = self.landscape.as_ref();
             let object = &mut self.objects[idx];
@@ -43974,15 +43950,15 @@ impl Engine {
                 (!library.is_idle_state(action)
                     && raw_direction >= 0
                     && raw_direction
-                        < library.directions_for_entry(&action.name, action.act_map_index) as i32)
-                    .then(|| {
-                        (
-                            self.objects[idx].state.direction,
-                            library
-                                .turn_action_for_entry(&action.name, action.act_map_index)
-                                .map(str::to_string),
-                        )
-                    })
+                        < library.directions_for_entry(&action.name, action.act_map_index))
+                .then(|| {
+                    (
+                        self.objects[idx].state.direction,
+                        library
+                            .turn_action_for_entry(&action.name, action.act_map_index)
+                            .map(str::to_string),
+                    )
+                })
             })
         else {
             return Ok(());
@@ -45521,7 +45497,7 @@ impl Engine {
         let initial_direction = self.objects[idx].state.direction;
 
         // Physical training (C4Object.cpp:5214-5216): Tick5 trains Fight.
-        if self.frame % 5 == 0 {
+        if self.frame.is_multiple_of(5) {
             self.train_physical(idx, "Fight", 1, C4_MAX_PHYSICAL);
         }
 
@@ -45581,7 +45557,7 @@ impl Engine {
         fighter.fixed_velocity.y = C4Fixed::ZERO;
         physics.clamp_fixed_velocity(&mut fighter.fixed_velocity);
         fighter.refresh_velocity_from_fixed();
-        if self.frame % 35 == 0 {
+        if self.frame.is_multiple_of(35) {
             self.do_object_experience(fighter_id, 2);
         }
 
@@ -45800,7 +45776,7 @@ impl Engine {
             .get(&self.objects[target_idx].definition_id)
             .map(Definition::no_horizontal_move)
             .unwrap_or(0);
-        if self.frame % 35 == 0 && txdir.is_nonzero() && no_horizontal_move == 0 {
+        if self.frame.is_multiple_of(35) && txdir.is_nonzero() && no_horizontal_move == 0 {
             let target_id = self.objects[target_idx].id;
             let position = self.objects[target_idx].state.position;
             let solid_mask_indices = self.active_solid_mask_indices();
@@ -46295,7 +46271,7 @@ impl Engine {
     /// Tick10 frames, contained FightReady objects fight hostile FightReady
     /// company sharing their container — directly, with no RejectFight veto.
     fn cross_check_contained_pass(&mut self, frame: u64) -> Result<(), EngineError> {
-        if frame % 10 != 0 {
+        if !frame.is_multiple_of(10) {
             return Ok(());
         }
         let focf = crate::ocf::FIGHT_READY;
@@ -46383,8 +46359,8 @@ impl Engine {
     /// Rust object ever carries OCF_OnFire yet, so the C++ stream consumes no
     /// draws for it either.
     fn cross_check_at_object_pass(&mut self, frame: u64) -> Result<(), EngineError> {
-        let tick5 = frame % 5 == 0;
-        let tick35 = frame % 35 == 0;
+        let tick5 = frame.is_multiple_of(5);
+        let tick35 = frame.is_multiple_of(35);
         let mut focf = crate::ocf::NONE;
         let mut tocf = crate::ocf::NONE;
         if tick5 {
@@ -46539,7 +46515,7 @@ impl Engine {
 
     /// CrossCheck pass 2: reverse area check (C4GameObjects.cpp:140-197).
     fn cross_check_reverse_area_pass(&mut self, frame: u64) -> Result<(), EngineError> {
-        let tick3 = frame % 3 == 0;
+        let tick3 = frame.is_multiple_of(3);
         let mut focf = crate::ocf::ALIVE;
         let mut tocf = crate::ocf::HIT_SPEED2;
         if tick3 {
@@ -47059,11 +47035,11 @@ impl Engine {
                 _ => 0,
             })
             .unwrap_or(self.objects[idx].state.fire_caused_by);
-        let caused_by = self
-            .players
-            .contains_key(&stored_caused_by)
-            .then_some(stored_caused_by)
-            .unwrap_or(OWNER_NONE);
+        let caused_by = if self.players.contains_key(&stored_caused_by) {
+            stored_caused_by
+        } else {
+            OWNER_NONE
+        };
         // Fire Phase (C4Object.cpp:769)
         {
             let object = &mut self.objects[idx];
@@ -47074,7 +47050,7 @@ impl Engine {
         // direct container's Base only needs to name a currently linked
         // player; ownership, hostility and the burning object's Alive flag
         // are irrelevant.
-        if frame % 5 == 0
+        if frame.is_multiple_of(5)
             && self.base_extinguish_enabled
             && self.objects[idx].state.category & CATEGORY_LIVING != 0
         {
@@ -47102,13 +47078,13 @@ impl Engine {
             }
         }
         // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:780)
-        if frame % 10 == 0 && !no_burn_damage {
+        if frame.is_multiple_of(10) && !no_burn_damage {
             if let Err(error) = self.change_object_damage(idx, 2, C4FX_CALL_DMG_FIRE, caused_by) {
                 tracing::warn!(%error, "fire damage callback failed; continuing");
             }
         }
         // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:782)
-        if frame % 5 == 0 {
+        if frame.is_multiple_of(5) {
             if let Err(error) = self.change_object_energy(idx, -1, C4FX_CALL_ENG_FIRE, caused_by) {
                 tracing::warn!(%error, "fire energy callback failed; continuing");
             }
@@ -47116,7 +47092,7 @@ impl Engine {
         // Background effects: Tick5 over valid landscape material
         // (C4Object.cpp:791-806) — extinguish in extinguisher material, then
         // the unconditional Random(3) landscape-inflame draw.
-        if frame % 5 == 0 {
+        if frame.is_multiple_of(5) {
             let position = self.objects[idx].state.position;
             let material = self
                 .landscape
@@ -47270,10 +47246,7 @@ impl Engine {
                 .get(&self.objects[idx].definition_id)
                 .is_some_and(Definition::incomplete_activity);
             if !incomplete_activity {
-                loop {
-                    let Some(parent_index) = self.find_object_index(object_id) else {
-                        break;
-                    };
+                while let Some(parent_index) = self.find_object_index(object_id) {
                     let Some(child) = self.objects[parent_index]
                         .state
                         .contents
@@ -47439,7 +47412,7 @@ impl Engine {
         // Growth (C4Object.cpp:824-837): every Tick35, Def Growth on an
         // incomplete, unburning alive Living or StaticBack gains
         // DoCon(Growth*100).
-        if frame % 35 == 0 {
+        if frame.is_multiple_of(35) {
             let object = &self.objects[idx];
             let category = object.state.category;
             let eligible = !object.state.on_fire
@@ -47456,7 +47429,7 @@ impl Engine {
         }
 
         // Energy reload in a friendly assigned base (C4Object.cpp:839-856).
-        if frame % 3 == 0 && self.objects[idx].state.alive {
+        if frame.is_multiple_of(3) && self.objects[idx].state.alive {
             let recipient_owner = self.objects[idx].state.owner;
             let recipient_energy = self.objects[idx].state.energy;
             let eligible_container = self.objects[idx].state.container.and_then(|container_id| {
@@ -47533,7 +47506,7 @@ impl Engine {
 
         // Magic reload uses the ENGINE-global DoMagicEnergy overload so the
         // No-Magic-Energy rule can veto the debit (C4Object.cpp:858-878).
-        if frame % 3 == 0 && self.objects[idx].state.alive {
+        if frame.is_multiple_of(3) && self.objects[idx].state.alive {
             let recipient_owner = self.objects[idx].state.owner;
             let recipient_magic = self.objects[idx].state.magic_energy;
             let eligible_container = self.objects[idx].state.container.and_then(|container_id| {
@@ -47600,7 +47573,7 @@ impl Engine {
             .get(&self.objects[idx].definition_id)
             .map(|definition| definition.no_breath())
             .unwrap_or(false);
-        if frame % 5 == 0 && self.objects[idx].state.alive && !no_breath {
+        if frame.is_multiple_of(5) && self.objects[idx].state.alive && !no_breath {
             let position = self.objects[idx].state.position;
             let shape_top = self.objects[idx]
                 .current_shape_rect()
@@ -47688,7 +47661,7 @@ impl Engine {
         }
 
         // Corrosion reads the cached (normally pre-movement) InMat.
-        if frame % 10 == 0 && self.objects[idx].state.alive {
+        if frame.is_multiple_of(10) && self.objects[idx].state.alive {
             let corrosive = self.objects[idx]
                 .in_mat
                 .and_then(|material| self.materials.get_by_id(material))
@@ -47712,7 +47685,7 @@ impl Engine {
 
         // Lava/material fire has no Alive gate and ignores the magnitude of
         // either property (C4Object.cpp:932-938).
-        if frame % 10 == 0 {
+        if frame.is_multiple_of(10) {
             let incindiary = self.objects[idx]
                 .in_mat
                 .and_then(|material| self.materials.get_by_id(material))
@@ -47731,7 +47704,7 @@ impl Engine {
 
         // Ordinary energy on nonliving structures drains unless a valid base
         // assignment protects it or the definition is an EnergyHolder.
-        if frame % 10 == 0 && self.objects[idx].state.energy != 0 {
+        if frame.is_multiple_of(10) && self.objects[idx].state.energy != 0 {
             let object = &self.objects[idx];
             let valid_base = self.players.contains_key(&object.state.base);
             let nonliving = object.state.category & CATEGORY_LIVING == 0;
@@ -47748,7 +47721,7 @@ impl Engine {
         }
 
         // Five-playing-hour birthday age cache and presentation.
-        if frame % 255 == 0 && self.objects[idx].state.alive {
+        if frame.is_multiple_of(255) && self.objects[idx].state.alive {
             let object_id = self.objects[idx].id;
             let link = self.crew_info_links.get(&object_id).copied();
             let mut changed = None;
@@ -47876,7 +47849,7 @@ impl Engine {
     /// auto-sale/lost-flag handling, and upright structure snow clearing.
     fn exec_object_base(&mut self, idx: usize, frame: u64) -> Result<(), EngineError> {
         // New base assignment by flag, no old base removal (:1005-1018).
-        if frame % 10 == 0 {
+        if frame.is_multiple_of(10) {
             let base = self.objects[idx].state.base;
             let can_be_base = self
                 .definitions
@@ -47943,7 +47916,7 @@ impl Engine {
             }
         }
         // Base execution (:1021-1031); AutoSellContents unported.
-        if frame % 35 == 0 {
+        if frame.is_multiple_of(35) {
             let idx = match self.objects.get(idx) {
                 Some(object) if object.state.status.is_active() => idx,
                 _ => return Ok(()),
@@ -48174,7 +48147,7 @@ impl Engine {
             return temporary;
         }
         let definition = self.definition_physical(idx);
-        let permanent = match self.info_definition_physical(idx) {
+        match self.info_definition_physical(idx) {
             Some(info_definition) if self.use_fair_crew => {
                 self.fair_crew_info_physical(idx, info_definition)
             }
@@ -48183,8 +48156,7 @@ impl Engine {
                 .info_physical
                 .unwrap_or(info_definition),
             None => definition,
-        };
-        permanent
+        }
     }
 
     /// Command tables carry a physical field for every structural target,
@@ -48236,11 +48208,11 @@ impl Engine {
         let Some(info) = self.crew_object_infos.get(&object.id) else {
             return false;
         };
-        let definition_id = self
-            .definitions
-            .contains_key(&info.definition_id)
-            .then_some(&info.definition_id)
-            .unwrap_or(&object.definition_id);
+        let definition_id = if self.definitions.contains_key(&info.definition_id) {
+            &info.definition_id
+        } else {
+            &object.definition_id
+        };
         !self
             .fair_crew_physical_cache
             .borrow()
@@ -51217,7 +51189,7 @@ impl Engine {
         let Some(object_position) = logical_links.iter().position(|id| *id == object) else {
             return false;
         };
-        if !logical_links.iter().any(|id| *id == relative_to) {
+        if !logical_links.contains(&relative_to) {
             return false;
         }
         logical_links.remove(object_position);
@@ -57157,7 +57129,7 @@ impl Engine {
         // DigFree/DigFreeRect add contents on every call, then run the cast
         // check only on !Tick5 — including calls that removed no new pixels
         // (C4Landscape.cpp:982,996).
-        if self.frame % 5 == 0 {
+        if self.frame.is_multiple_of(5) {
             self.process_dig_material_conversions(object_index, requested);
         }
     }
@@ -74266,8 +74238,7 @@ mod pathfinder_host_state_regression {
         for id in ["BOX_", "HOLD", "ROCK", "GOLD", "PSTL"] {
             engine
                 .register_definition(
-                    Definition::from_script(id, id, "#strict\n")
-                        .expect("definition compiles"),
+                    Definition::from_script(id, id, "#strict\n").expect("definition compiles"),
                 )
                 .expect("definition registers");
         }

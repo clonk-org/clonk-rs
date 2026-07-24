@@ -1412,7 +1412,7 @@ impl GameApp {
             let control_rate = u64::try_from(self.engine.control_rate())
                 .unwrap_or(1)
                 .max(1);
-            if !execute_offline_control_frame || self.engine.frame() % control_rate != 0 {
+            if !execute_offline_control_frame || !self.engine.frame().is_multiple_of(control_rate) {
                 return Ok(());
             }
             let controls = self.engine.take_pending_remove_player_controls();

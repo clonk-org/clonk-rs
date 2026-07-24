@@ -496,6 +496,10 @@ impl ClientRouteManager {
         );
     }
 
+    // Each argument is a distinct piece of classic route identity or owned
+    // task state; keeping them explicit prevents local/remote IDs from being
+    // silently conflated.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_peer_route<S>(
         &mut self,
         peer_id: ClientId,

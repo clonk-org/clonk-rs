@@ -64,7 +64,8 @@ impl SelectedClientPlayer {
         wire_name: LegacyCString,
         player_file: PlayerFile,
     ) -> Self {
-        let player_name = LegacyCString::from_bytes(clonk_script::c4_string_bytes(&player_file.name));
+        let player_name =
+            LegacyCString::from_bytes(clonk_script::c4_string_bytes(&player_file.name));
         let network_color = player_file.normalized_preferred_color();
         let alternate_color = player_file.normalized_alternate_color();
         Self {
@@ -81,6 +82,10 @@ impl SelectedClientPlayer {
         }
     }
 
+    // Keep the classic loader's independently normalized path, resource-name,
+    // player-name, and color fields explicit at this handoff. Combining them
+    // would hide which C4PlayerInfoCore value each argument preserves.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_configured(
         source_path: PathBuf,
         module_filename: LegacyCString,

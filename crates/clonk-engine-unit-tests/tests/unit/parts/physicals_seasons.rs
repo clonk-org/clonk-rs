@@ -499,10 +499,9 @@ protected func ControlCommand(command, target, tx, ty, target2, data, by)
             "truthy inside control consumes Exit after SetCommand clears the stack"
         );
         assert!(
-            actor_snapshot
+            !actor_snapshot
                 .local_vars
-                .get("own_control_calls")
-                .is_none(),
+                .contains_key("own_control_calls"),
             "native fControl=false skips the actor's own ControlCommand"
         );
 
@@ -5977,4 +5976,3 @@ func Trigger() {
         }
         panic!("seed should reach an earthquake gate in the bounded weather sweep");
     }
-

@@ -63,9 +63,7 @@ global func Probe()
 "#;
     // ForLine normalizes this x-major segment to (1,1)->(9,5). The caller-
     // reversed path therefore hits (3,2), not the nearer-from-caller (7,4).
-    let landscape = raster_landscape(12, 8, |x, y| {
-        u8::from((x, y) == (3, 2) || (x, y) == (7, 4))
-    });
+    let landscape = raster_landscape(12, 8, |x, y| u8::from((x, y) == (3, 2) || (x, y) == (7, 4)));
 
     assert_eq!(
         call_probe_result(script, landscape).expect("PathFree2 probe runs"),

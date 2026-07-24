@@ -1071,7 +1071,7 @@
         assert_eq!(
             app.startup_network_dialog
                 .as_ref()
-                .map(|dialog| std::ptr::from_ref(dialog)),
+                .map(std::ptr::from_ref),
             embedded_controller_ptr
         );
 
@@ -1401,8 +1401,8 @@
             .layout(preferred, resources)
             .chart;
         let chart_point = GuiPoint::new(
-            chart.x.saturating_add(chart.w as i32 / 2) as f32,
-            chart.y.saturating_add(chart.h as i32 / 2) as f32,
+            chart.x.saturating_add(chart.w / 2) as f32,
+            chart.y.saturating_add(chart.h / 2) as f32,
         );
         app.running_pointer_position = Some(chart_point);
         app.handle_mouse_button_classified(ElementState::Pressed, false)

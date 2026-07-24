@@ -700,10 +700,7 @@ impl PlayerState {
         }
     }
 
-    pub(crate) fn clear_object_pointers_before_cursor_adjust(
-        &mut self,
-        object: ObjectId,
-    ) -> bool {
+    pub(crate) fn clear_object_pointers_before_cursor_adjust(&mut self, object: ObjectId) -> bool {
         self.crew.retain(|member| *member != object);
         if self.captain == Some(object) {
             self.captain = None;
@@ -2284,16 +2281,10 @@ impl Player {
         ));
 
         for viewport in &mut self.viewports {
-            viewport.center.x = bound_view_center(
-                viewport.center.x.wrapping_add(delta.x),
-                min_x,
-                max_x,
-            );
-            viewport.center.y = bound_view_center(
-                viewport.center.y.wrapping_add(delta.y),
-                min_y,
-                max_y,
-            );
+            viewport.center.x =
+                bound_view_center(viewport.center.x.wrapping_add(delta.x), min_x, max_x);
+            viewport.center.y =
+                bound_view_center(viewport.center.y.wrapping_add(delta.y), min_y, max_y);
         }
     }
 
@@ -2310,10 +2301,7 @@ impl Player {
         self.clear_object_pointers_after_cursor_adjust(object);
     }
 
-    pub(crate) fn clear_object_pointers_before_cursor_adjust(
-        &mut self,
-        object: ObjectId,
-    ) -> bool {
+    pub(crate) fn clear_object_pointers_before_cursor_adjust(&mut self, object: ObjectId) -> bool {
         self.crew.retain(|member| *member != object);
         if self.captain == Some(object) {
             self.captain = None;
@@ -2441,7 +2429,8 @@ impl Player {
     }
 
     pub(crate) fn remove_fow_view_object(&mut self, object: ObjectId) {
-        self.fow_view_objects.retain(|candidate| *candidate != object);
+        self.fow_view_objects
+            .retain(|candidate| *candidate != object);
     }
 
     pub(crate) fn clear_fow_view_objects(&mut self) {
@@ -2569,7 +2558,7 @@ impl Player {
             if frequency == 0 {
                 continue;
             }
-            if self.production_unit % frequency == 0 {
+            if self.production_unit.is_multiple_of(frequency) {
                 let current = ordered_id_count(&self.home_base_material_entries, &definition_id, 0);
                 if current < MAX_HOME_BASE_MATERIAL as i32 {
                     set_ordered_id_count(
@@ -3238,7 +3227,10 @@ mod tests {
         let state = player.to_state();
         assert_eq!(state.player_info_id, 41);
         assert_eq!(state.score, 250);
-        assert_eq!((state.rounds, state.rounds_won, state.rounds_lost), (11, 7, 4));
+        assert_eq!(
+            (state.rounds, state.rounds_won, state.rounds_lost),
+            (11, 7, 4)
+        );
         assert_eq!(state.total_playing_time, 1_234);
         assert_eq!(player.game_join_time(), 0);
 
@@ -3326,7 +3318,10 @@ mod tests {
                 MessageBoardQuery::new(Some(missing), "missing".into(), false),
                 MessageBoardQuery::new(Some(listed), "listed".into(), false),
             ],
-            extra_data: vec![("object".into(), clonk_script::Value::Object(missing.as_u64()))],
+            extra_data: vec![(
+                "object".into(),
+                clonk_script::Value::Object(missing.as_u64()),
+            )],
             ..PlayerState::default()
         });
         player.set_view_target(Some(view_target));
@@ -3349,7 +3344,10 @@ mod tests {
         );
         assert_eq!(
             state.extra_data,
-            [("object".into(), clonk_script::Value::Object(missing.as_u64()))]
+            [(
+                "object".into(),
+                clonk_script::Value::Object(missing.as_u64())
+            )]
         );
         assert_eq!(state.viewports[0].focus, Some(listed));
     }

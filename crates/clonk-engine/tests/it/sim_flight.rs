@@ -1,8 +1,8 @@
 use clonk_engine::landscape::PixelGrid;
 use clonk_engine::{
     command::CommandId, math::itofix_prec, ActionSpec, ActionState, CommandDirection, Definition,
-    DefinitionTargetRect, Direction, Engine, EngineError, JoinPlayerConfig, Landscape,
-    ObjectId, ObjectUpdate, ObjectVertex, PhysicsSettings, ShapeAttachRecord, SpawnConfig, Vector2,
+    DefinitionTargetRect, Direction, Engine, EngineError, JoinPlayerConfig, Landscape, ObjectId,
+    ObjectUpdate, ObjectVertex, PhysicsSettings, ShapeAttachRecord, SpawnConfig, Vector2,
     CATEGORY_OBJECT, CATEGORY_STATIC_BACK, CNAT_BOTTOM,
 };
 use clonk_resources::PhysicalInfo;
@@ -160,9 +160,8 @@ protected func Probe(pTarget)
             .with_procedure("walk")
             .with_attach(CNAT_BOTTOM),
     );
-    let mut definition =
-        Definition::from_script("WROT", "Foreign walk rotation probe", script)
-            .expect("probe compiles");
+    let mut definition = Definition::from_script("WROT", "Foreign walk rotation probe", script)
+        .expect("probe compiles");
     definition.configure_actions(Some("Walk".to_string()), actions);
     definition.set_rotateable(45);
     definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
@@ -187,9 +186,7 @@ protected func Probe(pTarget)
         .with_action(ActionState::new("Walk"))
         .with_rotation_velocity(itofix_prec(41, 100));
     caller_config.shape_attach = Some(attached);
-    let caller = engine
-        .spawn_object(caller_config)
-        .expect("caller spawns");
+    let caller = engine.spawn_object(caller_config).expect("caller spawns");
 
     let mut target_config = SpawnConfig::new("WROT")
         .with_category(CATEGORY_OBJECT)
@@ -197,9 +194,7 @@ protected func Probe(pTarget)
         .with_rotation(6)
         .with_rotation_velocity(itofix_prec(23, 100));
     target_config.shape_attach = Some(attached);
-    let target = engine
-        .spawn_object(target_config)
-        .expect("target spawns");
+    let target = engine.spawn_object(target_config).expect("target spawns");
     for object in [caller, target] {
         engine
             .apply_object_update(
@@ -215,11 +210,7 @@ protected func Probe(pTarget)
     let caller_index = engine.find_object_index(caller).expect("caller exists");
     assert_eq!(
         engine
-            .call_object_function(
-                caller_index,
-                "Probe",
-                vec![Value::Object(target.as_u64())],
-            )
+            .call_object_function(caller_index, "Probe", vec![Value::Object(target.as_u64())],)
             .expect("foreign walk rotation call runs"),
         Value::Bool(true)
     );
@@ -244,11 +235,7 @@ protected func Probe(pTarget)
 
     assert_eq!(
         engine
-            .call_object_function(
-                caller_index,
-                "Probe",
-                vec![Value::Object(u64::MAX)],
-            )
+            .call_object_function(caller_index, "Probe", vec![Value::Object(u64::MAX)],)
             .expect("missing target is a normal false result"),
         Value::Bool(false)
     );
@@ -554,9 +541,7 @@ fn sim_flight_matches_cpp_native_argument_conversions() {
             return [result, x, y, xdir, ydir];
         }
         "#,
-        raster_landscape_with_densities(4, 4, vec![0, 1], |x, y| {
-            u8::from(x == 1 && y == 1)
-        }),
+        raster_landscape_with_densities(4, 4, vec![0, 1], |x, y| u8::from(x == 1 && y == 1)),
         PhysicsSettings::new(0, 20, -20),
     );
     assert_eq!(
@@ -602,8 +587,7 @@ fn sim_flight_optional_precision_default_follows_caller_strictness() {
         )
         .unwrap_or_else(|error| panic!("strict-2 SimFlight({falsy}) failed: {error}"));
         assert_eq!(
-            legacy,
-            expected_default,
+            legacy, expected_default,
             "below strict 3, {falsy} is absent and uses precision 10"
         );
 
@@ -815,7 +799,9 @@ fn real_tutorial09_clnk_command_jump_dives_into_deep_water() {
     engine
         .player_object_command(joined.number(), CommandId::Jump, None, 0, 0)
         .expect("queue C4CMD_Jump");
-    engine.tick_without_snapshot().expect("execute ObjectComJump");
+    engine
+        .tick_without_snapshot()
+        .expect("execute ObjectComJump");
 
     let snapshot = engine.object_snapshot(clonk).expect("CLNK survives");
     assert_eq!(snapshot.action.name, "Dive");
@@ -1016,7 +1002,11 @@ fn script_jump_native_respects_contact_density_dive_gate() {
         Value::Bool(true)
     );
     assert_eq!(
-        engine.object_snapshot(object).expect("probe survives").action.name,
+        engine
+            .object_snapshot(object)
+            .expect("probe survives")
+            .action
+            .name,
         "Jump"
     );
     assert_eq!(
@@ -1099,7 +1089,11 @@ func ProbeSolid()
         Value::Bool(true)
     );
     assert_eq!(
-        engine.object_snapshot(object).expect("probe survives").action.name,
+        engine
+            .object_snapshot(object)
+            .expect("probe survives")
+            .action
+            .name,
         "Jump"
     );
     assert_eq!(
@@ -1211,7 +1205,9 @@ fn live_contact_density_controls_movement_contact_with_liquid() {
         Value::Bool(true)
     );
 
-    engine.tick_without_snapshot().expect("movement contact probe ticks");
+    engine
+        .tick_without_snapshot()
+        .expect("movement contact probe ticks");
 
     let walker = engine.object_snapshot(walker).expect("walker survives");
     let falling = engine
@@ -1290,8 +1286,14 @@ func ProbeFallback() { allow_hardcoded = true; return Jump(); }
     assert_eq!(snapshot.velocity, Vector2::ZERO);
     assert_eq!(snapshot.local_vars.get("jump_calls"), Some(&Value::Int(1)));
     assert_eq!(snapshot.local_vars.get("jump_xdir"), Some(&Value::Int(196)));
-    assert_eq!(snapshot.local_vars.get("jump_ydir"), Some(&Value::Int(-400)));
-    assert_eq!(snapshot.local_vars.get("jump_by_com"), Some(&Value::Bool(true)));
+    assert_eq!(
+        snapshot.local_vars.get("jump_ydir"),
+        Some(&Value::Int(-400))
+    );
+    assert_eq!(
+        snapshot.local_vars.get("jump_by_com"),
+        Some(&Value::Bool(true))
+    );
 
     let index = engine.find_object_index(object).expect("probe remains");
     assert_eq!(

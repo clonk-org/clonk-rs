@@ -379,8 +379,8 @@
         let native_path_bytes = b"Defs-\xff.c4f\\Pack.c4d".to_vec();
         let native_path = PathBuf::from(OsString::from_vec(native_path_bytes.clone()));
         assert_eq!(
-            raw_definition_description_modules(&[native_path]),
-            [native_path_bytes.clone()]
+            raw_definition_description_modules(&[native_path]).as_slice(),
+            std::slice::from_ref(&native_path_bytes)
         );
         let relative = developer_console_definition_description_path(&native_path_bytes, None);
         assert_eq!(relative.as_slice(), native_path_bytes.as_slice());
@@ -7385,7 +7385,7 @@
             .expect("stage packed scenario alias");
         assert_eq!(
             staged.scenario.definition_resource_paths(),
-            [scenario_path.clone()]
+            std::slice::from_ref(&scenario_path)
         );
 
         let prepared = prepare_staged_network_host(&app, &staged);
@@ -7464,7 +7464,7 @@
             .expect("stage packed System alias");
         assert_eq!(
             staged.scenario.definition_resource_paths(),
-            [system_path.clone()]
+            std::slice::from_ref(&system_path)
         );
 
         let prepared = prepare_staged_network_host(&app, &staged);
@@ -9288,8 +9288,8 @@
             .expect("covered network dialog remains frozen");
         assert_eq!(app.startup_game_search_test_events.len(), 1);
         assert_eq!(
-            app.startup_game_references,
-            [nearly_expired_reference.clone()]
+            app.startup_game_references.as_slice(),
+            std::slice::from_ref(&nearly_expired_reference)
         );
         assert!(app
             .startup_direct_reference_queries

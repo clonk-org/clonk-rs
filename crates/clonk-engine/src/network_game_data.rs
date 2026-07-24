@@ -212,7 +212,6 @@ impl InitialNetworkGameData {
     /// Capture the scalar `C4Game::CompileFunc` fields while a live-save
     /// caller supplies typed Script/Sky/Effects/Scoreboard blocks itself.
     pub(crate) fn from_engine_live(engine: &Engine) -> Result<Self, InitialNetworkGameError> {
-
         let frame = i32::try_from(engine.frame).map_err(|_| {
             InitialNetworkGameError::IntegerOutOfRange {
                 field: "Frame",
@@ -265,11 +264,11 @@ impl InitialNetworkGameData {
             object_enumeration_index,
             rules,
             play_list: engine.music_playlist().to_owned(),
-            current_scenario_section: engine
-                .last_scenario_section_flags
-                .is_some()
-                .then(|| engine.current_scenario_section.clone())
-                .unwrap_or_default(),
+            current_scenario_section: if engine.last_scenario_section_flags.is_some() {
+                engine.current_scenario_section.clone()
+            } else {
+                Default::default()
+            },
             resort_any_object: engine.resort_any_object_pending(),
             music_enabled: false,
             music_level: i32::from(engine.music_level()),
@@ -1169,9 +1168,7 @@ pub fn parse_landscape_game_data(source: &[u8]) -> LandscapeGameData {
             while sections.last().is_some_and(|(level, _)| *level >= indent) {
                 sections.pop();
             }
-            let is_landscape = sections.is_empty()
-                && !found_landscape
-                && section == "Landscape";
+            let is_landscape = sections.is_empty() && !found_landscape && section == "Landscape";
             found_landscape |= is_landscape;
             sections.push((indent, is_landscape));
             continue;
@@ -1975,7 +1972,9 @@ mod tests {
         );
         assert_eq!(
             InitialNetworkGameData::for_initial_record(&engine).landscape,
-            InitialNetworkGameData::from_engine(&engine).unwrap().landscape
+            InitialNetworkGameData::from_engine(&engine)
+                .unwrap()
+                .landscape
         );
     }
 

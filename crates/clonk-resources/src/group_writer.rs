@@ -67,6 +67,14 @@ pub enum MutableGroupError {
     CompressionFailed(String),
 }
 
+pub(crate) struct ImportedPackedChildCoreMetadata {
+    pub(crate) crc_state: u8,
+    pub(crate) stored_crc: u32,
+    pub(crate) child_contents_crc: Option<u32>,
+    pub(crate) time: u32,
+    pub(crate) executable: bool,
+}
+
 impl fmt::Display for MutableGroupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -456,22 +464,18 @@ impl MutableGroup {
         &mut self,
         name: impl Into<Vec<u8>>,
         data: Vec<u8>,
-        crc_state: u8,
-        stored_crc: u32,
-        child_contents_crc: Option<u32>,
-        time: u32,
-        executable: bool,
+        metadata: ImportedPackedChildCoreMetadata,
     ) -> Result<(), MutableGroupError> {
         self.add_entry_bytes(
             name.into(),
             MutableGroupEntryData::PackedChild {
                 data,
-                crc_state,
-                stored_crc,
-                child_contents_crc,
+                crc_state: metadata.crc_state,
+                stored_crc: metadata.stored_crc,
+                child_contents_crc: metadata.child_contents_crc,
             },
-            time,
-            executable,
+            metadata.time,
+            metadata.executable,
         )
     }
 

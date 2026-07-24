@@ -1011,7 +1011,8 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     player.menu_navigate_to_caption("Production")?;
     player.menu_enter()?;
     player.wait_until("WRKS opens its real production menu", 30, |engine| {
-        object_menu_identification(engine, owner) == Some(clonk_script::Value::C4Id("CXCN".to_owned()))
+        object_menu_identification(engine, owner)
+            == Some(clonk_script::Value::C4Id("CXCN".to_owned()))
     })?;
     let balloon_index = player
         .engine()

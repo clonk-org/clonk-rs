@@ -1129,9 +1129,7 @@ fn path_free2_native_int(value: &Value, parameter: &str) -> Result<i32, RuntimeE
 /// parameters for the start point and blocked-pixel writeback.
 pub(crate) fn path_free2(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
     let x_arg = args.first().ok_or_else(|| {
-        RuntimeError::new(
-            "call to \"PathFree2\" parameter 1: got \"nil\", but expected \"&\"!",
-        )
+        RuntimeError::new("call to \"PathFree2\" parameter 1: got \"nil\", but expected \"&\"!")
     })?;
     if !x_arg.is_reference() {
         return Err(RuntimeError::new(format!(
@@ -1140,9 +1138,7 @@ pub(crate) fn path_free2(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
         )));
     }
     let y_arg = args.get(1).ok_or_else(|| {
-        RuntimeError::new(
-            "call to \"PathFree2\" parameter 2: got \"nil\", but expected \"&\"!",
-        )
+        RuntimeError::new("call to \"PathFree2\" parameter 2: got \"nil\", but expected \"&\"!")
     })?;
     if !y_arg.is_reference() {
         return Err(RuntimeError::new(format!(
@@ -1178,9 +1174,9 @@ pub(crate) fn path_free2(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
             Some(materials) => {
                 crate::path_free_exact_hit(landscape, materials, &[], x1, y1, x2, y2)
             }
-            None => crate::for_line_first_blocker(x1, y1, x2, y2, |x, y| {
-                landscape.is_solid_at(x, y)
-            }),
+            None => {
+                crate::for_line_first_blocker(x1, y1, x2, y2, |x, y| landscape.is_solid_at(x, y))
+            }
         })
     });
     let hit = hit.flatten();
@@ -1188,7 +1184,10 @@ pub(crate) fn path_free2(args: &[HostCallArg]) -> Result<Value, RuntimeError> {
     if let Some(hit) = hit {
         let wrote_x = x_arg.write(Value::Int(hit.x))?;
         let wrote_y = y_arg.write(Value::Int(hit.y))?;
-        debug_assert!(wrote_x && wrote_y, "validated PathFree2 reference disappeared");
+        debug_assert!(
+            wrote_x && wrote_y,
+            "validated PathFree2 reference disappeared"
+        );
         Ok(Value::Bool(false))
     } else {
         Ok(Value::Bool(true))
@@ -1390,11 +1389,8 @@ pub(crate) fn set_texture_index(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(texmap) = context.runtime_texmap_mut() else {
             return Ok(Value::Int(0));
         };
-        let (succeeded, moved_indices) = texmap.set_texture_index(
-            &material_texture,
-            new_index as u8,
-            insert,
-        );
+        let (succeeded, moved_indices) =
+            texmap.set_texture_index(&material_texture, new_index as u8, insert);
         let texmap = texmap.clone();
 
         if let Some((old_index, new_index)) = moved_indices {
@@ -1406,7 +1402,9 @@ pub(crate) fn set_texture_index(args: &[Value]) -> Result<Value, RuntimeError> {
             // C++ changes the live TextureMap before returning. Keep this
             // callback's COW world coherent and carry the captured state to
             // later effect callbacks and the authoritative fold.
-            context.world.preview_runtime_landscape_operation(&operation);
+            context
+                .world
+                .preview_runtime_landscape_operation(&operation);
             context.register_landscape_operation(operation);
         }
         Ok(Value::Int(i32::from(succeeded)))
@@ -1439,7 +1437,9 @@ pub(crate) fn remove_unused_texmap_entries(_args: &[Value]) -> Result<Value, Run
         // Queue even an empty preview. Earlier deferred terrain operations
         // can make entries newly used or unused before the authoritative
         // fold reaches this point.
-        context.world.preview_runtime_landscape_operation(&operation);
+        context
+            .world
+            .preview_runtime_landscape_operation(&operation);
         context.register_landscape_operation(operation);
         Ok(Value::Nil)
     })
@@ -1542,7 +1542,9 @@ pub(crate) fn shake_free(args: &[Value]) -> Result<Value, RuntimeError> {
             center: Vector2::new(x, y),
             radius,
         };
-        context.world.preview_runtime_landscape_operation(&operation);
+        context
+            .world
+            .preview_runtime_landscape_operation(&operation);
         context.register_landscape_operation(operation);
         Ok(Value::Nil)
     })
@@ -1632,19 +1634,13 @@ pub(crate) fn set_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-fn apply_sky_color_modulation(
-    function: &str,
-    target: RgbColor,
-) -> Result<Value, RuntimeError> {
+fn apply_sky_color_modulation(function: &str, target: RgbColor) -> Result<Value, RuntimeError> {
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
-        let context = borrow
-            .as_mut()
-            .ok_or_else(|| {
-                RuntimeError::new(format!("{function} requires an active engine context"))
-            })?;
-        let adjustment =
-            SkyAdjustment::from_color_modulation(context.world.sky_fade[0], target);
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new(format!("{function} requires an active engine context"))
+        })?;
+        let adjustment = SkyAdjustment::from_color_modulation(context.world.sky_fade[0], target);
         context.sky_adjustment = adjustment;
         context.register_landscape_operation(LandscapeOperation::SkyAdjust {
             modulation: adjustment.modulation,
@@ -1689,23 +1685,11 @@ pub(crate) fn set_sky_fade(args: &[Value]) -> Result<Value, RuntimeError> {
 /// OldGfx RGB color onto FadeClr1 via GetClrModulation; other indices are
 /// silent no-ops.
 pub(crate) fn set_sky_color(args: &[Value]) -> Result<Value, RuntimeError> {
-    let index = value_to_i32(
-        args.first().unwrap_or(&Value::Nil),
-        "SetSkyColor",
-        "index",
-    )?;
+    let index = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetSkyColor", "index")?;
     let target = RgbColor::new(
         value_to_i32(args.get(1).unwrap_or(&Value::Nil), "SetSkyColor", "red")? as u8,
-        value_to_i32(
-            args.get(2).unwrap_or(&Value::Nil),
-            "SetSkyColor",
-            "green",
-        )? as u8,
-        value_to_i32(
-            args.get(3).unwrap_or(&Value::Nil),
-            "SetSkyColor",
-            "blue",
-        )? as u8,
+        value_to_i32(args.get(2).unwrap_or(&Value::Nil), "SetSkyColor", "green")? as u8,
+        value_to_i32(args.get(3).unwrap_or(&Value::Nil), "SetSkyColor", "blue")? as u8,
     );
     if index != 0 {
         return Ok(Value::Nil);
@@ -1737,16 +1721,8 @@ pub(crate) fn get_sky_adjust(args: &[Value]) -> Result<Value, RuntimeError> {
 /// inverted-alpha `/ 256` blend returns each nonzero FadeClr2 channel minus
 /// one; FadeClr1 contributes nothing.
 pub(crate) fn get_sky_color(args: &[Value]) -> Result<Value, RuntimeError> {
-    let index = value_to_i32(
-        args.first().unwrap_or(&Value::Nil),
-        "GetSkyColor",
-        "index",
-    )?;
-    let channel = value_to_i32(
-        args.get(1).unwrap_or(&Value::Nil),
-        "GetSkyColor",
-        "channel",
-    )?;
+    let index = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetSkyColor", "index")?;
+    let channel = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "GetSkyColor", "channel")?;
     if index != 0 || !(0..=2).contains(&channel) {
         return Ok(Value::Int(0));
     }
@@ -2117,9 +2093,7 @@ fn call_runtime_map_script_algo(
     *random_context.rng.borrow_mut() = rng.clone();
     let args = args.map(Value::Int);
     let result = scenario_script
-        .and_then(|script| {
-            call_scoped_scenario_function(Arc::clone(script), function, &args)
-        })
+        .and_then(|script| call_scoped_scenario_function(Arc::clone(script), function, &args))
         .and_then(Result::ok)
         .is_some_and(|value| value.as_bool());
     *rng = random_context.rng.borrow().clone();
@@ -2255,7 +2229,9 @@ pub(crate) fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(bitmap) = rendered else {
             if texmap != texmap_before {
                 let operation = LandscapeOperation::SyncRuntimeTexMap { texmap };
-                context.world.preview_runtime_landscape_operation(&operation);
+                context
+                    .world
+                    .preview_runtime_landscape_operation(&operation);
                 context.register_landscape_operation(operation);
             }
             return Ok(Value::Int(0));

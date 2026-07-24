@@ -1439,13 +1439,11 @@ impl RawPacket {
             let save_player_files = parse_bool_field_or(&self.fields, "SavePlrs", false)?;
             let sync_clearance = parse_bool_field_or(&self.fields, "SyncClear", false)?;
             let by_client = parse_int_field_or(&self.fields, "ByClient", -1)?;
-            return Ok(Some(ControlPacket::Synchronize(
-                SynchronizeControlData {
-                    save_player_files,
-                    sync_clearance,
-                    by_client,
-                },
-            )));
+            return Ok(Some(ControlPacket::Synchronize(SynchronizeControlData {
+                save_player_files,
+                sync_clearance,
+                by_client,
+            })));
         }
 
         const CID_JOIN_PLR: u8 = 0x91; // CID_First|0x11 (C4PacketBase.h:160)
@@ -1560,11 +1558,13 @@ impl RawPacket {
         }
 
         if id == CID_SET_PLAYER_TEAM {
-            return Ok(Some(ControlPacket::SetPlayerTeam(SetPlayerTeamControlData {
-                team: parse_int_field_or(&self.fields, "Team", 0)?,
-                player: parse_int_field_or(&self.fields, "Plr", -1)?,
-                by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
-            })));
+            return Ok(Some(ControlPacket::SetPlayerTeam(
+                SetPlayerTeamControlData {
+                    team: parse_int_field_or(&self.fields, "Team", 0)?,
+                    player: parse_int_field_or(&self.fields, "Plr", -1)?,
+                    by_client: parse_int_field_or(&self.fields, "ByClient", -1)?,
+                },
+            )));
         }
 
         if id == CID_ELIMINATE_PLAYER {
@@ -1717,9 +1717,7 @@ impl RawPacket {
             // RCT_ID stops at the first byte outside its identifier alphabet.
             let raw_id = raw_id
                 .into_iter()
-                .take_while(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-')
-                })
+                .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-'))
                 .take(4)
                 .collect::<Vec<_>>();
             let mut id = *b"NONE";
@@ -1795,12 +1793,14 @@ impl RawPacket {
             };
             let int = |name: &str, default: i32| match field(name) {
                 None => Ok(default),
-                Some(value) => value.parse::<i32>().map_err(|_| {
-                    ControlParseError::InvalidIntegerField {
-                        field: name.to_string(),
-                        value: value.to_string(),
-                    }
-                }),
+                Some(value) => {
+                    value
+                        .parse::<i32>()
+                        .map_err(|_| ControlParseError::InvalidIntegerField {
+                            field: name.to_string(),
+                            value: value.to_string(),
+                        })
+                }
             };
             let filename = normalize_network_filename(field("Filename").unwrap_or_default());
             let at_client = int("AtClient", -1)?;
@@ -1815,11 +1815,7 @@ impl RawPacket {
                     .ok_or(ControlParseError::MissingJoinPlayerResource)?;
                 JoinPlayerSource::Resource(parse_network_resource_core(fields)?)
             } else {
-                JoinPlayerSource::Embedded(
-                    field("PlrData")
-                        .map(|value| parse_std_buf(value))
-                        .unwrap_or_default(),
-                )
+                JoinPlayerSource::Embedded(field("PlrData").map(parse_std_buf).unwrap_or_default())
             };
             let filename = LegacyCString::from_bytes(legacy_string_bytes(&filename)).ok_or(
                 ControlParseError::InteriorNulString {
@@ -1916,10 +1912,13 @@ impl RawPacket {
                     let parsed = raw
                         .strip_prefix("0x")
                         .or_else(|| raw.strip_prefix("0X"))
-                        .map_or_else(|| raw.parse::<i128>(), |hex| {
-                            u128::from_str_radix(hex, 16)
-                                .map(|value| value.min(i128::MAX as u128) as i128)
-                        });
+                        .map_or_else(
+                            || raw.parse::<i128>(),
+                            |hex| {
+                                u128::from_str_radix(hex, 16)
+                                    .map(|value| value.min(i128::MAX as u128) as i128)
+                            },
+                        );
                     parsed
                         .map(|value| {
                             if value < 0 {
@@ -3206,12 +3205,13 @@ pub fn parse_replay_player_infos_ini(
                 client.body.push((key, value));
             }
         } else if key.eq_ignore_ascii_case("LastPlayerID") {
-            last_player_id = value
-                .parse::<i32>()
-                .map_err(|_| ControlParseError::InvalidIntegerField {
-                    field: "LastPlayerID".to_string(),
-                    value,
-                })?;
+            last_player_id =
+                value
+                    .parse::<i32>()
+                    .map_err(|_| ControlParseError::InvalidIntegerField {
+                        field: "LastPlayerID".to_string(),
+                        value,
+                    })?;
         }
     }
 
@@ -3325,11 +3325,9 @@ fn parse_u8_field_or(
 ) -> Result<u8, ControlParseError> {
     match fields.get(name) {
         None => Ok(default),
-        Some(raw) => parse_cpp_ini_u8(raw).ok_or_else(|| {
-            ControlParseError::InvalidIntegerField {
-                field: name.to_string(),
-                value: raw.clone(),
-            }
+        Some(raw) => parse_cpp_ini_u8(raw).ok_or_else(|| ControlParseError::InvalidIntegerField {
+            field: name.to_string(),
+            value: raw.clone(),
         }),
     }
 }
@@ -3352,9 +3350,13 @@ fn parse_cpp_ini_u8(raw: &str) -> Option<u8> {
         (10, unsigned)
     };
     if digits.is_empty()
-        || !digits
-            .bytes()
-            .all(|byte| if radix == 16 { byte.is_ascii_hexdigit() } else { byte.is_ascii_digit() })
+        || !digits.bytes().all(|byte| {
+            if radix == 16 {
+                byte.is_ascii_hexdigit()
+            } else {
+                byte.is_ascii_digit()
+            }
+        })
     {
         return None;
     }
@@ -3413,21 +3415,21 @@ fn parse_network_resource_core(
     };
     let int = |name: &str, default: i32| match field(name) {
         None => Ok(default),
-        Some(value) => value.parse::<i32>().map_err(|_| {
-            ControlParseError::InvalidIntegerField {
+        Some(value) => value
+            .parse::<i32>()
+            .map_err(|_| ControlParseError::InvalidIntegerField {
                 field: format!("ResCore.{name}"),
                 value: value.to_string(),
-            }
-        }),
+            }),
     };
     let uint = |name: &str, default: u32| match field(name) {
         None => Ok(default),
-        Some(value) => value.parse::<u32>().map_err(|_| {
-            ControlParseError::InvalidIntegerField {
+        Some(value) => value
+            .parse::<u32>()
+            .map_err(|_| ControlParseError::InvalidIntegerField {
                 field: format!("ResCore.{name}"),
                 value: value.to_string(),
-            }
-        }),
+            }),
     };
     let string = |name: &str| {
         let value = normalize_network_filename(field(name).unwrap_or_default());
@@ -3446,11 +3448,11 @@ fn parse_network_resource_core(
         Some(value) if value.eq_ignore_ascii_case("Definitions") => 4,
         Some(value) if value.eq_ignore_ascii_case("System") => 5,
         Some(value) if value.eq_ignore_ascii_case("Material") => 6,
-        Some(value) => value.parse::<u8>().map_err(|_| {
-            ControlParseError::InvalidResourceType {
+        Some(value) => value
+            .parse::<u8>()
+            .map_err(|_| ControlParseError::InvalidResourceType {
                 value: value.to_string(),
-            }
-        })?,
+            })?,
     };
     let loadable = match field("Loadable") {
         None => true,
@@ -3470,8 +3472,10 @@ fn parse_network_resource_core(
             let mut digest = [0u8; 20];
             for (index, byte) in digest.iter_mut().enumerate() {
                 let offset = index * 2;
-                let pair = std::str::from_utf8(&value.as_bytes()[offset..offset + 2])
-                    .ok()
+                let pair = value
+                    .as_bytes()
+                    .get(offset..offset + 2)
+                    .and_then(|pair| std::str::from_utf8(pair).ok())
                     .and_then(|pair| u8::from_str_radix(pair, 16).ok())
                     .ok_or_else(|| ControlParseError::InvalidSha1Field {
                         field: "ResCore.FileSHA".to_string(),
@@ -3494,8 +3498,16 @@ fn parse_network_resource_core(
         id: int("ID", -1)?,
         derived_id: int("DerID", -1)?,
         loadable,
-        file_size: if loadable { uint("FileSize", 0)? } else { u32::MAX },
-        file_crc: if loadable { uint("FileCRC", 0)? } else { u32::MAX },
+        file_size: if loadable {
+            uint("FileSize", 0)?
+        } else {
+            u32::MAX
+        },
+        file_crc: if loadable {
+            uint("FileCRC", 0)?
+        } else {
+            u32::MAX
+        },
         chunk_size,
         contents_crc: uint("ContentsCRC", 0)?,
         file_sha,
@@ -4406,8 +4418,7 @@ ID=\"HUT2\"\n";
 
     #[test]
     fn parsed_legacy_strings_preserve_high_octal_bytes() {
-        let input =
-            "[Control]\n[IDPacket]\nID=136\n[Script]\nScript=\"\\200\\377\\a\\v\"\n";
+        let input = "[Control]\n[IDPacket]\nID=136\n[Script]\nScript=\"\\200\\377\\a\\v\"\n";
         let packets = parse_control_ini(input).expect("parse legacy script bytes");
         let ControlPacket::Script(script) = &packets[0] else {
             panic!("expected Script, got {:?}", packets[0]);
@@ -4582,13 +4593,9 @@ ID=\"HUT2\"\n";
                     player: -4,
                     by_client: 7,
                 }),
-                ControlPacket::ActivateGameGoalMenu(
-                    ActivateGameGoalMenuControlData::default(),
-                ),
+                ControlPacket::ActivateGameGoalMenu(ActivateGameGoalMenuControlData::default(),),
                 ControlPacket::ToggleHostility(ToggleHostilityControlData::default()),
-                ControlPacket::ActivateGameGoalRule(
-                    ActivateGameGoalRuleControlData::default(),
-                ),
+                ControlPacket::ActivateGameGoalRule(ActivateGameGoalRuleControlData::default(),),
                 ControlPacket::SetPlayerTeam(SetPlayerTeamControlData::default()),
                 ControlPacket::EliminatePlayer(EliminatePlayerControlData::default()),
             ]
@@ -4811,8 +4818,8 @@ ID=\"HUT2\"\n";
         assert_eq!(
             core.file_sha,
             Some([
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
-                0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x10, 0x20, 0x30, 0x40,
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff, 0x10, 0x20, 0x30, 0x40,
             ])
         );
         assert_eq!(core.filename.to_str(), Ok("Players/Tyler.c4p"));
@@ -4977,7 +4984,10 @@ ID=\"HUT2\"\n";
         let resource = player.resource.as_ref().expect("resource core retained");
         assert_eq!((resource.resource_type, resource.id), (3, 23));
         assert_eq!((resource.file_size, resource.file_crc), (1234, 305419896));
-        assert_eq!((resource.chunk_size, resource.contents_crc), (1024, 2596069104));
+        assert_eq!(
+            (resource.chunk_size, resource.contents_crc),
+            (1024, 2596069104)
+        );
         assert_eq!(resource.filename.to_str(), Ok("Players/Bot.c4p"));
         assert_eq!(resource.author.to_str(), Ok("Host/Bot"));
     }

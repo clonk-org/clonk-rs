@@ -184,7 +184,8 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     )?;
     player.double_tap(COM_DIG)?;
     player.wait_until("CNKT opens its ELEV construction menu", 30, |engine| {
-        object_menu_identification(engine, owner) == Some(clonk_script::Value::C4Id("CXCN".to_owned()))
+        object_menu_identification(engine, owner)
+            == Some(clonk_script::Value::C4Id("CXCN".to_owned()))
     })?;
     let elevator_index = player
         .engine()
@@ -621,9 +622,9 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         "the rescuer reaches the dry cavern wall",
         180,
         |engine| {
-            engine.object_snapshot(builder).is_some_and(|object| {
-                object.position.x >= 380
-            })
+            engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.position.x >= 380)
         },
     )?;
     player.hold_until(
@@ -708,9 +709,7 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         |engine| {
             engine
                 .object_snapshot(first_clonk)
-                .is_some_and(|object| {
-                    object.action.name == "Walk" && object.position.x >= 200
-                })
+                .is_some_and(|object| object.action.name == "Walk" && object.position.x >= 200)
         },
     );
     player.release(COM_UP)?;
@@ -759,9 +758,7 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         |engine| {
             engine
                 .object_snapshot(first_clonk)
-                .is_some_and(|object| {
-                    object.position.x >= 280 && object.action.name == "Scale"
-                })
+                .is_some_and(|object| object.position.x >= 280 && object.action.name == "Scale")
         },
     )?;
     player.hold_until(
@@ -815,11 +812,15 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         .is_some_and(|object| object.action.name == "Scale")
     {
         player.tap(COM_RIGHT)?;
-        player.wait_until("the builder releases the eastern cavern wall", 80, |engine| {
-            engine
-                .object_snapshot(builder)
-                .is_some_and(|object| object.action.name != "Scale")
-        })?;
+        player.wait_until(
+            "the builder releases the eastern cavern wall",
+            80,
+            |engine| {
+                engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name != "Scale")
+            },
+        )?;
     }
     player.hold_until(
         COM_LEFT,
@@ -836,9 +837,9 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         "the builder descends beside the drain",
         180,
         |engine| {
-            engine.object_snapshot(builder).is_some_and(|object| {
-                object.action.name == "Walk" || object.action.name == "Swim"
-            })
+            engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.action.name == "Walk" || object.action.name == "Swim")
         },
     )?;
     player.hold_until(COM_LEFT, "the builder re-enters the drain", 100, |engine| {
@@ -867,12 +868,17 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         },
     )?;
     if !clonk_carries(player.engine(), builder, "CRYS") {
-        player.hold_until(COM_DOWN, "the builder descends to the dropped CRYS", 120, |engine| {
-            clonk_carries(engine, builder, "CRYS")
-                || engine
-                    .object_snapshot(builder)
-                    .is_some_and(|object| object.position.y >= 328)
-        })?;
+        player.hold_until(
+            COM_DOWN,
+            "the builder descends to the dropped CRYS",
+            120,
+            |engine| {
+                clonk_carries(engine, builder, "CRYS")
+                    || engine
+                        .object_snapshot(builder)
+                        .is_some_and(|object| object.position.y >= 328)
+            },
+        )?;
         let crystal_x = player
             .engine()
             .object_snapshot(crystal)

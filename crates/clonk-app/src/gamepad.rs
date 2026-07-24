@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use clonk_engine::ControlButton;
 use gilrs::ev::Code;
 use gilrs::{Axis, Button, Event, EventType, GamepadId, Gilrs, GilrsBuilder};
-use clonk_engine::ControlButton;
 use winit::event::ElementState;
 
 use crate::input::{GamepadAxisCalibration, GamepadAxisCalibrations};
@@ -84,7 +84,7 @@ impl LegacyGamepadAxis {
     }
 
     pub(crate) const fn direction(self) -> ControlButton {
-        match (self.index % 2 == 0, self.high) {
+        match (self.index.is_multiple_of(2), self.high) {
             (true, false) => ControlButton::Left,
             (true, true) => ControlButton::Right,
             (false, false) => ControlButton::Up,
@@ -284,10 +284,7 @@ impl GamepadManager {
         }
         let pressed = state == ElementState::Pressed;
         match button {
-            Button::DPadLeft
-            | Button::DPadRight
-            | Button::DPadUp
-            | Button::DPadDown => {
+            Button::DPadLeft | Button::DPadRight | Button::DPadUp | Button::DPadDown => {
                 self.handle_dpad_button_for_slot(slot, button, pressed, output);
             }
             Button::South => {
@@ -1026,11 +1023,14 @@ mod tests {
         manager.handle_axis_for_slot(slot, Axis::LeftStickX, -1.0, &mut output);
         assert!(matches!(
             output.as_slice(),
-            [GamepadEvent::Axis { .. }, GamepadEvent::Direction {
-                button: ControlButton::Left,
-                state: ElementState::Pressed,
-                ..
-            }]
+            [
+                GamepadEvent::Axis { .. },
+                GamepadEvent::Direction {
+                    button: ControlButton::Left,
+                    state: ElementState::Pressed,
+                    ..
+                }
+            ]
         ));
 
         output.clear();
@@ -1045,11 +1045,14 @@ mod tests {
         manager.handle_button_for_slot(slot, Button::DPadLeft, ElementState::Released, &mut output);
         assert!(matches!(
             output.as_slice(),
-            [GamepadEvent::Axis { .. }, GamepadEvent::Direction {
-                button: ControlButton::Left,
-                state: ElementState::Released,
-                ..
-            }]
+            [
+                GamepadEvent::Axis { .. },
+                GamepadEvent::Direction {
+                    button: ControlButton::Left,
+                    state: ElementState::Released,
+                    ..
+                }
+            ]
         ));
     }
 

@@ -156,7 +156,7 @@ fn process_row_bands(
     worker_count: Option<usize>,
     process: impl Fn(usize, &mut [u8]) + Sync,
 ) {
-    debug_assert!(row_stride != 0 && rows.len() % row_stride == 0);
+    debug_assert!(row_stride != 0 && rows.len().is_multiple_of(row_stride));
     let row_count = rows.len() / row_stride;
     if row_count == 0 {
         return;
@@ -170,7 +170,7 @@ fn process_row_bands(
         return;
     }
 
-    let rows_per_band = (row_count + worker_count - 1) / worker_count;
+    let rows_per_band = row_count.div_ceil(worker_count);
     let bytes_per_band = rows_per_band * row_stride;
     rows.par_chunks_mut(bytes_per_band)
         .enumerate()

@@ -1,6 +1,8 @@
 //! Adapters from neutral engine scenario metadata to synchronized network data.
 
-use clonk_engine::{InitialNetworkScenarioMetadata, InitialNetworkTeamMetadata, ScenarioIdListEntry};
+use clonk_engine::{
+    InitialNetworkScenarioMetadata, InitialNetworkTeamMetadata, ScenarioIdListEntry,
+};
 use thiserror::Error;
 
 use crate::{

@@ -1,15 +1,16 @@
 use crate::control::PLAYER_INFO_FLAG_JOIN_ISSUED;
 use crate::{
-    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
-    CLIENT_PLAYER_INFO_FLAG_UPDATED, ControlPlayerInfoEntry, PlayerInfoControlData,
-};
-use crate::{
-    InitialNetworkTeam, InitialNetworkTeamDistribution, InitialNetworkTeamMetadata,
-    JoinPlayerConfig, JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore,
+    player_file::PlayerFile, InitialNetworkTeam, InitialNetworkTeamDistribution,
+    InitialNetworkTeamMetadata, JoinPlayerConfig, JoinPlayerControlData, JoinPlayerSource,
+    LegacyCString, NetworkResourceCore, PlayerInfoUpdateRequest, ScenarioError,
     PLAYER_INFO_FLAG_ATTRIBUTES_FIXED, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
     PLAYER_INFO_FLAG_NO_SCENARIO_INIT, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_FLAG_SAVEGAME_JOIN,
-    PLAYER_INFO_TYPE_USER, PlayerInfoUpdateRequest, ScenarioError, player_file::PlayerFile,
+    PLAYER_INFO_TYPE_USER,
+};
+use crate::{
+    ControlPlayerInfoEntry, PlayerInfoControlData, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+    CLIENT_PLAYER_INFO_FLAG_INITIAL, CLIENT_PLAYER_INFO_FLAG_UPDATED,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -484,8 +485,8 @@ impl ControlClientRegistry {
             return None;
         }
         if running {
-            let lag_frames = (i64::from(ping_ms) * i64::from(frames_per_second) / 500)
-                .clamp(0, 100);
+            let lag_frames =
+                (i64::from(ping_ms) * i64::from(frames_per_second) / 500).clamp(0, 100);
             let oldest_tick = i64::from(host_frame) - lag_frames - 20;
             if i64::from(request_tick) < oldest_tick {
                 return None;
@@ -801,8 +802,7 @@ impl ControlPlayerInfoRegistry {
                 );
             }
             if original_marks.original
-                || (shifted_players.len() > 1
-                    && original_marks.low_priority_original.is_some())
+                || (shifted_players.len() > 1 && original_marks.low_priority_original.is_some())
             {
                 return Err(TeamColorUpdateError::ConflictResolutionUnavailable {
                     player_id: shifted.id,
@@ -811,12 +811,12 @@ impl ControlPlayerInfoRegistry {
             }
 
             if include_possible_team_colors {
-                if let Some(team_color_blocker) = teams
-                    .filter(|teams| teams.team_colors)
-                    .and_then(|teams| {
-                        teams.teams.iter().find(|team| {
-                            player_colors_conflict(shifted.original_color, team.color)
-                        })
+                if let Some(team_color_blocker) =
+                    teams.filter(|teams| teams.team_colors).and_then(|teams| {
+                        teams
+                            .teams
+                            .iter()
+                            .find(|team| player_colors_conflict(shifted.original_color, team.color))
                     })
                 {
                     return Err(TeamColorUpdateError::ConflictResolutionUnavailable {
@@ -831,12 +831,13 @@ impl ControlPlayerInfoRegistry {
             }
         }
         for (shifted_offset, (_, shifted)) in shifted_players.iter().enumerate() {
-            if let Some((_, other)) = shifted_players
-                .iter()
-                .skip(shifted_offset + 1)
-                .find(|(_, other)| {
-                    player_colors_conflict(shifted.original_color, other.original_color)
-                })
+            if let Some((_, other)) =
+                shifted_players
+                    .iter()
+                    .skip(shifted_offset + 1)
+                    .find(|(_, other)| {
+                        player_colors_conflict(shifted.original_color, other.original_color)
+                    })
             {
                 return Err(TeamColorUpdateError::ConflictResolutionUnavailable {
                     player_id: shifted.id,
@@ -845,49 +846,52 @@ impl ControlPlayerInfoRegistry {
             }
         }
 
-        let randomization_conflict = players.iter().enumerate().find_map(
-            |(player_index, &player)| {
-                if shifted_indices.contains(&player_index)
-                    || !Self::player_color_is_resolver_mutable(player, teams)
-                {
-                    return None;
-                }
-                players
-                    .iter()
-                    .enumerate()
-                    .find(|(other_index, other)| {
-                        *other_index != player_index
-                            && (!shifted_indices.contains(other_index)
-                                || processing_rank[*other_index]
-                                    >= processing_rank[player_index])
-                            && (player.id == 0 || player.id != other.id)
-                            && player_info_uses_color(other)
-                            && player_colors_conflict(player.color, other.color)
-                    })
-                    .map(|(_, other)| other.id)
-                    .or_else(|| {
-                        restore_players
-                            .iter()
-                            .find(|other| {
-                                (player.id == 0 || player.id != other.id)
-                                    && player_info_uses_color(other)
-                                    && player_colors_conflict(player.color, other.color)
-                            })
-                            .map(|other| other.id)
-                    })
-                    .or_else(|| {
-                        include_possible_team_colors.then(|| teams)
-                            .flatten()
-                            .filter(|teams| teams.team_colors)
-                            .and_then(|teams| {
-                                teams.teams.iter().find(|team| {
-                                    player_colors_conflict(player.color, team.color)
+        let randomization_conflict =
+            players
+                .iter()
+                .enumerate()
+                .find_map(|(player_index, &player)| {
+                    if shifted_indices.contains(&player_index)
+                        || !Self::player_color_is_resolver_mutable(player, teams)
+                    {
+                        return None;
+                    }
+                    players
+                        .iter()
+                        .enumerate()
+                        .find(|(other_index, other)| {
+                            *other_index != player_index
+                                && (!shifted_indices.contains(other_index)
+                                    || processing_rank[*other_index]
+                                        >= processing_rank[player_index])
+                                && (player.id == 0 || player.id != other.id)
+                                && player_info_uses_color(other)
+                                && player_colors_conflict(player.color, other.color)
+                        })
+                        .map(|(_, other)| other.id)
+                        .or_else(|| {
+                            restore_players
+                                .iter()
+                                .find(|other| {
+                                    (player.id == 0 || player.id != other.id)
+                                        && player_info_uses_color(other)
+                                        && player_colors_conflict(player.color, other.color)
                                 })
-                            })
-                            .map(|team| team.player_ids.first().copied().unwrap_or(0))
-                    })
-            },
-        );
+                                .map(|other| other.id)
+                        })
+                        .or_else(|| {
+                            include_possible_team_colors
+                                .then_some(teams)
+                                .flatten()
+                                .filter(|teams| teams.team_colors)
+                                .and_then(|teams| {
+                                    teams.teams.iter().find(|team| {
+                                        player_colors_conflict(player.color, team.color)
+                                    })
+                                })
+                                .map(|team| team.player_ids.first().copied().unwrap_or(0))
+                        })
+                });
         if let Some(other_player_id) = randomization_conflict {
             return Err(TeamColorUpdateError::ConflictResolutionUnavailable {
                 player_id: shifted_players[0].1.id,
@@ -1229,12 +1233,9 @@ impl ControlPlayerInfoRegistry {
         } else {
             teams.teams.len()
         };
-        loop {
-            let Some(lowest_team) =
-                initial_random_smallest_team(&teams.teams, true, teams.random_team_count, oracle)
-            else {
-                break;
-            };
+        while let Some(lowest_team) =
+            initial_random_smallest_team(&teams.teams, true, teams.random_team_count, oracle)
+        {
             let mut largest_team: Option<usize> = None;
             for index in 0..team_count.min(teams.teams.len()) {
                 let is_larger = largest_team.is_none_or(|largest_index| {
@@ -1257,8 +1258,7 @@ impl ControlPlayerInfoRegistry {
             {
                 break;
             }
-            let Some(player_id) =
-                self.first_unissued_team_player(&teams.teams[largest_team])
+            let Some(player_id) = self.first_unissued_team_player(&teams.teams[largest_team])
             else {
                 break;
             };
@@ -1980,8 +1980,8 @@ impl ControlPlayerInfoRegistry {
                 let restore_color = (player.savegame_player != 0)
                     .then(|| {
                         restore_players
-                        .iter()
-                        .find(|restore| restore.id == player.savegame_player)
+                            .iter()
+                            .find(|restore| restore.id == player.savegame_player)
                             .map(|restore| restore.color)
                     })
                     .flatten();
@@ -1989,14 +1989,15 @@ impl ControlPlayerInfoRegistry {
                 // simply leaves the restore force unset and then tries the
                 // ordinary enabled team-color force.
                 let forced_color = restore_color.or_else(|| {
-                    enabled.then(|| {
-                        teams
-                            .teams
-                            .iter()
-                            .find(|team| team.id == player.team)
-                            .map(|team| team.color)
-                    })
-                    .flatten()
+                    enabled
+                        .then(|| {
+                            teams
+                                .teams
+                                .iter()
+                                .find(|team| team.id == player.team)
+                                .map(|team| team.color)
+                        })
+                        .flatten()
                 });
                 if let Some(color) = forced_color {
                     player.color = color;
@@ -2246,12 +2247,9 @@ impl ControlPlayerInfoRegistry {
                         && player.resource.as_ref().is_some_and(|resource| {
                             existing.players.iter().any(|existing_player| {
                                 existing_player.flags & PLAYER_INFO_FLAG_REMOVED == 0
-                                    && existing_player
-                                        .resource
-                                        .as_ref()
-                                        .is_some_and(|existing_resource| {
-                                            existing_resource.id == resource.id
-                                        })
+                                    && existing_player.resource.as_ref().is_some_and(
+                                        |existing_resource| existing_resource.id == resource.id,
+                                    )
                             })
                         });
                     if is_duplicate {
@@ -2283,9 +2281,7 @@ impl ControlPlayerInfoRegistry {
             joins_granted += 1;
             true
         });
-        if request.players.is_empty()
-            && request.flags & CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS != 0
-        {
+        if request.players.is_empty() && request.flags & CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS != 0 {
             return None;
         }
         assign_players(&mut request.players);
@@ -2445,11 +2441,7 @@ impl ControlPlayerInfoRegistry {
                 self.pending_reserved_join_ids
                     .remove(&player.id)
                     .then(|| {
-                        Self::join_player_from_snapshot(
-                            client_id,
-                            player,
-                            &mut path_for_resource,
-                        )
+                        Self::join_player_from_snapshot(client_id, player, &mut path_for_resource)
                     })
                     .flatten()
             })
@@ -2592,8 +2584,7 @@ impl ControlPlayerInfoRegistry {
             .map(|client| PlayerInfoControlData {
                 client_id,
                 flags: client.flags
-                    & !(CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
-                        | CLIENT_PLAYER_INFO_FLAG_UPDATED),
+                    & !(CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS | CLIENT_PLAYER_INFO_FLAG_UPDATED),
                 players: client.players.clone(),
                 by_client: 0,
             })
@@ -3233,7 +3224,9 @@ mod tests {
     impl InitialHostTeamAssignmentOracle for GeneratingTeamAssignmentOracle {
         fn safe_random(&mut self, range: i32) -> i32 {
             self.ranges.push(range);
-            self.outcomes.pop_front().expect("recorded SafeRandom result")
+            self.outcomes
+                .pop_front()
+                .expect("recorded SafeRandom result")
         }
 
         fn generate_team(
@@ -3364,12 +3357,10 @@ mod tests {
 
         assert_eq!(free_players[0].team, 0);
         assert_eq!(free_players[0].color, 0x0011_1111);
-        assert!(
-            free_teams
-                .teams
-                .iter()
-                .all(|team| team.player_ids.is_empty())
-        );
+        assert!(free_teams
+            .teams
+            .iter()
+            .all(|team| team.player_ids.is_empty()));
         assert!(free_oracle.ranges.is_empty());
 
         let mut random_teams = initial_teams;
@@ -3999,19 +3990,17 @@ mod tests {
             ..Default::default()
         });
 
-        let updates = registry.apply_league_projected_gains([
-            (20, 8),
-            (999, 44),
-            (10, 3),
-            (11, 5),
-            (11, 99),
-        ]);
+        let updates =
+            registry.apply_league_projected_gains([(20, 8), (999, 44), (10, 3), (11, 5), (11, 99)]);
 
         assert_eq!(registry.get(10).unwrap().league_projected_gain, 3);
         assert_eq!(registry.get(11).unwrap().league_projected_gain, 5);
         assert_eq!(registry.get(20).unwrap().league_projected_gain, 8);
         assert_eq!(
-            updates.iter().map(|packet| packet.client_id).collect::<Vec<_>>(),
+            updates
+                .iter()
+                .map(|packet| packet.client_id)
+                .collect::<Vec<_>>(),
             vec![4, 7]
         );
         assert!(updates
@@ -4049,7 +4038,10 @@ mod tests {
         assert_eq!(registry.get(20).unwrap().league_projected_gain, -1);
         assert_eq!(registry.get(21).unwrap().league_projected_gain, -1);
         assert_eq!(
-            updates.iter().map(|packet| packet.client_id).collect::<Vec<_>>(),
+            updates
+                .iter()
+                .map(|packet| packet.client_id)
+                .collect::<Vec<_>>(),
             vec![7]
         );
         assert_eq!(updates[0].flags & CLIENT_PLAYER_INFO_FLAG_UPDATED, 0);
@@ -4131,9 +4123,10 @@ mod tests {
 
         assert_eq!(registry.recreation_players(), vec![(3, 7), (4, 10)]);
         assert_eq!(registry.recreation_info_ids(), vec![7, 10]);
-        assert_eq!(registry.get(8).map(|info| info.flags), Some(
-            PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_REMOVED
-        ));
+        assert_eq!(
+            registry.get(8).map(|info| info.flags),
+            Some(PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_REMOVED)
+        );
     }
 
     #[test]
@@ -4614,10 +4607,7 @@ mod tests {
                 PlayerInfoUpdateRequest {
                     client_id: 3,
                     flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
-                    players: vec![
-                        resource_player(0, 64, 0),
-                        resource_player(0, 64, 0),
-                    ],
+                    players: vec![resource_player(0, 64, 0), resource_player(0, 64, 0)],
                 },
                 8,
             )
@@ -4678,7 +4668,10 @@ mod tests {
             admission.admitted.flags & CLIENT_PLAYER_INFO_FLAG_UPDATED,
             0
         );
-        assert!(registry.get(2).is_none(), "the direct control applies it later");
+        assert!(
+            registry.get(2).is_none(),
+            "the direct control applies it later"
+        );
         assert!(oracle.ranges.is_empty());
     }
 
@@ -4744,18 +4737,18 @@ mod tests {
                 .as_bytes(),
             b"Same (2)"
         );
-        assert_eq!(admission.updated_existing[0].flags, CLIENT_PLAYER_INFO_FLAG_INITIAL);
         assert_eq!(
-            admission.admitted.players[0].forced_name.as_bytes(),
-            b""
+            admission.updated_existing[0].flags,
+            CLIENT_PLAYER_INFO_FLAG_INITIAL
         );
+        assert_eq!(admission.admitted.players[0].forced_name.as_bytes(), b"");
         assert!(oracle.ranges.is_empty());
     }
 
     #[test]
     fn readded_packet_keeps_updated_marker_after_returning_to_initial_bytes() {
-        let named = |id, player_type, name: &[u8], forced_name: &[u8], color| {
-            ControlPlayerInfoEntry {
+        let named =
+            |id, player_type, name: &[u8], forced_name: &[u8], color| ControlPlayerInfoEntry {
                 id,
                 player_type,
                 name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
@@ -4763,8 +4756,7 @@ mod tests {
                 color,
                 original_color: color,
                 ..Default::default()
-            }
-        };
+            };
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.apply(PlayerInfoControlData {
             client_id: 10,
@@ -4793,13 +4785,7 @@ mod tests {
             outcomes: [].into(),
             ranges: Vec::new(),
         };
-        let mut fixed_incoming = named(
-            0,
-            PLAYER_INFO_TYPE_USER,
-            b"Same",
-            b"",
-            0x0000_00f4,
-        );
+        let mut fixed_incoming = named(0, PLAYER_INFO_TYPE_USER, b"Same", b"", 0x0000_00f4);
         fixed_incoming.flags |= PLAYER_INFO_FLAG_ATTRIBUTES_FIXED;
 
         let admission = registry
@@ -4839,8 +4825,8 @@ mod tests {
 
     #[test]
     fn retained_attribute_refresh_keeps_readded_packet_updates_in_registry_order() {
-        let named = |id, player_type, name: &[u8], forced_name: &[u8], color| {
-            ControlPlayerInfoEntry {
+        let named =
+            |id, player_type, name: &[u8], forced_name: &[u8], color| ControlPlayerInfoEntry {
                 id,
                 player_type,
                 name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
@@ -4848,8 +4834,7 @@ mod tests {
                 color,
                 original_color: color,
                 ..Default::default()
-            }
-        };
+            };
         let mut registry = ControlPlayerInfoRegistry::default();
         registry.apply(PlayerInfoControlData {
             client_id: 10,
@@ -4939,10 +4924,7 @@ mod tests {
 
         assert_eq!(oracle.ranges, vec![302, 302, 302]);
         assert_eq!(admission.admitted.players[0].color, 0x001e_140a);
-        assert_eq!(
-            admission.admitted.players[0].original_color,
-            0x00f4_0000
-        );
+        assert_eq!(admission.admitted.players[0].original_color, 0x00f4_0000);
         assert_ne!(
             admission.admitted.flags & CLIENT_PLAYER_INFO_FLAG_UPDATED,
             0
@@ -6311,11 +6293,7 @@ mod tests {
                 players: (1..=5)
                     .map(|id| ControlPlayerInfoEntry {
                         id,
-                        flags: if id == 1 {
-                            PLAYER_INFO_FLAG_JOINED
-                        } else {
-                            0
-                        },
+                        flags: if id == 1 { PLAYER_INFO_FLAG_JOINED } else { 0 },
                         team: if id == 5 { 2 } else { 1 },
                         color: if id == 5 {
                             team_two_color
@@ -6345,11 +6323,16 @@ mod tests {
             assert_eq!(updates[0].flags & CLIENT_PLAYER_INFO_FLAG_UPDATED, 0);
             assert_eq!(teams.teams[0].player_ids, vec![1, 3, 4]);
             assert_eq!(teams.teams[1].player_ids, vec![5, 2]);
-            assert_eq!(teams.teams[0].player_ids.len() - teams.teams[1].player_ids.len(), 1);
+            assert_eq!(
+                teams.teams[0].player_ids.len() - teams.teams[1].player_ids.len(),
+                1
+            );
             let joined = registry.get(1).expect("joined player remains registered");
             assert_eq!((joined.team, joined.color), (1, team_one_color));
             assert_ne!(joined.flags & PLAYER_INFO_FLAG_JOINED, 0);
-            let moved = registry.get(2).expect("first unjoined player remains registered");
+            let moved = registry
+                .get(2)
+                .expect("first unjoined player remains registered");
             assert_eq!((moved.team, moved.color), (2, team_two_color));
             assert_eq!(moved.original_color, original_color);
             assert_eq!(registry.get(3).expect("later unjoined player").team, 1);
@@ -6448,10 +6431,7 @@ mod tests {
                 .collect(),
             ..Default::default()
         });
-        let reserved = registry
-            .get(1)
-            .expect("reserved player exists")
-            .clone();
+        let reserved = registry.get(1).expect("reserved player exists").clone();
         registry.reserve_unjoined_player_snapshots(&[reserved]);
         let mut oracle = RecordingTeamAssignmentOracle {
             outcomes: [].into(),
@@ -6698,8 +6678,7 @@ mod tests {
                 (first.team, first.color, first.original_color),
                 (
                     if random_team_count > 1 { 3 } else { 2 },
-                    0x0010_0000 + u32::try_from(if random_team_count > 1 { 3 } else { 2 })
-                        .unwrap(),
+                    0x0010_0000 + u32::try_from(if random_team_count > 1 { 3 } else { 2 }).unwrap(),
                     0x0011_1111,
                 )
             );
@@ -7210,8 +7189,7 @@ mod tests {
             ..Default::default()
         });
 
-        let earlier_echo =
-            registry.issue_unjoined_player_snapshots(3, &earlier_players, |_| None);
+        let earlier_echo = registry.issue_unjoined_player_snapshots(3, &earlier_players, |_| None);
 
         assert_eq!(registry.client_info_ids(3), vec![8]);
         assert_eq!(
@@ -7221,11 +7199,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![7]
         );
-        assert!(
-            registry
-                .issue_unjoined_player_snapshots(3, &earlier_players, |_| None)
-                .is_empty()
-        );
+        assert!(registry
+            .issue_unjoined_player_snapshots(3, &earlier_players, |_| None)
+            .is_empty());
         assert_eq!(
             registry
                 .issue_unjoined_players(3, |_| None)
@@ -7271,11 +7247,9 @@ mod tests {
                 by_client: 0,
             }]
         );
-        assert!(
-            registry
-                .issue_reserved_player_snapshots(3, &players, |_| None)
-                .is_empty()
-        );
+        assert!(registry
+            .issue_reserved_player_snapshots(3, &players, |_| None)
+            .is_empty());
     }
 
     #[test]
@@ -7437,15 +7411,13 @@ mod tests {
 
     #[test]
     fn savegame_assignment_missing_rows_reset_prune_and_swap_in_attribute_admission() {
-        let candidate = |name: &[u8], savegame_player, flags, color| {
-            ControlPlayerInfoEntry {
-                name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
-                flags,
-                color,
-                original_color: color,
-                savegame_player,
-                ..Default::default()
-            }
+        let candidate = |name: &[u8], savegame_player, flags, color| ControlPlayerInfoEntry {
+            name: LegacyCString::from_bytes(name.to_vec()).unwrap(),
+            flags,
+            color,
+            original_color: color,
+            savegame_player,
+            ..Default::default()
         };
         let mut registry = ControlPlayerInfoRegistry::default();
         let mut oracle = RecordingTeamAssignmentOracle {
@@ -7460,12 +7432,7 @@ mod tests {
                     flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
                     players: vec![
                         candidate(b"Retained", 70, 0, 0x00f4_0000),
-                        candidate(
-                            b"Pruned",
-                            71,
-                            PLAYER_INFO_FLAG_SAVEGAME_JOIN,
-                            0x0000_c800,
-                        ),
+                        candidate(b"Pruned", 71, PLAYER_INFO_FLAG_SAVEGAME_JOIN, 0x0000_c800),
                         candidate(
                             b"Zero association",
                             0,
@@ -7492,13 +7459,11 @@ mod tests {
             vec![1, 3],
             "RemoveIndexedInfo swaps the already-visited last row into the hole"
         );
-        assert!(
-            admission
-                .admitted
-                .players
-                .iter()
-                .all(|player| player.savegame_player == 0)
-        );
+        assert!(admission
+            .admitted
+            .players
+            .iter()
+            .all(|player| player.savegame_player == 0));
         assert_ne!(
             admission.admitted.players[1].flags & PLAYER_INFO_FLAG_SAVEGAME_JOIN,
             0,
@@ -7716,7 +7681,10 @@ mod tests {
 
         let resumed = registry.get(7).expect("associated info takes saved ID");
         assert_eq!(resumed.team, 5);
-        assert_eq!(resumed.flags & PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_JOINED);
+        assert_eq!(
+            resumed.flags & PLAYER_INFO_FLAG_JOINED,
+            PLAYER_INFO_FLAG_JOINED
+        );
         assert_eq!(resumed.flags & PLAYER_INFO_FLAG_REMOVED, 0);
         assert_eq!(resumed.flags & PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK, 0);
         assert_ne!(resumed.flags & PLAYER_INFO_FLAG_ATTRIBUTES_FIXED, 0);

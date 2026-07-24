@@ -362,12 +362,8 @@ fn draw_image_bilinear_source_cpu<T: SurfaceDrawTarget + ?Sized>(
                     if (px as f32 + 0.5) >= t_right {
                         break;
                     }
-                    let u_rel = source.x + (px as f32 + 0.5 - tx) / scale_x
-                        - 0.5
-                        - blit_x as f32;
-                    let v_rel = source.y + (py as f32 + 0.5 - ty) / scale_y
-                        - 0.5
-                        - blit_y as f32;
+                    let u_rel = source.x + (px as f32 + 0.5 - tx) / scale_x - 0.5 - blit_x as f32;
+                    let v_rel = source.y + (py as f32 + 0.5 - ty) / scale_y - 0.5 - blit_y as f32;
                     let mut s = bilinear_sample_tile(image, blit_x, blit_y, ts, u_rel, v_rel);
                     if let Some([red, green, blue, transparency]) = modulation {
                         s[0] *= f32::from(red) / 255.0;
@@ -419,9 +415,7 @@ fn draw_image_bilinear_source_impl(
     ) {
         return;
     }
-    draw_image_bilinear_source_cpu(
-        surface, rect, image, source, gamma, blend_mode, modulation,
-    );
+    draw_image_bilinear_source_cpu(surface, rect, image, source, gamma, blend_mode, modulation);
 }
 
 fn draw_image_bilinear_cpu<T: SurfaceDrawTarget + ?Sized>(
@@ -847,8 +841,7 @@ fn blend_fragment_additive(
     let alpha = f32::from(source.a) / 255.0;
     let add = |channel, source: u8, destination: u8| {
         store_channel(
-            f32::from(destination)
-                + sample_channel(gamma, channel, f32::from(source)) * alpha,
+            f32::from(destination) + sample_channel(gamma, channel, f32::from(source)) * alpha,
         )
     };
     Color::new(
@@ -878,8 +871,7 @@ pub(crate) fn composite_sprite_fragment(
     gamma: Option<&clonk_graphics::GammaRamp>,
 ) -> Color {
     if let PreparedSpriteFragment::Layers { base, overlay } = source {
-        let destination =
-            composite_sprite_fragment(base.into_fragment(), destination, blit, gamma);
+        let destination = composite_sprite_fragment(base.into_fragment(), destination, blit, gamma);
         return composite_sprite_fragment(overlay.into_fragment(), destination, blit, gamma);
     }
 
@@ -907,9 +899,7 @@ pub(crate) fn composite_sprite_fragment(
         if blit.mode & C4GFXBLIT_ADDITIVE != 0 {
             store_channel(f32::from(destination) + source * alpha_factor)
         } else {
-            store_channel(
-                source * alpha_factor + f32::from(destination) * (1.0 - alpha_factor),
-            )
+            store_channel(source * alpha_factor + f32::from(destination) * (1.0 - alpha_factor))
         }
     };
     Color::new(
@@ -945,14 +935,7 @@ pub fn draw_image_bilinear(
     image: &ImageData,
     gamma: Option<&clonk_graphics::GammaRamp>,
 ) {
-    draw_image_bilinear_impl(
-        surface,
-        rect,
-        image,
-        gamma,
-        BilinearBlend::AlphaOver,
-        None,
-    );
+    draw_image_bilinear_impl(surface, rect, image, gamma, BilinearBlend::AlphaOver, None);
 }
 
 /// Draws a complete image through `C4Facet::DrawXFloat`: fractional target
@@ -1225,14 +1208,7 @@ pub fn draw_image_bilinear_additive(
     image: &ImageData,
     gamma: Option<&clonk_graphics::GammaRamp>,
 ) {
-    draw_image_bilinear_impl(
-        surface,
-        rect,
-        image,
-        gamma,
-        BilinearBlend::Additive,
-        None,
-    );
+    draw_image_bilinear_impl(surface, rect, image, gamma, BilinearBlend::Additive, None);
 }
 
 pub(crate) fn blend_colors(foreground: Color, background: Color) -> Color {

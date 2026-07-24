@@ -487,7 +487,7 @@ pub(crate) fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
             entries
                 .get(index / 2)
                 .map(|(id, count)| {
-                    if index % 2 == 0 {
+                    if index.is_multiple_of(2) {
                         Value::C4Id(id.clone())
                     } else {
                         Value::Int(*count)
@@ -500,7 +500,7 @@ pub(crate) fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
                 .exact_hostility_entries()
                 .get(index / 2)
                 .map(|(raw_id, count)| {
-                    if index % 2 == 0 {
+                    if index.is_multiple_of(2) {
                         Value::C4Id(render_cast_c4id(*raw_id))
                     } else {
                         Value::Int(*count)
@@ -702,7 +702,7 @@ pub(crate) fn get_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
-        let team = player.team.unwrap_or_else(|| {
+        let team = player.team.unwrap_or({
             if matches!(
                 player.status,
                 crate::PlayerStatus::TeamSelection | crate::PlayerStatus::TeamSelectionPending
@@ -3719,7 +3719,6 @@ pub(crate) fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
 /// FnMakeCrewMember (C4Script.cpp:2164-2168) -> C4Player::MakeCrewMember
 /// (C4Player.cpp:1167-1215): valid player + CrewMember def required; assigns
 /// an exact idle/new info, joins the independent roster and calls Recruitment.
-
 /// `pObj->Call(PSF_OnJoinCrew)` where PSF_OnJoinCrew is the fail-safe
 /// `~Recruitment` name and C4Object::Call uses fPassError=false.
 fn call_recruitment_callback(target: ObjectId, player: i32) {

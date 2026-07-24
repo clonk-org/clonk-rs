@@ -104,11 +104,7 @@ fn direct_exec_uses_target_strictness_while_eval_keeps_appended_origin() {
     let cells = LocalCells::default();
     assert_eq!(
         target
-            .direct_exec_with_cells_and_this(
-                r#"eval("1 == true")"#,
-                &cells,
-                Value::Nil,
-            )
+            .direct_exec_with_cells_and_this(r#"eval("1 == true")"#, &cells, Value::Nil,)
             .expect("menu-style DirectExec runs"),
         Value::Bool(true),
         "default DirectExec uses the nonstrict destination host"

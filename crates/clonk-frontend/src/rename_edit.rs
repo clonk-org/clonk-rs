@@ -367,7 +367,7 @@ impl<Focus> RenameEdit<Focus> {
     }
 
     pub fn cursor_visible(&self) -> bool {
-        self.focused && (self.blink_ticks / 18) % 2 == 0
+        self.focused && (self.blink_ticks / 18).is_multiple_of(2)
     }
 
     pub fn begin_pointer_selection(&mut self, position: usize) {
@@ -589,12 +589,7 @@ impl<Focus> RenameEdit<Focus> {
             }
         }
         let previous_clip = surface.clip();
-        let edit_clip = Rect::new(
-            rect.x,
-            rect.y,
-            rect.w.max(1) as u32,
-            rect.h.max(1) as u32,
-        );
+        let edit_clip = Rect::new(rect.x, rect.y, rect.w.max(1) as u32, rect.h.max(1) as u32);
         let active_clip = previous_clip
             .and_then(|clip| clip.intersection(edit_clip))
             .unwrap_or_else(|| {

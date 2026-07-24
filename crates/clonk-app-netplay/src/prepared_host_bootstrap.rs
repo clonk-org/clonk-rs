@@ -321,6 +321,15 @@ struct PendingInitialLeaguePlayers {
     team_metadata: InitialNetworkTeamMetadata,
 }
 
+struct InitialHostPlayerFinalization<'a> {
+    players: Vec<ControlPlayerInfoEntry>,
+    alternate_colors_by_resource: &'a HashMap<i32, u32>,
+    restore_players: &'a [ControlPlayerInfoEntry],
+    restore_last_player_id: i32,
+    max_players: usize,
+    team_metadata: InitialNetworkTeamMetadata,
+}
+
 /// Exact post-publication inputs retained until the league Start response has
 /// supplied the seed that C++ uses for `Landscape.Init`.
 #[derive(Debug, Clone)]
@@ -353,7 +362,7 @@ impl PreparedLeagueGeneratedLandscapeLoader {
 #[derive(Debug, Clone)]
 enum PreparedLocalPlayerIdentity {
     Configured(PreparedHostPlayerIdentity),
-    Generic(PlayerFile),
+    Generic(Box<PlayerFile>),
 }
 
 impl PreparedLocalPlayerIdentity {
@@ -487,9 +496,7 @@ impl PreparedHostBootstrap {
             .as_ref()
             .is_some_and(Scenario::generated_landscape_requires_seed_retry)
         {
-            return Err(
-                PrepareHostBootstrapError::LeagueGeneratedLandscapeInvalid { random_seed },
-            );
+            return Err(PrepareHostBootstrapError::LeagueGeneratedLandscapeInvalid { random_seed });
         }
         let mut retained_scenario = league_scenario
             .is_some()
@@ -524,9 +531,7 @@ impl PreparedHostBootstrap {
             self.host_config.max_players = max_players;
             self.admission.max_players = response.max_players;
         }
-        if let (Some(retained), Some(scenario)) =
-            (retained_scenario.as_mut(), league_scenario)
-        {
+        if let (Some(retained), Some(scenario)) = (retained_scenario.as_mut(), league_scenario) {
             **retained = Some(scenario);
         }
         Ok(())
@@ -690,12 +695,14 @@ impl PreparedHostBootstrap {
             PrepareHostBootstrapError::MaxPlayersOutOfRange(self.admission.max_players)
         })?;
         let (control, team_metadata, last_player_id) = finalize_initial_host_player_info(
-            authenticated_players,
-            &pending.alternate_colors_by_resource,
-            pending.restore_last_player_id,
-            max_players,
-            &pending.restore_players,
-            pending.team_metadata,
+            InitialHostPlayerFinalization {
+                players: authenticated_players,
+                alternate_colors_by_resource: &pending.alternate_colors_by_resource,
+                restore_players: &pending.restore_players,
+                restore_last_player_id: pending.restore_last_player_id,
+                max_players,
+                team_metadata: pending.team_metadata,
+            },
             team_assignment_oracle,
             check,
         )?;
@@ -933,9 +940,7 @@ pub enum PrepareHostBootstrapError {
         "published generated landscape for accepted random seed {random_seed} still requires a retry"
     )]
     PublishedGeneratedLandscapeInvalid { random_seed: u32 },
-    #[error(
-        "league-assigned random seed {random_seed} produces an invalid generated landscape"
-    )]
+    #[error("league-assigned random seed {random_seed} produces an invalid generated landscape")]
     LeagueGeneratedLandscapeInvalid { random_seed: u32 },
     #[error("the prepared host scenario was already claimed before the league seed was applied")]
     LeagueScenarioAlreadyClaimed,
@@ -1084,15 +1089,18 @@ fn swap_remove_rejected_players(
 }
 
 fn finalize_initial_host_player_info(
-    initial_players: Vec<ControlPlayerInfoEntry>,
-    alternate_colors_by_resource: &HashMap<i32, u32>,
-    restore_last_player_id: i32,
-    max_players: usize,
-    restore_players: &[ControlPlayerInfoEntry],
-    mut team_metadata: InitialNetworkTeamMetadata,
+    finalization: InitialHostPlayerFinalization<'_>,
     team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
     mut check: impl FnMut(&mut ControlPlayerInfoEntry) -> bool,
 ) -> Result<(PlayerInfoControlData, InitialNetworkTeamMetadata, i32), PrepareHostBootstrapError> {
+    let InitialHostPlayerFinalization {
+        players,
+        alternate_colors_by_resource,
+        restore_players,
+        restore_last_player_id,
+        max_players,
+        mut team_metadata,
+    } = finalization;
     let mut player_allocator = clonk_engine::ControlPlayerInfoRegistry::default();
     player_allocator.replace_snapshot(
         restore_last_player_id,
@@ -1103,7 +1111,7 @@ fn finalize_initial_host_player_info(
             PlayerInfoUpdateRequest {
                 client_id: 0,
                 flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
-                players: initial_players,
+                players,
             },
             max_players,
         )
@@ -1376,7 +1384,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
                     .map_err(|error| error.to_string())
                     .and_then(|group| PlayerFile::load(&group).map_err(|error| error.to_string()))
                 {
-                    Ok(player) => PreparedLocalPlayerIdentity::Generic(player),
+                    Ok(player) => PreparedLocalPlayerIdentity::Generic(Box::new(player)),
                     Err(error) => {
                         // Generic callers have not already loaded a classic
                         // player core. Match C4ClientPlayerInfos by dropping
@@ -1637,11 +1645,10 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     let material_resource_groups =
         published_game_resource_groups(&publication, HostResourceType::Material)?;
     let published_scenario_group = frozen_published_scenario_group(&publication)?;
-    let graphics_groups = definition_resolver
-        .resolve_graphics_groups_with_definition_roots(
-            &published_scenario_group,
-            &definition_groups,
-        )?;
+    let graphics_groups = definition_resolver.resolve_graphics_groups_with_definition_roots(
+        &published_scenario_group,
+        &definition_groups,
+    )?;
     let random_seed = u64::from(publication.join_snapshot.parameters.random_seed as u32);
     scenario = Scenario::load_network_from_group_with_languages_and_seed_and_packs(
         &published_scenario_group,
@@ -1744,12 +1751,14 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         )
     } else {
         let (control, team_metadata, last_player_id) = finalize_initial_host_player_info(
-            initial_players,
-            &alternate_colors_by_resource,
-            restore_player_infos.last_player_id,
-            max_players,
-            &restore_players,
-            team_metadata,
+            InitialHostPlayerFinalization {
+                players: initial_players,
+                alternate_colors_by_resource: &alternate_colors_by_resource,
+                restore_players: &restore_players,
+                restore_last_player_id: restore_player_infos.last_player_id,
+                max_players,
+                team_metadata,
+            },
             team_assignment_oracle,
             |_| true,
         )?;

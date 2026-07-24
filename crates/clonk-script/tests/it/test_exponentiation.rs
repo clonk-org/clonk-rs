@@ -121,9 +121,7 @@ fn unary_precedence_is_higher_than_exponentiation() {
 #[test]
 fn exponentiation_edge_semantics_match_cpp() {
     assert_eq!(
-        eval_strict1(
-            "[2 ** -1, empty ** 3, 2 ** empty, true ** true, 2 ** 40, 10 ** 10]",
-        ),
+        eval_strict1("[2 ** -1, empty ** 3, 2 ** empty, true ** true, 2 ** 40, 10 ** 10]",),
         Value::Array(vec![
             Value::Int(0),
             Value::Int(0),

@@ -1,11 +1,12 @@
 use crate::support::real_scenario::{prepare_installed_scenario, PreparedInstalledScenario};
+use crate::support::PreparedScenarioSubcase;
 use clonk_engine::{SpawnConfig, Vector2};
 use clonk_script::Value;
 
 #[test]
 fn jungle_amulet_real_scenario_subcases() {
     let prepared = prepare_installed_scenario("FarWorlds.c4f/Jungle.c4s", 0);
-    let subcases: &[(&str, fn(&PreparedInstalledScenario))] = &[
+    let subcases: &[PreparedScenarioSubcase] = &[
         (
             "upgrade_initializes_the_new_definition_inline",
             jungle_amulet_upgrade_initializes_the_new_definition_inline,
@@ -51,9 +52,7 @@ fn jungle_amulet_upgrade_initializes_the_new_definition_inline(
         (40, "AMMA", None, Some("Be")),
     ] {
         let clonk = engine
-            .spawn_object(
-                SpawnConfig::new("JCLK").with_position(Vector2::new(100 + offset, 100)),
-            )
+            .spawn_object(SpawnConfig::new("JCLK").with_position(Vector2::new(100 + offset, 100)))
             .expect("the shipped Jungle Clonk spawns");
         let amulet = engine
             .spawn_object(
@@ -70,10 +69,7 @@ fn jungle_amulet_upgrade_initializes_the_new_definition_inline(
             .call_object_function(
                 index,
                 "Upgrade",
-                vec![
-                    Value::C4Id(upgraded.into()),
-                    Value::Object(clonk.as_u64()),
-                ],
+                vec![Value::C4Id(upgraded.into()), Value::Object(clonk.as_u64())],
             )
             .expect("the shipped Upgrade callback completes");
 

@@ -127,13 +127,7 @@ impl PxsSystem {
     ) {
         for _ in 0..num {
             let velocity = Self::sample_cast_velocity(rng, level);
-            self.create(
-                mat,
-                itofix(tx),
-                itofix(ty),
-                velocity.x,
-                velocity.y,
-            );
+            self.create(mat, itofix(tx), itofix(ty), velocity.x, velocity.y);
         }
     }
 
@@ -299,7 +293,7 @@ impl PxsSystem {
                 return Err(PxsComponentError::InvalidNumberFormat(number_format));
             }
             (number_format, &bytes[4..])
-        } else if bytes.len() % PXS_CHUNK_BYTES == 0 {
+        } else if bytes.len().is_multiple_of(PXS_CHUNK_BYTES) {
             (1, bytes)
         } else {
             return Err(PxsComponentError::InvalidSize(bytes.len()));
@@ -545,13 +539,15 @@ mod tests {
     #[test]
     fn c4b_load_restores_fixed_and_historical_float_chunks_and_slots() {
         for fixture in [CPP_PXS_FORM1, CPP_PXS_FORM2] {
-            let system = PxsSystem::from_c4b(fixture)
-                .expect("C++ PXS component loads");
+            let system = PxsSystem::from_c4b(fixture).expect("C++ PXS component loads");
             let slots = system.iter_slots().collect::<Vec<_>>();
             assert_eq!(slots.len(), 2);
             assert_eq!((slots[0].0, slots[0].1, slots[0].2.mat), (0, 7, mat(2)));
             assert_eq!((slots[1].0, slots[1].1, slots[1].2.mat), (2, 499, mat(4)));
-            assert!(system.chunk_allocated(1), "serialized empty chunks stay allocated");
+            assert!(
+                system.chunk_allocated(1),
+                "serialized empty chunks stay allocated"
+            );
             let expected = [78_643, -327_680, 32_768, -6_553].map(C4Fixed::from_raw);
             assert_eq!(
                 [slots[0].2.x, slots[0].2.y, slots[0].2.xdir, slots[0].2.ydir],

@@ -69,6 +69,10 @@ where
     exit
 }
 
+// A route task owns each endpoint identifier, channel, transport, and liveness
+// handle independently; retaining those arguments makes the ownership transfer
+// at task spawn explicit.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_client_route<S>(
     local_connection_id: u32,
     remote_connection_id: u32,
@@ -190,25 +194,22 @@ pub(crate) async fn run_client_route<S>(
                         break Some(format!("connection {timeout:?} timeout"));
                     }
                 };
-                match ping {
-                    Some(ping) => {
-                        let sent = route_tx
-                            .send(ClientRouteCommand::Message(ControlMessage::Ping(ping)));
-                        liveness.record_ping_dispatched();
-                        if sent.is_err() {
-                            break Some("ping send failed: route writer closed".to_string());
-                        }
-                        if event_tx
-                            .send(ClientRouteEvent::PingDispatched {
-                                route_id: local_connection_id,
-                            })
-                            .is_err()
-                        {
-                            publish_disconnect = false;
-                            break None;
-                        }
+                if let Some(ping) = ping {
+                    let sent = route_tx
+                        .send(ClientRouteCommand::Message(ControlMessage::Ping(ping)));
+                    liveness.record_ping_dispatched();
+                    if sent.is_err() {
+                        break Some("ping send failed: route writer closed".to_string());
                     }
-                    None => {}
+                    if event_tx
+                        .send(ClientRouteEvent::PingDispatched {
+                            route_id: local_connection_id,
+                        })
+                        .is_err()
+                    {
+                        publish_disconnect = false;
+                        break None;
+                    }
                 }
             }
         }
@@ -370,6 +371,10 @@ pub(crate) async fn run_client_loop_with_addresses<S>(
     .await;
 }
 
+// This long-lived task is the ownership boundary for independent network
+// routes, recovery state, resource state, and application channels. A wrapper
+// struct would merely move this one-time destructuring into the function body.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_client_loop_with_routes(
     mut transport: ClientRouteManager,
     io_statistics: crate::NetworkIoStatistics,
@@ -1457,9 +1462,7 @@ pub(crate) async fn run_client_loop_with_routes(
                             mesh_tcp_available,
                             mesh_udp_available,
                         );
-                        let mesh_peer = mesh_peers
-                            .entry(packet.client_id)
-                            .or_insert_with(crate::ClientMeshPeerState::new);
+                        let mesh_peer = mesh_peers.entry(packet.client_id).or_default();
                         mesh_peer.add_address(packet.address, mesh_now);
                         let attempt = if packet.client_id != local_core.client_id
                             && packet.client_id != resource_state.host_peer_id
@@ -2165,7 +2168,7 @@ async fn dispatch_client_resource_actions_with_unavailable(
         match action {
             crate::ResourceCatalogAction::SendToPeer { peer_id, packet } => {
                 let request = match &packet {
-                    ResourcePacket::Request(request) => Some(request.clone()),
+                    ResourcePacket::Request(request) => Some(*request),
                     _ => None,
                 };
                 let outcome =
@@ -2274,9 +2277,7 @@ fn apply_client_membership(
             if join.by_client == HOST_CLIENT_ID as i32 =>
         {
             client_addresses.entry(join.core.client_id).or_default();
-            mesh_peers
-                .entry(join.core.client_id)
-                .or_insert_with(crate::ClientMeshPeerState::new);
+            mesh_peers.entry(join.core.client_id).or_default();
             client_cores.insert(join.core.client_id, join.core.clone());
             None
         }

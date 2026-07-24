@@ -1,7 +1,7 @@
 use crate::support::real_scenario::{join_local_player, load_installed_scenario};
 use clonk_engine::{
-    CNAT_BOTTOM, COM_DOWN, COM_RELEASE_OFFSET, COM_THROW, COM_UP, FULL_CON, ObjectId, ObjectUpdate,
-    Vector2,
+    ObjectId, ObjectUpdate, Vector2, CNAT_BOTTOM, COM_DOWN, COM_RELEASE_OFFSET, COM_THROW, COM_UP,
+    FULL_CON,
 };
 use clonk_script::Value;
 

@@ -58,8 +58,10 @@ fn concat_scalar_conversion_matches_cpp_to_string() {
         );
     }
     assert_eq!(
-        eval(r#"#strict 3
-func Test() { var value = "x"; value ..= true; return value; }"#),
+        eval(
+            r#"#strict 3
+func Test() { var value = "x"; value ..= true; return value; }"#
+        ),
         Value::String("x1".into())
     );
 }
@@ -68,21 +70,28 @@ func Test() { var value = "x"; value ..= true; return value; }"#),
 fn concat_rejects_values_without_cpp_string_conversion() {
     for (source, value_type) in [
         (r#"func Test() { var empty; return "x" .. empty; }"#, "any"),
-        (r#"#strict
-func Test() { return "x" .. [1]; }"#, "array"),
-        (r#"#strict 3
-func Test() { return "x" .. {}; }"#, "map"),
+        (
+            r#"#strict
+func Test() { return "x" .. [1]; }"#,
+            "array",
+        ),
+        (
+            r#"#strict 3
+func Test() { return "x" .. {}; }"#,
+            "map",
+        ),
     ] {
         assert_eq!(
             runtime_error(source, &[]),
-            format!(
-                "operator \"..\" right side: can not convert \"{value_type}\" to \"string\"!"
-            )
+            format!("operator \"..\" right side: can not convert \"{value_type}\" to \"string\"!")
         );
     }
 
     assert_eq!(
-        runtime_error(r#"func Test(obj) { return "x" .. obj; }"#, &[Value::Object(7)]),
+        runtime_error(
+            r#"func Test(obj) { return "x" .. obj; }"#,
+            &[Value::Object(7)]
+        ),
         "operator \"..\" right side: can not convert \"object\" to \"string\"!"
     );
     assert_eq!(
@@ -106,10 +115,7 @@ func Test() { var value = "x"; value ..= [1]; return value; }"#,
         "operator \"..=\" right side: can not convert \"array\" to \"string\"!"
     );
     assert_eq!(
-        runtime_error(
-            "#strict 2\nfunc Test() { return \"x\" .. (1 == 2); }",
-            &[]
-        ),
+        runtime_error("#strict 2\nfunc Test() { return \"x\" .. (1 == 2); }", &[]),
         "operator \"..\" right side: can not convert \"any\" to \"string\"!"
     );
 }
@@ -117,10 +123,7 @@ func Test() { var value = "x"; value ..= [1]; return value; }"#,
 #[test]
 fn concat_nil_left_side_reports_cpp_conversion_error() {
     assert_eq!(
-        runtime_error(
-            r#"func Test() { var empty; return empty .. "a"; }"#,
-            &[],
-        ),
+        runtime_error(r#"func Test() { var empty; return empty .. "a"; }"#, &[],),
         "operator \"..\" left side: can not convert \"any\" to \"string\", \"array\" or \"map\"!"
     );
 }
@@ -183,10 +186,7 @@ fn array_concat_rejects_result_over_max_size() {
     engine
         .call(
             "Install",
-            &[Value::Array(vec![
-                Value::Nil;
-                CPP_ARRAY_MAX_SIZE - 1
-            ])],
+            &[Value::Array(vec![Value::Nil; CPP_ARRAY_MAX_SIZE - 1])],
         )
         .expect("array below the C++ limit installs");
     assert_eq!(

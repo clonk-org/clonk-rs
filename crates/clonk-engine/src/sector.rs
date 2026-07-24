@@ -138,7 +138,8 @@ impl SectorMap {
     {
         let previous = std::mem::take(&mut self.order);
         let mut seen = HashSet::new();
-        self.order.extend(ids.into_iter().filter(|id| seen.insert(*id)));
+        self.order
+            .extend(ids.into_iter().filter(|id| seen.insert(*id)));
         self.order
             .extend(previous.into_iter().filter(|id| seen.insert(*id)));
         self.rebuild_ranks();
@@ -283,7 +284,9 @@ impl SectorMap {
     /// C4FindObject::Find has no Marker (C4FindObject.cpp:283-294), so an
     /// object whose shape spans sectors is re-encountered per sector.
     pub(crate) fn shape_id_lists_in_area(&self, area: &SectorArea) -> Vec<Vec<ObjectId>> {
-        area.iter().map(|key| self.shape_ids(key).to_vec()).collect()
+        area.iter()
+            .map(|key| self.shape_ids(key).to_vec())
+            .collect()
     }
 
     /// Same C++ enumeration order as `object_ids_in_area`, over the

@@ -90,19 +90,25 @@ pub fn set_as_live_save_restore_infos(
                     (
                         policy.save_user_players,
                         embed,
-                        embed
-                            .then(|| runtime_user_player_filename(client_name, player))
-                            .unwrap_or_default(),
+                        if embed {
+                            runtime_user_player_filename(client_name, player)
+                        } else {
+                            LegacyCString::default()
+                        },
                     )
                 }
-                PLAYER_INFO_TYPE_SCRIPT => (
-                    policy.save_script_players,
-                    policy.embed_script_player_files,
-                    policy
-                        .embed_script_player_files
-                        .then(|| runtime_script_player_filename(player.id))
-                        .unwrap_or_default(),
-                ),
+                PLAYER_INFO_TYPE_SCRIPT => {
+                    let embed = policy.embed_script_player_files;
+                    (
+                        policy.save_script_players,
+                        embed,
+                        if embed {
+                            runtime_script_player_filename(player.id)
+                        } else {
+                            LegacyCString::default()
+                        },
+                    )
+                }
                 _ => return false,
             };
             if !keep {

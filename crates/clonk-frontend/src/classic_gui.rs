@@ -78,9 +78,7 @@ impl<'a> ClassicGuiSkin<'a> {
         align: TextAlign,
         gamma: Option<&GammaRamp>,
     ) {
-        self.draw_caption_with_right_indent(
-            surface, rect, text, font, color, align, 0, gamma,
-        );
+        self.draw_caption_with_right_indent(surface, rect, text, font, color, align, 0, gamma);
     }
 
     /// Draws a wooden caption while reserving pixels at its right edge for
@@ -834,9 +832,7 @@ pub fn draw_clipped_text(
     gamma: Option<&GammaRamp>,
     clip: IntRect,
 ) {
-    draw_clipped_text_with_markup(
-        surface, font, x, y, text, color, align, gamma, clip, true,
-    );
+    draw_clipped_text_with_markup(surface, font, x, y, text, color, align, gamma, clip, true);
 }
 
 /// [`draw_clipped_text`] with the caller-selected `C4GUI::Label::fMarkup`
@@ -1455,11 +1451,8 @@ mod tests {
 
         let continuation_has_ink = |surface: &Surface| {
             (font.line_height.max(0) as u32..height).any(|y| {
-                (0..surface.width()).any(|x| {
-                    surface
-                        .get_pixel(x, y)
-                        .is_some_and(|pixel| pixel.a != 0)
-                })
+                (0..surface.width())
+                    .any(|x| surface.get_pixel(x, y).is_some_and(|pixel| pixel.a != 0))
             })
         };
         assert!(!continuation_has_ink(&literal));

@@ -1,9 +1,9 @@
+use clonk_engine::command::{CommandId, CommandMode, CommandRequest};
 use clonk_engine::{
-    Definition, DefinitionRect, Engine, ObjectMenuExtra, ObjectMenuItem, ObjectMenuState,
-    ObjectId, ObjectMenuSymbol, ObjectUpdate, SpawnConfig, Vector2, CATEGORY_SELECT_KNOWLEDGE,
+    Definition, DefinitionRect, Engine, ObjectId, ObjectMenuExtra, ObjectMenuItem, ObjectMenuState,
+    ObjectMenuSymbol, ObjectUpdate, SpawnConfig, Vector2, CATEGORY_SELECT_KNOWLEDGE,
     CATEGORY_VEHICLE, FULL_CON,
 };
-use clonk_engine::command::{CommandId, CommandMode, CommandRequest};
 use clonk_script::Value;
 
 use crate::support::real_scenario::{join_local_player, load_tutorial};
@@ -315,11 +315,17 @@ protected func RejectEntrance(pContainer)
         "RejectContents precedes the collection-limit PutAway gate"
     );
     assert_eq!(
-        engine.object_snapshot(held).expect("held item survives").container,
+        engine
+            .object_snapshot(held)
+            .expect("held item survives")
+            .container,
         Some(clonk)
     );
     assert_eq!(
-        engine.object_snapshot(item).expect("item survives").container,
+        engine
+            .object_snapshot(item)
+            .expect("item survives")
+            .container,
         Some(hut)
     );
     assert!(
@@ -370,8 +376,8 @@ protected func RejectContents()
     )
     .expect("container definition compiles");
     container.set_c4_callback_convention(true);
-    let mut item = Definition::from_script("ITEM", "Item", "#strict\n")
-        .expect("item definition compiles");
+    let mut item =
+        Definition::from_script("ITEM", "Item", "#strict\n").expect("item definition compiles");
     item.set_collectible(true);
     engine
         .register_definition(actor)
@@ -411,7 +417,9 @@ protected func RejectContents()
     );
     arm_get(&mut engine, clonk, old_target);
 
-    engine.tick_without_snapshot().expect("old Get reaches RejectContents");
+    engine
+        .tick_without_snapshot()
+        .expect("old Get reaches RejectContents");
 
     assert_eq!(
         engine
@@ -430,7 +438,9 @@ protected func RejectContents()
         Some(hut)
     );
 
-    engine.tick_without_snapshot().expect("replacement Get executes");
+    engine
+        .tick_without_snapshot()
+        .expect("replacement Get executes");
     assert_eq!(
         engine
             .object_snapshot(replacement)
@@ -481,8 +491,8 @@ protected func RejectContents()
     )
     .expect("container definition compiles");
     container.set_c4_callback_convention(true);
-    let mut item = Definition::from_script("ITEM", "Item", "#strict\n")
-        .expect("item definition compiles");
+    let mut item =
+        Definition::from_script("ITEM", "Item", "#strict\n").expect("item definition compiles");
     item.set_collectible(true);
     engine
         .register_definition(actor)
@@ -509,11 +519,7 @@ protected func RejectContents()
     let hut_index = engine.find_object_index(hut).expect("container exists");
     assert_eq!(
         engine
-            .call_object_function(
-                hut_index,
-                "Configure",
-                vec![Value::Object(target.as_u64())],
-            )
+            .call_object_function(hut_index, "Configure", vec![Value::Object(target.as_u64())],)
             .expect("container configures"),
         Value::Int(1)
     );
@@ -526,7 +532,10 @@ protected func RejectContents()
     assert_eq!(local_int(&engine, hut, "rejectContentsCount"), 1);
     assert_eq!(local_int(&engine, clonk, "nilDropTargetCount"), 1);
     assert_eq!(local_int(&engine, clonk, "staleDropTargetCount"), 0);
-    assert!(engine.object_snapshot(held).is_some(), "selected item survives");
+    assert!(
+        engine.object_snapshot(held).is_some(),
+        "selected item survives"
+    );
 }
 
 #[test]
@@ -588,8 +597,8 @@ protected func RejectContents()
         let mut container = Definition::from_script("HUT2", "Hut", &container_script)
             .expect("container definition compiles");
         container.set_c4_callback_convention(true);
-        let mut item = Definition::from_script("ITEM", "Item", "#strict\n")
-            .expect("item definition compiles");
+        let mut item =
+            Definition::from_script("ITEM", "Item", "#strict\n").expect("item definition compiles");
         item.set_collectible(true);
         engine
             .register_definition(actor)
@@ -725,7 +734,10 @@ protected func RejectEntrance(pContainer)
     assert_eq!(local_int(&engine, clonk, "dropSelectionCount"), 1);
     assert_eq!(local_int(&engine, clonk, "rejectCollectCount"), 0);
     assert_eq!(local_int(&engine, incoming, "rejectEntranceCount"), 0);
-    assert!(engine.object_snapshot(held).is_some(), "selected item survives");
+    assert!(
+        engine.object_snapshot(held).is_some(),
+        "selected item survives"
+    );
     assert_eq!(
         engine
             .object_snapshot(incoming)
@@ -831,7 +843,10 @@ protected func RejectEntrance(pContainer)
     assert_eq!(local_int(&engine, cart, "rejectEntranceCount"), 0);
     assert_eq!(local_int(&engine, clonk, "rejectCollectCount"), 0);
     assert_eq!(
-        engine.object_snapshot(cart).expect("cart survives").container,
+        engine
+            .object_snapshot(cart)
+            .expect("cart survives")
+            .container,
         Some(hut)
     );
     let message = frame
@@ -845,14 +860,12 @@ protected func RejectEntrance(pContainer)
         vec!["Cart not completed.", "Activation denied."]
     );
     engine.tick_without_snapshot().expect("failed Get clears");
-    assert!(
-        engine
-            .object_snapshot(clonk)
-            .expect("actor survives")
-            .command_stack
-            .command_names()
-            .is_empty()
-    );
+    assert!(engine
+        .object_snapshot(clonk)
+        .expect("actor survives")
+        .command_stack
+        .command_names()
+        .is_empty());
 
     let silent_clonk = engine
         .spawn_object(

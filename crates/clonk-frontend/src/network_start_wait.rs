@@ -213,7 +213,7 @@ impl<'a> NetworkStartWaitResources<'a> {
 }
 
 /// Pure interaction and presentation state for one start-wait dialog.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct NetworkStartWaitState {
     labels: NetworkStartWaitLabels,
     clients: Vec<NetworkStartWaitClient>,
@@ -224,22 +224,6 @@ pub struct NetworkStartWaitState {
     key_pressed: Option<(NetworkStartWaitControl, KeyCode)>,
     client_scroll: i32,
     sound_events: Vec<NetworkStartWaitSound>,
-}
-
-impl Default for NetworkStartWaitState {
-    fn default() -> Self {
-        Self {
-            labels: NetworkStartWaitLabels::default(),
-            clients: Vec::new(),
-            focus: None,
-            hovered: None,
-            pointer: None,
-            pointer_pressed: None,
-            key_pressed: None,
-            client_scroll: 0,
-            sound_events: Vec::new(),
-        }
-    }
 }
 
 impl NetworkStartWaitState {

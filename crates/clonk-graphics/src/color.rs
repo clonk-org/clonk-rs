@@ -74,8 +74,7 @@ impl Color {
     /// [`Self::modulate_clr_mod2`] helper used by software surface reads.
     pub(crate) fn modulate_rgb_mod2(self, modulation: Color) -> Color {
         let channel = |source: u8, modulation: u8| -> u8 {
-            (2 * i32::from(source) + 2 * i32::from(modulation) - 255)
-                .clamp(0, 255) as u8
+            (2 * i32::from(source) + 2 * i32::from(modulation) - 255).clamp(0, 255) as u8
         };
         Color {
             r: channel(self.r, modulation.r),

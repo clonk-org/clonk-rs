@@ -9,10 +9,8 @@ fn eke_flamethrower_launches_global_fire2_particles() {
     // target's particles in GlobalParticles (oracle-src-pinned
     // src/C4Script.cpp:4863-4879; src/C4Particles.cpp:378-418), which the viewport draws after normal
     // objects (src/C4Viewport.cpp:1071-1079).
-    let mut engine = load_installed_scenario(
-        "EkeReloaded.c4f/InterplanetaryCivilwar.c4f/MeltMe.c4s",
-        0,
-    );
+    let mut engine =
+        load_installed_scenario("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/MeltMe.c4s", 0);
     let owner = join_local_player(&mut engine, "Eke flamethrower particles");
     let clonk = engine
         .crew_cursor(owner)

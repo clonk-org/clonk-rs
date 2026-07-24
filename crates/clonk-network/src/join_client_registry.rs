@@ -70,10 +70,10 @@ pub fn reconcile_join_client_registry(
             .clients
             .iter()
             .any(|client| client.client_id == assigned_local_client_id))
-        .then(|| {
-            incoming.local_client_id = Some(assigned_local_client_id);
-            incoming
-        })
+    .then(|| {
+        incoming.local_client_id = Some(assigned_local_client_id);
+        incoming
+    })
 }
 
 fn decode_client_core(

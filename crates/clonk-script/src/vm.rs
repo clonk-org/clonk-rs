@@ -45,6 +45,12 @@ type CallArgs = SmallVec<[CallArg; MAX_CALL_PARAMETERS]>;
 type CallValues = SmallVec<[Value; MAX_CALL_PARAMETERS]>;
 type HostCallArgs = SmallVec<[HostCallArg; MAX_CALL_PARAMETERS]>;
 type CallBindings = SmallVec<[Binding; MAX_CALL_PARAMETERS]>;
+type DiagnosticObjectFormatter = fn(u64) -> Option<(String, Option<String>)>;
+
+struct AssignmentOperator<'a> {
+    operation: Option<&'a BinaryOp>,
+    spelling: &'a str,
+}
 
 thread_local! {
     /// C++ owns one process-global executor. Rust tests execute VMs in
@@ -488,13 +494,11 @@ thread_local! {
         RefCell::new(ExecutionDiagnostics::default());
     /// Optional engine-side C4Object::GetDataString bridge. clonk-script knows
     /// object numbers, while the embedding engine owns live names/status.
-    static DIAGNOSTIC_OBJECT_FORMATTER: Cell<
-        Option<fn(u64) -> Option<(String, Option<String>)>>,
-    > =
+    static DIAGNOSTIC_OBJECT_FORMATTER: Cell<Option<DiagnosticObjectFormatter>> =
         const { Cell::new(None) };
 }
 
-struct DiagnosticObjectFormatterGuard(Option<fn(u64) -> Option<(String, Option<String>)>>);
+struct DiagnosticObjectFormatterGuard(Option<DiagnosticObjectFormatter>);
 
 impl Drop for DiagnosticObjectFormatterGuard {
     fn drop(&mut self) {
@@ -1024,11 +1028,49 @@ pub(crate) enum RawIdentity {
     Heap(Rc<HeapIdentity>),
 }
 
+/// Identity metadata mirrors a C4ValueHash keyed by script values. The mutable
+/// state inside string values is enumeration metadata and does not participate
+/// in their equality or hash implementations.
+#[derive(Clone, Debug)]
+pub(crate) struct ProplistIdentities(HashMap<Value, Option<RawIdentity>>);
+
+impl ProplistIdentities {
+    fn with_capacity(capacity: usize) -> Self {
+        Self(HashMap::with_capacity(capacity))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&Value, &Option<RawIdentity>)> {
+        self.0.iter()
+    }
+
+    fn get(&self, key: &Value) -> Option<&Option<RawIdentity>> {
+        self.0.get(key)
+    }
+
+    fn remove(&mut self, key: &Value) -> Option<Option<RawIdentity>> {
+        self.0.remove(key)
+    }
+
+    fn insert(&mut self, key: Value, identity: Option<RawIdentity>) -> Option<Option<RawIdentity>> {
+        self.0.insert(key, identity)
+    }
+
+    fn retain(&mut self, predicate: impl FnMut(&Value, &mut Option<RawIdentity>) -> bool) {
+        self.0.retain(predicate);
+    }
+}
+
+impl FromIterator<(Value, Option<RawIdentity>)> for ProplistIdentities {
+    fn from_iter<T: IntoIterator<Item = (Value, Option<RawIdentity>)>>(iter: T) -> Self {
+        Self(HashMap::from_iter(iter))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum HeapIdentity {
     Opaque,
     Array(Vec<Option<RawIdentity>>),
-    Proplist(HashMap<Value, Option<RawIdentity>>),
+    Proplist(ProplistIdentities),
 }
 
 impl HeapIdentity {
@@ -1245,7 +1287,7 @@ impl TrackedValue {
 
     fn proplist(entries: Vec<(Value, Self)>) -> Self {
         let mut values = ValueMap::with_capacity(entries.len());
-        let mut identities = HashMap::with_capacity(entries.len());
+        let mut identities = ProplistIdentities::with_capacity(entries.len());
         for (key, entry) in entries {
             let TrackedValue { value, identity } = entry;
             c4_map_assign_set(&mut values, key.clone(), value);
@@ -5969,7 +6011,15 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<TrackedValue, RuntimeError> {
         self.evaluate_reference_assignment_raw(
-            target, operation, operator, value, env, depth, false,
+            target,
+            AssignmentOperator {
+                operation,
+                spelling: operator,
+            },
+            value,
+            env,
+            depth,
+            false,
         )?
         .into_tracked_on_stack()
     }
@@ -5977,13 +6027,16 @@ impl<'a> Vm<'a> {
     fn evaluate_reference_assignment_raw(
         &self,
         target: &AssignmentTarget,
-        operation: Option<&BinaryOp>,
-        operator: &str,
+        assignment_operator: AssignmentOperator<'_>,
         value: &Expr,
         env: &mut Environment,
         depth: usize,
         preserve_reference: bool,
     ) -> Result<ReturnValue, RuntimeError> {
+        let AssignmentOperator {
+            operation,
+            spelling: operator,
+        } = assignment_operator;
         // C++ evaluates an assignment target into one reference before its
         // RHS. Compound bytecodes read and mutate that retained reference;
         // re-evaluating the target would repeat address-side effects.
@@ -7018,7 +7071,7 @@ impl<'a> Vm<'a> {
                 Ok(ReturnValue::Value(tracked))
             }
             "eval" => {
-                let code = match args.get(0).map(CallArg::read).transpose()? {
+                let code = match args.first().map(CallArg::read).transpose()? {
                     Some(Value::String(code)) => code,
                     _ => return Ok(value(Value::Nil)),
                 };
@@ -8435,13 +8488,7 @@ impl<'a> Vm<'a> {
     }
 
     fn call_expression_returns_reference(&self, expr: &Expr, env: &Environment) -> bool {
-        let Expr::Call {
-            callee,
-            args,
-            is_optional: _,
-            ..
-        } = expr
-        else {
+        let Expr::Call { callee, args, .. } = expr else {
             return false;
         };
         match callee.as_ref() {
@@ -8590,8 +8637,10 @@ impl<'a> Vm<'a> {
                 value,
             } => self.evaluate_reference_assignment_raw(
                 target,
-                operation.as_ref(),
-                operator,
+                AssignmentOperator {
+                    operation: operation.as_ref(),
+                    spelling: operator,
+                },
                 value,
                 env,
                 depth,
@@ -8604,8 +8653,10 @@ impl<'a> Vm<'a> {
                 value,
             } => self.evaluate_reference_assignment_raw(
                 target,
-                Some(operation),
-                operator,
+                AssignmentOperator {
+                    operation: Some(operation),
+                    spelling: operator,
+                },
                 value,
                 env,
                 depth,

@@ -1022,6 +1022,10 @@ where
     .map_err(ClientAttemptError::into_error)
 }
 
+// The attempt combines independently optional secondary routes with the
+// primary transport and prepared mesh state. Keeping those inputs explicit
+// makes fallback behavior visible at each call site.
+#[allow(clippy::too_many_arguments)]
 async fn connect_client_stream_attempt<S>(
     stream: S,
     host_peer_addr: Option<SocketAddr>,
@@ -1615,6 +1619,9 @@ pub(crate) async fn connect_mesh_udp_route(
     })
 }
 
+// Classic mesh route identity contains two peer IDs and two connection IDs in
+// addition to its transport inputs; spelling them out avoids ambiguous tuples.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn connect_mesh_tcp_socket_route(
     peer_id: ClientId,
     initiator_id: ClientId,
@@ -1782,6 +1789,9 @@ pub(crate) async fn receive_optional_puncher_event(
     }
 }
 
+// Mesh dialing draws from separate peer, interface, handshake, UDP, and
+// statistics state stores; this function is their task-spawn ownership seam.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_mesh_dial(
     pending: &mut tokio::task::JoinSet<MeshRouteCompletion>,
     active_dials: &mut BTreeSet<MeshDialKey>,
