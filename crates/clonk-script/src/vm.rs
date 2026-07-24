@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
+use smallvec::SmallVec;
 
 use crate::ast::{
     AccessLevel, AssignmentTarget, BinaryOp, Expr, ForInit, Function, IndexOperand,
@@ -40,6 +41,11 @@ const ARRAY_MAX_SIZE: usize = 1_000_000;
 /// but not including, this index.
 const GLOBAL_SLOT_MAX_SIZE: i32 = 1_000_000;
 
+type CallArgs = SmallVec<[CallArg; MAX_CALL_PARAMETERS]>;
+type CallValues = SmallVec<[Value; MAX_CALL_PARAMETERS]>;
+type HostCallArgs = SmallVec<[HostCallArg; MAX_CALL_PARAMETERS]>;
+type CallBindings = SmallVec<[Binding; MAX_CALL_PARAMETERS]>;
+
 thread_local! {
     /// C++ owns one process-global executor. Rust tests execute VMs in
     /// parallel, so thread-local state preserves that synchronous singleton
@@ -49,6 +55,15 @@ thread_local! {
     /// selected native declares fewer. A cross-host dispatch consumes this
     /// one-shot override at the actual callee boundary.
     static CALL_PARAMETER_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
+    #[cfg(test)]
+    static CALL_ARG_HEAP_SPILLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_call_arg_heap_spill(spilled: bool) {
+    if spilled {
+        CALL_ARG_HEAP_SPILLS.with(|count| count.set(count.get() + 1));
+    }
 }
 
 struct ValueStackReservation {
@@ -75,9 +90,7 @@ impl ValueStackReservation {
             if fits {
                 Ok(())
             } else {
-                Err(RuntimeError::new(
-                    "internal error: value stack overflow!",
-                ))
+                Err(RuntimeError::new("internal error: value stack overflow!"))
             }
         })
     }
@@ -379,11 +392,14 @@ struct ActiveDiagnosticFrame {
     profile_started_at: Option<Instant>,
 }
 
+// Function frames deliberately embed C4AUL_MAX_Par inline. Boxing that variant
+// would restore one heap allocation on every ordinary script call.
+#[allow(clippy::large_enum_variant)]
 enum DiagnosticFrameKind {
     Function {
         host_identity: Option<ScriptHostIdentity>,
         function: String,
-        arguments: Vec<Value>,
+        arguments: CallValues,
         argument_reference_mask: u16,
         object_context: Option<String>,
         definition_context: Option<String>,
@@ -478,9 +494,7 @@ thread_local! {
         const { Cell::new(None) };
 }
 
-struct DiagnosticObjectFormatterGuard(
-    Option<fn(u64) -> Option<(String, Option<String>)>>,
-);
+struct DiagnosticObjectFormatterGuard(Option<fn(u64) -> Option<(String, Option<String>)>>);
 
 impl Drop for DiagnosticObjectFormatterGuard {
     fn drop(&mut self) {
@@ -723,7 +737,7 @@ impl ScriptDiagnosticGuard {
     fn enter(
         name: &str,
         profile_host_identity: Option<ScriptHostIdentity>,
-        args: Vec<Value>,
+        args: CallValues,
         argument_reference_mask: u16,
         this_value: &Value,
         owner_definition_name: Option<&str>,
@@ -787,20 +801,14 @@ impl ScriptDiagnosticGuard {
         guard
     }
 
-    fn enter_direct(
-        frame: DirectExecDiagnosticFrame,
-        profile_on_error: bool,
-    ) -> Self {
+    fn enter_direct(frame: DirectExecDiagnosticFrame, profile_on_error: bool) -> Self {
         let emission = EXECUTION_DIAGNOSTICS.with(|cell| {
             let mut diagnostics = cell.borrow_mut();
             let depth = diagnostics.frames.len() + 1;
             let stack_display = frame.display();
             let emission = diagnostics.trace.as_ref().map(|trace| {
                 let indent = ">".repeat(depth.saturating_sub(trace.start_depth));
-                (
-                    Arc::clone(&trace.sink),
-                    format!("T{indent}{stack_display}"),
-                )
+                (Arc::clone(&trace.sink), format!("T{indent}{stack_display}"))
             });
             diagnostics.frames.push(ActiveDiagnosticFrame {
                 kind: DiagnosticFrameKind::DirectExec(frame),
@@ -1096,7 +1104,10 @@ impl HeapIdentity {
                 };
                 Self::Array(identities)
             }
-            (Value::Proplist(entries), segment @ (PathSegment::Property(_) | PathSegment::Index(_))) => {
+            (
+                Value::Proplist(entries),
+                segment @ (PathSegment::Property(_) | PathSegment::Index(_)),
+            ) => {
                 let mut identities = match current {
                     Some(Self::Proplist(identities)) => identities.clone(),
                     _ => match Self::opaque_for(value) {
@@ -1362,8 +1373,7 @@ impl Binding {
     fn write_tracked(&self, tracked: TrackedValue) -> Result<(), RuntimeError> {
         match self {
             Binding::Direct { value, identity } => {
-                if c4_set_copy_is_zero_id(&tracked.value)
-                    && c4_set_copy_is_zero_id(&value.borrow())
+                if c4_set_copy_is_zero_id(&tracked.value) && c4_set_copy_is_zero_id(&value.borrow())
                 {
                     return Ok(());
                 }
@@ -1649,8 +1659,7 @@ impl LValueRef {
                     let legacy_pin = legacy_pin.borrow();
                     return tracked_value_at_path(&legacy_pin.root, &legacy_pin.segments);
                 }
-                let _context =
-                    GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
+                let _context = GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
                 let _guard = CallerContextGuard::enter(Some(caller.clone()));
                 read_path(&function(args)?, segments).map(TrackedValue::runtime)
             }
@@ -1664,8 +1673,7 @@ impl LValueRef {
     fn write_tracked(&self, tracked: TrackedValue) -> Result<(), RuntimeError> {
         match self {
             LValueRef::Cell { value, identity } => {
-                if c4_set_copy_is_zero_id(&tracked.value)
-                    && c4_set_copy_is_zero_id(&value.borrow())
+                if c4_set_copy_is_zero_id(&tracked.value) && c4_set_copy_is_zero_id(&value.borrow())
                 {
                     return Ok(());
                 }
@@ -1703,9 +1711,7 @@ impl LValueRef {
                         resolved.value.type_name()
                     )));
                 }
-                if c4_set_copy_is_zero_id(&tracked.value)
-                    && c4_set_copy_is_zero_id(&self.read()?)
-                {
+                if c4_set_copy_is_zero_id(&tracked.value) && c4_set_copy_is_zero_id(&self.read()?) {
                     return Ok(());
                 }
                 let TrackedValue {
@@ -1753,13 +1759,10 @@ impl LValueRef {
                         resolved.value.type_name()
                     )));
                 }
-                if c4_set_copy_is_zero_id(&tracked.value)
-                    && c4_set_copy_is_zero_id(&self.read()?)
-                {
+                if c4_set_copy_is_zero_id(&tracked.value) && c4_set_copy_is_zero_id(&self.read()?) {
                     return Ok(());
                 }
-                let _context =
-                    GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
+                let _context = GlobalCallContextGuard::enter(global_call_context_hook.as_ref());
                 let _guard = CallerContextGuard::enter(Some(caller.clone()));
                 let replacement = if segments.is_empty() {
                     tracked.set_copy().value
@@ -1882,7 +1885,6 @@ impl LValueRef {
         appended.prepare_legacy_host_path_step()?;
         Ok(appended)
     }
-
 }
 
 #[derive(Clone)]
@@ -2075,35 +2077,22 @@ fn tracked_value_at_path(
 }
 
 fn host_path_address_args(args: &[Value]) -> [Value; 3] {
-    let integer = |index| {
-        Value::Int(
-            args.get(index)
-                .and_then(Value::as_c4_int)
-                .unwrap_or(0),
-        )
-    };
+    let integer = |index| Value::Int(args.get(index).and_then(Value::as_c4_int).unwrap_or(0));
     let target = match args.get(1) {
         Some(Value::Object(id)) => Value::Object(*id),
-        None
-        | Some(
-            Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0),
-        ) => Value::Object(0),
+        None | Some(Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0)) => {
+            Value::Object(0)
+        }
         Some(value) => value.clone(),
     };
     [integer(0), target, integer(2)]
 }
 
-fn legacy_host_path_roots_match(
-    pin: &LegacyHostPathPin,
-    args: &[Value],
-) -> bool {
+fn legacy_host_path_roots_match(pin: &LegacyHostPathPin, args: &[Value]) -> bool {
     host_path_address_args(&pin.args) == host_path_address_args(args)
 }
 
-fn notify_legacy_host_path_pins_before_write(
-    args: &[Value],
-    segments: &[PathSegment],
-) {
+fn notify_legacy_host_path_pins_before_write(args: &[Value], segments: &[PathSegment]) {
     if !legacy_path_pin_scope_active() {
         return;
     }
@@ -2127,10 +2116,7 @@ fn notify_legacy_host_path_pins_before_write(
     }
 }
 
-fn update_legacy_host_path_pins_after_write(
-    args: &[Value],
-    replacement: Value,
-) {
+fn update_legacy_host_path_pins_after_write(args: &[Value], replacement: Value) {
     let replacement = TrackedValue::runtime(replacement);
     for pin in live_legacy_host_path_pins() {
         let mut pin = pin.borrow_mut();
@@ -2467,10 +2453,9 @@ fn read_path(value: &Value, segments: &[PathSegment]) -> Result<Value, RuntimeEr
                 .cloned()
                 .unwrap_or(Value::Nil),
             (PathSegment::Index(index), Value::String(text)) => string_index(&text, index)?,
-            (PathSegment::Index(key), Value::Proplist(entries)) => entries
-                .get_key(key)
-                .cloned()
-                .unwrap_or(Value::Nil),
+            (PathSegment::Index(key), Value::Proplist(entries)) => {
+                entries.get_key(key).cloned().unwrap_or(Value::Nil)
+            }
             (PathSegment::Index(_), other) => {
                 return Err(RuntimeError::new(format!(
                     "cannot index into value of type {}",
@@ -2534,7 +2519,9 @@ fn write_path(
                 Ok(())
             } else {
                 let Some(next) = entries.get_key_mut(key) else {
-                    return Err(RuntimeError::new(format!("cannot access map key {key} on nil")));
+                    return Err(RuntimeError::new(format!(
+                        "cannot access map key {key} on nil"
+                    )));
                 };
                 write_path(next, rest, new_value)
             }
@@ -2638,15 +2625,21 @@ impl HostCallArg {
             },
             _ => None,
         };
-        Ok(Some(values.into_iter().enumerate().map(|(index, value)| {
-            let identity = identities
-                .as_ref()
-                .and_then(|identities| identities.get(index))
-                .cloned()
-                .flatten()
-                .or_else(|| TrackedValue::runtime_identity(&value));
-            Self(CallArg::Value(TrackedValue { value, identity }))
-        }).collect()))
+        Ok(Some(
+            values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let identity = identities
+                        .as_ref()
+                        .and_then(|identities| identities.get(index))
+                        .cloned()
+                        .flatten()
+                        .or_else(|| TrackedValue::runtime_identity(&value));
+                    Self(CallArg::Value(TrackedValue { value, identity }))
+                })
+                .collect(),
+        ))
     }
 
     /// `C4Value::Equals` for native host functions, retaining raw backing
@@ -2704,8 +2697,14 @@ fn c4_raw_equal(
     left_identity: Option<&RawIdentity>,
     right_identity: Option<&RawIdentity>,
 ) -> bool {
-    let left_pointer = matches!(left, Value::String(_) | Value::Array(_) | Value::Proplist(_));
-    let right_pointer = matches!(right, Value::String(_) | Value::Array(_) | Value::Proplist(_));
+    let left_pointer = matches!(
+        left,
+        Value::String(_) | Value::Array(_) | Value::Proplist(_)
+    );
+    let right_pointer = matches!(
+        right,
+        Value::String(_) | Value::Array(_) | Value::Proplist(_)
+    );
     if left_pointer || right_pointer {
         return left_identity
             .zip(right_identity)
@@ -2751,20 +2750,38 @@ fn c4_operator_equal(left: &Value, right: &Value) -> bool {
         // C4V_Any has Data == 0 and compares that union payload without a
         // right-tag check.
         Value::Nil => c4_scalar_payload(right) == Some(0),
-        Value::Int(left) => matches!(right, Value::Nil | Value::Int(_) | Value::Bool(_) | Value::RawBool(_) | Value::C4Id(_))
-            && c4_scalar_payload(right) == Some(u64::from(*left as u32)),
-        Value::Bool(left) => matches!(right, Value::Nil | Value::Int(_) | Value::Bool(_) | Value::RawBool(_))
-            && c4_scalar_payload(right) == Some(u64::from(*left as u8)),
-        Value::RawBool(left) => matches!(right, Value::Nil | Value::Int(_) | Value::Bool(_) | Value::RawBool(_))
-            && c4_scalar_payload(right) == Some(*left as u64),
-        Value::C4Id(left) => matches!(right, Value::Nil | Value::Int(_) | Value::C4Id(_))
-            && c4_scalar_payload(right) == Some(crate::value::c4_id_raw(left) as u64),
+        Value::Int(left) => {
+            matches!(
+                right,
+                Value::Nil | Value::Int(_) | Value::Bool(_) | Value::RawBool(_) | Value::C4Id(_)
+            ) && c4_scalar_payload(right) == Some(u64::from(*left as u32))
+        }
+        Value::Bool(left) => {
+            matches!(
+                right,
+                Value::Nil | Value::Int(_) | Value::Bool(_) | Value::RawBool(_)
+            ) && c4_scalar_payload(right) == Some(u64::from(*left as u8))
+        }
+        Value::RawBool(left) => {
+            matches!(
+                right,
+                Value::Nil | Value::Int(_) | Value::Bool(_) | Value::RawBool(_)
+            ) && c4_scalar_payload(right) == Some(*left as u64)
+        }
+        Value::C4Id(left) => {
+            matches!(right, Value::Nil | Value::Int(_) | Value::C4Id(_))
+                && c4_scalar_payload(right) == Some(crate::value::c4_id_raw(left) as u64)
+        }
         Value::Object(left) => matches!(right, Value::Object(right) if left == right),
         Value::String(left) => {
             matches!(right, Value::String(right) if c4_strings_equal(left, right))
         }
-        Value::Array(left) => matches!(right, Value::Array(right) if c4_array_operator_equal(left, right)),
-        Value::Proplist(left) => matches!(right, Value::Proplist(right) if c4_map_operator_equal(left, right)),
+        Value::Array(left) => {
+            matches!(right, Value::Array(right) if c4_array_operator_equal(left, right))
+        }
+        Value::Proplist(left) => {
+            matches!(right, Value::Proplist(right) if c4_map_operator_equal(left, right))
+        }
     }
 }
 
@@ -2800,13 +2817,17 @@ fn c4_typed_equal(left: &Value, right: &Value) -> bool {
 
 fn c4_array_operator_equal(left: &[Value], right: &[Value]) -> bool {
     left.len() == right.len()
-        && left.iter().zip(right).all(|(left, right)| c4_operator_equal(left, right))
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| c4_operator_equal(left, right))
 }
 
 fn c4_map_operator_equal(left: &ValueMap, right: &ValueMap) -> bool {
     left.len() == right.len()
         && left.iter().all(|(left_key, left_value)| {
-            right.iter()
+            right
+                .iter()
                 .find(|(right_key, _)| c4_typed_equal(left_key, right_key))
                 // C4ValueHash::operator== spells this `other[key] != value`,
                 // so the other map's value is the asymmetric operator lhs.
@@ -3040,7 +3061,10 @@ impl<'a> Vm<'a> {
 
     /// Attach the engine-global script functions (System.c4g global funcs);
     /// `None` = no globals installed.
-    pub fn with_optional_globals(mut self, functions: Option<&'a HashMap<String, Function>>) -> Self {
+    pub fn with_optional_globals(
+        mut self,
+        functions: Option<&'a HashMap<String, Function>>,
+    ) -> Self {
         self.global_functions = functions;
         self
     }
@@ -3099,10 +3123,7 @@ impl<'a> Vm<'a> {
         self
     }
 
-    pub fn with_local_cell_hook(
-        mut self,
-        hook: Option<&'a crate::engine::LocalCellHook>,
-    ) -> Self {
+    pub fn with_local_cell_hook(mut self, hook: Option<&'a crate::engine::LocalCellHook>) -> Self {
         self.local_cell_hook = hook;
         self
     }
@@ -3187,8 +3208,10 @@ impl<'a> Vm<'a> {
         target: Option<Value>,
     ) -> ValueCell {
         let foreign = target.filter(|value| {
-            !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0))
-                && *value != self.this_value
+            !matches!(
+                value,
+                Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
+            ) && *value != self.this_value
         });
         if let Some(target) = foreign {
             return self
@@ -3215,8 +3238,7 @@ impl<'a> Vm<'a> {
             self.var_decls
                 .iter()
                 .any(|declaration| {
-                    declaration.kind == crate::ast::VarDeclKind::Local
-                        && declaration.name == name
+                    declaration.kind == crate::ast::VarDeclKind::Local && declaration.name == name
                 })
                 .then(|| env.object_state.named_local_cell(name))
         } else {
@@ -3224,12 +3246,7 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn object_local_tracked(
-        &self,
-        env: &Environment,
-        target: &Value,
-        name: &str,
-    ) -> TrackedValue {
+    fn object_local_tracked(&self, env: &Environment, target: &Value, name: &str) -> TrackedValue {
         self.object_local_cell(env, target, name)
             .map(|cell| self.read_tracked_cell(&cell))
             .unwrap_or_else(|| TrackedValue::runtime(Value::Nil))
@@ -3252,8 +3269,10 @@ impl<'a> Vm<'a> {
         target: Option<Value>,
     ) -> ValueCell {
         let foreign = target.filter(|value| {
-            !matches!(value, Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0))
-                && *value != self.this_value
+            !matches!(
+                value,
+                Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
+            ) && *value != self.this_value
         });
         if let Some(target) = foreign {
             if let Some(cell) = self
@@ -3332,7 +3351,8 @@ impl<'a> Vm<'a> {
             Value::String(name) => name.into_string(),
             Value::Nil => String::new(),
             Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
-                if env.strict_level.unwrap_or(0) < 3 => {
+                if env.strict_level.unwrap_or(0) < 3 =>
+            {
                 String::new()
             }
             other => {
@@ -3353,7 +3373,13 @@ impl<'a> Vm<'a> {
     /// Call with caller-prepared arguments (reference cells included) — the
     /// host-side C4AulParSet pattern where pars carry `GetRef()` values.
     pub(crate) fn call_args(&self, name: &str, args: Vec<CallArg>) -> Result<Value, RuntimeError> {
-        self.invoke_value(name, args, 0, ObjectState::default(), None)
+        self.invoke_value(
+            name,
+            args.into_iter().collect(),
+            0,
+            ObjectState::default(),
+            None,
+        )
     }
 
     /// Exact engine-global entry with caller-prepared arguments. Unlike
@@ -3365,7 +3391,7 @@ impl<'a> Vm<'a> {
         name: &str,
         args: Vec<CallArg>,
     ) -> Result<Value, RuntimeError> {
-        self.invoke_engine_global_raw(name, args, 0, None)?
+        self.invoke_engine_global_raw(name, args.into_iter().collect(), 0, None)?
             .into_value_on_stack()
     }
 
@@ -3385,7 +3411,7 @@ impl<'a> Vm<'a> {
             self.invoke_script_function(
                 &function.name,
                 function,
-                args,
+                args.into_iter().collect(),
                 depth,
                 ObjectState::default(),
                 None,
@@ -3453,15 +3479,8 @@ impl<'a> Vm<'a> {
             // with a nil `this`, so the destination host must restore Def.
             caller.definition_context |= self.definition_context;
         }
-        let _parameter_override =
-            CallParameterOverrideGuard::enter_if_absent(MAX_CALL_PARAMETERS);
-        self.invoke_value_with_reserved_result(
-            name,
-            args,
-            0,
-            cells.state.clone(),
-            caller,
-        )
+        let _parameter_override = CallParameterOverrideGuard::enter_if_absent(MAX_CALL_PARAMETERS);
+        self.invoke_value_with_reserved_result(name, args, 0, cells.state.clone(), caller)
     }
 
     /// Reference-returning counterpart to [`Vm::call_with_cells`].
@@ -3489,8 +3508,7 @@ impl<'a> Vm<'a> {
         if let Some(caller) = &mut caller {
             caller.definition_context |= self.definition_context;
         }
-        let _parameter_override =
-            CallParameterOverrideGuard::enter_if_absent(MAX_CALL_PARAMETERS);
+        let _parameter_override = CallParameterOverrideGuard::enter_if_absent(MAX_CALL_PARAMETERS);
         self.invoke_reference(name, args, 0, cells.state.clone(), caller)
             .map(ValueReference)
     }
@@ -3549,10 +3567,7 @@ impl<'a> Vm<'a> {
             return Ok((Value::Nil, object_state.to_local_vars(self.var_decls)));
         };
         let mut diagnostic = diagnostics.then(|| {
-            ScriptDiagnosticGuard::enter_direct(
-                self.direct_exec_diagnostic_frame(context),
-                true,
-            )
+            ScriptDiagnosticGuard::enter_direct(self.direct_exec_diagnostic_frame(context), true)
         });
         let mut env = Environment::new_with_params(&[], &[], strict_level, object_state.clone())?;
         env.temporary_script = true;
@@ -3577,13 +3592,7 @@ impl<'a> Vm<'a> {
         cells: &LocalCells,
         strict_level: Option<u8>,
     ) -> Result<Value, RuntimeError> {
-        self.direct_exec_with_cells_in_context(
-            source,
-            cells,
-            strict_level,
-            "DirectExec",
-            true,
-        )
+        self.direct_exec_with_cells_in_context(source, cells, strict_level, "DirectExec", true)
     }
 
     pub(crate) fn direct_exec_with_cells_in_context(
@@ -3603,10 +3612,7 @@ impl<'a> Vm<'a> {
             return Ok(Value::Nil);
         };
         let mut diagnostic = diagnostics.then(|| {
-            ScriptDiagnosticGuard::enter_direct(
-                self.direct_exec_diagnostic_frame(context),
-                true,
-            )
+            ScriptDiagnosticGuard::enter_direct(self.direct_exec_diagnostic_frame(context), true)
         });
         let mut env = Environment::new_with_params(&[], &[], strict_level, cells.state.clone())?;
         env.temporary_script = true;
@@ -3638,15 +3644,10 @@ impl<'a> Vm<'a> {
     ) -> DirectExecDiagnosticFrame {
         if let Value::Object(id) = &self.this_value {
             if *id != 0 {
-                let dynamic_script_name = diagnostic_object_display(*id)
-                    .and_then(|(_, script_name)| script_name);
-                let receiver = dynamic_script_name
-                    .as_deref()
-                    .unwrap_or(self.script_name);
-                return DirectExecDiagnosticFrame::new(
-                    format!("eval in {receiver}"),
-                    Some(*id),
-                );
+                let dynamic_script_name =
+                    diagnostic_object_display(*id).and_then(|(_, script_name)| script_name);
+                let receiver = dynamic_script_name.as_deref().unwrap_or(self.script_name);
+                return DirectExecDiagnosticFrame::new(format!("eval in {receiver}"), Some(*id));
             }
         }
         if !definition_context {
@@ -3665,7 +3666,7 @@ impl<'a> Vm<'a> {
     fn invoke_value(
         &self,
         name: &str,
-        args: Vec<CallArg>,
+        args: CallArgs,
         depth: usize,
         object_state: ObjectState,
         caller: Option<ScriptCallerContext>,
@@ -3677,7 +3678,7 @@ impl<'a> Vm<'a> {
     fn invoke_value_with_reserved_result(
         &self,
         name: &str,
-        args: Vec<CallArg>,
+        args: CallArgs,
         depth: usize,
         object_state: ObjectState,
         caller: Option<ScriptCallerContext>,
@@ -3689,7 +3690,7 @@ impl<'a> Vm<'a> {
     fn invoke_tracked_value(
         &self,
         name: &str,
-        args: Vec<CallArg>,
+        args: CallArgs,
         depth: usize,
         object_state: ObjectState,
         caller: Option<ScriptCallerContext>,
@@ -3701,7 +3702,7 @@ impl<'a> Vm<'a> {
     fn invoke_engine_value(
         &self,
         name: &str,
-        args: Vec<CallArg>,
+        args: CallArgs,
         depth: usize,
         object_state: ObjectState,
         caller: Option<ScriptCallerContext>,
@@ -3713,7 +3714,7 @@ impl<'a> Vm<'a> {
     fn invoke_engine_tracked_value(
         &self,
         name: &str,
-        args: Vec<CallArg>,
+        args: CallArgs,
         depth: usize,
         object_state: ObjectState,
         caller: Option<ScriptCallerContext>,
@@ -3725,7 +3726,7 @@ impl<'a> Vm<'a> {
     fn invoke_engine_raw(
         &self,
         name: &str,
-        args: Vec<CallArg>,
+        args: CallArgs,
         depth: usize,
         object_state: ObjectState,
         caller: Option<ScriptCallerContext>,
@@ -3755,7 +3756,7 @@ impl<'a> Vm<'a> {
             if let Some(function) = self.host_functions.get(name) {
                 let _guard = CallerContextGuard::enter(caller);
                 return self
-                    .invoke_host_function_call_args(name, function, &args)
+                    .invoke_host_function_call_args(name, function, args)
                     .map(TrackedValue::runtime)
                     .map(ReturnValue::Value);
             }
@@ -3763,7 +3764,7 @@ impl<'a> Vm<'a> {
             if let Some(function) = self.host_reference_function(name) {
                 let _guard = CallerContextGuard::enter(caller);
                 return self
-                    .invoke_host_reference_function(name, function, &args)
+                    .invoke_host_reference_function(name, function, args)
                     .map(TrackedValue::runtime)
                     .map(ReturnValue::Value);
             }
@@ -3779,10 +3780,8 @@ impl<'a> Vm<'a> {
         match self.global_functions {
             Some(functions) => functions.get(name),
             None => self.functions.get(name).and_then(|function| {
-                std::iter::successors(Some(function), |function| {
-                    function.overloaded.as_deref()
-                })
-                .find(|function| function.access == AccessLevel::Global)
+                std::iter::successors(Some(function), |function| function.overloaded.as_deref())
+                    .find(|function| function.access == AccessLevel::Global)
             }),
         }
     }
@@ -3790,7 +3789,7 @@ impl<'a> Vm<'a> {
     fn invoke_engine_global_raw(
         &self,
         name: &str,
-        args: Vec<CallArg>,
+        args: CallArgs,
         depth: usize,
         caller: Option<ScriptCallerContext>,
     ) -> Result<ReturnValue, RuntimeError> {
@@ -3817,7 +3816,7 @@ impl<'a> Vm<'a> {
             if let Some(function) = self.host_functions.get(name) {
                 let _guard = CallerContextGuard::enter(caller);
                 return self
-                    .invoke_host_function_call_args(name, function, &args)
+                    .invoke_host_function_call_args(name, function, args)
                     .map(TrackedValue::runtime)
                     .map(ReturnValue::Value);
             }
@@ -3825,7 +3824,7 @@ impl<'a> Vm<'a> {
             if let Some(function) = self.host_reference_function(name) {
                 let _guard = CallerContextGuard::enter(caller);
                 return self
-                    .invoke_host_reference_function(name, function, &args)
+                    .invoke_host_reference_function(name, function, args)
                     .map(TrackedValue::runtime)
                     .map(ReturnValue::Value);
             }
@@ -3900,7 +3899,7 @@ impl<'a> Vm<'a> {
     fn invoke_reference(
         &self,
         name: &str,
-        args: Vec<CallArg>,
+        args: CallArgs,
         depth: usize,
         object_state: ObjectState,
         caller: Option<ScriptCallerContext>,
@@ -3916,7 +3915,7 @@ impl<'a> Vm<'a> {
     fn invoke_raw(
         &self,
         name: &str,
-        args: Vec<CallArg>,
+        args: CallArgs,
         depth: usize,
         object_state: ObjectState,
         caller: Option<ScriptCallerContext>,
@@ -3965,7 +3964,7 @@ impl<'a> Vm<'a> {
                 // write-back seam (C4Script.cpp:1966-1978).
                 let _guard = CallerContextGuard::enter(caller);
                 return self
-                    .invoke_host_function_call_args(name, function, &args)
+                    .invoke_host_function_call_args(name, function, args)
                     .map(TrackedValue::runtime)
                     .map(ReturnValue::Value);
             }
@@ -3973,7 +3972,7 @@ impl<'a> Vm<'a> {
             if let Some(function) = self.host_reference_function(name) {
                 let _guard = CallerContextGuard::enter(caller);
                 return self
-                    .invoke_host_reference_function(name, function, &args)
+                    .invoke_host_reference_function(name, function, args)
                     .map(TrackedValue::runtime)
                     .map(ReturnValue::Value);
             }
@@ -3986,7 +3985,7 @@ impl<'a> Vm<'a> {
         &self,
         name: &str,
         function: &Function,
-        args: Vec<CallArg>,
+        args: CallArgs,
         depth: usize,
         object_state: ObjectState,
         caller: Option<ScriptCallerContext>,
@@ -4009,6 +4008,8 @@ impl<'a> Vm<'a> {
         // zero-to-three-argument call vector several times on every script
         // invocation.
         args.resize_with(MAX_CALL_PARAMETERS, || CallArg::runtime(Value::Nil));
+        #[cfg(test)]
+        record_call_arg_heap_spill(args.spilled());
         Self::check_convert_function_parameters(name, function, &mut args, caller.as_ref())?;
 
         // The external C4AulScriptFunc::Exec overload converts its temporary
@@ -4044,10 +4045,11 @@ impl<'a> Vm<'a> {
             Value::C4Id(id) => crate::value::c4_id_raw(id) != 0,
             _ => false,
         };
-        let inherited_definition_context = caller.as_ref().map_or(
-            function.access != AccessLevel::Global,
-            |caller| caller.definition_context,
-        );
+        let inherited_definition_context = caller
+            .as_ref()
+            .map_or(function.access != AccessLevel::Global, |caller| {
+                caller.definition_context
+            });
         env.definition_context = explicit_definition_context
             || (self.definition_context && inherited_definition_context);
         env.linked_host_lookup = self.exact_global_link_lookup
@@ -4254,8 +4256,11 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn call_args_to_values(&self, args: &[CallArg]) -> Result<Vec<Value>, RuntimeError> {
-        args.iter().map(CallArg::read).collect()
+    fn call_args_to_values(&self, args: &[CallArg]) -> Result<CallValues, RuntimeError> {
+        let values: CallValues = args.iter().map(CallArg::read).collect::<Result<_, _>>()?;
+        #[cfg(test)]
+        record_call_arg_heap_spill(values.spilled());
+        Ok(values)
     }
 
     fn host_reference_function(&self, name: &str) -> Option<&HostReferenceFunction> {
@@ -4274,27 +4279,41 @@ impl<'a> Vm<'a> {
     fn prepare_native_host_call_args(
         &self,
         name: &str,
-        args: &[CallArg],
-    ) -> Result<Vec<CallArg>, RuntimeError> {
-        let Some(parameter_types) = self
+        args: CallArgs,
+        declared_parameter_count: Option<usize>,
+    ) -> Result<CallArgs, RuntimeError> {
+        let parameter_types = self
             .host_function_parameter_types
-            .and_then(|functions| functions.get(name))
-        else {
-            return Ok(args.to_vec());
-        };
+            .and_then(|functions| functions.get(name));
 
         // Argument expressions have already run left-to-right. Only now does
-        // C4Aul balance the native frame to the declared signature.
-        let mut args = args.to_vec();
-        args.truncate(parameter_types.len());
-        args.resize_with(parameter_types.len(), || CallArg::runtime(Value::Nil));
+        // C4Aul balance the native frame to the declared signature. Build the
+        // final frame once: the registered arity limits which supplied slots
+        // survive, while a conversion table (when present) owns the final
+        // frame size just like the old two-stage normalization.
+        let source_limit = declared_parameter_count
+            .unwrap_or(args.len())
+            .min(args.len());
+        let parameter_count = parameter_types.map_or_else(
+            || declared_parameter_count.unwrap_or(args.len()),
+            |parameter_types| parameter_types.len(),
+        );
+        let mut prepared = CallArgs::with_capacity(parameter_count);
+        prepared.extend(args.into_iter().take(source_limit).take(parameter_count));
+        prepared.resize_with(parameter_count, || CallArg::runtime(Value::Nil));
+        #[cfg(test)]
+        record_call_arg_heap_spill(prepared.spilled());
+
+        let Some(parameter_types) = parameter_types else {
+            return Ok(prepared);
+        };
 
         let convert_to_any_eagerly = !matches!(
             caller_origin_strictness(),
             HostCallerStrictness::Strict(level) if level >= 3
         );
 
-        for (index, (arg, expected)) in args
+        for (index, (arg, expected)) in prepared
             .iter_mut()
             .zip(parameter_types.iter().copied())
             .enumerate()
@@ -4329,69 +4348,29 @@ impl<'a> Vm<'a> {
             }
             *arg = CallArg::Value(tracked);
         }
-        Ok(args)
-    }
-
-    fn prepare_native_host_values(
-        &self,
-        name: &str,
-        args: &[Value],
-    ) -> Result<Vec<Value>, RuntimeError> {
-        let args = args
-            .iter()
-            .cloned()
-            .map(CallArg::runtime)
-            .collect::<Vec<_>>();
-        let args = self.prepare_native_host_call_args(name, &args)?;
-        self.call_args_to_values(&args)
-    }
-
-    fn prepare_registered_host_values(
-        &self,
-        name: &str,
-        function: &RegisteredHostFunction,
-        args: &[Value],
-    ) -> Result<Vec<Value>, RuntimeError> {
-        let normalized;
-        let args = match function.parameter_count() {
-            Some(parameter_count) if args.len() != parameter_count => {
-                normalized = Self::normalize_host_values(args, parameter_count);
-                normalized.as_slice()
-            }
-            _ => args,
-        };
-        self.prepare_native_host_values(name, args)
+        Ok(prepared)
     }
 
     fn prepare_registered_host_call_args(
         &self,
         name: &str,
         function: &RegisteredHostFunction,
-        args: &[CallArg],
-    ) -> Result<Vec<CallArg>, RuntimeError> {
-        let normalized;
-        let args = match function.parameter_count() {
-            Some(parameter_count) if args.len() != parameter_count => {
-                normalized = Self::normalize_host_call_args(args, parameter_count);
-                normalized.as_slice()
-            }
-            _ => args,
-        };
-        self.prepare_native_host_call_args(name, args)
+        args: CallArgs,
+    ) -> Result<CallArgs, RuntimeError> {
+        self.prepare_native_host_call_args(name, args, function.parameter_count())
     }
 
     fn invoke_host_function_call_args(
         &self,
         name: &str,
         function: &RegisteredHostFunction,
-        args: &[CallArg],
+        args: CallArgs,
     ) -> Result<Value, RuntimeError> {
         // Reserve before dereferencing/converting CallArgs: a lazy HostPath
         // may invoke engine code, but C++ has already balanced the callee's
         // native frame at that point.
-        let parameter_slots = take_call_parameter_slots(
-            function.parameter_count().unwrap_or(MAX_CALL_PARAMETERS),
-        );
+        let parameter_slots =
+            take_call_parameter_slots(function.parameter_count().unwrap_or(MAX_CALL_PARAMETERS));
         let _value_stack = ValueStackReservation::reserve(parameter_slots)?;
         let args = self.prepare_registered_host_call_args(name, function, args)?;
         let values = self.call_args_to_values(&args)?;
@@ -4430,32 +4409,26 @@ impl<'a> Vm<'a> {
         &self,
         name: &str,
         function: &HostReferenceFunction,
-        args: &[CallArg],
+        args: CallArgs,
     ) -> Result<Value, RuntimeError> {
-        let parameter_slots = take_call_parameter_slots(
-            function.parameter_count().unwrap_or(MAX_CALL_PARAMETERS),
-        );
+        let parameter_slots =
+            take_call_parameter_slots(function.parameter_count().unwrap_or(MAX_CALL_PARAMETERS));
         let _value_stack = ValueStackReservation::reserve(parameter_slots)?;
-        let normalized;
-        let args = match function.parameter_count() {
-            Some(parameter_count) if args.len() != parameter_count => {
-                normalized = Self::normalize_host_call_args(args, parameter_count);
-                normalized.as_slice()
-            }
-            _ => args,
-        };
-        let args = self.prepare_native_host_call_args(name, args)?;
-        let args = args
+        let call_args =
+            self.prepare_native_host_call_args(name, args, function.parameter_count())?;
+        let args = call_args
             .iter()
             .cloned()
             .map(HostCallArg)
-            .collect::<Vec<_>>();
-        let debug_args = args
-            .iter()
-            .map(HostCallArg::read)
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<HostCallArgs>();
+        #[cfg(test)]
+        record_call_arg_heap_spill(args.spilled());
         if let Some(debugger) = &self.debugger {
             if let Some(callback) = debugger.on_call() {
+                let debug_args = args
+                    .iter()
+                    .map(HostCallArg::read)
+                    .collect::<Result<CallValues, _>>()?;
                 callback(name, &debug_args);
             }
         }
@@ -4467,28 +4440,7 @@ impl<'a> Vm<'a> {
                 callback(name, &result);
             }
         }
-        let call_args = args.into_iter().map(|arg| arg.0).collect::<Vec<_>>();
         Ok(materialize_internal_native_call_result(result, &call_args))
-    }
-
-    fn normalize_host_values(args: &[Value], parameter_count: usize) -> Vec<Value> {
-        let mut normalized = args
-            .iter()
-            .take(parameter_count)
-            .cloned()
-            .collect::<Vec<_>>();
-        normalized.resize(parameter_count, Value::Nil);
-        normalized
-    }
-
-    fn normalize_host_call_args(args: &[CallArg], parameter_count: usize) -> Vec<CallArg> {
-        let mut normalized = args
-            .iter()
-            .take(parameter_count)
-            .cloned()
-            .collect::<Vec<_>>();
-        normalized.resize_with(parameter_count, || CallArg::runtime(Value::Nil));
-        normalized
     }
 
     fn execute_statements(
@@ -4658,9 +4610,8 @@ impl<'a> Vm<'a> {
                 // AB_FOREACH reserves its cursor metadata before checking the
                 // container type. Arrays retain iterable+cursor; maps retain
                 // iterable+key+value throughout the body.
-                let _foreach_slots = ValueStackReservation::reserve(
-                    if value_variable.is_some() { 3 } else { 2 },
-                )?;
+                let _foreach_slots =
+                    ValueStackReservation::reserve(if value_variable.is_some() { 3 } else { 2 })?;
 
                 let items: Vec<(Value, Option<Value>)> = if value_variable.is_some() {
                     match &iterable_value {
@@ -4677,11 +4628,9 @@ impl<'a> Vm<'a> {
                     }
                 } else {
                     match &iterable_value {
-                        Value::Array(values) => values
-                            .iter()
-                            .cloned()
-                            .map(|value| (value, None))
-                            .collect(),
+                        Value::Array(values) => {
+                            values.iter().cloned().map(|value| (value, None)).collect()
+                        }
                         other => {
                             return Err(RuntimeError::new(format!(
                                 "for: array expected, but got {}!",
@@ -4693,13 +4642,8 @@ impl<'a> Vm<'a> {
                 for (key_or_item, map_value) in items {
                     // Both header spellings use the function-scoped named-var
                     // slots populated by the pre-parser/hoisting pass.
-                    env.assign_function_var_tracked(
-                        variable,
-                        TrackedValue::runtime(key_or_item),
-                    )?;
-                    if let (Some(value_variable), Some(map_value)) =
-                        (value_variable, map_value)
-                    {
+                    env.assign_function_var_tracked(variable, TrackedValue::runtime(key_or_item))?;
+                    if let (Some(value_variable), Some(map_value)) = (value_variable, map_value) {
                         env.assign_function_var_tracked(
                             value_variable,
                             TrackedValue::runtime(map_value),
@@ -5095,14 +5039,7 @@ impl<'a> Vm<'a> {
                 args,
                 failsafe,
                 forward_rest,
-            } => self.invoke_global_call(
-                name,
-                args,
-                *failsafe,
-                *forward_rest,
-                env,
-                depth,
-            ),
+            } => self.invoke_global_call(name, args, *failsafe, *forward_rest, env, depth),
             Expr::Call {
                 callee,
                 args,
@@ -5148,18 +5085,11 @@ impl<'a> Vm<'a> {
                             // before the zero-arity builtin discards it. This
                             // lookup also precedes old-style constants.
                             if self.has_bound_this(env) {
-                                return Err(RuntimeError::new(
-                                    "cannot call bound variable 'this'",
-                                ));
+                                return Err(RuntimeError::new("cannot call bound variable 'this'"));
                             }
                             if function.is_none() && !self.has_host_function(name) {
-                                let _ = self.build_call_args(
-                                    Some(name),
-                                    None,
-                                    args,
-                                    env,
-                                    depth + 1,
-                                )?;
+                                let _ =
+                                    self.build_call_args(Some(name), None, args, env, depth + 1)?;
                                 return Ok(self.this_value.clone());
                             }
                         }
@@ -5168,16 +5098,10 @@ impl<'a> Vm<'a> {
                             && !self.functions.contains_key(name)
                             && !self.has_host_function(name)
                         {
-                            let evaluated_args = self.build_call_args(
-                                None,
-                                None,
-                                args,
-                                env,
-                                depth + 1,
-                            )?;
-                            let _parameter_slots = ValueStackReservation::reserve(
-                                if name == "Var" { 1 } else { 2 },
-                            )?;
+                            let evaluated_args =
+                                self.build_call_args(None, None, args, env, depth + 1)?;
+                            let _parameter_slots =
+                                ValueStackReservation::reserve(if name == "Var" { 1 } else { 2 })?;
                             let index = Self::slot_index_from_value(
                                 if name == "Var" { "Var()" } else { "Local()" },
                                 evaluated_args
@@ -5186,9 +5110,7 @@ impl<'a> Vm<'a> {
                                     .transpose()?
                                     .unwrap_or(Value::Nil),
                             )?;
-                            if name == "Local"
-                                && self.retain_global_call_context_for_host_paths
-                            {
+                            if name == "Local" && self.retain_global_call_context_for_host_paths {
                                 return Ok(Value::Nil);
                             }
                             let cell = if name == "Var" {
@@ -5206,18 +5128,11 @@ impl<'a> Vm<'a> {
                             && !self.functions.contains_key(name)
                             && !self.has_host_function(name)
                         {
-                            let evaluated_args = self.build_call_args(
-                                None,
-                                None,
-                                args,
-                                env,
-                                depth + 1,
-                            )?;
+                            let evaluated_args =
+                                self.build_call_args(None, None, args, env, depth + 1)?;
                             let _parameter_slots = ValueStackReservation::reserve(2)?;
-                            let index = Self::slot_index_from_value(
-                                "Local()",
-                                evaluated_args[0].read()?,
-                            )?;
+                            let index =
+                                Self::slot_index_from_value("Local()", evaluated_args[0].read()?)?;
                             if index < 0 {
                                 return Ok(Value::Nil);
                             }
@@ -5234,13 +5149,7 @@ impl<'a> Vm<'a> {
                             && !self.has_host_function(name)
                         {
                             return self
-                                .set_local_tracked(
-                                    args,
-                                    None,
-                                    env,
-                                    depth + 1,
-                                    3,
-                                )
+                                .set_local_tracked(args, None, env, depth + 1, 3)
                                 .map(|tracked| tracked.value);
                         }
                         // FnSetGlobal writes the same engine-global numbered
@@ -5266,13 +5175,8 @@ impl<'a> Vm<'a> {
                             && (1..=2).contains(&args.len())
                             && !self.functions.contains_key(name)
                         {
-                            let evaluated_args = self.build_call_args(
-                                None,
-                                None,
-                                args,
-                                env,
-                                depth + 1,
-                            )?;
+                            let evaluated_args =
+                                self.build_call_args(None, None, args, env, depth + 1)?;
                             let _parameter_slots = ValueStackReservation::reserve(2)?;
                             let local_name = match evaluated_args[0].read()? {
                                 Value::String(local_name) => local_name,
@@ -5283,10 +5187,7 @@ impl<'a> Vm<'a> {
                                     )))
                                 }
                             };
-                            let target = evaluated_args
-                                .get(1)
-                                .map(CallArg::read)
-                                .transpose()?;
+                            let target = evaluated_args.get(1).map(CallArg::read).transpose()?;
                             if self.retain_global_call_context_for_host_paths
                                 && target.as_ref().is_none_or(|value| {
                                     matches!(
@@ -5350,33 +5251,23 @@ impl<'a> Vm<'a> {
                             && !self.functions.contains_key(name)
                             && !self.has_host_function(name)
                         {
-                            let evaluated_args = self.build_call_args(
-                                None,
-                                None,
-                                args,
-                                env,
-                                depth + 1,
-                            )?;
-                            let _eval_parameter_slot =
-                                ValueStackReservation::reserve(1)?;
-                            let code = match evaluated_args
-                                .first()
-                                .map(CallArg::read)
-                                .transpose()?
-                            {
-                                Some(Value::String(code)) => code,
-                                // A null string cannot parse; DirectExec's
-                                // catch yields C4VNull (C4AulExec.cpp:
-                                // 1693-1699).
-                                _ => return Ok(Value::Nil),
-                            };
+                            let evaluated_args =
+                                self.build_call_args(None, None, args, env, depth + 1)?;
+                            let _eval_parameter_slot = ValueStackReservation::reserve(1)?;
+                            let code =
+                                match evaluated_args.first().map(CallArg::read).transpose()? {
+                                    Some(Value::String(code)) => code,
+                                    // A null string cannot parse; DirectExec's
+                                    // catch yields C4VNull (C4AulExec.cpp:
+                                    // 1693-1699).
+                                    _ => return Ok(Value::Nil),
+                                };
                             start_direct_exec_profile();
                             let Ok(expr) = crate::parser::Parser::with_strict_level_c4_string(
                                 &code,
                                 env.strict_level,
                             )
-                            .parse_direct_exec_expression()
-                            else {
+                            .parse_direct_exec_expression() else {
                                 // Parse errors log and yield C4VNull
                                 // (DirectExec's catch, C4AulExec.cpp:1693).
                                 return Ok(Value::Nil);
@@ -5414,13 +5305,8 @@ impl<'a> Vm<'a> {
                             && !self.functions.contains_key(name)
                             && !self.has_host_function(name)
                         {
-                            let evaluated_args = self.build_call_args(
-                                None,
-                                None,
-                                args,
-                                env,
-                                depth + 1,
-                            )?;
+                            let evaluated_args =
+                                self.build_call_args(None, None, args, env, depth + 1)?;
                             let _parameter_slot = ValueStackReservation::reserve(1)?;
                             let index = evaluated_args
                                 .first()
@@ -5460,17 +5346,14 @@ impl<'a> Vm<'a> {
                                 // fn (C4Aul OwnerOverloaded includes engine
                                 // funcs — GoldRush AI.c4d's global
                                 // GetOwner/Hostile overrides rely on it).
-                                if let Some(host) =
-                                    self.host_functions.get(&inherited_name)
-                                {
-                                    let mut evaluated_args =
-                                        self.build_call_args(
-                                            Some(&inherited_name),
-                                            None,
-                                            args,
-                                            env,
-                                            depth + 1,
-                                        )?;
+                                if let Some(host) = self.host_functions.get(&inherited_name) {
+                                    let mut evaluated_args = self.build_call_args(
+                                        Some(&inherited_name),
+                                        None,
+                                        args,
+                                        env,
+                                        depth + 1,
+                                    )?;
                                     if *forward_rest {
                                         Self::append_forwarded_args(
                                             &mut evaluated_args,
@@ -5485,12 +5368,10 @@ impl<'a> Vm<'a> {
                                     return self.invoke_host_function_call_args(
                                         &env.function_name.clone(),
                                         host,
-                                        &evaluated_args,
+                                        evaluated_args,
                                     );
                                 }
-                                if let Some(host) =
-                                    self.host_reference_function(&inherited_name)
-                                {
+                                if let Some(host) = self.host_reference_function(&inherited_name) {
                                     let mut evaluated_args = self.build_call_args(
                                         Some(&inherited_name),
                                         None,
@@ -5510,7 +5391,7 @@ impl<'a> Vm<'a> {
                                     return self.invoke_host_reference_function(
                                         &inherited_name,
                                         host,
-                                        &evaluated_args,
+                                        evaluated_args,
                                     );
                                 }
                                 return if name == "_inherited" {
@@ -5518,13 +5399,8 @@ impl<'a> Vm<'a> {
                                     // and evaluates every explicit argument
                                     // before discarding it and pushing nil
                                     // (C4AulParse.cpp:2793-2797).
-                                    let _ = self.build_call_args(
-                                        None,
-                                        None,
-                                        args,
-                                        env,
-                                        depth + 1,
-                                    )?;
+                                    let _ =
+                                        self.build_call_args(None, None, args, env, depth + 1)?;
                                     Ok(Value::Nil)
                                 } else {
                                     Err(RuntimeError::new(format!(
@@ -5533,14 +5409,13 @@ impl<'a> Vm<'a> {
                                     )))
                                 };
                             };
-                            let mut evaluated_args =
-                                self.build_call_args(
-                                    Some(&target.name),
-                                    Some(&target),
-                                    args,
-                                    env,
-                                    depth + 1,
-                                )?;
+                            let mut evaluated_args = self.build_call_args(
+                                Some(&target.name),
+                                Some(&target),
+                                args,
+                                env,
+                                depth + 1,
+                            )?;
                             if *forward_rest {
                                 Self::append_forwarded_args(
                                     &mut evaluated_args,
@@ -5577,8 +5452,7 @@ impl<'a> Vm<'a> {
                                 if let Some(value) = self.global_constant(name).or_else(|| {
                                     self.constants
                                         .and_then(|constants| constants.get(name).cloned())
-                                })
-                                {
+                                }) {
                                     // C++ requires an immediate ')' after
                                     // the '(' (Match(ATT_BCLOSE),
                                     // C4AulParse.cpp:2860).
@@ -5694,12 +5568,9 @@ impl<'a> Vm<'a> {
                     depth,
                 )
                 .map(|tracked| tracked.value),
-            Expr::Property(target, _)
-                if Self::expression_contains_array_append(target) =>
-            {
-                self.evaluate_reference_or_value(expr, env, depth)?
-                    .into_value_on_stack()
-            }
+            Expr::Property(target, _) if Self::expression_contains_array_append(target) => self
+                .evaluate_reference_or_value(expr, env, depth)?
+                .into_value_on_stack(),
             Expr::Property(target, name) => {
                 let proplist = self.evaluate(target, env, depth)?;
                 let _target_slot = ValueStackReservation::reserve(1)?;
@@ -5711,18 +5582,10 @@ impl<'a> Vm<'a> {
             Expr::Assignment(target, value_expr) => {
                 self.evaluate_assignment(target, value_expr, env, depth)
             }
-            Expr::PreIncrement(expr) => {
-                self.update_counter(expr, env, 1, false, "increment")
-            }
-            Expr::PreDecrement(expr) => {
-                self.update_counter(expr, env, -1, false, "decrement")
-            }
-            Expr::PostIncrement(expr) => {
-                self.update_counter(expr, env, 1, true, "increment")
-            }
-            Expr::PostDecrement(expr) => {
-                self.update_counter(expr, env, -1, true, "decrement")
-            }
+            Expr::PreIncrement(expr) => self.update_counter(expr, env, 1, false, "increment"),
+            Expr::PreDecrement(expr) => self.update_counter(expr, env, -1, false, "decrement"),
+            Expr::PostIncrement(expr) => self.update_counter(expr, env, 1, true, "increment"),
+            Expr::PostDecrement(expr) => self.update_counter(expr, env, -1, true, "decrement"),
         }
     }
 
@@ -5836,12 +5699,9 @@ impl<'a> Vm<'a> {
                 env,
                 depth,
             ),
-            Expr::Property(target, _)
-                if Self::expression_contains_array_append(target) =>
-            {
-                self.evaluate_reference_or_value(expr, env, depth)?
-                    .into_tracked_on_stack()
-            }
+            Expr::Property(target, _) if Self::expression_contains_array_append(target) => self
+                .evaluate_reference_or_value(expr, env, depth)?
+                .into_tracked_on_stack(),
             Expr::Property(target, name) => {
                 let collection = self.evaluate_tracked(target, env, depth)?;
                 let _target_slot = ValueStackReservation::reserve(1)?;
@@ -5892,14 +5752,7 @@ impl<'a> Vm<'a> {
                 failsafe,
                 forward_rest,
             } => self
-                .invoke_global_call_raw(
-                    name,
-                    args,
-                    *failsafe,
-                    *forward_rest,
-                    env,
-                    depth,
-                )?
+                .invoke_global_call_raw(name, args, *failsafe, *forward_rest, env, depth)?
                 .into_tracked_on_stack(),
             Expr::Call {
                 callee,
@@ -5948,22 +5801,10 @@ impl<'a> Vm<'a> {
                     {
                         return self.evaluate(expr, env, depth).map(TrackedValue::runtime);
                     }
-                    if name == "SetLocal"
-                        && function.is_none()
-                        && !self.has_host_function(name)
-                    {
-                        return self.set_local_tracked(
-                            args,
-                            None,
-                            env,
-                            depth + 1,
-                            3,
-                        );
+                    if name == "SetLocal" && function.is_none() && !self.has_host_function(name) {
+                        return self.set_local_tracked(args, None, env, depth + 1, 3);
                     }
-                    if name == "SetGlobal"
-                        && function.is_none()
-                        && !self.has_host_function(name)
-                    {
+                    if name == "SetGlobal" && function.is_none() && !self.has_host_function(name) {
                         return self.set_global_tracked(args, *forward_rest, env, depth + 1);
                     }
                     if env.strict_level.unwrap_or(0) < 2
@@ -6327,15 +6168,15 @@ impl<'a> Vm<'a> {
     fn fold_legacy_zero(value: Value, strict_level: Option<u8>) -> Value {
         match value {
             Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
-                if strict_level.unwrap_or(0) < 3 => Value::Nil,
+                if strict_level.unwrap_or(0) < 3 =>
+            {
+                Value::Nil
+            }
             value => value,
         }
     }
 
-    fn fold_legacy_zero_tracked(
-        mut value: TrackedValue,
-        strict_level: Option<u8>,
-    ) -> TrackedValue {
+    fn fold_legacy_zero_tracked(mut value: TrackedValue, strict_level: Option<u8>) -> TrackedValue {
         value.value = Self::fold_legacy_zero(value.value, strict_level);
         value
     }
@@ -6428,12 +6269,7 @@ impl<'a> Vm<'a> {
 
         match op {
             Add => self.eval_add(left, right),
-            Concat => self.eval_concat(
-                left,
-                right,
-                strict,
-                display_symbol.unwrap_or(".."),
-            ),
+            Concat => self.eval_concat(left, right, strict, display_symbol.unwrap_or("..")),
             // Reached only via non-short-circuit paths (the Binary arm in
             // `evaluate` handles `??` before both sides run); keep the same
             // nil-only semantics.
@@ -6510,12 +6346,8 @@ impl<'a> Vm<'a> {
             }
             // String comparison operators
             StringEqual => self.eval_string_cmp(left, right, strict, |a, b| a == b, "S="),
-            KeywordStringEqual => {
-                self.eval_string_cmp(left, right, strict, |a, b| a == b, "eq")
-            }
-            KeywordStringNotEqual => {
-                self.eval_string_cmp(left, right, strict, |a, b| a != b, "ne")
-            }
+            KeywordStringEqual => self.eval_string_cmp(left, right, strict, |a, b| a == b, "eq"),
+            KeywordStringNotEqual => self.eval_string_cmp(left, right, strict, |a, b| a != b, "ne"),
         }
     }
 
@@ -6574,9 +6406,7 @@ impl<'a> Vm<'a> {
                 let value = self.eval_concat(left.value, right.value, strict, operator)?;
                 Ok(TrackedValue {
                     value,
-                    identity: Some(RawIdentity::Heap(Rc::new(HeapIdentity::Array(
-                        identities,
-                    )))),
+                    identity: Some(RawIdentity::Heap(Rc::new(HeapIdentity::Array(identities)))),
                 })
             }
             (Value::Proplist(left_entries), Value::Proplist(right_entries)) => {
@@ -6999,7 +6829,12 @@ impl<'a> Vm<'a> {
         args: &[CallArg],
         index: usize,
     ) -> Result<i32, RuntimeError> {
-        match args.get(index).map(CallArg::read).transpose()?.unwrap_or(Value::Nil) {
+        match args
+            .get(index)
+            .map(CallArg::read)
+            .transpose()?
+            .unwrap_or(Value::Nil)
+        {
             Value::Int(value) => Ok(value),
             Value::Bool(value) => Ok(i32::from(value)),
             Value::RawBool(value) => Ok(value as u32 as i32),
@@ -7018,7 +6853,12 @@ impl<'a> Vm<'a> {
         args: &[CallArg],
         index: usize,
     ) -> Result<Option<Value>, RuntimeError> {
-        match args.get(index).map(CallArg::read).transpose()?.unwrap_or(Value::Nil) {
+        match args
+            .get(index)
+            .map(CallArg::read)
+            .transpose()?
+            .unwrap_or(Value::Nil)
+        {
             Value::Nil
             | Value::Int(0)
             | Value::Bool(false)
@@ -7040,11 +6880,17 @@ impl<'a> Vm<'a> {
         index: usize,
         strict_level: Option<u8>,
     ) -> Result<String, RuntimeError> {
-        match args.get(index).map(CallArg::read).transpose()?.unwrap_or(Value::Nil) {
+        match args
+            .get(index)
+            .map(CallArg::read)
+            .transpose()?
+            .unwrap_or(Value::Nil)
+        {
             Value::String(value) => Ok(value.into_string()),
             Value::Nil => Ok(String::new()),
             Value::Int(0) | Value::Bool(false) | Value::RawBool(0)
-                if strict_level.unwrap_or(0) < 3 => {
+                if strict_level.unwrap_or(0) < 3 =>
+            {
                 Ok(String::new())
             }
             other => Err(RuntimeError::new(format!(
@@ -7065,16 +6911,18 @@ impl<'a> Vm<'a> {
     ) -> Result<ReturnValue, RuntimeError> {
         let strict_level = caller.and_then(|caller| caller.origin_strict_level);
         let name = self.global_builtin_string_arg("VarN", args, 0, strict_level)?;
-        Ok(match caller.and_then(|caller| {
-            caller
-                .function_vars
-                .borrow()
-                .get(&name)
-                .map(Binding::lvalue)
-        }) {
-            Some(reference) => ReturnValue::Reference(reference),
-            None => ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
-        })
+        Ok(
+            match caller.and_then(|caller| {
+                caller
+                    .function_vars
+                    .borrow()
+                    .get(&name)
+                    .map(Binding::lvalue)
+            }) {
+                Some(reference) => ReturnValue::Reference(reference),
+                None => ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
+            },
+        )
     }
 
     fn invoke_global_builtin_raw(
@@ -7116,9 +6964,7 @@ impl<'a> Vm<'a> {
                 // Native C4V_Any parameter conversion canonicalizes every
                 // falsy value to nil for callers below strict 3
                 // (C4AulExec.cpp:1435-1439).
-                let tracked = if env.strict_level.unwrap_or(0) < 3
-                    && !tracked.value.as_bool()
-                {
+                let tracked = if env.strict_level.unwrap_or(0) < 3 && !tracked.value.as_bool() {
                     TrackedValue::runtime(Value::Nil)
                 } else {
                     tracked
@@ -7147,14 +6993,15 @@ impl<'a> Vm<'a> {
                 )))
             }
             "LocalN" => {
-                let local_name =
-                    self.global_builtin_string_arg(name, args, 0, env.strict_level)?;
+                let local_name = self.global_builtin_string_arg(name, args, 0, env.strict_level)?;
                 let Some(target) = self.global_builtin_object_arg(name, args, 1)? else {
                     return Ok(value(Value::Nil));
                 };
-                Ok(ReturnValue::Reference(self.tracked_cell(
-                    self.localn_cell(env, &local_name, Some(target)),
-                )))
+                Ok(ReturnValue::Reference(self.tracked_cell(self.localn_cell(
+                    env,
+                    &local_name,
+                    Some(target),
+                ))))
             }
             "SetLocal" => {
                 let index = self.global_builtin_int_arg(name, args, 0)?;
@@ -7222,9 +7069,8 @@ impl<'a> Vm<'a> {
         depth: usize,
     ) -> Result<ReturnValue, RuntimeError> {
         let function = self.engine_global_script_function(name);
-        let vm_builtin = function.is_none()
-            && !self.has_host_function(name)
-            && Self::is_global_vm_builtin(name);
+        let vm_builtin =
+            function.is_none() && !self.has_host_function(name) && Self::is_global_vm_builtin(name);
         let known = function.is_some() || self.has_host_function(name) || vm_builtin;
         if !known {
             if !failsafe {
@@ -7264,12 +7110,9 @@ impl<'a> Vm<'a> {
             if let Some(host) = global_vm.host_functions.get(name) {
                 let caller = env.caller_context();
                 let _guard = CallerContextGuard::enter(Some(caller.clone()));
-                let args = global_vm.prepare_registered_host_call_args(
-                    name,
-                    host,
-                    &evaluated_args,
-                )?;
-                let args = global_vm.call_args_to_values(&args)?;
+                let args =
+                    global_vm.prepare_registered_host_call_args(name, host, evaluated_args)?;
+                let args = global_vm.call_args_to_values(&args)?.into_vec();
                 return Ok(ReturnValue::Reference(LValueRef::HostPath {
                     function: host.callback().clone(),
                     args,
@@ -7284,13 +7127,9 @@ impl<'a> Vm<'a> {
         // eval builtin or context hook may itself call script and must not
         // consume the parameter ownership intended for this dispatch.
         let _parameter_override = CallParameterOverrideGuard::enter(0);
-        global_vm.invoke_engine_global_raw(
-            name,
-            evaluated_args,
-            depth + 1,
-            Some(env.caller_context()),
-        )
-        .map(materialize_target_call_result)
+        global_vm
+            .invoke_engine_global_raw(name, evaluated_args, depth + 1, Some(env.caller_context()))
+            .map(materialize_target_call_result)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7401,10 +7240,8 @@ impl<'a> Vm<'a> {
             && args.len() == 1
             && !self.functions.contains_key(name)
         {
-            let evaluated_args =
-                self.build_call_args(None, None, args, env, depth + 1)?;
-            let _parameter_slots =
-                ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+            let evaluated_args = self.build_call_args(None, None, args, env, depth + 1)?;
+            let _parameter_slots = ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
             let local_name = match evaluated_args[0].read()? {
                 Value::String(local_name) => local_name,
                 other => {
@@ -7429,14 +7266,9 @@ impl<'a> Vm<'a> {
             && !self.functions.contains_key(name)
             && !self.has_host_function(name)
         {
-            let evaluated_args =
-                self.build_call_args(None, None, args, env, depth + 1)?;
-            let _parameter_slots =
-                ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
-            let index = Self::slot_index_from_value(
-                "Local()",
-                evaluated_args[0].read()?,
-            )?;
+            let evaluated_args = self.build_call_args(None, None, args, env, depth + 1)?;
+            let _parameter_slots = ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+            let index = Self::slot_index_from_value("Local()", evaluated_args[0].read()?)?;
             if index < 0 {
                 return Ok(Value::Nil);
             }
@@ -7454,24 +7286,13 @@ impl<'a> Vm<'a> {
             && !self.has_host_function(name)
         {
             return self
-                .set_local_tracked(
-                    args,
-                    Some(target),
-                    env,
-                    depth + 1,
-                    MAX_CALL_PARAMETERS,
-                )
+                .set_local_tracked(args, Some(target), env, depth + 1, MAX_CALL_PARAMETERS)
                 .map(|tracked| tracked.value);
         }
         if matches!(
             &target,
-            Value::Nil
-                | Value::Int(0)
-                | Value::Bool(false)
-                | Value::RawBool(0)
-                | Value::Object(0)
-        )
-            || matches!(&target, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
+            Value::Nil | Value::Int(0) | Value::Bool(false) | Value::RawBool(0) | Value::Object(0)
+        ) || matches!(&target, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
         {
             // Parse_Params emits every argument expression before AB_CALL or
             // AB_CALLFS checks the target (C4AulParse.cpp:3240;
@@ -7479,21 +7300,18 @@ impl<'a> Vm<'a> {
             // an argument error win before reporting the zero target.
             let function = self.functions.get(name);
             let _ = self.build_call_args(Some(name), function, args, env, depth + 1)?;
-            let _parameter_slots =
-                ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+            let _parameter_slots = ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
             return Err(RuntimeError::new("Object call: target is zero!"));
         }
         match &target {
-            Value::Object(_) | Value::C4Id(_) if self.method_dispatch.is_some() =>
-            {
+            Value::Object(_) | Value::C4Id(_) if self.method_dispatch.is_some() => {
                 let function = self.functions.get(name);
                 let mut evaluated_args =
                     self.build_call_args(Some(name), function, args, env, depth + 1)?;
                 if forward_rest {
                     Self::append_forwarded_args(&mut evaluated_args, env, MAX_CALL_PARAMETERS)?;
                 }
-                let _parameter_slots =
-                    ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+                let _parameter_slots = ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
                 let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
                 dispatch_args.push(target.clone());
                 dispatch_args.push(Value::String(name.to_string().into()));
@@ -7522,10 +7340,8 @@ impl<'a> Vm<'a> {
             other => {
                 if self.method_dispatch.is_some() {
                     let function = self.functions.get(name);
-                    let _ =
-                        self.build_call_args(Some(name), function, args, env, depth + 1)?;
-                    let _parameter_slots =
-                        ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+                    let _ = self.build_call_args(Some(name), function, args, env, depth + 1)?;
+                    let _parameter_slots = ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
                     Err(RuntimeError::new(format!(
                         "Object call: Invalid target type {}, expected object or id!",
                         other.type_name()
@@ -7568,8 +7384,7 @@ impl<'a> Vm<'a> {
         if forward_rest {
             Self::append_forwarded_args(&mut evaluated_args, env, MAX_CALL_PARAMETERS)?;
         }
-        let _parameter_override =
-            CallParameterOverrideGuard::enter(MAX_CALL_PARAMETERS);
+        let _parameter_override = CallParameterOverrideGuard::enter(MAX_CALL_PARAMETERS);
         self.invoke_value_with_reserved_result(
             name,
             evaluated_args,
@@ -7586,8 +7401,8 @@ impl<'a> Vm<'a> {
         args: &[Expr],
         env: &mut Environment,
         depth: usize,
-    ) -> Result<Vec<CallArg>, RuntimeError> {
-        let mut evaluated_args = Vec::with_capacity(args.len());
+    ) -> Result<CallArgs, RuntimeError> {
+        let mut evaluated_args = CallArgs::with_capacity(args.len());
         let mut value_stack = ValueStackReservation::empty();
         for (index, arg) in args.iter().enumerate() {
             let script_wants_reference = function
@@ -7600,8 +7415,8 @@ impl<'a> Vm<'a> {
             // An unresolved `this` is the context-function result, an rvalue;
             // a parameter/function-var/object-local named `this` remains the
             // ordinary live reference found by the same syntax.
-            let unbound_context_this = matches!(arg, Expr::Variable(name) if name == "this")
-                && !self.has_bound_this(env);
+            let unbound_context_this =
+                matches!(arg, Expr::Variable(name) if name == "this") && !self.has_bound_this(env);
             let can_be_reference = if unbound_context_this {
                 false
             } else if host_wants_reference {
@@ -7651,6 +7466,8 @@ impl<'a> Vm<'a> {
                 value_stack.grow(1)?;
             }
         }
+        #[cfg(test)]
+        record_call_arg_heap_spill(evaluated_args.spilled());
         Ok(evaluated_args)
     }
 
@@ -7660,7 +7477,7 @@ impl<'a> Vm<'a> {
     /// (C4AulParse.cpp:2293-2306). Direct native calls use their exact arity;
     /// script, object and global calls retain the 10-slot frame.
     fn append_forwarded_args(
-        evaluated_args: &mut Vec<CallArg>,
+        evaluated_args: &mut CallArgs,
         env: &Environment,
         parameter_limit: usize,
     ) -> Result<(), RuntimeError> {
@@ -7735,21 +7552,14 @@ impl<'a> Vm<'a> {
     /// a value (FnSimFlight's C4Value* parameters, C4Script.cpp:5309-5312).
     fn expr_can_be_host_reference(&self, expr: &Expr) -> bool {
         match expr {
-            Expr::Variable(_)
-            | Expr::Property(_, _)
-            | Expr::Index(_, _)
-            | Expr::ArrayAppend(_) => true,
+            Expr::Variable(_) | Expr::Property(_, _) | Expr::Index(_, _) | Expr::ArrayAppend(_) => {
+                true
+            }
             Expr::Call { callee, .. } => match callee.as_ref() {
                 Expr::Variable(name) => {
                     matches!(
                         name.as_str(),
-                        "Local"
-                            | "LocalN"
-                            | "Var"
-                            | "VarN"
-                            | "EffectVar"
-                            | "Global"
-                            | "GlobalN"
+                        "Local" | "LocalN" | "Var" | "VarN" | "EffectVar" | "Global" | "GlobalN"
                     ) || self
                         .functions
                         .get(name)
@@ -7970,11 +7780,8 @@ impl<'a> Vm<'a> {
                 let reference = self.assignment_target_to_lvalue(env, base, depth)?;
                 let _base_slot = ValueStackReservation::reserve(1)?;
                 if !matches!(&reference, LValueRef::HostPath { .. }) {
-                    let (index, _index_slot) = self.evaluate_index_operand(
-                        index_operand,
-                        env,
-                        depth,
-                    )?;
+                    let (index, _index_slot) =
+                        self.evaluate_index_operand(index_operand, env, depth)?;
                     let collection = reference.read()?;
                     match (&collection, &index) {
                         (Value::Object(0), _) => {
@@ -8003,11 +7810,8 @@ impl<'a> Vm<'a> {
                         }
                     }
                 }
-                let (index, _index_slot) = self.evaluate_index_operand(
-                    index_operand,
-                    env,
-                    depth,
-                )?;
+                let (index, _index_slot) =
+                    self.evaluate_index_operand(index_operand, env, depth)?;
                 reference.detach_container_identity_if_shared();
                 reference.append(PathSegment::Index(index))
             }
@@ -8035,23 +7839,18 @@ impl<'a> Vm<'a> {
                 Ok(self.tracked_cell(slot_cell(&env.var_slots, index)))
             }
             AssignmentTarget::EffectSlot(args) => {
-                let evaluated_args =
-                    self.build_call_args(None, None, args, env, depth + 1)?;
-                let raw_arg_values = evaluated_args
-                    .iter()
-                    .map(CallArg::read)
-                    .collect::<Result<Vec<_>, _>>()?;
+                let evaluated_args = self.build_call_args(None, None, args, env, depth + 1)?;
                 if let Some(function) = self.host_functions.get("EffectVar") {
-                    let _parameter_slots = ValueStackReservation::reserve(
-                        function.parameter_count().unwrap_or(3),
-                    )?;
+                    let _parameter_slots =
+                        ValueStackReservation::reserve(function.parameter_count().unwrap_or(3))?;
                     let caller = env.caller_context();
                     let _guard = CallerContextGuard::enter(Some(caller.clone()));
-                    let arg_values = self.prepare_registered_host_values(
+                    let prepared_args = self.prepare_registered_host_call_args(
                         "EffectVar",
                         function,
-                        &raw_arg_values,
+                        evaluated_args,
                     )?;
+                    let arg_values = self.call_args_to_values(&prepared_args)?.into_vec();
                     return Ok(LValueRef::HostPath {
                         function: function.callback().clone(),
                         args: arg_values,
@@ -8065,6 +7864,11 @@ impl<'a> Vm<'a> {
                     });
                 }
                 let _parameter_slots = ValueStackReservation::reserve(3)?;
+                let raw_arg_values = evaluated_args.iter().map(CallArg::read).collect::<Result<
+                    CallValues,
+                    _,
+                >>(
+                )?;
 
                 // Host-less fixture VMs retain EffectVar slots in ordinary
                 // environment cells; exposing that cell keeps the same
@@ -8138,8 +7942,7 @@ impl<'a> Vm<'a> {
                 // `LocalN("x") = v` writes the named object local through;
                 // the two-argument form targets ANOTHER object's local via
                 // the host cell hook.
-                let evaluated_args =
-                    self.build_call_args(None, None, args, env, depth + 1)?;
+                let evaluated_args = self.build_call_args(None, None, args, env, depth + 1)?;
                 let _parameter_slots = ValueStackReservation::reserve(2)?;
                 let local_name = match evaluated_args[0].read()? {
                     Value::String(local_name) => local_name,
@@ -8150,10 +7953,7 @@ impl<'a> Vm<'a> {
                         )))
                     }
                 };
-                let target = evaluated_args
-                    .get(1)
-                    .map(CallArg::read)
-                    .transpose()?;
+                let target = evaluated_args.get(1).map(CallArg::read).transpose()?;
                 if self.retain_global_call_context_for_host_paths
                     && target.as_ref().is_none_or(|value| {
                         matches!(
@@ -8178,8 +7978,7 @@ impl<'a> Vm<'a> {
                     && !self.functions.contains_key(name)
                     && !self.has_host_function(name) =>
             {
-                let evaluated_args =
-                    self.build_call_args(None, None, args, env, depth + 1)?;
+                let evaluated_args = self.build_call_args(None, None, args, env, depth + 1)?;
                 let _parameter_slot = ValueStackReservation::reserve(1)?;
                 let index = evaluated_args
                     .first()
@@ -8209,8 +8008,7 @@ impl<'a> Vm<'a> {
                     return Err(RuntimeError::new("cannot call bound variable 'this'"));
                 }
                 let function = self.own_or_global_script_function(name);
-                let args =
-                    self.build_call_args(Some(name), function, args, env, depth + 1)?;
+                let args = self.build_call_args(Some(name), function, args, env, depth + 1)?;
                 self.invoke_reference(
                     name,
                     args,
@@ -8227,16 +8025,9 @@ impl<'a> Vm<'a> {
                 args,
                 is_arrow,
             } if method == "LocalN" && args.len() == 1 => {
-                let (object_value, evaluated_args, _target_slot, _parameter_slots) =
-                    self.evaluate_method_slot_operands(
-                        object,
-                        args,
-                        *is_arrow,
-                        None,
-                        None,
-                        2,
-                        env,
-                        depth,
+                let (object_value, evaluated_args, _target_slot, _parameter_slots) = self
+                    .evaluate_method_slot_operands(
+                        object, args, *is_arrow, None, None, 2, env, depth,
                     )?;
                 if *is_arrow
                     && matches!(
@@ -8269,16 +8060,9 @@ impl<'a> Vm<'a> {
                 args,
                 is_arrow,
             } if method == "Local" && args.len() == 1 => {
-                let (object_value, evaluated_args, _target_slot, _parameter_slots) =
-                    self.evaluate_method_slot_operands(
-                        object,
-                        args,
-                        *is_arrow,
-                        None,
-                        None,
-                        2,
-                        env,
-                        depth,
+                let (object_value, evaluated_args, _target_slot, _parameter_slots) = self
+                    .evaluate_method_slot_operands(
+                        object, args, *is_arrow, None, None, 2, env, depth,
                     )?;
                 if *is_arrow
                     && matches!(
@@ -8292,10 +8076,7 @@ impl<'a> Vm<'a> {
                 {
                     return Err(RuntimeError::new("Object call: target is zero!"));
                 }
-                let index = Self::slot_index_from_value(
-                    "Local()",
-                    evaluated_args[0].read()?,
-                )?;
+                let index = Self::slot_index_from_value("Local()", evaluated_args[0].read()?)?;
                 Ok(self.tracked_cell(self.numbered_local_cell(env, index, Some(object_value))))
             }
             AssignmentTarget::MethodSlot {
@@ -8307,8 +8088,8 @@ impl<'a> Vm<'a> {
                 // Preserve the legacy method-slot shim as an actual retained
                 // cell so plain assignment can resolve it before the RHS.
                 let native_slots = if method == "Var" { 1 } else { 3 };
-                let (object_value, evaluated_args, _target_slot, _parameter_slots) =
-                    self.evaluate_method_slot_operands(
+                let (object_value, evaluated_args, _target_slot, _parameter_slots) = self
+                    .evaluate_method_slot_operands(
                         object,
                         args,
                         *is_arrow,
@@ -8350,8 +8131,8 @@ impl<'a> Vm<'a> {
                 is_arrow,
             } if !matches!(method.as_str(), "Var" | "EffectVar") => {
                 let function = self.functions.get(method);
-                let (mut target, evaluated_args, _target_slot, _parameter_slots) =
-                    self.evaluate_method_slot_operands(
+                let (mut target, evaluated_args, _target_slot, _parameter_slots) = self
+                    .evaluate_method_slot_operands(
                         object,
                         args,
                         *is_arrow,
@@ -8375,8 +8156,7 @@ impl<'a> Vm<'a> {
                         | Value::Bool(false)
                         | Value::RawBool(0)
                         | Value::Object(0)
-                )
-                    || matches!(&target, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
+                ) || matches!(&target, Value::C4Id(id) if crate::value::c4_id_raw(id) == 0)
                 {
                     return Err(RuntimeError::new("Object call: target is zero!"));
                 }
@@ -8392,13 +8172,10 @@ impl<'a> Vm<'a> {
                         for arg in &evaluated_args {
                             dispatch_args.push(arg.read()?);
                         }
-                        let dispatch = self
-                            .method_reference_dispatch
-                            .ok_or_else(|| {
-                                RuntimeError::new("method reference dispatch vanished")
-                            })?;
-                        let _guard =
-                            CallerContextGuard::enter(Some(env.caller_context()));
+                        let dispatch = self.method_reference_dispatch.ok_or_else(|| {
+                            RuntimeError::new("method reference dispatch vanished")
+                        })?;
+                        let _guard = CallerContextGuard::enter(Some(env.caller_context()));
                         let _parameter_override =
                             (*is_arrow).then(|| CallParameterOverrideGuard::enter(0));
                         dispatch(&dispatch_args).map(ValueReference::into_lvalue)
@@ -8453,7 +8230,7 @@ impl<'a> Vm<'a> {
     ) -> Result<
         (
             Value,
-            Vec<CallArg>,
+            CallArgs,
             ValueStackReservation,
             ValueStackReservation,
         ),
@@ -8462,10 +8239,8 @@ impl<'a> Vm<'a> {
         if is_arrow {
             let target = self.evaluate(object, env, depth + 1)?;
             let target_slot = ValueStackReservation::reserve(1)?;
-            let evaluated_args =
-                self.build_call_args(name, function, args, env, depth + 1)?;
-            let parameter_slots =
-                ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
+            let evaluated_args = self.build_call_args(name, function, args, env, depth + 1)?;
+            let parameter_slots = ValueStackReservation::reserve(MAX_CALL_PARAMETERS)?;
             return Ok((target, evaluated_args, target_slot, parameter_slots));
         }
 
@@ -8476,8 +8251,7 @@ impl<'a> Vm<'a> {
         direct_args.push(object.clone());
         let mut evaluated_args =
             self.build_call_args(name, function, &direct_args, env, depth + 1)?;
-        let parameter_slots =
-            ValueStackReservation::reserve(native_parameter_slots)?;
+        let parameter_slots = ValueStackReservation::reserve(native_parameter_slots)?;
         let object = evaluated_args
             .pop()
             .map(|value| value.read())
@@ -8604,10 +8378,12 @@ impl<'a> Vm<'a> {
         }
 
         if name == "GlobalN" && args.len() == 1 {
-            return Ok(Some(match self.evaluate_named_global(args, env, depth + 1)? {
-                Some(cell) => ReturnValue::Reference(self.tracked_cell(cell)),
-                None => ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
-            }));
+            return Ok(Some(
+                match self.evaluate_named_global(args, env, depth + 1)? {
+                    Some(cell) => ReturnValue::Reference(self.tracked_cell(cell)),
+                    None => ReturnValue::Value(TrackedValue::runtime(Value::Nil)),
+                },
+            ));
         }
         if name == "VarN" {
             let values = self.build_call_args(None, None, args, env, depth + 1)?;
@@ -8618,20 +8394,16 @@ impl<'a> Vm<'a> {
         }
         if matches!(name.as_str(), "Local" | "Var") && args.len() <= 1 {
             if name == "Local" && self.retain_global_call_context_for_host_paths {
-                return Ok(Some(ReturnValue::Value(TrackedValue::runtime(
-                    Value::Nil,
-                ))));
+                return Ok(Some(ReturnValue::Value(TrackedValue::runtime(Value::Nil))));
             }
             let index = self.evaluate_slot_index(
                 if name == "Local" { "Local()" } else { "Var()" },
-                args.first()
-                    .unwrap_or(&Expr::Literal(Literal::Int(0))),
+                args.first().unwrap_or(&Expr::Literal(Literal::Int(0))),
                 env,
                 depth + 1,
             )?;
-            let _parameter_slots = ValueStackReservation::reserve(
-                if name == "Local" { 2 } else { 1 },
-            )?;
+            let _parameter_slots =
+                ValueStackReservation::reserve(if name == "Local" { 2 } else { 1 })?;
             if name == "Local" && index < 0 {
                 return Ok(Some(ReturnValue::Value(TrackedValue::runtime(Value::Nil))));
             }
@@ -8645,8 +8417,7 @@ impl<'a> Vm<'a> {
         if name == "Par" && args.len() <= 1 {
             let index = self.evaluate_slot_index(
                 "Par",
-                args.first()
-                    .unwrap_or(&Expr::Literal(Literal::Int(0))),
+                args.first().unwrap_or(&Expr::Literal(Literal::Int(0))),
                 env,
                 depth + 1,
             )?;
@@ -8688,16 +8459,14 @@ impl<'a> Vm<'a> {
                 }
 
                 let null_implicit_local = self.retain_global_call_context_for_host_paths
-                    && (name == "Local" && args.len() <= 1
-                        || name == "LocalN" && args.len() == 1);
+                    && (name == "Local" && args.len() <= 1 || name == "LocalN" && args.len() == 1);
                 if null_implicit_local {
                     return false;
                 }
 
                 name == "EffectVar"
                     || !self.has_host_function(name)
-                        && (matches!(name.as_str(), "Var" | "Local")
-                            && args.len() <= 2
+                        && (matches!(name.as_str(), "Var" | "Local") && args.len() <= 2
                             || name == "Par" && args.len() <= 1
                             || name == "VarN"
                             || name == "LocalN" && (1..=2).contains(&args.len())
@@ -8771,14 +8540,7 @@ impl<'a> Vm<'a> {
                 args,
                 failsafe,
                 forward_rest,
-            } => self.invoke_global_call_raw(
-                name,
-                args,
-                *failsafe,
-                *forward_rest,
-                env,
-                depth,
-            ),
+            } => self.invoke_global_call_raw(name, args, *failsafe, *forward_rest, env, depth),
             Expr::Call { .. } => {
                 if let Some(value) = self.evaluate_reference_function_call(expr, env, depth)? {
                     return Ok(value);
@@ -8862,9 +8624,7 @@ impl<'a> Vm<'a> {
         env: &Environment,
     ) -> Result<ReturnValue, RuntimeError> {
         match base {
-            ReturnValue::Value(value)
-                if matches!(value.value, Value::Nil | Value::Object(0)) =>
-            {
+            ReturnValue::Value(value) if matches!(value.value, Value::Nil | Value::Object(0)) => {
                 Err(RuntimeError::new(
                     "map access with .: map expected, but got nil!",
                 ))
@@ -8917,8 +8677,7 @@ impl<'a> Vm<'a> {
         env: &mut Environment,
         depth: usize,
     ) -> Result<ReturnValue, RuntimeError> {
-        let (index, _index_slot) =
-            self.evaluate_index_operand(index_operand, env, depth)?;
+        let (index, _index_slot) = self.evaluate_index_operand(index_operand, env, depth)?;
         if !legacy_path_pin_creation_active() {
             let base = match base {
                 ReturnValue::Value(value) => value,
@@ -8927,11 +8686,7 @@ impl<'a> Vm<'a> {
                         resolved
                     } else {
                         let collection = reference.read()?;
-                        Self::grow_empty_negative_array(
-                            Some(&reference),
-                            &collection,
-                            &index,
-                        )?;
+                        Self::grow_empty_negative_array(Some(&reference), &collection, &index)?;
                         reference.read_tracked()?
                     }
                 }
@@ -8946,9 +8701,7 @@ impl<'a> Vm<'a> {
                 .map(ReturnValue::Value);
         }
         match base {
-            ReturnValue::Value(value)
-                if matches!(value.value, Value::Nil | Value::Object(0)) =>
-            {
+            ReturnValue::Value(value) if matches!(value.value, Value::Nil | Value::Object(0)) => {
                 Err(RuntimeError::new(
                     "indexed access [index]: array, map or string expected, but got nil",
                 ))
@@ -9166,10 +8919,7 @@ impl<'a> Vm<'a> {
             .map(CallArg::read_tracked)
             .transpose()?
             .unwrap_or_else(|| TrackedValue::runtime(Value::Nil));
-        let explicit_target = evaluated_args
-            .get(2)
-            .map(CallArg::read)
-            .transpose()?;
+        let explicit_target = evaluated_args.get(2).map(CallArg::read).transpose()?;
         let target = explicit_target
             .filter(|value| {
                 !matches!(
@@ -9200,8 +8950,7 @@ impl<'a> Vm<'a> {
         // Parse_Params evaluates every explicit argument before balancing the
         // native two-parameter frame, so even ignored surplus arguments run
         // before FnSetGlobal performs its write (C4AulParse.cpp:2311-2344).
-        let mut evaluated_args =
-            self.build_call_args(Some("SetGlobal"), None, args, env, depth)?;
+        let mut evaluated_args = self.build_call_args(Some("SetGlobal"), None, args, env, depth)?;
         if forward_rest {
             Self::append_forwarded_args(&mut evaluated_args, env, 2)?;
         }
@@ -9227,9 +8976,7 @@ impl<'a> Vm<'a> {
                     index.clone(),
                 ))
             }
-            Expr::ArrayAppend(base) => {
-                Ok(AssignmentTarget::ArrayAppend(base.clone()))
-            }
+            Expr::ArrayAppend(base) => Ok(AssignmentTarget::ArrayAppend(base.clone())),
             // Special case: Local(expr), Var(expr), and EffectVar(args...) are valid for increment/decrement
             Expr::Call {
                 callee,
@@ -9305,7 +9052,6 @@ impl<'a> Vm<'a> {
             ))),
         }
     }
-
 }
 
 enum ControlFlow {
@@ -9386,7 +9132,7 @@ struct Environment {
     /// The full argument slots of the executing call: `Par(i)` reads them
     /// (C4AulExec.cpp:1127-1140) and `Callee(...)` forwards the slots past
     /// `named_param_count` (C4AulParse.cpp:2293-2306, ParNamed.iSize).
-    call_args: Rc<Vec<Binding>>,
+    call_args: Rc<CallBindings>,
     named_param_count: usize,
     /// The function the executing one overloaded — the `inherited(...)` /
     /// `_inherited(...)` target (C++ Fn->OwnerOverloaded,
@@ -9432,10 +9178,12 @@ impl Environment {
                 }
                 _ => Ok(Binding::tracked(arg.read_tracked()?)),
             })
-            .collect::<Result<Vec<_>, RuntimeError>>()?;
+            .collect::<Result<CallBindings, RuntimeError>>()?;
         while call_args.len() < MAX_CALL_PARAMETERS {
             call_args.push(Binding::direct(Value::Nil));
         }
+        #[cfg(test)]
+        record_call_arg_heap_spill(call_args.spilled());
         let mut scopes = vec![HashMap::new()];
         let base = scopes.last_mut().unwrap();
         for (param, binding) in params.iter().zip(call_args.iter()) {
@@ -9616,6 +9364,32 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_ten_slot_call_arguments_stay_inline() {
+        // C++ evaluates directly into C4AulExec::Values[1024] and balances
+        // script calls to C4AUL_MAX_Par == 10 without allocating a parameter
+        // vector (C4AulExec.cpp:62-63, 1112-1130; C4Aul.h).
+        CALL_ARG_HEAP_SPILLS.with(|count| count.set(0));
+        let result = execute_script(
+            r#"
+                func Callee(a, b, c, d, e, f, g, h, i, j) {
+                    return a + b + c + d + e + f + g + h + i + j;
+                }
+                func Test() { return Callee(1, 2, 3, 4, 5, 6, 7, 8, 9, 10); }
+            "#,
+            "Test",
+            &[],
+        )
+        .expect("ten-argument script call runs");
+
+        assert_eq!(result, Value::Int(55));
+        assert_eq!(
+            CALL_ARG_HEAP_SPILLS.with(Cell::get),
+            0,
+            "C4Aul's fixed-size call frame must not spill ordinary arguments to the heap"
+        );
+    }
+
+    #[test]
     fn calls_inside_global_functions_stay_in_engine_scope() {
         // A global function is owned by Game.ScriptEngine, so its unqualified
         // calls resolve through that engine rather than the current object's
@@ -9683,8 +9457,7 @@ mod tests {
         let cell = value_cell(Value::Nil);
         let hook_cell = cell.clone();
         let hook: crate::engine::LocalCellHook = std::rc::Rc::new(move |target, name| {
-            (matches!(target, Value::Int(42)) && name == "__local_2")
-                .then(|| hook_cell.clone())
+            (matches!(target, Value::Int(42)) && name == "__local_2").then(|| hook_cell.clone())
         });
         let vm = Vm::new(&functions, &host_functions, &var_decls, None)
             .with_local_cell_hook(Some(&hook));
@@ -10138,7 +9911,9 @@ mod tests {
             execute_script(
                 source,
                 "Probe",
-                &[Value::String(c4_string_from_bytes(b"1//comment\r+1").into())],
+                &[Value::String(
+                    c4_string_from_bytes(b"1//comment\r+1").into()
+                )],
             )
             .expect("a carriage return ends a C++ line comment"),
             Value::Int(2)

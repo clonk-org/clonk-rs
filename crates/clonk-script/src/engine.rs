@@ -115,8 +115,7 @@ fn value_contains_c4_string(value: &Value) -> bool {
         Value::Proplist(values) => {
             values.iter().any(|(key, value)| {
                 value_contains_c4_string(key) || value_contains_c4_string(value)
-            })
-                || values.hidden_values().any(value_contains_c4_string)
+            }) || values.hidden_values().any(value_contains_c4_string)
         }
         Value::Int(_)
         | Value::Bool(_)
@@ -150,8 +149,7 @@ pub type GlobalCallContextHook = Arc<dyn Fn(bool) + Send + Sync>;
 /// The engine-global named-variable table (`static` declarations;
 /// C4AulScriptEngine::GlobalNamed): one shared table across every script
 /// host. Values live in cells so lvalues (x = .., x++, ...) write through.
-pub type GlobalVariables =
-    std::rc::Rc<std::cell::RefCell<IndexMap<String, crate::vm::ValueCell>>>;
+pub type GlobalVariables = std::rc::Rc<std::cell::RefCell<IndexMap<String, crate::vm::ValueCell>>>;
 
 /// The engine-global numbered-variable table (`C4AulScriptEngine::Global`).
 /// It is separate from [`GlobalVariables`] because numeric slots and declared
@@ -184,11 +182,75 @@ pub struct StringRegistrationLedger {
 #[derive(Clone, Debug, Default)]
 pub struct StringRegistrationLedgerState {
     entries: Vec<StringRegistration>,
+    /// Non-owning O(1) membership for the ordered registration list. Each
+    /// indexed pointer still has its Weak in `entries`, keeping the Arc
+    /// control-block address reserved until both are pruned together.
+    registered_identities: HashSet<usize>,
+    /// Parse-time literal identities by their parser spelling.
+    ///
+    /// C++ stores the resolved `C4String *` directly in each AB_STRING
+    /// instruction (C4AulParse.cpp:2440-2442), so executing a literal never
+    /// scans the table again. Keep this index weak: a cache handle must not
+    /// increment `C4String::iRefCnt` and make an otherwise unreferenced Hold
+    /// string eligible for save enumeration.
+    literal_cache: HashMap<String, std::sync::Weak<C4StringValueInner>>,
     /// Identities unregistered by C4StringTable::Clear while an external
     /// C4Value still owns them. They remain valid strings, but pTable is null
     /// in C++ and later live-value traversal must not silently re-register
     /// the same pointer.
     detached: Vec<std::sync::Weak<C4StringValueInner>>,
+    detached_identities: HashSet<usize>,
+}
+
+impl StringRegistrationLedgerState {
+    fn identity(value: &std::sync::Weak<C4StringValueInner>) -> usize {
+        value.as_ptr() as usize
+    }
+
+    fn rebuild_registered_identities(&mut self) {
+        self.registered_identities.clear();
+        self.registered_identities.extend(
+            self.entries
+                .iter()
+                .map(|entry| Self::identity(&entry.value)),
+        );
+    }
+
+    fn rebuild_detached_identities(&mut self) {
+        self.detached_identities.clear();
+        self.detached_identities
+            .extend(self.detached.iter().map(Self::identity));
+    }
+
+    fn retain_live_entries(&mut self) {
+        self.entries
+            .retain(|candidate| candidate.value.strong_count() != 0);
+        self.rebuild_registered_identities();
+    }
+
+    fn retain_live_detached(&mut self) {
+        self.detached
+            .retain(|candidate| candidate.strong_count() != 0);
+        self.rebuild_detached_identities();
+    }
+
+    fn push_entry(&mut self, entry: StringRegistration) {
+        self.registered_identities
+            .insert(Self::identity(&entry.value));
+        self.entries.push(entry);
+    }
+
+    #[cfg(test)]
+    fn registered_identity_count(&self) -> usize {
+        self.registered_identities.len()
+    }
+
+    fn literal_lookup(&self, value: &str) -> Option<C4StringValue> {
+        self.literal_cache
+            .get(value)
+            .and_then(std::sync::Weak::upgrade)
+            .map(C4StringValue::from_inner)
+    }
 }
 
 impl Clone for StringRegistrationLedger {
@@ -269,9 +331,9 @@ fn c4_string_table_prefix(bytes: &[u8]) -> &[u8] {
 }
 
 fn c4_string_table_values_equal(left: &str, right: &str) -> bool {
-    let left = crate::value::c4_string_bytes(left);
-    let right = crate::value::c4_string_bytes(right);
-    c4_string_table_prefix(&left) == c4_string_table_prefix(&right)
+    let left = crate::value::c4_string_bytes_cow(left);
+    let right = crate::value::c4_string_bytes_cow(right);
+    c4_string_table_prefix(left.as_ref()) == c4_string_table_prefix(right.as_ref())
 }
 
 fn c4_string_table_bytes_equal(left: &[u8], right: &[u8]) -> bool {
@@ -291,9 +353,8 @@ pub fn new_string_registrations() -> StringRegistrations {
 /// the table again.
 pub fn clear_c4_string_holds(registrations: &StringRegistrationLedger) {
     let mut registrations = registrations.borrow_mut();
-    registrations
-        .detached
-        .retain(|candidate| candidate.strong_count() != 0);
+    registrations.literal_cache.clear();
+    registrations.retain_live_detached();
 
     let mut retained = Vec::with_capacity(registrations.entries.len());
     let mut detached = std::mem::take(&mut registrations.detached);
@@ -315,36 +376,28 @@ pub fn clear_c4_string_holds(registrations: &StringRegistrationLedger) {
     }
     registrations.entries = retained;
     registrations.detached = detached;
+    registrations.rebuild_registered_identities();
+    registrations.rebuild_detached_identities();
 }
 
-pub fn register_c4_string(
-    registrations: &StringRegistrationLedger,
-    value: &C4StringValue,
-) {
+pub fn register_c4_string(registrations: &StringRegistrationLedger, value: &C4StringValue) {
     let mut registrations = registrations.borrow_mut();
-    registrations
-        .detached
-        .retain(|candidate| candidate.strong_count() != 0);
     let value_identity = value.downgrade();
-    if registrations
-        .detached
-        .iter()
-        .any(|candidate| candidate.ptr_eq(&value_identity))
+    let identity = StringRegistrationLedgerState::identity(&value_identity);
+    if registrations.detached_identities.contains(&identity)
+        || registrations.registered_identities.contains(&identity)
     {
         return;
     }
-    registrations
-        .entries
-        .retain(|candidate| candidate.value.strong_count() != 0);
-    if registrations
-        .entries
-        .iter()
-        .filter_map(StringRegistration::upgrade)
-        .any(|candidate| candidate.ptr_eq(value))
-    {
+    registrations.retain_live_detached();
+    if registrations.detached_identities.contains(&identity) {
         return;
     }
-    registrations.entries.push(StringRegistration {
+    registrations.retain_live_entries();
+    if registrations.registered_identities.contains(&identity) {
+        return;
+    }
+    registrations.push_entry(StringRegistration {
         value: value.downgrade(),
         held: None,
         untouched_loaded: None,
@@ -359,9 +412,7 @@ pub fn register_c4_referenced_string(
     value: &str,
 ) -> C4StringValue {
     let mut registrations = registrations.borrow_mut();
-    registrations
-        .entries
-        .retain(|candidate| candidate.value.strong_count() != 0);
+    registrations.retain_live_entries();
     for existing in &mut registrations.entries {
         let Some(existing_value) = existing.upgrade() else {
             continue;
@@ -372,7 +423,7 @@ pub fn register_c4_referenced_string(
         }
     }
     let value = C4StringValue::new(value.to_owned());
-    registrations.entries.push(StringRegistration {
+    registrations.push_entry(StringRegistration {
         value: value.downgrade(),
         held: None,
         untouched_loaded: None,
@@ -387,9 +438,10 @@ pub fn register_c4_literal_string(
     value: &str,
 ) -> C4StringValue {
     let mut registrations = registrations.borrow_mut();
-    registrations
-        .entries
-        .retain(|candidate| candidate.value.strong_count() != 0);
+    if let Some(existing) = registrations.literal_lookup(value) {
+        return existing;
+    }
+    registrations.retain_live_entries();
     for existing in &mut registrations.entries {
         let Some(existing_value) = existing.upgrade() else {
             continue;
@@ -397,11 +449,18 @@ pub fn register_c4_literal_string(
         if c4_string_table_values_equal(&existing_value, value) {
             existing.held = Some(existing_value.clone());
             existing.untouched_loaded = None;
+            registrations
+                .literal_cache
+                .insert(value.to_owned(), existing_value.downgrade());
             return existing_value;
         }
     }
-    let value = C4StringValue::new(value.to_owned());
-    registrations.entries.push(StringRegistration {
+    let cache_key = value.to_owned();
+    let value = C4StringValue::new(cache_key.clone());
+    registrations
+        .literal_cache
+        .insert(cache_key, value.downgrade());
+    registrations.push_entry(StringRegistration {
         value: value.downgrade(),
         held: Some(value.clone()),
         untouched_loaded: None,
@@ -417,9 +476,7 @@ pub fn register_loaded_c4_string(
     value: &str,
 ) {
     let mut registrations = registrations.borrow_mut();
-    registrations
-        .entries
-        .retain(|candidate| candidate.value.strong_count() != 0);
+    registrations.retain_live_entries();
     for existing in &mut registrations.entries {
         let Some(existing_value) = existing.upgrade() else {
             continue;
@@ -430,7 +487,7 @@ pub fn register_loaded_c4_string(
         }
     }
     let value = C4StringValue::loaded(value.to_owned(), enum_id);
-    registrations.entries.push(StringRegistration {
+    registrations.push_entry(StringRegistration {
         value: value.downgrade(),
         held: None,
         untouched_loaded: Some(value),
@@ -446,9 +503,7 @@ pub fn resolve_c4_string(
     enum_id: i32,
 ) -> Option<C4StringValue> {
     let mut registrations = registrations.borrow_mut();
-    registrations
-        .entries
-        .retain(|candidate| candidate.value.strong_count() != 0);
+    registrations.retain_live_entries();
     for entry in &mut registrations.entries {
         let Some(value) = entry.upgrade() else {
             continue;
@@ -462,9 +517,7 @@ pub fn resolve_c4_string(
 }
 
 /// Snapshot current table order for diagnostics and compatibility callers.
-pub fn c4_string_registration_order(
-    registrations: &StringRegistrationLedger,
-) -> Vec<String> {
+pub fn c4_string_registration_order(registrations: &StringRegistrationLedger) -> Vec<String> {
     registrations
         .borrow()
         .entries
@@ -508,9 +561,7 @@ pub fn save_current_c4_string_enumeration(
             saved.push(bytes);
         }
     }
-    registrations
-        .entries
-        .retain(|entry| entry.value.strong_count() != 0);
+    registrations.retain_live_entries();
     saved
 }
 
@@ -554,19 +605,14 @@ pub fn enumerate_c4_strings(
         };
         value.set_enum_id(enum_id);
     }
-    registrations
-        .entries
-        .retain(|entry| entry.value.strong_count() != 0);
+    registrations.retain_live_entries();
     values
 }
 
 /// Register every string owned by a C4Value in construction/traversal order.
 /// The VM invokes this as expressions materialize; embedders also use it for
 /// values entering synchronized state without passing through the VM.
-pub fn register_c4_value_strings(
-    registrations: &StringRegistrationLedger,
-    value: &Value,
-) {
+pub fn register_c4_value_strings(registrations: &StringRegistrationLedger, value: &Value) {
     match value {
         Value::String(value) => register_c4_string(registrations, value),
         Value::Array(values) => {
@@ -662,9 +708,10 @@ fn register_global_declarations_inner(
         match var_decl.kind {
             crate::ast::VarDeclKind::Static => {
                 let was_present = table.borrow().contains_key(&var_decl.name);
-                table.borrow_mut().entry(var_decl.name.clone()).or_insert_with(|| {
-                    crate::vm::value_cell(Value::Nil)
-                });
+                table
+                    .borrow_mut()
+                    .entry(var_decl.name.clone())
+                    .or_insert_with(|| crate::vm::value_cell(Value::Nil));
                 if globals_consts.is_none() && !was_present {
                     fallback_mutables.insert(var_decl.name.clone());
                 }
@@ -703,11 +750,9 @@ fn register_global_declarations_inner(
                             None if fallback_mutables.contains(name.as_str()) => None,
                             None => table.borrow().get(name).cloned(),
                         };
-                        let value = cell
-                            .map(|cell| cell.borrow().clone())
-                            .or_else(|| {
-                                engine_constants.and_then(|values| values.get(name).cloned())
-                            });
+                        let value = cell.map(|cell| cell.borrow().clone()).or_else(|| {
+                            engine_constants.and_then(|values| values.get(name).cloned())
+                        });
                         let Some(value) = value else {
                             // Parse_Const aborts this comma-delimited group.
                             // Parse_Script recovery can then resume at a later
@@ -1244,7 +1289,8 @@ impl Engine {
                 register_c4_literal_string(registrations, literal);
             }
         }
-        self.string_literals.extend(script.string_literals.iter().cloned());
+        self.string_literals
+            .extend(script.string_literals.iter().cloned());
         for function in script.functions.values_mut() {
             function.bind_source_host(self.host_identity);
             if let Some(script_name) = &self.script_name {
@@ -1273,9 +1319,7 @@ impl Engine {
         // they register there (keeping any existing value — statics
         // persist across script loads) and never become per-object locals.
         for var_decl in script.var_decls {
-            if self.globals_named.is_some()
-                && var_decl.kind != crate::ast::VarDeclKind::Local
-            {
+            if self.globals_named.is_some() && var_decl.kind != crate::ast::VarDeclKind::Local {
                 continue;
             }
             self.var_decls.push(var_decl);
@@ -2118,7 +2162,8 @@ impl Engine {
         .with_local_cell_hook(self.local_cell_hook.as_ref())
         .with_string_registrations(self.string_registrations.as_deref())
         .with_this(this);
-        vm.call_with_cells(name, args, cells).map_err(ScriptError::from)
+        vm.call_with_cells(name, args, cells)
+            .map_err(ScriptError::from)
     }
 
     /// Cross-object AB_CALL bridge entry. This preserves the script caller
@@ -2288,12 +2333,7 @@ impl Engine {
         local_vars: &std::collections::HashMap<String, Value>,
         this: Value,
     ) -> Result<(Value, std::collections::HashMap<String, Value>), ScriptError> {
-        self.direct_exec_with_locals_and_this_in_context(
-            source,
-            local_vars,
-            this,
-            "DirectExec",
-        )
+        self.direct_exec_with_locals_and_this_in_context(source, local_vars, this, "DirectExec")
     }
 
     pub fn direct_exec_with_locals_and_this_in_context(
@@ -2391,7 +2431,7 @@ impl Engine {
             context,
             diagnostics,
         )
-            .map_err(ScriptError::from)
+        .map_err(ScriptError::from)
     }
 
     /// Like [`direct_exec_with_locals_and_this`], against SHARED live
@@ -2406,12 +2446,7 @@ impl Engine {
         cells: &crate::vm::LocalCells,
         this: Value,
     ) -> Result<Value, ScriptError> {
-        self.direct_exec_with_cells_and_this_in_context(
-            source,
-            cells,
-            this,
-            "DirectExec",
-        )
+        self.direct_exec_with_cells_and_this_in_context(source, cells, this, "DirectExec")
     }
 
     pub fn direct_exec_with_cells_and_this_in_context(
@@ -2878,11 +2913,15 @@ mod tests {
         destination.set_global_functions(Some(globals));
 
         assert_eq!(
-            destination.call("LocalQueue", &[]).expect("local call runs"),
+            destination
+                .call("LocalQueue", &[])
+                .expect("local call runs"),
             Value::Bool(true)
         );
         assert_eq!(
-            destination.call("Queue", &[]).expect("global fallback runs"),
+            destination
+                .call("Queue", &[])
+                .expect("global fallback runs"),
             Value::Bool(true)
         );
         assert_eq!(
@@ -2967,17 +3006,13 @@ mod tests {
         destination.apply_host_registration_snapshot(&snapshot);
 
         assert!(destination.host_functions.contains_key("Ordinary"));
-        assert!(
-            !destination
-                .host_reference_functions
-                .contains_key("Ordinary")
-        );
+        assert!(!destination
+            .host_reference_functions
+            .contains_key("Ordinary"));
         assert!(!destination.host_functions.contains_key("Reference"));
-        assert!(
-            destination
-                .host_reference_functions
-                .contains_key("Reference")
-        );
+        assert!(destination
+            .host_reference_functions
+            .contains_key("Reference"));
         assert!(destination.has_host_function("Custom"));
         assert_eq!(
             destination.host_function_parameter_types["Ordinary"].as_ref(),
@@ -3034,13 +3069,13 @@ mod tests {
             Some("Scenario.c4s/Objects.c4d/Script.c")
         );
         assert_eq!(
-            boom.overloaded
-                .as_deref()
-                .and_then(Function::source_name),
+            boom.overloaded.as_deref().and_then(Function::source_name),
             Some("Foreign.c4d/Script.c")
         );
 
-        let error = host.call("Boom", &[]).expect_err("runtime error is captured");
+        let error = host
+            .call("Boom", &[])
+            .expect_err("runtime error is captured");
         assert_eq!(
             error.call_frames()[0].source_name(),
             Some("Scenario.c4s/Objects.c4d/Script.c")
@@ -3096,7 +3131,9 @@ mod tests {
             Value::Int(2)
         );
         assert_eq!(
-            declaring.call("Queue", &[]).expect("global helper resolves"),
+            declaring
+                .call("Queue", &[])
+                .expect("global helper resolves"),
             Value::Int(2)
         );
         assert_eq!(
@@ -3213,13 +3250,7 @@ mod tests {
         )]));
 
         let value = linked_host
-            .call_pinned_with_cells_and_this(
-                &pinned,
-                true,
-                &[],
-                &cells,
-                Value::Object(42),
-            )
+            .call_pinned_with_cells_and_this(&pinned, true, &[], &cells, Value::Object(42))
             .expect("pinned callback runs on its LinkedTo host");
 
         assert_eq!(
@@ -3359,7 +3390,11 @@ mod tests {
             .expect("script loads");
 
         assert_eq!(
-            globals.borrow().keys().map(String::as_str).collect::<Vec<_>>(),
+            globals
+                .borrow()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             ["Zed", "Alpha"]
         );
         assert_eq!(
@@ -3431,9 +3466,7 @@ mod tests {
         let workers = (0..8)
             .map(|_| {
                 let strings = Arc::clone(&strings);
-                std::thread::spawn(move || {
-                    register_c4_literal_string(strings.as_ref(), "shared")
-                })
+                std::thread::spawn(move || register_c4_literal_string(strings.as_ref(), "shared"))
             })
             .collect::<Vec<_>>();
         let values = workers
@@ -3445,6 +3478,51 @@ mod tests {
             .iter()
             .all(|value| value.ptr_eq(values.first().expect("one string value"))));
         assert_eq!(c4_string_registration_order(&strings), ["shared"]);
+    }
+
+    #[test]
+    fn parser_literal_lookup_cache_is_weak_and_clear_scoped() {
+        // C4AulParse stores the C4String pointer in the emitted AB_STRING
+        // operand (C4AulParse.cpp:773-788), so execution must not repeat
+        // C4StringTable::FindString's linked-list scan.
+        let strings = new_string_registrations();
+        let literal = register_c4_literal_string(&strings, "shared");
+        let cached = strings
+            .borrow()
+            .literal_lookup("shared")
+            .expect("linked parser literal is cached");
+        assert!(literal.ptr_eq(&cached));
+        let nul_alias = register_c4_literal_string(&strings, "shared\0suffix");
+        assert!(
+            literal.ptr_eq(&nul_alias),
+            "distinct parser spellings retain C4StringTable's first-NUL identity"
+        );
+        assert!(strings.borrow().literal_lookup("shared\0suffix").is_some());
+
+        clear_c4_string_holds(&strings);
+        assert!(
+            strings.borrow().literal_lookup("shared").is_none(),
+            "C4StringTable::Clear invalidates parser operand identities"
+        );
+    }
+
+    #[test]
+    fn runtime_string_membership_is_identity_indexed_without_text_interning() {
+        // C4StringTable::Reg appends a newly constructed C4String in O(1);
+        // repeated C4Value sightings retain that pointer, while equal-text
+        // RegString calls remain distinct (C4StringTable.cpp:67-82,159-162).
+        let strings = new_string_registrations();
+        let first = C4StringValue::from("same");
+        let second = C4StringValue::from("same");
+
+        register_c4_string(&strings, &first);
+        register_c4_string(&strings, &first);
+        register_c4_string(&strings, &second);
+
+        let registrations = strings.borrow();
+        assert_eq!(registrations.entries.len(), 2);
+        assert_eq!(registrations.registered_identity_count(), 2);
+        assert!(!first.ptr_eq(&second));
     }
 
     #[test]
@@ -3531,10 +3609,7 @@ mod tests {
             ["x".to_owned(), "y".to_owned(), "x".to_owned()]
         );
         assert_eq!(
-            enumerate_c4_strings(
-                &strings,
-                &[first_x.clone(), y.clone(), second_x.clone()],
-            ),
+            enumerate_c4_strings(&strings, &[first_x.clone(), y.clone(), second_x.clone()],),
             [b"x".to_vec(), b"y".to_vec()]
         );
         assert_eq!(first_x.enum_id(), 0);

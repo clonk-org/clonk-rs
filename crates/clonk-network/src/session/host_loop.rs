@@ -14,11 +14,51 @@ async fn accept_udp_session(
     }
 }
 
+#[cfg(test)]
+fn tcp_accept_failure_injections() -> &'static (Mutex<BTreeSet<SocketAddr>>, tokio::sync::Notify) {
+    static INJECTIONS: std::sync::OnceLock<(Mutex<BTreeSet<SocketAddr>>, tokio::sync::Notify)> =
+        std::sync::OnceLock::new();
+    INJECTIONS.get_or_init(|| (Mutex::new(BTreeSet::new()), tokio::sync::Notify::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn inject_tcp_accept_failure(address: SocketAddr) {
+    let (injections, notify) = tcp_accept_failure_injections();
+    assert!(
+        injections.lock().unwrap().insert(address),
+        "TCP accept failure already injected for {address}"
+    );
+    notify.notify_waiters();
+}
+
+#[cfg(test)]
+async fn next_injected_tcp_accept_failure(address: SocketAddr) -> io::Error {
+    let (injections, notify) = tcp_accept_failure_injections();
+    loop {
+        let notified = notify.notified();
+        if injections.lock().unwrap().remove(&address) {
+            return io::Error::other("injected TCP accept failure");
+        }
+        notified.await;
+    }
+}
+
 async fn accept_tcp_connection(
     listener: &mut Option<TcpListener>,
 ) -> io::Result<(TcpStream, SocketAddr)> {
     match listener {
-        Some(listener) => listener.accept().await,
+        Some(listener) => {
+            #[cfg(test)]
+            {
+                let address = listener.local_addr()?;
+                return tokio::select! {
+                    result = listener.accept() => result,
+                    error = next_injected_tcp_accept_failure(address) => Err(error),
+                };
+            }
+            #[cfg(not(test))]
+            listener.accept().await
+        }
         None => std::future::pending().await,
     }
 }
@@ -91,15 +131,12 @@ async fn handle_host_puncher_event(
                     client_id: HOST_CLIENT_ID as i32,
                     address: *address,
                 };
-                for client_id in host_target_client_ids(state, None) {
-                    let _ = send_host_message(
-                        state,
-                        client_id,
-                        ConnectionTrafficClass::Message,
-                        ControlMessage::Address(packet),
-                    )
-                    .await;
-                }
+                let _ = broadcast_host_message(
+                    state,
+                    ConnectionTrafficClass::Message,
+                    ControlMessage::Address(packet),
+                    None,
+                );
             }
             if !added.is_empty() {
                 emit_host_local_addresses(state).await;
@@ -148,6 +185,7 @@ pub(crate) async fn run_host(
     resource_backend: Option<crate::ResourceTransferBackend>,
     io_statistics: crate::NetworkIoStatistics,
     mut commands: mpsc::Receiver<HostCommand>,
+    control_send_time: ControlSendTimeSnapshot,
     event_tx: mpsc::Sender<HostEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
@@ -260,6 +298,7 @@ pub(crate) async fn run_host(
         scheduler: ResyncScheduler::new(config.resync_cooldown),
         clients: BTreeMap::new(),
         accepted_routes: BTreeMap::new(),
+        control_send_time_epoch: 0,
         closed_routes: crate::post_mortem::ClosedConnectionRouter::default(),
         pending_sync: Vec::new(),
         status_barrier: StatusBarrier::stable(config.initial_status),
@@ -291,11 +330,16 @@ pub(crate) async fn run_host(
         config,
     };
 
-    let (client_tx, mut client_rx) = mpsc::channel::<HostLoopMessage>(128);
+    // C4InteractiveThread::PushEvent appends accepted network events to an
+    // uncapped FIFO; a delayed main-thread consumer never suspends socket
+    // reads or drops an already accepted event
+    // (oracle-src-pinned src/C4InteractiveThread.cpp:70-100).
+    let (client_tx, mut client_rx) = mpsc::unbounded_channel::<HostLoopMessage>();
     let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(32);
     let mut route_tasks = tokio::task::JoinSet::<()>::new();
     let mut resync_timer = interval(state.config.resync_interval);
     let mut resource_timer = interval(Duration::from_millis(crate::NETWORK_TIMER_INTERVAL_MS));
+    let mut published_control_send_time_epoch = None;
 
     if let Some(error) = udp_start_error {
         let _ = state
@@ -317,6 +361,10 @@ pub(crate) async fn run_host(
     }
 
     loop {
+        if published_control_send_time_epoch != Some(state.control_send_time_epoch) {
+            publish_host_control_send_time(&state, &control_send_time);
+            published_control_send_time_epoch = Some(state.control_send_time_epoch);
+        }
         if !state
             .status_barrier
             .remotes
@@ -329,15 +377,21 @@ pub(crate) async fn run_host(
             .last_chase_target_update
             .map(|last_update| last_update + CHASE_TARGET_UPDATE_INTERVAL);
         let async_control_deadline = state.async_control_deadline();
+        // Socket tasks feed `client_rx` through an unbounded FIFO, just like
+        // C4InteractiveThread. Do not let that always-ready FIFO starve game
+        // commands: a command already queued disables every earlier network
+        // arm. A command racing this check can be delayed by at most one
+        // network operation before the next pass observes it.
+        let command_pending = !commands.is_empty();
         tokio::select! {
             biased;
             _ = &mut shutdown_rx => {
                 break;
             }
-            _ = wait_for_async_control_deadline(async_control_deadline) => {
+            _ = wait_for_async_control_deadline(async_control_deadline), if !command_pending => {
                 force_expired_async_control(&mut state).await;
             }
-            event = next_host_puncher_event(&mut puncher_events) => {
+            event = next_host_puncher_event(&mut puncher_events), if !command_pending => {
                 handle_host_puncher_event(
                     event,
                     udp_handle.as_ref(),
@@ -347,7 +401,7 @@ pub(crate) async fn run_host(
                 )
                 .await;
             }
-            accept_result = accept_tcp_connection(&mut listener) => {
+            accept_result = accept_tcp_connection(&mut listener), if !command_pending => {
                 match accept_result {
                     Ok((stream, addr)) => {
                         let connection_id = state.next_connection_id;
@@ -371,11 +425,16 @@ pub(crate) async fn run_host(
                                 error: format!("failed to accept connection: {error}"),
                             })
                             .await;
-                        break;
+                        // C4NetIOTCP::Accept reports this scheduler pass as
+                        // failed, but the scheduler keeps the TCP proc
+                        // installed and its worker immediately runs another
+                        // pass (src/C4NetIO.cpp:610-625,1038-1053;
+                        // src/StdScheduler.cpp:160-191,229-244).
+                        tokio::task::yield_now().await;
                     }
                 }
             }
-            accept_result = accept_udp_session(&mut udp_hub) => {
+            accept_result = accept_udp_session(&mut udp_hub), if !command_pending => {
                 match accept_result {
                     Ok(stream) => {
                         let addr = stream.peer_addr();
@@ -419,13 +478,13 @@ pub(crate) async fn run_host(
                     }
                 }
             }
-            completed = route_tasks.join_next(), if !route_tasks.is_empty() => {
+            completed = route_tasks.join_next(), if !command_pending && !route_tasks.is_empty() => {
                 let _ = completed;
             }
-            Some(request) = admission_rx.recv() => {
+            Some(request) = admission_rx.recv(), if !command_pending => {
                 handle_host_admission_request(request, &mut state).await;
             }
-            Some(message) = client_rx.recv() => {
+            Some(message) = client_rx.recv(), if !command_pending => {
                 match message {
                     HostLoopMessage::ClientAccepted {
                         connection_id,
@@ -480,12 +539,14 @@ pub(crate) async fn run_host(
                             .filter(|route| route.client_id == client_id)
                         {
                             route.ping.apply(update, Instant::now());
+                            state.invalidate_control_send_time();
                         }
                     }
                     HostLoopMessage::ClientDisconnected {
                         connection_id,
                         client_id,
                         next_inbound_packet,
+                        next_outbound_packet,
                         post_mortem,
                         reason,
                     } => {
@@ -493,6 +554,7 @@ pub(crate) async fn run_host(
                             connection_id,
                             client_id,
                             next_inbound_packet,
+                            next_outbound_packet,
                             post_mortem,
                             reason,
                             &mut state,
@@ -729,7 +791,7 @@ pub(crate) async fn run_host(
                         completion,
                     } => {
                         let disconnected =
-                            disconnect_host_runtime_connection(connection_id, &state);
+                            disconnect_host_runtime_connection(connection_id, &mut state);
                         let _ = completion.send(disconnected);
                     }
                     #[cfg(test)]
@@ -810,10 +872,10 @@ fn spawn_host_accept(
     connection_id: u32,
     io_statistics: crate::NetworkIoStatistics,
     admission_tx: mpsc::Sender<HostAdmissionRequest>,
-    host_tx: mpsc::Sender<HostLoopMessage>,
+    host_tx: mpsc::UnboundedSender<HostLoopMessage>,
 ) {
     if let Err(error) = stream.set_nodelay(true) {
-        let _ = host_tx.try_send(HostLoopMessage::AdmissionFailed {
+        let _ = host_tx.send(HostLoopMessage::AdmissionFailed {
             connection_id,
             error: format!("failed to configure connection {addr}: {error}"),
         });
@@ -832,7 +894,7 @@ fn spawn_host_accept(
     );
 }
 
-fn spawn_host_transport<S>(
+pub(crate) fn spawn_host_transport<S>(
     route_tasks: &mut tokio::task::JoinSet<()>,
     stream: S,
     addr: SocketAddr,
@@ -841,7 +903,7 @@ fn spawn_host_transport<S>(
     connection_id: u32,
     io_statistics: crate::NetworkIoStatistics,
     admission_tx: mpsc::Sender<HostAdmissionRequest>,
-    host_tx: mpsc::Sender<HostLoopMessage>,
+    host_tx: mpsc::UnboundedSender<HostLoopMessage>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -862,12 +924,10 @@ fn spawn_host_transport<S>(
             match run_host_connection_handshake(&mut transport, request, &admission_tx).await {
                 Ok(handshake) => handshake,
                 Err(error) => {
-                    let _ = host_tx
-                        .send(HostLoopMessage::AdmissionFailed {
-                            connection_id,
-                            error: format!("connection admission from {addr} failed: {error}"),
-                        })
-                        .await;
+                    let _ = host_tx.send(HostLoopMessage::AdmissionFailed {
+                        connection_id,
+                        error: format!("connection admission from {addr} failed: {error}"),
+                    });
                     return;
                 }
             };
@@ -879,15 +939,13 @@ fn spawn_host_transport<S>(
         } = handshake;
         debug_assert_eq!(local_connection_id, connection_id);
         let Ok(client_id) = ClientId::try_from(peer_core.client_id) else {
-            let _ = host_tx
-                .send(HostLoopMessage::AdmissionFailed {
-                    connection_id,
-                    error: "accepted peer has a negative client id".to_string(),
-                })
-                .await;
+            let _ = host_tx.send(HostLoopMessage::AdmissionFailed {
+                connection_id,
+                error: "accepted peer has a negative client id".to_string(),
+            });
             return;
         };
-        let (outbound, outbound_rx) = HostOutboundSender::channel(64);
+        let (outbound, outbound_rx) = HostOutboundSender::channel();
         let retire_rx = outbound.subscribe_retire();
         let (setup_tx, setup_rx) = oneshot::channel();
         if host_tx
@@ -897,88 +955,45 @@ fn spawn_host_transport<S>(
                 core: peer_core,
                 peer_addr: addr,
                 protocol,
-                outbound,
+                outbound: outbound.clone(),
                 setup_tx,
             })
-            .await
             .is_err()
         {
             return;
         }
-        let setup = match setup_rx.await {
-            Ok(Ok(setup)) => setup,
-            Ok(Err(error)) => {
-                let _ = host_tx
-                    .send(HostLoopMessage::ClientDisconnected {
-                        connection_id,
-                        client_id,
-                        next_inbound_packet: liveness.connection().inbound_packet_counter(),
-                        post_mortem: None,
-                        reason: Some(error),
-                    })
-                    .await;
-                return;
-            }
-            Err(_) => {
-                let _ = host_tx
-                    .send(HostLoopMessage::ClientDisconnected {
-                        connection_id,
-                        client_id,
-                        next_inbound_packet: liveness.connection().inbound_packet_counter(),
-                        post_mortem: None,
-                        reason: Some("host setup coordinator stopped".to_string()),
-                    })
-                    .await;
-                return;
-            }
-        };
-        if let Some(setup) = setup {
-            if let Err(error) = transport
-                .send_message(ControlMessage::JoinData(Box::new(setup.join_data)))
-                .await
-            {
-                let _ = host_tx
-                    .send(HostLoopMessage::ClientDisconnected {
-                        connection_id,
-                        client_id,
-                        next_inbound_packet: liveness.connection().inbound_packet_counter(),
-                        post_mortem: None,
-                        reason: Some(format!("JoinData send failed: {error}")),
-                    })
-                    .await;
-                return;
-            }
-            for address in setup.addresses {
-                if let Err(error) = transport
-                    .send_message(ControlMessage::Address(address))
-                    .await
-                {
-                    let _ = host_tx
-                        .send(HostLoopMessage::ClientDisconnected {
-                            connection_id,
-                            client_id,
-                            next_inbound_packet: liveness.connection().inbound_packet_counter(),
-                            post_mortem: None,
-                            reason: Some(format!("address send failed: {error}")),
-                        })
-                        .await;
-                    return;
-                }
-            }
-        }
-
-        ClientTask {
+        // C4Network2IO keeps every mutually accepted socket live while the
+        // main thread prepares SendJoinData
+        // (src/C4Network2IO.cpp:611-623,1155-1191;
+        // src/C4Network2.cpp:1107-1133,1836-1865).
+        let client_task = ClientTask {
             local_connection_id: connection_id,
             remote_connection_id,
             client_id,
             transport,
             outbound_rx,
             retire_rx,
-            host_tx,
+            host_tx: host_tx.clone(),
             liveness,
         }
-        .run()
-        .await;
+        .run();
+        tokio::pin!(client_task);
+        // The owning host loop performs C++'s synchronous SendJoinData work
+        // and queues the complete JoinData/address prefix before releasing
+        // this transport gate. The accepted route still services inbound
+        // Ping/Pong through `client_task` while that main-thread work waits.
+        tokio::select! {
+            setup = setup_rx => match setup {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => {
+                    outbound.retire();
+                    client_task.await;
+                    return;
+                }
+            },
+            () = &mut client_task => return,
+        }
+        client_task.await;
     });
 }
 
@@ -1044,24 +1059,22 @@ async fn handle_host_admission_request(request: HostAdmissionRequest, state: &mu
             state
                 .client_cores
                 .insert(join.core.client_id, join.core.clone());
+            state.invalidate_control_send_time();
             state
                 .pending_kinds
                 .insert(join.core.client_id, requested_kind);
             if let Ok(data) =
                 crate::encode_control_entry_payload(&clonk_engine::ControlPacket::ClientJoin(join))
             {
-                for client_id in host_target_client_ids(state, None) {
-                    let _ = send_host_message(
-                        state,
-                        client_id,
-                        ConnectionTrafficClass::Message,
-                        ControlMessage::Packet {
-                            delivery: ControlDelivery::Direct,
-                            data: data.clone(),
-                        },
-                    )
-                    .await;
-                }
+                let _ = broadcast_host_message(
+                    state,
+                    ConnectionTrafficClass::Message,
+                    ControlMessage::Packet {
+                        delivery: ControlDelivery::Direct,
+                        data: data.clone(),
+                    },
+                    None,
+                );
                 let _ = state
                     .event_tx
                     .send(HostEvent::Direct {
@@ -1090,14 +1103,14 @@ async fn handle_host_admission_request(request: HostAdmissionRequest, state: &mu
     let _ = request.decision_tx.send(decision);
 }
 
-async fn handle_client_accepted(
+pub(crate) async fn handle_client_accepted(
     connection_id: u32,
     remote_connection_id: u32,
     core: clonk_engine::ClientCoreControlData,
     peer_addr: SocketAddr,
     protocol: crate::NetworkProtocol,
     outbound: HostOutboundSender,
-    setup_tx: oneshot::Sender<Result<Option<ClientSetup>, String>>,
+    setup_tx: oneshot::Sender<Result<(), String>>,
     state: &mut HostState,
 ) {
     state.pending_admissions.remove(&connection_id);
@@ -1127,10 +1140,12 @@ async fn handle_client_accepted(
             outbound: outbound.clone(),
         },
     );
+    state.invalidate_control_send_time();
     debug_assert!(replaced_route.is_none());
     if state.clients.contains_key(&client_id) {
-        if setup_tx.send(Ok(None)).is_err() {
+        if setup_tx.send(Ok(())).is_err() {
             state.accepted_routes.remove(&connection_id);
+            state.invalidate_control_send_time();
             return;
         }
         let preferred = preferred_host_route(state, client_id, ConnectionTrafficClass::Message)
@@ -1168,13 +1183,16 @@ async fn handle_client_accepted(
         .await;
 
     let setup_result = match build_client_setup(client_id, state) {
-        Ok(Some(setup)) => {
-            mark_join_data_sent(client_id, state);
-            Ok(Some(setup))
-        }
+        Ok(Some(setup)) => match enqueue_client_setup_prefix(&outbound, setup) {
+            Ok(()) => {
+                mark_join_data_sent(client_id, state);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        },
         Ok(None) => {
             emit_join_data_needed(client_id, state).await;
-            Ok(None)
+            Ok(())
         }
         Err(error) => Err(error),
     };
@@ -1184,6 +1202,7 @@ async fn handle_client_accepted(
         handle_client_disconnected(
             connection_id,
             client_id,
+            0,
             0,
             None,
             setup_error.or_else(|| Some("accepted connection setup was dropped".to_string())),
@@ -1203,6 +1222,25 @@ async fn handle_client_accepted(
         let actions = state.resource_catalog.on_peer_connected(core.client_id);
         dispatch_host_resource_actions(actions, state).await;
     }
+}
+
+fn enqueue_client_setup_prefix(
+    outbound: &HostOutboundSender,
+    setup: ClientSetup,
+) -> Result<(), String> {
+    let ClientSetup {
+        join_data,
+        addresses,
+    } = setup;
+    outbound
+        .try_send(ControlMessage::JoinData(Box::new(join_data)))
+        .map_err(|_| "accepted route closed while queueing JoinData".to_string())?;
+    for address in addresses {
+        outbound
+            .try_send(ControlMessage::Address(address))
+            .map_err(|_| "accepted route closed while queueing initial addresses".to_string())?;
+    }
+    Ok(())
 }
 
 fn build_client_setup(
@@ -1336,8 +1374,7 @@ pub(crate) fn pending_join_data_client_ids(
     clients
         .iter()
         .filter_map(|(client_id, client)| {
-            (!client.join_data_sent && !removing_clients.contains(client_id))
-                .then_some(*client_id)
+            (!client.join_data_sent && !removing_clients.contains(client_id)).then_some(*client_id)
         })
         .collect()
 }
@@ -1432,7 +1469,10 @@ pub(crate) fn address_for_peer(
 }
 
 impl HostState {
-    pub(crate) fn coordination_register(&mut self, client_id: ClientId) -> Result<(), crate::ControlError> {
+    pub(crate) fn coordination_register(
+        &mut self,
+        client_id: ClientId,
+    ) -> Result<(), crate::ControlError> {
         if !self.coordinator.client_ids().any(|id| id == client_id) {
             self.coordinator.register_client(client_id)?;
         }
@@ -1476,4 +1516,3 @@ impl HostState {
             .then(|| waiting.deadline(self.config.async_max_wait_frames))
     }
 }
-

@@ -270,7 +270,12 @@ impl GameApp {
             }
             b"set" => {
                 if let Some(value) = parameter.strip_prefix(b"maxplayer ") {
-                    if self.engine.is_control_host() {
+                    // In a live network session, isCtrlHost is the initialized
+                    // local network client's identity. Never let stale
+                    // process-local engine state authorize a real client
+                    // (src/C4GameControl.cpp:59-68;
+                    // src/C4MessageInput.cpp:472-490).
+                    if network_host || (self.network.is_none() && self.engine.is_control_host()) {
                         let maximum = legacy_sscanf_decimal_prefix(value).unwrap_or(0);
                         if maximum == 0 && value != b"0" {
                             self.append_control_message_log(
@@ -278,6 +283,19 @@ impl GameApp {
                                 CONTROL_LOG_COLOR,
                                 None,
                             );
+                        } else if !game_running {
+                            if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                                network.submit_control_set(clonk_network::LegacyControlSet {
+                                    value_type: 2,
+                                    data: maximum,
+                                    by_client: 0,
+                                })
+                            }) {
+                                tracing::error!(
+                                    %error,
+                                    "failed to submit lobby maximum-player update"
+                                );
+                            }
                         } else {
                             self.submit_or_execute_running_control_set(2, maximum)?;
                         }

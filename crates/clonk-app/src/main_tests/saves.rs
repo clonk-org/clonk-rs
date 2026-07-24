@@ -1808,6 +1808,8 @@
 
         let mut app = new_running_sandbox_app();
         app.app_paths = Some(paths);
+        app.reload_application_language_resources()
+            .expect("reload localized screenshot resources after replacing fixture paths");
         app.set_display_mode(DisplayMode::Window);
         let expected_path = install.path().join("Screenshots/Screenshot001.png");
 
@@ -2435,7 +2437,7 @@
                 .expect("advanced save error dialog")
                 .state
                 .caption(),
-            "Error"
+            "Fehler"
         );
         assert!(app.status_text.is_empty());
         app.finish_message_dialog(MessageDialogResult::Ok)

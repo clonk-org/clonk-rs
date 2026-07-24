@@ -1,5 +1,5 @@
-// Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
-// sequence, not a child module, so test ids stay `tests::<fn>`.
+    // Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
+    // sequence, not a child module, so test ids stay `tests::<fn>`.
 
     #[test]
     fn classic_command_line_keeps_rust_option_values_out_of_legacy_scanning() {
@@ -149,13 +149,8 @@
         let user_data = tempdir().expect("command-line user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
         configure_test_startup_participant(&paths, user_data.path());
-        persist_config_value(
-            &paths,
-            "General",
-            "Participants",
-            "MissingConfigured.c4p",
-        )
-        .expect("make command-line player override observable");
+        persist_config_value(&paths, "General", "Participants", "MissingConfigured.c4p")
+            .expect("make command-line player override observable");
         let player_path = user_data.path().join("Exact.c4p");
         let scenario_path = paths.scenario_dir().join("Direct.c4s");
         let definition_path = scenario_path.join("Defs.c4d");
@@ -275,11 +270,7 @@
         let fixture = tempdir().expect("developer console strictness configuration");
         let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
         let mut config = Config::new();
-        config.set_in(
-            Some("Developer"),
-            "ConsoleScriptStrictness",
-            "Strict2",
-        );
+        config.set_in(Some("Developer"), "ConsoleScriptStrictness", "Strict2");
         config
             .save(paths.config_file())
             .expect("save developer console configuration");
@@ -361,10 +352,7 @@
         assert_eq!(
             classic_direct_reference_endpoint("127.0.0.1", Some(&paths))
                 .expect("custom reference port"),
-            clonk_network::ReferenceEndpoint::Address(SocketAddr::from((
-                [127, 0, 0, 1],
-                23_456,
-            )))
+            clonk_network::ReferenceEndpoint::Address(SocketAddr::from(([127, 0, 0, 1], 23_456,)))
         );
         assert_eq!(
             classic_loader_language_sequence(&paths).expect("command-line language sequence"),
@@ -448,11 +436,9 @@
         )
         .expect("initialize pinned offline app");
         wait_for_menu(&mut app);
-        let scenario = resolve_next_mission_scenario(
-            &app.scenario_catalog,
-            "Tutorial.c4f/Tutorial07.c4s",
-        )
-        .expect("Tutorial07 is present in the real scenario catalog");
+        let scenario =
+            resolve_next_mission_scenario(&app.scenario_catalog, "Tutorial.c4f/Tutorial07.c4s")
+                .expect("Tutorial07 is present in the real scenario catalog");
 
         app.start_scenario(scenario)
             .expect("start pinned offline Tutorial07");
@@ -480,18 +466,20 @@
 
     fn app_default_rank_promotion_name(app: &GameApp) -> String {
         let script = r#"#strict 2
-func Award()
-{
-    DoCrewExp(1000);
-    return GetObjectInfoCoreVal("RankName", "ObjectInfo");
-}
-"#;
+    func Award()
+    {
+        DoCrewExp(1000);
+        return GetObjectInfoCoreVal("RankName", "ObjectInfo");
+    }
+    "#;
         let mut engine = Engine::with_seed(0);
         app.apply_material_library_to(&mut engine);
-        let mut crew = Definition::from_script("CREW", "Crew", script)
-            .expect("default-rank app probe compiles");
+        let mut crew =
+            Definition::from_script("CREW", "Crew", script).expect("default-rank app probe compiles");
         crew.set_crew_member(true);
-        engine.register_definition(crew).expect("probe crew registers");
+        engine
+            .register_definition(crew)
+            .expect("probe crew registers");
         engine.set_player_starts(vec![clonk_engine::scenario::PlayerStart {
             ready_crew: vec![("CREW".to_string(), 1)],
             ..Default::default()
@@ -516,7 +504,9 @@ func Award()
             })
             .expect("rank owner joins");
         let crew_id = engine.player(0).expect("rank owner exists").crew()[0];
-        let crew_index = engine.find_object_index(crew_id).expect("probe crew exists");
+        let crew_index = engine
+            .find_object_index(crew_id)
+            .expect("probe crew exists");
         match engine
             .call_object_function(crew_index, "Award", Vec::new())
             .expect("default-rank promotion succeeds")
@@ -576,6 +566,186 @@ func Award()
     }
 
     #[test]
+    fn graphics_pass_percentiles_use_nearest_rank() {
+        let samples = (1..=20)
+            .rev()
+            .map(Duration::from_millis)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            graphics_pass_percentiles(&samples),
+            (
+                Duration::from_millis(10),
+                Duration::from_millis(19),
+                Duration::from_millis(20),
+            )
+        );
+        assert_eq!(
+            graphics_pass_percentiles(&[]),
+            (Duration::ZERO, Duration::ZERO, Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn presentation_benchmark_context_reports_actual_network_players() {
+        assert_eq!(
+                presentation_benchmark_context_line(24, 24, 24, 24, 24),
+                "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players=24 synchronized_player_infos=24 activated_nonhost_clients=24 runtime_crew_objects=24 runtime_players_with_exactly_one_live_sf5b_crew=24"
+            );
+    }
+
+    #[test]
+    fn presentation_benchmark_network_evidence_uses_unique_preferred_message_routes() {
+        let connections = vec![
+            clonk_network::RuntimeNetworkConnection {
+                connection_id: 1,
+                client_id: 0,
+                usage: "Data/Msg".to_string(),
+                protocol: clonk_network::NetworkProtocol::Tcp,
+                peer_address: None,
+                packet_loss: 0,
+                ping_ms: 7,
+                lag_ms: 9,
+            },
+            clonk_network::RuntimeNetworkConnection {
+                connection_id: 2,
+                client_id: 2,
+                usage: "Msg".to_string(),
+                protocol: clonk_network::NetworkProtocol::Udp,
+                peer_address: None,
+                packet_loss: 3,
+                ping_ms: -1,
+                lag_ms: 12,
+            },
+            clonk_network::RuntimeNetworkConnection {
+                connection_id: 3,
+                client_id: 2,
+                usage: "Data".to_string(),
+                protocol: clonk_network::NetworkProtocol::Tcp,
+                peer_address: None,
+                packet_loss: 99,
+                ping_ms: 100,
+                lag_ms: 101,
+            },
+        ];
+
+        let evidence = summarize_presentation_benchmark_network(1, &connections, 4, 26_813);
+
+        assert_eq!(evidence.local_client_id, 1);
+        assert_eq!(evidence.preferred_message_route_peer_ids, vec![0, 2]);
+        assert_eq!(evidence.tcp_preferred_message_routes, 1);
+        assert_eq!(evidence.udp_preferred_message_routes, 1);
+        assert_eq!(evidence.unknown_preferred_message_routes, 0);
+        assert_eq!(evidence.nonnegative_ping_peer_count, 1);
+        assert_eq!(evidence.nonnegative_lag_peer_count, 2);
+        assert_eq!(evidence.max_nonnegative_ping_ms, Some(7));
+        assert_eq!(evidence.max_nonnegative_lag_ms, Some(12));
+        assert_eq!(evidence.max_packet_loss, 3);
+        assert_eq!(evidence.control_presend, 4);
+        assert_eq!(evidence.avg_control_send_time_us, 26_813);
+        assert_eq!(
+                evidence.machine_line(),
+                "LC_APP_PRESENTATION_BENCHMARK_NETWORK inspection_status=ok local_client_id=1 preferred_message_route_peer_count=2 preferred_message_route_peer_ids=[0,2] tcp_preferred_message_routes=1 udp_preferred_message_routes=1 unknown_preferred_message_routes=0 nonnegative_ping_peer_count=1 nonnegative_lag_peer_count=2 max_nonnegative_ping_ms=7 max_nonnegative_lag_ms=12 max_packet_loss=3 control_presend=4 avg_control_send_time_us=26813"
+            );
+    }
+
+    #[test]
+    fn presentation_benchmark_counts_live_player_crew_objects() {
+        let mut app = new_lightweight_running_sandbox_app();
+        let crew = app.snapshot.players[0].crew[0];
+        app.snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == crew)
+            .expect("sandbox crew object")
+            .alive = true;
+        assert_eq!(runtime_crew_object_count(&app.snapshot), 1);
+
+        app.snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == crew)
+            .expect("sandbox crew object")
+            .alive = false;
+        assert_eq!(runtime_crew_object_count(&app.snapshot), 0);
+    }
+
+    #[test]
+    fn presentation_benchmark_requires_one_live_sf5b_in_each_players_crew() {
+        // HarpoonRace creates SF5B and passes it to MakeCrewMember for each
+        // player; C++ then retains that exact object in the owning player's
+        // Crew list (HarpoonRace.c4s/Script.c:66-73;
+        // src/C4Player.cpp:1173-1202).
+        let mut app = new_lightweight_running_sandbox_app();
+        let first_crew = app.snapshot.players[0].crew[0];
+        let first_crew_object = app
+            .snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == first_crew)
+            .expect("sandbox crew object");
+        first_crew_object.definition_id = "SF5B".to_string();
+        first_crew_object.alive = true;
+
+        let mut second_crew = app
+            .snapshot
+            .object(first_crew)
+            .expect("sandbox crew object")
+            .clone();
+        second_crew.id = ObjectId::new(first_crew.as_u64() + 1);
+        app.snapshot.objects.push(second_crew);
+        app.snapshot.players[0]
+            .crew
+            .push(ObjectId::new(first_crew.as_u64() + 1));
+
+        let mut second_player = app.snapshot.players[0].clone();
+        second_player.id += 1;
+        second_player.crew.clear();
+        app.snapshot.players.push(second_player);
+
+        assert_eq!(runtime_crew_object_count(&app.snapshot), 2);
+        assert_eq!(
+            runtime_players_with_exactly_one_live_sf5b_crew(&app.snapshot),
+            0
+        );
+
+        let second_crew = app.snapshot.players[0]
+            .crew
+            .pop()
+            .expect("second sandbox crew");
+        app.snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == second_crew)
+            .expect("second sandbox crew object")
+            .owner = app.snapshot.players[1].id;
+        app.snapshot.players[1].crew.push(second_crew);
+        assert_eq!(
+            runtime_players_with_exactly_one_live_sf5b_crew(&app.snapshot),
+            2
+        );
+
+        app.snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == second_crew)
+            .expect("second sandbox crew object")
+            .alive = false;
+        assert_eq!(
+            runtime_players_with_exactly_one_live_sf5b_crew(&app.snapshot),
+            1
+        );
+    }
+
+    #[test]
+    fn presentation_benchmark_keep_running_requires_explicit_one() {
+        assert!(parse_presentation_benchmark_keep_running(Some("1")));
+        for value in [None, Some(""), Some("0"), Some("true")] {
+            assert!(!parse_presentation_benchmark_keep_running(value));
+        }
+    }
+
+    #[test]
     fn presentation_benchmark_warms_up_counts_successes_and_reports_one_window() {
         let base = Instant::now();
         let mut benchmark = PresentationBenchmark::new(Duration::from_secs(3));
@@ -630,23 +800,37 @@ func Award()
         assert_eq!(report.automatic_graphics_skips, 1);
         assert_eq!(report.graphics_average, Duration::from_millis(15));
         assert_eq!(report.graphics_max, Duration::from_millis(20));
+        assert_eq!(report.graphics_p50, Duration::from_millis(10));
+        assert_eq!(report.graphics_p95, Duration::from_millis(20));
+        assert_eq!(report.graphics_p99, Duration::from_millis(20));
         assert_eq!(
-            report.machine_line(),
-            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000"
+            report.graphics_samples,
+            vec![Duration::from_millis(10), Duration::from_millis(20)]
         );
-        assert_eq!(benchmark.poll(true, base + Duration::from_secs(10), 999), None);
+        assert_eq!(
+                report.machine_line(),
+                "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds=3.000000 successful_present_submissions=2 presentation_submission_fps=0.666667 refreshed_frames=1 simulation_frames=105 simulation_fps=35.000000 automatic_graphics_skips=1 average_graphics_pass_ms=15.000000 max_graphics_pass_ms=20.000000 graphics_pass_sample_count=2 graphics_pass_p50_ms=10.000000 graphics_pass_p95_ms=20.000000 graphics_pass_p99_ms=20.000000 graphics_pass_samples_ns=[10000000,20000000]"
+            );
+        assert_eq!(
+            benchmark.poll(true, base + Duration::from_secs(10), 999),
+            None
+        );
     }
 
     #[test]
-    fn max_refresh_delay_defaults_to_rust_16_ms_and_honors_positive_config() {
-        assert_eq!(configured_max_refresh_delay_ms(b""), 16);
+    fn max_refresh_delay_defaults_to_cpp_30_ms_and_honors_positive_config() {
+        // Config.Graphics.MaxRefreshDelay defaults to 30, so the native
+        // 28 ms game timer remains one 28 ms graphics opportunity instead of
+        // being divided into two 14 ms redraws (src/C4Config.cpp:481-485;
+        // src/C4Application.cpp:510-520).
+        assert_eq!(configured_max_refresh_delay_ms(b""), 30);
         assert_eq!(
             configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=0\n"),
-            16
+            30
         );
         assert_eq!(
             configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=-5\n"),
-            16
+            30
         );
         assert_eq!(
             configured_max_refresh_delay_ms(b"[Graphics]\nMaxRefreshDelay=30\n"),
@@ -691,10 +875,10 @@ func Award()
         let definition_path = scenario_path.join("Defs.c4d");
         fs::create_dir_all(&definition_path).expect("create scenario definition");
         fs::write(
-            scenario_path.join("Scenario.txt"),
-            "[Head]\nTitle=Two players\nMaxPlayer=3\n\n[Definitions]\nDefinition1=Scenarios/TwoPlayers.c4s/Defs.c4d\n",
-        )
-        .expect("write scenario core");
+                scenario_path.join("Scenario.txt"),
+                "[Head]\nTitle=Two players\nMaxPlayer=3\n\n[Definitions]\nDefinition1=Scenarios/TwoPlayers.c4s/Defs.c4d\n",
+            )
+            .expect("write scenario core");
         fs::write(
             definition_path.join("DefCore.txt"),
             "[DefCore]\nid=TEST\nName=Test\nCategory=1\n",
@@ -706,17 +890,17 @@ func Award()
             let path = install.path().join(filename);
             let mut group = clonk_resources::MutableGroup::new(filename);
             group
-                .add_file_with_metadata(
-                    "Player.txt",
-                    format!(
-                        "[Player]\nName={name}\n\n[Preferences]\nControl={control}\nMouse=0\nAutoStopControl={}\n",
-                        i32::from(auto_stop),
+                    .add_file_with_metadata(
+                        "Player.txt",
+                        format!(
+                            "[Player]\nName={name}\n\n[Preferences]\nControl={control}\nMouse=0\nAutoStopControl={}\n",
+                            i32::from(auto_stop),
+                        )
+                        .into_bytes(),
+                        1,
+                        false,
                     )
-                    .into_bytes(),
-                    1,
-                    false,
-                )
-                .expect("add player core");
+                    .expect("add player core");
             fs::write(&path, group.pack().expect("pack player")).expect("write player group");
             path
         };
@@ -1053,10 +1237,8 @@ func Award()
 
         let dir = tempdir().expect("config root");
         let path = dir.path().join("legacyclonk.config");
-        fs::write(&path, "[General]\nConfigResetSafety=7\n")
-            .expect("write corrupt config");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .expect("make config writable");
+        fs::write(&path, "[General]\nConfigResetSafety=7\n").expect("write corrupt config");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("make config writable");
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500))
             .expect("forbid sibling staging files");
 
@@ -1079,8 +1261,7 @@ func Award()
         let user_data = tempdir().expect("user data");
         let dir = tempdir().expect("config root");
         fs::create_dir_all(install.path().join("planet")).expect("planet directory");
-        fs::write(install.path().join("planet/System.c4g"), b"stub")
-            .expect("system group stub");
+        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group stub");
         let path = dir.path().join("portable.config");
         let original = b"[General]\nConfigResetSafety=7\nName=Portable\n";
         fs::write(&path, original).expect("write corrupt custom config");
@@ -1090,11 +1271,14 @@ func Award()
             ("LC_CONFIG_FILE", None),
         ]);
 
-        let error = discover_validated_startup_paths(Some(&path))
-            .expect_err("custom corruption must abort");
+        let error =
+            discover_validated_startup_paths(Some(&path)).expect_err("custom corruption must abort");
 
         assert_eq!(error.to_string(), CUSTOM_CONFIG_CORRUPTED_ERROR);
-        assert_eq!(fs::read(&path).expect("read untouched custom config"), original);
+        assert_eq!(
+            fs::read(&path).expect("read untouched custom config"),
+            original
+        );
     }
 
     #[test]
@@ -1103,11 +1287,9 @@ func Award()
         let user_data = tempdir().expect("user data");
         let custom = tempdir().expect("environment config root");
         fs::create_dir_all(install.path().join("planet")).expect("planet directory");
-        fs::write(install.path().join("planet/System.c4g"), b"stub")
-            .expect("system group stub");
+        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group stub");
         let path = custom.path().join("environment.config");
-        fs::write(&path, "[General]\nConfigResetSafety=7\n")
-            .expect("write corrupt environment config");
+        fs::write(&path, "[General]\nConfigResetSafety=7\n").expect("write corrupt environment config");
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(install.path())),
             ("LC_USER_DATA_DIR", Some(user_data.path())),
@@ -1133,10 +1315,8 @@ func Award()
         let original = b"[General]\nName=Keep\n\n[Graphics]\nResolutionY=0\n";
         fs::write(&path, original).expect("write config without integrity fields");
 
-        assert!(
-            !validate_or_repair_startup_config(&path, false)
-                .expect("missing integrity fields are defaults")
-        );
+        assert!(!validate_or_repair_startup_config(&path, false)
+            .expect("missing integrity fields are defaults"));
         assert_eq!(fs::read(&path).expect("read unchanged config"), original);
     }
 
@@ -1146,8 +1326,7 @@ func Award()
         let home = tempdir().expect("home root");
         let poison = tempdir().expect("poison user root");
         fs::create_dir_all(install.path().join("planet")).expect("planet directory");
-        fs::write(install.path().join("planet/System.c4g"), b"stub")
-            .expect("system group stub");
+        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group stub");
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(install.path())),
             ("HOME", Some(home.path())),
@@ -1159,8 +1338,7 @@ func Award()
         ]);
         let initial = cached_app_paths_with_config_file(None).expect("discover default paths");
         let config_path = initial.config_file();
-        fs::create_dir_all(config_path.parent().expect("config parent"))
-            .expect("create config parent");
+        fs::create_dir_all(config_path.parent().expect("config parent")).expect("create config parent");
         fs::write(
             &config_path,
             format!(
@@ -1176,7 +1354,11 @@ func Award()
         let repaired = discover_validated_startup_paths(None)
             .expect("repair poisoned config")
             .expect("rediscover repaired paths");
-        let expected_language = if input::is_german_system() { "DE" } else { "US" };
+        let expected_language = if input::is_german_system() {
+            "DE"
+        } else {
+            "US"
+        };
 
         assert_eq!(repaired.config_file(), config_path);
         assert_ne!(repaired.user_data_dir(), poison.path());
@@ -1198,8 +1380,7 @@ func Award()
         let user_data = tempdir().expect("user data");
         let custom = tempdir().expect("custom config root");
         fs::create_dir_all(install.path().join("planet")).expect("planet directory");
-        fs::write(install.path().join("planet/System.c4g"), b"stub")
-            .expect("system group stub");
+        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group stub");
         let config_file = custom.path().join("command-line.config");
         let cli = Cli::try_parse_from([
             OsString::from("clonk-app"),
@@ -1225,8 +1406,7 @@ func Award()
         let user_data = tempdir().expect("user data");
         let custom = tempdir().expect("custom config root");
         fs::create_dir_all(install.path().join("planet")).expect("planet directory");
-        fs::write(install.path().join("planet/System.c4g"), b"stub")
-            .expect("system group stub");
+        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group stub");
         let environment_file = custom.path().join("environment.config");
         let command_line_file = custom.path().join("command-line.config");
         let command_line_sentinel = b"[Graphics]\nResolutionX=321\nResolutionY=234\n";
@@ -1493,11 +1673,7 @@ func Award()
         });
 
         let mut bindings = KeyboardBindings::load(None);
-        assert!(bindings.rebind_for_set(
-            2,
-            ControlBindingId::PlayerMenu,
-            VirtualKeyCode::F8,
-        ));
+        assert!(bindings.rebind_for_set(2, ControlBindingId::PlayerMenu, VirtualKeyCode::F8,));
         let mut gamepad_bindings = GamepadBindings::default();
         for (binding, button) in [
             (ControlBindingId::Throw, 0),
@@ -1513,16 +1689,14 @@ func Award()
         let mut clonk_definition =
             Definition::from_script("Clonk", "Clonk", "").expect("Clonk definition");
         clonk_definition.set_hide_hud_elements(0x3f);
-        clonk_definition.set_hide_hud_bars(
-            clonk_engine::HIDE_HUD_BAR_ENERGY | clonk_engine::HIDE_HUD_BAR_BREATH,
-        );
+        clonk_definition
+            .set_hide_hud_bars(clonk_engine::HIDE_HUD_BAR_ENERGY | clonk_engine::HIDE_HUD_BAR_BREATH);
         engine
             .register_definition(clonk_definition)
             .expect("register Clonk definition");
         engine
             .register_definition(
-                Definition::from_script("Balloon", "Balloon", "")
-                    .expect("Balloon definition"),
+                Definition::from_script("Balloon", "Balloon", "").expect("Balloon definition"),
             )
             .expect("register Balloon definition");
         let overlay = collect_player_overlays(
@@ -1663,7 +1837,11 @@ func Award()
         );
         assert_eq!(overlay[0].cursor, Some(teammate));
         assert_eq!(overlay[0].crew_count, 1, "ViewCursor is not roster crew");
-        assert_eq!(overlay[0].crew.len(), 2, "non-roster ViewCursor is projected");
+        assert_eq!(
+            overlay[0].crew.len(),
+            2,
+            "non-roster ViewCursor is projected"
+        );
         assert_eq!(
             overlay[0]
                 .crew
@@ -1696,9 +1874,9 @@ func Award()
                         "MACC",
                         "Mission access probe",
                         r#"#strict 2
-public func Has(password) { return GetMissionAccess(password); }
-public func Grant(password) { return GainMissionAccess(password); }
-"#,
+    public func Has(password) { return GetMissionAccess(password); }
+    public func Grant(password) { return GainMissionAccess(password); }
+    "#,
                     )
                     .expect("mission-access probe compiles"),
                 )
@@ -1706,7 +1884,9 @@ public func Grant(password) { return GainMissionAccess(password); }
             let object = engine
                 .spawn_object(SpawnConfig::new("MACC"))
                 .expect("mission-access probe spawns");
-            engine.find_object_index(object).expect("probe remains live")
+            engine
+                .find_object_index(object)
+                .expect("probe remains live")
         }
 
         let _lock = env_lock().lock();
@@ -1772,8 +1952,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                 set_control_test_team(2, Vec::new(), 0),
             ],
         );
-        app.network_team_assignment =
-            Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
         assert!(app.select_classic_lobby_sheet(LobbySheet::Options));
 
         app.submit_classic_lobby_team_setting(LobbyOptionKind::TeamDistribution, 4);
@@ -1812,9 +1991,9 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(options.iter().any(|row| {
             row.kind == LobbyOptionKind::TeamDistribution && row.value == "surprise random!"
         }));
-        assert!(options.iter().any(|row| {
-            row.kind == LobbyOptionKind::TeamColors && row.value == "enabled"
-        }));
+        assert!(options
+            .iter()
+            .any(|row| { row.kind == LobbyOptionKind::TeamColors && row.value == "enabled" }));
         assert!(options
             .iter()
             .any(|row| row.kind == LobbyOptionKind::RandomTeamCount));
@@ -1915,14 +2094,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             ],
         };
 
-        let rows = classic_lobby_roster_projection(
-            &clients,
-            &infos,
-            Some(&metadata),
-            0,
-            LobbySheet::Teams,
-        )
-        .0;
+        let rows =
+            classic_lobby_roster_projection(&clients, &infos, Some(&metadata), 0, LobbySheet::Teams).0;
         assert_eq!(
             rows.iter().map(LobbyRosterRow::id).collect::<Vec<_>>(),
             vec![
@@ -1934,18 +2107,14 @@ public func Grant(password) { return GainMissionAccess(password); }
                 LobbyRosterId::Header(LobbyRosterHeader::Team(3)),
             ]
         );
-        assert!(rows.iter().all(|row| !matches!(row, LobbyRosterRow::Client(_))));
+        assert!(rows
+            .iter()
+            .all(|row| !matches!(row, LobbyRosterRow::Client(_))));
 
         let mut generated = metadata.clone();
         generated.auto_generate_teams = true;
-        let generated = classic_lobby_roster_projection(
-            &clients,
-            &infos,
-            Some(&generated),
-            0,
-            LobbySheet::Teams,
-        )
-        .0;
+        let generated =
+            classic_lobby_roster_projection(&clients, &infos, Some(&generated), 0, LobbySheet::Teams).0;
         assert!(!generated.iter().any(|row| matches!(
             row,
             LobbyRosterRow::Header(LobbyHeaderRow {
@@ -2117,7 +2286,6 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .focused_control(),
             PlrSelControl::PlayerList
         );
-
     }
 
     #[test]
@@ -2143,7 +2311,8 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.open_player_selection_dialog();
 
         for (character, expected) in [('T', 2), ('T', 3), ('t', 0)] {
-            app.handle_text_input(character).expect("route list character");
+            app.handle_text_input(character)
+                .expect("route list character");
             assert_eq!(
                 app.startup_player_dialog
                     .as_ref()
@@ -2171,7 +2340,10 @@ public func Grant(password) { return GainMissionAccess(password); }
         let panel = &popup.layout().panels[0];
         assert_eq!(panel.rows.len(), 2);
         assert_eq!(panel.selected, None);
-        assert_eq!((panel.bounds.x, panel.bounds.y), (anchor.x as i32, anchor.y as i32));
+        assert_eq!(
+            (panel.bounds.x, panel.bounds.y),
+            (anchor.x as i32, anchor.y as i32)
+        );
         app.close_context_menu_silently();
 
         app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
@@ -2216,9 +2388,9 @@ public func Grant(password) { return GainMissionAccess(password); }
                 .map(|image| (image.width(), image.height())),
             Some((150, 150))
         );
-        assert!(controller.big_icon_preview().is_some_and(|image| {
-            image.width() <= 64 && image.height() <= 64
-        }));
+        assert!(controller
+            .big_icon_preview()
+            .is_some_and(|image| { image.width() <= 64 && image.height() <= 64 }));
     }
 
     #[test]
@@ -2315,7 +2487,10 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("properties remain open")
             .controller
             .handle_key_down(KeyCode::Escape);
-        assert!(actions.is_empty(), "selector cancel stays in player properties");
+        assert!(
+            actions.is_empty(),
+            "selector cancel stays in player properties"
+        );
         app.process_startup_player_properties_actions(vec![
             clonk_frontend::startup_plrproperties::PlayerPropertiesAction::ChoosePicture,
         ]);
@@ -2373,10 +2548,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             .expect("the player-properties modal renders over selection");
         app.startup_player_properties_dialog = None;
 
-        for key in [
-            VirtualKeyCode::Return,
-            VirtualKeyCode::F2,
-        ] {
+        for key in [VirtualKeyCode::Return, VirtualKeyCode::F2] {
             app.handle_key(key, ElementState::Pressed)
                 .expect("existing-player shortcut opens editor");
             assert!(matches!(
@@ -2466,8 +2638,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(load_show_folder_maps(None));
         let user_data = tempdir().expect("ShowFolderMaps config");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-        persist_config_value(&paths, "Graphics", "ShowFolderMaps", "0")
-            .expect("disable folder maps");
+        persist_config_value(&paths, "Graphics", "ShowFolderMaps", "0").expect("disable folder maps");
         assert!(!load_show_folder_maps(Some(&paths)));
     }
 
@@ -2631,10 +2802,10 @@ public func Grant(password) { return GainMissionAccess(password); }
         let paths = AppPaths::discover().expect("discover app paths");
         paths.ensure_user_dirs().expect("create user directories");
         fs::write(
-            paths.config_file(),
-            "[General]\nFontName=Endeavour\nFontSize=28\nVendorResetKey=remove\n[Graphics]\nScale=250\n",
-        )
-        .expect("seed reset config");
+                paths.config_file(),
+                "[General]\nFontName=Endeavour\nFontSize=28\nVendorResetKey=remove\n[Graphics]\nScale=250\n",
+            )
+            .expect("seed reset config");
         let mut app = GameApp::new(
             1280,
             720,
@@ -2662,9 +2833,9 @@ public func Grant(password) { return GainMissionAccess(password); }
         let modal = app.message_dialogs.last().expect("reset modal");
         assert_eq!(modal.state.caption(), "Reset configuration");
         assert_eq!(
-            modal.state.message(),
-            "Are you sure you want to reset all configuration values?|For changes to take effect the program has to be restarted."
-        );
+                modal.state.message(),
+                "Are you sure you want to reset all configuration values?|For changes to take effect the program has to be restarted."
+            );
         assert_eq!(modal.state.buttons(), MessageDialogButtons::YES_NO);
         assert_eq!(modal.state.icon(), MessageDialogIcon::NOTIFY);
         assert_eq!(modal.state.focused_button(), Some(MessageDialogButton::Yes));
@@ -2730,10 +2901,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             3,
             app.gamepad_gui_control,
         );
-        let dialog = app
-            .startup_options_dialog
-            .as_mut()
-            .expect("options dialog");
+        let dialog = app.startup_options_dialog.as_mut().expect("options dialog");
         *dialog.controls_mut() = controls;
         dialog.restore_sheet(OptionsSheet::Keyboard);
 
@@ -2804,10 +2972,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             .as_mut()
             .unwrap()
             .restore_sheet(OptionsSheet::Gamepad);
-        app.process_options_dialog_actions(vec![OptionsDlgAction::SheetChanged(
-            OptionsSheet::Gamepad,
-        )])
-        .expect("enter Gamepad sheet");
+        app.process_options_dialog_actions(vec![OptionsDlgAction::SheetChanged(OptionsSheet::Gamepad)])
+            .expect("enter Gamepad sheet");
         app.handle_modifiers_changed(ModifiersState::ALT)
             .expect("hold Alt on Gamepad sheet");
         app.handle_key(VirtualKeyCode::Key3, ElementState::Pressed)
@@ -2845,14 +3011,9 @@ public func Grant(password) { return GainMissionAccess(password); }
 
         let mut app = new_classic_menu_app(640, 480);
         app.open_options_menu();
-        let dialog = app
-            .startup_options_dialog
-            .as_mut()
-            .expect("options dialog");
+        let dialog = app.startup_options_dialog.as_mut().expect("options dialog");
         dialog.restore_sheet(OptionsSheet::Keyboard);
-        assert!(dialog
-            .controls_mut()
-            .select_set(ControlDevice::Keyboard, 3));
+        assert!(dialog.controls_mut().select_set(ControlDevice::Keyboard, 3));
         app.handle_modifiers_changed(ModifiersState::ALT)
             .expect("hold Alt");
 
@@ -2908,7 +3069,10 @@ public func Grant(password) { return GainMissionAccess(password); }
             "Could not save configuration: simulated config write failure"
         );
         assert_eq!(error.state.icon(), MessageDialogIcon::ERROR);
-        assert!(matches!(error.continuation, MessageDialogContinuation::None));
+        assert!(matches!(
+            error.continuation,
+            MessageDialogContinuation::None
+        ));
     }
 
     #[test]
@@ -2990,9 +3154,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             focus_suppressed: true,
             events: vec![
                 ContextMenuEvent::Closed,
-                ContextMenuEvent::Activated(AppContextMenuCommand::OptionsLanguage(
-                    "US".to_string(),
-                )),
+                ContextMenuEvent::Activated(AppContextMenuCommand::OptionsLanguage("US".to_string())),
             ],
         })
         .expect("select US language");
@@ -3212,10 +3374,10 @@ public func Grant(password) { return GainMissionAccess(password); }
         let scenario_path = outer.join("Choice.c4s");
         fs::create_dir_all(&scenario_path).expect("selection scenario group");
         fs::write(
-            scenario_path.join("Scenario.txt"),
-            "[Head]\nTitle=Definition Choice\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=./Preset.c4d\n",
-        )
-        .expect("selection scenario core");
+                scenario_path.join("Scenario.txt"),
+                "[Head]\nTitle=Definition Choice\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=./Preset.c4d\n",
+            )
+            .expect("selection scenario core");
 
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), Some(content_root));
         persist_config_value(&paths, "General", "DefinitionPath", "Custom/")
@@ -3276,10 +3438,10 @@ public func Grant(password) { return GainMissionAccess(password); }
             "a nonempty scenario preset replaces the seed before rooted/local expansion"
         );
         fs::write(
-            scenario_path.join("Scenario.txt"),
-            "[Head]\nTitle=Definition Choice\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Preset.c4d\n",
-        )
-        .expect("change only the scenario preset spelling after staging");
+                scenario_path.join("Scenario.txt"),
+                "[Head]\nTitle=Definition Choice\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Preset.c4d\n",
+            )
+            .expect("change only the scenario preset spelling after staging");
         let changed_spelling = build_network_host_preparation(
             &app,
             &seed.frontend,
@@ -3300,10 +3462,10 @@ public func Grant(password) { return GainMissionAccess(password); }
             } if staged != prepared
         ));
         fs::write(
-            scenario_path.join("Scenario.txt"),
-            "[Head]\nTitle=Definition Choice\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Seed.c4d\n",
-        )
-        .expect("change scenario preset after staging");
+                scenario_path.join("Scenario.txt"),
+                "[Head]\nTitle=Definition Choice\nMaxPlayer=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Seed.c4d\n",
+            )
+            .expect("change scenario preset after staging");
         let changed_selection = build_network_host_preparation(
             &app,
             &seed.frontend,
@@ -3470,9 +3632,9 @@ public func Grant(password) { return GainMissionAccess(password); }
         let confirm = &app.message_dialogs[0].state;
         assert_eq!(confirm.caption(), "Delete");
         assert_eq!(
-            confirm.message(),
-            "Do you really want to delete player Ada? - this player has a total playing time of 10:00:01!"
-        );
+                confirm.message(),
+                "Do you really want to delete player Ada? - this player has a total playing time of 10:00:01!"
+            );
         assert_eq!(
             confirm.buttons(),
             clonk_frontend::message_dialog::MessageDialogButtons::YES_NO
@@ -3705,10 +3867,8 @@ public func Grant(password) { return GainMissionAccess(password); }
     #[test]
     fn l143_chart_toggle_key_is_default_unbound_configurable_and_escape_owned() {
         assert!(RuntimeKeyConfig::default().chart_toggle.is_empty());
-        let parsed = parse_runtime_key_config(
-            b"[Keys]\nChartToggle=F8\n[Keys]\nChartToggle=F7\n",
-        )
-        .expect("parse the represented default-unbound chart action");
+        let parsed = parse_runtime_key_config(b"[Keys]\nChartToggle=F8\n[Keys]\nChartToggle=F7\n")
+            .expect("parse the represented default-unbound chart action");
         assert_eq!(
             parsed.chart_toggle,
             vec![RuntimeKeyChord::keyboard(
@@ -3786,7 +3946,9 @@ public func Grant(password) { return GainMissionAccess(password); }
         priority.runtime_key_config_cache = OnceLock::new();
         priority
             .runtime_key_config_cache
-            .set(Ok(parse_runtime_key_config(b"[Keys]\nChartToggle=F2\n").unwrap()))
+            .set(Ok(
+                parse_runtime_key_config(b"[Keys]\nChartToggle=F2\n").unwrap()
+            ))
             .expect("install duplicate base-priority chord");
         priority
             .handle_key(VirtualKeyCode::F2, ElementState::Pressed)
@@ -3816,12 +3978,10 @@ public func Grant(password) { return GainMissionAccess(password); }
         let fixture = tempdir().expect("running script configuration");
         let (_guard, paths) = exact_loader_test_paths(fixture.path(), None);
         let mut config = Config::new();
-        config.set_in(
-            Some("Developer"),
-            "ConsoleScriptStrictness",
-            "Strict1",
-        );
-        config.save(paths.config_file()).expect("save script config");
+        config.set_in(Some("Developer"), "ConsoleScriptStrictness", "Strict1");
+        config
+            .save(paths.config_file())
+            .expect("save script config");
 
         let mut app = new_state_only_running_sandbox_app();
         app.app_paths = Some(paths);
@@ -3843,9 +4003,9 @@ public func Grant(password) { return GainMissionAccess(password); }
     #[test]
     fn l006_runtime_key_config_compiles_lists_modifiers_raw_joy_and_disable_codes() {
         let parsed = parse_runtime_key_config(
-            b"[Keys]\nNetObsNextPlayer=F5\nChatOpen=Ctrl+Shift+F2,Return\nScoreboardToggle=None\nGameAbort=Joy2A\nKbd1Key1=\\x0042010a\nUnknownAction=F9\n[Keys]\nNetObsNextPlayer=F6\n",
-        )
-        .expect("compile the first classic Keys node");
+                b"[Keys]\nNetObsNextPlayer=F5\nChatOpen=Ctrl+Shift+F2,Return\nScoreboardToggle=None\nGameAbort=Joy2A\nKbd1Key1=\\x0042010a\nUnknownAction=F9\n[Keys]\nNetObsNextPlayer=F6\n",
+            )
+            .expect("compile the first classic Keys node");
         assert_eq!(
             parsed.net_observer_next_player,
             vec![RuntimeKeyChord::keyboard(
@@ -3861,10 +4021,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                         VirtualKeyCode::F2,
                         ModifiersState::CTRL | ModifiersState::SHIFT,
                     ),
-                    RuntimeKeyChord::keyboard(
-                        VirtualKeyCode::Return,
-                        ModifiersState::empty(),
-                    ),
+                    RuntimeKeyChord::keyboard(VirtualKeyCode::Return, ModifiersState::empty(),),
                 ]
                 .as_slice()
             )
@@ -3880,7 +4037,10 @@ public func Grant(password) { return GainMissionAccess(password); }
         );
         assert_eq!(
             parsed.override_for("Kbd1Key1").unwrap()[0].physical,
-            RuntimePhysicalKey::Gamepad { slot: 1, button: 10 }
+            RuntimePhysicalKey::Gamepad {
+                slot: 1,
+                button: 10
+            }
         );
         assert!(parsed.override_for("UnknownAction").is_none());
 
@@ -3899,14 +4059,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             partial.override_for("ChatOpen"),
             Some(
                 [
-                    RuntimeKeyChord::keyboard(
-                        VirtualKeyCode::Capital,
-                        ModifiersState::empty(),
-                    ),
-                    RuntimeKeyChord::keyboard(
-                        VirtualKeyCode::F2,
-                        ModifiersState::empty(),
-                    ),
+                    RuntimeKeyChord::keyboard(VirtualKeyCode::Capital, ModifiersState::empty(),),
+                    RuntimeKeyChord::keyboard(VirtualKeyCode::F2, ModifiersState::empty(),),
                 ]
                 .as_slice()
             )
@@ -3951,8 +4105,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.engine
             .replace_player_viewports(
                 owner,
-                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180))
-                    .with_focus(Some(focus))],
+                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
             )
             .expect("place camera away from every scroll bound");
         app.engine.set_local_players([]);
@@ -4135,14 +4288,14 @@ public func Grant(password) { return GainMissionAccess(password); }
             .install_scenario_script_with_convention(
                 "SetMaxPlayer negative admission fixture",
                 r#"
-                static set_result;
+                    static set_result;
 
-                global func RejectLimitAndSpawn()
-                {
-                    set_result = SetMaxPlayer(-1);
-                    CreateScriptPlayer("Rejected Bot", 0x112233, 2, 15, __AI);
-                }
-                "#,
+                    global func RejectLimitAndSpawn()
+                    {
+                        set_result = SetMaxPlayer(-1);
+                        CreateScriptPlayer("Rejected Bot", 0x112233, 2, 15, __AI);
+                    }
+                    "#,
                 true,
             )
             .expect("fixture script installs");
@@ -4204,22 +4357,21 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.engine
             .replace_player_viewports(
                 original,
-                vec![clonk_engine::PlayerViewport::new(Vector2::new(300, 180))
-                    .with_zoom(1.75)],
+                vec![clonk_engine::PlayerViewport::new(Vector2::new(300, 180)).with_zoom(1.75)],
             )
             .expect("install source physical zoom");
         app.snapshot = app.engine.snapshot();
         let _ = app.create_physical_viewport(target, false, true, true);
         app.engine.clear_scenario_script();
         app.engine
-            .install_scenario_script_with_convention(
-                "PhysicalViewport.c",
-                &format!(
-                    "#strict 3\nfunc Probe() {{ SetViewOffset({original}, 17, 19); SetFilmView({target}); SetViewOffset({original}, 91, 92); }}"
-                ),
-                true,
-            )
-            .expect("install film retarget probe");
+                .install_scenario_script_with_convention(
+                    "PhysicalViewport.c",
+                    &format!(
+                        "#strict 3\nfunc Probe() {{ SetViewOffset({original}, 17, 19); SetFilmView({target}); SetViewOffset({original}, 91, 92); }}"
+                    ),
+                    true,
+                )
+                .expect("install film retarget probe");
         app.engine.set_replay_control(true);
         app.engine
             .call_scenario_script_function("Probe", Vec::new())
@@ -4249,11 +4401,9 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(app.ui_sound_log.is_empty(), "CloseViewport(A) matches none");
 
         app.snapshot = app.engine.snapshot();
-        let rendered = collect_viewport_inputs_from_physical_state(
-            &app.snapshot,
-            &app.physical_viewports,
-        )
-        .expect("both surviving physical viewports render");
+        let rendered =
+            collect_viewport_inputs_from_physical_state(&app.snapshot, &app.physical_viewports)
+                .expect("both surviving physical viewports render");
         assert_eq!(rendered.len(), 2);
         assert!(rendered.iter().all(|viewport| viewport.owner == target));
         assert_eq!(rendered[0].zoom, 1.75);
@@ -4326,7 +4476,10 @@ public func Grant(password) { return GainMissionAccess(password); }
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
         let tick = app.local_control_submission_tick();
-        let crew = app.engine.crew_cursor(app.local_owner).expect("sandbox cursor");
+        let crew = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
         let before = app
             .engine
             .object_snapshot(crew)
@@ -4674,7 +4827,9 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert!(app.full_speed);
         assert_eq!(app.frame_skip, 2);
         assert_eq!(
-            app.runtime_flash_message.as_ref().map(|message| message.text.as_str()),
+            app.runtime_flash_message
+                .as_ref()
+                .map(|message| message.text.as_str()),
             Some("Speed: 2x")
         );
         app.handle_key(VirtualKeyCode::NumpadAdd, ElementState::Released)
@@ -4690,7 +4845,9 @@ public func Grant(password) { return GainMissionAccess(password); }
         }
         assert!(!app.full_speed);
         assert_eq!(
-            app.runtime_flash_message.as_ref().map(|message| message.text.as_str()),
+            app.runtime_flash_message
+                .as_ref()
+                .map(|message| message.text.as_str()),
             Some("Speed: 1x")
         );
 
@@ -4701,7 +4858,9 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(app.frame_skip, 50);
         assert!(app.full_speed);
         assert_eq!(
-            app.runtime_flash_message.as_ref().map(|message| message.text.as_str()),
+            app.runtime_flash_message
+                .as_ref()
+                .map(|message| message.text.as_str()),
             Some("Speed: 50x")
         );
 
@@ -4796,9 +4955,9 @@ public func Grant(password) { return GainMissionAccess(password); }
                 Layer::Scoreboard => {
                     let mut app = new_scoreboard_test_app(
                         r#"global func Initialize()
-                        {
-                            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-                        }"#,
+                            {
+                                SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                            }"#,
                     );
                     toggle_scoreboard(&mut app, ModifiersState::empty());
                     app
@@ -4819,10 +4978,8 @@ public func Grant(password) { return GainMissionAccess(password); }
                     .expect("open message"),
                 Layer::Context => {
                     app.open_context_menu_at(
-                        vec![
-                            ContextMenuEntry::<AppContextMenuCommand>::new("Root")
-                                .with_submenu(vec![ContextMenuEntry::new("Child")]),
-                        ],
+                        vec![ContextMenuEntry::<AppContextMenuCommand>::new("Root")
+                            .with_submenu(vec![ContextMenuEntry::new("Child")])],
                         GuiPoint::new(24.0, 24.0),
                     )
                     .expect("open context");
@@ -4836,8 +4993,7 @@ public func Grant(password) { return GainMissionAccess(password); }
                     ));
                 }
                 Layer::Load => {
-                    app.save_browser =
-                        Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
+                    app.save_browser = Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
                 }
                 Layer::Object => {
                     assert!(app.open_object_menu().expect("open object state"));
@@ -4957,10 +5113,7 @@ public func Grant(password) { return GainMissionAccess(password); }
     fn generated_team_name_template_preserves_the_runtime_table_charset() {
         let cp1252 = RuntimeLanguageTable {
             charset: RuntimeHelpCharset::Windows1252,
-            entries: HashMap::from([(
-                "IDS_MSG_TEAM".to_string(),
-                "Équipe %d".to_string(),
-            )]),
+            entries: HashMap::from([("IDS_MSG_TEAM".to_string(), "Équipe %d".to_string())]),
         };
         assert_eq!(
             generated_team_name_template(&cp1252).as_bytes(),
@@ -4974,6 +5127,305 @@ public func Grant(password) { return GainMissionAccess(password); }
         assert_eq!(
             generated_team_name_template(&utf8).as_bytes(),
             "Équipe %d".as_bytes()
+        );
+    }
+
+    #[test]
+    fn runtime_resource_lookup_uses_the_process_loaded_language_table() {
+        // C4Application owns one ResStrTable and replaces it only when the
+        // Options dialog reloads the language. Per-frame console/menu lookup
+        // must not reopen and parse System.c4g.
+        let mut app = new_menu_app(320, 240);
+        app.startup_tooltip_resources.insert(
+            "IDS_TEST_PROCESS_RESOURCE".to_string(),
+            "process cached É".to_string(),
+        );
+        app.runtime_language_charset = RuntimeHelpCharset::Windows1252;
+
+        assert_eq!(
+            app.runtime_resource_text("IDS_TEST_PROCESS_RESOURCE", "fallback"),
+            "process cached É"
+        );
+        assert_eq!(
+            app.runtime_resource_bytes("IDS_TEST_PROCESS_RESOURCE"),
+            b"process cached \xc9"
+        );
+    }
+
+    #[test]
+    fn process_language_table_survives_disk_edits_until_an_explicit_options_reload() {
+        let install = tempdir().expect("process language install fixture");
+        let user_data = tempdir().expect("process language user fixture");
+        let system = install.path().join("planet/System.c4g");
+        fs::create_dir_all(&system).expect("create process language System.c4g");
+        let language = system.join("LanguageUS.txt");
+        let table = |generation: &str, charset: &str| {
+            format!(
+                "IDS_LANG_CHARSET={charset}\n\
+                     IDS_MSG_SELECT={generation} select %s\n\
+                     IDS_NET_CLIENT_READY={generation} ready %s.\n\
+                     IDS_NET_CLIENT_UNREADY={generation} not ready %s.\n\
+                     IDS_MSG_NOTALLSAVEGAMEPLAYERSHAVE={generation} unassociated players\n\
+                     IDS_MSG_FREESAVEGAMEPLRS={generation} player assignment\n\
+                     IDS_MSG_DONTSHOW={generation} don't show\n\
+                     IDS_MSG_NOSPLITSCREENINLEAGUE={generation} players %s and %s\n\
+                     IDS_NET_ERR_LEAGUE={generation} league error\n\
+                     IDS_TEXT_COMMANDSAVAILABLEDURINGLO={generation} lobby commands\n\
+                     IDS_PLR_NEWCOMMENT={generation} new player\n\
+                     IDS_NET_REFONCLIENT={generation} %s on %s\n\
+                     IDS_NET_QUERY_MASTERSRV={generation} internet server\n\
+                     IDS_NET_CLIENTONNET=%s on %s\n\
+                     IDS_NET_INFOQUERY={generation} querying\n\
+                     IDS_CTL_NOLANGINFO={generation} no language info\n\
+                     IDS_MSG_TEAM=Team %d\n"
+            )
+        };
+        fs::write(&language, table("Loaded", "")).expect("write initially loaded process language");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover process language fixture");
+        paths.ensure_user_dirs().expect("create fixture user dirs");
+        fs::write(
+            paths.config_file(),
+            "[General]\nLanguage=US\nLanguageEx=US\n",
+        )
+        .expect("select fixture language");
+
+        let mut app = new_real_menu_app(640, 480);
+        app.app_paths = Some(paths.clone());
+        app.reload_application_language_resources()
+            .expect("load the process language table");
+        assert_eq!(
+            app.runtime_language_charset,
+            RuntimeHelpCharset::Windows1252
+        );
+
+        fs::write(&language, table("Mutated", "UTF-8"))
+            .expect("mutate language file after process startup");
+        let disk = load_runtime_language_table(Some(&paths))
+            .expect("the mutated language table is independently loadable");
+        assert_eq!(
+            disk.entries.get("IDS_MSG_SELECT").map(String::as_str),
+            Some("Mutated select %s")
+        );
+        assert_eq!(disk.charset, RuntimeHelpCharset::Utf8);
+        assert_eq!(
+            load_options_program_state(Some(&paths), Some(&app.startup_tooltip_resources),)
+                .no_language_info,
+            "Loaded no language info"
+        );
+
+        attach_l040_network_dialog(&mut app);
+        app.startup_game_references = vec![clonk_network::NetworkGameReference {
+            title: "HarpoonRace".to_string(),
+            host_name: "Host".to_string(),
+            state: "Lobby".to_string(),
+            max_players: 24,
+            ..Default::default()
+        }];
+        let loads_before_browser = runtime_language_table_load_count(paths.system_group_path());
+        assert!(
+            loads_before_browser >= 2,
+            "the probe observes the initial process load and explicit disk inspection"
+        );
+        for _ in 0..3 {
+            app.sync_startup_network_game_rows();
+            let row = &app
+                .startup_network_dialog
+                .as_ref()
+                .expect("network browser")
+                .games()[0];
+            assert_eq!(row.title, "Loaded HarpoonRace on Host");
+            let mut frame = vec![0_u8; 640 * 480 * 4];
+            app.render(&mut frame)
+                .expect("render network browser from retained language table");
+        }
+        assert_eq!(
+            runtime_language_table_load_count(paths.system_group_path()),
+            loads_before_browser,
+            "network-browser row projection and rendering must not reopen System.c4g"
+        );
+
+        assert_eq!(
+            app.runtime_resource_text("IDS_MSG_SELECT", "fallback"),
+            "Loaded select %s"
+        );
+        assert_eq!(
+            app.runtime_resource_bytes("IDS_MSG_NOSPLITSCREENINLEAGUE"),
+            b"Loaded players %s and %s"
+        );
+        assert_eq!(
+            app.new_startup_player_properties_controller(0, 0).comment(),
+            "Loaded new player"
+        );
+
+        app.control_clients
+            .replace_snapshot([message_client(7, b"Remote")]);
+        app.append_remote_lobby_ready_log(clonk_network::ReadyCheckPacket {
+            client_id: 7,
+            data: clonk_network::ReadyCheckData::Ready,
+        });
+        assert_eq!(
+            latest_message_board_logical_entry(&app).as_deref(),
+            Some("Loaded ready Remote.")
+        );
+
+        install_test_classic_host_team_lobby(&mut app);
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/help".to_string()))
+            .expect("render lobby command help from the retained process table");
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .expect("classic host lobby")
+            .controller
+            .logs()
+            .iter()
+            .any(|line| line.text == "Loaded lobby commands"));
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::TeamSelectionRequested {
+            player_id: 7,
+        }])
+        .expect("open a team selector from the retained process table");
+        let menu = app
+            .context_menu
+            .as_mut()
+            .expect("team selector context menu");
+        let first = menu.layout().panels[0].rows[0].rect;
+        menu.handle_pointer_move(GuiPoint::new((first.x + 1) as f32, (first.y + 1) as f32));
+        assert!(
+            menu.hovered_tooltip_at(Instant::now() + Duration::from_secs(1))
+                .is_some_and(|tooltip| tooltip.starts_with("Loaded select ")),
+            "team selector tooltip must not observe the on-disk edit"
+        );
+        app.close_context_menu_silently();
+
+        app.network_is_league = true;
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+            countdown_seconds: 5,
+            check_league_rules: true,
+            confirm_unassociated_savegame_players: false,
+        }])
+        .expect("evaluate the cached league split-screen resources");
+        let league = app.message_dialogs.last().expect("cached league dialog");
+        assert_eq!(
+            league.state.message(),
+            "Loaded players Chooser and Companion"
+        );
+        assert_eq!(league.state.caption(), "Loaded league error");
+        app.message_dialogs.clear();
+        app.network_is_league = false;
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+            countdown_seconds: 5,
+            check_league_rules: false,
+            confirm_unassociated_savegame_players: true,
+        }])
+        .expect("show the unassociated-player confirmation");
+        let confirmation = app
+            .message_dialogs
+            .last()
+            .expect("cached confirmation dialog");
+        assert_eq!(confirmation.state.message(), "Loaded unassociated players");
+        assert_eq!(confirmation.state.caption(), "Loaded player assignment");
+
+        app.reload_application_language_resources()
+            .expect("Options language reload replaces the process table");
+        assert_eq!(app.runtime_language_charset, RuntimeHelpCharset::Utf8);
+        assert_eq!(
+            app.runtime_resource_text("IDS_MSG_SELECT", "fallback"),
+            "Mutated select %s"
+        );
+        assert_eq!(
+            app.new_startup_player_properties_controller(0, 0).comment(),
+            "Mutated new player"
+        );
+        assert_eq!(
+            load_options_program_state(Some(&paths), Some(&app.startup_tooltip_resources),)
+                .no_language_info,
+            "Mutated no language info"
+        );
+    }
+
+    #[test]
+    fn runtime_join_flash_keeps_the_process_language_charset_until_reload() {
+        let install = tempdir().expect("runtime-join language install fixture");
+        let user_data = tempdir().expect("runtime-join language user fixture");
+        let system = install.path().join("planet/System.c4g");
+        fs::create_dir_all(&system).expect("create runtime-join System.c4g");
+        let language = system.join("LanguageUS.txt");
+        let mut initial = b"IDS_LANG_CHARSET=\nIDS_NET_RUNTIMEJOINFREE=".to_vec();
+        initial.extend(std::iter::repeat_n(0xe9, 300));
+        initial.extend_from_slice(b"\nIDS_NET_RUNTIMEJOINBARRED=Cached barred\nIDS_MSG_TEAM=Team %d\n");
+        fs::write(&language, initial).expect("write CP1252 runtime-join language");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover runtime-join fixture");
+        paths.ensure_user_dirs().expect("create fixture user dirs");
+        fs::write(
+            paths.config_file(),
+            "[General]\nLanguage=US\nLanguageEx=US\n",
+        )
+        .expect("select fixture language");
+
+        let mut app = new_classic_running_sandbox_app();
+        app.app_paths = Some(paths.clone());
+        app.reload_application_language_resources()
+            .expect("load CP1252 process table");
+        fs::write(
+            &language,
+            "IDS_LANG_CHARSET=UTF-8\n\
+                 IDS_NET_RUNTIMEJOINFREE=Reloaded free\n\
+                 IDS_NET_RUNTIMEJOINBARRED=Reloaded barred\n\
+                 IDS_MSG_TEAM=Team %d\n",
+        )
+        .expect("replace disk table with UTF-8 after startup");
+
+        let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
+        assert!(matches!(
+            app.runtime_network_role(),
+            RuntimeNetworkRole::Host
+        ));
+        app.control_clients
+            .replace_snapshot([message_client(0, b"Host")]);
+        app.handle_key(VirtualKeyCode::F4, ElementState::Pressed)
+            .expect("open runtime client list");
+        let acknowledgement = thread::spawn(move || {
+            let (allowed, completion) = commands.receive_join_allowed();
+            assert!(allowed);
+            completion
+                .send(Ok(()))
+                .expect("acknowledge runtime-join change");
+        });
+        app.apply_runtime_client_list_option(LobbyOptionKind::RuntimeJoin, 1)
+            .expect("apply runtime-join option with process charset");
+        acknowledgement
+            .join()
+            .expect("runtime-join acknowledgement thread");
+
+        let flash = app
+            .runtime_flash_message
+            .as_ref()
+            .expect("runtime-join state flashes");
+        assert_eq!(
+            flash.text.chars().count(),
+            300,
+            "the retained CP1252 table keeps all 300 one-byte characters"
+        );
+        assert!(flash.text.chars().all(|character| character == '\u{e9}'));
+        assert_eq!(
+            app.runtime_language_charset,
+            RuntimeHelpCharset::Windows1252
+        );
+
+        app.reload_application_language_resources()
+            .expect("Options reload adopts the replacement language table");
+        assert_eq!(app.runtime_language_charset, RuntimeHelpCharset::Utf8);
+        assert_eq!(
+            app.classic_lobby_option_labels().runtime_join_free,
+            "Reloaded free"
         );
     }
 
@@ -4999,8 +5451,8 @@ public func Grant(password) { return GainMissionAccess(password); }
         fs::write(paths.config_file(), "[General]\nLanguageEx=ZZ,DE\n")
             .expect("write fixture language config");
 
-        let table = load_runtime_language_table(Some(&paths))
-            .expect("empty ZZ falls through to mixed-case DE");
+        let table =
+            load_runtime_language_table(Some(&paths)).expect("empty ZZ falls through to mixed-case DE");
         let (need, none) = needed_material_resource_strings(&table);
         assert_eq!(need, "%s|braucht noch");
         assert_eq!(none, "%s braucht kein|weiteres Baumaterial.");
@@ -5019,8 +5471,7 @@ public func Grant(password) { return GainMissionAccess(password); }
         let _lock = env_lock().lock();
         let install = tempdir().expect("runtime language-pack install fixture");
         let user_data = tempdir().expect("runtime language-pack user fixture");
-        fs::create_dir_all(install.path().join("planet/System.c4g"))
-            .expect("empty local System.c4g");
+        fs::create_dir_all(install.path().join("planet/System.c4g")).expect("empty local System.c4g");
         fs::create_dir(install.path().join("planet/System.c4g/LanguageFI.txt"))
             .expect("unreadable local language-table candidate");
         let pack_system = install
@@ -5057,8 +5508,8 @@ public func Grant(password) { return GainMissionAccess(password); }
             vec!["US".to_string(), "FI".to_string()]
         );
 
-        let table = load_runtime_language_table(Some(&paths))
-            .expect("LanguageFI.txt loads from Finnish.c4g");
+        let table =
+            load_runtime_language_table(Some(&paths)).expect("LanguageFI.txt loads from Finnish.c4g");
         assert_eq!(table.charset, RuntimeHelpCharset::Utf8);
         assert_eq!(
             table.entries.get("Probe").map(String::as_str),
@@ -5111,8 +5562,11 @@ public func Grant(password) { return GainMissionAccess(password); }
         let user_data = tempdir().expect("global System user fixture");
         let system = install.path().join("planet/System.c4g");
         fs::create_dir_all(&system).expect("local System.c4g");
-        fs::write(system.join("Probe.c"), "global func Probe() { return true; }\n")
-            .expect("global script");
+        fs::write(
+            system.join("Probe.c"),
+            "global func Probe() { return true; }\n",
+        )
+        .expect("global script");
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(install.path())),
             ("LC_USER_DATA_DIR", Some(user_data.path())),
@@ -5204,7 +5658,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             extra.join("kEyCoNfIg.TxT"),
             "[Keys]\nToggleShowHelp=Shift+F2\nUnknownAction=F9\n",
         )
-            .expect("directory KeyConfig fixture");
+        .expect("directory KeyConfig fixture");
         let loaded = load_runtime_global_key_config(Some(&paths))
             .expect("known directory remaps load while unknown names only warn");
         assert_eq!(
@@ -5466,12 +5920,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             "Display:UpperBoard reinitializes viewport/dialog geometry before the next render"
         );
         assert_eq!(app.graphics.viewport_rect(owner).expect("viewport").y, 25);
-        assert_eq!(
-            app.graphics
-                .preferred_dialog_rect(Some(owner))
-                .y,
-            25
-        );
+        assert_eq!(app.graphics.preferred_dialog_rect(Some(owner)).y, 25);
         assert_eq!(
             app.active_ingame_mouse_viewport()
                 .expect("active mouse viewport")
@@ -5596,18 +6045,14 @@ public func Grant(password) { return GainMissionAccess(password); }
         let left_mask = 1 << clonk_engine::COM_LEFT;
 
         for (key, source) in [
-            (
-                VirtualKeyCode::F1,
-                b"[Keys]\nKbd2Key7=F1\n".as_slice(),
-            ),
-            (
-                VirtualKeyCode::F3,
-                b"[Keys]\nKbd2Key7=F3\n".as_slice(),
-            ),
+            (VirtualKeyCode::F1, b"[Keys]\nKbd2Key7=F1\n".as_slice()),
+            (VirtualKeyCode::F3, b"[Keys]\nKbd2Key7=F3\n".as_slice()),
         ] {
             app.runtime_key_config_cache = OnceLock::new();
             app.runtime_key_config_cache
-                .set(Ok(parse_runtime_key_config(source).expect("parse secondary player remap")))
+                .set(Ok(
+                    parse_runtime_key_config(source).expect("parse secondary player remap")
+                ))
                 .expect("install secondary player remap");
 
             app.handle_key(key, ElementState::Pressed)
@@ -5715,9 +6160,9 @@ public func Grant(password) { return GainMissionAccess(password); }
                     }
                 }
                 assert_eq!(
-                    app.pressed_engine_keys, expected_raw_keys,
-                    "raw physical state precedes modified priority dispatch: modifiers {modifiers:?}, state {state:?}",
-                );
+                        app.pressed_engine_keys, expected_raw_keys,
+                        "raw physical state precedes modified priority dispatch: modifiers {modifiers:?}, state {state:?}",
+                    );
                 assert!(
                     app.show_startup_hint,
                     "modifiers {modifiers:?}, state {state:?}"
@@ -5994,7 +6439,8 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.engine
             .call_scenario_script_function("Halt", Vec::new())
             .expect("queue script halt");
-        app.update().expect("apply direct script halt before simulation");
+        app.update()
+            .expect("apply direct script halt before simulation");
         assert_eq!(app.engine.frame(), initial_frame);
         assert_ne!(app.offline_halt_count, 0);
 
@@ -6009,7 +6455,8 @@ public func Grant(password) { return GainMissionAccess(password); }
         app.engine
             .call_scenario_script_function("Toggle", Vec::new())
             .expect("queue a running script toggle");
-        app.update().expect("direct toggle halts before another tick");
+        app.update()
+            .expect("direct toggle halts before another tick");
         assert_eq!(app.engine.frame(), initial_frame + 1);
         assert_ne!(app.offline_halt_count, 0);
 
@@ -6034,7 +6481,10 @@ public func Grant(password) { return GainMissionAccess(password); }
         game_over
             .update()
             .expect("evaluation consumes queued pause requests before returning");
-        assert_eq!(game_over.offline_halt_count, 0);
+        assert_eq!(
+            game_over.offline_halt_count, 1,
+            "evaluation keeps the halt acquired by C4GameOverDlg::OnShown"
+        );
         game_over
             .handle_modifiers_changed(ModifiersState::ALT)
             .expect("set the Continue mnemonic modifier");
@@ -6057,8 +6507,7 @@ public func Grant(password) { return GainMissionAccess(password); }
             (7, b"PauseGame(true)".as_slice(), Some(0)),
         ] {
             let mut app = new_running_sandbox_app();
-            let (_events, mut commands) =
-                install_running_network_stub(&mut app, local_client_id, 0, 1);
+            let (_events, mut commands) = install_running_network_stub(&mut app, local_client_id, 0, 1);
             app.network_is_league = true;
             app.network_control_running = false;
             let go = clonk_network::NetworkStatus {

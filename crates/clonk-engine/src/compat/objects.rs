@@ -1,6 +1,5 @@
 use super::*;
 
-
 const OWNER_ANY: i32 = -2;
 pub(crate) const ANY_CONTAINER_SENTINEL: i32 = 123;
 const NO_CONTAINER_SENTINEL: i32 = 124;
@@ -561,7 +560,10 @@ pub(crate) fn object_is_present(target: ObjectId) -> bool {
     })
 }
 
-pub(crate) fn first_retained_content(context: &EffectHostContext, target: ObjectId) -> Option<ObjectId> {
+pub(crate) fn first_retained_content(
+    context: &EffectHostContext,
+    target: ObjectId,
+) -> Option<ObjectId> {
     context
         .get_world_object(target)?
         .contents()
@@ -619,12 +621,10 @@ fn live_collection_eligible(
     construction_ready
         && positive_rect
         && below_limit
-        && !scope
-            .action_library
-            .disables_object_for_entry(
-                scope.effective_action_name(),
-                scope.effective_action_index(),
-            )
+        && !scope.action_library.disables_object_for_entry(
+            scope.effective_action_name(),
+            scope.effective_action_index(),
+        )
         && (ignore_no_collect_delay || scope.no_collect_delay() == 0)
 }
 
@@ -661,12 +661,10 @@ pub(crate) fn refresh_live_object_ocf(context: &mut EffectHostContext, target: O
             scope.ocf() & ocf::ON_FIRE != 0,
             scope.alive(),
             scope.category(),
-            scope
-                .action_library
-                .disables_object_for_entry(
-                    scope.effective_action_name(),
-                    scope.effective_action_index(),
-                ),
+            scope.action_library.disables_object_for_entry(
+                scope.effective_action_name(),
+                scope.effective_action_index(),
+            ),
         )
     })
     else {
@@ -850,7 +848,12 @@ fn live_exit_layer_bounds(
     let metadata = context.definition_metadata(&definition_id)?;
     let (action_name, action_index) = context
         .object_scope(target)
-        .map(|scope| (scope.effective_action_name(), scope.effective_action_index()))
+        .map(|scope| {
+            (
+                scope.effective_action_name(),
+                scope.effective_action_index(),
+            )
+        })
         .unwrap_or((object.action_name.as_str(), object.action_index));
     let procedure = metadata
         .action_library
@@ -1160,8 +1163,7 @@ fn clear_contents_and_contained_live(target: ObjectId, f_calls: bool) -> Result<
             .map(|child| (child, context.contents_link_generation(child)))
             .collect::<Vec<_>>()
     });
-    let mut iterator =
-        crate::direct_com::RemovalSafeContentsIterator::new(target, &initial_links);
+    let mut iterator = crate::direct_com::RemovalSafeContentsIterator::new(target, &initial_links);
     loop {
         let links_and_position = HOST_CONTEXT.with(|cell| {
             let borrow = cell.borrow();
@@ -1215,7 +1217,10 @@ pub(crate) fn exit_object_at_current_position(target: ObjectId) -> Result<bool, 
 /// Live `C4Object::Enter(target)` without Collect's RejectCollect,
 /// Collection and Hit tail. This is the path used by CreateContents and
 /// Split2Components and must finish its callbacks before their next step.
-pub(crate) fn enter_object_live(target: ObjectId, container: ObjectId) -> Result<bool, RuntimeError> {
+pub(crate) fn enter_object_live(
+    target: ObjectId,
+    container: ObjectId,
+) -> Result<bool, RuntimeError> {
     enter_object_live_with_calls(target, container, true)
 }
 
@@ -1337,9 +1342,7 @@ fn enter_object_live_internal(
             .and_then(|definition_id| context.definition_metadata(&definition_id).cloned())
             .unwrap_or_default();
         let target_ready = context.object_scope(target).is_some_and(|scope| {
-            !scope.destroy
-                && scope.status() != ObjectStatus::Deleted
-                && scope.container().is_none()
+            !scope.destroy && scope.status() != ObjectStatus::Deleted && scope.container().is_none()
         }) || context
             .get_world_object(target)
             .is_some_and(|object| object.is_present() && object.container().is_none());
@@ -1486,7 +1489,10 @@ fn retire_object_info_and_clear_references(
     context.clear_non_player_script_object_references(target, last_position);
 }
 
-pub(crate) fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, RuntimeError> {
+pub(crate) fn assign_removal_live(
+    target: ObjectId,
+    exit_contents: bool,
+) -> Result<bool, RuntimeError> {
     // C4Object::AssignRemoval gates on raw Status truthiness. Inactive is a
     // live nonzero status and is activated internally before deletion.
     if !object_has_status(target) {
@@ -1535,18 +1541,16 @@ pub(crate) fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Resu
     // AssignRemoval(true) passes the removed container's x/y to every
     // direct child's Exit (C4Object.cpp:285-288).
     let exit_position = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|context| {
-                context
-                    .object_scope(target)
-                    .map(|scope| scope.current_position)
-                    .or_else(|| {
-                        context
-                            .get_world_object(target)
-                            .map(|object| object.position)
-                    })
-            })
+        cell.borrow().as_ref().and_then(|context| {
+            context
+                .object_scope(target)
+                .map(|scope| scope.current_position)
+                .or_else(|| {
+                    context
+                        .get_world_object(target)
+                        .map(|object| object.position)
+                })
+        })
     });
 
     HOST_CONTEXT.with(|cell| {
@@ -1618,14 +1622,12 @@ fn can_sell_object_live(target: ObjectId, player: i32) -> bool {
         let Some(context) = borrow.as_ref() else {
             return false;
         };
-        let player_active = context
-            .player_state(player)
-            .is_some_and(|state| {
-                !matches!(
-                    state.status,
-                    crate::PlayerStatus::Eliminated | crate::PlayerStatus::Surrendered
-                ) && !state.surrendered
-            });
+        let player_active = context.player_state(player).is_some_and(|state| {
+            !matches!(
+                state.status,
+                crate::PlayerStatus::Eliminated | crate::PlayerStatus::Surrendered
+            ) && !state.surrendered
+        });
         player_active
             && context
                 .get_world_object(target)
@@ -2261,10 +2263,7 @@ pub(crate) fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
             == Some(ActionProcedure::Attach)
     });
     if attached {
-        let _ = object_set_action(&[
-            object_reference_value(item),
-            Value::String("Idle".into()),
-        ])?;
+        let _ = object_set_action(&[object_reference_value(item), Value::String("Idle".into())])?;
     }
 
     call_fail_safe(collector, "Collection", &[object_reference_value(item)]);
@@ -2808,7 +2807,7 @@ fn container_filter_from_value(value: Option<&Value>) -> ContainerFilter {
     }
 }
 
-struct FindObjectParams {
+pub(crate) struct FindObjectParams {
     definition: Option<String>,
     x: i32,
     y: i32,
@@ -2947,53 +2946,67 @@ impl FindObjectParams {
         self.width > 0 && self.height > 0
     }
 
-    fn matches_object(&self, object: &HostWorldObject) -> bool {
-        if matches!(object.status(), ObjectStatus::Deleted) {
+    fn excludes_id(&self, id: ObjectId) -> bool {
+        self.exclude == Some(id)
+    }
+
+    fn matches_fields(
+        &self,
+        id: ObjectId,
+        definition_id: &str,
+        status: ObjectStatus,
+        ocf: u32,
+        container: Option<ObjectId>,
+        owner: i32,
+        action_name: &str,
+        action_target: Option<ObjectId>,
+        action_target2: Option<ObjectId>,
+    ) -> bool {
+        if matches!(status, ObjectStatus::Deleted) {
             return false;
         }
 
         if let Some(exclude) = self.exclude {
-            if object.id == exclude {
+            if id == exclude {
                 return false;
             }
         }
 
         if let Some(definition) = &self.definition {
-            if object.definition_id() != definition {
+            if definition_id != definition {
                 return false;
             }
         }
 
-        if self.ocf_mask != ocf::ALL && object.ocf() & self.ocf_mask == 0 {
+        if self.ocf_mask != ocf::ALL && ocf & self.ocf_mask == 0 {
             return false;
         }
 
         match self.container {
             ContainerFilter::Any => {}
             ContainerFilter::Exact(expected) => {
-                if object.container() != Some(expected) {
+                if container != Some(expected) {
                     return false;
                 }
             }
             ContainerFilter::RequiresContainer => {
-                if object.container().is_none() {
+                if container.is_none() {
                     return false;
                 }
             }
             ContainerFilter::RequiresNoContainer => {
-                if object.container().is_some() {
+                if container.is_some() {
                     return false;
                 }
             }
         }
 
-        if self.owner != OWNER_ANY && object.owner() != self.owner {
+        if self.owner != OWNER_ANY && owner != self.owner {
             return false;
         }
 
         if let Some(target) = self.action_target {
-            let matches =
-                object.action_target(0) == Some(target) || object.action_target(1) == Some(target);
+            let matches = action_target == Some(target) || action_target2 == Some(target);
             if !matches {
                 return false;
             }
@@ -3002,17 +3015,44 @@ impl FindObjectParams {
         if let Some(action) = self.action.as_deref() {
             if !action.is_empty() {
                 if self.treat_idle {
-                    let name = object.action_name();
-                    if name != "Idle" && name != "ActIdle" {
+                    if action_name != "Idle" && action_name != "ActIdle" {
                         return false;
                     }
-                } else if object.action_name() != action {
+                } else if action_name != action {
                     return false;
                 }
             }
         }
 
         true
+    }
+
+    pub(crate) fn matches_object(&self, object: &HostWorldObject) -> bool {
+        self.matches_fields(
+            object.id,
+            object.definition_id(),
+            object.status(),
+            object.ocf(),
+            object.container(),
+            object.owner(),
+            object.action_name(),
+            object.action_target(0),
+            object.action_target(1),
+        )
+    }
+
+    pub(crate) fn matches_engine_object(&self, object: &crate::Object) -> bool {
+        self.matches_fields(
+            object.id,
+            object.definition_id.as_str(),
+            object.state.status,
+            object.state.ocf,
+            object.state.container,
+            object.state.owner,
+            object.state.action.name.as_str(),
+            object.state.action.target,
+            object.state.action.target2,
+        )
     }
 
     fn matches_area(&self, world: &impl WorldAccessor, object: &HostWorldObject) -> bool {
@@ -3083,8 +3123,7 @@ pub(crate) fn construction_delta_from_percent(percent: i32) -> i32 {
 /// link to the back and return the new first object. Unlike ShiftContents,
 /// this always advances exactly one link, including within a uniform stack.
 pub(crate) fn scroll_contents(args: &[Value]) -> Result<Value, RuntimeError> {
-    let target_object =
-        parse_native_object_argument(args.first(), "ScrollContents", "target")?;
+    let target_object = parse_native_object_argument(args.first(), "ScrollContents", "target")?;
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -3529,9 +3568,7 @@ impl FindCondition {
             22 => FindCondition::Category(arg_i32(1)),
             // C4FO_Action
             30 => match data.get(1) {
-                Some(Value::String(name)) => {
-                    FindCondition::Action(name.as_ref().to_owned())
-                }
+                Some(Value::String(name)) => FindCondition::Action(name.as_ref().to_owned()),
                 _ => return ParsedCriterion::None,
             },
             // C4FO_ActionTarget (index clamped to 0..=1, C4FindObject.cpp:138-144)
@@ -4502,18 +4539,27 @@ pub(crate) fn find_object_owner(args: &[Value]) -> Result<Value, RuntimeError> {
 fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
     let mut skip_until = params.find_next;
     for object_id in world.master_object_ids() {
-        let Some(object) = world.get_object(object_id) else {
-            continue;
-        };
         if let Some(target) = skip_until {
             if object_id == target {
                 skip_until = None;
             }
             continue;
         }
-        if !params.matches_object(&object) {
+        if params.excludes_id(object_id) {
             continue;
         }
+        if !world
+            .matches_legacy_find_object_candidate(object_id, params)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if params.is_full_range() {
+            return Some(object_id);
+        }
+        let Some(object) = world.get_object(object_id) else {
+            continue;
+        };
         if params.matches_area(world, &object) {
             return Some(object_id);
         }
@@ -4524,13 +4570,19 @@ fn find_object_linear(world: &impl WorldAccessor, params: &FindObjectParams) -> 
 fn find_object_closest(world: &impl WorldAccessor, params: &FindObjectParams) -> Option<ObjectId> {
     let reference = params.reference_distance(world);
     let mut best: Option<(ObjectId, i64)> = None;
-    for object_id in params.candidate_ids(world) {
+    for object_id in world.master_object_ids() {
+        if params.excludes_id(object_id) {
+            continue;
+        }
+        if !world
+            .matches_legacy_find_object_candidate(object_id, params)
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let Some(object) = world.get_object(object_id) else {
             continue;
         };
-        if !params.matches_object(&object) {
-            continue;
-        }
         let distance = squared_distance(object.position(), params.x, params.y);
         if let Some(reference) = reference {
             if distance <= reference {
@@ -4933,7 +4985,8 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         // has no script caller or its immediate caller is NONSTRICT.
         let substitute_local_owner = matches!(
             clonk_script::caller_strictness(),
-            clonk_script::HostCallerStrictness::NoCaller | clonk_script::HostCallerStrictness::NonStrict
+            clonk_script::HostCallerStrictness::NoCaller
+                | clonk_script::HostCallerStrictness::NonStrict
         );
         let owner = if substitute_local_owner {
             context
@@ -6327,7 +6380,8 @@ pub(crate) fn create_construction(args: &[Value]) -> Result<Value, RuntimeError>
             .unwrap_or(Vector2::ZERO);
         let substitute_local_owner = matches!(
             clonk_script::caller_strictness(),
-            clonk_script::HostCallerStrictness::NoCaller | clonk_script::HostCallerStrictness::NonStrict
+            clonk_script::HostCallerStrictness::NoCaller
+                | clonk_script::HostCallerStrictness::NonStrict
         );
         let owner = if substitute_local_owner {
             context
@@ -6376,7 +6430,10 @@ pub(crate) fn create_construction(args: &[Value]) -> Result<Value, RuntimeError>
                             .object_effective_name(blocker)
                             .filter(|name| !name.is_empty())
                             .unwrap_or_default();
-                        context.world.construction_check_strings.format_blocked(&name)
+                        context
+                            .world
+                            .construction_check_strings
+                            .format_blocked(&name)
                     }
                 };
                 register_construction_check_feedback(context, text);
@@ -7217,7 +7274,9 @@ pub(crate) struct NativeObjectCreation {
 /// exact initial position and fixed motion are not expressible through the
 /// script `CreateObject` wrapper. The pending spawn is only storage: every
 /// NewObject lifecycle callback runs here before this function returns.
-pub(crate) fn create_native_object(request: NativeObjectCreation) -> Result<Option<ObjectId>, RuntimeError> {
+pub(crate) fn create_native_object(
+    request: NativeObjectCreation,
+) -> Result<Option<ObjectId>, RuntimeError> {
     let registration = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow.as_mut().ok_or_else(|| {
@@ -7431,7 +7490,13 @@ pub(crate) fn create_native_object(request: NativeObjectCreation) -> Result<Opti
             // authoritative, but seed the spawn for the no-write case.
             spawn.rotation = initial_rotation;
         }
-        Some((was_full, final_construction, entry_position, entry_shape, refresh))
+        Some((
+            was_full,
+            final_construction,
+            entry_position,
+            entry_shape,
+            refresh,
+        ))
     });
     let Some((was_full, staged_construction, entry_position, entry_shape, refresh)) = staged else {
         return Ok(None);
@@ -7535,10 +7600,9 @@ pub(crate) fn create_native_object(request: NativeObjectCreation) -> Result<Opti
         {
             spawn.position = adjusted_position;
             spawn.construction = final_construction;
-            let adjusted_fixed =
-                FixedVec2::from_ints(adjusted_position.x, adjusted_position.y);
-            spawn.fixed_position = (preserved_fixed_position != adjusted_fixed)
-                .then_some(preserved_fixed_position);
+            let adjusted_fixed = FixedVec2::from_ints(adjusted_position.x, adjusted_position.y);
+            spawn.fixed_position =
+                (preserved_fixed_position != adjusted_fixed).then_some(preserved_fixed_position);
         }
         if adjusted_position != current_position {
             context.update_live_solid_mask(target, false);
@@ -8248,11 +8312,7 @@ fn reflect_object_values(
     let local_vars = reflected_object_locals(context, target, state, scope);
     let compiler_cache = scope
         .map(|scope| &scope.current_compiler_cache)
-        .or_else(|| {
-            world_object
-                .as_ref()
-                .map(|object| &object.compiler_cache)
-        })
+        .or_else(|| world_object.as_ref().map(|object| &object.compiler_cache))
         .cloned()
         .unwrap_or_default();
 
@@ -8660,9 +8720,7 @@ fn reflect_object_values(
                     .map(|state| state.action.compiled_name().to_string())
                     .unwrap_or_else(|| {
                         if scope.effective_action_index().is_none()
-                            && crate::action::is_builtin_idle_name(
-                                scope.effective_action_name(),
-                            )
+                            && crate::action::is_builtin_idle_name(scope.effective_action_name())
                         {
                             String::new()
                         } else {
@@ -8671,9 +8729,7 @@ fn reflect_object_values(
                     })
             }
         })
-        .or_else(|| {
-            state.map(|state| state.action.compiled_name().to_string())
-        })
+        .or_else(|| state.map(|state| state.action.compiled_name().to_string()))
         .or_else(|| {
             world_object
                 .as_ref()
@@ -8730,9 +8786,11 @@ fn reflect_object_values(
     );
     let phase_delay = scope
         .and_then(|scope| {
-            scope.pending_update.action.as_ref().and_then(|action| {
-                action.ticks.or_else(|| action.name.as_ref().map(|_| 0))
-            })
+            scope
+                .pending_update
+                .action
+                .as_ref()
+                .and_then(|action| action.ticks.or_else(|| action.name.as_ref().map(|_| 0)))
         })
         .or_else(|| state.map(|state| state.action.ticks))
         .unwrap_or(0);
@@ -8862,10 +8920,7 @@ fn reflect_object_values(
                 .unwrap_or(false),
         ),
     );
-    reflection.push(
-        &object_path("Layer"),
-        Value::Int(compiler_cache.layer),
-    );
+    reflection.push(&object_path("Layer"), Value::Int(compiler_cache.layer));
     let base_graphics = match scope {
         Some(scope) => scope.base_graphics.as_ref(),
         None => state.and_then(|state| state.base_graphics.as_ref()),
@@ -9049,7 +9104,10 @@ pub(crate) fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeE
         let Some(info) = info else {
             return Ok(Value::Nil);
         };
-        if section.as_deref().is_none_or(|section| section == "Physical") {
+        if section
+            .as_deref()
+            .is_none_or(|section| section == "Physical")
+        {
             if entry_number == 0 {
                 if let Some(value) = physical.and_then(|physical| match entry.as_str() {
                     "Energy" => Some(physical.energy),
@@ -9082,7 +9140,10 @@ pub(crate) fn get_object_info_core_val(args: &[Value]) -> Result<Value, RuntimeE
                 return Ok(Value::Nil);
             }
         }
-        if section.as_deref().is_some_and(|section| section != "ObjectInfo") {
+        if section
+            .as_deref()
+            .is_some_and(|section| section != "ObjectInfo")
+        {
             tracing::debug!(?section, %entry, "GetObjectInfoCoreVal section not modeled; nil");
             return Ok(Value::Nil);
         }

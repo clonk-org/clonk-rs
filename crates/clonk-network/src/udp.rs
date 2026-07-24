@@ -33,8 +33,7 @@ const MAX_CHECK_ASK_COUNT: usize = 10;
 pub const RELIABLE_UDP_PROTOCOL_VERSION: u32 = 2;
 
 /// Maximum inner-packet bytes carried by one C++ reliable-UDP data fragment.
-pub const RELIABLE_UDP_DATA_PAYLOAD_LIMIT: usize =
-    MAX_DATAGRAM_SIZE - DATA_PACKET_HEADER_SIZE;
+pub const RELIABLE_UDP_DATA_PAYLOAD_LIMIT: usize = MAX_DATAGRAM_SIZE - DATA_PACKET_HEADER_SIZE;
 
 /// C4NetIOUDP::Peer::iReCheckInterval.
 pub const RELIABLE_UDP_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
@@ -244,6 +243,14 @@ impl ReliableUdpReceiveWindow {
         &mut self,
         fragment: ReliableUdpDataFragment,
     ) -> Result<Vec<ReliableUdpReassembledPacket>, ReliableUdpReassemblyError> {
+        self.receive_direct_data_fragment_with_limit(fragment, usize::MAX)
+    }
+
+    pub(crate) fn receive_direct_data_fragment_with_limit(
+        &mut self,
+        fragment: ReliableUdpDataFragment,
+        delivery_limit: usize,
+    ) -> Result<Vec<ReliableUdpReassembledPacket>, ReliableUdpReassemblyError> {
         self.direct.observe_header(fragment.packet_number);
         if fragment.packet_number < self.direct.next_expected_packet_number {
             return Ok(Vec::new());
@@ -291,7 +298,7 @@ impl ReliableUdpReceiveWindow {
                 .insert(fragment.first_packet_number, packet);
         }
         self.direct.observe_data_fragment(fragment.packet_number);
-        Ok(self.take_complete_direct_packets())
+        Ok(self.take_complete_direct_packets(delivery_limit))
     }
 
     /// Constructs the C++ acknowledgment counters and bounded missing list.
@@ -330,11 +337,7 @@ impl ReliableUdpReceiveWindow {
         } else {
             self.multicast.next_expected_packet_number
         };
-        let check = self.plan_check_from(
-            outgoing_packet_number,
-            direct_start,
-            multicast_start,
-        );
+        let check = self.plan_check_from(outgoing_packet_number, direct_start, multicast_start);
         if let Some(packet_number) = check.missing_packet_numbers.last() {
             self.last_packet_asked = *packet_number;
         }
@@ -344,8 +347,8 @@ impl ReliableUdpReceiveWindow {
         let has_asks = !check.missing_packet_numbers.is_empty()
             || !check.missing_multicast_packet_numbers.is_empty();
         if !damping_active {
-            self.next_recheck_at = has_asks
-                .then(|| now.saturating_add(RELIABLE_UDP_RECHECK_INTERVAL));
+            self.next_recheck_at =
+                has_asks.then(|| now.saturating_add(RELIABLE_UDP_RECHECK_INTERVAL));
         }
         (has_asks || force).then_some(check)
     }
@@ -383,9 +386,12 @@ impl ReliableUdpReceiveWindow {
         }
     }
 
-    fn take_complete_direct_packets(&mut self) -> Vec<ReliableUdpReassembledPacket> {
+    pub(crate) fn take_complete_direct_packets(
+        &mut self,
+        delivery_limit: usize,
+    ) -> Vec<ReliableUdpReassembledPacket> {
         let mut complete_packets = Vec::new();
-        loop {
+        while complete_packets.len() < delivery_limit {
             let first_packet_number = self.direct.next_expected_packet_number;
             let is_complete = self
                 .direct_packets
@@ -645,14 +651,13 @@ pub fn decode_reliable_udp_connect_ok(
         return Err(ReliableUdpDecodeError::UnexpectedType(wire[0]));
     }
     let packet_number = u32::from_ne_bytes(wire[1..5].try_into().expect("checked packet length"));
-    let multicast_mode = match i32::from_ne_bytes(
-        wire[5..9].try_into().expect("checked packet length"),
-    ) {
-        0 => ReliableUdpMulticastMode::NoMulticast,
-        1 => ReliableUdpMulticastMode::Multicast,
-        2 => ReliableUdpMulticastMode::MulticastOk,
-        mode => return Err(ReliableUdpDecodeError::UnsupportedMulticastMode(mode)),
-    };
+    let multicast_mode =
+        match i32::from_ne_bytes(wire[5..9].try_into().expect("checked packet length")) {
+            0 => ReliableUdpMulticastMode::NoMulticast,
+            1 => ReliableUdpMulticastMode::Multicast,
+            2 => ReliableUdpMulticastMode::MulticastOk,
+            mode => return Err(ReliableUdpDecodeError::UnsupportedMulticastMode(mode)),
+        };
     let observed_address = decode_bin_address(&wire[9..])?;
     Ok(ReliableUdpConnectOk {
         packet_number,
@@ -712,8 +717,7 @@ pub fn decode_reliable_udp_add_address(
         return Err(ReliableUdpDecodeError::UnexpectedType(wire[0]));
     }
     Ok(ReliableUdpAddAddress {
-        packet_number: decode_native_u32(wire, 1)
-            .expect("checked alternate-address packet length"),
+        packet_number: decode_native_u32(wire, 1).expect("checked alternate-address packet length"),
         address: decode_bin_address(&wire[5..24])?,
         new_address: decode_bin_address(&wire[24..ADD_ADDRESS_PACKET_SIZE])?,
     })
@@ -782,11 +786,7 @@ pub fn decode_reliable_udp_data_fragment(
         first_packet_number: u32::from_ne_bytes(
             wire[5..9].try_into().expect("checked data header length"),
         ),
-        total_size: u32::from_ne_bytes(
-            wire[9..13]
-                .try_into()
-                .expect("checked data header length"),
-        ),
+        total_size: u32::from_ne_bytes(wire[9..13].try_into().expect("checked data header length")),
         payload: wire[DATA_PACKET_HEADER_SIZE..].to_vec(),
     })
 }
@@ -955,9 +955,7 @@ fn decode_bin_address(wire: &[u8]) -> Result<SocketAddr, ReliableUdpDecodeError>
             0,
             0,
         ))),
-        address_type => Err(ReliableUdpDecodeError::UnsupportedAddressType(
-            address_type,
-        )),
+        address_type => Err(ReliableUdpDecodeError::UnsupportedAddressType(address_type)),
     }
 }
 
@@ -1114,10 +1112,7 @@ mod tests {
 
         let packet = ReliableUdpAddAddress {
             packet_number: 0x1122_3344,
-            address: SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::new(203, 0, 113, 7),
-                11_115,
-            )),
+            address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 7), 11_115)),
             new_address: SocketAddr::V6(SocketAddrV6::new(
                 "2001:db8::1234".parse::<Ipv6Addr>().unwrap(),
                 11_113,
@@ -1133,12 +1128,7 @@ mod tests {
         expected.extend_from_slice(&[0; 12]);
         expected.extend_from_slice(&packet.new_address.port().to_ne_bytes());
         expected.push(2);
-        expected.extend_from_slice(
-            &"2001:db8::1234"
-                .parse::<Ipv6Addr>()
-                .unwrap()
-                .octets(),
-        );
+        expected.extend_from_slice(&"2001:db8::1234".parse::<Ipv6Addr>().unwrap().octets());
 
         assert_eq!(expected.len(), ADD_ADDRESS_PACKET_SIZE);
         assert_eq!(encode_reliable_udp_add_address(&packet), expected);
@@ -1245,10 +1235,8 @@ mod tests {
             assert_eq!(RELIABLE_UDP_DATA_PAYLOAD_LIMIT, 499);
             assert_eq!(encoded.len(), expected_fragment_lengths.len());
             let mut payload_offset = 0;
-            for (fragment_index, (&fragment_len, wire)) in expected_fragment_lengths
-                .iter()
-                .zip(&encoded)
-                .enumerate()
+            for (fragment_index, (&fragment_len, wire)) in
+                expected_fragment_lengths.iter().zip(&encoded).enumerate()
             {
                 let packet_number = first_packet_number.wrapping_add(fragment_index as u32);
                 let fragment_payload = &payload[payload_offset..payload_offset + fragment_len];

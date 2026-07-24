@@ -17,9 +17,9 @@ mod display_sleep_inhibitor;
 use clonk_app_render::draw_commands;
 mod game_message;
 mod gamepad;
-use clonk_app_render::gpu_renderer;
-use clonk_app_netplay::host_game_resource_sources;
 use clonk_app_menus::ingame_menu;
+use clonk_app_netplay::host_game_resource_sources;
+use clonk_app_render::gpu_renderer;
 mod input;
 mod local_control;
 use clonk_app_netplay::network;
@@ -69,7 +69,7 @@ mod game_app_sound;
 mod game_app_startup;
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, hash_map::DefaultHasher};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::ffi::OsString;
 use std::fmt;
@@ -81,43 +81,15 @@ use std::ops::ControlFlow as OpsControlFlow;
 use std::path::{Component, Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::{
-    Arc, Mutex, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
     mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
+    Arc, Mutex, OnceLock,
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use clonk_app_netplay::control_message::{mentions_nick, ControlMessageState};
-use control_options::{binding_display_name, format_key_label};
-use desktop_notification::{DesktopNotification, DesktopNotifier};
-use display_sleep_inhibitor::DisplaySleepInhibitor;
-use clonk_app_menus::game_over::{
-    EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction, GameOverActivationKey,
-    GameOverClassicResources, GameOverEntry, GameOverFocus, GameOverOutcome, GameOverSound,
-    GameOverState, NextMissionButton,
-};
-use gamepad::{
-    GamepadActionType, GamepadEvent, GamepadManager, GamepadSlot, GuiButtonClass,
-    LegacyGamepadAxis, LegacyGamepadButton, SourcedGamepadEvent,
-};
-use clonk_app_menus::ingame_menu::{
-    DisplayFlags, DisplayToggle, GoalRuleEntry, HostDisconnectClientEntry, HostilityEntry,
-    IngameMenuGraphics, IngameMenuPointerTarget, IngameMenuState, MainMenuConditions, MenuAction,
-    MenuOutcome, NewPlayerEntry, ObserverPlayerEntry, ObserverTarget, OptionFlags, SaveSlotState,
-    TeamSelectionEntry, UpperBoardMode,
-};
-use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
-use clonk_app_netplay::{
-    ClientScenarioResources, ClientStartBarrier, ClientStartResourceRole,
-    ConfiguredClientPlayerSelection, PendingClientStartResource, ResolvedClientStartResource,
-    SelectedClientPlayer, compose_client_network_scenario, load_configured_mission_access,
-    load_snapshotted_client_players,
-    publish_initial_configured_client_players, resolve_client_game_resources,
-    resolve_client_scenario_resources, snapshot_configured_client_player_selection,
-};
 use clonk_app_core::pictures::{
     apply_definition_owner_color, definition_menu_picture, inventory_object_picture_layers,
     object_menu_item_picture_with_renderer_modes, resolve_portrait_text_spec,
@@ -127,31 +99,71 @@ use clonk_app_core::{
     AppMode, ClassicGameLobbyBoundary, ClassicGameLobbyChild, ClassicGuiBootstrapIssue,
     ClassicStartupBootstrapIssue,
 };
-use clonk_audio::{
-    AudioError, AudioSystem, ChannelId, MusicHandle, ResamplingMode, SoundHandle,
+use clonk_app_menus::game_over::{
+    EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction, GameOverActivationKey,
+    GameOverClassicResources, GameOverEntry, GameOverFocus, GameOverOutcome, GameOverSound,
+    GameOverState, NextMissionButton,
 };
+use clonk_app_menus::ingame_menu::{
+    DisplayFlags, DisplayToggle, GoalRuleEntry, HostDisconnectClientEntry, HostilityEntry,
+    IngameMenuGraphics, IngameMenuPointerTarget, IngameMenuState, MainMenuConditions, MenuAction,
+    MenuOutcome, NewPlayerEntry, ObserverPlayerEntry, ObserverTarget, OptionFlags, SaveSlotState,
+    TeamSelectionEntry, UpperBoardMode,
+};
+use clonk_app_menus::menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event};
+use clonk_app_menus::object_menu::{
+    engine_script_menu_inline_image_specs, engine_script_menu_layout_with_free_anchor,
+    engine_script_menu_layout_with_presentation,
+    engine_script_menu_pointer_target_with_free_anchor,
+    engine_script_menu_pointer_target_with_presentation, engine_script_menu_presentation_geometry,
+    engine_script_menu_presentation_geometry_with_free_anchor,
+    render_engine_script_menu_with_gamma, resolve_engine_script_menu_footer,
+    validate_menu_decoration_for_area, EngineScriptMenuLayout, EngineScriptMenuPointerTarget,
+    EngineScriptMenuPresentationGeometry, MenuMode as AppObjectMenuMode, ObjectMenuAction,
+    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState,
+};
+use clonk_app_netplay::control_message::{mentions_nick, ControlMessageState};
+use clonk_app_netplay::network::{
+    ClientSettings, HostSettings, LeagueEndAttempt, LeagueEndFailurePhase,
+    LeagueRecordStreamStatus, NetworkControl, NetworkControlClock, NetworkEvent, NetworkEventWake,
+    NetworkEventWakeCallback, NetworkManager, NetworkMode, NetworkStartError,
+    NetworkStartupCancellation,
+};
+use clonk_app_netplay::network_host_preparation::NetworkHostPreparation;
+use clonk_app_netplay::prepared_host_bootstrap::{
+    PreparedHostBootstrap, PreparedHostPlayerIdentity, PreparedHostPlayerSource,
+    ProcessInitialHostTeamAssignmentOracle, CLASSIC_SAFE_RANDOM_LOCK,
+};
+use clonk_app_netplay::{
+    compose_client_network_scenario, load_configured_mission_access,
+    load_snapshotted_client_players, publish_initial_configured_client_players,
+    resolve_client_game_resources, resolve_client_scenario_resources,
+    snapshot_configured_client_player_selection, ClientScenarioResources, ClientStartBarrier,
+    ClientStartResourceRole, ConfiguredClientPlayerSelection, PendingClientStartResource,
+    ResolvedClientStartResource, SelectedClientPlayer,
+};
+use clonk_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, ResamplingMode, SoundHandle};
 use clonk_core::{std_config::Config, std_markup::Markup};
 use clonk_engine::command::CommandId;
 use clonk_engine::player_file::PlayerFile;
 use clonk_engine::scenario::{LegacyDefinitionResolver, ScenarioLoaderHead, ScenarioLobbyMetadata};
-use clonk_engine::text_spec::{TextSpec, parse_text_spec};
+use clonk_engine::text_spec::{parse_text_spec, TextSpec};
 use clonk_engine::ControlKeyName;
 use clonk_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlClientRegistry,
     ControlCommand, ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError,
-    EngineState, EnvironmentSettings, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT,
-    FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER,
-    FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, JoinPlayerConfig, Landscape, MaterialSet,
-    LegacyCString, MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind,
+    EngineState, EnvironmentSettings, JoinPlayerConfig, Landscape, LegacyCString, MaterialSet,
+    MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageControlData, MessageKind,
     MissionAccessStore, MouseDragCarryableCursor, MouseDragSource, MouseWorldCursor,
-    MovementProfile, OWNER_NONE, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData,
+    MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerCommandControlData,
     PlayerConfig, PlayerSelectControlData, RgbColor, Scenario, ScenarioError,
-    MessageControlData, ScoreboardPresentationRequest, ScriptControlPolicy,
-    ShowCommandsRequestStore, SimulationSnapshot, SkyConfig, SpawnConfig, SpeechPlaybackOutcome,
-    SyncCheckPacket,
-    TeamConfiguration, Vector2, PLAYER_VIEW_MODE_SCROLLING, PLAYER_VIEW_MODE_TARGET,
-    MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL, MESSAGE_TYPE_PRIVATE,
-    MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM, MESSAGE_TYPE_TEAM,
+    ScoreboardPresentationRequest, ScriptControlPolicy, ShowCommandsRequestStore,
+    SimulationSnapshot, SkyConfig, SpawnConfig, SpeechPlaybackOutcome, SyncCheckPacket,
+    TeamConfiguration, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM,
+    FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL,
+    FLAG_X_REL, FLAG_Y_REL, MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL,
+    MESSAGE_TYPE_PRIVATE, MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM,
+    MESSAGE_TYPE_TEAM, OWNER_NONE, PLAYER_VIEW_MODE_SCROLLING, PLAYER_VIEW_MODE_TARGET,
 };
 use clonk_frontend::clonk_fonts::expand_hotkey_markup;
 use clonk_frontend::context_menu::{
@@ -191,8 +203,7 @@ use clonk_frontend::loader_screen::{
     LoaderState, LoaderUpdate, STARTUP_LOADER_SPECIFICATION,
 };
 use clonk_frontend::rename_edit::{
-    RenameEdit, RenameEditAction, RenameEditCursorOperation, RenameEditResolution,
-    RenameEditResult,
+    RenameEdit, RenameEditAction, RenameEditCursorOperation, RenameEditResolution, RenameEditResult,
 };
 use clonk_frontend::startup_plrsel::{
     PlrSelControl, PlrSelCrewContextCommand, PlrSelPlayerContextCommand,
@@ -201,9 +212,9 @@ use clonk_frontend::{
     default_owner_color, viewport_edge_scroll, viewport_edge_scroll_at, ActiveViewportProjection,
     ColorByOwnerMask, CrewNameOverlay, CrewOverlay, CursorAtlas, DefinitionDebugGeometry,
     DefinitionSprite, GamePalette, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics,
-    ImageData, InputDispatcher, InventoryOverlay, KeyCode, MainMenuAction,
-    MainMenuItem, MaterialRenderInfo, MaterialTextureSurface, MessageBoardMode,
-    MessageBoardOverlay, MouseCursorPhase, ParticleFacet, ParticleRenderDefinition, PlayerOverlay,
+    ImageData, InputDispatcher, InventoryOverlay, KeyCode, MainMenuAction, MainMenuItem,
+    MaterialRenderInfo, MaterialTextureSurface, MessageBoardMode, MessageBoardOverlay,
+    MouseCursorPhase, ParticleFacet, ParticleRenderDefinition, PlayerOverlay,
     RenderedAudibilityCall, RenderedObjectAudibilityCalls, ScenarioEntry, ScenarioKind,
     SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction, StartupTooltip,
     ViewportEdgeScroll, ViewportInput, ViewportPointer,
@@ -212,9 +223,8 @@ use clonk_graphics::clonk_font::{
     font_image_lookup_tag, inline_image_token, FontImageProvider, FontImageRef,
 };
 use clonk_graphics::{
-    BitmapFont, Color, GpuGammaMode, GpuPresentation, GpuScene, GpuSceneRecorder,
-    PixelFormat, Point as SurfacePoint, Rect, RgbaSurfaceViewMut, Surface, TextFont, Transform,
-    TrueTypeFont,
+    BitmapFont, Color, GpuGammaMode, GpuPresentation, GpuScene, GpuSceneRecorder, PixelFormat,
+    Point as SurfacePoint, Rect, RgbaSurfaceViewMut, Surface, TextFont, Transform, TrueTypeFont,
 };
 use clonk_gui::{ButtonTextures, Rect as GuiRect};
 use clonk_network::{
@@ -229,74 +239,60 @@ use clonk_resources::{
     MutableGroupChildMut, MutableGroupEntryKind, ParticleDefinition as ResourceParticleDefinition,
     ResolvedFontSpec, ResourceDefinition as ResourceDefinitionData,
 };
+use control_options::{binding_display_name, format_key_label};
+use desktop_notification::{DesktopNotification, DesktopNotifier};
+use display_sleep_inhibitor::DisplaySleepInhibitor;
+use gamepad::{
+    GamepadActionType, GamepadEvent, GamepadManager, GamepadSlot, GuiButtonClass,
+    LegacyGamepadAxis, LegacyGamepadButton, SourcedGamepadEvent,
+};
+use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
-use clonk_app_menus::menu_controls::{map_async_cursor_menu_control_event, map_menu_control_event};
-use clonk_app_netplay::network::{
-    ClientSettings, HostSettings, LeagueEndAttempt, LeagueEndFailurePhase, LeagueRecordStreamStatus,
-    NetworkControl, NetworkControlClock, NetworkEvent, NetworkManager, NetworkMode,
-    NetworkStartError, NetworkStartupCancellation,
-};
-use clonk_app_netplay::network_host_preparation::NetworkHostPreparation;
 use network_team_assignment::{NetworkTeamAssignmentState, NetworkTeamControlError};
-use clonk_app_menus::object_menu::{
-    engine_script_menu_inline_image_specs, engine_script_menu_layout_with_free_anchor,
-    engine_script_menu_layout_with_presentation,
-    engine_script_menu_pointer_target_with_free_anchor,
-    engine_script_menu_pointer_target_with_presentation,
-    engine_script_menu_presentation_geometry,
-    engine_script_menu_presentation_geometry_with_free_anchor,
-    render_engine_script_menu_with_gamma, resolve_engine_script_menu_footer,
-    validate_menu_decoration_for_area, EngineScriptMenuLayout, EngineScriptMenuPointerTarget,
-    EngineScriptMenuPresentationGeometry, MenuMode as AppObjectMenuMode, ObjectMenuAction,
-    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState,
-};
 use offline_savegame::{prepare_offline_savegame_startup, OfflineSavegameStartup};
 use offline_startup::{
     offline_player_paths_identical, offline_player_real_path, OfflineStartupPlayers,
 };
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
-use clonk_app_netplay::prepared_host_bootstrap::{
-    PreparedHostBootstrap, PreparedHostPlayerIdentity, PreparedHostPlayerSource,
-    ProcessInitialHostTeamAssignmentOracle, CLASSIC_SAFE_RANDOM_LOCK,
-};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
 use serde::{
-    Deserialize, Serialize,
     de::{self, Unexpected, Visitor},
     ser::Serializer,
+    Deserialize, Serialize,
 };
-use sha1::{Digest, Sha1};
 use settings::{AudioOptions, DisplayMode, DisplayOptions};
+use sha1::{Digest, Sha1};
 use startup_player_files::{
+    crew_file_name_for_title, delete_crew_file, delete_player_file, discover_crew_files,
+    discover_player_files, discover_player_files_in, load_local_player_big_icon,
+    load_network_player_big_icon, load_packed_network_player_big_icon,
+    load_player_big_icon_from_group, persist_activations, player_group_filename, rename_crew,
+    save_player_properties, set_crew_death_message, set_crew_participation,
     PlayerActivationRefusal, PlayerImageWrite, PlayerPropertiesSaveError, SavedStartupPlayer,
-    StartupCrewFile, StartupCrewMutationError, StartupPlayerFile, crew_file_name_for_title,
-    delete_crew_file, delete_player_file, discover_crew_files, discover_player_files,
-    discover_player_files_in, load_local_player_big_icon, load_network_player_big_icon,
-    load_packed_network_player_big_icon, load_player_big_icon_from_group, persist_activations,
-    player_group_filename, rename_crew, save_player_properties, set_crew_death_message,
-    set_crew_participation,
+    StartupCrewFile, StartupCrewMutationError, StartupPlayerFile,
 };
-use time::{OffsetDateTime, macros::format_description};
+use time::{macros::format_description, OffsetDateTime};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
     ElementState, Event, KeyboardInput, ModifiersState, MouseButton, MouseScrollDelta, TouchPhase,
     VirtualKeyCode, WindowEvent,
 };
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::{ControlFlow, EventLoopBuilder};
 use winit::window::{Fullscreen, UserAttentionType, Window, WindowBuilder};
 
 const PLAYER_OWNER: i32 = 1;
 const STARTUP_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const INGAME_FRAME_INTERVAL: Duration = Duration::from_millis(28);
-// Native defaults Graphics.MaxRefreshDelay to 30 ms. Rust intentionally uses
-// 16 ms when the key is absent/invalid so a 28 ms game tick yields two 14 ms
-// presentation opportunities; any explicit positive native value still wins.
-const DEFAULT_MAX_REFRESH_DELAY_MS: u64 = 16;
+// C4Config defaults Graphics.MaxRefreshDelay to 30 ms. With the native 28 ms
+// game timer, C4Application therefore schedules one graphics opportunity per
+// simulation interval (src/C4Config.cpp:481-485; C4Application.cpp:510-520).
+const DEFAULT_MAX_REFRESH_DELAY_MS: u64 = 30;
 const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp backlog to avoid runaway catch-up
 const PRESENTATION_BENCHMARK_ENV: &str = "LC_APP_PRESENTATION_BENCHMARK_SECONDS";
 const PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK_ENV: &str =
     "LC_APP_PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK";
+const PRESENTATION_BENCHMARK_KEEP_RUNNING_ENV: &str = "LC_APP_PRESENTATION_BENCHMARK_KEEP_RUNNING";
 const PRESENTATION_BENCHMARK_WARMUP: Duration = Duration::from_secs(2);
 const SAVE_THUMBNAIL_WIDTH: u32 = 200;
 const SAVE_THUMBNAIL_HEIGHT: u32 = 150;
@@ -332,9 +328,9 @@ const MENU_DRAG_THRESHOLD: f32 = 5.0;
 const CPP_DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 
 fn classic_press_is_double_click(last_click: &mut Option<Instant>, now: Instant) -> bool {
-    if last_click.is_some_and(|last| {
-        now.saturating_duration_since(last) < CPP_DOUBLE_CLICK_INTERVAL
-    }) {
+    if last_click
+        .is_some_and(|last| now.saturating_duration_since(last) < CPP_DOUBLE_CLICK_INTERVAL)
+    {
         *last_click = None;
         true
     } else {
@@ -725,8 +721,8 @@ fn forward_console_input<R: BufRead>(
             let _ = sender.send(ConsoleInputEvent::Eof);
             return Ok(());
         }
-        let terminated = line.last() == Some(&b'\n')
-            || (cfg!(windows) && line.last() == Some(&b'\r'));
+        let terminated =
+            line.last() == Some(&b'\n') || (cfg!(windows) && line.last() == Some(&b'\r'));
         if !terminated {
             // Native buffers bytes until Return/LF. EOF does not dispatch a
             // final unterminated fragment.
@@ -742,11 +738,7 @@ fn forward_console_input<R: BufRead>(
             .filter(|byte| !byte.is_ascii_control())
             .collect::<Vec<_>>();
         let command = native_bytes_as_legacy_text(&command);
-        if !command.is_empty()
-            && sender
-                .send(ConsoleInputEvent::Command(command))
-                .is_err()
-        {
+        if !command.is_empty() && sender.send(ConsoleInputEvent::Command(command)).is_err() {
             return Ok(());
         }
     }
@@ -769,6 +761,27 @@ fn spawn_console_stdin_reader() -> Result<Receiver<ConsoleInputEvent>> {
 }
 
 fn run_console_event_loop(mut app: GameApp, commands: Receiver<ConsoleInputEvent>) -> Result<()> {
+    enum ConsoleLoopEvent {
+        Input(ConsoleInputEvent),
+        Network(NetworkEventWake),
+    }
+
+    let (loop_sender, loop_receiver) = mpsc::channel();
+    let input_sender = loop_sender.clone();
+    thread::Builder::new()
+        .name("lc-console-input-events".to_string())
+        .spawn(move || {
+            while let Ok(event) = commands.recv() {
+                if input_sender.send(ConsoleLoopEvent::Input(event)).is_err() {
+                    break;
+                }
+            }
+        })
+        .context("failed to start console input event bridge")?;
+    app.install_network_event_waker(Arc::new(move |wake| {
+        let _ = loop_sender.send(ConsoleLoopEvent::Network(wake));
+    }));
+
     let mut previous_instant = Instant::now();
     let mut accumulator = Duration::ZERO;
     let mut game_clock_accumulator = Duration::ZERO;
@@ -781,6 +794,7 @@ fn run_console_event_loop(mut app: GameApp, commands: Receiver<ConsoleInputEvent
 
     let outcome = (|| -> Result<()> {
         loop {
+            app.refresh_network_event_waker();
             if app.take_exit_request() {
                 return Ok(());
             }
@@ -788,11 +802,7 @@ fn run_console_event_loop(mut app: GameApp, commands: Receiver<ConsoleInputEvent
             let now = Instant::now();
             let frame_time = now.saturating_duration_since(previous_instant);
             previous_instant = now;
-            advance_game_clock_from_elapsed(
-                &mut app,
-                &mut game_clock_accumulator,
-                frame_time,
-            )?;
+            advance_game_clock_from_elapsed(&mut app, &mut game_clock_accumulator, frame_time)?;
             accumulate_frame_time_for_mode(
                 app.mode,
                 app.engine.game_tick_delay_ms(),
@@ -820,14 +830,17 @@ fn run_console_event_loop(mut app: GameApp, commands: Receiver<ConsoleInputEvent
                         .saturating_sub(accumulator),
                 )
             };
-            match commands.recv_timeout(wait_duration) {
-                Ok(ConsoleInputEvent::Command(command)) => {
+            match loop_receiver.recv_timeout(wait_duration) {
+                Ok(ConsoleLoopEvent::Input(ConsoleInputEvent::Command(command))) => {
                     if let Err(error) = app.process_console_command(&command) {
                         tracing::error!(%error, command, "console command failed");
                     }
                 }
-                Ok(ConsoleInputEvent::Eof) => return Ok(()),
-                Ok(ConsoleInputEvent::Error(error)) => return Err(error.into()),
+                Ok(ConsoleLoopEvent::Input(ConsoleInputEvent::Eof)) => return Ok(()),
+                Ok(ConsoleLoopEvent::Input(ConsoleInputEvent::Error(error))) => {
+                    return Err(error.into());
+                }
+                Ok(ConsoleLoopEvent::Network(wake)) => app.note_network_event_wake(wake),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(anyhow!("console stdin reader disconnected unexpectedly"));
@@ -1032,6 +1045,10 @@ struct PreparedGoLoadingState {
     fair_crew_forced: bool,
     allow_debug: bool,
     auto_frame_skip: bool,
+    /// The exact `C4GameParameters` lists consumed by InitRules/InitGoals.
+    /// Unlike a host's mutable lobby snapshot, this narrow copy survives a
+    /// client's pending JoinData packet being consumed before activation.
+    synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists,
     team_configuration: TeamConfiguration,
     team_registry: Vec<clonk_engine::TeamInfo>,
     /// Separately retained `Game.DefinitionFilenames`. Final C4GameRes types
@@ -1117,18 +1134,17 @@ impl ScenarioLoadingState {
         fair_crew_forced: bool,
         allow_debug: bool,
         auto_frame_skip: bool,
+        synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists,
         team_configuration: TeamConfiguration,
         team_registry: Vec<clonk_engine::TeamInfo>,
     ) -> Self {
-        let (save_game, network_runtime_join) = data.lobby_metadata().map_or(
-            (false, false),
-            |metadata| {
+        let (save_game, network_runtime_join) =
+            data.lobby_metadata().map_or((false, false), |metadata| {
                 (
                     metadata.head().is_save_game(),
                     metadata.head().allows_network_runtime_join(),
                 )
-            },
-        );
+            });
         let (sender, receiver) = mpsc::channel();
         let _ = sender.send(ScenarioLoadingEvent::Finished(Ok(data)));
         Self {
@@ -1157,6 +1173,7 @@ impl ScenarioLoadingState {
                 fair_crew_forced,
                 allow_debug,
                 auto_frame_skip,
+                synchronized_rule_goal_lists,
                 team_configuration,
                 team_registry,
                 definition_modules: None,
@@ -2345,18 +2362,14 @@ fn build_classic_font_spec(
             size,
             weight,
         } => {
-            let bytes = bytes
-                .with_context(|| format!("classic font face `{face}` was not resolved"))?;
+            let bytes =
+                bytes.with_context(|| format!("classic font face `{face}` was not resolved"))?;
             let size = u32::try_from(size)
                 .ok()
                 .filter(|size| *size > 0)
                 .with_context(|| format!("classic font `{face}` has invalid size {size}"))?;
             clonk_frontend::clonk_fonts::build_vector_font_face(
-                &bytes,
-                face_index,
-                size,
-                weight,
-                shadow,
+                &bytes, face_index, size, weight, shadow,
             )
             .with_context(|| format!("failed to initialize classic vector font `{face}`"))
         }
@@ -2446,7 +2459,8 @@ fn build_classic_font_from_catalog(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| anyhow!("classic font `{request}` has no usable {role:?} face")))
+    Err(last_error
+        .unwrap_or_else(|| anyhow!("classic font `{request}` has no usable {role:?} face")))
 }
 
 fn matching_native_font_source(
@@ -2974,12 +2988,9 @@ fn resolve_game_graphics_resources(
     // sized reload, then ReloadResolutionDependentFiles replaces that legacy
     // sheet with the already-cached selected size before any frame can use it.
     let cursor_atlas = match load_game_graphics_image("Cursor", registrations, graphics, &palette) {
-        Ok(_) => cached_cursor_atlas
-            .as_deref()
-            .cloned()
-            .context(
-                "legacy Cursor.* suppressed sized cursor initialization before a cache existed",
-            )?,
+        Ok(_) => cached_cursor_atlas.as_deref().cloned().context(
+            "legacy Cursor.* suppressed sized cursor initialization before a cache existed",
+        )?,
         Err(_) => {
             let cursor_stems = [
                 "CursorXXXXXLarge",
@@ -3478,13 +3489,8 @@ fn loaded_game_gui_registrations(
             &fallback_definition_load
         }
     };
-    let catalog = classic_loader_registrations(
-        frontend,
-        &scenario_group,
-        &head,
-        definition_load,
-        paths,
-    )?;
+    let catalog =
+        classic_loader_registrations(frontend, &scenario_group, &head, definition_load, paths)?;
     let first_definition_order = catalog
         .iter()
         .map(|registration| registration.registration_order)
@@ -3635,14 +3641,10 @@ fn load_classic_global_system_scripts(
     let config = load_classic_loader_config(paths)?;
     let has_explicit_language = config.as_ref().is_some_and(|config| {
         ["LanguageEx", "Language"].into_iter().any(|key| {
-            classic_loader_config_value(config, key)
-                .is_some_and(|value| !value.is_empty())
+            classic_loader_config_value(config, key).is_some_and(|value| !value.is_empty())
         })
     });
-    let languages = match classic_configured_language_sequence_from_config(
-        config.as_ref(),
-        false,
-    ) {
+    let languages = match classic_configured_language_sequence_from_config(config.as_ref(), false) {
         Ok(languages) => languages,
         Err(_) if !has_explicit_language => startup_language_sequence(Some(paths)),
         Err(error) => return Err(error),
@@ -3658,10 +3660,7 @@ fn classic_configured_language_sequence(
     language_ex_skip_whitespace: bool,
 ) -> Result<Vec<String>> {
     let config = load_classic_loader_config(paths)?;
-    classic_configured_language_sequence_from_config(
-        config.as_ref(),
-        language_ex_skip_whitespace,
-    )
+    classic_configured_language_sequence_from_config(config.as_ref(), language_ex_skip_whitespace)
 }
 
 fn classic_configured_language_sequence_from_config(
@@ -3754,9 +3753,7 @@ fn format_two_legacy_string_arguments(
         .windows(2)
         .position(|window| window == b"%s")?
         + after_first;
-    let mut formatted = Vec::with_capacity(
-        template.len() - 4 + first.len() + second.len(),
-    );
+    let mut formatted = Vec::with_capacity(template.len() - 4 + first.len() + second.len());
     formatted.extend_from_slice(&template[..first_marker]);
     formatted.extend_from_slice(first);
     formatted.extend_from_slice(&template[after_first..second_marker]);
@@ -4146,9 +4143,7 @@ fn runtime_key_name(name: &str) -> Option<VirtualKeyCode> {
         || name.eq_ignore_ascii_case("KP_Add")
     {
         Some(VirtualKeyCode::NumpadAdd)
-    } else if name.eq_ignore_ascii_case("Keypad Enter")
-        || name.eq_ignore_ascii_case("KP_Enter")
-    {
+    } else if name.eq_ignore_ascii_case("Keypad Enter") || name.eq_ignore_ascii_case("KP_Enter") {
         Some(VirtualKeyCode::NumpadEnter)
     } else if name.eq_ignore_ascii_case("Keypad .")
         || name.eq_ignore_ascii_case("Keypad Period")
@@ -4248,7 +4243,10 @@ fn parse_runtime_physical_key(raw: &str) -> RuntimePhysicalKey {
         return RuntimePhysicalKey::Disabled;
     }
     if let Some(hex) = raw.strip_prefix("\\x") {
-        let digits = hex.bytes().take_while(u8::is_ascii_hexdigit).collect::<Vec<_>>();
+        let digits = hex
+            .bytes()
+            .take_while(u8::is_ascii_hexdigit)
+            .collect::<Vec<_>>();
         if !digits.is_empty() {
             if let Ok(digits) = std::str::from_utf8(&digits) {
                 if let Ok(value) = u32::from_str_radix(digits, 16) {
@@ -4265,7 +4263,11 @@ fn parse_runtime_physical_key(raw: &str) -> RuntimePhysicalKey {
             .strip_prefix('-')
             .map(|rest| (true, rest))
             .unwrap_or((false, rest));
-        let digits = number.1.bytes().take_while(u8::is_ascii_digit).collect::<Vec<_>>();
+        let digits = number
+            .1
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .collect::<Vec<_>>();
         if !digits.is_empty() {
             if let Ok(digits) = std::str::from_utf8(&digits) {
                 if let Ok(mut gamepad) = digits.parse::<i32>() {
@@ -4319,21 +4321,60 @@ fn parse_runtime_key_chord(raw: &str) -> Result<Option<RuntimeKeyChord>> {
             key = Some(parse_runtime_physical_key(section));
         }
     }
-    Ok(key.map(|physical| RuntimeKeyChord { physical, modifiers }))
+    Ok(key.map(|physical| RuntimeKeyChord {
+        physical,
+        modifiers,
+    }))
 }
 
 const RUNTIME_REGISTERED_GLOBAL_KEYS: &[&str] = &[
-    "MusicToggle", "SoundToggle", "Screenshot", "ScreenshotEx", "ToggleChat",
-    "ToggleShowHelp", "NetClientListDlgToggle", "MsgBoardScrollUp", "MsgBoardScrollDown",
-    "DbgModeToggle", "DbgShowVtxToggle", "DbgShowActionToggle", "DbgShowSolidMaskToggle",
-    "GameSpeedUp", "GameSlowDown", "FullscreenMenuLeft", "FullscreenMenuRight",
-    "FullscreenMenuUp", "FullscreenMenuDown", "FullscreenMenuOK", "FullscreenMenuCancel",
-    "FullscreenMenuOpen", "FilmNextPlayer", "ChatOpen", "ChatOpen2Allies", "ChatOpen2Say",
-    "FreeViewScrollLeft", "FreeViewScrollRight", "FreeViewScrollUp", "FreeViewScrollDown",
-    "ScoreboardToggle", "GameAbort", "FullscreenPauseToggle", "ConsolePauseToggle",
-    "EditCursorModeToggle", "ToolsDlgGradeUp", "ToolsDlgGradeDown", "ToolsDlgPopMaterial",
-    "ToolsDlgPopTextures", "ToolsDlgIFTToggle", "ToolsDlgToolToggle", "EditCursorDelete",
-    "ChartToggle", "NetObsNextPlayer", "CtrlRateDown", "CtrlRateUp", "NetAllowJoinToggle",
+    "MusicToggle",
+    "SoundToggle",
+    "Screenshot",
+    "ScreenshotEx",
+    "ToggleChat",
+    "ToggleShowHelp",
+    "NetClientListDlgToggle",
+    "MsgBoardScrollUp",
+    "MsgBoardScrollDown",
+    "DbgModeToggle",
+    "DbgShowVtxToggle",
+    "DbgShowActionToggle",
+    "DbgShowSolidMaskToggle",
+    "GameSpeedUp",
+    "GameSlowDown",
+    "FullscreenMenuLeft",
+    "FullscreenMenuRight",
+    "FullscreenMenuUp",
+    "FullscreenMenuDown",
+    "FullscreenMenuOK",
+    "FullscreenMenuCancel",
+    "FullscreenMenuOpen",
+    "FilmNextPlayer",
+    "ChatOpen",
+    "ChatOpen2Allies",
+    "ChatOpen2Say",
+    "FreeViewScrollLeft",
+    "FreeViewScrollRight",
+    "FreeViewScrollUp",
+    "FreeViewScrollDown",
+    "ScoreboardToggle",
+    "GameAbort",
+    "FullscreenPauseToggle",
+    "ConsolePauseToggle",
+    "EditCursorModeToggle",
+    "ToolsDlgGradeUp",
+    "ToolsDlgGradeDown",
+    "ToolsDlgPopMaterial",
+    "ToolsDlgPopTextures",
+    "ToolsDlgIFTToggle",
+    "ToolsDlgToolToggle",
+    "EditCursorDelete",
+    "ChartToggle",
+    "NetObsNextPlayer",
+    "CtrlRateDown",
+    "CtrlRateUp",
+    "NetAllowJoinToggle",
     "NetStatsToggle",
 ];
 
@@ -4356,9 +4397,8 @@ fn runtime_player_key_slot(name: &str) -> Option<(usize, ControlBindingId)> {
 fn runtime_registered_key_name(name: &str) -> bool {
     RUNTIME_REGISTERED_GLOBAL_KEYS.contains(&name)
         || runtime_player_key_slot(name).is_some()
-        || (1..=4).any(|gamepad| {
-            (1..=12).any(|control| name == format!("Joy{gamepad}Btn{control}"))
-        })
+        || (1..=4)
+            .any(|gamepad| (1..=12).any(|control| name == format!("Joy{gamepad}Btn{control}")))
 }
 
 fn parse_runtime_key_config(bytes: &[u8]) -> Result<RuntimeKeyConfig> {
@@ -4371,7 +4411,10 @@ fn parse_runtime_key_config(bytes: &[u8]) -> Result<RuntimeKeyConfig> {
         if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
             continue;
         }
-        let structural = line.split_once(';').map_or(line, |(head, _)| head).trim_end();
+        let structural = line
+            .split_once(';')
+            .map_or(line, |(head, _)| head)
+            .trim_end();
         if structural.starts_with('[') && structural.ends_with(']') {
             if in_keys {
                 break;
@@ -4502,6 +4545,15 @@ fn load_runtime_language_table(paths: Option<&AppPaths>) -> Result<RuntimeLangua
         // bytes are the same shipped System.c4g table used by production.
         return parse_runtime_language_table(EMBEDDED_US, "embedded LanguageUS.txt");
     };
+    #[cfg(test)]
+    {
+        let counts = RUNTIME_LANGUAGE_TABLE_LOAD_COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
+        *counts
+            .lock()
+            .expect("runtime language load counter mutex")
+            .entry(paths.system_group_path().to_path_buf())
+            .or_default() += 1;
+    }
     let system = Group::open(paths.system_group_path()).ok();
     let language_packs = classic_language_packs(paths);
     let system_groups = language_packs.system_groups_with_optional_local(system.as_ref());
@@ -4522,6 +4574,29 @@ fn load_runtime_language_table(paths: Option<&AppPaths>) -> Result<RuntimeLangua
     anyhow::bail!(
         "loading the classic US language fallback for F1 help: LanguageUS.txt is unavailable"
     )
+}
+
+#[cfg(test)]
+static RUNTIME_LANGUAGE_TABLE_LOAD_COUNTS: OnceLock<Mutex<HashMap<PathBuf, usize>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn runtime_language_table_load_count(system_group_path: &Path) -> usize {
+    RUNTIME_LANGUAGE_TABLE_LOAD_COUNTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("runtime language load counter mutex")
+        .get(system_group_path)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn embedded_runtime_language_table() -> &'static RuntimeLanguageTable {
+    static TABLE: OnceLock<RuntimeLanguageTable> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        load_runtime_language_table(None)
+            .expect("the embedded LanguageUS.txt startup resource is valid")
+    })
 }
 
 fn parse_runtime_language_bytes_table(
@@ -4605,10 +4680,14 @@ fn load_runtime_language_bytes_table(
     anyhow::bail!("Language string table not loaded.")
 }
 
-fn startup_resource_string(paths: Option<&AppPaths>, key: &str, fallback: &str) -> String {
-    load_runtime_language_table(paths)
-        .ok()
-        .and_then(|table| table.entries.get(key).cloned())
+fn runtime_resource_text_from_table(
+    resources: &HashMap<String, String>,
+    key: &str,
+    fallback: &str,
+) -> String {
+    resources
+        .get(key)
+        .cloned()
         .unwrap_or_else(|| fallback.to_string())
 }
 
@@ -4619,9 +4698,9 @@ fn format_resource_string(mut template: String, arguments: &[&str]) -> String {
             template.find("%d"),
             template.find("%i"),
         ]
-            .into_iter()
-            .flatten()
-            .min();
+        .into_iter()
+        .flatten()
+        .min();
         let Some(placeholder) = placeholder else {
             break;
         };
@@ -4642,9 +4721,9 @@ fn format_resource_string_with_opaque_arguments(template: String, arguments: &[&
             remainder.find("%d"),
             remainder.find("%i"),
         ]
-            .into_iter()
-            .flatten()
-            .min();
+        .into_iter()
+        .flatten()
+        .min();
         let Some(placeholder) = placeholder else {
             break;
         };
@@ -4656,11 +4735,7 @@ fn format_resource_string_with_opaque_arguments(template: String, arguments: &[&
     output
 }
 
-fn network_game_version_string(
-    game: &str,
-    version: [i32; 4],
-    build: i32,
-) -> String {
+fn network_game_version_string(game: &str, version: [i32; 4], build: i32) -> String {
     format!(
         "{game} {}.{}.{}.{} [{build}]",
         version[0], version[1], version[2], version[3]
@@ -4696,10 +4771,6 @@ fn open_external_http_url(url: &str) -> io::Result<()> {
     ));
 
     command.arg(url).spawn().map(drop)
-}
-
-fn load_runtime_help_language_table(paths: Option<&AppPaths>) -> Result<HashMap<String, String>> {
-    Ok(load_runtime_language_table(paths)?.entries)
 }
 
 fn needed_material_resource_strings(table: &RuntimeLanguageTable) -> (String, String) {
@@ -5025,13 +5096,8 @@ fn build_scenario_loader(
         .with_context(|| format!("failed to open scenario group at {}", path.display()))?;
     let head = load_classic_scenario_loader_head(&scenario_group, paths)?;
     let graphics = main_graphics_group(paths)?;
-    let registrations = classic_loader_registrations(
-        scenario,
-        &scenario_group,
-        &head,
-        definition_load,
-        paths,
-    )?;
+    let registrations =
+        classic_loader_registrations(scenario, &scenario_group, &head, definition_load, paths)?;
     validate_loader_graphics_font_sources(&registrations)?;
     let tier = highest_loader_tier(&registrations)?;
     let selected =
@@ -5085,7 +5151,9 @@ fn build_scenario_loader(
         Err(error) => {
             let detail = error.to_string();
             for name in CLASSIC_GLOBAL_GUI_FONTS {
-                refreshed_gui_resolution.failures.insert(name, detail.clone());
+                refreshed_gui_resolution
+                    .failures
+                    .insert(name, detail.clone());
             }
             None
         }
@@ -5259,6 +5327,12 @@ struct NetworkTickGate {
     ready: BTreeMap<Tick, Vec<NetworkControl>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NetworkControlWait {
+    ReadyTick(Tick),
+    PlayerResource { resource_id: i32 },
+}
+
 #[derive(Debug, Default)]
 struct NetworkSyncGate {
     scheduled: BTreeMap<Tick, Vec<Vec<NetworkControl>>>,
@@ -5304,8 +5378,7 @@ fn published_runtime_dynamic_covers_request(
     requested_control_tick: Tick,
 ) -> bool {
     dynamic.resource_type != clonk_engine::NETWORK_RESOURCE_TYPE_NULL
-        && dynamic_tick
-            >= i32::try_from(requested_control_tick).unwrap_or(i32::MAX)
+        && dynamic_tick >= i32::try_from(requested_control_tick).unwrap_or(i32::MAX)
 }
 
 impl NetworkSyncGate {
@@ -5412,7 +5485,9 @@ enum AdmissionResourceUnavailable {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AdmissionResourceState {
-    Loading { removed: bool },
+    Loading {
+        removed: bool,
+    },
     Complete {
         path: PathBuf,
         removed: bool,
@@ -5527,18 +5602,19 @@ impl AdmissionResourceStore {
     }
 
     fn lobby_ready_available(&self) -> bool {
-        self.resource_cores
-            .iter()
-            .all(|(resource_id, core)| {
-                core.resource_type == clonk_network::HostResourceType::Player as u8
-                    || !matches!(
-                        self.resources.get(resource_id),
-                        Some(AdmissionResourceState::Loading { removed: false })
-                    )
-            })
+        self.resource_cores.iter().all(|(resource_id, core)| {
+            core.resource_type == clonk_network::HostResourceType::Player as u8
+                || !matches!(
+                    self.resources.get(resource_id),
+                    Some(AdmissionResourceState::Loading { removed: false })
+                )
+        })
     }
 
-    fn ensure_by_core(&mut self, core: &clonk_engine::NetworkResourceCore) -> &AdmissionResourceState {
+    fn ensure_by_core(
+        &mut self,
+        core: &clonk_engine::NetworkResourceCore,
+    ) -> &AdmissionResourceState {
         self.resource_cores
             .entry(core.id)
             .or_insert_with(|| core.clone());
@@ -5668,7 +5744,8 @@ fn pending_admission_resource(
             }) if clients.contains(*at_client) => (matches!(
                 resources.ensure_by_core(core),
                 AdmissionResourceState::Loading { .. }
-            ) && !aborted_player_joins.contains(&(core.id, *info_id)))
+            ) && !aborted_player_joins
+                .contains(&(core.id, *info_id)))
             .then(|| {
                 let player_name = controls
                     .iter()
@@ -5926,13 +6003,10 @@ impl FrontendAssets {
                             cursor_atlas = resources.cursor_atlas.as_ref().clone();
                             hud_graphics = resources.hud_graphics.as_ref().clone();
                             game_palette = resources.palette.as_ref().clone();
-                            liquid_animation =
-                                resources.liquid_animation.as_deref().cloned();
+                            liquid_animation = resources.liquid_animation.as_deref().cloned();
                             if let Some(options) = resources.options {
-                                startup_dialog_images.insert(
-                                    "Options.png".to_string(),
-                                    options.as_ref().clone(),
-                                );
+                                startup_dialog_images
+                                    .insert("Options.png".to_string(), options.as_ref().clone());
                             }
                         }
                         Err(error) => {
@@ -6056,8 +6130,8 @@ impl FrontendAssets {
                 .map(std::num::NonZeroUsize::get)
                 .unwrap_or(4)
         }
-            .min(names.len())
-            .max(1);
+        .min(names.len())
+        .max(1);
         let next = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|scope| {
             for _ in 0..workers {
@@ -6100,9 +6174,7 @@ impl FrontendAssets {
 
     /// Resolves the configured startup RX face for every shadowless book
     /// font set (C4Startup.cpp:92-116).
-    fn load_classic_startup_fonts(
-        paths: Option<&AppPaths>,
-    ) -> Option<ClassicStartupFontBundle> {
+    fn load_classic_startup_fonts(paths: Option<&AppPaths>) -> Option<ClassicStartupFontBundle> {
         let paths = paths?;
         let registrations = match startup_loader_registrations(paths) {
             Ok(registrations) => registrations,
@@ -6199,10 +6271,8 @@ impl FrontendAssets {
     /// sheet when the global group wins again. Returns whether any sheet
     /// was rebound.
     fn apply_active_gui_sheet_overrides(&mut self, overrides: &[ClassicGuiSheetOverride]) -> bool {
-        let by_stem: HashMap<&'static str, &ClassicGuiSheetOverride> = overrides
-            .iter()
-            .map(|sheet| (sheet.stem, sheet))
-            .collect();
+        let by_stem: HashMap<&'static str, &ClassicGuiSheetOverride> =
+            overrides.iter().map(|sheet| (sheet.stem, sheet)).collect();
         let mut changed = false;
         for (stem, canonical_name) in CLASSIC_GLOBAL_GUI_SHEETS {
             match by_stem.get(stem) {
@@ -7071,14 +7141,15 @@ impl FrontendAssets {
         if let Some(evaluation) = evaluation {
             for goal in evaluation.goals() {
                 if goal.picture.as_ref().is_some_and(|image| malformed(image)) {
-                    missing.push(format!(
-                        "goal definition picture `{}`",
-                        goal.definition_id
-                    ));
+                    missing.push(format!("goal definition picture `{}`", goal.definition_id));
                 }
             }
             for player in evaluation.players() {
-                if player.big_icon.as_ref().is_some_and(|image| malformed(image)) {
+                if player
+                    .big_icon
+                    .as_ref()
+                    .is_some_and(|image| malformed(image))
+                {
                     missing.push(format!("player {} BigIcon", player.player_info_id));
                 }
             }
@@ -8216,16 +8287,8 @@ fn startup_config_is_corrupted(config: &[u8]) -> bool {
 fn canonicalize_startup_integrity_scalars(config: &[u8]) -> Result<Option<Vec<u8>>> {
     let mut canonical = config.to_vec();
     for (section, key, default) in [
-        (
-            "General",
-            "ConfigResetSafety",
-            CLASSIC_CONFIG_RESET_SAFETY,
-        ),
-        (
-            "Graphics",
-            "ResolutionX",
-            CLASSIC_DEFAULT_RESOLUTION_X,
-        ),
+        ("General", "ConfigResetSafety", CLASSIC_CONFIG_RESET_SAFETY),
+        ("Graphics", "ResolutionX", CLASSIC_DEFAULT_RESOLUTION_X),
     ] {
         if clonk_app_netplay::configured_native_scalar(&canonical, section, key).is_none() {
             continue;
@@ -8340,11 +8403,7 @@ fn validate_or_repair_startup_config(
     // The native recovery immediately reloads the saved defaults. Reflect the
     // post-load version adaptation in this file-backed runtime: build 347
     // enables shaders and is then stamped to the current engine build.
-    defaults.set_in(
-        Some("General"),
-        "Version",
-        CLASSIC_ENGINE_BUILD.to_string(),
-    );
+    defaults.set_in(Some("General"), "Version", CLASSIC_ENGINE_BUILD.to_string());
     defaults.set_in(Some("Graphics"), "Shader", "1");
     let serialized = defaults
         .to_string()
@@ -8367,8 +8426,7 @@ fn validate_or_repair_startup_config(
 fn discover_validated_startup_paths(
     explicit_config: Option<&Path>,
 ) -> Result<Option<Arc<AppPaths>>> {
-    let command_line_config =
-        explicit_config.is_some_and(|path| !path.as_os_str().is_empty());
+    let command_line_config = explicit_config.is_some_and(|path| !path.as_os_str().is_empty());
     let mut app_paths = match cached_app_paths_with_config_file(explicit_config) {
         Ok(paths) => Some(paths),
         Err(_) => {
@@ -8388,9 +8446,7 @@ fn discover_validated_startup_paths(
     };
     let repaired_config = app_paths
         .as_ref()
-        .map(|paths| {
-            validate_or_repair_startup_config(&paths.config_file(), command_line_config)
-        })
+        .map(|paths| validate_or_repair_startup_config(&paths.config_file(), command_line_config))
         .transpose()?
         .unwrap_or(false);
     if repaired_config {
@@ -8449,7 +8505,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let classic = parse_classic_command_line(&cli.classic_arguments);
     install_classic_language_override(&classic);
-    let console_log_capture = classic.console.then(clonk_logging::ConsoleLogCapture::default);
+    let console_log_capture = classic
+        .console
+        .then(clonk_logging::ConsoleLogCapture::default);
 
     let explicit_config = classic
         .config_file
@@ -8476,9 +8534,9 @@ fn main() -> Result<()> {
     } else {
         if let Some(capture) = console_log_capture.clone() {
             clonk_logging::init_verbose_with_capture(classic.verbose, capture);
-    } else {
-        clonk_logging::init_verbose(classic.verbose);
-    }
+        } else {
+            clonk_logging::init_verbose(classic.verbose);
+        }
     }
     if let Some(paths) = app_paths.as_ref() {
         if let Err(err) = paths.ensure_user_dirs() {
@@ -8567,15 +8625,15 @@ fn main() -> Result<()> {
             None
         }
     };
-    let event_loop = EventLoop::new();
+    let event_loop = EventLoopBuilder::<NetworkEventWake>::with_user_event().build();
     // The stored resolution is in output pixels (ResX*Scale), like the C++
     // window setup (C4Application.cpp:183).
     let window = startup_window_builder(
         &display_options,
         PhysicalSize::new(initial_width, initial_height),
     )
-        .build(&event_loop)
-        .context("failed to create application window")?;
+    .build(&event_loop)
+    .context("failed to create application window")?;
     if classic.console {
         window.set_title("LegacyClonk Console");
     }
@@ -8644,6 +8702,14 @@ fn main() -> Result<()> {
         .context("failed to start command-line network join")?;
     app.launch_classic_command_line_scenario()
         .context("failed to start command-line scenario")?;
+    // winit's macOS proxy is Send but not Sync. The network sender can be
+    // cloned across worker tasks, so serialize proxy access behind a mutex.
+    let network_event_proxy = Arc::new(Mutex::new(event_loop.create_proxy()));
+    app.install_network_event_waker(Arc::new(move |wake| {
+        if let Ok(proxy) = network_event_proxy.lock() {
+            let _ = proxy.send_event(wake);
+        }
+    }));
     let mut console_commands = classic
         .console
         .then(spawn_console_stdin_reader)
@@ -8663,6 +8729,7 @@ fn main() -> Result<()> {
     let mut automatic_frame_skip = AutomaticFrameSkip::default();
     let mut presentation_benchmark = presentation_benchmark_from_env();
     let presentation_benchmark_asserts_native_tick = presentation_benchmark_asserts_native_tick();
+    let presentation_benchmark_keeps_running = presentation_benchmark_keeps_running();
 
     event_loop.run(move |event, _, control_flow| {
         match event {
@@ -8686,7 +8753,12 @@ fn main() -> Result<()> {
                     control_flow.set_exit();
                 }
             }
+            Event::UserEvent(wake) => app.note_network_event_wake(wake),
             Event::MainEventsCleared => {
+                // Network managers may be replaced by asynchronous menu/lobby
+                // transitions. Carry the process event-loop wake handle onto
+                // the currently live manager before this pass can block.
+                app.refresh_network_event_waker();
                 let mut close_console_commands = false;
                 if let Some(commands) = console_commands.as_ref() {
                     loop {
@@ -8742,14 +8814,10 @@ fn main() -> Result<()> {
                 // A post-launch native fullscreen transition can still fail
                 // during another macOS Space animation. winit restores its
                 // state to windowed on failure, so retry the configured mode.
-                if deferred_fullscreen_retry_at
-                    .is_some_and(|retry_at| Instant::now() >= retry_at)
-                {
-                    deferred_fullscreen_retry_at = reconcile_deferred_fullscreen(
-                        &window,
-                        display_options.mode,
-                    )
-                    .then(|| Instant::now() + DEFERRED_FULLSCREEN_RETRY_DELAY);
+                if deferred_fullscreen_retry_at.is_some_and(|retry_at| Instant::now() >= retry_at) {
+                    deferred_fullscreen_retry_at =
+                        reconcile_deferred_fullscreen(&window, display_options.mode)
+                            .then(|| Instant::now() + DEFERRED_FULLSCREEN_RETRY_DELAY);
                 }
                 if app.take_exit_request() {
                     control_flow.set_exit();
@@ -8821,21 +8889,25 @@ fn main() -> Result<()> {
                     // SetGameTickDelay replaces the application timer. Anchor
                     // the first graphics opportunity to the new interval so
                     // an old partial period cannot leak across game modes.
-                    next_graphics_deadline =
-                        graphics_now + frame_schedule.refresh_interval;
+                    next_graphics_deadline = graphics_now + frame_schedule.refresh_interval;
                 }
 
                 // Window/input/network events may wake Winit early. Native
                 // graphics still run only on the application timer, so keep
                 // an absolute deadline instead of treating every wake as a
                 // decoupled graphics opportunity.
-                let graphics_due = graphics_now >= next_graphics_deadline;
+                let graphics_due = simulation_pass.immediate_network_retry
+                    || graphics_now >= next_graphics_deadline;
                 if graphics_due {
-                    next_graphics_deadline = advance_graphics_deadline(
-                        next_graphics_deadline,
-                        graphics_now,
-                        frame_schedule.refresh_interval,
-                    );
+                    next_graphics_deadline = if simulation_pass.immediate_network_retry {
+                        graphics_now + frame_schedule.refresh_interval
+                    } else {
+                        advance_graphics_deadline(
+                            next_graphics_deadline,
+                            graphics_now,
+                            frame_schedule.refresh_interval,
+                        )
+                    };
                     if simulation_pass.skip_redraw {
                         // Native's manual/network DoSkipFrame takes this same
                         // graphics opportunity and clears the shared latch.
@@ -8855,9 +8927,8 @@ fn main() -> Result<()> {
                         + frame_schedule
                             .simulation_interval
                             .saturating_sub(accumulator);
-                    *control_flow = ControlFlow::WaitUntil(
-                        next_graphics_deadline.min(simulation_deadline),
-                    );
+                    *control_flow =
+                        ControlFlow::WaitUntil(next_graphics_deadline.min(simulation_deadline));
                 }
             }
             Event::RedrawRequested(id)
@@ -8874,7 +8945,10 @@ fn main() -> Result<()> {
             Event::RedrawRequested(id) if id == window.id() => {
                 let graphics_started = Instant::now();
                 app.graphics.set_presentation_scale(presenter.scale());
-                if matches!(app.mode, AppMode::Menu | AppMode::Loading | AppMode::Running) {
+                if matches!(
+                    app.mode,
+                    AppMode::Menu | AppMode::Loading | AppMode::Running
+                ) {
                     app.retained_gpu_presentation_active = true;
                     if pixels.context().texture_extent.width != 1
                         || pixels.context().texture_extent.height != 1
@@ -8912,51 +8986,63 @@ fn main() -> Result<()> {
                                     app.mode == AppMode::Running,
                                     completed_at,
                                     app.engine.frame(),
-                                )
-                                {
+                                ) {
+                                    let network_evidence =
+                                        inspect_presentation_benchmark_network(&app);
                                     finish_presentation_benchmark(
                                         control_flow,
                                         report,
                                         presentation_benchmark_asserts_native_tick,
+                                        app.engine.players().count(),
+                                        app.control_player_infos.nonremoved_player_count(),
+                                        app.control_clients
+                                            .activated_client_ids()
+                                            .into_iter()
+                                            .filter(|client_id| *client_id != 0)
+                                            .count(),
+                                        runtime_crew_object_count(&app.snapshot),
+                                        runtime_players_with_exactly_one_live_sf5b_crew(
+                                            &app.snapshot,
+                                        ),
+                                        network_evidence,
+                                        presentation_benchmark_keeps_running,
                                     );
                                 }
                             }
                         }
-                        Err(error) => {
-                            match retained_gpu_present_recovery(&error) {
-                                RetainedGpuPresentRecovery::RebuildDevice => {
-                                    tracing::warn!(
-                                        ?error,
-                                        "retained GPU device or surface requires recreation"
-                                    );
-                                    match rebuild_retained_gpu_device(
-                                        &window,
-                                        &mut pixels,
-                                        &mut retained_gpu_renderer,
-                                    ) {
-                                        Ok(()) => window.request_redraw(),
-                                        Err(rebuild_error) => {
-                                            tracing::error!(
-                                                ?rebuild_error,
-                                                "retained GPU recovery failed"
-                                            );
-                                            control_flow.set_exit();
-                                        }
+                        Err(error) => match retained_gpu_present_recovery(&error) {
+                            RetainedGpuPresentRecovery::RebuildDevice => {
+                                tracing::warn!(
+                                    ?error,
+                                    "retained GPU device or surface requires recreation"
+                                );
+                                match rebuild_retained_gpu_device(
+                                    &window,
+                                    &mut pixels,
+                                    &mut retained_gpu_renderer,
+                                ) {
+                                    Ok(()) => window.request_redraw(),
+                                    Err(rebuild_error) => {
+                                        tracing::error!(
+                                            ?rebuild_error,
+                                            "retained GPU recovery failed"
+                                        );
+                                        control_flow.set_exit();
                                     }
                                 }
-                                RetainedGpuPresentRecovery::Retry => {
-                                    tracing::warn!(
-                                        ?error,
-                                        "retained GPU surface timed out; retrying presentation"
-                                    );
-                                    window.request_redraw();
-                                }
-                                RetainedGpuPresentRecovery::Fatal => {
-                                    tracing::error!(?error, "retained GPU render failed");
-                                    control_flow.set_exit();
-                                }
                             }
-                        }
+                            RetainedGpuPresentRecovery::Retry => {
+                                tracing::warn!(
+                                    ?error,
+                                    "retained GPU surface timed out; retrying presentation"
+                                );
+                                window.request_redraw();
+                            }
+                            RetainedGpuPresentRecovery::Fatal => {
+                                tracing::error!(?error, "retained GPU render failed");
+                                control_flow.set_exit();
+                            }
+                        },
                     }
                     window.set_cursor_visible(app.platform_cursor_visible());
                     return;
@@ -9055,11 +9141,9 @@ fn main() -> Result<()> {
                         control_flow.set_exit();
                         return;
                     };
-                    if let Err(err) = app.render_native_game_messages(
-                        pixels.frame_mut(),
-                        geometry,
-                        gamma,
-                    ) {
+                    if let Err(err) =
+                        app.render_native_game_messages(pixels.frame_mut(), geometry, gamma)
+                    {
                         tracing::error!(error = ?err, "native game-message render failed");
                         control_flow.set_exit();
                         return;
@@ -9105,10 +9189,22 @@ fn main() -> Result<()> {
                                 completed_at,
                                 app.engine.frame(),
                             ) {
+                                let network_evidence = inspect_presentation_benchmark_network(&app);
                                 finish_presentation_benchmark(
                                     control_flow,
                                     report,
                                     presentation_benchmark_asserts_native_tick,
+                                    app.engine.players().count(),
+                                    app.control_player_infos.nonremoved_player_count(),
+                                    app.control_clients
+                                        .activated_client_ids()
+                                        .into_iter()
+                                        .filter(|client_id| *client_id != 0)
+                                        .count(),
+                                    runtime_crew_object_count(&app.snapshot),
+                                    runtime_players_with_exactly_one_live_sf5b_crew(&app.snapshot),
+                                    network_evidence,
+                                    presentation_benchmark_keeps_running,
                                 );
                             }
                         }
@@ -9177,10 +9273,11 @@ enum RetainedGpuPresentRecovery {
 }
 
 fn wgpu_device_loss_panic_detail(payload: &(dyn std::any::Any + Send)) -> Option<String> {
-    let detail = payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| payload.downcast_ref::<&'static str>().map(|detail| (*detail).to_owned()))?;
+    let detail = payload.downcast_ref::<String>().cloned().or_else(|| {
+        payload
+            .downcast_ref::<&'static str>()
+            .map(|detail| (*detail).to_owned())
+    })?;
     let normalized = detail.to_ascii_lowercase();
     (normalized.contains("parent device is lost")
         || normalized.contains("device was lost")
@@ -9206,9 +9303,9 @@ fn retained_gpu_present_recovery(error: &anyhow::Error) -> RetainedGpuPresentRec
         return RetainedGpuPresentRecovery::RebuildDevice;
     }
     match error.downcast_ref::<pixels::Error>() {
-        Some(pixels::Error::Surface(pixels::wgpu::SurfaceError::Lost | pixels::wgpu::SurfaceError::Outdated)) => {
-            RetainedGpuPresentRecovery::RebuildDevice
-        }
+        Some(pixels::Error::Surface(
+            pixels::wgpu::SurfaceError::Lost | pixels::wgpu::SurfaceError::Outdated,
+        )) => RetainedGpuPresentRecovery::RebuildDevice,
         Some(pixels::Error::Surface(pixels::wgpu::SurfaceError::Timeout)) => {
             RetainedGpuPresentRecovery::Retry
         }
@@ -9228,8 +9325,7 @@ fn rebuild_retained_gpu_device(
     let surface = SurfaceTexture::new(size.width, size.height, window);
     let mut replacement = PixelsBuilder::new(size.width, size.height, surface)
         .wgpu_backend(
-            pixels::wgpu::util::backend_bits_from_env()
-                .unwrap_or(pixels::wgpu::Backends::PRIMARY),
+            pixels::wgpu::util::backend_bits_from_env().unwrap_or(pixels::wgpu::Backends::PRIMARY),
         )
         .enable_vsync(false)
         .build()
@@ -9378,11 +9474,8 @@ fn present_retained_gpu_frame(
             .as_ref()
             .or(current_frame.as_ref())
             .and_then(|frame| {
-                match encode_presented_save_thumbnail(
-                    frame.extent[0],
-                    frame.extent[1],
-                    &frame.rgba,
-                ) {
+                match encode_presented_save_thumbnail(frame.extent[0], frame.extent[1], &frame.rgba)
+                {
                     Ok(encoded) => Some(encoded),
                     Err(error) => {
                         tracing::warn!(
@@ -10726,12 +10819,7 @@ impl AudioContext {
                     }
                 }
                 AudioCommand::DetachObjectSounds { target, position } => {
-                    self.detach_object_sounds(
-                        *target,
-                        *position,
-                        snapshot,
-                        viewports,
-                    );
+                    self.detach_object_sounds(*target, *position, snapshot, viewports);
                 }
                 AudioCommand::PlaySoundAt { name, position } => {
                     let (volume, pan) =
@@ -10758,23 +10846,11 @@ impl AudioContext {
                     target,
                     volume,
                 } => {
-                    let updated = self.update_sound_volume(
-                        name,
-                        *target,
-                        *volume,
-                        snapshot,
-                        viewports,
-                    );
+                    let updated =
+                        self.update_sound_volume(name, *target, *volume, snapshot, viewports);
                     if !updated {
                         if let Err(err) = self.start_sound(
-                            name,
-                            *target,
-                            *volume,
-                            true,
-                            false,
-                            None,
-                            snapshot,
-                            viewports,
+                            name, *target, *volume, true, false, None, snapshot, viewports,
                         ) {
                             tracing::error!(
                                 sound = %name,
@@ -11049,11 +11125,7 @@ impl AudioContext {
         }
     }
 
-    fn active_channel_key(
-        &self,
-        name: &str,
-        target: Option<ObjectId>,
-    ) -> Option<SoundInstanceKey> {
+    fn active_channel_key(&self, name: &str, target: Option<ObjectId>) -> Option<SoundInstanceKey> {
         let pattern = SoundSearchTerms::new(name).prepared_pattern();
         // C4SoundSystem::FindInst walks samples in catalog order, then each
         // sample's instances in insertion order. Detached one-shots have a
@@ -11123,8 +11195,7 @@ impl AudioContext {
             info.volume = volume;
             if info.target.is_none() {
                 if let Some((_, pan)) = info.detached_mix {
-                    info.detached_mix =
-                        Some(((volume as f32 / 100.0).max(0.0), pan));
+                    info.detached_mix = Some(((volume as f32 / 100.0).max(0.0), pan));
                 }
             }
             let Some(channel) = info.channel else {
@@ -11162,10 +11233,7 @@ impl AudioContext {
             .iter()
             .filter_map(|(key, info)| {
                 info.target.and_then(|target| snapshot.object(target))?;
-                Some((
-                    (info.sample_order, info.instance_order),
-                    key.clone(),
-                ))
+                Some(((info.sample_order, info.instance_order), key.clone()))
             })
             .collect::<Vec<_>>();
         ordered_channels.sort_unstable_by_key(|(order, _)| *order);
@@ -11287,12 +11355,7 @@ impl AudioContext {
         let mut ordered_channels = self
             .active_channels
             .iter()
-            .map(|(key, info)| {
-                (
-                    (info.sample_order, info.instance_order),
-                    key.clone(),
-                )
-            })
+            .map(|(key, info)| ((info.sample_order, info.instance_order), key.clone()))
             .collect::<Vec<_>>();
         ordered_channels.sort_unstable_by_key(|(order, _)| *order);
         for (_, key) in ordered_channels {
@@ -11438,10 +11501,7 @@ impl AudioContext {
         }
     }
 
-    fn ensure_sound_with_key(
-        &mut self,
-        name: &str,
-    ) -> Result<Option<LoadedSound>, AudioError> {
+    fn ensure_sound_with_key(&mut self, name: &str) -> Result<Option<LoadedSound>, AudioError> {
         let request_key = name.to_ascii_lowercase();
         let terms = SoundSearchTerms::new(name);
         let selected_index = if let Some(pattern) = terms.wildcard_pattern.as_deref() {
@@ -11744,12 +11804,7 @@ impl SoundResolver {
             .scenario
             .iter()
             .chain(&self.global)
-            .flat_map(|library| {
-                library
-                    .entries
-                    .iter()
-                    .map(|entry| entry.file_name.clone())
-            })
+            .flat_map(|library| library.entries.iter().map(|entry| entry.file_name.clone()))
             .collect::<Vec<_>>();
         names.sort_unstable();
         names.dedup();
@@ -11896,10 +11951,7 @@ impl SoundLibrary {
         None
     }
 
-    fn wildcard_match_indices<'a>(
-        &'a self,
-        pattern: &'a str,
-    ) -> impl Iterator<Item = usize> + 'a {
+    fn wildcard_match_indices<'a>(&'a self, pattern: &'a str) -> impl Iterator<Item = usize> + 'a {
         self.entries
             .iter()
             .enumerate()
@@ -12058,7 +12110,9 @@ impl SoundSearchTerms {
 }
 
 fn sound_name_has_extension(name: &str) -> bool {
-    let component_start = name.rfind(std::path::MAIN_SEPARATOR).map_or(0, |index| index + 1);
+    let component_start = name
+        .rfind(std::path::MAIN_SEPARATOR)
+        .map_or(0, |index| index + 1);
     name[component_start..]
         .rfind('.')
         .is_some_and(|index| component_start + index + 1 < name.len())
@@ -12720,10 +12774,14 @@ enum MessageDialogContinuation {
     None,
     /// `C4AbortGameDialog` owns one offline `Game.HaltCount` increment from
     /// `OnShown` until the first normal close path reaches `OnClosed`.
-    AbortGame { halted_offline: bool },
+    AbortGame {
+        halted_offline: bool,
+    },
     /// Native `C4Console::Message` blocks before an optional second status
     /// dialog (the script-created-object warning precedes a save error).
-    DeveloperConsoleNotice { follow_up: Option<String> },
+    DeveloperConsoleNotice {
+        follow_up: Option<String>,
+    },
     StartupNetworkConnectProgress,
     StartupIrcConnectWarning {
         login: clonk_frontend::startup_netdlg::NetDlgChatLogin,
@@ -12740,9 +12798,15 @@ enum MessageDialogContinuation {
     NetworkServerRedirect {
         address: String,
     },
-    ClassicLobbyStart { countdown_seconds: i32 },
-    LobbyResourceOverwrite { resource_id: i32 },
-    DeleteStartupPlayer { path: PathBuf },
+    ClassicLobbyStart {
+        countdown_seconds: i32,
+    },
+    LobbyResourceOverwrite {
+        resource_id: i32,
+    },
+    DeleteStartupPlayer {
+        path: PathBuf,
+    },
     DeleteStartupCrew {
         player_path: PathBuf,
         file_name: String,
@@ -12751,8 +12815,12 @@ enum MessageDialogContinuation {
         path: PathBuf,
         next_identifier: Option<String>,
     },
-    NetworkScenarioPlayerCountWarning { scenario: FrontendScenario },
-    LobbyReadyCheck { remaining_seconds: u32 },
+    NetworkScenarioPlayerCountWarning {
+        scenario: FrontendScenario,
+    },
+    LobbyReadyCheck {
+        remaining_seconds: u32,
+    },
     LiveMasterserverSignup,
     LeaguePlayerAuthWait,
     LeaguePlayerAuthWelcome,
@@ -12761,7 +12829,9 @@ enum MessageDialogContinuation {
     LeagueEndRetry,
     LeagueEndRejected,
     LeagueSignupCancelled,
-    LeagueVote { subject: LeagueVoteSubject },
+    LeagueVote {
+        subject: LeagueVoteSubject,
+    },
     LeagueSurrender,
     OptionsScaleTest {
         old_percent: i32,
@@ -13299,7 +13369,10 @@ enum AppContextMenuCommand {
     OptionsFontFace(String),
     OptionsFontSize(i32),
     OptionsDisplayMode(clonk_frontend::startup_options_graphics::GraphicsDisplayMode),
-    LobbyTeam { player_id: i32, team_id: i32 },
+    LobbyTeam {
+        player_id: i32,
+        team_id: i32,
+    },
     LobbyControlRate(i32),
     LobbyRuntimeJoin(bool),
     RuntimeClientOption {
@@ -13316,9 +13389,17 @@ enum AppContextMenuCommand {
     /// Deferred Take Over submenu request: children are computed when the
     /// submenu opens, mirroring `PlayerListItem::OnContextTakeOver`
     /// (src/C4PlayerInfoListBox.cpp:535-556) running at submenu-open time.
-    LobbyPlayerTakeOverSubmenu { savegame_player_id: i32 },
-    LobbyPlayerRemove { client_id: i32, player_id: i32 },
-    LobbyPlayerNewColor { client_id: i32, player_id: i32 },
+    LobbyPlayerTakeOverSubmenu {
+        savegame_player_id: i32,
+    },
+    LobbyPlayerRemove {
+        client_id: i32,
+        player_id: i32,
+    },
+    LobbyPlayerNewColor {
+        client_id: i32,
+        player_id: i32,
+    },
     LobbyClientToggleMute(i32),
     LobbyClientToggleActivate(i32),
     LobbyClientInfo(i32),
@@ -13965,8 +14046,7 @@ fn network_material_load_plan<'a>(
     let authoritative_groups = match network_mode {
         Some(NetworkMode::Client(_)) => material_groups,
         Some(NetworkMode::Host(HostSettings {
-            prepared: Some(_),
-            ..
+            prepared: Some(_), ..
         })) => material_groups,
         Some(NetworkMode::Host(_)) | None => None,
     };
@@ -14181,7 +14261,9 @@ fn route_network_savegame_recreation(
     player_infos.recreation_players()
 }
 
-fn synchronized_parameters_are_league(parameters: &clonk_network::JoinGameParametersEnvelope) -> bool {
+fn synchronized_parameters_are_league(
+    parameters: &clonk_network::JoinGameParametersEnvelope,
+) -> bool {
     // C4GameParameters::isLeague checks LeagueAddress, not the display-name
     // League field (src/C4GameParameters.h:126-173).
     !parameters.league_address.is_empty()
@@ -14384,7 +14466,9 @@ fn runtime_teams_from_initial_metadata(
             .with_player_ids(team.player_ids.clone())
             .with_player_start_index(team.player_start_index)
             .with_max_players(team.max_players)
-            .with_icon_spec(clonk_script::c4_string_from_bytes(team.icon_spec.as_bytes()))
+            .with_icon_spec(clonk_script::c4_string_from_bytes(
+                team.icon_spec.as_bytes(),
+            ))
         })
         .collect()
 }
@@ -14404,7 +14488,9 @@ fn runtime_teams_from_join_snapshot(
             .with_player_ids(team.player_ids.clone())
             .with_player_start_index(team.player_start_index)
             .with_max_players(team.max_players)
-            .with_icon_spec(clonk_script::c4_string_from_bytes(team.icon_spec.as_bytes()))
+            .with_icon_spec(clonk_script::c4_string_from_bytes(
+                team.icon_spec.as_bytes(),
+            ))
         })
         .collect()
 }
@@ -14601,6 +14687,26 @@ fn synchronized_team_configuration(
     }
 }
 
+fn synchronized_rule_goal_lists(
+    parameters: &clonk_network::JoinGameParametersEnvelope,
+) -> clonk_engine::GameParameterRuleGoalLists {
+    let entries = |source: &[clonk_network::JoinDataIdListEntry]| {
+        source
+            .iter()
+            .map(|entry| {
+                clonk_engine::ScenarioIdListEntry::new(
+                    String::from_utf8_lossy(entry.id.as_bytes()).into_owned(),
+                    entry.count,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    clonk_engine::GameParameterRuleGoalLists::new(
+        entries(&parameters.rules),
+        entries(&parameters.goals),
+    )
+}
+
 fn initial_network_is_league(network_mode: Option<&NetworkMode>) -> bool {
     network_mode.is_some_and(|mode| match mode {
         NetworkMode::Host(HostSettings {
@@ -14677,10 +14783,7 @@ fn initial_network_team_assignment(
 enum StartupPlayerPropertiesOrigin {
     MainMenuFirstPlayer,
     SelectionNew,
-    SelectionEdit {
-        path: PathBuf,
-        was_activated: bool,
-    },
+    SelectionEdit { path: PathBuf, was_activated: bool },
 }
 
 struct PendingStartupPlayerProperties {
@@ -14721,8 +14824,7 @@ fn resize_startup_player_image(image: &ImageData, maximum: u32) -> ImageData {
     for y in 0..resized_height {
         let source_y = (u64::from(y) * u64::from(height) / u64::from(resized_height)) as u32;
         for x in 0..resized_width {
-            let source_x =
-                (u64::from(x) * u64::from(width) / u64::from(resized_width)) as u32;
+            let source_x = (u64::from(x) * u64::from(width) / u64::from(resized_width)) as u32;
             let source = ((source_y * width + source_x) * 4) as usize;
             let target = ((y * resized_width + x) * 4) as usize;
             pixels[target..target + 4].copy_from_slice(&image.pixels()[source..source + 4]);
@@ -14819,12 +14921,8 @@ fn extract_default_startup_portraits_once(paths: &AppPaths) {
             return;
         }
     }
-    if let Err(error) = save_config_preserving_native_general_booleans(
-        &config,
-        &config_path,
-        None,
-        None,
-    )
+    if let Err(error) =
+        save_config_preserving_native_general_booleans(&config, &config_path, None, None)
     {
         tracing::warn!(%error, path = %config_path.display(), "failed to persist portrait extraction flag");
     }
@@ -15257,11 +15355,15 @@ struct GameApp {
     /// IDS_GAME_DEFRANKS from the currently loaded process language table.
     /// The next return-to-startup PreInit promotes this to Game.Rank.
     loaded_default_rank_names: Option<Vec<String>>,
-    /// Process startup tooltip strings. Unlike one-off status messages,
-    /// tooltips are resolved every presented frame after their hover delay;
-    /// retain the active C4ResStrTable projection and refresh it with an
-    /// Options language change instead of reopening System.c4g every frame.
+    /// Process-global `Application.ResStrTable` projection shared by startup,
+    /// lobby, console, and runtime presentation. C++ replaces this table only
+    /// after an Options language selection; retaining it also prevents
+    /// per-frame network-browser/console lookup from reopening System.c4g.
     startup_tooltip_resources: HashMap<String, String>,
+    /// Encoding of the process-global resource table. `LoadResStr` reads the
+    /// same already-loaded table as the UTF-8 presentation helpers; retain
+    /// its source charset so byte-returning call sites do not reopen it.
+    runtime_language_charset: RuntimeHelpCharset,
     /// Process-local Config.General.MissionAccess shared across fresh games.
     mission_access: MissionAccessStore,
     /// Process-global C4Group maker captured from `Config.General.Name` once
@@ -15469,8 +15571,11 @@ struct GameApp {
     #[cfg(test)]
     ui_sound_log: Vec<String>,
     #[cfg(test)]
-    league_surrender_pre_abort_results:
-        Option<(clonk_engine::RoundResultsState, clonk_engine::RoundResultsState, bool)>,
+    league_surrender_pre_abort_results: Option<(
+        clonk_engine::RoundResultsState,
+        clonk_engine::RoundResultsState,
+        bool,
+    )>,
     /// `C4Game::IsMusicEnabled`; runtime playback ownership remains distinct
     /// from persisted RXMusic while a game is running.
     runtime_music_enabled: bool,
@@ -15546,6 +15651,7 @@ struct GameApp {
     // HTTP timeout.
     pending_lobby_internet_signup: Option<network::PendingMasterserverSignup>,
     pending_league_player_auth: Option<PendingLeaguePlayerAuth>,
+    network_event_waker: Option<NetworkEventWakeCallback>,
     network: Option<NetworkManager>,
     network_mode: Option<NetworkMode>,
     /// Process-session credentials mutated by C4LeagueSignupDialog. Native
@@ -15576,6 +15682,8 @@ struct GameApp {
     staged_network_host_scenario: Option<StagedNetworkHostScenario>,
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
+    waiting_network_control: Option<NetworkControlWait>,
+    network_control_retry_pending: bool,
     network_sync: NetworkSyncGate,
     /// `C4GameControl::Input` packets produced outside the simulation in a
     /// local game. They execute together at the next control-rate frame.
@@ -16121,8 +16229,7 @@ struct RecordingSession {
     description_definition_modules: Vec<Vec<u8>>,
 }
 
-type StartupNetworkResult =
-    std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>;
+type StartupNetworkResult = std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>;
 
 struct StartupNetworkAttempt {
     cancellation: NetworkStartupCancellation,
@@ -16228,9 +16335,7 @@ struct ClassicDirectReferenceQueryResult {
 }
 
 struct ClassicDirectReferenceQuery {
-    receiver: Receiver<
-        std::result::Result<ClassicDirectReferenceQueryResult, NetworkStartError>,
-    >,
+    receiver: Receiver<std::result::Result<ClassicDirectReferenceQueryResult, NetworkStartError>>,
 }
 
 impl RecordingSession {
@@ -16450,11 +16555,9 @@ fn count_direct_stream_player_crew_files(group: &Group) -> std::result::Result<u
         let child = if group.is_directory() {
             group.open_child(&entry.relative_path)
         } else {
-            group
-                .read_entry_bytes_exact(&entry)
-                .and_then(|bytes| {
-                    Group::from_raw_memory(path_from_group_name_bytes(&entry.name_bytes), bytes)
-                })
+            group.read_entry_bytes_exact(&entry).and_then(|bytes| {
+                Group::from_raw_memory(path_from_group_name_bytes(&entry.name_bytes), bytes)
+            })
         };
         let Ok(child) = child else {
             continue;
@@ -17238,7 +17341,10 @@ struct RuntimeKeyChord {
 
 impl RuntimeKeyChord {
     fn keyboard(key: VirtualKeyCode, modifiers: ModifiersState) -> Self {
-        Self { physical: RuntimePhysicalKey::Keyboard(key), modifiers }
+        Self {
+            physical: RuntimePhysicalKey::Keyboard(key),
+            modifiers,
+        }
     }
 
     fn matches(self, key: VirtualKeyCode, modifiers: ModifiersState) -> bool {
@@ -17249,8 +17355,9 @@ impl RuntimeKeyChord {
         }
         match self.physical {
             RuntimePhysicalKey::Keyboard(configured) => configured == key,
-            RuntimePhysicalKey::Raw(configured) => input::encode_virtual_key_code(key)
-                .is_some_and(|raw| raw as u32 == configured),
+            RuntimePhysicalKey::Raw(configured) => {
+                input::encode_virtual_key_code(key).is_some_and(|raw| raw as u32 == configured)
+            }
             RuntimePhysicalKey::Gamepad { .. } | RuntimePhysicalKey::Disabled => false,
         }
     }
@@ -17263,13 +17370,15 @@ impl RuntimeKeyChord {
             RuntimePhysicalKey::Gamepad {
                 slot: configured_slot,
                 button: configured_button,
-            } => configured_slot == slot
-                && (configured_button == 10 + button
-                    || configured_button == 0xff
-                    || (configured_button == 0xfc && button < 4)
-                    || (configured_button == 0xfb && button >= 4)
-                    || (configured_button == 0xfe && button % 2 == 0)
-                    || (configured_button == 0xfd && button % 2 == 1)),
+            } => {
+                configured_slot == slot
+                    && (configured_button == 10 + button
+                        || configured_button == 0xff
+                        || (configured_button == 0xfc && button < 4)
+                        || (configured_button == 0xfb && button >= 4)
+                        || (configured_button == 0xfe && button % 2 == 0)
+                        || (configured_button == 0xfd && button % 2 == 1))
+            }
             RuntimePhysicalKey::Keyboard(_)
             | RuntimePhysicalKey::Raw(_)
             | RuntimePhysicalKey::Disabled => false,
@@ -17873,7 +17982,7 @@ impl AutomaticFrameSkip {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PresentationBenchmarkMeasurement {
     started: Option<Instant>,
     simulation_frame: u64,
@@ -17882,9 +17991,10 @@ struct PresentationBenchmarkMeasurement {
     automatic_graphics_skips: u64,
     graphics_total: Duration,
     graphics_max: Duration,
+    graphics_samples: Vec<Duration>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct PresentationBenchmarkReport {
     elapsed: Duration,
     submissions: u64,
@@ -17893,26 +18003,40 @@ struct PresentationBenchmarkReport {
     automatic_graphics_skips: u64,
     graphics_average: Duration,
     graphics_max: Duration,
+    graphics_p50: Duration,
+    graphics_p95: Duration,
+    graphics_p99: Duration,
+    graphics_samples: Vec<Duration>,
 }
 
 impl PresentationBenchmarkReport {
-    fn machine_line(self) -> String {
+    fn machine_line(&self) -> String {
         let elapsed_seconds = self.elapsed.as_secs_f64();
         let submission_fps = self.submissions as f64 / elapsed_seconds;
         let simulation_fps = self.simulation_frames as f64 / elapsed_seconds;
+        let graphics_samples_ns = self
+            .graphics_samples
+            .iter()
+            .map(|sample| sample.as_nanos().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds={elapsed_seconds:.6} successful_present_submissions={} presentation_submission_fps={submission_fps:.6} refreshed_frames={} simulation_frames={} simulation_fps={simulation_fps:.6} automatic_graphics_skips={} average_graphics_pass_ms={:.6} max_graphics_pass_ms={:.6}",
+            "LC_APP_PRESENTATION_BENCHMARK elapsed_seconds={elapsed_seconds:.6} successful_present_submissions={} presentation_submission_fps={submission_fps:.6} refreshed_frames={} simulation_frames={} simulation_fps={simulation_fps:.6} automatic_graphics_skips={} average_graphics_pass_ms={:.6} max_graphics_pass_ms={:.6} graphics_pass_sample_count={} graphics_pass_p50_ms={:.6} graphics_pass_p95_ms={:.6} graphics_pass_p99_ms={:.6} graphics_pass_samples_ns=[{graphics_samples_ns}]",
             self.submissions,
             self.refreshed_frames,
             self.simulation_frames,
             self.automatic_graphics_skips,
             self.graphics_average.as_secs_f64() * 1_000.0,
             self.graphics_max.as_secs_f64() * 1_000.0,
+            self.graphics_samples.len(),
+            self.graphics_p50.as_secs_f64() * 1_000.0,
+            self.graphics_p95.as_secs_f64() * 1_000.0,
+            self.graphics_p99.as_secs_f64() * 1_000.0,
         )
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct PresentationBenchmark {
     window: Duration,
     first_successful_presentation: Option<Instant>,
@@ -17968,6 +18092,9 @@ impl PresentationBenchmark {
                 self.measurement.graphics_total.as_secs_f64() / submissions as f64,
             )
         };
+        let graphics_samples = std::mem::take(&mut self.measurement.graphics_samples);
+        let (graphics_p50, graphics_p95, graphics_p99) =
+            graphics_pass_percentiles(&graphics_samples);
         Some(PresentationBenchmarkReport {
             elapsed,
             submissions,
@@ -17976,6 +18103,10 @@ impl PresentationBenchmark {
             automatic_graphics_skips: self.measurement.automatic_graphics_skips,
             graphics_average,
             graphics_max: self.measurement.graphics_max,
+            graphics_p50,
+            graphics_p95,
+            graphics_p99,
+            graphics_samples,
         })
     }
 
@@ -18002,6 +18133,7 @@ impl PresentationBenchmark {
             .graphics_total
             .saturating_add(graphics_duration);
         self.measurement.graphics_max = self.measurement.graphics_max.max(graphics_duration);
+        self.measurement.graphics_samples.push(graphics_duration);
     }
 
     fn record_automatic_graphics_skip(&mut self) {
@@ -18011,6 +18143,20 @@ impl PresentationBenchmark {
         self.measurement.automatic_graphics_skips =
             self.measurement.automatic_graphics_skips.saturating_add(1);
     }
+}
+
+fn graphics_pass_percentiles(samples: &[Duration]) -> (Duration, Duration, Duration) {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let nearest_rank = |percentile: usize| {
+        let index = sorted
+            .len()
+            .saturating_mul(percentile)
+            .div_ceil(100)
+            .saturating_sub(1);
+        sorted.get(index).copied().unwrap_or_default()
+    };
+    (nearest_rank(50), nearest_rank(95), nearest_rank(99))
 }
 
 fn parse_presentation_benchmark_window(raw: &str) -> Option<Duration> {
@@ -18032,8 +18178,20 @@ fn presentation_benchmark_asserts_native_tick() -> bool {
     std::env::var(PRESENTATION_BENCHMARK_ASSERT_NATIVE_TICK_ENV).is_ok_and(|value| value == "1")
 }
 
+fn parse_presentation_benchmark_keep_running(raw: Option<&str>) -> bool {
+    raw == Some("1")
+}
+
+fn presentation_benchmark_keeps_running() -> bool {
+    parse_presentation_benchmark_keep_running(
+        std::env::var(PRESENTATION_BENCHMARK_KEEP_RUNNING_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
 fn validate_native_tick_presentation_budget(
-    report: PresentationBenchmarkReport,
+    report: &PresentationBenchmarkReport,
 ) -> std::result::Result<(), String> {
     if report.submissions == 0 || report.refreshed_frames == 0 {
         return Err("benchmark produced no refreshed presentation".to_string());
@@ -18053,21 +18211,239 @@ fn validate_native_tick_presentation_budget(
     Ok(())
 }
 
+fn presentation_benchmark_context_line(
+    runtime_players: usize,
+    synchronized_player_infos: usize,
+    activated_nonhost_clients: usize,
+    runtime_crew_objects: usize,
+    runtime_players_with_exactly_one_live_sf5b_crew: usize,
+) -> String {
+    format!(
+        "LC_APP_PRESENTATION_BENCHMARK_CONTEXT runtime_players={runtime_players} synchronized_player_infos={synchronized_player_infos} activated_nonhost_clients={activated_nonhost_clients} runtime_crew_objects={runtime_crew_objects} runtime_players_with_exactly_one_live_sf5b_crew={runtime_players_with_exactly_one_live_sf5b_crew}"
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PresentationBenchmarkNetworkEvidence {
+    local_client_id: ClientId,
+    preferred_message_route_peer_ids: Vec<ClientId>,
+    tcp_preferred_message_routes: usize,
+    udp_preferred_message_routes: usize,
+    unknown_preferred_message_routes: usize,
+    nonnegative_ping_peer_count: usize,
+    nonnegative_lag_peer_count: usize,
+    max_nonnegative_ping_ms: Option<i32>,
+    max_nonnegative_lag_ms: Option<i32>,
+    max_packet_loss: u32,
+    control_presend: i32,
+    avg_control_send_time_us: i64,
+}
+
+impl PresentationBenchmarkNetworkEvidence {
+    fn machine_line(&self) -> String {
+        let peer_ids = self
+            .preferred_message_route_peer_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "LC_APP_PRESENTATION_BENCHMARK_NETWORK inspection_status=ok local_client_id={} preferred_message_route_peer_count={} preferred_message_route_peer_ids=[{peer_ids}] tcp_preferred_message_routes={} udp_preferred_message_routes={} unknown_preferred_message_routes={} nonnegative_ping_peer_count={} nonnegative_lag_peer_count={} max_nonnegative_ping_ms={} max_nonnegative_lag_ms={} max_packet_loss={} control_presend={} avg_control_send_time_us={}",
+            self.local_client_id,
+            self.preferred_message_route_peer_ids.len(),
+            self.tcp_preferred_message_routes,
+            self.udp_preferred_message_routes,
+            self.unknown_preferred_message_routes,
+            self.nonnegative_ping_peer_count,
+            self.nonnegative_lag_peer_count,
+            self.max_nonnegative_ping_ms.unwrap_or(-1),
+            self.max_nonnegative_lag_ms.unwrap_or(-1),
+            self.max_packet_loss,
+            self.control_presend,
+            self.avg_control_send_time_us,
+        )
+    }
+}
+
+fn summarize_presentation_benchmark_network(
+    local_client_id: ClientId,
+    connections: &[clonk_network::RuntimeNetworkConnection],
+    control_presend: i32,
+    avg_control_send_time_us: i64,
+) -> PresentationBenchmarkNetworkEvidence {
+    let mut preferred_message_routes = BTreeMap::new();
+    for connection in connections {
+        if connection.usage.split('/').any(|usage| usage == "Msg") {
+            preferred_message_routes
+                .entry(connection.client_id)
+                .or_insert(connection);
+        }
+    }
+    let mut evidence = PresentationBenchmarkNetworkEvidence {
+        local_client_id,
+        preferred_message_route_peer_ids: preferred_message_routes.keys().copied().collect(),
+        tcp_preferred_message_routes: 0,
+        udp_preferred_message_routes: 0,
+        unknown_preferred_message_routes: 0,
+        nonnegative_ping_peer_count: 0,
+        nonnegative_lag_peer_count: 0,
+        max_nonnegative_ping_ms: None,
+        max_nonnegative_lag_ms: None,
+        max_packet_loss: 0,
+        control_presend,
+        avg_control_send_time_us,
+    };
+    for connection in preferred_message_routes.values() {
+        match connection.protocol {
+            clonk_network::NetworkProtocol::Tcp => {
+                evidence.tcp_preferred_message_routes += 1;
+            }
+            clonk_network::NetworkProtocol::Udp => {
+                evidence.udp_preferred_message_routes += 1;
+            }
+            _ => {
+                evidence.unknown_preferred_message_routes += 1;
+            }
+        }
+        if connection.ping_ms >= 0 {
+            evidence.nonnegative_ping_peer_count += 1;
+            evidence.max_nonnegative_ping_ms = Some(
+                evidence
+                    .max_nonnegative_ping_ms
+                    .map_or(connection.ping_ms, |current| {
+                        current.max(connection.ping_ms)
+                    }),
+            );
+        }
+        if connection.lag_ms >= 0 {
+            evidence.nonnegative_lag_peer_count += 1;
+            evidence.max_nonnegative_lag_ms = Some(
+                evidence
+                    .max_nonnegative_lag_ms
+                    .map_or(connection.lag_ms, |current| current.max(connection.lag_ms)),
+            );
+        }
+        evidence.max_packet_loss = evidence.max_packet_loss.max(connection.packet_loss);
+    }
+    evidence
+}
+
+fn inspect_presentation_benchmark_network(
+    app: &GameApp,
+) -> Option<std::result::Result<PresentationBenchmarkNetworkEvidence, String>> {
+    let network = app.network.as_ref()?;
+    let Some(control_clock) = app.network_control_clock else {
+        return Some(Err("network_control_clock_unavailable".to_string()));
+    };
+    Some(
+        network
+            .runtime_connections()
+            .map(|connections| {
+                summarize_presentation_benchmark_network(
+                    network.local_client_id(),
+                    &connections,
+                    control_clock.control_presend(),
+                    control_clock.avg_control_send_time(),
+                )
+            })
+            .map_err(|error| {
+                tracing::error!(
+                    %error,
+                    "presentation benchmark runtime connection inspection failed"
+                );
+                "runtime_connection_inspection_failed".to_string()
+            }),
+    )
+}
+
+/// Count the distinct live objects retained by all runtime Crew lists. Native
+/// MakeCrewMember requires active CrewMember objects before inserting them
+/// (src/C4Player.cpp:1173-1203), and AssignDeath clears Alive before removing
+/// the object from its player's crew (src/C4Object.cpp:1170-1200).
+fn runtime_crew_object_count(snapshot: &SimulationSnapshot) -> usize {
+    snapshot
+        .players
+        .iter()
+        .flat_map(|player| player.crew.iter().copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .filter(|crew| {
+            snapshot.object(*crew).is_some_and(|object| {
+                object.crew_member && object.status.is_active() && object.alive
+            })
+        })
+        .count()
+}
+
+/// Count players whose Crew contains exactly one live, owner-matched SF5B.
+/// HarpoonRace creates one SF5B owned by each player and calls MakeCrewMember
+/// with it (HarpoonRace.c4s/Script.c:66-73); C++ retains that exact object in
+/// the player's Crew (src/C4Player.cpp:1173-1203).
+fn runtime_players_with_exactly_one_live_sf5b_crew(snapshot: &SimulationSnapshot) -> usize {
+    snapshot
+        .players
+        .iter()
+        .filter(|player| {
+            player
+                .crew
+                .iter()
+                .filter(|crew| {
+                    snapshot.object(**crew).is_some_and(|object| {
+                        object.definition_id == "SF5B"
+                            && object.owner == player.id
+                            && object.crew_member
+                            && object.status.is_active()
+                            && object.alive
+                    })
+                })
+                .count()
+                == 1
+        })
+        .count()
+}
+
 fn finish_presentation_benchmark(
     control_flow: &mut ControlFlow,
     report: PresentationBenchmarkReport,
     assert_native_tick: bool,
+    runtime_players: usize,
+    synchronized_player_infos: usize,
+    activated_nonhost_clients: usize,
+    runtime_crew_objects: usize,
+    runtime_players_with_exactly_one_live_sf5b_crew: usize,
+    network_evidence: Option<std::result::Result<PresentationBenchmarkNetworkEvidence, String>>,
+    keep_running: bool,
 ) {
     println!("{}", report.machine_line());
+    println!(
+        "{}",
+        presentation_benchmark_context_line(
+            runtime_players,
+            synchronized_player_infos,
+            activated_nonhost_clients,
+            runtime_crew_objects,
+            runtime_players_with_exactly_one_live_sf5b_crew,
+        )
+    );
+    if let Some(network_evidence) = network_evidence {
+        match network_evidence {
+            Ok(network_evidence) => println!("{}", network_evidence.machine_line()),
+            Err(error_code) => println!(
+                "LC_APP_PRESENTATION_BENCHMARK_NETWORK inspection_status=error error_code={error_code}"
+            ),
+        }
+    }
     if assert_native_tick {
-        if let Err(error) = validate_native_tick_presentation_budget(report) {
+        if let Err(error) = validate_native_tick_presentation_budget(&report) {
             eprintln!("LC_APP_PRESENTATION_BENCHMARK result=fail error={error}");
             control_flow.set_exit_with_code(2);
             return;
         }
         println!("LC_APP_PRESENTATION_BENCHMARK result=pass native_tick_budget_ms=28");
     }
-    control_flow.set_exit();
+    if !keep_running {
+        control_flow.set_exit();
+    }
 }
 
 fn advance_graphics_deadline(deadline: Instant, now: Instant, interval: Duration) -> Instant {
@@ -18093,6 +18469,7 @@ struct SimulationPassOutcome {
     executed_frames: u32,
     skipped_render_frames: u32,
     skip_redraw: bool,
+    immediate_network_retry: bool,
 }
 
 fn frame_schedule_for_mode(
@@ -18116,8 +18493,7 @@ fn frame_schedule_for_mode(
             let refresh_ms = if game_tick_delay_ms < max_refresh_ms {
                 game_tick_delay_ms
             } else {
-                game_tick_delay_ms
-                    / game_tick_delay_ms.div_ceil(max_refresh_ms)
+                game_tick_delay_ms / game_tick_delay_ms.div_ceil(max_refresh_ms)
             };
             FrameSchedule {
                 simulation_interval: Duration::from_millis(game_tick_delay_ms),
@@ -18186,6 +18562,7 @@ fn advance_simulation_pass(
     let mut outcome = SimulationPassOutcome::default();
     let mut catch_up = false;
     let mut full_speed_due = app.mode == AppMode::Running && app.full_speed;
+    let mut network_retry_due = app.take_network_control_retry();
     if full_speed_due {
         // FullSpeed is driven by one Winit Poll iteration at a time. Discard
         // timer debt so this pass cannot monopolize the event loop.
@@ -18194,11 +18571,13 @@ fn advance_simulation_pass(
 
     loop {
         let timer_due = *accumulator >= frame_schedule.simulation_interval;
-        if !timer_due && !catch_up && !full_speed_due {
+        if !timer_due && !catch_up && !full_speed_due && !network_retry_due {
             break;
         }
 
         let executed_interval = frame_schedule.simulation_interval;
+        let immediate_network_retry =
+            network_retry_due && !timer_due && !catch_up && !full_speed_due;
         let frame_before = app.engine.frame();
         if let Err(error) = app.update() {
             // Script errors during the simulation tick show in the log and
@@ -18214,6 +18593,7 @@ fn advance_simulation_pass(
             *accumulator -= executed_interval;
         }
         full_speed_due = false;
+        network_retry_due = false;
         outcome.did_update = true;
 
         let frame_advanced = app.engine.frame() != frame_before;
@@ -18225,10 +18605,15 @@ fn advance_simulation_pass(
             frame_advanced && frame_skip > 1 && app.engine.frame().rem_euclid(frame_skip) != 0;
         let skip_render = pacing.skip_render || manual_skip;
         if frame_advanced {
+            if immediate_network_retry {
+                // CStdApp::Execute consumes DoNotDelay by anchoring LastExecute
+                // to this packet-driven retry instead of retaining timer debt.
+                *accumulator = Duration::ZERO;
+                outcome.immediate_network_retry = true;
+            }
             outcome.executed_frames = outcome.executed_frames.saturating_add(1);
             if skip_render {
-                outcome.skipped_render_frames =
-                    outcome.skipped_render_frames.saturating_add(1);
+                outcome.skipped_render_frames = outcome.skipped_render_frames.saturating_add(1);
             }
         }
         // Winit already coalesces intermediate catch-up frames into this one
@@ -19286,7 +19671,10 @@ impl NetworkLobbyState {
             .insert(client_id, LobbyParticipantState { name, ready, kind });
     }
 
-    fn replace_participants_from_clients(&mut self, clients: &[clonk_engine::ClientCoreControlData]) {
+    fn replace_participants_from_clients(
+        &mut self,
+        clients: &[clonk_engine::ClientCoreControlData],
+    ) {
         self.participants = clients
             .iter()
             .filter_map(|client| {
@@ -19470,10 +19858,8 @@ impl NetworkLobbyState {
         if self.controller.labels() != &self.labels {
             self.controller.set_labels(self.labels.clone());
         }
-        self.controller.set_preload_button_state(
-            self.preload.manual_button_present,
-            self.preload.eligible,
-        );
+        self.controller
+            .set_preload_button_state(self.preload.manual_button_present, self.preload.eligible);
         self.controller.set_active_sheet(self.active_sheet);
         if self.controller.scenario_text() != &self.scenario_description.text {
             self.controller
@@ -19555,11 +19941,7 @@ impl NetworkLobbyState {
         surface: &Surface,
         assets: &FrontendAssets,
         scenario_game_options: &GameOptionButtons,
-        input: impl FnOnce(
-            &mut ClassicGameLobby,
-            &LobbyLayout,
-            &LobbyRosterLayout,
-        ) -> T,
+        input: impl FnOnce(&mut ClassicGameLobby, &LobbyLayout, &LobbyRosterLayout) -> T,
     ) -> Result<T> {
         let fonts = assets
             .clonk_fonts
@@ -19659,9 +20041,7 @@ impl NetworkLobbyState {
             surface,
             assets,
             scenario_game_options,
-            |controller, layout, roster| {
-                controller.pointer_secondary_down(point, layout, roster)
-            },
+            |controller, layout, roster| controller.pointer_secondary_down(point, layout, roster),
         )
     }
 
@@ -19723,9 +20103,7 @@ impl NetworkLobbyState {
             surface,
             assets,
             scenario_game_options,
-            |controller, layout, roster| {
-                controller.pointer_middle_down(point, layout, roster)
-            },
+            |controller, layout, roster| controller.pointer_middle_down(point, layout, roster),
         )
     }
 
@@ -19749,9 +20127,7 @@ impl NetworkLobbyState {
                 }
                 TouchPhase::Started => controller.touch_start(point, layout, roster),
                 TouchPhase::Moved => controller.touch_move(point, layout, roster),
-                TouchPhase::Ended => {
-                    controller.touch_end(point, layout, roster, Instant::now())
-                }
+                TouchPhase::Ended => controller.touch_end(point, layout, roster, Instant::now()),
                 TouchPhase::Cancelled => controller.touch_cancel(),
             },
         )
@@ -19859,8 +20235,7 @@ impl NetworkLobbyState {
         let scroll_window_captured =
             contains(layout.chat_log_client) || contains(layout.roster_client);
         self.controller.note_pointer_wheel();
-        let outside_scroll_window = contains(layout.chat_log)
-            && !contains(layout.chat_log_client)
+        let outside_scroll_window = contains(layout.chat_log) && !contains(layout.chat_log_client)
             || contains(layout.roster) && !contains(layout.roster_client);
         let changed =
             !outside_scroll_window && self.controller.wheel(point, delta, &layout, &roster);
@@ -19906,9 +20281,7 @@ impl NetworkLobbyState {
     }
 
     fn handle_key(&mut self, key: KeyCode, state: ElementState) -> Option<LobbyAction> {
-        if state != ElementState::Pressed
-            || self.controller.focus() != LobbyControl::ChatInput
-        {
+        if state != ElementState::Pressed || self.controller.focus() != LobbyControl::ChatInput {
             return None;
         }
         match key {
@@ -19919,9 +20292,7 @@ impl NetworkLobbyState {
                 // C4MessageInput's one process-local BackBuffer.
                 Some(LobbyAction::ChatEdited)
             }
-            KeyCode::Down => {
-                Some(LobbyAction::ChatEdited)
-            }
+            KeyCode::Down => Some(LobbyAction::ChatEdited),
             KeyCode::Left => {
                 let _ = lobby_chat_apply_edit_key(
                     &mut self.chat_edit,
@@ -20144,7 +20515,12 @@ impl MenuState {
         let folder_identifiers = self
             .stack
             .iter()
-            .filter_map(|layer| layer.folder.as_ref().map(|folder| folder.identifier.clone()))
+            .filter_map(|layer| {
+                layer
+                    .folder
+                    .as_ref()
+                    .map(|folder| folder.identifier.clone())
+            })
             .collect::<Vec<_>>();
         self.stack = vec![MenuLayer::new("Scenarios", entries)];
         for identifier in folder_identifiers {
@@ -20152,8 +20528,7 @@ impl MenuState {
                 .current_entries()
                 .iter()
                 .find(|entry| {
-                    entry.identifier == identifier
-                        && matches!(entry.kind, ScenarioKind::Folder)
+                    entry.identifier == identifier && matches!(entry.kind, ScenarioKind::Folder)
                 })
                 .cloned()
             else {
@@ -20408,10 +20783,13 @@ impl MenuState {
         if count == 0 {
             return Vec::new();
         }
-        let current = self
-            .menu
-            .selected_index()
-            .unwrap_or_else(|| if delta.is_negative() { count - 1 } else { 0 });
+        let current = self.menu.selected_index().unwrap_or_else(|| {
+            if delta.is_negative() {
+                count - 1
+            } else {
+                0
+            }
+        });
         let next = current.saturating_add_signed(delta).min(count - 1);
         if next == current && self.menu.selected_index().is_some() {
             return Vec::new();
@@ -20643,9 +21021,7 @@ impl MenuState {
         let map = self.current_map_mut()?;
         let button = map.scenarios.get(index)?;
         let entry = button.entry.clone();
-        let previous_identifier = map
-            .selected_entry()
-            .map(|entry| entry.identifier.clone());
+        let previous_identifier = map.selected_entry().map(|entry| entry.identifier.clone());
         let single_click = button.single_click;
         map.selected_button = Some(index);
         let entry = entry?;
@@ -20903,9 +21279,7 @@ fn parse_map_folder(text: &str) -> Result<ParsedMapFolder> {
                 };
                 continue;
             }
-            if !root_active
-                || (indentation > section_indentation && section_indentation > 0)
-            {
+            if !root_active || (indentation > section_indentation && section_indentation > 0) {
                 section = ParsedMapFolderSection::None;
                 section_indentation = indentation;
                 continue;
@@ -20917,7 +21291,9 @@ fn parse_map_folder(text: &str) -> Result<ParsedMapFolder> {
                     ParsedMapFolderSection::Scenario(parsed.scenarios.len() - 1)
                 }
                 "AccessGfx" => {
-                    parsed.access_overlays.push(ParsedMapFolderAccess::default());
+                    parsed
+                        .access_overlays
+                        .push(ParsedMapFolderAccess::default());
                     ParsedMapFolderSection::Access(parsed.access_overlays.len() - 1)
                 }
                 _ => ParsedMapFolderSection::None,
@@ -20973,9 +21349,7 @@ fn parse_map_folder(text: &str) -> Result<ParsedMapFolder> {
                     "File" => scenario.filename = value,
                     "BaseImage" => scenario.base_image = value,
                     "OverlayImage" => scenario.overlay_image = value,
-                    "SingleClick" => {
-                        scenario.single_click = parse_map_folder_bool(&value, key)?
-                    }
+                    "SingleClick" => scenario.single_click = parse_map_folder_bool(&value, key)?,
                     "Area" => scenario.area = parse_map_folder_rect(&value)?,
                     "Title" => scenario.title = value,
                     "TitleFontSize" => {
@@ -20987,23 +21361,17 @@ fn parse_map_folder(text: &str) -> Result<ParsedMapFolder> {
                     "TitleColorActive" => {
                         scenario.title_color_active = parse_map_folder_u32(&value, key)?
                     }
-                    "TitleOffX" => {
-                        scenario.title_offset_x = parse_map_folder_i32(&value, key)?
-                    }
-                    "TitleOffY" => {
-                        scenario.title_offset_y = parse_map_folder_i32(&value, key)?
-                    }
+                    "TitleOffX" => scenario.title_offset_x = parse_map_folder_i32(&value, key)?,
+                    "TitleOffY" => scenario.title_offset_y = parse_map_folder_i32(&value, key)?,
                     "TitleAlign" => {
-                        scenario.title_align = value.parse::<u8>().with_context(|| {
-                            format!("invalid FolderMap {key} value `{value}`")
-                        })?
+                        scenario.title_align = value
+                            .parse::<u8>()
+                            .with_context(|| format!("invalid FolderMap {key} value `{value}`"))?
                     }
                     "TitleUseBookFont" => {
                         scenario.title_use_book_font = parse_map_folder_bool(&value, key)?
                     }
-                    "ImageDump" => {
-                        scenario.image_dump = parse_map_folder_bool(&value, key)?
-                    }
+                    "ImageDump" => scenario.image_dump = parse_map_folder_bool(&value, key)?,
                     _ => {}
                 }
             }
@@ -22278,8 +22646,8 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
 
         let mut groups = Vec::new();
         for (_, _, parent_path) in registrations {
-            let parent = open_group_path_for_folder_map(&parent_path)
-                .map_err(ScenarioError::Resources)?;
+            let parent =
+                open_group_path_for_folder_map(&parent_path).map_err(ScenarioError::Resources)?;
             Self::push_material_child(&parent, &mut groups)?;
         }
 
@@ -22346,8 +22714,8 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
         registrations
             .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
         for (_, _, parent_path) in registrations {
-            let parent = open_group_path_for_folder_map(&parent_path)
-                .map_err(ScenarioError::Resources)?;
+            let parent =
+                open_group_path_for_folder_map(&parent_path).map_err(ScenarioError::Resources)?;
             Self::push_graphics_child(&parent, &mut groups, &mut seen)?;
         }
 
@@ -22806,8 +23174,7 @@ fn cached_app_paths_with_config_file(
         return result.clone();
     }
 
-    let discovered =
-        AppPaths::discover_with_config_file(explicit_config_file).map(Arc::new);
+    let discovered = AppPaths::discover_with_config_file(explicit_config_file).map(Arc::new);
     *cache = Some(discovered.clone());
     discovered
 }
@@ -22923,8 +23290,8 @@ fn classic_savegame_scenario_name(scenario: &FrontendScenario) -> String {
         .filter(|component| !component.is_empty())
         .collect::<Vec<_>>();
     let leaf = logical_components.last().copied().unwrap_or("");
-    let parent = (logical_components.len() >= 2)
-        .then(|| logical_components[logical_components.len() - 2]);
+    let parent =
+        (logical_components.len() >= 2).then(|| logical_components[logical_components.len() - 2]);
     classic_savegame_scenario_name_from_parts(leaf, parent, &scenario.title)
 }
 
@@ -23093,7 +23460,10 @@ fn material_int_array<const N: usize>(values: Option<Vec<i32>>) -> [i32; N] {
 }
 
 fn material_render_placement(material: &clonk_resources::MaterialDefinition) -> i32 {
-    if let Some(placement) = material.int("Placement").filter(|placement| *placement != 0) {
+    if let Some(placement) = material
+        .int("Placement")
+        .filter(|placement| *placement != 0)
+    {
         return placement;
     }
     let density = material.int("Density").unwrap_or(0);
@@ -23225,18 +23595,17 @@ fn admit_material_texture_names(group: &Group, inventory: &mut Vec<String>) -> u
                 .position(|byte| *byte == b'.')
                 .unwrap_or(entry.name_bytes.len());
             let full_stem = clonk_script::c4_string_from_bytes(&entry.name_bytes[..stem_end]);
-            if inventory.iter().any(|stored| {
-                clonk_resources::material::c4_names_equal(stored, &full_stem)
-            }) {
+            if inventory
+                .iter()
+                .any(|stored| clonk_resources::material::c4_names_equal(stored, &full_stem))
+            {
                 continue;
             }
             if extension.eq_ignore_ascii_case(b".bmp")
                 && group
                     .read_entry_bytes_exact(entry)
                     .ok()
-                    .and_then(|bytes| {
-                        clonk_resources::bitmap::IndexedBitmap::decode(&bytes).ok()
-                    })
+                    .and_then(|bytes| clonk_resources::bitmap::IndexedBitmap::decode(&bytes).ok())
                     .is_none()
             {
                 continue;
@@ -23269,9 +23638,7 @@ fn admitted_material_groups_with_paths(
         }
         let flags = if index == 0 {
             read_group_file_case_insensitive(&group, "TexMap.txt")
-                .map(|source| {
-                    clonk_resources::texmap::TextureMap::parse_bytes(&source)
-                })
+                .map(|source| clonk_resources::texmap::TextureMap::parse_bytes(&source))
                 .unwrap_or_default()
         } else {
             let Some(source) = read_group_file_case_insensitive(&group, "TexMap.txt") else {
@@ -23335,11 +23702,9 @@ fn load_material_render_info_with_paths(
     app_paths: Option<&AppPaths>,
 ) -> HashMap<String, clonk_frontend::MaterialRenderInfo> {
     let mut render_info = HashMap::new();
-    for source in admitted_material_groups_with_paths(
-        scenario_path,
-        authoritative_external_groups,
-        app_paths,
-    ) {
+    for source in
+        admitted_material_groups_with_paths(scenario_path, authoritative_external_groups, app_paths)
+    {
         if !source.materials {
             continue;
         }
@@ -23380,17 +23745,19 @@ fn absorb_material_texture_group(
                 .position(|byte| *byte == b'.')
                 .unwrap_or(entry.name_bytes.len());
             let full_stem = clonk_script::c4_string_from_bytes(&entry.name_bytes[..stem_end]);
-            if inventory.iter().any(|stored| {
-                clonk_resources::material::c4_names_equal(stored, &full_stem)
-            }) {
+            if inventory
+                .iter()
+                .any(|stored| clonk_resources::material::c4_names_equal(stored, &full_stem))
+            {
                 continue;
             }
             let bytes = group.read_entry_bytes_exact(entry).ok();
             let is_bmp = extension.eq_ignore_ascii_case(b".bmp");
             let indexed = if is_bmp {
-                let Some(mut bitmap) = bytes.as_deref().and_then(|bytes| {
-                    clonk_resources::bitmap::IndexedBitmap::decode(bytes).ok()
-                }) else {
+                let Some(mut bitmap) = bytes
+                    .as_deref()
+                    .and_then(|bytes| clonk_resources::bitmap::IndexedBitmap::decode(bytes).ok())
+                else {
                     continue;
                 };
                 // CSurface8::AllowColor(0, 2, true) retains zero and folds
@@ -23418,11 +23785,7 @@ fn absorb_material_texture_group(
             if let Some(bitmap) = indexed {
                 textures.insert(
                     fixed_key,
-                    MaterialTextureSurface::surface8(
-                        bitmap.width,
-                        bitmap.height,
-                        bitmap.indices,
-                    ),
+                    MaterialTextureSurface::surface8(bitmap.width, bitmap.height, bitmap.indices),
                 );
                 continue;
             }
@@ -23462,11 +23825,9 @@ fn load_scenario_material_textures_with_paths(
 ) -> HashMap<String, MaterialTextureSurface> {
     let mut textures = HashMap::new();
     let mut inventory = Vec::new();
-    for source in admitted_material_groups_with_paths(
-        scenario_path,
-        authoritative_external_groups,
-        app_paths,
-    ) {
+    for source in
+        admitted_material_groups_with_paths(scenario_path, authoritative_external_groups, app_paths)
+    {
         if !source.textures {
             continue;
         }
@@ -23693,7 +24054,9 @@ fn legacy_atoi_i32(raw: &str) -> i32 {
     };
     let digits_start = index;
     let mut value = 0_i64;
-    while let Some(digit) = bytes.get(index).and_then(|byte| byte.is_ascii_digit().then_some(*byte))
+    while let Some(digit) = bytes
+        .get(index)
+        .and_then(|byte| byte.is_ascii_digit().then_some(*byte))
     {
         value = value
             .saturating_mul(10)
@@ -23725,9 +24088,7 @@ fn resolve_offline_round_random_seed(
 
 fn current_offline_round_random_seed(parameter_seed: Option<i32>) -> u64 {
     let pin = std::env::var_os("LC_PIN_SEED");
-    let pin = pin
-        .as_deref()
-        .map(|value| value.to_string_lossy());
+    let pin = pin.as_deref().map(|value| value.to_string_lossy());
     resolve_offline_round_random_seed(parameter_seed, current_unix_timestamp(), pin.as_deref())
 }
 
@@ -23751,9 +24112,7 @@ fn format_startup_crew_birthday(seconds: i32) -> String {
         .ok()
         .and_then(|datetime| {
             datetime
-                .format(&format_description!(
-                    "[day].[month].[year] [hour]:[minute]"
-                ))
+                .format(&format_description!("[day].[month].[year] [hour]:[minute]"))
                 .ok()
         })
         .unwrap_or_default()
@@ -23820,7 +24179,7 @@ fn unique_save_path(dir: &Path, base: &str) -> PathBuf {
 fn next_recording_index(dir: &Path) -> io::Result<u32> {
     if !dir.exists() {
         return Ok(1);
-                        }
+    }
     let count = fs::read_dir(dir)?.try_fold(0_u32, |count, entry| {
         let entry = entry?;
         let file_name = entry.file_name();
@@ -23910,10 +24269,7 @@ fn screenshot_directories(paths: Option<&AppPaths>) -> (PathBuf, PathBuf) {
         let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         return (root.join("Screenshots"), root);
     };
-    (
-        paths.screenshot_dir(),
-        paths.install_root().to_path_buf(),
-    )
+    (paths.screenshot_dir(), paths.install_root().to_path_buf())
 }
 
 fn next_screenshot_path(directory: &Path) -> PathBuf {
@@ -23953,9 +24309,7 @@ fn encode_screenshot_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>
         writer
             .write_image_data(&rgb)
             .context("failed to encode screenshot PNG")?;
-        writer
-            .finish()
-            .context("failed to finish screenshot PNG")?;
+        writer.finish().context("failed to finish screenshot PNG")?;
     }
     Ok(buffer)
 }
@@ -23971,7 +24325,10 @@ fn prepare_numbered_screenshot_path(paths: Option<&AppPaths>) -> (PathBuf, Resul
                 "failed to create screenshot folder; falling back to install root"
             );
             let result = fs::create_dir_all(&fallback).with_context(|| {
-                format!("failed to create screenshot fallback at {}", fallback.display())
+                format!(
+                    "failed to create screenshot fallback at {}",
+                    fallback.display()
+                )
             });
             (fallback, result)
         }
@@ -23999,7 +24356,10 @@ fn write_screenshot(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result
 }
 
 fn scaled_screenshot_extent(extent: u32, scale: f32) -> Result<u32> {
-    anyhow::ensure!(scale.is_finite() && scale > 0.0, "invalid screenshot scale {scale}");
+    anyhow::ensure!(
+        scale.is_finite() && scale > 0.0,
+        "invalid screenshot scale {scale}"
+    );
     let scaled = (f64::from(extent) * f64::from(scale)).ceil();
     anyhow::ensure!(
         scaled >= 1.0 && scaled <= f64::from(u32::MAX),
@@ -24376,15 +24736,15 @@ fn load_gamepad_gui_control(paths: Option<&AppPaths>) -> bool {
 /// fair-crew icon. The field name is `FairCrew`, but the serialized key is not.
 fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
     let config = load_native_config_bytes(paths);
-    clonk_app_netplay::configured_native_boolean(&config, "General", "NoCrew")
-        .unwrap_or(false)
+    clonk_app_netplay::configured_native_boolean(&config, "General", "NoCrew").unwrap_or(false)
 }
 
 /// Native `C4Application::DoInit` constructs `C4GamePadControl` only when
 /// `Config.General.GamepadEnabled` is true. `C4ConfigGeneral` defaults the
 /// field on, so a missing or malformed serialized value retains that default.
 fn configured_gamepads_enabled(config: &[u8]) -> bool {
-    clonk_app_netplay::configured_native_boolean(config, "General", "GamepadEnabled").unwrap_or(true)
+    clonk_app_netplay::configured_native_boolean(config, "General", "GamepadEnabled")
+        .unwrap_or(true)
 }
 
 fn load_gamepads_enabled(paths: Option<&AppPaths>) -> bool {
@@ -24415,9 +24775,9 @@ fn save_config_preserving_native_general_booleans(
         })
     });
     let always_debug = updated_always_debug.or_else(|| {
-        existing
-            .as_deref()
-            .and_then(|config| clonk_app_netplay::configured_native_boolean(config, "General", "DebugMode"))
+        existing.as_deref().and_then(|config| {
+            clonk_app_netplay::configured_native_boolean(config, "General", "DebugMode")
+        })
     });
     config.save(path)?;
     let mut updates = Vec::new();
@@ -24435,7 +24795,8 @@ fn save_config_preserving_native_general_booleans(
     }
     if !updates.is_empty() {
         let saved = fs::read(path)?;
-        let updated = clonk_app_netplay::update_configured_native_values(&saved, "General", &updates)?;
+        let updated =
+            clonk_app_netplay::update_configured_native_values(&saved, "General", &updates)?;
         fs::write(path, updated)?;
     }
     Ok(())
@@ -24509,19 +24870,18 @@ struct StartupDefinitionPaths {
 
 fn startup_definition_paths(paths: &AppPaths) -> io::Result<StartupDefinitionPaths> {
     let configured_text = match fs::read(paths.config_file()) {
-        Ok(config) => native_config_text(&config, "General", "DefinitionPath")
-            .filter(|path| !path.is_empty()),
+        Ok(config) => {
+            native_config_text(&config, "General", "DefinitionPath").filter(|path| !path.is_empty())
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
     let configured_bytes = configured_text
         .as_ref()
         .map(|path| clonk_script::c4_string_bytes(path));
-    let configured_path = configured_bytes.as_ref().map(|path| {
-        path_from_group_name_bytes(&normalize_legacy_path_bytes(
-            path.clone(),
-        ))
-    });
+    let configured_path = configured_bytes
+        .as_ref()
+        .map(|path| path_from_group_name_bytes(&normalize_legacy_path_bytes(path.clone())));
     // AppPaths maps an installed C++ ExePath data layout to `content/` in a
     // source checkout; packaged layouts fall back to the install root.
     let exe_data_root = paths.content_dir().unwrap_or(paths.install_root());
@@ -24530,7 +24890,9 @@ fn startup_definition_paths(paths: &AppPaths) -> io::Result<StartupDefinitionPat
         .as_ref()
         // C4Config::AtExePath is literal concatenation even when DefinitionPath
         // starts with a root or drive marker.
-        .map(|path| concatenate_legacy_path(&executable_prefix, &clonk_script::c4_string_bytes(path)))
+        .map(|path| {
+            concatenate_legacy_path(&executable_prefix, &clonk_script::c4_string_bytes(path))
+        })
         .unwrap_or_else(|| exe_data_root.to_path_buf());
     let active_custom_root = configured_bytes
         .as_deref()
@@ -24770,6 +25132,7 @@ where
 
 fn load_options_program_state(
     paths: Option<&AppPaths>,
+    resources: Option<&HashMap<String, String>>,
 ) -> clonk_frontend::startup_options_dlg::ProgramSheetState {
     let mut state = clonk_frontend::startup_options_dlg::ProgramSheetState::default();
     let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
@@ -24833,9 +25196,8 @@ fn load_options_program_state(
             classic_language_packs(paths).language_infos(system.as_ref())
         })
         .unwrap_or_else(|| state.language_infos.clone());
-    if let Ok(table) = load_runtime_language_table(paths) {
-        state.no_language_info = table
-            .entries
+    if let Some(resources) = resources {
+        state.no_language_info = resources
             .get("IDS_CTL_NOLANGINFO")
             .cloned()
             .unwrap_or_else(|| "[Undefined: IDS_CTL_NOLANGINFO]".to_string());
@@ -24996,24 +25358,20 @@ fn load_native_config_bytes(paths: Option<&AppPaths>) -> Vec<u8> {
 
 fn materialized_save_description_language(config: &[u8]) -> Vec<u8> {
     match clonk_app_netplay::configured_native_value(config, "General", "Language") {
-        Some(value) => {
-            value
-                .as_bytes()
-                .iter()
-                .copied()
-                .take_while(|byte| *byte != b',')
-                .take(2)
-                .collect::<Vec<_>>()
-        }
+        Some(value) => value
+            .as_bytes()
+            .iter()
+            .copied()
+            .take_while(|byte| *byte != b',')
+            .take(2)
+            .collect::<Vec<_>>(),
         // C4Config materializes its system-language default only when the
         // field is absent. An explicitly stored empty first segment (for
         // example `Language=,DE`) survives through SCopyUntil unchanged.
-        None => {
-            classic_loader_system_language()
-                .unwrap_or("US")
-                .as_bytes()
-                .to_vec()
-        }
+        None => classic_loader_system_language()
+            .unwrap_or("US")
+            .as_bytes()
+            .to_vec(),
     }
 }
 
@@ -25026,8 +25384,8 @@ fn configured_process_group_maker(config: &[u8]) -> LegacyCString {
 /// enables DebugMode by default, while the graphical client requires the
 /// persisted AlwaysDebug switch. Both remain gated by Parameters.AllowDebug.
 fn arm_engine_debug_mode(engine: &mut Engine, config: &[u8], console_mode: bool) {
-    let always_debug =
-        clonk_app_netplay::configured_native_boolean(config, "General", "DebugMode").unwrap_or(false);
+    let always_debug = clonk_app_netplay::configured_native_boolean(config, "General", "DebugMode")
+        .unwrap_or(false);
     engine.set_debug_mode((console_mode || always_debug) && engine.allow_debug());
 }
 
@@ -25053,7 +25411,8 @@ fn configured_allow_scripting_in_replays(config: &[u8]) -> bool {
 }
 
 fn configured_auto_frame_skip(config: &[u8]) -> bool {
-    clonk_app_netplay::configured_native_boolean(config, "Graphics", "AutoFrameSkip").unwrap_or(true)
+    clonk_app_netplay::configured_native_boolean(config, "Graphics", "AutoFrameSkip")
+        .unwrap_or(true)
 }
 
 /// Freeze C4GameParameters at game activation. Network JoinData is
@@ -25070,11 +25429,9 @@ fn frozen_auto_frame_skip(
 }
 
 fn configured_console_script_strictness(config: &[u8]) -> clonk_engine::ScriptStrictness {
-    let Some(value) = clonk_app_netplay::configured_native_scalar(
-        config,
-        "Developer",
-        "ConsoleScriptStrictness",
-    ) else {
+    let Some(value) =
+        clonk_app_netplay::configured_native_scalar(config, "Developer", "ConsoleScriptStrictness")
+    else {
         return clonk_engine::ScriptStrictness::Strict3;
     };
     let value = value
@@ -25099,9 +25456,7 @@ fn configured_console_script_strictness(config: &[u8]) -> clonk_engine::ScriptSt
     }
 }
 
-fn native_console_script_strictness_number(
-    value: &[u8],
-) -> Option<clonk_engine::ScriptStrictness> {
+fn native_console_script_strictness_number(value: &[u8]) -> Option<clonk_engine::ScriptStrictness> {
     let hexadecimal = value.starts_with(b"0x") || value.starts_with(b"0X");
     let (negative, mut cursor, radix) = if hexadecimal {
         (false, 2, 16)
@@ -25202,7 +25557,9 @@ fn configured_fair_crew_strength(config: &[u8]) -> i32 {
 fn native_bytes_as_legacy_text(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len());
     for byte in bytes {
-        text.push_str(&clonk_script::c4_string_from_bytes(std::slice::from_ref(byte)));
+        text.push_str(&clonk_script::c4_string_from_bytes(std::slice::from_ref(
+            byte,
+        )));
     }
     text
 }
@@ -25392,9 +25749,8 @@ fn build_network_host_preparation(
     let (definition_executable_path, definition_path) = staged_definition_paths
         .map(|(executable, definitions)| (executable.to_owned(), definitions.to_owned()))
         .unwrap_or_else(|| game_save_definition_paths(app.app_paths.as_ref(), &config_bytes));
-    let definition_executable_root = path_from_group_name_bytes(&clonk_script::c4_string_bytes(
-        &definition_executable_path,
-    ));
+    let definition_executable_root =
+        path_from_group_name_bytes(&clonk_script::c4_string_bytes(&definition_executable_path));
 
     let mut install_roots = Vec::new();
     if let Some(paths) = app.app_paths.as_ref() {
@@ -25498,11 +25854,10 @@ fn build_network_host_preparation(
             .iter()
             .filter(|player| player.render_model.activated)
             .map(|player| {
-                let wire_name =
-                    clonk_engine::LegacyCString::from_bytes(player.file_name.as_bytes().to_vec())
-                        .ok_or_else(|| {
-                            anyhow!("selected player filename contains an interior NUL")
-                        })?;
+                let wire_name = clonk_engine::LegacyCString::from_bytes(
+                    player.file_name.as_bytes().to_vec(),
+                )
+                .ok_or_else(|| anyhow!("selected player filename contains an interior NUL"))?;
                 let opened_name = clonk_engine::LegacyCString::from_bytes(
                     resource_path_identity::opened_group_name(
                         &player.path,
@@ -25604,7 +25959,9 @@ fn build_network_host_preparation(
     })
 }
 
-fn load_network_search_settings(paths: Option<&AppPaths>) -> clonk_network::NetworkGameSearchConfig {
+fn load_network_search_settings(
+    paths: Option<&AppPaths>,
+) -> clonk_network::NetworkGameSearchConfig {
     let config = load_native_config_bytes(paths);
     let network_ports = sanitized_network_ports(&config);
     let value = |key| native_config_text(&config, "Network", key);
@@ -25657,7 +26014,9 @@ fn load_reference_query_settings(paths: Option<&AppPaths>) -> clonk_network::Ref
 
 fn load_league_auth_settings(paths: Option<&AppPaths>) -> clonk_network::LeagueAuthRequestHead {
     let config = load_native_config_bytes(paths);
-    let value = |key| clonk_app_netplay::configured_native_value(&config, "Network", key).unwrap_or_default();
+    let value = |key| {
+        clonk_app_netplay::configured_native_value(&config, "Network", key).unwrap_or_default()
+    };
     clonk_network::LeagueAuthRequestHead {
         account: value("LeagueNick"),
         // C4Config deliberately omits LeaguePassword from its compiler. It
@@ -25858,8 +26217,7 @@ fn load_classic_lobby_identity_with_hostname_provider(
     } else {
         configured_local_name
     };
-    let local_name =
-        sanitize_classic_lobby_name(&local_name, "Network.LocalName", false)?;
+    let local_name = sanitize_classic_lobby_name(&local_name, "Network.LocalName", false)?;
     let configured_nick = sanitize_classic_lobby_name(
         &network_name("Nick").unwrap_or_default(),
         "Network.Nick",
@@ -25973,7 +26331,10 @@ fn persist_irc_login_settings(
         paths,
         "IRC",
         &[
-            ("Nick", clonk_app_netplay::NativeConfigValue::CppEscapedString(&nick)),
+            (
+                "Nick",
+                clonk_app_netplay::NativeConfigValue::CppEscapedString(&nick),
+            ),
             (
                 "RealName",
                 clonk_app_netplay::NativeConfigValue::CppEscapedString(&real_name),
@@ -26818,13 +27179,12 @@ fn lobby_chat_context_entries(
     clipboard_available: bool,
 ) -> Vec<ContextMenuEntry<AppContextMenuCommand>> {
     let labels = InputDialogContextLabels::default();
-    let entry =
-        |label: &str, tooltip: &str, command: LobbyChatContextCommand| {
-            ContextMenuEntry::new(label)
-                .with_tooltip(tooltip)
-                .with_icon(ContextMenuIcon::None)
-                .with_action(AppContextMenuCommand::LobbyChat(command))
-        };
+    let entry = |label: &str, tooltip: &str, command: LobbyChatContextCommand| {
+        ContextMenuEntry::new(label)
+            .with_tooltip(tooltip)
+            .with_icon(ContextMenuIcon::None)
+            .with_action(AppContextMenuCommand::LobbyChat(command))
+    };
     let selection = lobby_chat_selection(view);
     let mut entries = Vec::new();
     if selection.is_some() {
@@ -26873,7 +27233,8 @@ fn lobby_chat_insert_text_impl(
 ) -> bool {
     const CPP_EDIT_MAX_BYTES: usize = 254;
     lobby_chat_delete_selection(view);
-    let mut remaining = CPP_EDIT_MAX_BYTES.saturating_sub(clonk_script::c4_string_byte_len(&view.text));
+    let mut remaining =
+        CPP_EDIT_MAX_BYTES.saturating_sub(clonk_script::c4_string_byte_len(&view.text));
     let mut sanitized = String::new();
     for character in text
         .chars()
@@ -26929,16 +27290,16 @@ fn lobby_chat_scroll_caret_in_view(
     if client_width < 5 {
         return;
     }
-    let caret_x = font.measure(&view.text[..view.caret], false).0
-        + font.measure("\u{a6}", false).0 / 2;
+    let caret_x =
+        font.measure(&view.text[..view.caret], false).0 + font.measure("\u{a6}", false).0 / 2;
     if caret_x < view.horizontal_scroll && view.horizontal_scroll > 0 {
         view.horizontal_scroll = caret_x.saturating_sub(2).max(0);
     }
     if caret_x > view.horizontal_scroll
         && caret_x > client_width.saturating_add(view.horizontal_scroll)
     {
-        view.horizontal_scroll = caret_x.saturating_sub(client_width)
-            + i32::from(view.caret < view.text.len()) * 2;
+        view.horizontal_scroll =
+            caret_x.saturating_sub(client_width) + i32::from(view.caret < view.text.len()) * 2;
     }
 }
 
@@ -26948,8 +27309,7 @@ fn lobby_chat_pointer_character(
     layout: &LobbyLayout,
     font: &clonk_graphics::clonk_font::ClonkFont,
 ) -> usize {
-    let control_x = point.x.floor() as i32 - (layout.chat_edit.x + 4)
-        + view.horizontal_scroll;
+    let control_x = point.x.floor() as i32 - (layout.chat_edit.x + 4) + view.horizontal_scroll;
     lobby_chat_character_at(view, control_x, font)
 }
 
@@ -26989,9 +27349,7 @@ fn lobby_chat_apply_double_click(
     let previous_caret = view.caret;
     let is_spacer = |character: Option<char>| {
         character.is_none_or(|character| {
-            character.is_ascii()
-                && !character.is_ascii_alphanumeric()
-                && character != '_'
+            character.is_ascii() && !character.is_ascii_alphanumeric() && character != '_'
         })
     };
     let mut position = lobby_chat_pointer_character(view, point, layout, font);
@@ -27034,7 +27392,8 @@ fn lobby_chat_apply_double_click(
 fn lobby_chat_insert_primary_text(view: &mut LobbyChatEditView, text: &str) -> bool {
     const CPP_EDIT_MAX_BYTES: usize = 254;
     lobby_chat_delete_selection(view);
-    let mut remaining = CPP_EDIT_MAX_BYTES.saturating_sub(clonk_script::c4_string_byte_len(&view.text));
+    let mut remaining =
+        CPP_EDIT_MAX_BYTES.saturating_sub(clonk_script::c4_string_byte_len(&view.text));
     let mut inserted = String::new();
     for character in text.chars().take_while(|character| *character != '\0') {
         let width = clonk_script::c4_string_byte_len(&character.to_string());
@@ -27080,7 +27439,9 @@ fn lobby_chat_paste_text<E>(
     mut finish_input: impl FnMut(String) -> Result<bool, E>,
 ) -> Result<LobbyChatPasteOutcome, E> {
     let mut outcome = LobbyChatPasteOutcome::default();
-    let mut rest = clipboard.split_once('\0').map_or(clipboard, |(head, _)| head);
+    let mut rest = clipboard
+        .split_once('\0')
+        .map_or(clipboard, |(head, _)| head);
     while let Some(line_break) = rest.find(['\r', '\n']) {
         if line_break == 0 {
             rest = &rest[1..];
@@ -27186,10 +27547,9 @@ fn lobby_chat_apply_edit_key(
     // C4GUI::Edit::KeyCursorOp returns immediately after deleting an active
     // selection. Every other recognized cursor operation reaches
     // ScrollCursorInView, even when it does not move the caret.
-    let deleted_selection_without_scroll = matches!(
-        key,
-        LobbyChatEditKey::Backspace | LobbyChatEditKey::Delete
-    ) && lobby_chat_selection(view).is_some();
+    let deleted_selection_without_scroll =
+        matches!(key, LobbyChatEditKey::Backspace | LobbyChatEditKey::Delete)
+            && lobby_chat_selection(view).is_some();
     let old_caret = view.caret;
     let target = match key {
         LobbyChatEditKey::Left => Some(if modifiers.control {
@@ -27355,10 +27715,18 @@ fn parse_lobby_message_control(text: &str) -> Result<Option<MessageControlData>>
     } else {
         (MESSAGE_TYPE_NORMAL, raw.as_slice())
     };
-    while message.first().copied().is_some_and(legacy_message_whitespace) {
+    while message
+        .first()
+        .copied()
+        .is_some_and(legacy_message_whitespace)
+    {
         message = &message[1..];
     }
-    while message.last().copied().is_some_and(legacy_message_whitespace) {
+    while message
+        .last()
+        .copied()
+        .is_some_and(legacy_message_whitespace)
+    {
         message = &message[..message.len() - 1];
     }
     if message.is_empty() && message_type != MESSAGE_TYPE_ALERT {
@@ -27431,10 +27799,18 @@ fn parse_running_message_control(
         (MESSAGE_TYPE_NORMAL, raw)
     };
 
-    while message.first().copied().is_some_and(legacy_message_whitespace) {
+    while message
+        .first()
+        .copied()
+        .is_some_and(legacy_message_whitespace)
+    {
         message.remove(0);
     }
-    while message.last().copied().is_some_and(legacy_message_whitespace) {
+    while message
+        .last()
+        .copied()
+        .is_some_and(legacy_message_whitespace)
+    {
         message.pop();
     }
     if cinematic && message_type == MESSAGE_TYPE_SAY && message.len() >= 2 {
@@ -27541,13 +27917,14 @@ fn build_game_over_dialog(
             big_icon: player_big_icon(state.player_info_id),
         });
     }
-    let separate_team_ids = (teams.len() == 2 && !auto_generate_teams)
-        .then(|| [teams[0].id, teams[1].id]);
-    let evaluation = EvaluationViewModel::new(goals, players).with_dialog_context(
-        c4_presentation_text(&snapshot.round_results.custom_evaluation_strings),
-        separate_team_ids,
-    )
-    .with_team_order(teams.iter().map(|team| team.id));
+    let separate_team_ids =
+        (teams.len() == 2 && !auto_generate_teams).then(|| [teams[0].id, teams[1].id]);
+    let evaluation = EvaluationViewModel::new(goals, players)
+        .with_dialog_context(
+            c4_presentation_text(&snapshot.round_results.custom_evaluation_strings),
+            separate_team_ids,
+        )
+        .with_team_order(teams.iter().map(|team| team.id));
 
     // Keep the asset-less fallback usable, but derive it from the same frozen
     // evaluation instead of treating every still-Active player as a winner or
@@ -27594,9 +27971,7 @@ fn build_game_over_dialog(
     dialog
 }
 
-fn configured_control_key_names(
-    bindings: &KeyboardBindings,
-) -> HashMap<i32, Vec<ControlKeyName>> {
+fn configured_control_key_names(bindings: &KeyboardBindings) -> HashMap<i32, Vec<ControlKeyName>> {
     (0..4_usize)
         .map(|control_set| {
             let names = ControlBindingId::ALL
@@ -27699,24 +28074,18 @@ fn project_startup_irc_command(
         NetDlgChatCommand::Part { channel } => clonk_network::IrcCommand::Part {
             channel: encode_startup_irc_text(&channel)?,
         },
-        NetDlgChatCommand::Message { target, text } => {
-            clonk_network::IrcCommand::Message {
-                target: encode_startup_irc_text(&target)?,
-                text: encode_startup_irc_text(&text)?,
-            }
-        }
-        NetDlgChatCommand::Notice { target, text } => {
-            clonk_network::IrcCommand::Notice {
-                target: encode_startup_irc_text(&target)?,
-                text: encode_startup_irc_text(&text)?,
-            }
-        }
-        NetDlgChatCommand::Action { target, text } => {
-            clonk_network::IrcCommand::Action {
-                target: encode_startup_irc_text(&target)?,
-                text: encode_startup_irc_text(&text)?,
-            }
-        }
+        NetDlgChatCommand::Message { target, text } => clonk_network::IrcCommand::Message {
+            target: encode_startup_irc_text(&target)?,
+            text: encode_startup_irc_text(&text)?,
+        },
+        NetDlgChatCommand::Notice { target, text } => clonk_network::IrcCommand::Notice {
+            target: encode_startup_irc_text(&target)?,
+            text: encode_startup_irc_text(&text)?,
+        },
+        NetDlgChatCommand::Action { target, text } => clonk_network::IrcCommand::Action {
+            target: encode_startup_irc_text(&target)?,
+            text: encode_startup_irc_text(&text)?,
+        },
         NetDlgChatCommand::Raw(line) => {
             clonk_network::IrcCommand::Raw(encode_startup_irc_text(&line)?)
         }
@@ -27836,30 +28205,30 @@ impl GameApp {
             .map(|entry| entry.render_model.clone())
             .collect();
         let network_lobby = match (&network_mode, &network) {
-            (Some(mode), Some(manager)) => Some(NetworkLobbyState::new(
-                manager.local_client_id(),
-                player_name.clone(),
-                matches!(mode, NetworkMode::Host(_)),
-            )
-            .with_preloading(
-                load_options_program_state(paths).preloading,
-                LobbyLabels::default(),
-            )),
+            (Some(mode), Some(manager)) => Some(
+                NetworkLobbyState::new(
+                    manager.local_client_id(),
+                    player_name.clone(),
+                    matches!(mode, NetworkMode::Host(_)),
+                )
+                .with_preloading(
+                    load_options_program_state(paths, None).preloading,
+                    LobbyLabels::default(),
+                ),
+            ),
             _ => None,
         };
         let control_clients = initial_control_clients(network.as_ref(), network_mode.as_ref());
         let network_control_running = network.is_none();
         let network_control_clock = initial_network_control_clock(network_mode.as_ref());
-        let network_client_next_control_ticks = network_control_clock.map_or_else(
-            HashMap::new,
-            |clock| {
+        let network_client_next_control_ticks =
+            network_control_clock.map_or_else(HashMap::new, |clock| {
                 control_clients
                     .activated_client_ids()
                     .into_iter()
                     .map(|client_id| (client_id, clock.current_tick()))
                     .collect()
-            },
-        );
+            });
         let host_join_snapshot = initial_host_join_snapshot(network_mode.as_ref());
         let network_max_players = initial_network_max_players(network_mode.as_ref());
         let network_is_league = initial_network_is_league(network_mode.as_ref());
@@ -28050,10 +28419,8 @@ impl GameApp {
                 LegacyCString::from_bytes(b"Team %d".to_vec())
                     .expect("the shipped team-name resource contains no NUL")
             });
-        let network_team_assignment = initial_network_team_assignment(
-            network_mode.as_ref(),
-            &generated_team_name_template,
-        );
+        let network_team_assignment =
+            initial_network_team_assignment(network_mode.as_ref(), &generated_team_name_template);
         let (needed_material_need, needed_material_none) = runtime_language_table
             .as_ref()
             .map(|table| needed_material_resource_strings(table))
@@ -28076,14 +28443,14 @@ impl GameApp {
             .ok()
             .map(default_rank_resource_names);
         let loaded_default_rank_names = default_rank_names.clone();
-        let startup_tooltip_resources = runtime_language_table
-            .as_ref()
-            .map(|table| table.entries.clone())
-            .unwrap_or_else(|_| {
-                load_runtime_language_table(None)
-                    .expect("the embedded LanguageUS.txt startup resource is valid")
-                    .entries
-            });
+        let (startup_tooltip_resources, runtime_language_charset) =
+            match runtime_language_table.as_ref() {
+                Ok(table) => (table.entries.clone(), table.charset),
+                Err(_) => {
+                    let table = embedded_runtime_language_table();
+                    (table.entries.clone(), table.charset)
+                }
+            };
         engine.set_needed_material_resource_strings(
             needed_material_need.clone(),
             needed_material_none.clone(),
@@ -28131,6 +28498,7 @@ impl GameApp {
             default_rank_names,
             loaded_default_rank_names,
             startup_tooltip_resources,
+            runtime_language_charset,
             mission_access,
             process_group_maker,
             save_description_language_table,
@@ -28273,6 +28641,7 @@ impl GameApp {
             material_library: None,
             pending_lobby_internet_signup: None,
             pending_league_player_auth: None,
+            network_event_waker: None,
             network,
             network_mode,
             league_auth_session: None,
@@ -28294,6 +28663,8 @@ impl GameApp {
             staged_network_host_scenario: None,
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
+            waiting_network_control: None,
+            network_control_retry_pending: false,
             network_sync: NetworkSyncGate::default(),
             offline_control_input: Vec::new(),
             offline_halt_count: 0,
@@ -28645,8 +29016,7 @@ impl GameApp {
         let gpu_recorder = surface.take_gpu_scene_capture();
         // Additive passes can contribute RGB while preserving a transparent
         // destination alpha. Retain those bytes for ordered replay too.
-        let has_raster = gpu_recorder.is_none()
-            && surface.pixels().iter().any(|byte| *byte != 0);
+        let has_raster = gpu_recorder.is_none() && surface.pixels().iter().any(|byte| *byte != 0);
         let has_gpu_commands = gpu_recorder
             .as_ref()
             .is_some_and(|recorder| !recorder.is_empty());
@@ -28654,9 +29024,7 @@ impl GameApp {
             let clip = isolated_clip.filter(|clip| {
                 has_raster
                     && !text.is_empty()
-                    && text
-                        .iter()
-                        .all(|command| command.clip == Some(*clip))
+                    && text.iter().all(|command| command.clip == Some(*clip))
             });
             plan.batches.push(NativePresentationBatch {
                 logical_layer: has_raster.then(|| surface.pixels().to_vec()),
@@ -28758,9 +29126,10 @@ impl GameApp {
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
-        let restart_same_dialog_fade = self.startup_dialog_fade.as_ref().and_then(|fade| {
-            (fade.outgoing == Some(fade.incoming)).then_some(fade.incoming)
-        });
+        let restart_same_dialog_fade = self
+            .startup_dialog_fade
+            .as_ref()
+            .and_then(|fade| (fade.outgoing == Some(fade.incoming)).then_some(fade.incoming));
         self.startup_dialog_fade = None;
         self.close_context_menu_silently();
         // Native resize tears down/repositions dialog elements and therefore
@@ -28921,8 +29290,10 @@ impl GameApp {
             .set_show_commands_request_store(self.show_commands_requests.clone());
         self.engine
             .set_control_key_names(configured_control_key_names(&self.bindings));
-        self.engine
-            .set_control_host(!matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))));
+        self.engine.set_control_host(!matches!(
+            self.network_mode.as_ref(),
+            Some(NetworkMode::Client(_))
+        ));
         self.engine.set_needed_material_resource_strings(
             self.needed_material_need.clone(),
             self.needed_material_none.clone(),
@@ -28954,8 +29325,10 @@ impl GameApp {
         engine.set_mission_access_store(self.mission_access.clone());
         engine.set_show_commands_request_store(self.show_commands_requests.clone());
         engine.set_control_key_names(configured_control_key_names(&self.bindings));
-        engine
-            .set_control_host(!matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))));
+        engine.set_control_host(!matches!(
+            self.network_mode.as_ref(),
+            Some(NetworkMode::Client(_))
+        ));
         engine.set_needed_material_resource_strings(
             self.needed_material_need.clone(),
             self.needed_material_none.clone(),
@@ -29164,11 +29537,10 @@ impl GameApp {
     }
 
     fn copy_search_edit_selection(&mut self, cut: bool) {
-        let result =
-            transfer_edit_selection(&mut self.menu_state.search_edit, cut, |selected| {
-                arboard::Clipboard::new()
-                    .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
-            });
+        let result = transfer_edit_selection(&mut self.menu_state.search_edit, cut, |selected| {
+            arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
+        });
         if let Err(err) = result {
             tracing::warn!(error = %err, "failed to copy scenario search text");
         }
@@ -29279,8 +29651,7 @@ impl GameApp {
     fn runtime_help_columns(&self) -> Result<&RuntimeHelpColumns> {
         self.runtime_help_text_cache
             .get_or_init(|| {
-                load_runtime_help_language_table(self.app_paths.as_ref())
-                    .and_then(|table| build_runtime_help_columns(&table))
+                build_runtime_help_columns(&self.startup_tooltip_resources)
                     .map_err(|error| format!("{error:#}"))
             })
             .as_ref()
@@ -29311,9 +29682,10 @@ impl GameApp {
     fn runtime_flash_resources(&self) -> Result<&RuntimeFlashResources> {
         self.runtime_flash_resources_cache
             .get_or_init(|| {
-                load_runtime_language_table(self.app_paths.as_ref())
-                    .map(|table| build_runtime_flash_resources(&table))
-                    .map_err(|error| format!("{error:#}"))
+                Ok(build_runtime_flash_resources(&RuntimeLanguageTable {
+                    charset: self.runtime_language_charset,
+                    entries: self.startup_tooltip_resources.clone(),
+                }))
             })
             .as_ref()
             .map_err(|detail| anyhow!(detail.clone()))
@@ -29732,9 +30104,7 @@ impl GameApp {
     }
 
     fn local_control_submission_tick(&self) -> Tick {
-        let after_executing = self
-            .executing_ready_tick
-            .map(|tick| tick.saturating_add(1));
+        let after_executing = self.executing_ready_tick.map(|tick| tick.saturating_add(1));
         let next_unsent = self
             .network_control_clock
             .and_then(|clock| Tick::try_from(clock.next_unsent_tick()).ok());
@@ -30013,25 +30383,25 @@ impl GameApp {
     /// Loads the definition pictures for goal/rule menu symbols
     /// (`pDef->Draw(fctSymbol)`, C4MainMenu.cpp:367,397).
     fn cache_definition_icons(&mut self, entries: &[GoalRuleEntry]) -> Result<(), EngineError> {
-        let icons = entries
-            .iter()
-            .map(|entry| {
-                let image = self
-                    .engine
-                    .try_definition_picture_image(&entry.definition_id)
-                    .map_err(|error| {
-                        classic_parity_engine_error(report_classic_parity_boundary(
-                            ClassicParityBoundary::IngameMenuDefinitionIcon {
-                                definition_id: entry.definition_id.clone(),
-                                detail: error.to_string(),
-                            },
-                        ))
-                    })?;
-                Ok(image.map(|image| {
-                    (entry.definition_id.clone(), definition_menu_picture(image))
-                }))
-            })
-            .collect::<std::result::Result<Vec<_>, EngineError>>()?;
+        let icons =
+            entries
+                .iter()
+                .map(|entry| {
+                    let image = self
+                        .engine
+                        .try_definition_picture_image(&entry.definition_id)
+                        .map_err(|error| {
+                            classic_parity_engine_error(report_classic_parity_boundary(
+                                ClassicParityBoundary::IngameMenuDefinitionIcon {
+                                    definition_id: entry.definition_id.clone(),
+                                    detail: error.to_string(),
+                                },
+                            ))
+                        })?;
+                    Ok(image
+                        .map(|image| (entry.definition_id.clone(), definition_menu_picture(image))))
+                })
+                .collect::<std::result::Result<Vec<_>, EngineError>>()?;
         let gfx = self.ensure_ingame_menu_gfx();
         for (id, image) in icons.into_iter().flatten() {
             gfx.definition_icons.insert(id, image);
@@ -30143,8 +30513,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         let runtime_commit = self.runtime_network_status_barrier;
         if runtime_commit.is_some_and(|pending| {
-            !pending.local_reached
-                || !same_runtime_network_status_barrier(pending.status, status)
+            !pending.local_reached || !same_runtime_network_status_barrier(pending.status, status)
         }) {
             tracing::warn!(
                 state = status.state,
@@ -30200,6 +30569,16 @@ impl GameApp {
             );
             return Ok(());
         };
+        if status.state == clonk_network::NETWORK_STATE_GO {
+            // Native DoLobby destroys pLobby before returning into scenario
+            // initialization. Clear a joined-client adapter at the same
+            // boundary so no hidden lobby state can consume synchronized
+            // runtime traffic (src/C4Network2.cpp:493-515).
+            let closed_joined_lobby = self.network_lobby.take().is_some();
+            if closed_joined_lobby && self.mode != AppMode::Running {
+                self.close_context_menu_silently();
+            }
+        }
         self.runtime_network_control_mode = Some(status.control_mode);
         self.runtime_network_committed_status = Some(status);
         if status.state == clonk_network::NETWORK_STATE_GO {
@@ -30276,21 +30655,12 @@ impl GameApp {
         // MainDlg::OnLog (src/C4Log.cpp:227-239;
         // src/C4GameLobby.cpp:738-753).
         let name = legacy_presentation_text(name);
-        let template = startup_resource_string(
-            self.app_paths.as_ref(),
-            "IDS_NET_CLIENT_JOIN",
-            "Client %s connected.",
-        );
+        let template = self.runtime_resource_text("IDS_NET_CLIENT_JOIN", "Client %s connected.");
         let message = format_resource_string(template, &[&name]);
         self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
     }
 
-    fn append_control_message_log(
-        &mut self,
-        line: String,
-        color: u32,
-        lobby_sender: Option<i32>,
-    ) {
+    fn append_control_message_log(&mut self, line: String, color: u32, lobby_sender: Option<i32>) {
         tracing::info!(message = %line, "network message");
         let line = self.timestamp_log_line(line);
         let color = lobby_sender
@@ -30333,7 +30703,10 @@ impl GameApp {
 
     fn timestamp_log_line(&self, line: String) -> String {
         if self.show_log_timestamps {
-            format!("{} {line}", clonk_core::chrono_util::current_timestamp(true))
+            format!(
+                "{} {line}",
+                clonk_core::chrono_util::current_timestamp(true)
+            )
         } else {
             line
         }
@@ -30551,9 +30924,7 @@ impl GameApp {
         let tick = self.local_control_submission_tick();
         if let Some(network) = self.network.as_ref() {
             let sync = self.running_control_prefers_sync();
-            if let Err(error) =
-                network.submit_decided_em_move_object_control(tick, control, sync)
-            {
+            if let Err(error) = network.submit_decided_em_move_object_control(tick, control, sync) {
                 tracing::error!(%error, "failed to submit editor selection script");
             }
             return Ok(());
@@ -30663,15 +31034,11 @@ impl GameApp {
     }
 
     fn ingame_moving_drag_active(&self) -> bool {
-        self.mouse_state
-            .is_some_and(|state| {
-                state.motion.region_drag_started || state.motion.world_drag_started
-            })
-            || self
-                .ingame_right_mouse_state
-                .is_some_and(|state| {
-                    state.motion.region_drag_started || state.motion.world_drag_started
-                })
+        self.mouse_state.is_some_and(|state| {
+            state.motion.region_drag_started || state.motion.world_drag_started
+        }) || self.ingame_right_mouse_state.is_some_and(|state| {
+            state.motion.region_drag_started || state.motion.world_drag_started
+        })
     }
 
     fn ingame_selection_drag_active(&self) -> bool {
@@ -30919,9 +31286,7 @@ impl GameApp {
         &self,
         motion: IngameMouseState,
     ) -> Option<(IngameDragSelectionKind, Vec<ObjectId>)> {
-        if !motion.moved
-            || !motion.selection_frame
-            || self.ingame_pointer_fog_blocked(motion.last)
+        if !motion.moved || !motion.selection_frame || self.ingame_pointer_fog_blocked(motion.last)
         {
             return None;
         }
@@ -30954,11 +31319,7 @@ impl GameApp {
         }
     }
 
-    fn ingame_fog_allows_target(
-        &self,
-        pointer: ViewportPointer,
-        target: ObjectId,
-    ) -> bool {
+    fn ingame_fog_allows_target(&self, pointer: ViewportPointer, target: ObjectId) -> bool {
         !self.ingame_pointer_fog_blocked(pointer)
             || self
                 .snapshot
@@ -30991,11 +31352,7 @@ impl GameApp {
     /// cursor-inventory cell. These regions sit above the world pick layer
     /// and retain the group's first object as their Target
     /// (C4Viewport.cpp:911-917; C4ObjectList.cpp:343-372).
-    fn ingame_inventory_region_hit(
-        &self,
-        owner: i32,
-        point: GuiPoint,
-    ) -> Option<(ObjectId, Rect)> {
+    fn ingame_inventory_region_hit(&self, owner: i32, point: GuiPoint) -> Option<(ObjectId, Rect)> {
         let pointer = self.graphics.viewport_output_point_at(point)?;
         if pointer.owner != owner {
             return None;
@@ -31008,9 +31365,7 @@ impl GameApp {
             .find(|player| player.id == pointer.owner)
             .and_then(|player| player.view_cursor.or(player.cursor))?;
         let cursor_definition = &self.snapshot.object(cursor)?.definition_id;
-        if self
-            .engine
-            .definition_hide_hud_elements(cursor_definition)
+        if self.engine.definition_hide_hud_elements(cursor_definition)
             & clonk_engine::HIDE_HUD_ELEMENT_INVENTORY
             != 0
         {
@@ -31022,11 +31377,11 @@ impl GameApp {
             cursor,
             self.graphics.advanced_renderer_config(),
         );
-        let section = clonk_frontend::hud::inventory_region_index(viewport, point, inventory.len())?;
-        let region = clonk_frontend::hud::inventory_region_rect(viewport, section, inventory.len())?;
-        inventory
-            .get(section)
-            .map(|item| (item.object_id, region))
+        let section =
+            clonk_frontend::hud::inventory_region_index(viewport, point, inventory.len())?;
+        let region =
+            clonk_frontend::hud::inventory_region_rect(viewport, section, inventory.len())?;
+        inventory.get(section).map(|item| (item.object_id, region))
     }
 
     fn ingame_inventory_region_target(&self, owner: i32, point: GuiPoint) -> Option<ObjectId> {
@@ -31034,11 +31389,7 @@ impl GameApp {
             .map(|(target, _)| target)
     }
 
-    fn ingame_command_region_hit(
-        &self,
-        owner: i32,
-        point: GuiPoint,
-    ) -> Option<(u8, String, Rect)> {
+    fn ingame_command_region_hit(&self, owner: i32, point: GuiPoint) -> Option<(u8, String, Rect)> {
         if !self.display_flags.show_commands
             || self.object_menu.is_some()
             || self.engine.cursor_object_menu(owner).is_some()
@@ -31106,14 +31457,12 @@ impl GameApp {
         let state = self
             .mouse_state
             .as_ref()
-            .filter(|state| {
-                state.motion.region_drag_started || state.motion.world_drag_started
-            })
+            .filter(|state| state.motion.region_drag_started || state.motion.world_drag_started)
             .or_else(|| {
                 self.ingame_right_mouse_state.as_ref().filter(|state| {
                     state.motion.region_drag_started || state.motion.world_drag_started
                 })
-        })?;
+            })?;
         let target = state.down_target?;
         let mut selected = if state.motion.region_drag_started {
             self.ingame_dragged_objects.clone()
@@ -31308,9 +31657,10 @@ impl GameApp {
                 ingame_pointer_world_pixel(drag.motion.start),
             )
         };
-        let region_selection = drag
-            .down_region
-            .then(|| self.engine.mouse_region_drag_objects(target, expand_region_group));
+        let region_selection = drag.down_region.then(|| {
+            self.engine
+                .mouse_region_drag_objects(target, expand_region_group)
+        });
         match source {
             Some(MouseDragSource::Carryable) => {
                 self.finish_ingame_carryable_drag(drag, target, region_selection)?;
@@ -31696,10 +32046,10 @@ impl GameApp {
         self.object_no_dig = object_no_dig.clone();
         self.loaded_default_rank_names = Some(default_rank_resource_names(&table));
         self.startup_tooltip_resources = table.entries.clone();
+        self.runtime_language_charset = table.charset;
         self.engine
             .set_needed_material_resource_strings(needed_material_need, needed_material_none);
-        self.engine
-            .set_object_no_dig_resource_string(object_no_dig);
+        self.engine.set_object_no_dig_resource_string(object_no_dig);
         let construction_check_feedback = construction_check_resource_strings(&table);
         self.construction_check_feedback = construction_check_feedback.clone();
         {
@@ -32209,7 +32559,7 @@ impl GameApp {
         let runtime_record_waiting = self.runtime_record_requested && self.recording.is_none();
         let mut batch_recorded = self.recording.is_some();
         if batch_recorded {
-        self.record_control_batch(&packets);
+            self.record_control_batch(&packets);
         }
         debug_assert!(self.executing_ready_tick.is_none());
         self.executing_ready_tick = Some(tick);
@@ -32228,16 +32578,14 @@ impl GameApp {
                         .as_ref()
                         .and_then(|network| i32::try_from(network.local_client_id()).ok())
                         == Some(info.by_client);
-                    let had_client_packet = self
-                        .control_player_infos
-                        .client_packet(client_id)
-                        .is_some();
-                    let send_clean_follow_up = matches!(
-                        self.runtime_network_role(),
-                        RuntimeNetworkRole::Host
-                    ) && info.flags & clonk_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED != 0
-                        && (info.flags & clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS == 0
-                            || !had_client_packet);
+                    let had_client_packet =
+                        self.control_player_infos.client_packet(client_id).is_some();
+                    let send_clean_follow_up =
+                        matches!(self.runtime_network_role(), RuntimeNetworkRole::Host)
+                            && info.flags & clonk_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED != 0
+                            && (info.flags & clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
+                                == 0
+                                || !had_client_packet);
                     self.admission_resources
                         .register_player_info_resources(&info.players);
                     self.control_player_infos.apply(info);
@@ -32272,26 +32620,28 @@ impl GameApp {
                         // that queued follow-up inline, like the existing
                         // CreateScriptPlayer admission path above.
                         let local_client_id = self.offline_local_client_id();
-                        let joins = self.control_player_infos.issue_unjoined_local_players(
-                            local_client_id,
-                            |info| (!info.filename.is_empty()).then(|| info.filename.clone()),
-                        );
+                        let joins = self
+                            .control_player_infos
+                            .issue_unjoined_local_players(local_client_id, |info| {
+                                (!info.filename.is_empty()).then(|| info.filename.clone())
+                            });
                         for join in joins {
                             if self.recording.is_some() {
                                 let mut recorded_join = join.clone();
                                 let recorded = if join.filename.is_empty() {
                                     Some(recorded_join)
                                 } else {
-                                    let path = PathBuf::from(
-                                        join.filename.to_string_lossy().into_owned(),
-                                    );
+                                    let path =
+                                        PathBuf::from(join.filename.to_string_lossy().into_owned());
                                     match packed_group_bytes(
                                         &path,
                                         self.process_group_maker.as_bytes(),
                                     ) {
                                         Ok(player_data) => {
                                             recorded_join.source =
-                                                clonk_engine::JoinPlayerSource::Embedded(player_data);
+                                                clonk_engine::JoinPlayerSource::Embedded(
+                                                    player_data,
+                                                );
                                             Some(recorded_join)
                                         }
                                         Err(error) => {
@@ -32325,9 +32675,9 @@ impl GameApp {
                         }
                         clonk_engine::JoinPlayerSource::Embedded(_) => None,
                     };
-                    if aborted_key.is_some_and(|key| {
-                        self.aborted_player_resource_joins.remove(&key)
-                    }) {
+                    if aborted_key
+                        .is_some_and(|key| self.aborted_player_resource_joins.remove(&key))
+                    {
                         Ok(())
                     } else {
                         self.apply_join_player_control(join)
@@ -32558,10 +32908,8 @@ impl GameApp {
                             let mut updated_clients = HashSet::new();
                             if had_player_info {
                                 self.recheck_team_memberships_without_random_rebalance();
-                                let executes_host_cascade = matches!(
-                                    self.runtime_network_role(),
-                                    RuntimeNetworkRole::Host
-                                );
+                                let executes_host_cascade =
+                                    matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
                                 if executes_host_cascade {
                                     let restore_players = host_restore_player_info_entries(
                                         self.host_join_snapshot.as_ref(),
@@ -32595,9 +32943,7 @@ impl GameApp {
                                     match attribute_updates {
                                         Ok(updates) => {
                                             updated_clients.extend(
-                                                updates
-                                                    .into_iter()
-                                                    .map(|update| update.client_id),
+                                                updates.into_iter().map(|update| update.client_id),
                                             );
                                         }
                                         Err(error) => {
@@ -32620,9 +32966,8 @@ impl GameApp {
                                     );
                                 }
                             }
-                            let updates = self
-                                .control_player_infos
-                                .client_packets(&updated_clients);
+                            let updates =
+                                self.control_player_infos.client_packets(&updated_clients);
                             if let Some(network) = self.network.as_ref() {
                                 for update in updates {
                                     if let Err(error) = network.broadcast_player_info(update) {
@@ -32684,6 +33029,40 @@ impl GameApp {
             self.refresh_network_client_next_control_ticks();
         }
         result
+    }
+
+    fn install_network_event_waker(&mut self, callback: NetworkEventWakeCallback) {
+        self.network_event_waker = Some(callback);
+        self.refresh_network_event_waker();
+    }
+
+    fn refresh_network_event_waker(&self) {
+        if let (Some(network), Some(callback)) =
+            (self.network.as_ref(), self.network_event_waker.as_ref())
+        {
+            network.install_event_waker(callback.clone());
+        }
+    }
+
+    fn note_network_event_wake(&mut self, wake: NetworkEventWake) {
+        self.network_control_retry_pending |= matches!(
+            (self.waiting_network_control, wake),
+            (
+                Some(NetworkControlWait::ReadyTick(expected)),
+                NetworkEventWake::ReadyTick(actual)
+            ) if expected == actual
+        ) || matches!(
+            (self.waiting_network_control, wake),
+            (
+                Some(NetworkControlWait::PlayerResource { resource_id: expected }),
+                NetworkEventWake::ResourceComplete(actual)
+                    | NetworkEventWake::ResourceLoadFailed(actual)
+            ) if expected == actual
+        );
+    }
+
+    fn take_network_control_retry(&mut self) -> bool {
+        std::mem::take(&mut self.network_control_retry_pending)
     }
 
     fn update(&mut self) -> Result<(), EngineError> {
@@ -32757,7 +33136,22 @@ impl GameApp {
         self.sync_scoreboard_presentation();
         match action {
             GameOverAction::Continue => {
+                let resumes_changed_to_local_control = self.network.is_none()
+                    && !self.network_control_running
+                    && self.offline_halt_count != 0;
                 self.dismiss_game_over_dialog();
+                // C4GameOverDlg::OnClosed invokes Game.Unpause only after an
+                // accepted Continue close. This requests synchronized GS_Go
+                // for a host, remains a client no-op, and clears the direct
+                // offline halt (src/C4GameOverDlg.cpp:360-381;
+                // src/C4Game.cpp:1071-1084).
+                self.set_runtime_pause(false);
+                if resumes_changed_to_local_control {
+                    // Fatal network cleanup transfers the dialog's stopped
+                    // control into an offline halt. Continue releases both
+                    // halves of that ChangeToLocal handoff.
+                    self.network_control_running = true;
+                }
             }
             GameOverAction::End => {
                 self.return_to_menu();
@@ -32941,20 +33335,18 @@ impl GameApp {
                         // has acknowledged this exact barrier
                         // (src/C4Network2.cpp:2017-2077,2091-2110).
                         self.mode = AppMode::Loading;
-                        let client_control_tick = if matches!(
-                            self.network_mode,
-                            Some(NetworkMode::Client(_))
-                        ) {
-                            self.network_control_clock
-                                .map(NetworkControlClock::current_tick)
-                        } else {
-                            None
-                        };
+                        let client_control_tick =
+                            if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                                self.network_control_clock
+                                    .map(NetworkControlClock::current_tick)
+                            } else {
+                                None
+                            };
                         let reached = if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
                             match client_control_tick {
                                 Some(current_control_tick) => {
-                                    let current_frame = i32::try_from(self.engine.frame())
-                                        .unwrap_or(i32::MAX);
+                                    let current_frame =
+                                        i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
                                     match self
                                         .client_start_barrier
                                         .local_initialized_at(current_control_tick)
@@ -33264,9 +33656,9 @@ impl GameApp {
             .iter()
             .copied()
             .filter(|object| {
-                self.engine.object_snapshot(*object).is_some_and(|object| {
-                    object.status != clonk_engine::ObjectStatus::Deleted
-                })
+                self.engine
+                    .object_snapshot(*object)
+                    .is_some_and(|object| object.status != clonk_engine::ObjectStatus::Deleted)
             })
             .collect()
     }
@@ -33332,10 +33724,9 @@ impl GameApp {
     }
 
     fn runtime_resource_string(&self, key: &str) -> String {
-        load_runtime_language_table(self.app_paths.as_ref())
-            .or_else(|_| load_runtime_language_table(None))
-            .ok()
-            .and_then(|table| table.entries.get(key).cloned())
+        self.startup_tooltip_resources
+            .get(key)
+            .cloned()
             .unwrap_or_else(|| format!("[Undefined: {key}]"))
     }
 
@@ -33344,15 +33735,10 @@ impl GameApp {
     }
 
     fn runtime_resource_bytes_with_fallback(&self, key: &str, fallback: &str) -> Vec<u8> {
-        let Ok(table) = load_runtime_language_table(self.app_paths.as_ref())
-            .or_else(|_| load_runtime_language_table(None))
-        else {
+        let Some(value) = self.startup_tooltip_resources.get(key) else {
             return fallback.as_bytes().to_vec();
         };
-        let Some(value) = table.entries.get(key) else {
-            return fallback.as_bytes().to_vec();
-        };
-        match table.charset {
+        match self.runtime_language_charset {
             RuntimeHelpCharset::Windows1252 => value
                 .chars()
                 .map(runtime_cp1252_byte)
@@ -33363,10 +33749,7 @@ impl GameApp {
     }
 
     fn runtime_resource_text(&self, key: &str, fallback: &str) -> String {
-        load_runtime_language_table(self.app_paths.as_ref())
-            .ok()
-            .and_then(|table| table.entries.get(key).cloned())
-            .unwrap_or_else(|| fallback.to_string())
+        runtime_resource_text_from_table(&self.startup_tooltip_resources, key, fallback)
     }
 
     fn quick_load(&mut self) -> Result<()> {
@@ -33407,12 +33790,7 @@ impl GameApp {
             .context("application paths are unavailable for saved-game font resolution")?;
         let (head, catalog, graphics_registrations) =
             loaded_game_gui_registrations(frontend, definition_load, paths)?;
-        resolve_classic_font_bundle(
-            paths,
-            Some(head.font()),
-            &catalog,
-            &graphics_registrations,
-        )
+        resolve_classic_font_bundle(paths, Some(head.font()), &catalog, &graphics_registrations)
     }
 
     fn apply_loaded_game(&mut self, save: SavedGameFile) -> Result<()> {
@@ -33432,10 +33810,9 @@ impl GameApp {
                         saved_definition_load.as_ref(),
                     )?,
                 ),
-                Some(self.loaded_game_graphics_resources(
-                    &frontend,
-                    saved_definition_load.as_ref(),
-                )?),
+                Some(
+                    self.loaded_game_graphics_resources(&frontend, saved_definition_load.as_ref())?,
+                ),
             )
         };
         self.assets
@@ -33532,8 +33909,7 @@ impl GameApp {
         self.engine.set_smoke_level(self.graphics_smoke_level);
         self.engine.set_local_players([self.local_owner]);
         self.engine.set_network_game(self.network.is_some());
-        self.engine
-            .set_network_control_mode(self.network.is_some());
+        self.engine.set_network_control_mode(self.network.is_some());
         self.engine.set_league_game(self.network_is_league);
         seed_engine_player_info_parameters(
             &mut self.engine,
@@ -33542,8 +33918,7 @@ impl GameApp {
         );
         self.engine
             .set_max_players(i32::try_from(self.network_max_players).unwrap_or(i32::MAX));
-        self.engine
-            .set_recording_active(self.recording_enabled);
+        self.engine.set_recording_active(self.recording_enabled);
         self.engine.set_fair_crew_forced(parameter_bootstrap.0);
         self.engine
             .set_allow_debug(saved_allow_debug.unwrap_or(parameter_bootstrap.1));
@@ -33582,7 +33957,7 @@ impl GameApp {
                 self.console_mode,
             );
             configure_sandbox_engine(&mut self.engine, definition_load, self.audio.as_mut())
-            .context("failed to prepare sandbox engine for saved game")?;
+                .context("failed to prepare sandbox engine for saved game")?;
         } else {
             let path = frontend.path.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -33594,12 +33969,9 @@ impl GameApp {
             let languages = startup_language_sequence(resolver_paths.as_deref());
             let resolver = InstallDefinitionResolver::new(resolver_paths);
             let scenario_data = match saved_definition_load.as_ref() {
-                Some(definition_load) => load_scenario_with_definition_load(
-                    path,
-                    &resolver,
-                    &languages,
-                    definition_load,
-                ),
+                Some(definition_load) => {
+                    load_scenario_with_definition_load(path, &resolver, &languages, definition_load)
+                }
                 None => Scenario::load_from_path_with_languages(path, &resolver, &languages),
             }
             .with_context(|| {
@@ -33748,8 +34120,7 @@ impl GameApp {
         // network-client packets. It does not RemovePlayer their saved
         // objects; the following ValidateOwners phase only orphans the three
         // runtime player-number references.
-        self.engine
-            .retain_restored_players(retained_player_numbers);
+        self.engine.retain_restored_players(retained_player_numbers);
         // C++ compiles runtime data first, then C4Player::Init overwrites the
         // current client/name and reruns InitControl for every recreated
         // player. Control is always recalculated; MouseControl is only set
@@ -33815,9 +34186,7 @@ impl GameApp {
             saved_pref_auto_context_menu,
         ) in restored_players
         {
-            let linked_client_id = self
-                .control_player_infos
-                .client_id_for_info(player_info_id);
+            let linked_client_id = self.control_player_infos.client_id_for_info(player_info_id);
             let current_info = self.control_player_infos.get(player_info_id);
             let script_player = current_info
                 .map(|info| info.is_script_player())
@@ -33869,8 +34238,7 @@ impl GameApp {
                         previous_control.is_some()
                             || (!networked
                                 && (saved_at_client == clonk_engine::PlayerAtClient::HOST
-                                    || (player_info_id == 0
-                                        && number == previous_local_owner)))
+                                    || (player_info_id == 0 && number == previous_local_owner)))
                     }
                 };
 
@@ -34343,8 +34711,7 @@ impl MapFolderTransform {
                 container.h as f32 / image_height,
             )
         } else {
-            let scale = (container.w as f32 / image_width)
-                .min(container.h as f32 / image_height);
+            let scale = (container.w as f32 / image_width).min(container.h as f32 / image_height);
             (scale, scale)
         };
         let width = image_width * scale_x;
@@ -34528,8 +34895,7 @@ fn draw_scensel_map_dynamic(
         scenario_menu.selection_info_scroll,
         Some(gamma),
     );
-    scenario_menu.selection_info_scroll =
-        metrics.clamp_offset(scenario_menu.selection_info_scroll);
+    scenario_menu.selection_info_scroll = metrics.clamp_offset(scenario_menu.selection_info_scroll);
 
     if !hide_title {
         fonts.title.draw_with_gamma(
@@ -34587,8 +34953,7 @@ fn draw_scensel_map_dynamic(
     let cb_enabled = scenario_menu.definition_checkbox_enabled;
     let cb_checked = scenario_menu.definition_checkbox_checked;
     let cb_highlighted = cb_enabled
-        && (scenario_menu.definition_checkbox_focused
-            || pointer_over(layout.user_change_checkbox));
+        && (scenario_menu.definition_checkbox_focused || pointer_over(layout.user_change_checkbox));
     scensel::draw_user_change_checkbox(
         surface,
         &layout,
@@ -34725,15 +35090,14 @@ fn draw_scensel_dynamic(
     // to the frame; a cloned scratch surface would retain and then discard the
     // semantic row-label commands while only its raster pixels were copied.
     let previous_clip = surface.clip();
-    let viewport_clip = Rect::new(
-        x,
-        top,
-        item_w.max(0) as u32,
-        viewport_height.max(0) as u32,
-    );
+    let viewport_clip = Rect::new(x, top, item_w.max(0) as u32, viewport_height.max(0) as u32);
     let list_clip = previous_clip.map_or(viewport_clip, |clip| {
-        clip.intersection(viewport_clip)
-            .unwrap_or(Rect::new(viewport_clip.x, viewport_clip.y, 0, 0))
+        clip.intersection(viewport_clip).unwrap_or(Rect::new(
+            viewport_clip.x,
+            viewport_clip.y,
+            0,
+            0,
+        ))
     });
     surface.set_clip(list_clip);
     let mut y = top - scenario_menu.scenario_list_scroll();
@@ -34744,15 +35108,14 @@ fn draw_scensel_dynamic(
         if y + item_h > top && selected == Some(index + offset) {
             // C4GUI_ListBoxSelColor while the list draws focus; the edit or
             // an open context retains logical focus but uses InactiveSelColor.
-            let selection_color =
-                if draw_focus
-                    && scenario_menu.dialog_focus() == ScenselDialogFocus::List
-                    && scenario_menu.rename_edit.is_none()
-                {
-                    0xafaf0000
-                } else {
-                    0xaf7f7f7f
-                };
+            let selection_color = if draw_focus
+                && scenario_menu.dialog_focus() == ScenselDialogFocus::List
+                && scenario_menu.rename_edit.is_none()
+            {
+                0xafaf0000
+            } else {
+                0xaf7f7f7f
+            };
             fill_engine_box(
                 surface,
                 x,
@@ -34764,12 +35127,9 @@ fn draw_scensel_dynamic(
             );
         }
         if y + item_h > top {
-            let is_renaming = scenario_menu
-                .rename_edit
-                .as_ref()
-                .is_some_and(|rename| {
-                    rename.identifier == *identifier && !rename.edit.label_visible()
-                });
+            let is_renaming = scenario_menu.rename_edit.as_ref().is_some_and(|rename| {
+                rename.identifier == *identifier && !rename.edit.label_visible()
+            });
             scensel::draw_scen_list_item(
                 surface,
                 &assets.scen_icons,
@@ -34936,12 +35296,14 @@ fn draw_scensel_dynamic(
 
 /// The startup render gamma ramp (default config: identity + black floor).
 fn startup_gamma() -> &'static clonk_graphics::GammaRamp {
-    static STARTUP_GAMMA: std::sync::OnceLock<clonk_graphics::GammaRamp> = std::sync::OnceLock::new();
+    static STARTUP_GAMMA: std::sync::OnceLock<clonk_graphics::GammaRamp> =
+        std::sync::OnceLock::new();
     STARTUP_GAMMA.get_or_init(clonk_graphics::GammaRamp::standard)
 }
 
 fn startup_identity_gamma() -> &'static clonk_graphics::GammaRamp {
-    static IDENTITY_GAMMA: std::sync::OnceLock<clonk_graphics::GammaRamp> = std::sync::OnceLock::new();
+    static IDENTITY_GAMMA: std::sync::OnceLock<clonk_graphics::GammaRamp> =
+        std::sync::OnceLock::new();
     IDENTITY_GAMMA.get_or_init(clonk_graphics::GammaRamp::identity)
 }
 
@@ -35055,9 +35417,8 @@ fn render_startup_frame(
                     } else {
                         "Start Game"
                     };
-                    let draw_focus = !context_menu_open
-                        && !definition_selector_open
-                        && !game_option_input_open;
+                    let draw_focus =
+                        !context_menu_open && !definition_selector_open && !game_option_input_open;
                     if scenario_loading_label.is_none() && scenario_menu.current_map().is_some() {
                         // The book sheet is hidden in map mode. Paint only the
                         // dialog background before the map so cached search/
@@ -35120,9 +35481,9 @@ fn render_startup_frame(
                             draw_focus,
                         )?;
                     }
-                    let resources = assets.game_option_resources().with_context(
-                        || "classic scenario game-option resources are unavailable",
-                    )?;
+                    let resources = assets.game_option_resources().with_context(|| {
+                        "classic scenario game-option resources are unavailable"
+                    })?;
                     scenario_game_options.render(
                         surface,
                         &resources,
@@ -35195,9 +35556,10 @@ fn render_startup_frame(
                         options_draw_focus,
                     );
                     if let Some(controller) = options_advanced {
-                        let advanced_assets = assets.options_advanced_assets().with_context(
-                            || "classic advanced-options resources are unavailable",
-                        )?;
+                        let advanced_assets =
+                            assets.options_advanced_assets().with_context(|| {
+                                "classic advanced-options resources are unavailable"
+                            })?;
                         clonk_frontend::startup_options_advanced::AdvancedConfigScreen::render(
                             surface,
                             &advanced_assets,
@@ -35351,7 +35713,6 @@ fn render_startup_frame(
         if let Some(context_menu) = context_menu {
             context_menu.render_panels(surface, Some(gamma))?;
         }
-
     }
     let surface = graphics.surface();
     if !surface.is_gpu_scene_capture_active() {
@@ -35394,10 +35755,7 @@ fn startup_fade_packed_modulation(opacity: u8) -> u32 {
     (u32::from(255_u8.saturating_sub(opacity)) << 24) | 0x00ff_ffff
 }
 
-fn apply_startup_fade_to_batch(
-    batch: &mut NativePresentationBatch,
-    opacity: u8,
-) -> Result<()> {
+fn apply_startup_fade_to_batch(batch: &mut NativePresentationBatch, opacity: u8) -> Result<()> {
     // `C4GUI::Dialog::Draw` switches to eFadeNone at the fully visible
     // endpoint and therefore does not activate even a white modulation.
     if opacity == u8::MAX {
@@ -35460,8 +35818,7 @@ fn blend_startup_dialog_frames(
                 / 255;
         }
         composed =
-            (u32::from(*new) * incoming_opacity + composed * (255 - incoming_opacity) + 127)
-                / 255;
+            (u32::from(*new) * incoming_opacity + composed * (255 - incoming_opacity) + 127) / 255;
         *new = composed as u8;
     }
 }
@@ -35642,10 +35999,7 @@ fn collect_viewport_inputs<'a>(
                 )
             })
             .unwrap_or(Vector2::ZERO);
-        inputs.push(
-            ViewportInput::ownerless(center, 1.0)
-                .with_camera_identity(OWNER_NONE, 0),
-        );
+        inputs.push(ViewportInput::ownerless(center, 1.0).with_camera_identity(OWNER_NONE, 0));
     }
 
     Ok(inputs)
@@ -35724,25 +36078,19 @@ fn physical_player_viewport_input<'a>(
                 source.and_then(|state| state.cursor.and_then(|cursor| snapshot.object(cursor)))
             })
             .or_else(|| {
-                source.and_then(|state| {
-                    state.crew.first().and_then(|crew| snapshot.object(*crew))
-                })
+                source.and_then(|state| state.crew.first().and_then(|crew| snapshot.object(*crew)))
             });
         let mut input = if physical.is_no_owner_viewport {
             ViewportInput::ownerless(center, physical.preserved_zoom)
         } else {
-            ViewportInput::owned_without_focus(
-                OWNER_NONE,
-                center,
-                physical.preserved_zoom,
-            )
+            ViewportInput::owned_without_focus(OWNER_NONE, center, physical.preserved_zoom)
         };
         input.focus = focus;
         return Ok(input
             .with_offset(physical.preserved_offset)
-            .with_scrolling(source.is_some_and(|state| {
-                state.view_mode == PLAYER_VIEW_MODE_SCROLLING
-            }))
+            .with_scrolling(
+                source.is_some_and(|state| state.view_mode == PLAYER_VIEW_MODE_SCROLLING),
+            )
             .with_physical_camera_identity(physical.physical_identity, slot));
     }
 
@@ -35804,9 +36152,7 @@ fn collect_viewport_inputs_from_physical_state<'a>(
                     owner: physical.displayed_player,
                 })?;
             if state.viewports.is_empty() {
-                return Err(ClassicViewportBoundary::LocalViewportUnavailable {
-                    owner: state.id,
-                });
+                return Err(ClassicViewportBoundary::LocalViewportUnavailable { owner: state.id });
             }
             for slot in 0..state.viewports.len() {
                 inputs.push(physical_player_viewport_input(snapshot, physical, slot)?);
@@ -35962,9 +36308,7 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
     }
 }
 
-fn script_text_spec_resources_from_assets(
-    assets: &FrontendAssets,
-) -> ScriptTextSpecResources<'_> {
+fn script_text_spec_resources_from_assets(assets: &FrontendAssets) -> ScriptTextSpecResources<'_> {
     script_text_spec_resources_from_assets_and_hud(assets, assets.hud_graphics.as_ref())
 }
 
@@ -36095,13 +36439,64 @@ fn collect_player_overlays(
     bindings: &KeyboardBindings,
     gamepad_bindings: &GamepadBindings,
 ) -> Vec<PlayerOverlay> {
+    collect_player_overlays_filtered(engine, snapshot, focus_id, bindings, gamepad_bindings, None)
+}
+
+/// Prepare overlay state only for players presented by a physical viewport.
+///
+/// C4GraphicsSystem iterates its viewport list and C4Viewport::DrawOverlay
+/// resolves only that viewport's Player (src/C4GraphicsSystem.cpp:167-170;
+/// src/C4Viewport.cpp:836-897). An ownerless observer is the exception because
+/// C4Game::DrawCursors(NO_OWNER) traverses every player
+/// (src/C4Game.cpp:1852-1887).
+fn collect_player_overlays_for_viewports(
+    engine: &mut Engine,
+    snapshot: &SimulationSnapshot,
+    focus_id: Option<ObjectId>,
+    bindings: &KeyboardBindings,
+    gamepad_bindings: &GamepadBindings,
+    viewports: &[ViewportInput<'_>],
+) -> Vec<PlayerOverlay> {
+    let visible_owners = (!viewports
+        .iter()
+        .any(|viewport| viewport.owner == OWNER_NONE))
+    .then(|| {
+        viewports
+            .iter()
+            .map(|viewport| viewport.owner)
+            .collect::<HashSet<_>>()
+    });
+    collect_player_overlays_filtered(
+        engine,
+        snapshot,
+        focus_id,
+        bindings,
+        gamepad_bindings,
+        visible_owners.as_ref(),
+    )
+}
+
+fn collect_player_overlays_filtered(
+    engine: &mut Engine,
+    snapshot: &SimulationSnapshot,
+    focus_id: Option<ObjectId>,
+    bindings: &KeyboardBindings,
+    gamepad_bindings: &GamepadBindings,
+    visible_owners: Option<&HashSet<i32>>,
+) -> Vec<PlayerOverlay> {
     let detail_map: HashMap<_, _> = snapshot
         .players
         .iter()
         .map(|state| (state.id, state))
         .collect();
-    let mut players = Vec::with_capacity(snapshot.hud.players.len());
-    for player in &snapshot.hud.players {
+    let mut players =
+        Vec::with_capacity(visible_owners.map_or(snapshot.hud.players.len(), HashSet::len));
+    for player in snapshot
+        .hud
+        .players
+        .iter()
+        .filter(|player| visible_owners.is_none_or(|owners| owners.contains(&player.owner)))
+    {
         let cursor = detail_map
             .get(&player.owner)
             .and_then(|state| state.view_cursor.or(state.cursor));
@@ -36139,10 +36534,9 @@ fn collect_player_overlays(
                     .unwrap_or(object.magic_capacity);
                 let breath_capacity = physical.map(|physical| physical.breath).unwrap_or(0);
                 let is_focus = focus_id == Some(object.id) || cursor == Some(object.id);
-                let hide_hud_elements = engine
-                    .definition_hide_hud_elements(object.definition_id.as_str());
-                let hide_hud_bars =
-                    engine.definition_hide_hud_bars(object.definition_id.as_str());
+                let hide_hud_elements =
+                    engine.definition_hide_hud_elements(object.definition_id.as_str());
+                let hide_hud_bars = engine.definition_hide_hud_bars(object.definition_id.as_str());
                 (
                     label,
                     object.energy,
@@ -36492,9 +36886,7 @@ fn league_signup_dialog_key_code(
         {
             map_key_code(code)
         }
-        VirtualKeyCode::Tab
-            if modifiers.is_empty() || modifiers == ModifiersState::SHIFT =>
-        {
+        VirtualKeyCode::Tab if modifiers.is_empty() || modifiers == ModifiersState::SHIFT => {
             Some(KeyCode::Tab)
         }
         VirtualKeyCode::Up
@@ -37556,9 +37948,8 @@ where
             &languages,
             &language_packs,
             |progress| {
-                let combined = (root_base
-                    .saturating_add(usize::from(progress.percent())))
-                    / root_count;
+                let combined =
+                    (root_base.saturating_add(usize::from(progress.percent()))) / root_count;
                 let combined = u8::try_from(combined.min(100)).unwrap_or(100);
                 emitted_percent = emitted_percent.max(combined);
                 if report_progress(emitted_percent) {
@@ -37618,10 +38009,7 @@ fn scenario_logical_storage(path: &Path) -> Result<(PathBuf, Vec<String>)> {
                 .filter_map(|component| match component {
                     std::path::Component::Normal(name) => {
                         Some(name.to_str().map(str::to_owned).ok_or_else(|| {
-                            anyhow!(
-                                "scenario path has no UTF-8 group entry: {}",
-                                path.display()
-                            )
+                            anyhow!("scenario path has no UTF-8 group entry: {}", path.display())
                         }))
                     }
                     _ => None,
@@ -37671,8 +38059,7 @@ fn mutable_group_descend<'a>(
 
 fn scenario_filename_from_title(title: &str, kind: ScenarioKind, old_path: &Path) -> String {
     const STRIP: &[char] = &[
-        '!', '"', '§', '%', '&', '/', '=', '?', '+', '*', '#', ':', ';', '<', '>', '\\',
-        '.',
+        '!', '"', '§', '%', '&', '/', '=', '?', '+', '*', '#', ':', ';', '<', '>', '\\', '.',
     ];
     let mut filename = title
         .chars()
@@ -37840,8 +38227,8 @@ fn copy_file_or_directory(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 fn copy_directory_contents(source: &Path, destination: &Path) -> Result<()> {
-    for entry in fs::read_dir(source)
-        .with_context(|| format!("read folder group {}", source.display()))?
+    for entry in
+        fs::read_dir(source).with_context(|| format!("read folder group {}", source.display()))?
     {
         let entry = entry?;
         copy_file_or_directory(&entry.path(), &destination.join(entry.file_name()))
@@ -37923,9 +38310,8 @@ fn commit_staged_path_with_backup(
     let backup = match fs::symlink_metadata(destination) {
         Ok(_) => {
             let backup = unused_sibling_rewrite_path(parent, filename)?;
-            fs::rename(destination, &backup).with_context(|| {
-                format!("stage existing group {}", destination.display())
-            })?;
+            fs::rename(destination, &backup)
+                .with_context(|| format!("stage existing group {}", destination.display()))?;
             Some(backup)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -38213,8 +38599,9 @@ fn delete_folder_save_entry(root: &Path, name: &[u8]) -> Result<()> {
     match remove_file_or_directory(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error)
-            .with_context(|| format!("delete folder-group entry {}", path.display())),
+        Err(error) => {
+            Err(error).with_context(|| format!("delete folder-group entry {}", path.display()))
+        }
     }
 }
 
@@ -38247,15 +38634,12 @@ fn delete_folder_save_pattern_segment(root: &Path, pattern: &[u8]) -> Result<()>
         .collect::<std::result::Result<Vec<_>, _>>()?;
     for entry in entries {
         let name = path_to_legacy_bytes(Path::new(&entry.file_name()));
-        if console_save_ignored_directory_entry(&name)
-            || !classic_wildcard_match(pattern, &name)
-        {
+        if console_save_ignored_directory_entry(&name) || !classic_wildcard_match(pattern, &name) {
             continue;
         }
         // Native Delete stops this wildcard scan at its first failed erase.
-        remove_file_or_directory(&entry.path()).with_context(|| {
-            format!("delete folder-group entry {}", entry.path().display())
-        })?;
+        remove_file_or_directory(&entry.path())
+            .with_context(|| format!("delete folder-group entry {}", entry.path().display()))?;
     }
     Ok(())
 }
@@ -38276,9 +38660,7 @@ fn find_folder_save_entry(root: &Path, pattern: &[u8]) -> Result<Option<PathBuf>
     {
         let entry = entry?;
         let name = path_to_legacy_bytes(Path::new(&entry.file_name()));
-        if !console_save_ignored_directory_entry(&name)
-            && classic_wildcard_match(pattern, &name)
-        {
+        if !console_save_ignored_directory_entry(&name) && classic_wildcard_match(pattern, &name) {
             return Ok(Some(entry.path()));
         }
     }
@@ -38289,8 +38671,8 @@ fn merge_folder_save_material(root: &Path, raw_patch: &[u8], maker: &[u8]) -> Re
     let patch = Group::from_raw_memory(PathBuf::from("Material.c4g"), raw_patch.to_vec())
         .context("open live Material.c4g patch")?;
     let Some(target_path) = find_folder_save_entry(root, b"Material.c4g")? else {
-        let packed = pack_folder_save_child(raw_patch, maker)
-            .context("close new live Material.c4g")?;
+        let packed =
+            pack_folder_save_child(raw_patch, maker).context("close new live Material.c4g")?;
         return write_folder_save_entry(root, b"Material.c4g", &packed)
             .context("move new live Material.c4g into folder group");
     };
@@ -38325,7 +38707,10 @@ fn merge_folder_save_patch_into_directory(
     patch: &Group,
     maker: &[u8],
 ) -> Result<()> {
-    for entry in patch.entries().context("enumerate live Material.c4g patch")? {
+    for entry in patch
+        .entries()
+        .context("enumerate live Material.c4g patch")?
+    {
         let payload = patch
             .read_entry_bytes_exact(&entry)
             .context("read live Material.c4g patch entry")?;
@@ -38340,13 +38725,16 @@ fn merge_folder_save_patch_into_directory(
 }
 
 fn merge_folder_save_patch_into_group(target: &mut MutableGroup, patch: &Group) -> Result<()> {
-    for entry in patch.entries().context("enumerate live Material.c4g patch")? {
+    for entry in patch
+        .entries()
+        .context("enumerate live Material.c4g patch")?
+    {
         if entry.is_directory {
             let child = patch
                 .open_child(&entry.relative_path)
                 .context("open live Material.c4g patch child")?;
-            let child = MutableGroup::from_group(&child)
-                .context("copy live Material.c4g patch child")?;
+            let child =
+                MutableGroup::from_group(&child).context("copy live Material.c4g patch child")?;
             target
                 .add_child_bytes_with_metadata(
                     entry.name_bytes,
@@ -38457,7 +38845,9 @@ fn unpack_recording_group(source: &Group, destination: &Path) -> Result<()> {
         for entry in source.entries()? {
             let relative = path_from_group_name_bytes(&entry.name_bytes);
             anyhow::ensure!(
-                relative.components().all(|component| matches!(component, Component::Normal(_))),
+                relative
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_))),
                 "record entry has an unsafe name: {}",
                 relative.display()
             );
@@ -38479,11 +38869,7 @@ fn unpack_recording_group(source: &Group, destination: &Path) -> Result<()> {
             let mut file = options.open(&target)?;
             file.write_all(&payload)?;
             let stamp = UNIX_EPOCH + Duration::from_secs(u64::from(entry.time));
-            let _ = file.set_times(
-                fs::FileTimes::new()
-                    .set_accessed(stamp)
-                    .set_modified(stamp),
-            );
+            let _ = file.set_times(fs::FileTimes::new().set_accessed(stamp).set_modified(stamp));
         }
         Ok(())
     })();
@@ -38527,10 +38913,7 @@ fn rewrite_directory_scenario_title(
         return Ok(());
     }
     let canonical_title = path.join("Title.txt");
-    replace_file_from_same_directory(
-        &canonical_title,
-        format!("{language}:{title}").as_bytes(),
-    )?;
+    replace_file_from_same_directory(&canonical_title, format!("{language}:{title}").as_bytes())?;
     for title_path in title_paths {
         let same_file = matches!(
             (fs::canonicalize(&title_path), fs::canonicalize(&canonical_title)),
@@ -38661,7 +39044,10 @@ fn delete_scenario_storage(path: &Path) -> Result<()> {
     let source = Group::open(&physical)?;
     let mut mutable = MutableGroup::from_group(&source)?;
     let parent = mutable_group_descend(&mut mutable, &children)?;
-    anyhow::ensure!(parent.remove_entry(&name), "C4Group entry `{name}` does not exist");
+    anyhow::ensure!(
+        parent.remove_entry(&name),
+        "C4Group entry `{name}` does not exist"
+    );
     let packed = mutable.pack()?;
     replace_file_from_same_directory(&physical, &packed)?;
     Ok(())
@@ -38885,7 +39271,10 @@ impl MusicCatalog {
             // C4MusicSystem::Play makes exactly one SafeRandom call whenever
             // there is a fresh candidate, including SafeRandom(1).
             let index = next_mod(candidates.len());
-            assert!(index < candidates.len(), "random selector exceeded its range");
+            assert!(
+                index < candidates.len(),
+                "random selector exceeded its range"
+            );
             return Some(candidates[index]);
         }
 
@@ -39322,9 +39711,7 @@ impl MusicResolver {
         // rebuilds its song list even when the path and selected root names are
         // unchanged, so never reuse the prior catalog here.
         let (scenario, has_local_sources) = path
-            .map(|path| {
-                build_scenario_music_catalog(path, definition_roots, self.extra.as_ref())
-            })
+            .map(|path| build_scenario_music_catalog(path, definition_roots, self.extra.as_ref()))
             .transpose()?
             .unwrap_or_else(|| (MusicCatalog::empty(), false));
         self.scenario = scenario;
@@ -39388,14 +39775,12 @@ fn build_scenario_music_catalog(
     }
 
     let mut has_local_sources = scenario_has_tracks;
-    has_local_sources |=
-        extend_direct_music_child(&mut catalog, &scenario, "scenario Music.c4g");
+    has_local_sources |= extend_direct_music_child(&mut catalog, &scenario, "scenario Music.c4g");
 
     let mut parent = path.parent();
     while let Some(folder_path) = parent.filter(|parent| has_extension(parent, "c4f")) {
         let folder = Group::open(folder_path)?;
-        has_local_sources |=
-            extend_direct_music_child(&mut catalog, &folder, "parent Music.c4g");
+        has_local_sources |= extend_direct_music_child(&mut catalog, &folder, "parent Music.c4g");
         parent = folder_path.parent();
     }
 
@@ -39773,11 +40158,8 @@ fn compute_mix_values_for_with_rendered_audibility(
         return (base_volume, 0.0);
     };
     let origin_mix = compute_positional_mix_values(target.position, snapshot, viewports);
-    let (audibility, pan) = cached_attached_object_mix_values(
-        target,
-        rendered_object_audibility,
-    )
-    .unwrap_or(origin_mix);
+    let (audibility, pan) =
+        cached_attached_object_mix_values(target, rendered_object_audibility).unwrap_or(origin_mix);
     (
         base_volume * adjusted_audibility(audibility, custom_falloff),
         pan,

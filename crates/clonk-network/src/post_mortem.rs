@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::ClientId;
@@ -39,6 +39,29 @@ impl PostMortemPacket {
             .wrapping_sub(self.packet_counter) as usize;
         self.packets.get(offset..).unwrap_or(&[])
     }
+}
+
+pub(crate) fn retain_post_failure_packet(
+    post_mortem: &mut Option<PostMortemPacket>,
+    connection_id: u32,
+    next_packet_counter: &mut u32,
+    packet: Vec<u8>,
+) {
+    if packet
+        .first()
+        .is_none_or(|packet_type| *packet_type < crate::PACKET_LOG_START)
+    {
+        return;
+    }
+    let recovery = post_mortem.get_or_insert_with(|| PostMortemPacket {
+        connection_id,
+        packet_counter: *next_packet_counter,
+        packets: Vec::new(),
+    });
+    debug_assert_eq!(recovery.connection_id, connection_id);
+    recovery.packets.push(packet);
+    *next_packet_counter = next_packet_counter.wrapping_add(1);
+    recovery.packet_counter = *next_packet_counter;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,7 +170,7 @@ impl ClosedConnectionRouter {
 #[derive(Debug, Default)]
 pub struct RecoverablePacketLog {
     next_packet_counter: u32,
-    packets: Vec<(u32, Vec<u8>)>,
+    packets: VecDeque<(u32, Vec<u8>)>,
     post_mortem_sent: bool,
 }
 
@@ -161,7 +184,10 @@ impl RecoverablePacketLog {
         }
         let number = self.next_packet_counter;
         self.next_packet_counter = self.next_packet_counter.wrapping_add(1);
-        self.packets.insert(0, (number, packet));
+        // Native PacketLogEntry prepends one linked-list node in O(1)
+        // (oracle-src-pinned src/C4Network2IO.h:251-260;
+        // src/C4Network2IO.cpp:1470-1476).
+        self.packets.push_front((number, packet));
         Some(number)
     }
 
@@ -234,7 +260,7 @@ mod tests {
         log.acknowledge_received(0);
         assert_eq!(log.logged_packet_count(), 3);
         log.acknowledge_received(2);
-        assert_eq!(log.packets, vec![(2, vec![0x12, 0xcc])]);
+        assert_eq!(log.packets, VecDeque::from([(2, vec![0x12, 0xcc])]));
         assert_eq!(log.next_packet_counter(), 3);
     }
 
@@ -268,6 +294,32 @@ mod tests {
         log.record_outbound(vec![0x10, 0xaa]);
         assert!(log.create_post_mortem(7).is_some());
         assert_eq!(log.create_post_mortem(7), None);
+    }
+
+    #[test]
+    fn packet_log_prepends_without_relocating_the_retained_backlog() {
+        const PACKET_COUNT: usize = 4_096;
+
+        // Native PacketLogEntry prepends one linked-list node in O(1);
+        // draining a large accepted route queue must not repeatedly relocate
+        // the complete retained suffix (oracle-src-pinned
+        // src/C4Network2IO.h:251-260;
+        // src/C4Network2IO.cpp:1383-1400,1470-1476).
+        let mut log = RecoverablePacketLog::default();
+        log.packets.reserve_exact(PACKET_COUNT);
+        log.record_outbound(vec![crate::PACKET_LOG_START, 0]);
+        let oldest_address = std::ptr::from_ref(&log.packets[0]);
+        let reserved_capacity = log.packets.capacity();
+
+        for value in 1..PACKET_COUNT {
+            log.record_outbound(vec![crate::PACKET_LOG_START, value as u8]);
+        }
+
+        assert_eq!(log.packets.capacity(), reserved_capacity);
+        assert!(std::ptr::eq(
+            oldest_address,
+            std::ptr::from_ref(&log.packets[PACKET_COUNT - 1])
+        ));
     }
 
     #[test]

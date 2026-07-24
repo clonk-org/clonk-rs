@@ -228,10 +228,7 @@ impl ClientPerformanceStats {
         let wait_ms = signed_instant_millis(arrived_at, reached_at);
         let scaled = self.scaled_wait_ms.entry(client_id).or_default();
         // C4GameControlClient::AddPerf, including signed integer truncation.
-        *scaled += wait_ms
-            .saturating_mul(100)
-            .saturating_sub(*scaled)
-            / 100;
+        *scaled += wait_ms.saturating_mul(100).saturating_sub(*scaled) / 100;
     }
 
     fn trim(&mut self) {
@@ -429,8 +426,8 @@ pub struct ClientConfig {
 impl ClientConfig {
     pub fn new(name: impl Into<String>, kind: ParticipantKind) -> Self {
         let name = name.into();
-        let group_maker = clonk_engine::LegacyCString::from_bytes(name.as_bytes().to_vec())
-            .unwrap_or_default();
+        let group_maker =
+            clonk_engine::LegacyCString::from_bytes(name.as_bytes().to_vec()).unwrap_or_default();
         Self {
             name,
             group_maker,
@@ -524,7 +521,9 @@ fn default_client_resource_directory() -> PathBuf {
         .join("Network")
 }
 
-pub(crate) async fn bind_client_mesh_tcp_listener(bind_address: SocketAddr) -> io::Result<TcpListener> {
+pub(crate) async fn bind_client_mesh_tcp_listener(
+    bind_address: SocketAddr,
+) -> io::Result<TcpListener> {
     if !bind_address.ip().is_unspecified() {
         return TcpListener::bind(bind_address).await;
     }
@@ -716,8 +715,20 @@ pub enum HostEvent {
         client_id: Option<ClientId>,
         packet_type: u8,
     },
+    /// A connection attempt or accepted secondary route failed while the
+    /// authoritative logical session remained available.
+    RecoverableRouteDiagnostic {
+        client_id: Option<ClientId>,
+        error: String,
+    },
+    /// A transport, protocol, or resource diagnostic while the host loop
+    /// remains available. Terminal authoritative failures use `FatalError`.
     TransportError {
         client_id: Option<ClientId>,
+        error: String,
+    },
+    /// The host's authoritative lockstep state can no longer advance.
+    FatalError {
         error: String,
     },
 }
@@ -831,6 +842,7 @@ pub enum HostCommand {
 #[derive(Debug)]
 pub struct HostHandle {
     pub(crate) command_tx: mpsc::Sender<HostCommand>,
+    pub(crate) control_send_time: ControlSendTimeSnapshot,
     pub(crate) event_rx: Option<mpsc::Receiver<HostEvent>>,
     pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) join_handle: tokio::task::JoinHandle<()>,
@@ -965,6 +977,16 @@ impl HostHandle {
             })
             .await
             .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub fn control_send_time_ms(&self, activated_client_ids: &[ClientId]) -> i32 {
+        self.control_send_time.sample(activated_client_ids)
+    }
+
+    /// Clones the session-loop-independent performance sampler used by the
+    /// game thread at its control-consumption boundary.
+    pub fn control_send_time_snapshot(&self) -> ControlSendTimeSnapshot {
+        self.control_send_time.clone()
     }
 
     /// Report local arrival only for the barrier the caller actually drove.
@@ -1289,7 +1311,9 @@ pub enum ClientError {
     #[error("failed to connect to host: {0}")]
     Connect(#[from] io::Error),
     #[error("host rejected the client password: {message:?}")]
-    WrongPassword { message: clonk_engine::LegacyCString },
+    WrongPassword {
+        message: clonk_engine::LegacyCString,
+    },
     #[error("handshake rejected: {0}")]
     Handshake(String),
     #[error("client resource publication failed: {0}")]
@@ -1463,6 +1487,7 @@ pub enum ClientCommand {
 #[derive(Debug)]
 pub struct ClientHandle {
     pub(crate) command_tx: mpsc::Sender<ClientCommand>,
+    pub(crate) control_send_time: ControlSendTimeSnapshot,
     pub(crate) event_rx: Option<mpsc::Receiver<ClientEvent>>,
     pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) join_handle: tokio::task::JoinHandle<()>,
@@ -1647,6 +1672,16 @@ impl ClientHandle {
             .map_err(|_| ClientError::ClientLoopGone)
     }
 
+    pub fn control_send_time_ms(&self, activated_client_ids: &[ClientId]) -> i32 {
+        self.control_send_time.sample(activated_client_ids)
+    }
+
+    /// Clones the synchronous performance sampler published by this client's
+    /// preferred route registry.
+    pub fn control_send_time_snapshot(&self) -> ControlSendTimeSnapshot {
+        self.control_send_time.clone()
+    }
+
     pub async fn runtime_client_states(
         &self,
         tick: Tick,
@@ -1762,7 +1797,9 @@ impl ClientHandle {
             })
             .await
             .expect("client loop accepts forced mesh attempt");
-        forced.await.expect("client loop completes forced mesh attempt");
+        forced
+            .await
+            .expect("client loop completes forced mesh attempt");
     }
 
     pub async fn shutdown(mut self) -> Result<(), ClientError> {

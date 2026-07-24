@@ -9,6 +9,7 @@ const CHILD_MODE: &str = "LC_L029_CHILD_MODE";
 const CHILD_LOG_PATH: &str = "LC_L029_CHILD_LOG_PATH";
 const INFO_MARKER: &str = "l029 session info marker";
 const DEBUG_MARKER: &str = "l029 session debug marker";
+const GPU_TEXTURE_MARKER: &str = "l029 wgpu texture allocation marker";
 
 #[test]
 fn l029_session_log_is_overwritten_and_verbose_tees_to_stderr() {
@@ -18,6 +19,7 @@ fn l029_session_log_is_overwritten_and_verbose_tees_to_stderr() {
             .expect("initialize child session log");
         tracing::info!(INFO_MARKER);
         tracing::debug!(DEBUG_MARKER);
+        tracing::info!(target: "wgpu_core::device", GPU_TEXTURE_MARKER);
         let unused_path = log_path.with_file_name("unused-Clonk.log");
         let err = clonk_logging::init_verbose_with_file(false, &unused_path)
             .expect_err("a second file subscriber must not report success");
@@ -74,6 +76,16 @@ fn l029_session_log_is_overwritten_and_verbose_tees_to_stderr() {
         assert!(
             !stdout.contains(DEBUG_MARKER),
             "debug was written to stdout"
+        );
+        // C++ logs only aggregate texture/material counts at C4Game.cpp:982-984;
+        // its allocation/upload path at C4Surface.cpp:1242-1269 stays silent.
+        assert!(
+            !stderr.contains(GPU_TEXTURE_MARKER),
+            "dependency texture allocation was written to stderr in {mode} mode"
+        );
+        assert!(
+            !session_log.contains(GPU_TEXTURE_MARKER),
+            "dependency texture allocation was written to the session log in {mode} mode"
         );
     }
 

@@ -190,8 +190,7 @@ impl GameApp {
     }
 
     pub(crate) fn control_message_has_lobby(&self) -> bool {
-        self.classic_host_lobby.is_some()
-            || (self.startup_view == StartupView::NetworkLobby && self.network_lobby.is_some())
+        self.classic_host_lobby_active() || self.joined_network_lobby_active()
     }
 
     pub(crate) fn control_message_lobby_chat_color(&self, client_id: i32) -> u32 {
@@ -818,8 +817,13 @@ impl GameApp {
             rows,
         );
         controller.set_labels(self.classic_lobby_labels());
-        let preload =
-            LobbyPreloadState::new(load_options_program_state(self.app_paths.as_ref()).preloading);
+        let preload = LobbyPreloadState::new(
+            load_options_program_state(
+                self.app_paths.as_ref(),
+                Some(&self.startup_tooltip_resources),
+            )
+            .preloading,
+        );
         controller.set_preload_button_state(preload.manual_button_present, preload.eligible);
         let runtime_join_allowed = settings
             .prepared
@@ -1097,6 +1101,9 @@ impl GameApp {
     }
 
     pub(crate) fn sync_classic_lobby_roster(&mut self) {
+        if self.classic_host_lobby.is_none() && self.network_lobby.is_none() {
+            return;
+        }
         self.submit_restart_restore_team_updates_for_new_roster_items();
         let active_sheet = self
             .classic_host_lobby
@@ -2404,9 +2411,10 @@ impl GameApp {
             return Ok(false);
         }
 
-        let select_template = load_runtime_language_table(self.app_paths.as_ref())
-            .ok()
-            .and_then(|table| table.entries.get("IDS_MSG_SELECT").cloned());
+        let select_template = self
+            .startup_tooltip_resources
+            .get("IDS_MSG_SELECT")
+            .cloned();
         let metadata = self.visible_classic_lobby_team_metadata();
         let entries = metadata
             .as_ref()
@@ -3202,10 +3210,7 @@ impl GameApp {
         } else {
             "Client %s not ready."
         };
-        let template = load_runtime_language_table(self.app_paths.as_ref())
-            .ok()
-            .and_then(|table| table.entries.get(key).cloned())
-            .unwrap_or_else(|| fallback.to_string());
+        let template = self.runtime_resource_text(key, fallback);
         let text = template
             .split_once("%s")
             .map(|(prefix, suffix)| format!("{prefix}{client_name}{suffix}"))
@@ -4244,24 +4249,16 @@ impl GameApp {
         if confirm_unassociated_savegame_players
             && !self.startup_message_hidden("HideMsgPlrNoTakeOver")
         {
-            let table = load_runtime_language_table(self.app_paths.as_ref()).ok();
-            let message = table
-                .as_ref()
-                .and_then(|table| table.entries.get("IDS_MSG_NOTALLSAVEGAMEPLAYERSHAVE"))
-                .cloned()
-                .unwrap_or_else(|| {
-                    "Not all savegame players have been associated with a local player!|Any unassociated savegame players will be removed from the game. Unassociated local players will join as new players.|Start anyway?".to_string()
-                });
-            let caption = table
-                .as_ref()
-                .and_then(|table| table.entries.get("IDS_MSG_FREESAVEGAMEPLRS"))
-                .cloned()
-                .unwrap_or_else(|| "Player assignment".to_string());
-            let checkbox = table
-                .as_ref()
-                .and_then(|table| table.entries.get("IDS_MSG_DONTSHOW"))
-                .cloned()
-                .unwrap_or_else(|| "&Don't display this message in the future.".to_string());
+            let message = self.runtime_resource_text(
+                "IDS_MSG_NOTALLSAVEGAMEPLAYERSHAVE",
+                "Not all savegame players have been associated with a local player!|Any unassociated savegame players will be removed from the game. Unassociated local players will join as new players.|Start anyway?",
+            );
+            let caption =
+                self.runtime_resource_text("IDS_MSG_FREESAVEGAMEPLRS", "Player assignment");
+            let checkbox = self.runtime_resource_text(
+                "IDS_MSG_DONTSHOW",
+                "&Don't display this message in the future.",
+            );
             self.push_message_dialog(
                 clonk_frontend::message_dialog::MessageDialogState::new(
                     message,
@@ -4320,35 +4317,11 @@ impl GameApp {
                     .is_some_and(|entry| entry.count != 0)
             })
         };
-        let table = load_runtime_language_table(self.app_paths.as_ref()).ok();
-        let template = table
-            .as_ref()
-            .and_then(|table| table.entries.get("IDS_MSG_NOSPLITSCREENINLEAGUE"))
-            .map(String::as_str)
-            .unwrap_or(
-                "Players %s and %s would be playing against each other in split-screen. This is disallowed in league games!",
-            );
-        let charset = table
-            .as_ref()
-            .map(|table| table.charset)
-            .unwrap_or(RuntimeHelpCharset::Windows1252);
-        let template_bytes = match charset {
-            RuntimeHelpCharset::Windows1252 => template
-                .chars()
-                .map(runtime_cp1252_byte)
-                .collect::<Result<Vec<_>>>()
-                .map_err(|error| {
-                    classic_game_lobby_model_engine_error(format!(
-                        "league split-screen template cannot be encoded: {error}"
-                    ))
-                })?,
-            RuntimeHelpCharset::Utf8 => template.as_bytes().to_vec(),
-        };
-        let caption = table
-            .as_ref()
-            .and_then(|table| table.entries.get("IDS_NET_ERR_LEAGUE"))
-            .cloned()
-            .unwrap_or_else(|| "League error".to_string());
+        let fallback = "Players %s and %s would be playing against each other in split-screen. This is disallowed in league games!";
+        let template = self.runtime_resource_text("IDS_MSG_NOSPLITSCREENINLEAGUE", fallback);
+        let template_bytes =
+            self.runtime_resource_bytes_with_fallback("IDS_MSG_NOSPLITSCREENINLEAGUE", fallback);
+        let caption = self.runtime_resource_text("IDS_NET_ERR_LEAGUE", "League error");
         let (_, clients) = self.control_player_infos.retained_rows_snapshot();
         let mut removals = Vec::new();
         let mut blocking_reason = None;
@@ -5153,7 +5126,7 @@ impl GameApp {
             if start_host_when_ready {
                 self.start_network_game_now()?;
             } else if self.pending_client_start_status.is_some() {
-                self.prepare_client_network_scenario_if_ready();
+                self.prepare_client_network_scenario_if_ready()?;
             }
         }
         Ok(())
@@ -5253,10 +5226,7 @@ impl GameApp {
     }
 
     fn classic_lobby_resource_text(&self, key: &str, fallback: &str) -> String {
-        load_runtime_language_table(self.app_paths.as_ref())
-            .ok()
-            .and_then(|table| table.entries.get(key).cloned())
-            .unwrap_or_else(|| fallback.to_string())
+        self.runtime_resource_text(key, fallback)
     }
 
     fn process_classic_lobby_command(&mut self, text: &str) -> Result<bool, EngineError> {
@@ -5270,7 +5240,7 @@ impl GameApp {
             .map_or((raw.as_slice(), &[][..]), |space| {
                 (&raw[..space], &raw[space + 1..])
             });
-        let host = matches!(self.network_mode, Some(NetworkMode::Host(_)));
+        let host = matches!(self.runtime_network_role(), RuntimeNetworkRole::Host);
         let local_client_id = self
             .network
             .as_ref()
@@ -7073,6 +7043,36 @@ impl GameApp {
         true
     }
 
+    pub(crate) fn close_lobby_child_dialogs_silently(&mut self) {
+        // Fullscreen DoLobby destroys MainDlg and then asks Screen to close
+        // every remaining dialog without invoking acceptance/cancellation
+        // callbacks (src/C4Network2.cpp:493-512).
+        self.close_context_menu_silently();
+        self.release_message_dialog_pointer_elements();
+        self.message_dialogs.clear();
+        self.message_dialog_active_index = None;
+        self.message_dialog_pointer_capture_index = None;
+        self.message_dialog_consumed_keys.clear();
+        self.game_option_input_dialog = None;
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.league_signup_dialog = None;
+        self.cancelled_league_signup_continuation = None;
+        self.league_signup_consumed_keys.clear();
+        self.league_signup_pointer_capture = false;
+        self.league_signup_pointer_position = None;
+        self.definition_selector = None;
+        self.pending_definition_selection = None;
+        self.pending_lobby_player_selection = None;
+        self.definition_selector_last_click = None;
+        self.definition_selector_consumed_keys.clear();
+        self.definition_selector_pointer_capture = false;
+        self.startup_player_properties_dialog = None;
+        self.mark_menu_dirty();
+    }
+
     pub(crate) fn tick_network_lobby_countdown(&mut self) -> bool {
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             return false;
@@ -7293,9 +7293,9 @@ impl GameApp {
         &mut self,
         ready: bool,
     ) -> Result<(), EngineError> {
-        // `network_lobby` remains available while the prepared scenario is
-        // transitioning into play. C++ checks the network status after the
-        // modal closes and returns unless it is still exactly GS_Lobby.
+        // C++ checks the network status after the modal closes and returns
+        // unless it is still exactly GS_Lobby. DoLobby normally deletes the
+        // lobby and closes this dialog as soon as GS_Go is installed.
         let status_left_lobby = self
             .pending_client_start_status
             .is_some_and(|status| status.state != clonk_network::NETWORK_STATE_LOBBY);

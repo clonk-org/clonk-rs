@@ -262,16 +262,12 @@ impl GameApp {
                                     ("IDS_DLG_SELALL", "IDS_DLGTIP_SELALL")
                                 }
                             };
-                            ContextMenuEntry::new(startup_resource_string(
-                                self.app_paths.as_ref(),
-                                label_key,
-                                &item.label,
-                            ))
-                            .with_tooltip(startup_resource_string(
-                                self.app_paths.as_ref(),
-                                tooltip_key,
-                                &item.tooltip,
-                            ))
+                            ContextMenuEntry::new(
+                                self.runtime_resource_text(label_key, &item.label),
+                            )
+                            .with_tooltip(
+                                self.runtime_resource_text(tooltip_key, &item.tooltip),
+                            )
                             .with_icon(ContextMenuIcon::None)
                             .with_action(AppContextMenuCommand::LeagueSignupEdit {
                                 field,
@@ -2544,11 +2540,15 @@ impl GameApp {
         }
     }
 
-    pub(crate) fn prepare_client_network_scenario_if_ready(&mut self) {
+    pub(crate) fn prepare_client_network_scenario_if_ready(&mut self) -> Result<(), EngineError> {
         if let Err(error) = self.try_prepare_client_network_scenario() {
             tracing::error!(%error, "failed to prepare client network scenario");
-            self.status_text = format!("Unable to prepare network scenario: {error}");
+            return self.finish_scenario_loading_failure(
+                format!("Unable to prepare network scenario: {error}"),
+                true,
+            );
         }
+        Ok(())
     }
 
     pub(crate) fn try_prepare_client_network_scenario(&mut self) -> Result<(), String> {
@@ -2854,6 +2854,7 @@ impl GameApp {
             join_data.parameters.fair_crew_forced,
             join_data.parameters.allow_debug,
             join_data.parameters.auto_frame_skip,
+            synchronized_rule_goal_lists(&join_data.parameters),
             synchronized_team_configuration(&join_data.parameters),
             team_registry,
         );
@@ -3366,6 +3367,31 @@ impl GameApp {
         }
     }
 
+    pub(crate) fn record_network_error_round_result(&mut self, message: &str) {
+        let encoded = match self.runtime_language_charset {
+            RuntimeHelpCharset::Windows1252 => message
+                .chars()
+                .map(runtime_cp1252_byte)
+                .collect::<Result<Vec<_>>>(),
+            RuntimeHelpCharset::Utf8 => Ok(message.as_bytes().to_vec()),
+        };
+        let mut result_message = encoded.unwrap_or_else(|error| {
+            tracing::warn!(
+                %error,
+                "network result message was not representable in the process language charset"
+            );
+            message.as_bytes().to_vec()
+        });
+        if let Some(nul) = result_message.iter().position(|byte| *byte == 0) {
+            result_message.truncate(nul);
+        }
+        self.engine.evaluate_network_round_results(
+            clonk_engine::RoundResultsNetworkResult::NetworkError,
+            Some(result_message),
+        );
+        self.snapshot.round_results = self.engine.snapshot().round_results;
+    }
+
     pub(crate) fn process_network_events(&mut self) -> Result<(), EngineError> {
         let events = self
             .network
@@ -3381,7 +3407,7 @@ impl GameApp {
                 // C4GameControlNetwork::HandleControlPkt executes synchronized
                 // controls immediately while network control is frozen in the
                 // lobby (src/C4GameControlNetwork.cpp:558-588).
-                let frozen_lobby = self.network_lobby.is_some()
+                let frozen_lobby = self.joined_network_lobby_active()
                     || self.classic_host_lobby_active()
                     || (self.mode == AppMode::Loading
                         && self
@@ -3401,6 +3427,85 @@ impl GameApp {
                     self.apply_synchronized_controls(tick, controls)?;
                     continue;
                 }
+                if let NetworkEvent::FatalError(message) = &event {
+                    self.record_network_error_round_result(message);
+                    let purpose = if matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+                        StartupNetworkPurpose::StagedHost
+                    } else {
+                        StartupNetworkPurpose::Join
+                    };
+                    let network_control_active = self.network_control_clock.is_some()
+                        && (self.mode == AppMode::Running
+                            || (self.mode == AppMode::Loading
+                                && self.network_lobby.is_none()
+                                && self.classic_host_lobby.is_none()));
+                    if network_control_active {
+                        // Clear on loss of the live network invokes
+                        // ChangeToLocal whenever Game.Control is already in
+                        // CM_Network, including post-lobby Game::Init. It
+                        // keeps the current frame/control tick and removes
+                        // remote clients instead of leaving the dead lockstep
+                        // clock installed (src/C4Network2.cpp:748-775;
+                        // src/C4GameControl.cpp:93-127).
+                        tracing::error!(
+                            message = %message,
+                            "fatal network worker error; changing network control to local"
+                        );
+                        if self.network.is_some() {
+                            let local_client_id = self
+                                .network
+                                .as_ref()
+                                .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                                .unwrap_or_else(|| self.offline_local_client_id());
+                            self.change_network_control_to_local(local_client_id);
+                        }
+                        break;
+                    }
+                    // A failed application message loop before GO makes
+                    // native DoLobby clear the network and return false.
+                    // Game::Init then returns through QuitGame to the
+                    // remembered startup dialog with its error flag retained
+                    // (src/C4Network2.cpp:475-510;
+                    // src/C4Game.cpp:408-411;
+                    // src/C4Application.cpp:373-400,438-449).
+                    self.finish_startup_network_failure(
+                        purpose,
+                        format!("Unable to start network session: {message}"),
+                    )?;
+                    break;
+                }
+                let lobby_diagnostic_active =
+                    self.classic_host_lobby_active() || self.joined_network_lobby_active();
+                if lobby_diagnostic_active {
+                    let diagnostic = match &event {
+                        NetworkEvent::RecoverableRouteDiagnostic { client_id, error } => {
+                            Some((*client_id, error.clone(), false))
+                        }
+                        NetworkEvent::TransportDiagnostic { client_id, error } => {
+                            Some((*client_id, error.clone(), true))
+                        }
+                        NetworkEvent::Error(error) => Some((None, error.clone(), true)),
+                        _ => None,
+                    };
+                    if let Some((client_id, error, severe)) = diagnostic {
+                        // Both host and client fullscreen lobbies own
+                        // C4GameLobby::MainDlg. The GUI log sink forwards
+                        // ordinary network warnings/errors to whichever
+                        // lobby is live, without a host-role gate
+                        // (src/C4Log.cpp:227-239;
+                        // src/C4GameLobby.cpp:738-753).
+                        let message = client_id
+                            .map(|client_id| format!("client {client_id}: {error}"))
+                            .unwrap_or(error);
+                        if severe {
+                            tracing::error!(message = %message, "lobby network diagnostic");
+                        } else {
+                            tracing::warn!(message = %message, "recoverable lobby route diagnostic");
+                        }
+                        self.append_control_message_log(message, CONTROL_LOG_COLOR, None);
+                        continue;
+                    }
+                }
                 if self.classic_host_lobby_active() {
                     if let NetworkEvent::LeagueUpdate(response) = &event {
                         self.apply_league_update_response(response.clone());
@@ -3419,7 +3524,9 @@ impl GameApp {
                     }
                     let classic_lobby_state_event = matches!(
                         &event,
-                        NetworkEvent::JoinDataNeeded { .. }
+                        NetworkEvent::ActivationRequest { .. }
+                            | NetworkEvent::StatusCommitted(_)
+                            | NetworkEvent::JoinDataNeeded { .. }
                             | NetworkEvent::PlayerInfoUpdateRequest { .. }
                             | NetworkEvent::PreexecutedPlayerInfoEcho { .. }
                             | NetworkEvent::DirectControl(NetworkControl::PlayerInfo(_))
@@ -3429,6 +3536,7 @@ impl GameApp {
                             | NetworkEvent::DirectControl(NetworkControl::DebugRecord(_))
                             | NetworkEvent::PeerConnected { .. }
                             | NetworkEvent::PeerDisconnected { .. }
+                            | NetworkEvent::PeerConnectionFailed { .. }
                             | NetworkEvent::ResourceProgress { .. }
                             | NetworkEvent::ResourceComplete { .. }
                             | NetworkEvent::ResourceLoadFailed { .. }
@@ -3451,9 +3559,9 @@ impl GameApp {
                         NetworkEvent::ReadyCheck(_) => None,
                         NetworkEvent::HostStatusAck { .. } => None,
                         NetworkEvent::StatusRequested(_) => Some("status request"),
-                        NetworkEvent::StatusCommitted(_) => Some("status commit"),
+                        NetworkEvent::StatusCommitted(_) => None,
                         NetworkEvent::LobbyCountdown(_) => None,
-                        NetworkEvent::ActivationRequest { .. } => Some("activation request"),
+                        NetworkEvent::ActivationRequest { .. } => None,
                         NetworkEvent::JoinDataNeeded { .. } => None,
                         NetworkEvent::PlayerInfoUpdateRequest { .. } => None,
                         NetworkEvent::PreexecutedPlayerInfoEcho { .. } => None,
@@ -3469,9 +3577,7 @@ impl GameApp {
                         NetworkEvent::DirectControl(_) => Some("direct player/resource control"),
                         NetworkEvent::PeerConnected { .. } => None,
                         NetworkEvent::PeerDisconnected { .. } => None,
-                        NetworkEvent::PeerConnectionFailed { .. } => {
-                            Some("client connection failure")
-                        }
+                        NetworkEvent::PeerConnectionFailed { .. } => None,
                         NetworkEvent::NetpuncherStateChanged { .. } => unreachable!(
                             "netpuncher state is applied before the classic-lobby boundary"
                         ),
@@ -3480,7 +3586,18 @@ impl GameApp {
                         NetworkEvent::ResourceComplete { .. } => None,
                         NetworkEvent::ResourceLoadFailed { .. } => None,
                         NetworkEvent::ResourceDeriveUnsupported { .. } => None,
-                        NetworkEvent::Error(_) => Some("network error presentation"),
+                        NetworkEvent::RecoverableRouteDiagnostic { .. } => unreachable!(
+                            "recoverable route diagnostics are logged before the classic-lobby boundary"
+                        ),
+                        NetworkEvent::TransportDiagnostic { .. } => unreachable!(
+                            "transport diagnostics are logged before the classic-lobby boundary"
+                        ),
+                        NetworkEvent::Error(_) => unreachable!(
+                            "network diagnostics are logged before the classic-lobby boundary"
+                        ),
+                        NetworkEvent::FatalError(_) => unreachable!(
+                            "fatal worker failures restore startup before the classic-lobby boundary"
+                        ),
                     };
                     if let Some(boundary) = boundary {
                         return Err(classic_game_lobby_child_error(
@@ -3492,11 +3609,10 @@ impl GameApp {
                     }
                 }
                 match event {
-                    NetworkEvent::HostPingMeasured { round_trip_ms } => {
-                        if let Some(clock) = self.network_control_clock.as_mut() {
-                            clock.observe_round_trip_ms(round_trip_ms);
-                        }
-                    }
+                    // Route Ping/Pong remains available for presentation, but
+                    // C++ CalcPerformance paces from the full preferred-route
+                    // topology sampled at the consumed-control boundary.
+                    NetworkEvent::HostPingMeasured { .. } => {}
                     NetworkEvent::HostStatusChanged(status) => {
                         self.retarget_network_start_wait(status);
                         if let Some(clock) = self.network_control_clock.as_mut() {
@@ -3707,6 +3823,20 @@ impl GameApp {
                         if let Some(clock) = self.network_control_clock.as_mut() {
                             clock.set_target_tick(Some(status.target_tick));
                         }
+                        if status.state != clonk_network::NETWORK_STATE_LOBBY
+                            && self.joined_network_lobby_active()
+                        {
+                            // HandleStatus installs GS_Go before the status
+                            // acknowledgement or scenario preparation
+                            // finishes. That makes DoLobby close and delete
+                            // pLobby immediately (src/C4Network2.cpp:475-515,
+                            // 2010-2029).
+                            self.close_lobby_child_dialogs_silently();
+                            self.network_lobby = None;
+                            self.host_lobby_countdown = None;
+                            self.pending_local_lobby_countdown_echoes.clear();
+                            self.mode = AppMode::Loading;
+                        }
                         if self.mode == AppMode::Running {
                             // CheckStatusReached keeps control running until
                             // the requested target is reached at an empty
@@ -3722,7 +3852,7 @@ impl GameApp {
                                 {
                                     self.pending_client_start_status = Some(requested);
                                 }
-                                self.prepare_client_network_scenario_if_ready();
+                                self.prepare_client_network_scenario_if_ready()?;
                                 if self.network.is_none() {
                                     break;
                                 }
@@ -3921,7 +4051,6 @@ impl GameApp {
                                         tracing::error!(%error, "failed to broadcast updated PlayerInfo follow-up");
                                     }
                                 }
-                                self.sync_classic_lobby_roster();
                             }
                             NetworkControl::Vote(vote) => self.execute_league_vote(vote)?,
                             NetworkControl::Set(set) => self.execute_control_set(set),
@@ -3996,6 +4125,14 @@ impl GameApp {
                         })
                         .flatten();
                         if let Some(local_client_id) = local_client_id {
+                            let host_lost_in_lobby = self.mode == AppMode::Menu
+                                && self.startup_view == StartupView::NetworkLobby;
+                            let host_name = self
+                                .control_clients
+                                .state(0)
+                                .map(|host| legacy_presentation_text(host.name.as_bytes()))
+                                .filter(|name| !name.is_empty())
+                                .unwrap_or_else(|| "Host".to_string());
                             // A lost host cannot receive a graceful ConnRe;
                             // C4Network2 clears directly into ChangeToLocal
                             // (C4Network2.cpp:1786-1817).
@@ -4003,6 +4140,32 @@ impl GameApp {
                                 local_client_id,
                                 clonk_network::LeagueDisconnectReason::ConnectionFailed,
                             );
+                            let message = format_resource_string(
+                                self.runtime_resource_text(
+                                    "IDS_NET_HOSTDISCONNECTED",
+                                    "Network: host %s disconnected!",
+                                ),
+                                &[&host_name],
+                            );
+                            // OnClientDisconnect evaluates the host-loss
+                            // verdict before C4Network2::Clear. The same
+                            // result is retained whether Clear exits DoLobby
+                            // or changes an active round to local control
+                            // (src/C4Network2.cpp:1825-1833).
+                            self.record_network_error_round_result(&message);
+                            if host_lost_in_lobby {
+                                // Clear makes an active DoLobby return false,
+                                // aborting C4Game::Init back through the
+                                // remembered startup dialog. Only an already
+                                // running round continues under local control
+                                // (C4Network2.cpp:477-515,1809-1833;
+                                // C4Game.cpp:405-411).
+                                self.finish_startup_network_failure(
+                                    StartupNetworkPurpose::Join,
+                                    message,
+                                )?;
+                                break;
+                            }
                             self.change_network_control_to_local(local_client_id);
                         }
                         if let Some(reason) = reason {
@@ -4080,6 +4243,13 @@ impl GameApp {
                             local,
                         );
                         self.register_classic_lobby_resource(&core, 100);
+                        // A completed player resource may replace the lobby's
+                        // fallback icon with BigIcon.png. This is an explicit
+                        // PlayerInfo-list invalidation; ordinary packet batches
+                        // must not rebuild these raster rows.
+                        if core.resource_type == clonk_network::HostResourceType::Player as u8 {
+                            self.sync_classic_lobby_roster();
+                        }
                         tracing::info!(
                             resource_id,
                             resource = %core.filename.to_string_lossy(),
@@ -4091,7 +4261,7 @@ impl GameApp {
                         // network overloading C4GraphicsResource::Init stays
                         // re-callable for (C4GraphicsResource.cpp:285-291).
                         self.refresh_network_overloaded_gui_resources(&core)?;
-                        self.prepare_client_network_scenario_if_ready();
+                        self.prepare_client_network_scenario_if_ready()?;
                         if self.network.is_none() {
                             break;
                         }
@@ -4109,6 +4279,18 @@ impl GameApp {
                         self.admission_resources.mark_failed(resource_id);
                         self.finish_blocking_resource_wait(resource_id);
                         self.remove_classic_lobby_resource(resource_id);
+                        // A failed player transfer may restore the fallback
+                        // icon, so reproject at this lifecycle edge only.
+                        if self
+                            .admission_resources
+                            .resource_cores
+                            .get(&resource_id)
+                            .is_some_and(|core| {
+                                core.resource_type == clonk_network::HostResourceType::Player as u8
+                            })
+                        {
+                            self.sync_classic_lobby_roster();
+                        }
                         tracing::warn!(resource_id, "network resource load failed");
                         if let Some(display_name) = failed_client_start {
                             self.finish_startup_network_failure(
@@ -4127,14 +4309,28 @@ impl GameApp {
                         );
                         self.sync_classic_lobby_resource_ready();
                     }
+                    NetworkEvent::RecoverableRouteDiagnostic { client_id, error } => {
+                        tracing::warn!(
+                            ?client_id,
+                            message = %error,
+                            "recoverable network route diagnostic"
+                        );
+                    }
+                    NetworkEvent::TransportDiagnostic { client_id, error } => {
+                        tracing::error!(
+                            ?client_id,
+                            message = %error,
+                            "network transport diagnostic"
+                        );
+                    }
                     NetworkEvent::Error(message) => {
                         tracing::error!(message = %message, "network error");
                     }
+                    NetworkEvent::FatalError(message) => {
+                        tracing::error!(message = %message, "fatal network worker error");
+                    }
                 }
             }
-        }
-        if had_events {
-            self.sync_classic_lobby_roster();
         }
         Ok(())
     }
@@ -4186,6 +4382,7 @@ impl GameApp {
             }
         }
         self.publish_current_host_player_infos();
+        self.sync_classic_lobby_roster();
     }
 
     pub(crate) fn report_league_disconnect(
@@ -4253,16 +4450,11 @@ impl GameApp {
         reference: clonk_network::NetworkGameReference,
     ) -> Result<(), EngineError> {
         if !reference.join_allowed {
-            let message = startup_resource_string(
-                self.app_paths.as_ref(),
+            let message = self.runtime_resource_text(
                 "IDS_NET_NOJOIN_NORUNTIME",
                 "The game has started already and runtime join is not allowed! Try joining anyway?",
             );
-            let caption = startup_resource_string(
-                self.app_paths.as_ref(),
-                "IDS_NET_NOJOIN",
-                "Cannot join game",
-            );
+            let caption = self.runtime_resource_text("IDS_NET_NOJOIN", "Cannot join game");
             self.push_message_dialog(
                 clonk_frontend::message_dialog::MessageDialogState::new(
                     message,
@@ -4770,6 +4962,7 @@ impl GameApp {
                 fair_crew_forced,
                 allow_debug,
                 auto_frame_skip,
+                synchronized_rule_goal_lists,
                 team_configuration,
                 team_registry,
             )) = self
@@ -4786,6 +4979,7 @@ impl GameApp {
                         snapshot.parameters.fair_crew_forced,
                         snapshot.parameters.allow_debug,
                         snapshot.parameters.auto_frame_skip,
+                        synchronized_rule_goal_lists(&snapshot.parameters),
                         synchronized_team_configuration(&snapshot.parameters),
                         runtime_teams_from_join_snapshot(&snapshot.parameters.teams),
                     )
@@ -4858,6 +5052,7 @@ impl GameApp {
                 fair_crew_forced,
                 allow_debug,
                 auto_frame_skip,
+                synchronized_rule_goal_lists,
                 team_configuration,
                 team_registry,
             );
@@ -5284,6 +5479,7 @@ impl GameApp {
         // C4GameControl::ChangeToLocal preserves FrameCounter, ControlTick and
         // Game.Parameters while changing only the cadence to ControlRate=1
         // (C4GameControl.cpp:93-127).
+        let game_over_dialog_shown = self.game_over_dialog.is_some();
         self.finalize_pending_league_end_for_teardown();
         self.clear_lobby_preload();
         let control_tick = self.engine.sync_check(local_client_id).control_tick;
@@ -5324,8 +5520,11 @@ impl GameApp {
         self.network_sync.clear();
         self.offline_control_input.clear();
         self.sync_checks.clear();
-        self.offline_halt_count = 0;
-        self.network_control_running = true;
+        self.offline_halt_count = i32::from(game_over_dialog_shown);
+        // Native does not clear HaltCount while C4GameOverDlg is shown;
+        // otherwise a client starts simulating when its host disconnects
+        // beneath the evaluation dialog (src/C4GameControl.cpp:121-127).
+        self.network_control_running = !game_over_dialog_shown;
         self.runtime_network_status_barrier = None;
         self.league_votes.clear();
         self.clear_blocking_resource_wait();
@@ -6632,6 +6831,11 @@ impl GameApp {
         self.status_text = status_message;
         self.game_over_dialog = Some(dialog);
         self.show_or_raise_runtime_default_dialog(RuntimeDefaultDialog::GameOver);
+        // C4GameOverDlg::OnShown delegates to C4Game::Pause after closing the
+        // scoreboard and player fullscreen menus. That routes through the
+        // synchronized GS_Pause barrier for a network host, is governed by
+        // the host for a client, and directly acquires the offline halt.
+        self.set_runtime_pause(true);
         Ok(())
     }
 

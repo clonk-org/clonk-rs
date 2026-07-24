@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
@@ -667,6 +669,8 @@ impl Drop for NullBackend {
 pub struct AudioMixer {
     state: Arc<Mutex<MixerState>>,
     channel_finished: Arc<RwLock<Option<ChannelFinished>>>,
+    #[cfg(test)]
+    channel_slot_probe_count: Arc<AtomicUsize>,
     sample_rate: u32,
     resampling_mode: ResamplingMode,
     inert: bool,
@@ -676,6 +680,9 @@ struct MixerState {
     sounds: HashMap<SoundId, Arc<AudioClip>>,
     music: HashMap<MusicId, Arc<MusicAsset>>,
     channels: Vec<Option<ChannelPlayback>>,
+    /// Numeric channel slots that are currently occupied, kept in ascending
+    /// order so mixing preserves SDL_mixer's channel-order accumulation.
+    active_channel_indices: Vec<usize>,
     channel_generations: Vec<u64>,
     active_music: Option<MusicPlayback>,
     next_sound_id: u32,
@@ -763,6 +770,7 @@ impl AudioMixer {
             sounds: HashMap::new(),
             music: HashMap::new(),
             channels: (0..max_channels).map(|_| None).collect(),
+            active_channel_indices: Vec::new(),
             channel_generations: vec![0; max_channels],
             active_music: None,
             next_sound_id: 1,
@@ -772,6 +780,8 @@ impl AudioMixer {
         Self {
             state: Arc::new(Mutex::new(state)),
             channel_finished: Arc::new(RwLock::new(None)),
+            #[cfg(test)]
+            channel_slot_probe_count: Arc::new(AtomicUsize::new(0)),
             sample_rate,
             resampling_mode,
             inert,
@@ -890,6 +900,13 @@ impl AudioMixer {
         }
         state.channel_generations[channel_index] = generation;
         state.channels[channel_index] = Some(playback);
+        let insertion = state
+            .active_channel_indices
+            .binary_search(&channel_index)
+            .unwrap_or_else(|insertion| insertion);
+        state
+            .active_channel_indices
+            .insert(insertion, channel_index);
         Ok(ChannelId(channel_index, generation))
     }
 
@@ -898,8 +915,14 @@ impl AudioMixer {
         if state.channel_generations.get(channel.0) != Some(&channel.1) {
             return;
         }
-        if let Some(slot) = state.channels.get_mut(channel.0) {
-            *slot = None;
+        let halted = state
+            .channels
+            .get_mut(channel.0)
+            .is_some_and(|slot| slot.take().is_some());
+        if halted {
+            if let Ok(index) = state.active_channel_indices.binary_search(&channel.0) {
+                state.active_channel_indices.remove(index);
+            }
         }
     }
 
@@ -1026,6 +1049,16 @@ impl AudioMixer {
         self.mix_into_channels(output, 2);
     }
 
+    #[cfg(test)]
+    fn reset_channel_slot_probe_count(&self) {
+        self.channel_slot_probe_count.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn channel_slot_probe_count(&self) -> usize {
+        self.channel_slot_probe_count.load(Ordering::Relaxed)
+    }
+
     pub fn set_channel_finished_callback_ffi(
         &self,
         callback: Option<extern "C" fn(i32, *mut std::ffi::c_void)>,
@@ -1091,14 +1124,29 @@ impl AudioMixer {
 
         let (callback, finished_list) = {
             let mut state = self.state.lock().unwrap();
+            let MixerState {
+                channels,
+                active_channel_indices,
+                active_music,
+                ..
+            } = &mut *state;
+            debug_assert!(active_channel_indices
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]));
+            debug_assert!(active_channel_indices
+                .iter()
+                .all(|index| channels.get(*index).is_some_and(Option::is_some)));
             for frame_index in 0..frames {
                 let mut left = 0.0f32;
                 let mut right = 0.0f32;
 
-                for (index, slot) in state.channels.iter_mut().enumerate() {
-                    let Some(channel) = slot.as_mut() else {
-                        continue;
-                    };
+                for &index in active_channel_indices.iter() {
+                    #[cfg(test)]
+                    self.channel_slot_probe_count
+                        .fetch_add(1, Ordering::Relaxed);
+                    let channel = channels[index]
+                        .as_mut()
+                        .expect("active channel index must reference an occupied slot");
                     let frames_len = channel.clip.frames.len();
                     if frames_len == 0 {
                         if !finished_channels.contains(&index) {
@@ -1132,7 +1180,7 @@ impl AudioMixer {
                 }
 
                 if !finished_music {
-                    if let Some(music) = state.active_music.as_mut() {
+                    if let Some(music) = active_music.as_mut() {
                         if let Some(frame) = music.next_frame() {
                             let mut volume = music.volume_step as f32 / SDL_MIXER_MAX_VOLUME;
                             if let Some(fade) = music.fade_out.as_mut() {
@@ -1164,15 +1212,16 @@ impl AudioMixer {
             finished_channels.dedup();
 
             for index in &finished_channels {
-                if let Some(slot) = state.channels.get_mut(*index) {
+                if let Some(slot) = channels.get_mut(*index) {
                     if slot.is_some() {
                         slot.take();
                     }
                 }
             }
+            active_channel_indices.retain(|index| finished_channels.binary_search(index).is_err());
 
             if finished_music {
-                state.active_music = None;
+                *active_music = None;
             }
 
             (
@@ -1986,6 +2035,30 @@ mod tests {
         assert!(mixer.channel_is_playing(channel));
         mixer.halt_channel(channel);
         assert!(!mixer.channel_is_playing(channel));
+    }
+
+    #[test]
+    fn inactive_channel_capacity_does_not_increase_per_sample_mix_work() {
+        // C4AudioSystemSdl.cpp:177 allocates the configured channel capacity,
+        // while SDL_mixer mixes the active channel at the same numeric slot.
+        // Capacity must not multiply the per-sample work or change the output.
+        let data = generate_sine_wave(50, 440.0, 44_100);
+        let mix_one_callback = |max_channels| {
+            let mixer = AudioMixer::new(44_100, max_channels);
+            let sound_id = mixer.load_sound(&data).unwrap();
+            let channel = mixer.play_sound(sound_id, true).unwrap();
+            assert_eq!(channel.0, 0);
+            let mut buffer = vec![0_i16; 512 * 2];
+            mixer.reset_channel_slot_probe_count();
+            mixer.mix_i16(&mut buffer);
+            (buffer, mixer.channel_slot_probe_count())
+        };
+
+        let (single_channel_output, single_channel_probes) = mix_one_callback(1);
+        let (full_capacity_output, full_capacity_probes) = mix_one_callback(1_024);
+        assert_eq!(full_capacity_output, single_channel_output);
+        assert_eq!(single_channel_probes, 512);
+        assert_eq!(full_capacity_probes, single_channel_probes);
     }
 
     #[test]

@@ -32,6 +32,11 @@
 //   * `C4Landscape::ExecuteScan` and `DoScan` are mechanically extracted in
 //     full; a 6x8 Water/Ice Surface8 fixture records the exact conversion
 //     cadence and ScanX cursor advancement.
+//   * `C4SGame::ConvertGoals` and `C4Game::InitRules`/`InitGoals` are
+//     mechanically extracted in full, together with the C4IDList operations
+//     they call. The HarpoonRace fixture converts its authored RVLR rule plus
+//     default StructuresNeedEnergy into the RVLR+ENRG parameter list and then
+//     records the objects placed from those authoritative parameters.
 //   * The complete bottom/top/side DFA_FLIGHT arms of
 //     `C4Object::ContactAction`, their action helpers, and the shared
 //     unresolved-flight tail are mechanically extracted; a minimal object
@@ -43,12 +48,15 @@
 // Regenerate the golden with `parity/oracle/gen_golden.sh`.
 
 #include <cstdint>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <functional>
 #include <initializer_list>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "oracle_fixed.h" // generated from src/Fixed.h by gen_golden.sh
 #include <C4Random.h>     // real engine header (no DEBUGREC)
@@ -586,10 +594,113 @@ void C4Object::ContactActionRightFlight(int32_t fDisabled, C4PhysicalInfo *pPhys
 inline bool ObjectActionTumble(C4Object *, int32_t, C4Fixed, C4Fixed) { return false; }
 inline bool ObjectActionJump(C4Object *, C4Fixed, C4Fixed, bool) { return false; }
 
+// --- Network rule/goal parameter placement ---------------------------------
+// C4Id.h's production representation is a native unsigned long containing the
+// four legacy bytes. The focused scaffold keeps only that value contract; all
+// list mutation/traversal and scenario/game decisions below execute exact
+// bodies mechanically lifted from the pinned C++ source.
+using C4ID = unsigned long;
+inline constexpr C4ID C4ID_None = 0;
+
+constexpr C4ID C4Id(std::string_view text)
+{
+    if (text.size() < 4 || text == "NONE") return C4ID_None;
+    C4ID id = 0;
+    for (std::size_t index = 4; index > 0; --index)
+    {
+        id <<= 8;
+        id |= static_cast<C4ID>(text[index - 1]);
+    }
+    return id;
+}
+
+class C4IDList
+{
+public:
+    C4IDList() = default;
+    C4IDList(const C4IDList &) = default;
+    C4IDList &operator=(const C4IDList &) = default;
+
+    struct Entry
+    {
+        C4ID id;
+        int32_t count;
+
+        Entry() : id{C4ID_None}, count{0} {}
+        Entry(C4ID id, int32_t count) : id{id}, count{count} {}
+    };
+
+    void Clear();
+    C4ID GetID(std::size_t index, int32_t *count = nullptr) const;
+    int32_t GetIDCount(C4ID id, int32_t zeroDefaultValue = 0) const;
+    bool SetIDCount(C4ID id, int32_t count, bool addNewID = false);
+    int32_t GetNumberOfIDs() const;
+
+private:
+    std::vector<Entry> content;
+};
+
+#include "id_list_find.inc"
+#include "id_list_clear.inc"
+#include "id_list_get_id.inc"
+#include "id_list_get_id_count.inc"
+#include "id_list_set_id_count.inc"
+#include "id_list_get_number_of_ids.inc"
+
+struct C4NameListOracle
+{
+    void Clear() {}
+};
+
+struct C4SRealism
+{
+    bool ConstructionNeedsMaterial{};
+    bool StructuresNeedEnergy{};
+};
+
+inline constexpr int32_t C4S_Cooperative = 0;
+inline constexpr int32_t C4S_Melee = 1;
+inline constexpr int32_t C4S_MeleeTeamwork = 2;
+inline constexpr int32_t C4S_KillTheCaptain = 0;
+inline constexpr int32_t C4S_CaptureTheFlag = 2;
+inline constexpr int32_t C4S_Goldmine = 1;
+inline constexpr int32_t C4S_Monsterkill = 2;
+inline constexpr int32_t C4S_ValueGain = 3;
+
+class C4SGame
+{
+public:
+    int32_t Mode{C4S_Cooperative};
+    int32_t Elimination{1};
+    bool EnableRemoveFlag{};
+    int32_t ValueGain{};
+    C4IDList CreateObjects;
+    C4IDList ClearObjects;
+    C4NameListOracle ClearMaterial;
+    int32_t CooperativeGoal{};
+    C4IDList Goals;
+    C4IDList Rules;
+
+    void ConvertGoals(C4SRealism &realism);
+
+protected:
+    void ClearOldGoals();
+};
+
+#include "scenario_convert_goals.inc"
+#include "scenario_clear_old_goals.inc"
+
 struct C4Game
 {
     C4ObjectListOracle Objects;
     C4MaterialMapOracle Material;
+    struct
+    {
+        C4IDList Rules;
+        C4IDList Goals;
+    } Parameters;
+    std::vector<C4ID> InitCreated;
+    int32_t UpdateRulesCalls{};
     struct DigSpawnRecord
     {
         int32_t count{};
@@ -602,6 +713,15 @@ struct C4Game
     } DigSpawn;
 
     void ShakeObjects(int32_t tx, int32_t ty, int32_t range, int32_t causedBy);
+    void InitRules();
+    void InitGoals();
+    void UpdateRules() { ++UpdateRulesCalls; }
+
+    C4Object *CreateObject(C4ID definition, C4Object *)
+    {
+        InitCreated.push_back(definition);
+        return nullptr;
+    }
 
     C4Object *CreateObject(
         int32_t definition,
@@ -624,6 +744,9 @@ struct C4Game
     }
 };
 
+#include "game_init_rules.inc"
+#include "game_init_goals.inc"
+
 static C4Game DigGameOracle;
 
 // Exact production DigOutMaterialCast body. The scaffold records the
@@ -640,6 +763,121 @@ static C4Game DigGameOracle;
 #include "shake_objects.inc"
 #include "object_fling.inc"
 #undef C4D_Living
+
+static C4IDList makeIDList(
+    std::initializer_list<std::pair<std::string_view, int32_t>> entries)
+{
+    C4IDList list;
+    for (const auto &[id, count] : entries)
+        list.SetIDCount(C4Id(id), count, true);
+    return list;
+}
+
+static void printC4ID(C4ID id)
+{
+    char text[5]{};
+    for (std::size_t index = 0; index < 4; ++index)
+        text[index] = static_cast<char>((id >> (index * 8)) & 0xff);
+    printf("\"%s\"", text);
+}
+
+static void printC4IDList(const C4IDList &list)
+{
+    printf("[");
+    for (int32_t index = 0; index < list.GetNumberOfIDs(); ++index)
+    {
+        if (index) printf(",");
+        int32_t count{};
+        const C4ID id = list.GetID(static_cast<std::size_t>(index), &count);
+        printf("{\"id\":");
+        printC4ID(id);
+        printf(",\"count\":%d}", count);
+    }
+    printf("]");
+}
+
+static void printCreatedIDs(
+    const std::vector<C4ID> &created,
+    std::size_t begin,
+    std::size_t end)
+{
+    printf("[");
+    for (std::size_t index = begin; index < end; ++index)
+    {
+        if (index != begin) printf(",");
+        printC4ID(created[index]);
+    }
+    printf("]");
+}
+
+static void printNetworkRuleGoalPlacementCase(
+    const char *name,
+    const C4IDList &scenarioRules,
+    const C4IDList &scenarioGoals,
+    const C4IDList &parameterRules,
+    const C4IDList &parameterGoals)
+{
+    C4Game game;
+    game.Parameters.Rules = parameterRules;
+    game.Parameters.Goals = parameterGoals;
+    game.InitRules();
+    const std::size_t ruleEnd = game.InitCreated.size();
+    game.InitGoals();
+
+    printf("{\"name\":\"%s\",\"scenario_rules\":", name);
+    printC4IDList(scenarioRules);
+    printf(",\"scenario_goals\":");
+    printC4IDList(scenarioGoals);
+    printf(",\"parameter_rules\":");
+    printC4IDList(parameterRules);
+    printf(",\"parameter_goals\":");
+    printC4IDList(parameterGoals);
+    printf(",\"rule_objects\":");
+    printCreatedIDs(game.InitCreated, 0, ruleEnd);
+    printf(",\"goal_objects\":");
+    printCreatedIDs(game.InitCreated, ruleEnd, game.InitCreated.size());
+    printf(",\"update_rules_calls\":%d}", game.UpdateRulesCalls);
+}
+
+static void printNetworkRuleGoalPlacementCases()
+{
+    // content/EkeReloaded.c4f/InterplanetaryCivilwar.c4f/
+    // HarpoonRace.c4s/Scenario.txt authors RVLR=1 and RACE=1 while omitting
+    // StructNeedEnergy. C4Scenario.cpp:233 defaults that field true, and the
+    // exact ConvertGoals body (:506-556) appends ENRG before Parameters is
+    // sent in JoinData. Exact InitRules/InitGoals then read those parameter
+    // lists at C4Game.cpp:4056-4076.
+    C4SGame harpoonRace;
+    harpoonRace.Rules = makeIDList({{"RVLR", 1}});
+    harpoonRace.Goals = makeIDList({{"RACE", 1}});
+    const C4IDList rawHarpoonRules = harpoonRace.Rules;
+    const C4IDList rawHarpoonGoals = harpoonRace.Goals;
+    C4SRealism harpoonRealism{
+        .ConstructionNeedsMaterial = false,
+        .StructuresNeedEnergy = true,
+    };
+    harpoonRace.ConvertGoals(harpoonRealism);
+
+    printf("\"network_rule_goal_placement\":[");
+    printNetworkRuleGoalPlacementCase(
+        "harpoonrace_join_data",
+        rawHarpoonRules,
+        rawHarpoonGoals,
+        harpoonRace.Rules,
+        harpoonRace.Goals);
+    printf(",");
+
+    // A second source-selection/count edge makes the differential capable of
+    // catching a client that rereads Scenario.txt: rules place max(count, 1),
+    // goals place exactly count, and neither local list may leak through.
+    printNetworkRuleGoalPlacementCase(
+        "authoritative_count_edges",
+        makeIDList({{"RVLR", 7}}),
+        makeIDList({{"RACE", 7}}),
+        makeIDList({{"RVLR", 0}, {"ENRG", 2}}),
+        makeIDList({{"RACE", 0}}));
+    printf("]");
+}
 
 static void printDigOutMaterialCastCase()
 {
@@ -1899,34 +2137,39 @@ int main()
     printDefPictureScaleCases();
     printf(",\n");
 
-    // 16. Exact DigOutMaterialCast spawn arguments and the twenty following
+    // 16. HarpoonRace C4SGame conversion followed by authoritative
+    //     C4GameParameters rule/goal placement, plus a source/count edge.
+    printNetworkRuleGoalPlacementCases();
+    printf(",\n");
+
+    // 17. Exact DigOutMaterialCast spawn arguments and the twenty following
     //     Random draws on the same synced ledger.
     printDigOutMaterialCastCase();
     printf(",\n");
 
-    // 17. Exact production ShakeObjects master-order/RNG gate sequence and
+    // 18. Exact production ShakeObjects master-order/RNG gate sequence and
     //     C4Object::Fling raw fallback.
     printShakeObjectsCase();
     printf(",\n");
 
-    // 18. Exact C4Landscape::ClearPix / BlastFreePix / BlastFree scan,
+    // 19. Exact C4Landscape::ClearPix / BlastFreePix / BlastFree scan,
     //     pre-count, IFT-preserving mutation, and RNG order.
     printBlastFreeCase();
     printf(",\n");
 
-    // 19. Exact C4Landscape::ExecuteScan / DoScan conversion cadence and
+    // 20. Exact C4Landscape::ExecuteScan / DoScan conversion cadence and
     //     ScanX advancement across a wrapping two-column scan.
     printLandscapeScanCase();
     printf(",\n");
 
-    // 20. Exact DFA_FLIGHT ContactAction arms, especially the low-speed
+    // 21. Exact DFA_FLIGHT ContactAction arms, especially the low-speed
     //     `fDisabled` paths into FlatUp/Tumble instead of Hangle/Scale.
     printContactActionBottomFlightCases();
     printf(",\n");
     printContactActionTopSideFlightCases();
     printf(",\n");
 
-    // 21. movement: per-frame sub-pixel accumulation (the Theme-C core).
+    // 22. movement: per-frame sub-pixel accumulation (the Theme-C core).
     //    Mirrors C4Movement.cpp:260-261 (fix += dir) and :627 (ydir += gravity),
     //    WITHOUT landscape collision/contact (that is the per-pixel loop, item 4).
     arr_begin("movement");

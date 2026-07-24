@@ -1060,6 +1060,7 @@ dependencies = [
  "log",
  "reqwest",
  "serde",
+ "serde_json",
  "sha1",
  "socket2",
  "thiserror 1.0.69",
@@ -1113,6 +1114,7 @@ dependencies = [
  "indexmap 2.11.4",
  "serde",
  "serde_json",
+ "smallvec",
  "stacker",
  "thiserror 1.0.69",
 ]

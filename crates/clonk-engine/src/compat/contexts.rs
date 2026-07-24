@@ -1,6 +1,5 @@
 use super::*;
 
-
 struct FairCrewHostContextState {
     script_object: Option<ObjectId>,
     script_definition: Option<Option<DefinitionId>>,
@@ -80,6 +79,26 @@ pub(crate) fn fair_crew_definition_context() -> Option<(DefinitionId, PhysicalIn
 impl WorldAccessor for EffectHostContext {
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject> {
         self.get_world_object(id)
+    }
+
+    fn matches_legacy_find_object_candidate(
+        &self,
+        id: ObjectId,
+        params: &FindObjectParams,
+    ) -> Option<bool> {
+        // Active/dormant/nested scopes carry same-call SetAction, SetOwner,
+        // Enter/Exit, ChangeDef, Status and OCF writes. Keep using the full
+        // overlay for those few candidates; only untouched engine objects
+        // may be tested directly by the lazy provider.
+        if self.object_scope(id).is_some() {
+            return self
+                .get_world_object(id)
+                .map(|object| params.matches_object(&object));
+        }
+        if let Some(object) = self.pending_objects.get(&id) {
+            return Some(params.matches_object(object));
+        }
+        self.world.matches_legacy_find_object_candidate(id, params)
     }
 
     fn object_ids(&self) -> Vec<ObjectId> {
@@ -226,7 +245,9 @@ pub(crate) fn broadcast_global_callback(
 /// Run one creatorless engine-side object creation while preserving the
 /// calling script object's live scope. `Game.CreateObject(id, nullptr)` does
 /// not inherit the script caller's position, owner, layer, or controller.
-pub(crate) fn with_creatorless_object_context<T>(callback: impl FnOnce() -> T) -> Result<T, RuntimeError> {
+pub(crate) fn with_creatorless_object_context<T>(
+    callback: impl FnOnce() -> T,
+) -> Result<T, RuntimeError> {
     let calling_object = HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let context = borrow.as_mut().ok_or_else(|| {
@@ -280,7 +301,11 @@ pub(crate) fn call_object_own_fail_safe(target: ObjectId, function: &str, args: 
 /// Fail-safe own-script call that also accepts an already-active object
 /// scope which has not joined the world list yet. Plain Engine spawns run
 /// Construction/Initialize in exactly that pre-insertion state.
-pub(crate) fn call_inflight_object_own_fail_safe(target: ObjectId, function: &str, args: &[Value]) -> Value {
+pub(crate) fn call_inflight_object_own_fail_safe(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+) -> Value {
     match call_world_object_own_function_inflight(target, function, args) {
         Some(Ok(value)) => value,
         Some(Err(error)) => {
@@ -352,7 +377,10 @@ pub(crate) fn object_call(args: &[Value]) -> Result<Value, RuntimeError> {
 /// managed by the active host context. `None` for non-object targets —
 /// the VM then falls back to the executing object like C++'s nullptr
 /// conversion.
-pub(crate) fn foreign_local_cell_hook(target: &Value, name: &str) -> Option<clonk_script::ValueCell> {
+pub(crate) fn foreign_local_cell_hook(
+    target: &Value,
+    name: &str,
+) -> Option<clonk_script::ValueCell> {
     let target = object_id_from_value(target)?;
     HOST_CONTEXT.with(|cell| {
         let mut context = cell.borrow_mut();
@@ -673,8 +701,8 @@ pub(crate) fn call_scoped_global_effect_function(
     if !script.has_global_function(function) && !script.has_host_function(function) {
         return None;
     }
-    let (previous_script_object, previous_script_definition, previous_definition) =
-        HOST_CONTEXT.with(|cell| {
+    let (previous_script_object, previous_script_definition, previous_definition) = HOST_CONTEXT
+        .with(|cell| {
             if let Some(context) = cell.borrow_mut().as_mut() {
                 let active = context.object.take();
                 context.dormant_scopes.push(active);
@@ -712,8 +740,8 @@ fn call_scoped_script_reference(
     args: &[Value],
 ) -> Option<Result<clonk_script::ValueReference, RuntimeError>> {
     let resolution = script.resolve_function(function, true)?;
-    let (previous_script_object, previous_script_definition, previous_definition) =
-        HOST_CONTEXT.with(|cell| {
+    let (previous_script_object, previous_script_definition, previous_definition) = HOST_CONTEXT
+        .with(|cell| {
             if let Some(context) = cell.borrow_mut().as_mut() {
                 let definition = definition_override.clone().or_else(|| {
                     if resolution.scope == clonk_script::ScriptFunctionScope::Global {
@@ -783,8 +811,8 @@ fn call_scoped_script_function_impl(
     if !resolvable {
         return None;
     }
-    let (previous_script_object, previous_script_definition, previous_definition) =
-        HOST_CONTEXT.with(|cell| {
+    let (previous_script_object, previous_script_definition, previous_definition) = HOST_CONTEXT
+        .with(|cell| {
             if let Some(context) = cell.borrow_mut().as_mut() {
                 let definition = match definition_override {
                     Some(definition) => definition,
@@ -814,7 +842,7 @@ fn call_scoped_script_function_impl(
             } else {
                 (None, None, None)
             }
-    });
+        });
     let locals = HashMap::new();
     let call = if let Some(resolution) = pinned_resolution {
         let cells = clonk_script::LocalCells::from_local_vars(&locals);
@@ -873,8 +901,9 @@ pub(crate) fn definition_call(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(script) = script else {
         return Ok(Value::Nil); // C4Id2Def failure → C4VNull (C4Script.cpp:3462)
     };
-    let pars: Vec<Value> = args.iter().skip(2).take(8).cloned().collect();
-    call_scoped_scenario_function(script, name, &pars).unwrap_or(Ok(Value::Nil))
+    let parameter_end = args.len().min(10);
+    let pars = args.get(2..parameter_end).unwrap_or(&[]);
+    call_scoped_scenario_function(script, name, pars).unwrap_or(Ok(Value::Nil))
 }
 
 /// FnGameCall (C4Script.cpp:3470-3484): runs a function on the scenario
@@ -897,8 +926,9 @@ pub(crate) fn game_call(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(script) = script else {
         return Ok(Value::Nil);
     };
-    let pars: Vec<Value> = args.iter().skip(1).take(9).cloned().collect();
-    call_scoped_script_function(script, name, &pars).unwrap_or(Ok(Value::Nil))
+    let parameter_end = args.len().min(10);
+    let pars = args.get(1..parameter_end).unwrap_or(&[]);
+    call_scoped_script_function(script, name, pars).unwrap_or(Ok(Value::Nil))
 }
 
 /// FnGameCallEx (C4Script.cpp:3486-3500) → `C4GameScriptHost::GRBroadcast`
@@ -916,7 +946,8 @@ pub(crate) fn game_call_ex(args: &[Value]) -> Result<Value, RuntimeError> {
     if name.is_empty() {
         return Ok(Value::Nil);
     }
-    let pars: Vec<Value> = args.iter().skip(1).take(9).cloned().collect();
+    let parameter_end = args.len().min(10);
+    let pars = args.get(1..parameter_end).unwrap_or(&[]);
 
     // C4D_Goal | C4D_Environment | C4D_Rule (definition.rs:1608-1622)
     const BROADCAST_MASK: i32 = (1 << 5) | (1 << 6) | (1 << 19);
@@ -942,7 +973,7 @@ pub(crate) fn game_call_ex(args: &[Value]) -> Result<Value, RuntimeError> {
         if !eligible {
             continue;
         }
-        if let Some(result) = call_world_object_own_function(target, &name, &pars) {
+        if let Some(result) = call_world_object_own_function(target, &name, pars) {
             result?;
         }
     }
@@ -954,7 +985,7 @@ pub(crate) fn game_call_ex(args: &[Value]) -> Result<Value, RuntimeError> {
     });
     match script {
         Some(script) => {
-            call_scoped_scenario_function(script, &name, &pars).unwrap_or(Ok(Value::Nil))
+            call_scoped_scenario_function(script, &name, pars).unwrap_or(Ok(Value::Nil))
         }
         None => Ok(Value::Nil),
     }
@@ -1129,7 +1160,10 @@ pub(crate) fn locate_func(args: &[Value]) -> Result<Value, RuntimeError> {
             messages.push(format!("{function} (engine)"));
         }
 
-        Ok((messages, resolution.is_some() || script.has_host_function(&function)))
+        Ok((
+            messages,
+            resolution.is_some() || script.has_host_function(&function),
+        ))
     });
 
     let (messages, found) = match lookup {
@@ -1939,10 +1973,8 @@ where
             game_over_triggered,
         ));
         let guard = EffectHostContextTlsGuard { cell, active: true };
-        let result = clonk_script::with_diagnostic_object_formatter(
-            diagnostic_object_data_string,
-            func,
-        );
+        let result =
+            clonk_script::with_diagnostic_object_formatter(diagnostic_object_data_string, func);
         let context = guard.finish();
         let outcome = context.into_commands();
         AUDIO_CONTEXT.with(|cell| {
@@ -2463,7 +2495,10 @@ fn call_world_object_reference_with(
                     (cells, true)
                 }
             },
-            None => (clonk_script::LocalCells::from_local_vars(&local_vars), false),
+            None => (
+                clonk_script::LocalCells::from_local_vars(&local_vars),
+                false,
+            ),
         }
     });
     let (previous_script_object, previous_script_definition) = HOST_CONTEXT.with(|cell| {
@@ -2692,7 +2727,10 @@ fn call_world_object_function_with_options(
                     (cells, true)
                 }
             },
-            None => (clonk_script::LocalCells::from_local_vars(&local_vars), false),
+            None => (
+                clonk_script::LocalCells::from_local_vars(&local_vars),
+                false,
+            ),
         }
     });
     // The HOST_CONTEXT borrow is released here: the nested VM's host
@@ -3016,13 +3054,12 @@ impl EffectHostContext {
         // object have no modeled VM frame, so preserve their synthetic
         // ActionLibrary fallback instead of treating the missing metadata as
         // an authoritative null definition.
-        let script_definition_context = if resolved_script_definition.is_some()
-            || script_object_context.is_none()
-        {
-            Some(resolved_script_definition)
-        } else {
-            None
-        };
+        let script_definition_context =
+            if resolved_script_definition.is_some() || script_object_context.is_none() {
+                Some(resolved_script_definition)
+            } else {
+                None
+            };
         let mut object = object.map(|ctx| {
             let HostObjectContext {
                 id,
@@ -3226,7 +3263,10 @@ impl EffectHostContext {
         }
     }
 
-    pub(crate) fn scope_mut(&mut self, scope: EffectScope) -> Result<&mut EffectScopeContext, RuntimeError> {
+    pub(crate) fn scope_mut(
+        &mut self,
+        scope: EffectScope,
+    ) -> Result<&mut EffectScopeContext, RuntimeError> {
         match scope {
             EffectScope::Object(Some(target)) => self
                 .object_scope_mut(target)
@@ -3781,13 +3821,7 @@ impl EffectHostContext {
         self.world
             .landscape_mut()
             .map(|landscape| {
-                preview_dig_rect_pixels(
-                    landscape,
-                    materials.as_ref(),
-                    origin,
-                    width,
-                    height,
-                )
+                preview_dig_rect_pixels(landscape, materials.as_ref(), origin, width, height)
             })
             .unwrap_or_default()
     }
@@ -3844,7 +3878,11 @@ impl EffectHostContext {
         true
     }
 
-    pub(crate) fn dig_material_content(&mut self, target: ObjectId, material: crate::MaterialId) -> i32 {
+    pub(crate) fn dig_material_content(
+        &mut self,
+        target: ObjectId,
+        material: crate::MaterialId,
+    ) -> i32 {
         if !self.ensure_dig_material_contents(target) {
             return 0;
         }
@@ -3855,7 +3893,11 @@ impl EffectHostContext {
             .unwrap_or(0)
     }
 
-    pub(crate) fn reset_dig_material_content(&mut self, target: ObjectId, material: crate::MaterialId) {
+    pub(crate) fn reset_dig_material_content(
+        &mut self,
+        target: ObjectId,
+        material: crate::MaterialId,
+    ) {
         if !self.ensure_dig_material_contents(target) {
             return;
         }
@@ -3934,9 +3976,7 @@ impl EffectHostContext {
                 .landscape_ref()
                 .is_some_and(|landscape| landscape.pixel_grid().is_some());
         if bracket_masks {
-            let bounds = crate::landscape::RasterChangeRect::new(
-                origin.x, origin.y, width, height,
-            );
+            let bounds = crate::landscape::RasterChangeRect::new(origin.x, origin.y, width, height);
             let landscape = self
                 .world
                 .landscape_mut()
@@ -4003,7 +4043,10 @@ impl EffectHostContext {
     /// the VM returns, where CheckInstabilityRange/PXS side effects happen
     /// exactly once; this preview exists only so later host calls observe
     /// C++'s already-cleared Surface8 pixel.
-    pub(crate) fn preview_extract_liquid(&mut self, position: Vector2) -> Option<crate::material::MaterialId> {
+    pub(crate) fn preview_extract_liquid(
+        &mut self,
+        position: Vector2,
+    ) -> Option<crate::material::MaterialId> {
         if !self
             .world
             .landscape_ref()
@@ -4057,7 +4100,10 @@ impl EffectHostContext {
             .is_some_and(|texmap| texmap.get_index_mat_tex(material_texture, None) != 0)
     }
 
-    pub(crate) fn preview_runtime_map_creator(&mut self, creator: crate::map_creator_s2::MapCreatorS2State) {
+    pub(crate) fn preview_runtime_map_creator(
+        &mut self,
+        creator: crate::map_creator_s2::MapCreatorS2State,
+    ) {
         let Some(landscape) = self.world.landscape_mut() else {
             return;
         };
@@ -4340,13 +4386,9 @@ impl EffectHostContext {
                     local_shape.height.saturating_add(add_top),
                 );
                 let contact = vertices.iter().fold(0, |bits, vertex| {
-                    bits | compute_vertex_contact(
-                        position,
-                        vertex,
-                        0,
-                        contact_density,
-                        |x, y| self.movement_density_at(&pending_masks, x, y),
-                    )
+                    bits | compute_vertex_contact(position, vertex, 0, contact_density, |x, y| {
+                        self.movement_density_at(&pending_masks, x, y)
+                    })
                 });
                 let owner = scope.map(ObjectScopeContext::owner).unwrap_or(object.owner);
                 let selected = object.selected;
@@ -5220,10 +5262,7 @@ impl EffectHostContext {
                 self.object_scope(target)
                     .map(|scope| scope.current_position)
             })
-            .or_else(|| {
-                self.get_world_object(target)
-                    .map(|object| object.position)
-            })
+            .or_else(|| self.get_world_object(target).map(|object| object.position))
         {
             self.audio.detach_object_sounds(target, position);
         }
@@ -5369,7 +5408,11 @@ impl EffectHostContext {
 
     /// Cross-object LocalN writes must be visible to a later nested call
     /// on the same target (C++ mutates live state mid-call).
-    pub(crate) fn overlay_foreign_cells(&self, target: ObjectId, locals: &mut HashMap<String, Value>) {
+    pub(crate) fn overlay_foreign_cells(
+        &self,
+        target: ObjectId,
+        locals: &mut HashMap<String, Value>,
+    ) {
         for ((object, name), cell) in &self.foreign_local_cells {
             if *object == target {
                 locals.insert(name.clone(), cell.borrow().clone());
@@ -5500,10 +5543,8 @@ impl EffectHostContext {
             .map(|metadata| metadata.action_library.clone())
             .unwrap_or_default();
         let ocf_base = metadata.map_or(0, |metadata| metadata.ocf_base);
-        let definition_physical = metadata.map_or_else(
-            PhysicalInfo::default,
-            |metadata| metadata.physical,
-        );
+        let definition_physical =
+            metadata.map_or_else(PhysicalInfo::default, |metadata| metadata.physical);
         let state = object.full_state()?;
         // C4Object::SetOCF derives OCF_CrewMember from Def->CrewMember,
         // independently of the player's live Crew roster. Engine-backed
@@ -5697,14 +5738,22 @@ impl EffectHostContext {
     /// Stage one C4Object::DoCon call, including its percent-step component
     /// cutoff/gain. Keeping this at call time preserves multiple DoCon and
     /// SetComponent ordering inside one script callback.
-    pub(crate) fn adjust_object_construction(&mut self, target: ObjectId, delta: i32) -> Option<i32> {
+    pub(crate) fn adjust_object_construction(
+        &mut self,
+        target: ObjectId,
+        delta: i32,
+    ) -> Option<i32> {
         self.adjust_object_construction_mode(target, delta, true)
     }
 
     /// The same construction/component fold for a live non-initial DoCon.
     /// Its caller performs AssignRemoval synchronously after the callback and
     /// position side arms, so zero construction must remain callable here.
-    pub(crate) fn stage_live_docon_construction(&mut self, target: ObjectId, delta: i32) -> Option<i32> {
+    pub(crate) fn stage_live_docon_construction(
+        &mut self,
+        target: ObjectId,
+        delta: i32,
+    ) -> Option<i32> {
         self.adjust_object_construction_mode(target, delta, false)
     }
 
@@ -5891,7 +5940,11 @@ impl EffectHostContext {
 
     /// Records a menu write for `target` (Some = open/replace, None =
     /// closed). False when no scope can be materialized for the target.
-    pub(crate) fn set_object_menu(&mut self, target: ObjectId, menu: Option<crate::ObjectMenuState>) -> bool {
+    pub(crate) fn set_object_menu(
+        &mut self,
+        target: ObjectId,
+        menu: Option<crate::ObjectMenuState>,
+    ) -> bool {
         if !self.ensure_object_scope(target) {
             return false;
         }
@@ -5938,7 +5991,11 @@ impl EffectHostContext {
     }
 
     /// Stage an ordinary-object SetName write through the normal scope fold.
-    pub(crate) fn set_object_custom_name(&mut self, target: ObjectId, custom_name: Option<String>) -> bool {
+    pub(crate) fn set_object_custom_name(
+        &mut self,
+        target: ObjectId,
+        custom_name: Option<String>,
+    ) -> bool {
         if !self.ensure_object_scope(target) {
             return false;
         }
@@ -6050,7 +6107,11 @@ impl EffectHostContext {
             .is_some()
     }
 
-    pub(crate) fn object_overlay_color_modulation(&self, target: ObjectId, overlay_id: i32) -> Option<u32> {
+    pub(crate) fn object_overlay_color_modulation(
+        &self,
+        target: ObjectId,
+        overlay_id: i32,
+    ) -> Option<u32> {
         if let Some(scope) = self.object_scope(target) {
             return scope
                 .graphics_overlays
@@ -6132,7 +6193,11 @@ impl EffectHostContext {
             .map(|metadata| metadata.blit_mode)
     }
 
-    pub(crate) fn object_overlay_blit_mode(&self, target: ObjectId, overlay_id: i32) -> Option<u32> {
+    pub(crate) fn object_overlay_blit_mode(
+        &self,
+        target: ObjectId,
+        overlay_id: i32,
+    ) -> Option<u32> {
         if let Some(scope) = self.object_scope(target) {
             return scope
                 .graphics_overlays
@@ -6468,8 +6533,7 @@ impl EffectHostContext {
                 if !live_sorted {
                     continue;
                 }
-                let Some((other_category, other_definition)) = self.contents_sort_key(other)
-                else {
+                let Some((other_category, other_definition)) = self.contents_sort_key(other) else {
                     continue;
                 };
                 if other_category & CATEGORY_SORT_LIMIT == sort_category
@@ -6877,8 +6941,7 @@ impl EffectHostContext {
     fn set_global_call_context(&mut self, enter: bool) {
         if enter {
             self.dormant_scopes.push(self.object.take());
-            let script_definition =
-                self.script_definition_context.replace(None);
+            let script_definition = self.script_definition_context.replace(None);
             self.global_call_contexts.push((
                 self.script_object_context.take(),
                 self.definition_context.take(),
@@ -6911,13 +6974,13 @@ impl EffectHostContext {
                 // that definition from the active local frame's exact host.
                 (self.global_call_contexts.is_empty()
                     && clonk_script::caller_uses_engine_scope() == Some(false))
-                    .then(clonk_script::caller_host_identity)
-                    .flatten()
-                    .and_then(|identity| {
-                        self.world
-                            .script_for_host_identity(identity)
-                            .and_then(|(_, definition, _)| definition)
-                    })
+                .then(clonk_script::caller_host_identity)
+                .flatten()
+                .and_then(|identity| {
+                    self.world
+                        .script_for_host_identity(identity)
+                        .and_then(|(_, definition, _)| definition)
+                })
             })
             .or_else(|| self.definition_context.clone())
             .or_else(|| {
@@ -7077,14 +7140,7 @@ impl EffectHostContext {
                     active_assign_death,
                 )
             }
-            None => (
-                Vec::new(),
-                None,
-                Vec::new(),
-                Vec::new(),
-                false,
-                None,
-            ),
+            None => (Vec::new(), None, Vec::new(), Vec::new(), false, None),
         };
 
         // The outer object update has its dedicated channel. Carry Kill as
@@ -7122,19 +7178,13 @@ impl EffectHostContext {
                 .retain(|spawn| spawn.id.is_none_or(|id| !destroyed.contains(&id)));
         }
 
-        let host_raster_preview = (!self.solid_mask_operations.is_empty()).then(|| {
-            HostRasterPreview {
+        let host_raster_preview =
+            (!self.solid_mask_operations.is_empty()).then(|| HostRasterPreview {
                 landscape: self.world.landscape_ref().cloned(),
                 solid_mask_bakes: self.solid_mask_bakes.clone(),
-                solid_mask_instance_sequences: self
-                    .solid_mask_instance_sequences
-                    .borrow()
-                    .clone(),
-                next_solid_mask_instance_sequence: self
-                    .next_solid_mask_instance_sequence
-                    .get(),
-            }
-        });
+                solid_mask_instance_sequences: self.solid_mask_instance_sequences.borrow().clone(),
+                next_solid_mask_instance_sequence: self.next_solid_mask_instance_sequence.get(),
+            });
         let audio_events = self.audio.take_events();
         let mut outcome = EffectContextOutcome::new(
             object_effects,
@@ -7394,7 +7444,11 @@ impl EffectScopeContext {
         self.remove_effect_with_dead(name_filter, index, no_callbacks, false)
     }
 
-    pub(crate) fn find_live_effect(&self, name_filter: Option<&str>, index: i32) -> Option<EffectState> {
+    pub(crate) fn find_live_effect(
+        &self,
+        name_filter: Option<&str>,
+        index: i32,
+    ) -> Option<EffectState> {
         self.effect_position(name_filter, index, false)
             .map(|position| self.effects[position].clone())
     }
@@ -7825,17 +7879,18 @@ impl ObjectScopeContext {
     /// Install the callback-visible half of C4Object::ChangeDef after the
     /// old-definition SetAction(ActIdle) phase. Runtime Category and the
     /// live ContactDensity are object fields and intentionally survive.
-    pub(crate) fn install_definition_preview(&mut self, definition_id: &str, metadata: &DefinitionMetadata) {
+    pub(crate) fn install_definition_preview(
+        &mut self,
+        definition_id: &str,
+        metadata: &DefinitionMetadata,
+    ) {
         self.pending_update.change_def = Some(definition_id.to_string());
         self.definition_id = Some(definition_id.to_string());
         self.unsorted = true;
         self.action_library = metadata.action_library.clone();
         self.current_action_blocks_other_actions = self
             .action_library
-            .blocks_other_actions_for_entry(
-                &self.current_action_name,
-                self.current_action_index,
-            );
+            .blocks_other_actions_for_entry(&self.current_action_name, self.current_action_index);
         self.definition_physical = metadata.physical;
         self.ocf_base = metadata.ocf_base;
         self.crew_member = metadata.crew_member;
@@ -8408,7 +8463,6 @@ impl ObjectScopeContext {
         }
     }
 
-
     pub(crate) fn category(&self) -> i32 {
         self.pending_update
             .category
@@ -8591,10 +8645,7 @@ impl ObjectScopeContext {
         // the two action-gated bits from same-call GetOCF/world reads.
         if self
             .action_library
-            .disables_object_for_entry(
-                self.effective_action_name(),
-                self.effective_action_index(),
-            )
+            .disables_object_for_entry(self.effective_action_name(), self.effective_action_index())
         {
             mask &= !(ocf::COLLECTION | ocf::FIGHT_READY);
         }
@@ -8644,10 +8695,7 @@ impl ObjectScopeContext {
         }
         if self
             .action_library
-            .disables_object_for_entry(
-                self.effective_action_name(),
-                self.effective_action_index(),
-            )
+            .disables_object_for_entry(self.effective_action_name(), self.effective_action_index())
         {
             mask &= !(ocf::COLLECTION | ocf::FIGHT_READY);
         }
@@ -9089,7 +9137,11 @@ impl ObjectScopeContext {
     /// Component-only dir write (FnSetXDir/FnSetYDir): stages just the
     /// touched component — the fold lands it on the object's TRUE fixed
     /// velocity without disturbing the other component.
-    pub(crate) fn set_fixed_velocity_component(&mut self, component: VelocityComponent, value: C4Fixed) {
+    pub(crate) fn set_fixed_velocity_component(
+        &mut self,
+        component: VelocityComponent,
+        value: C4Fixed,
+    ) {
         let mut current = self.fixed_velocity();
         component.assign_fixed(&mut current, value);
         self.current_fixed_velocity = current;
@@ -9232,7 +9284,11 @@ impl ObjectScopeContext {
         self.pending_update.draw_transform = Some(transform);
     }
 
-    pub(crate) fn set_overlay_transform(&mut self, id: i32, transform: Option<DrawTransform>) -> bool {
+    pub(crate) fn set_overlay_transform(
+        &mut self,
+        id: i32,
+        transform: Option<DrawTransform>,
+    ) -> bool {
         let mut changed = false;
         if let Some(existing) = self
             .graphics_overlays

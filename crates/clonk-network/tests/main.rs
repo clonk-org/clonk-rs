@@ -11,6 +11,7 @@ mod initial_network_parameters;
 mod legacy_control_cpp_diff;
 mod live_network_dynamic;
 mod local_resource_resolution;
+mod network_load_24;
 mod resource_file_store;
 mod resource_transfer_backend;
 mod startup_game_advertiser;

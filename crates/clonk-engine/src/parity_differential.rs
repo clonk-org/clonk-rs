@@ -10,6 +10,7 @@
 //! `src/C4SolidMaskBitmap.h`, plus complete `C4Object::DigOutMaterialCast`,
 //! `C4Game::ShakeObjects`, `C4Object::Fling`, `C4Landscape::ClearPix`,
 //! `BlastFreePix`, `BlastFree`, `ExecuteScan`, and `DoScan` bodies and the
+//! `C4SGame::ConvertGoals`, `C4Game::InitRules`/`InitGoals`, and
 //! bottom/top/side-flight `C4Object::ContactAction` arms) by
 //! `parity/oracle/gen_golden.sh` — so this is a genuine differential against
 //! the C++ oracle, not a Rust-vs-Rust regression.
@@ -22,26 +23,30 @@
 //! On any divergence the test panics with the first mismatch (section, index,
 //! field, C++ value vs Rust value).
 
+use clonk_resources::Group;
 use clonk_script::{c4_hash_combine, cnv_fn, C4VType, Value as ScriptValue, ValueMap};
 use serde_json::Value;
 
-use crate::landscape::{Landscape, LandscapeRasterState, PixelGrid};
 use crate::compat::{cos_func, sin_func, LandscapeOperation};
+use crate::landscape::{Landscape, LandscapeRasterState, PixelGrid};
 use crate::material::{consume_corrosion_effect_rng, evaluate_corrosion, MaterialSet};
 use crate::math::{
-    fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed,
-    FixedVec2,
+    fixed10, fixed100, fixed256, fixtoi, fixtoi_prec, itofix, itofix_prec, C4Fixed, FixedVec2,
 };
 use crate::rng::LcgRng;
-use crate::scenario::MapPixelClassifier;
+use crate::scenario::{
+    GameParameterRuleGoalLists, LegacyDefinitionResolver, MapPixelClassifier, ScenarioError,
+    ScenarioIdListEntry,
+};
 use crate::{
     contact_action_wall_tumble_x, ActionSpec, ActionState, CommandDirection, Definition,
     DefinitionPicture, DefinitionRect, DefinitionSpriteImage, DefinitionTargetRect, Direction,
-    Engine,
-    ObjectBaseGraphics, ObjectStatus, ObjectUpdate, PhysicalInfo, PhysicsSettings, PlayerConfig,
-    ShapeAttachRecord, SpawnConfig, CATEGORY_LIVING, CATEGORY_OBJECT, OWNER_NONE,
+    Engine, ObjectBaseGraphics, ObjectStatus, ObjectUpdate, PhysicalInfo, PhysicsSettings,
+    PlayerConfig, Scenario, ShapeAttachRecord, SpawnConfig, CATEGORY_LIVING, CATEGORY_OBJECT,
+    OWNER_NONE,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const GOLDEN: &str = concat!(
@@ -98,6 +103,17 @@ fn expect_eq_u64(section: &str, index: usize, field: &str, cpp: u64, rust: u64) 
             serde_json::json!(cpp),
             serde_json::json!(rust),
         );
+    }
+    assert_eq!(
+        cpp, rust,
+        "PARITY DIVERGENCE in `{section}` entry {index} field `{field}`: \
+         C++ golden = {cpp}, Rust = {rust}"
+    );
+}
+
+fn expect_json_eq(section: &str, index: usize, field: &str, cpp: Value, rust: Value) {
+    if cpp != rust {
+        write_parity_diff_from_environment(section, index, field, cpp.clone(), rust.clone());
     }
     assert_eq!(
         cpp, rust,
@@ -312,10 +328,7 @@ fn swim_action_direction_engine() -> (Engine, crate::ObjectId) {
                     C4Fixed::from_raw(57_212_928),
                     C4Fixed::from_raw(28_737_532),
                 ))
-                .with_fixed_velocity(FixedVec2::new(
-                    C4Fixed::ZERO,
-                    C4Fixed::from_raw(-6_556),
-                ))
+                .with_fixed_velocity(FixedVec2::new(C4Fixed::ZERO, C4Fixed::from_raw(-6_556)))
                 .with_action(action)
                 .with_direction(Direction::Right)
                 .with_command_direction(CommandDirection::Left)
@@ -476,16 +489,12 @@ protected func Destruction()
     if geometry_break {
         action.target = Some(
             engine
-                .spawn_object(
-                    SpawnConfig::new("CEND").with_position(crate::Vector2::new(10, 0)),
-                )
+                .spawn_object(SpawnConfig::new("CEND").with_position(crate::Vector2::new(10, 0)))
                 .expect("first endpoint spawns"),
         );
         action.target2 = Some(
             engine
-                .spawn_object(
-                    SpawnConfig::new("CEND").with_position(crate::Vector2::new(20, 0)),
-                )
+                .spawn_object(SpawnConfig::new("CEND").with_position(crate::Vector2::new(20, 0)))
                 .expect("second endpoint spawns"),
         );
     }
@@ -497,10 +506,7 @@ protected func Destruction()
                 .with_local_vars(HashMap::from([
                     ("callbackOrder".to_string(), ScriptValue::Int(0)),
                     ("lineBreakCount".to_string(), ScriptValue::Int(0)),
-                    (
-                        "lineBreakArgumentPresent".to_string(),
-                        ScriptValue::Int(0),
-                    ),
+                    ("lineBreakArgumentPresent".to_string(), ScriptValue::Int(0)),
                     ("lineBreakAutomatic".to_string(), ScriptValue::Int(0)),
                     ("destructionCount".to_string(), ScriptValue::Int(0)),
                 ]))
@@ -598,8 +604,8 @@ fn coordinate_sprite(size: u32) -> DefinitionSpriteImage {
 }
 
 fn def_picture_scale_engine(scale_percent: u32, picture: DefinitionPicture) -> Engine {
-    let mut definition = Definition::from_script("PSCL", "Picture Scale", "#strict\n")
-        .expect("fixture compiles");
+    let mut definition =
+        Definition::from_script("PSCL", "Picture Scale", "#strict\n").expect("fixture compiles");
     definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
     definition.set_picture(Some(picture));
     // C4Def.cpp:745 `Scale = C4DefCore::Scale / 100.0f`, as wired at lib.rs:12841.
@@ -646,9 +652,263 @@ fn solid_mask_graphics_engine() -> (Engine, crate::ObjectId) {
     (engine, id)
 }
 
+struct RuleGoalParityResolver {
+    roots: Vec<PathBuf>,
+}
+
+impl LegacyDefinitionResolver for RuleGoalParityResolver {
+    fn resolve_definition_groups(
+        &self,
+        scenario: &Group,
+        identifier: &str,
+    ) -> Result<Vec<Group>, ScenarioError> {
+        let mut groups = Vec::new();
+        let normalized = identifier.replace('\\', "/");
+        let path = Path::new(&normalized);
+
+        if let Ok(child) = scenario.open_child(path) {
+            groups.push(child);
+        }
+        for root in &self.roots {
+            let candidate = root.join(path);
+            if !candidate.exists() {
+                continue;
+            }
+            let group = Group::open(&candidate)?;
+            if groups
+                .iter()
+                .all(|existing| existing.root() != group.root())
+            {
+                groups.push(group);
+            }
+        }
+        if groups.is_empty() {
+            Err(ScenarioError::LegacyDefinitionNotFound {
+                path: identifier.to_string(),
+            })
+        } else {
+            Ok(groups)
+        }
+    }
+}
+
+fn golden_scenario_id_list(case: &Value, key: &str) -> Vec<ScenarioIdListEntry> {
+    case[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("network rule/goal case field `{key}` is an array"))
+        .iter()
+        .map(|entry| {
+            ScenarioIdListEntry::new(
+                entry["id"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("`{key}` entry has an id")),
+                i(entry, "count") as i32,
+            )
+        })
+        .collect()
+}
+
+fn scenario_id_list_text(entries: &[ScenarioIdListEntry]) -> String {
+    entries
+        .iter()
+        .map(|entry| format!("{}={};", entry.id, entry.count))
+        .collect()
+}
+
+fn indexed_bmp_2x2() -> Vec<u8> {
+    const WIDTH: u32 = 2;
+    const HEIGHT: u32 = 2;
+    const STRIDE: usize = 4;
+    const DATA_OFFSET: usize = 14 + 40 + 256 * 4;
+    let file_size = DATA_OFFSET + STRIDE * HEIGHT as usize;
+    let mut bytes = Vec::with_capacity(file_size);
+    bytes.extend_from_slice(b"BM");
+    bytes.extend_from_slice(&(file_size as u32).to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&(DATA_OFFSET as u32).to_le_bytes());
+    bytes.extend_from_slice(&40u32.to_le_bytes());
+    bytes.extend_from_slice(&(WIDTH as i32).to_le_bytes());
+    bytes.extend_from_slice(&(HEIGHT as i32).to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&8u16.to_le_bytes());
+    for _ in 0..4 {
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
+    bytes.extend_from_slice(&256u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.resize(file_size, 0);
+    bytes
+}
+
+fn rust_network_rule_goal_placement(case: &Value, case_index: usize) {
+    let name = case["name"]
+        .as_str()
+        .expect("network rule/goal case has a name");
+    let scenario_rules = golden_scenario_id_list(case, "scenario_rules");
+    let scenario_goals = golden_scenario_id_list(case, "scenario_goals");
+    let parameter_rules = golden_scenario_id_list(case, "parameter_rules");
+    let parameter_goals = golden_scenario_id_list(case, "parameter_goals");
+
+    let fixture = tempfile::tempdir().expect("network rule/goal parity fixture");
+    let definitions_root = fixture.path().join("Defs.c4d");
+    let goal_ids = scenario_goals
+        .iter()
+        .chain(parameter_goals.iter())
+        .map(|entry| entry.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut definition_ids = scenario_rules
+        .iter()
+        .chain(scenario_goals.iter())
+        .chain(parameter_rules.iter())
+        .chain(parameter_goals.iter())
+        .map(|entry| entry.id.clone())
+        .collect::<BTreeSet<_>>();
+    definition_ids.insert("GOAL".to_string());
+    for id in definition_ids {
+        let definition = definitions_root.join(format!("{id}.c4d"));
+        std::fs::create_dir_all(&definition).expect("definition directory");
+        let category = if goal_ids.contains(id.as_str()) {
+            4096
+        } else {
+            8192
+        };
+        std::fs::write(
+            definition.join("DefCore.txt"),
+            format!("[DefCore]\nid={id}\nName={id}\nCategory={category}\n"),
+        )
+        .expect("definition core writes");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(definition.join("Graphics.png"))
+            .expect("definition graphics writes");
+    }
+
+    let scenario_directory = fixture.path().join("RuleGoalParity.c4s");
+    std::fs::create_dir_all(&scenario_directory).expect("scenario directory");
+    let energy_default = if name == "harpoonrace_join_data" {
+        String::new()
+    } else {
+        "StructNeedEnergy=0\n".to_string()
+    };
+    std::fs::write(
+        scenario_directory.join("Scenario.txt"),
+        format!(
+            "[Head]\nTitle=RuleGoalParity\n\n\
+             [Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Game]\n{energy_default}Goals={}\nRules={}\n\n\
+             [Landscape]\nMapZoom=10\n",
+            scenario_id_list_text(&scenario_goals),
+            scenario_id_list_text(&scenario_rules),
+        ),
+    )
+    .expect("scenario core writes");
+    std::fs::write(scenario_directory.join("Landscape.bmp"), indexed_bmp_2x2())
+        .expect("scenario landscape writes");
+
+    let resolver = RuleGoalParityResolver {
+        roots: vec![fixture.path().to_path_buf()],
+    };
+    let scenario =
+        Scenario::load_from_path_with(&scenario_directory, &resolver).expect("scenario loads");
+
+    if name == "harpoonrace_join_data" {
+        let defaults = scenario
+            .lobby_metadata()
+            .expect("legacy scenario has lobby metadata")
+            .game_parameter_defaults();
+        let rust_rules = defaults
+            .rules()
+            .iter()
+            .map(|entry| serde_json::json!({"id": entry.id(), "count": entry.count()}))
+            .collect::<Vec<_>>();
+        let rust_goals = defaults
+            .goals()
+            .iter()
+            .map(|entry| serde_json::json!({"id": entry.id(), "count": entry.count()}))
+            .collect::<Vec<_>>();
+        expect_json_eq(
+            "network_rule_goal_placement",
+            case_index,
+            "parameter_rules",
+            case["parameter_rules"].clone(),
+            Value::Array(rust_rules),
+        );
+        expect_json_eq(
+            "network_rule_goal_placement",
+            case_index,
+            "parameter_goals",
+            case["parameter_goals"].clone(),
+            Value::Array(rust_goals),
+        );
+    }
+
+    let synchronized =
+        GameParameterRuleGoalLists::new(parameter_rules.clone(), parameter_goals.clone());
+    let mut engine = Engine::with_seed(7);
+    scenario
+        .apply_before_players_for_game_start(
+            &mut engine,
+            true,
+            None,
+            None,
+            None,
+            Some(&synchronized),
+            None,
+        )
+        .expect("network scenario applies");
+    let snapshot = engine.snapshot();
+    let rule_ids = parameter_rules
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<HashSet<_>>();
+    let goal_ids = parameter_goals
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<HashSet<_>>();
+    let rust_rule_objects = snapshot
+        .objects
+        .iter()
+        .filter(|object| rule_ids.contains(object.definition_id.as_str()))
+        .map(|object| Value::String(object.definition_id.clone()))
+        .collect();
+    let rust_goal_objects = snapshot
+        .objects
+        .iter()
+        .filter(|object| goal_ids.contains(object.definition_id.as_str()))
+        .map(|object| Value::String(object.definition_id.clone()))
+        .collect();
+    expect_json_eq(
+        "network_rule_goal_placement",
+        case_index,
+        "rule_objects",
+        case["rule_objects"].clone(),
+        Value::Array(rust_rule_objects),
+    );
+    expect_json_eq(
+        "network_rule_goal_placement",
+        case_index,
+        "goal_objects",
+        case["goal_objects"].clone(),
+        Value::Array(rust_goal_objects),
+    );
+}
+
 #[test]
 fn parity_differential_matches_cpp_golden() {
     let golden = load_golden();
+
+    // C4SGame::ConvertGoals and C4Game::InitRules/InitGoals
+    // (oracle-src-pinned src/C4Scenario.cpp:506-556;
+    // src/C4Game.cpp:4056-4076). HarpoonRace drives the same authored lists
+    // through both converters; the count-edge case then makes local
+    // Scenario.txt leakage observable while applying the synchronized lists.
+    for (case_index, case) in golden["network_rule_goal_placement"]
+        .as_array()
+        .expect("network_rule_goal_placement is a C++ oracle array")
+        .iter()
+        .enumerate()
+    {
+        rust_network_rule_goal_placement(case, case_index);
+    }
 
     // 1. itofix (whole-integer + precision-denominated).
     for (idx, e) in golden["itofix"].as_array().unwrap().iter().enumerate() {
@@ -852,14 +1112,8 @@ fn parity_differential_matches_cpp_golden() {
 
         let mut digger =
             Definition::from_script("DGRR", "Digger", "").expect("digger fixture compiles");
-        digger.set_shape_rect(Some(DefinitionRect::new(
-            -2,
-            shape_y,
-            4,
-            shape_height,
-        )));
-        let mut gem =
-            Definition::from_script("GEM_", "Gem", "").expect("gem fixture compiles");
+        digger.set_shape_rect(Some(DefinitionRect::new(-2, shape_y, 4, shape_height)));
+        let mut gem = Definition::from_script("GEM_", "Gem", "").expect("gem fixture compiles");
         gem.set_rotateable(1);
 
         let material_source = r#"
@@ -889,14 +1143,7 @@ fn parity_differential_matches_cpp_golden() {
         densities[10] = 80;
         let mut material_names = vec![None; 128];
         material_names[10] = Some("Earth".to_string());
-        let grid = PixelGrid::new(
-            5,
-            5,
-            pixels,
-            densities,
-            material_names,
-            vec![None; 128],
-        );
+        let grid = PixelGrid::new(5, 5, pixels, densities, material_names, vec![None; 128]);
         let mut landscape = Landscape::flat(5, 5);
         landscape.set_pixel_grid(grid);
         engine.set_landscape(landscape);
@@ -1597,7 +1844,9 @@ fn parity_differential_matches_cpp_golden() {
                 ice as i64,
             );
             if index + 1 < states.len() {
-                engine.tick_without_snapshot().expect("landscape scan oracle frame executes");
+                engine
+                    .tick_without_snapshot()
+                    .expect("landscape scan oracle frame executes");
             }
         }
     }
@@ -1708,8 +1957,9 @@ fn parity_differential_matches_cpp_golden() {
         .iter()
         .enumerate()
     {
-        let mut definition = Definition::from_script("CFTS", "Contact top/side oracle", "#strict\n")
-            .expect("contact top/side oracle compiles");
+        let mut definition =
+            Definition::from_script("CFTS", "Contact top/side oracle", "#strict\n")
+                .expect("contact top/side oracle compiles");
         definition.configure_actions(
             Some("Flight".to_string()),
             HashMap::from([
@@ -2186,15 +2436,13 @@ func Trigger(object pOther) {
             )
             .expect("bare killer differential script compiles"),
         );
-        let bare_result = |function: &str, bare: &mut clonk_script::Engine| {
-            match bare
-                .call(function, &[])
-                .unwrap_or_else(|error| panic!("bare killer call `{function}` failed: {error}"))
-            {
-                ScriptValue::Int(value) => i64::from(value),
-                ScriptValue::Bool(value) => i64::from(value),
-                value => panic!("bare killer call `{function}` returned {value:?}"),
-            }
+        let bare_result = |function: &str, bare: &mut clonk_script::Engine| match bare
+            .call(function, &[])
+            .unwrap_or_else(|error| panic!("bare killer call `{function}` failed: {error}"))
+        {
+            ScriptValue::Int(value) => i64::from(value),
+            ScriptValue::Bool(value) => i64::from(value),
+            value => panic!("bare killer call `{function}` returned {value:?}"),
         };
         expect_eq(
             "script_killer",
@@ -2310,7 +2558,9 @@ func Trigger(object pOther) {
         );
 
         let (mut full_frame, id) = action_direction_engine();
-        full_frame.tick_without_snapshot().expect("oracle frame executes");
+        full_frame
+            .tick_without_snapshot()
+            .expect("oracle frame executes");
         let object = &full_frame.objects[full_frame
             .find_object_index(id)
             .expect("oracle object survives")];
@@ -2412,7 +2662,9 @@ func Trigger(object pOther) {
         );
 
         let (mut full_frame, id) = swim_action_direction_engine();
-        full_frame.tick_without_snapshot().expect("oracle frame executes");
+        full_frame
+            .tick_without_snapshot()
+            .expect("oracle frame executes");
         let object = &full_frame.objects[full_frame
             .find_object_index(id)
             .expect("oracle swimmer survives")];
@@ -2460,7 +2712,9 @@ func Trigger(object pOther) {
             .as_str()
             .expect("action_callbacks case has a name");
         let (mut engine, id) = action_callbacks_engine(name);
-        engine.tick_without_snapshot().expect("callback fixture frame executes");
+        engine
+            .tick_without_snapshot()
+            .expect("callback fixture frame executes");
         expect_eq(
             "action_callbacks",
             idx,

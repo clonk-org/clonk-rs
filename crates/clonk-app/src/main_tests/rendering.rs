@@ -1,5 +1,5 @@
-// Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
-// sequence, not a child module, so test ids stay `tests::<fn>`.
+    // Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
+    // sequence, not a child module, so test ids stay `tests::<fn>`.
 
     #[cfg(unix)]
     #[test]
@@ -38,7 +38,10 @@
     fn definition_path_directory_probe_applies_both_cpp_trailing_removals() {
         let separator = std::path::MAIN_SEPARATOR as u8;
         assert_eq!(definition_path_directory_probe(&[separator]), None);
-        assert_eq!(definition_path_directory_probe(&[separator, separator]), None);
+        assert_eq!(
+            definition_path_directory_probe(&[separator, separator]),
+            None
+        );
         assert_eq!(
             definition_path_directory_probe(&[b'D', b'e', b'f', b's', separator]),
             Some(b"Defs".to_vec())
@@ -52,8 +55,7 @@
 
     #[test]
     fn hud_inventory_left_click_queues_exact_contents_only() {
-        let (mut app, owner, _crew, _first, target, region_point) =
-            inventory_region_fixture();
+        let (mut app, owner, _crew, _first, target, region_point) = inventory_region_fixture();
         let click_point = GuiPoint::new(region_point.x, region_point.y - 14.0);
         assert_eq!(
             app.ingame_viewport_region(owner, click_point),
@@ -94,13 +96,13 @@
         let mut frame = vec![0_u8; 320 * 200 * 4];
         app.render(&mut frame).expect("render overlap behind HUD");
         assert_eq!(
-            app.ingame_mouse_select_target(owner, click_point),
-            Some(overlap),
-            "fixture must catch a leaked selection; overlap={:?}, projected={:?}, behind={behind:?}, region={click_point:?}, raw_pick={:?}",
-            app.snapshot.object(overlap),
-            app.graphics.world_to_screen(owner, behind),
-            app.graphics.object_at_point(&app.snapshot, owner, click_point),
-        );
+                app.ingame_mouse_select_target(owner, click_point),
+                Some(overlap),
+                "fixture must catch a leaked selection; overlap={:?}, projected={:?}, behind={behind:?}, region={click_point:?}, raw_pick={:?}",
+                app.snapshot.object(overlap),
+                app.graphics.world_to_screen(owner, behind),
+                app.graphics.object_at_point(&app.snapshot, owner, click_point),
+            );
         let (manager, _events, mut network_commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
@@ -121,8 +123,7 @@
         app.handle_ingame_mouse_button(ElementState::Released)
             .expect("inventory left-up");
 
-        let (controls, commands, selections) =
-            network_commands.take_submitted_player_inputs();
+        let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
         assert_eq!(
             controls,
             vec![(
@@ -135,13 +136,15 @@
             )]
         );
         assert!(commands.is_empty(), "HUD click must not queue MoveTo");
-        assert!(selections.is_empty(), "HUD click must not select world crew");
+        assert!(
+            selections.is_empty(),
+            "HUD click must not select world crew"
+        );
     }
 
     #[test]
     fn hud_inventory_autostop_queues_stored_press_and_release() {
-        let (mut app, owner, _crew, _first, target, region_point) =
-            inventory_region_fixture();
+        let (mut app, owner, _crew, _first, target, region_point) = inventory_region_fixture();
         app.engine
             .player_mut(owner)
             .expect("local player")
@@ -166,15 +169,11 @@
         app.network = Some(manager);
         let tick = app.local_control_submission_tick();
 
-        app.handle_cursor_moved(PhysicalPosition::new(
-            f64::from(down.x),
-            f64::from(down.y),
-        ))
-        .expect("move onto inventory edge");
+        app.handle_cursor_moved(PhysicalPosition::new(f64::from(down.x), f64::from(down.y)))
+            .expect("move onto inventory edge");
         app.handle_ingame_mouse_button(ElementState::Pressed)
             .expect("AutoStop inventory left-down");
-        let (controls, commands, selections) =
-            network_commands.take_submitted_player_inputs();
+        let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
         assert_eq!(
             controls,
             vec![(
@@ -200,8 +199,7 @@
         );
         app.handle_ingame_mouse_button(ElementState::Released)
             .expect("AutoStop inventory left-up");
-        let (controls, commands, selections) =
-            network_commands.take_submitted_player_inputs();
+        let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
         assert_eq!(
             controls,
             vec![(
@@ -347,10 +345,8 @@
             .replace_player_viewports(
                 owner,
                 vec![
-                    clonk_engine::PlayerViewport::new(Vector2::new(240, 180))
-                        .with_focus(Some(focus)),
-                    clonk_engine::PlayerViewport::new(Vector2::new(720, 180))
-                        .with_focus(Some(focus)),
+                    clonk_engine::PlayerViewport::new(Vector2::new(240, 180)).with_focus(Some(focus)),
+                    clonk_engine::PlayerViewport::new(Vector2::new(720, 180)).with_focus(Some(focus)),
                 ],
             )
             .expect("install same-owner split viewports");
@@ -413,12 +409,8 @@
             show_command_keys: false,
         });
         app.graphics.surface_mut().fill(Color::transparent());
-        app.graphics.draw_viewport_control_overlays(
-            Some(viewport.index),
-            false,
-            None,
-            Some(&gamma),
-        );
+        app.graphics
+            .draw_viewport_control_overlays(Some(viewport.index), false, None, Some(&gamma));
         let isolated = app.graphics.surface().pixels().to_vec();
 
         app.display_flags.show_commands = true;
@@ -475,8 +467,7 @@
             );
             app.handle_ingame_mouse_button(ElementState::Released)
                 .expect("command left-up");
-            let (controls, commands, selections) =
-                network_commands.take_submitted_player_inputs();
+            let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
             assert_eq!(
                 controls,
                 vec![(
@@ -486,18 +477,17 @@
                 )]
             );
             assert!(commands.is_empty(), "COM {command} leaked a world command");
-            assert!(selections.is_empty(), "COM {command} leaked world selection");
+            assert!(
+                selections.is_empty(),
+                "COM {command} leaked world selection"
+            );
         }
     }
 
     #[test]
     fn selection_drag_entering_hud_region_is_cancelled() {
-        let (mut app, owner, _crew, _first, _target, region_point) =
-            inventory_region_fixture();
-        let viewport = app
-            .graphics
-            .viewport_rect(owner)
-            .expect("local viewport");
+        let (mut app, owner, _crew, _first, _target, region_point) = inventory_region_fixture();
+        let viewport = app.graphics.viewport_rect(owner).expect("local viewport");
         let (start, crossed) = (viewport.y + 12..viewport.y + viewport.height as i32 - 48)
             .step_by(4)
             .flat_map(|y| {
@@ -539,10 +529,9 @@
             f64::from(crossed.y),
         ))
         .expect("cross drag threshold");
-        assert!(
-            app.mouse_state
-                .is_some_and(|state| state.motion.moved && state.motion.selection_frame)
-        );
+        assert!(app
+            .mouse_state
+            .is_some_and(|state| state.motion.moved && state.motion.selection_frame));
 
         app.handle_cursor_moved(PhysicalPosition::new(
             f64::from(region_point.x),
@@ -555,8 +544,7 @@
         }));
         app.handle_ingame_mouse_button(ElementState::Released)
             .expect("release cancelled frame over region");
-        let (controls, commands, selections) =
-            network_commands.take_submitted_player_inputs();
+        let (controls, commands, selections) = network_commands.take_submitted_player_inputs();
         assert_eq!(
             controls,
             vec![(
@@ -633,22 +621,14 @@
         frame_skip.finish_graphics_pass(true, tick_delay, tick_delay);
         assert!(!frame_skip.begin_graphics_pass(true));
 
-        frame_skip.finish_graphics_pass(
-            true,
-            tick_delay + Duration::from_millis(1),
-            tick_delay,
-        );
+        frame_skip.finish_graphics_pass(true, tick_delay + Duration::from_millis(1), tick_delay);
         assert!(frame_skip.begin_graphics_pass(true));
     }
 
     #[test]
     fn automatic_frame_skip_never_skips_two_consecutive_graphics_passes() {
         let mut frame_skip = AutomaticFrameSkip::default();
-        frame_skip.finish_graphics_pass(
-            true,
-            Duration::from_millis(29),
-            Duration::from_millis(28),
-        );
+        frame_skip.finish_graphics_pass(true, Duration::from_millis(29), Duration::from_millis(28));
 
         assert!(frame_skip.begin_graphics_pass(true));
         assert!(!frame_skip.begin_graphics_pass(true));
@@ -703,11 +683,9 @@
         let install = tempdir().expect("install root");
         let user_data = tempdir().expect("user data");
         fs::create_dir_all(install.path().join("planet")).expect("planet directory");
-        fs::write(install.path().join("planet/System.c4g"), b"stub")
-            .expect("system group stub");
+        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group stub");
         let config_file = user_data.path().join("fullscreen.config");
-        fs::write(&config_file, "[Graphics]\nDisplayMode=Window\n")
-            .expect("seed windowed config");
+        fs::write(&config_file, "[Graphics]\nDisplayMode=Window\n").expect("seed windowed config");
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(install.path())),
             ("LC_USER_DATA_DIR", Some(user_data.path())),
@@ -843,8 +821,7 @@
         )]);
 
         assert_eq!(
-            reduce_rendered_object_audibility(&calls, &snapshot, &[], &HashMap::new())[&target.id]
-                .pan,
+            reduce_rendered_object_audibility(&calls, &snapshot, &[], &HashMap::new())[&target.id].pan,
             98,
             "each integer contribution is clamped before the next one is added",
         );
@@ -887,9 +864,7 @@
         let mut normal_snapshot = snapshot;
         normal_snapshot.objects[0].status = ObjectStatus::Normal;
         assert_eq!(
-            reduce_rendered_object_audibility(&calls, &normal_snapshot, &[], &previous)
-                [&target.id]
-                .pan,
+            reduce_rendered_object_audibility(&calls, &normal_snapshot, &[], &previous)[&target.id].pan,
             20,
             "normal objects begin every completed frame with reset pan",
         );
@@ -900,8 +875,7 @@
         let dir = tempdir().expect("tempdir");
         let scenario = dir.path().join("ObjectMix.c4s");
         fs::create_dir_all(&scenario).expect("create scenario group");
-        fs::write(scenario.join("Impact.wav"), silent_pcm_wav(10_000))
-            .expect("write object sound");
+        fs::write(scenario.join("Impact.wav"), silent_pcm_wav(10_000)).expect("write object sound");
 
         let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
         audio.configure_scenario(Some(&scenario));
@@ -1123,8 +1097,7 @@
             .map(|shape| shape.height)
             .unwrap_or(0);
         let first = c4_message_target_position(target, Vector2::ZERO, shape_height, projections[0]);
-        let second =
-            c4_message_target_position(target, Vector2::ZERO, shape_height, projections[1]);
+        let second = c4_message_target_position(target, Vector2::ZERO, shape_height, projections[1]);
         assert!(!projections[0].contains_logical_point(first));
         assert!(projections[1].contains_logical_point(second));
         let changed = rendered
@@ -1212,9 +1185,7 @@
             [0, 0, 220, 255],
             [0, 0, 70, 255],
         ];
-        let pixels = (0..3)
-            .flat_map(|_| columns.into_iter().flatten())
-            .collect();
+        let pixels = (0..3).flat_map(|_| columns.into_iter().flatten()).collect();
         let hud = HudGraphics {
             energy_bars: Some(ImageData::new(6, 3, pixels)),
             ..HudGraphics::default()
@@ -1302,7 +1273,10 @@
             .iter()
             .find(|player| player.owner == owner)
             .expect("sandbox overlay");
-        assert!(overlay.view_wealth, "nonzero ViewWealth uses C++ truthiness");
+        assert!(
+            overlay.view_wealth,
+            "nonzero ViewWealth uses C++ truthiness"
+        );
         assert!(
             !overlay.view_value,
             "ViewValue stays hidden when Game.ValueGain is disabled"
@@ -1336,10 +1310,73 @@
     }
 
     #[test]
+    fn viewport_overlay_collection_skips_unpresented_remote_players() {
+        let mut app = new_lightweight_running_sandbox_app();
+        let local_owner = app.local_owner;
+        let remote_owner = local_owner + 77;
+        let mut remote_player = app
+            .snapshot
+            .players
+            .first()
+            .expect("sandbox player")
+            .clone();
+        remote_player.id = remote_owner;
+        remote_player.name = "Remote benchmark player".to_string();
+        app.snapshot.players.push(remote_player);
+        let mut remote_hud = app
+            .snapshot
+            .hud
+            .players
+            .first()
+            .expect("sandbox HUD player")
+            .clone();
+        remote_hud.owner = remote_owner;
+        app.snapshot.hud.players.push(remote_hud);
+
+        // C4GraphicsSystem iterates physical viewports, and each
+        // C4Viewport::DrawOverlay resolves only that viewport's Player
+        // (src/C4GraphicsSystem.cpp:167-170; src/C4Viewport.cpp:836-897).
+        let owned_viewport = [ViewportInput::owned_without_focus(
+            local_owner,
+            Vector2::ZERO,
+            1.0,
+        )];
+        let overlays = collect_player_overlays_for_viewports(
+            &mut app.engine,
+            &app.snapshot,
+            None,
+            &app.bindings,
+            &app.gamepad_bindings,
+            &owned_viewport,
+        );
+        assert_eq!(
+            overlays
+                .iter()
+                .map(|overlay| overlay.owner)
+                .collect::<Vec<_>>(),
+            vec![local_owner]
+        );
+
+        // NO_OWNER is the native exception: C4Game::DrawCursors(NO_OWNER)
+        // traverses every player, so their cursor-label data remains needed
+        // (src/C4Game.cpp:1852-1887).
+        let observer_viewport = [ViewportInput::ownerless(Vector2::ZERO, 1.0)];
+        let overlays = collect_player_overlays_for_viewports(
+            &mut app.engine,
+            &app.snapshot,
+            None,
+            &app.bindings,
+            &app.gamepad_bindings,
+            &observer_viewport,
+        );
+        assert_eq!(overlays.len(), 2);
+    }
+
+    #[test]
     fn hud_graphics_loads_gamepad_startup_phases() {
         let paths = AppPaths::discover().expect("discover repository install");
-        let graphics = GraphicsResource::open(paths.planet_dir().join("Graphics.c4g"))
-            .expect("open Graphics.c4g");
+        let graphics =
+            GraphicsResource::open(paths.planet_dir().join("Graphics.c4g")).expect("open Graphics.c4g");
         let hud = FrontendAssets::load_hud_graphics(&graphics);
         let gamepad = hud.gamepad.as_ref().expect("Gamepad.png loaded into HUD");
         assert_eq!((gamepad.width(), gamepad.height()), (320, 36));
@@ -1359,8 +1396,8 @@
         let flint_group =
             Group::open(repository.join("content/Objects.c4d/Items.c4d/Weapons.c4d/TFlint.c4d"))
                 .expect("open real TFLN definition");
-        let flint_resource = clonk_resources::ResourceDefinition::load(&flint_group)
-            .expect("load real TFLN definition");
+        let flint_resource =
+            clonk_resources::ResourceDefinition::load(&flint_group).expect("load real TFLN definition");
         let mut engine = Engine::new();
         engine
             .register_definition(
@@ -1384,8 +1421,7 @@
         active_json["owner"] = serde_json::json!(0);
         active_json["crew_member"] = serde_json::json!(false);
         active_json["container"] = serde_json::json!(crew_id.as_u64());
-        active_json["picture_rect"] =
-            serde_json::json!({"x": 0, "y": 76, "width": 64, "height": 64});
+        active_json["picture_rect"] = serde_json::json!({"x": 0, "y": 76, "width": 64, "height": 64});
         active_json["color_modulation"] = serde_json::json!(0x0040_80c0_u32);
         let active: ObjectSnapshot =
             serde_json::from_value(active_json).expect("active flint deserializes");
@@ -1584,7 +1620,8 @@
         .expect("route running mouse pointer");
         let retained = app.window_mouse_position;
         app.window_active = false;
-        app.handle_focus_lost().expect("clear running hover on focus loss");
+        app.handle_focus_lost()
+            .expect("clear running hover on focus loss");
         assert!(app.ingame_pointer.is_none());
         app.handle_focus_gained()
             .expect("reproject stationary pointer after focus gain");
@@ -1605,7 +1642,8 @@
 
         app.external_irc_dialog_visible = true;
         app.running_world_mouse_owned = true;
-        app.pointer_left().expect("leave while a running dialog is shown");
+        app.pointer_left()
+            .expect("leave while a running dialog is shown");
         assert!(
             app.ingame_pointer.is_some(),
             "fixture exercises the dialog-owned pointer-left early return"
@@ -1655,7 +1693,8 @@
             IngameMouseCursorKind::Region
         );
 
-        app.render(&mut frame).expect("render passive Region cursor");
+        app.render(&mut frame)
+            .expect("render passive Region cursor");
         assert_eq!(
             app.ingame_mouse_caption.cursor,
             IngameMouseCursorKind::Region
@@ -1952,18 +1991,18 @@
             .process_network_events()
             .expect_err("a malformed mid-round winner fails typed");
         assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::GlobalGuiBootstrapResources {
-                issues: vec![ClassicGuiBootstrapIssue::malformed(
-                    "GUISubmenu",
-                    "a readable selected bmp/jpeg/jpg/png RGBA surface",
-                    format!(
-                        "{root}:GUISubmenu.png: failed to decode exact classic image entry `GUISubmenu.png` from {root}",
-                        root = corrupt_graphics.display()
-                    ),
-                )],
-            },
-        );
+                error,
+                ClassicParityBoundary::GlobalGuiBootstrapResources {
+                    issues: vec![ClassicGuiBootstrapIssue::malformed(
+                        "GUISubmenu",
+                        "a readable selected bmp/jpeg/jpg/png RGBA surface",
+                        format!(
+                            "{root}:GUISubmenu.png: failed to decode exact classic image entry `GUISubmenu.png` from {root}",
+                            root = corrupt_graphics.display()
+                        ),
+                    )],
+                },
+            );
         assert_eq!(sheet_ptr(&app, "GUICaption.png"), caption_ptr);
         assert_eq!(sheet_ptr(&app, "GUIScroll.png"), scroll_ptr);
         assert_eq!(sheet_ptr(&app, "GUIIcons.png"), icons_ptr);
@@ -2183,8 +2222,7 @@
     fn m06_l033_surface_error_policy_rebuilds_or_retries_only_recoverable_errors() {
         let classify = |surface| {
             retained_gpu_present_recovery(
-                &anyhow::Error::new(pixels::Error::Surface(surface))
-                    .context("retained presentation"),
+                &anyhow::Error::new(pixels::Error::Surface(surface)).context("retained presentation"),
             )
         };
         assert_eq!(
@@ -2203,13 +2241,12 @@
             classify(pixels::wgpu::SurfaceError::OutOfMemory),
             RetainedGpuPresentRecovery::Fatal
         );
-        let observed_device_loss = anyhow::Error::new(
-            gpu_renderer::GpuRendererError::DeviceRecreationRequired {
+        let observed_device_loss =
+            anyhow::Error::new(gpu_renderer::GpuRendererError::DeviceRecreationRequired {
                 reason: gpu_renderer::RetainedGpuRecreateReason::DeviceLost,
                 detail: "Parent device is lost".to_owned(),
-            },
-        )
-        .context("retained presentation");
+            })
+            .context("retained presentation");
         assert_eq!(
             retained_gpu_present_recovery(&observed_device_loss),
             RetainedGpuPresentRecovery::RebuildDevice
@@ -2317,10 +2354,7 @@
         )
         .expect("same system family resolves the startup book fonts");
         assert!(
-            provider
-                .requests()
-                .iter()
-                .all(|(_, weight)| *weight == 400),
+            provider.requests().iter().all(|(_, weight)| *weight == 400),
             "the requested FontDef weight reaches system lookup"
         );
 
@@ -2385,7 +2419,9 @@
         )
         .err()
         .expect("malformed system bytes cannot be substituted or accepted");
-        assert!(error.to_string().contains("failed to initialize classic vector font"));
+        assert!(error
+            .to_string()
+            .contains("failed to initialize classic vector font"));
     }
 
     #[test]
@@ -2401,8 +2437,8 @@
         ]);
         let paths = AppPaths::discover().expect("font fallback paths");
         paths.ensure_user_dirs().expect("font fallback user dirs");
-        let system_font = fs::read(root.path().join("planet/System.c4g/Endeavour.ttf"))
-            .expect("fixture vector font");
+        let system_font =
+            fs::read(root.path().join("planet/System.c4g/Endeavour.ttf")).expect("fixture vector font");
 
         // FreeType accepts trailing bytes in an sfnt. Distinct sentinels let
         // the winning same-face registration be observed without changing
@@ -2422,8 +2458,7 @@
         )
         .expect("newest usable font group");
 
-        let mut unreadable_vector =
-            packed_test_group(&[("Unreadable.ttf", false, b"optional vector")]);
+        let mut unreadable_vector = packed_test_group(&[("Unreadable.ttf", false, b"optional vector")]);
         make_packed_test_entry_unreadable(&mut unreadable_vector, 0);
         let unreadable_vector = Group::from_raw_memory(
             PathBuf::from("unreadable-vector-fonts.c4g"),
@@ -2523,12 +2558,10 @@
             system_font.as_slice()
         );
         assert!(!provider.requests().is_empty());
-        assert!(
-            provider
-                .requests()
-                .iter()
-                .all(|(family, weight)| family == "FallbackFace" && *weight == 400)
-        );
+        assert!(provider
+            .requests()
+            .iter()
+            .all(|(family, weight)| family == "FallbackFace" && *weight == 400));
     }
 
     #[test]
@@ -2618,9 +2651,8 @@
             group: Group::open(&override_group).expect("override group"),
         }];
         let base_group = Group::open(&base).expect("base group");
-        let selected =
-            select_named_graphics_image_source("GUIBigArrows", &registrations, &base_group)
-                .expect("select globally later png");
+        let selected = select_named_graphics_image_source("GUIBigArrows", &registrations, &base_group)
+            .expect("select globally later png");
         assert!(!selected.from_registration);
         assert_eq!(
             selected.source.entry.relative_path,
@@ -2640,9 +2672,8 @@
             registration_order: 0,
             group: Group::open(&override_group).expect("reopen override group"),
         }];
-        let selected =
-            select_named_graphics_image_source("GUIBigArrows", &registrations, &base_group)
-                .expect("select equal-priority last extension");
+        let selected = select_named_graphics_image_source("GUIBigArrows", &registrations, &base_group)
+            .expect("select equal-priority last extension");
         assert_eq!(
             selected.source.entry.relative_path,
             PathBuf::from("GUIBigArrows.png")
@@ -2724,14 +2755,13 @@
         base_palette[10 * 3..10 * 3 + 3].copy_from_slice(&[10, 0, 0]);
         fs::write(base_path.join("C4.pal"), base_palette).expect("base C4.pal");
         let base = Group::open(&base_path).expect("base graphics");
-        let startup = resolve_game_graphics_resources(&[], &base, None, true)
-            .expect("startup graphics bundle");
+        let startup =
+            resolve_game_graphics_resources(&[], &base, None, true).expect("startup graphics bundle");
 
         let mut scenario_palette = vec![0_u8; GamePalette::BYTE_LEN];
         scenario_palette[6 * 3..6 * 3 + 3].copy_from_slice(&[3, 4, 5]);
         scenario_palette[10 * 3..10 * 3 + 3].copy_from_slice(&[1, 2, 3]);
-        fs::write(scenario_path.join("C4.pal"), scenario_palette)
-            .expect("scenario C4.pal");
+        fs::write(scenario_path.join("C4.pal"), scenario_palette).expect("scenario C4.pal");
         write_preview_png(&scenario_path.join("Control.png"), [80, 90, 100, 255]);
         write_preview_png(&scenario_path.join("Gamepad.png"), [140, 150, 160, 255]);
         write_preview_png(&scenario_path.join("Options.png"), [110, 120, 130, 255]);
@@ -2801,7 +2831,11 @@
         );
         assert_eq!(active.palette.color(6), Color::opaque(12, 16, 20));
         assert_eq!(
-            active.options.as_deref().expect("scenario options").pixels(),
+            active
+                .options
+                .as_deref()
+                .expect("scenario options")
+                .pixels(),
             [110, 120, 130, 255]
         );
         assert_eq!(
@@ -2868,7 +2902,10 @@
                 .pixels(),
             [4, 8, 12, 255]
         );
-        assert_eq!(app.graphics.game_palette().color(6), Color::opaque(12, 16, 20));
+        assert_eq!(
+            app.graphics.game_palette().color(6),
+            Color::opaque(12, 16, 20)
+        );
         assert_eq!(
             app.ensure_ingame_menu_gfx()
                 .options
@@ -2890,7 +2927,10 @@
         app.return_to_menu();
         assert!(app.active_game_graphics.is_none());
         assert_eq!(app.graphics.hud_graphics().as_ref(), startup_hud.as_ref());
-        assert_eq!(app.graphics.game_palette().as_ref(), startup_palette.as_ref());
+        assert_eq!(
+            app.graphics.game_palette().as_ref(),
+            startup_palette.as_ref()
+        );
     }
 
     #[test]
@@ -3002,10 +3042,10 @@
         let active_mapping = tempdir().expect("active Fonts.txt fixture");
         install_global_gui_test_root(active_mapping.path(), None);
         fs::write(
-            active_mapping.path().join("planet/System.c4g/Fonts.txt"),
-            "[Font]\nName=Endeavour\nSize=14\nLogFont=Endeavour,12\nSmallFont=Endeavour,13\nFont=Endeavour,14\nCaptionFont=Endeavour,16\nTitleFont=Endeavour,22\n",
-        )
-        .expect("write active Fonts.txt mapping");
+                active_mapping.path().join("planet/System.c4g/Fonts.txt"),
+                "[Font]\nName=Endeavour\nSize=14\nLogFont=Endeavour,12\nSmallFont=Endeavour,13\nFont=Endeavour,14\nCaptionFont=Endeavour,16\nTitleFont=Endeavour,22\n",
+            )
+            .expect("write active Fonts.txt mapping");
         {
             let user = active_mapping.path().join("user");
             let _guard = EnvGuard::set(&[
@@ -3250,7 +3290,13 @@
             25
         );
         assert_eq!(
-            restarted.assets.book_fonts.as_ref().unwrap().text.line_height,
+            restarted
+                .assets
+                .book_fonts
+                .as_ref()
+                .unwrap()
+                .text
+                .line_height,
             25
         );
         assert_eq!(
@@ -3694,10 +3740,8 @@
         app.engine
             .replace_player_viewports(
                 secondary,
-                vec![
-                    clonk_engine::PlayerViewport::new(secondary_position)
-                        .with_focus(Some(secondary_crew)),
-                ],
+                vec![clonk_engine::PlayerViewport::new(secondary_position)
+                    .with_focus(Some(secondary_crew))],
             )
             .expect("set secondary viewport");
         app.engine.set_local_players([primary, secondary]);
@@ -3767,11 +3811,9 @@
             .expect("C++ ceil-quantized point projects through the assigned viewport");
         assert!(
             physical_point.x < secondary_viewport.x as f32
-                || physical_point.x
-                    >= (secondary_viewport.x + secondary_viewport.width as i32) as f32
+                || physical_point.x >= (secondary_viewport.x + secondary_viewport.width as i32) as f32
                 || physical_point.y < secondary_viewport.y as f32
-                || physical_point.y
-                    >= (secondary_viewport.y + secondary_viewport.height as i32) as f32,
+                || physical_point.y >= (secondary_viewport.y + secondary_viewport.height as i32) as f32,
             "the physical point lies outside the mouse owner's viewport"
         );
         let primary_commands = app
@@ -3839,8 +3881,7 @@
         app.engine
             .replace_player_viewports(
                 owner,
-                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180))
-                    .with_focus(Some(focus))],
+                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
             )
             .expect("place camera away from every scroll bound");
         app.snapshot = app.engine.snapshot();
@@ -3850,16 +3891,12 @@
             .graphics
             .viewport_rect(owner)
             .expect("mouse owner viewport");
-        let left = GuiPoint::new(
-            rect.x as f32,
-            (rect.y + rect.height as i32 / 2) as f32,
-        );
+        let left = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
         assert!(app.ingame_viewport_region(owner, left).is_none());
-        assert!(
-            app.script_menu_pointer_target(left)
-                .expect("left edge target query")
-                .is_none()
-        );
+        assert!(app
+            .script_menu_pointer_target(left)
+            .expect("left edge target query")
+            .is_none());
         let view_state = |app: &GameApp| {
             let snapshot = app.engine.snapshot();
             let player = snapshot
@@ -3871,11 +3908,8 @@
         };
         let (before, _) = view_state(&app);
 
-        app.handle_cursor_moved(PhysicalPosition::new(
-            f64::from(left.x),
-            f64::from(left.y),
-        ))
-        .expect("move onto left viewport edge");
+        app.handle_cursor_moved(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)))
+            .expect("move onto left viewport edge");
         let left_edge = app
             .ingame_edge_scroll
             .expect("left edge retains continuous scrolling")
@@ -3939,10 +3973,7 @@
         app.engine
             .player_in_com(owner, clonk_engine::COM_RIGHT, 0)
             .expect("ordinary player input resets the camera mode");
-        assert_eq!(
-            view_state(&app).1,
-            clonk_engine::PLAYER_VIEW_MODE_CURSOR
-        );
+        assert_eq!(view_state(&app).1, clonk_engine::PLAYER_VIEW_MODE_CURSOR);
     }
 
     #[test]
@@ -3953,8 +3984,7 @@
         app.engine
             .replace_player_viewports(
                 owner,
-                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180))
-                    .with_focus(Some(focus))],
+                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
             )
             .expect("place camera away from every scroll bound");
         app.snapshot = app.engine.snapshot();
@@ -4013,8 +4043,7 @@
         app.engine
             .replace_player_viewports(
                 owner,
-                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180))
-                    .with_focus(Some(focus))],
+                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
             )
             .expect("place camera away from every scroll bound");
         app.snapshot = app.engine.snapshot();
@@ -4078,8 +4107,7 @@
         app.engine
             .replace_player_viewports(
                 owner,
-                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180))
-                    .with_focus(Some(focus))],
+                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
             )
             .expect("place camera away from every scroll bound");
         app.snapshot = app.engine.snapshot();
@@ -4150,8 +4178,7 @@
         app.engine
             .replace_player_viewports(
                 owner,
-                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180))
-                    .with_focus(Some(focus))],
+                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
             )
             .expect("place camera away from every scroll bound");
         app.snapshot = app.engine.snapshot();
@@ -4204,7 +4231,8 @@
     fn tick5_starts_edge_pan_after_suppressing_viewport_region_disappears() {
         let mut app = new_running_sandbox_app();
         while app.engine.frame() % 5 != 4 {
-            app.update().expect("align the next simulation frame to Tick5");
+            app.update()
+                .expect("align the next simulation frame to Tick5");
         }
         let owner = app.local_owner;
         let focus = app.engine.crew_cursor(owner).expect("sandbox cursor");
@@ -4229,8 +4257,7 @@
         app.engine
             .replace_player_viewports(
                 owner,
-                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180))
-                    .with_focus(Some(focus))],
+                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
             )
             .expect("place camera away from every scroll bound");
         app.snapshot = app.engine.snapshot();
@@ -4238,10 +4265,7 @@
         app.render(&mut frame)
             .expect("establish command region and viewport");
         let rect = app.graphics.viewport_rect(owner).expect("owner viewport");
-        let left = GuiPoint::new(
-            rect.x as f32,
-            (rect.y + rect.height as i32 / 2) as f32,
-        );
+        let left = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
         let corner = GuiPoint::new(
             (rect.x + rect.width as i32 - 1) as f32,
             (rect.y + rect.height as i32 - 1) as f32,
@@ -4254,11 +4278,8 @@
             "the contained cursor's Exit pair covers the bottom-right edge"
         );
 
-        app.handle_cursor_moved(PhysicalPosition::new(
-            f64::from(left.x),
-            f64::from(left.y),
-        ))
-        .expect("enter scrolling mode before the suppressing region move");
+        app.handle_cursor_moved(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)))
+            .expect("enter scrolling mode before the suppressing region move");
         assert!(app.ingame_edge_scroll.is_some());
         app.handle_cursor_moved(PhysicalPosition::new(
             f64::from(corner.x),
@@ -4295,8 +4316,7 @@
         app.engine
             .replace_player_viewports(
                 owner,
-                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180))
-                    .with_focus(Some(focus))],
+                vec![clonk_engine::PlayerViewport::new(Vector2::new(800, 180)).with_focus(Some(focus))],
             )
             .expect("place camera away from every scroll bound");
         app.snapshot = app.engine.snapshot();
@@ -4305,11 +4325,10 @@
         let rect = app.graphics.viewport_rect(owner).expect("owner viewport");
         let corner = GuiPoint::new(rect.x as f32, rect.y as f32);
         assert!(app.ingame_viewport_region(owner, corner).is_none());
-        assert!(
-            app.script_menu_pointer_target(corner)
-                .expect("corner target query")
-                .is_none()
-        );
+        assert!(app
+            .script_menu_pointer_target(corner)
+            .expect("corner target query")
+            .is_none());
         let before = app.engine.player(owner).unwrap().viewports()[0].center;
 
         app.handle_cursor_moved(PhysicalPosition::new(
@@ -4327,10 +4346,7 @@
             .expect("corner retains edge state")
             .edge;
         assert_eq!(corner_edge.delta, Vector2::new(-10, -10));
-        assert_eq!(
-            corner_edge.cursor,
-            clonk_frontend::MouseCursorPhase::UpLeft
-        );
+        assert_eq!(corner_edge.cursor, clonk_frontend::MouseCursorPhase::UpLeft);
     }
 
     #[test]
@@ -4359,16 +4375,10 @@
         app.snapshot = app.engine.snapshot();
         app.render(&mut frame).expect("render positioned camera");
         let rect = app.graphics.viewport_rect(owner).expect("owner viewport");
-        let left = GuiPoint::new(
-            rect.x as f32,
-            (rect.y + rect.height as i32 / 2) as f32,
-        );
+        let left = GuiPoint::new(rect.x as f32, (rect.y + rect.height as i32 / 2) as f32);
 
-        app.handle_cursor_moved(PhysicalPosition::new(
-            f64::from(left.x),
-            f64::from(left.y),
-        ))
-        .expect("scroll into fullscreen overflow bound");
+        app.handle_cursor_moved(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)))
+            .expect("scroll into fullscreen overflow bound");
 
         assert_eq!(
             app.engine.player(owner).unwrap().viewports()[0].center,
@@ -4409,11 +4419,8 @@
             (before.rect.y + before.rect.height as i32 / 2) as f32,
         );
 
-        app.handle_cursor_moved(PhysicalPosition::new(
-            f64::from(left.x),
-            f64::from(left.y),
-        ))
-        .expect("move passive pointer onto left edge");
+        app.handle_cursor_moved(PhysicalPosition::new(f64::from(left.x), f64::from(left.y)))
+            .expect("move passive pointer onto left edge");
 
         let after_move = app.graphics.active_viewport_projections()[0];
         assert_eq!(after_move.content_origin_x, before.content_origin_x - 10.0);
@@ -4567,14 +4574,14 @@
 
     #[test]
     fn construction_drag_keeps_hud_regions_blocking_the_world_site() {
-        let (mut app, owner, menu_point, _valid, _invalid, _world, _c4id) =
-            construction_drag_fixture();
+        let (mut app, owner, menu_point, _valid, _invalid, _world, _c4id) = construction_drag_fixture();
         let cursor = app.engine.crew_cursor(owner).expect("sandbox cursor");
-        let mut item =
-            Definition::from_script("B33I", "HUD item", "#strict\n").expect("item compiles");
+        let mut item = Definition::from_script("B33I", "HUD item", "#strict\n").expect("item compiles");
         item.set_category(clonk_engine::CATEGORY_OBJECT);
         item.set_collectible(true);
-        app.engine.register_definition(item).expect("item registers");
+        app.engine
+            .register_definition(item)
+            .expect("item registers");
         let carried = app
             .engine
             .spawn_object(SpawnConfig::new("B33I").with_container(cursor))
@@ -4737,14 +4744,15 @@
                 name: format!("Player {index}"),
             })
             .collect::<Vec<_>>();
-        player_app.ingame_menu.replace(
-            player,
-            Some(IngameMenuState::new_player_menu(&players)),
-        );
+        player_app
+            .ingame_menu
+            .replace(player, Some(IngameMenuState::new_player_menu(&players)));
         player_app
             .render(&mut frame)
             .expect("seed player-menu presentation");
-        let area = player_app.ingame_menu_area(player).expect("player viewport");
+        let area = player_app
+            .ingame_menu_area(player)
+            .expect("player viewport");
         let bounds = {
             let fallback = player_app.assets.font_arc();
             let font = clonk_frontend::hud::HudFont::from_set(
@@ -4797,14 +4805,13 @@
                 .bounds(area, &font, &gfx)
                 .x
         };
-        assert_eq!(
-            moved_x,
-            bounds.x + 11
-        );
+        assert_eq!(moved_x, bounds.x + 11);
         player_app
             .handle_mouse_button(ElementState::Released)
             .expect("release player-menu title");
-        player_app.resize(360, 220).expect("reset player menu location");
+        player_app
+            .resize(360, 220)
+            .expect("reset player menu location");
         assert!(player_app.menu_title_drag.is_none());
     }
 
@@ -4885,11 +4892,8 @@
     #[test]
     fn runtime_help_and_flash_resolve_fontregular_images() {
         let mut app = new_classic_running_sandbox_app();
-        let resolved = resolve_font_images_in_texts(
-            &app.engine,
-            ["{{CLNK}}"],
-            app.script_text_spec_resources(),
-        );
+        let resolved =
+            resolve_font_images_in_texts(&app.engine, ["{{CLNK}}"], app.script_text_spec_resources());
         assert!(
             resolved.font_image("CLNK").is_some(),
             "the live FontRegular provider resolves installed definitions"
@@ -4911,7 +4915,8 @@
             .expect("italic FontRegular help image renders");
         app.runtime_help_visible = false;
         let mut baseline = vec![0_u8; 320 * 200 * 4];
-        app.render(&mut baseline).expect("render overlay-free baseline");
+        app.render(&mut baseline)
+            .expect("render overlay-free baseline");
         assert_ne!(help, baseline, "resolved help image contributes pixels");
 
         app.set_runtime_flash_message("<i>{{CLNK}}</i>", RuntimeHelpCharset::Windows1252)
@@ -4953,7 +4958,8 @@
             .expect("enable debug mode");
         assert!(app.engine.debug_mode());
         assert_eq!(runtime_flash_text(&app), Some("Debug mode: on"));
-        app.bindings.rebind(ControlBindingId::Left, VirtualKeyCode::F5);
+        app.bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F5);
         app.engine
             .player_mut(app.local_owner)
             .expect("local player")
@@ -5225,16 +5231,16 @@
         // and OverlayType (C4Material.cpp:170-204; C4Material.h:79-105).
         let library = clonk_resources::MaterialLibrary::parse(
             "[Material]\n\
-             Name=Earth\n\
-             Color=1,2,3,4,5,6,7,8,9\n\
-             ColorX=11,12,13,14\n\
-             Alpha=21,22,23,24\n\
-             Density=50\n\
-             TextureOverlay=Smooth\n\
-             OverlayType=8\n\
-             PXSGfx=Snow\n\
-             PXSGfxRt=1,2,16,8,-8,-4\n\
-             PXSGfxSize=10\n",
+                 Name=Earth\n\
+                 Color=1,2,3,4,5,6,7,8,9\n\
+                 ColorX=11,12,13,14\n\
+                 Alpha=21,22,23,24\n\
+                 Density=50\n\
+                 TextureOverlay=Smooth\n\
+                 OverlayType=8\n\
+                 PXSGfx=Snow\n\
+                 PXSGfxRt=1,2,16,8,-8,-4\n\
+                 PXSGfxSize=10\n",
         )
         .expect("material library");
         let definition = library.get("Earth").expect("Earth material");
@@ -5288,11 +5294,7 @@
             material_render_info(definition),
             clonk_frontend::MaterialRenderInfo::new([0; 9], [0; 6], None, 0, 0)
                 .with_placement(5)
-                .with_pxs_graphics(
-                    Some("Lava".to_string()),
-                    [0, 0, 32, 32, -16, -16],
-                    32
-                ),
+                .with_pxs_graphics(Some("Lava".to_string()), [0, 0, 32, 32, -16, -16], 32),
         );
     }
 
@@ -5316,14 +5318,16 @@
         let render_info = load_material_render_info(&tutorial, None);
         assert_eq!(
             render_info.get("rain"),
-            Some(&clonk_frontend::MaterialRenderInfo::new(
-                [7, 35, 140, 7, 35, 140, 7, 35, 140],
-                [0; 6],
-                Some("Liquid".to_string()),
-                0,
-                25,
-            )
-            .with_placement(10)),
+            Some(
+                &clonk_frontend::MaterialRenderInfo::new(
+                    [7, 35, 140, 7, 35, 140, 7, 35, 140],
+                    [0; 6],
+                    Some("Liquid".to_string()),
+                    0,
+                    25,
+                )
+                .with_placement(10)
+            ),
         );
         assert_eq!(
             render_info.get("ashes"),
@@ -5336,11 +5340,7 @@
                     50,
                 )
                 .with_placement(30)
-                .with_pxs_graphics(
-                    Some("Ashes".to_string()),
-                    [0, 0, 32, 32, -16, -16],
-                    32,
-                ),
+                .with_pxs_graphics(Some("Ashes".to_string()), [0, 0, 32, 32, -16, -16], 32,),
             ),
             "the parent default PXSGfxSize=32 must beat global Ashes size 6",
         );
@@ -5437,7 +5437,10 @@
             .get("broken")
             .and_then(MaterialTextureSurface::surface32_image)
             .expect("invalid PNG retains an empty Surface32 identity");
-        assert_eq!((broken.width(), broken.height(), broken.pixels()), (0, 0, &[][..]));
+        assert_eq!(
+            (broken.width(), broken.height(), broken.pixels()),
+            (0, 0, &[][..])
+        );
         assert_eq!(
             textures
                 .get(&clonk_resources::material::c4_name_key(prefix))

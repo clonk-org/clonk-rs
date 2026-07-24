@@ -30,13 +30,21 @@ fn c4_raw_byte_escape(character: char) -> Option<u8> {
         .then(|| (scalar - C4_RAW_BYTE_ESCAPE_BASE) as u8)
 }
 
+#[inline]
+fn c4_string_has_raw_byte_escape(value: &str) -> bool {
+    // Script/content identifiers and literals are overwhelmingly ASCII.
+    // Avoid constructing and decoding a `Chars` iterator for that native
+    // byte-identical fast path.
+    !value.is_ascii()
+        && value
+            .chars()
+            .any(|character| c4_raw_byte_escape(character).is_some())
+}
+
 /// Build a script string that losslessly represents arbitrary native bytes.
 pub fn c4_string_from_bytes(bytes: &[u8]) -> String {
     if let Ok(text) = std::str::from_utf8(bytes) {
-        if !text
-            .chars()
-            .any(|character| c4_raw_byte_escape(character).is_some())
-        {
+        if !c4_string_has_raw_byte_escape(text) {
             return text.to_owned();
         }
     }
@@ -57,11 +65,8 @@ pub fn c4_string_from_bytes(bytes: &[u8]) -> String {
 /// Borrow the native byte spelling when the Rust string needs no raw-byte
 /// projection. Ordinary UTF-8 is already the exact C4 string byte sequence;
 /// only the private-use escape range requires decoding into owned storage.
-fn c4_string_bytes_cow(value: &str) -> Cow<'_, [u8]> {
-    if !value
-        .chars()
-        .any(|character| c4_raw_byte_escape(character).is_some())
-    {
+pub(crate) fn c4_string_bytes_cow(value: &str) -> Cow<'_, [u8]> {
+    if !c4_string_has_raw_byte_escape(value) {
         return Cow::Borrowed(value.as_bytes());
     }
 
@@ -83,10 +88,7 @@ pub fn c4_string_bytes(value: &str) -> Vec<u8> {
 }
 
 pub fn c4_string_byte_len(value: &str) -> usize {
-    if !value
-        .chars()
-        .any(|character| c4_raw_byte_escape(character).is_some())
-    {
+    if !c4_string_has_raw_byte_escape(value) {
         return value.len();
     }
 
@@ -278,7 +280,7 @@ impl<'de> serde::Deserialize<'de> for C4StringValue {
 }
 
 pub(crate) fn c4_string_from_literal(value: String) -> String {
-    if value.chars().any(|character| c4_raw_byte_escape(character).is_some()) {
+    if c4_string_has_raw_byte_escape(&value) {
         c4_string_from_bytes(value.as_bytes())
     } else {
         value
@@ -286,10 +288,7 @@ pub(crate) fn c4_string_from_literal(value: String) -> String {
 }
 
 fn c4_string_literal_query(value: &str) -> Option<Cow<'_, str>> {
-    if value
-        .chars()
-        .any(|character| c4_raw_byte_escape(character).is_some())
-    {
+    if c4_string_has_raw_byte_escape(value) {
         Some(Cow::Owned(c4_string_from_bytes(value.as_bytes())))
     } else {
         None
@@ -366,7 +365,10 @@ pub fn c4_id_text(id: &str) -> String {
         return format!("{signed:04}");
     }
     let bytes = (raw as u32).to_le_bytes();
-    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
     c4_string_from_bytes(&bytes[..end])
 }
 
@@ -725,8 +727,7 @@ impl ValueMap {
     /// access pattern) without allocating a temporary [`Value::String`].
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.0.get(&StringQuery(key)).or_else(|| {
-            c4_string_literal_query(key)
-                .and_then(|key| self.0.get(&StringQuery(key.as_ref())))
+            c4_string_literal_query(key).and_then(|key| self.0.get(&StringQuery(key.as_ref())))
         })
     }
 
@@ -998,13 +999,15 @@ impl<'de> serde::Deserialize<'de> for ValueMap {
             Entries(Vec<(Value, Value)>),
         }
 
-        Ok(match <Repr as serde::Deserialize>::deserialize(deserializer)? {
-            Repr::Legacy(entries) => entries
-                .into_iter()
-                .map(|(key, value)| (c4_string_from_literal(key), value))
-                .collect(),
-            Repr::Entries(entries) => entries.into_iter().collect(),
-        })
+        Ok(
+            match <Repr as serde::Deserialize>::deserialize(deserializer)? {
+                Repr::Legacy(entries) => entries
+                    .into_iter()
+                    .map(|(key, value)| (c4_string_from_literal(key), value))
+                    .collect(),
+                Repr::Entries(entries) => entries.into_iter().collect(),
+            },
+        )
     }
 }
 
@@ -1784,13 +1787,14 @@ mod map_tests {
             cloned.hidden_values().cloned().collect::<Vec<_>>(),
             vec![Value::String("newer".into()), Value::String("older".into())]
         );
-        assert_eq!(cloned, ValueMap::new(), "hidden slots do not affect equality");
+        assert_eq!(
+            cloned,
+            ValueMap::new(),
+            "hidden slots do not affect equality"
+        );
 
         let registrations = crate::new_string_registrations();
-        crate::register_c4_value_strings(
-            &registrations,
-            &Value::Proplist(cloned.clone()),
-        );
+        crate::register_c4_value_strings(&registrations, &Value::Proplist(cloned.clone()));
         assert_eq!(
             crate::c4_string_registration_order(&registrations),
             vec!["newer".to_string(), "older".to_string()],
@@ -1824,7 +1828,8 @@ mod map_tests {
 
         assert_eq!(map.get(&literal), Some(&Value::Int(1)));
         assert!(map.contains_key(&literal));
-        *map.get_mut(&literal).expect("reserved-marker key is mutable") = Value::Int(2);
+        *map.get_mut(&literal)
+            .expect("reserved-marker key is mutable") = Value::Int(2);
         assert_eq!(map.shift_remove(&literal), Some(Value::Int(2)));
         assert!(!map.contains_key(&literal));
 
@@ -1956,8 +1961,7 @@ mod c4_string_tests {
     #[test]
     fn raw_byte_projection_keeps_equality_hashing_and_literal_collisions_byte_exact() {
         let utf8_literal = Value::String("\u{ff}".into());
-        let equivalent_raw_bytes =
-            Value::String(c4_string_from_bytes("\u{ff}".as_bytes()).into());
+        let equivalent_raw_bytes = Value::String(c4_string_from_bytes("\u{ff}".as_bytes()).into());
         let single_high_byte = Value::String(c4_string_from_bytes(&[0xff]).into());
 
         assert_eq!(utf8_literal, equivalent_raw_bytes);
@@ -1990,10 +1994,8 @@ mod c4_string_tests {
         );
         assert_ne!(Value::String(canonical_literal.into()), single_high_byte);
 
-        let encoded = serde_json::to_string(&single_high_byte)
-            .expect("raw-byte string serializes");
-        let decoded: Value =
-            serde_json::from_str(&encoded).expect("raw-byte string deserializes");
+        let encoded = serde_json::to_string(&single_high_byte).expect("raw-byte string serializes");
+        let decoded: Value = serde_json::from_str(&encoded).expect("raw-byte string deserializes");
         assert_eq!(decoded, single_high_byte);
         let Value::String(decoded) = decoded else {
             panic!("round-trip preserves the string variant");

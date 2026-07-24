@@ -41,6 +41,86 @@ use crate::prepared_host_bootstrap::{
     league_checksum_start, PreparedHostBootstrap, PreparedLeagueHostConfig,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkEventWake {
+    ReadyTick(Tick),
+    ResourceComplete(i32),
+    ResourceLoadFailed(i32),
+}
+
+pub type NetworkEventWakeCallback = Arc<dyn Fn(NetworkEventWake) + Send + Sync>;
+
+#[derive(Clone, Default)]
+struct NetworkEventWakeHandle {
+    callback: Arc<Mutex<Option<NetworkEventWakeCallback>>>,
+}
+
+impl std::fmt::Debug for NetworkEventWakeHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NetworkEventWakeHandle")
+            .field("installed", &self.callback.lock().is_some())
+            .finish()
+    }
+}
+
+impl NetworkEventWakeHandle {
+    fn install(&self, callback: NetworkEventWakeCallback) {
+        *self.callback.lock() = Some(callback);
+    }
+
+    fn notify(&self, event: NetworkEventWake) {
+        let callback = self.callback.lock().clone();
+        if let Some(callback) = callback {
+            callback(event);
+        }
+    }
+}
+
+/// Lossless app event sender with the native network-pipe wake side effect.
+///
+/// C++ first queues the packet event, then signals its application pipe. Keep
+/// that ordering so a woken app always observes the corresponding event.
+#[derive(Clone, Debug)]
+pub struct NetworkEventSender {
+    sender: Sender<NetworkEvent>,
+    wake: NetworkEventWakeHandle,
+}
+
+impl NetworkEventSender {
+    fn channel() -> (Self, Receiver<NetworkEvent>) {
+        let (sender, receiver) = mpsc::channel();
+        (
+            Self {
+                sender,
+                wake: NetworkEventWakeHandle::default(),
+            },
+            receiver,
+        )
+    }
+
+    pub fn send(
+        &self,
+        event: NetworkEvent,
+    ) -> std::result::Result<(), mpsc::SendError<NetworkEvent>> {
+        let wake = match &event {
+            NetworkEvent::ReadyTick { tick, .. } => Some(NetworkEventWake::ReadyTick(*tick)),
+            NetworkEvent::ResourceComplete { resource_id, .. } => {
+                Some(NetworkEventWake::ResourceComplete(*resource_id))
+            }
+            NetworkEvent::ResourceLoadFailed { resource_id } => {
+                Some(NetworkEventWake::ResourceLoadFailed(*resource_id))
+            }
+            _ => None,
+        };
+        self.sender.send(event)?;
+        if let Some(wake) = wake {
+            self.wake.notify(wake);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum NetworkMode {
     Host(HostSettings),
@@ -210,7 +290,9 @@ fn client_join_protocol_enabled(
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum NetworkStartError {
     #[error("host rejected the client password: {message:?}")]
-    WrongPassword { message: clonk_engine::LegacyCString },
+    WrongPassword {
+        message: clonk_engine::LegacyCString,
+    },
     #[error("network startup was cancelled")]
     Cancelled,
     #[error("{0}")]
@@ -303,7 +385,7 @@ pub struct NetworkControlClock {
     control_presend: i32,
     target_fps: i32,
     avg_control_send_time_us: i32,
-    host_round_trip_ms: Option<i32>,
+    control_send_time_ms: Option<i32>,
     target_tick: Option<i32>,
     local_activated: Option<bool>,
 }
@@ -317,7 +399,7 @@ impl NetworkControlClock {
             control_presend: 1,
             target_fps: DEFAULT_CONTROL_TARGET_FPS,
             avg_control_send_time_us: 0,
-            host_round_trip_ms: None,
+            control_send_time_ms: None,
             target_tick: None,
             local_activated: None,
         }
@@ -379,10 +461,10 @@ impl NetworkControlClock {
         self.target_tick = target_tick;
     }
 
-    /// Store the latest host message-connection Ping/Pong RTT. C++ samples
-    /// that same latest value once per successfully consumed control tick.
-    pub fn observe_round_trip_ms(&mut self, round_trip_ms: i32) {
-        self.host_round_trip_ms = Some(round_trip_ms);
+    /// Store C++ CalcPerformance's topology-aware message-route sample for the
+    /// successfully consumed control tick.
+    pub fn observe_control_send_time_ms(&mut self, control_send_time_ms: i32) {
+        self.control_send_time_ms = Some(control_send_time_ms);
     }
 
     pub fn control_presend(self) -> i32 {
@@ -409,14 +491,14 @@ impl NetworkControlClock {
     }
 
     fn update_control_presend(&mut self) -> Option<ControlPreSendChange> {
-        let round_trip_ms = self.host_round_trip_ms.filter(|rtt| *rtt != 0)?;
+        let control_send_time_ms = self.control_send_time_ms.filter(|sample| *sample != 0)?;
         // Both fields and both expressions are `int32_t` in C++. Preserve
         // the target's full script-visible range and the platform's two's-
         // complement arithmetic instead of silently widening extreme values.
         self.avg_control_send_time_us = self
             .avg_control_send_time_us
             .wrapping_mul(149)
-            .wrapping_add(round_trip_ms.wrapping_mul(1_000))
+            .wrapping_add(control_send_time_ms.wrapping_mul(1_000))
             / 150;
         let next = self
             .target_fps
@@ -503,6 +585,7 @@ impl NetworkControlClock {
 #[derive(Debug)]
 struct NetworkWorkerReady {
     local_client_id: ClientId,
+    control_send_time: clonk_network::ControlSendTimeSnapshot,
     league_start_response: Option<clonk_network::LeagueStartResponse>,
     league_runtime_available: bool,
     league_record_runtime: Option<LeagueRecordRuntimeHandle>,
@@ -929,7 +1012,9 @@ fn dispatch_league_record_upload(
     let config = config.clone();
     let upload_result_tx = upload_result_tx.clone();
     tokio::spawn(async move {
-        let result = transport.post(&upload.endpoint, &upload.body, &config).await;
+        let result = transport
+            .post(&upload.endpoint, &upload.body, &config)
+            .await;
         let message = LeagueRecordUploadResult {
             success: result.is_ok(),
             error: result.err().map(|error| error.to_string()),
@@ -1148,10 +1233,12 @@ impl ClientActivationState {
 pub struct NetworkManager {
     command_tx: tokio_mpsc::Sender<NetworkCommand>,
     control_tick_tx: tokio_mpsc::UnboundedSender<ControlTickProbe>,
+    control_performance_tx: tokio_mpsc::UnboundedSender<ControlPerformanceEvent>,
     control_tick_probe: Mutex<Option<ControlTickProbe>>,
     current_frame: Arc<AtomicI32>,
     event_rx: Receiver<NetworkEvent>,
     telemetry_rx: Receiver<NetworkEvent>,
+    event_wake: NetworkEventWakeHandle,
     worker: Option<thread::JoinHandle<()>>,
     local_client_id: ClientId,
     netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
@@ -1161,6 +1248,7 @@ pub struct NetworkManager {
     league_runtime_available: AtomicBool,
     league_record_runtime: Option<LeagueRecordRuntimeHandle>,
     network_io_statistics: clonk_network::NetworkIoStatistics,
+    control_send_time: clonk_network::ControlSendTimeSnapshot,
     #[cfg(any(test, feature = "test-hooks"))]
     test_runtime_client_states: Arc<Mutex<Vec<RuntimeNetworkClientState>>>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -1175,8 +1263,7 @@ const MASTERSERVER_SIGNUP_FINISHED: u8 = 2;
 pub struct PendingMasterserverSignup {
     enabled: bool,
     previous_enabled: bool,
-    completion:
-        Receiver<std::result::Result<Option<clonk_network::LeagueStartResponse>, String>>,
+    completion: Receiver<std::result::Result<Option<clonk_network::LeagueStartResponse>, String>>,
     cancellation: Option<tokio::sync::oneshot::Sender<()>>,
     transition: Arc<std::sync::atomic::AtomicU8>,
 }
@@ -1252,6 +1339,16 @@ struct ControlTickProbe {
     queued: bool,
 }
 
+#[derive(Debug)]
+enum ControlPerformanceEvent {
+    TickConsumed {
+        tick: Tick,
+        consumed_at: tokio::time::Instant,
+        client_ids: Vec<ClientId>,
+    },
+    Reset,
+}
+
 #[derive(Debug, Clone, Default)]
 struct NetworkNetpuncherState {
     local_addresses: Vec<NetworkAddress>,
@@ -1261,6 +1358,10 @@ struct NetworkNetpuncherState {
 #[cfg(any(test, feature = "test-hooks"))]
 pub struct TestNetworkCommands {
     command_rx: tokio_mpsc::Receiver<NetworkCommand>,
+    // The app's test-hooks feature constructs this probe without consuming
+    // performance events; clonk-app-netplay's own regression does consume it.
+    #[allow(dead_code)]
+    control_performance_rx: tokio_mpsc::UnboundedReceiver<ControlPerformanceEvent>,
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -1268,8 +1369,7 @@ pub struct TestMasterserverSignupCommand {
     pub enabled: bool,
     pub config: PreparedLeagueHostConfig,
     pub reference: clonk_network::HostGameReference,
-    completion:
-        Sender<std::result::Result<Option<clonk_network::LeagueStartResponse>, String>>,
+    completion: Sender<std::result::Result<Option<clonk_network::LeagueStartResponse>, String>>,
     cancellation: tokio::sync::oneshot::Receiver<()>,
     transition: Arc<std::sync::atomic::AtomicU8>,
 }
@@ -1492,7 +1592,7 @@ impl TestNetworkCommands {
     pub fn complete_runtime_host_join(
         mut self,
         published_core: clonk_engine::NetworkResourceCore,
-        event_tx: Sender<NetworkEvent>,
+        event_tx: NetworkEventSender,
         direct_ready: Sender<()>,
     ) -> RuntimeHostJoinResult {
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
@@ -1732,9 +1832,7 @@ impl TestNetworkCommands {
                 Ok(NetworkCommand::Shutdown) => break,
                 Ok(command) => panic!("unexpected league-host command: {command:?}"),
                 Err(tokio_mpsc::error::TryRecvError::Empty) => {
-                    if checked.len() == responses.len()
-                        && broadcasts.len() >= expected_broadcasts
-                    {
+                    if checked.len() == responses.len() && broadcasts.len() >= expected_broadcasts {
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(1));
@@ -2387,7 +2485,21 @@ pub enum NetworkEvent {
     ResourceDeriveUnsupported {
         core: clonk_engine::NetworkResourceCore,
     },
+    /// A connection attempt or secondary route failed while the authoritative
+    /// logical session remained live.
+    RecoverableRouteDiagnostic {
+        client_id: Option<ClientId>,
+        error: String,
+    },
+    /// A peer transport/protocol error that does not stop the network worker.
+    TransportDiagnostic {
+        client_id: Option<ClientId>,
+        error: String,
+    },
+    /// An application-level network diagnostic while the worker remains live.
     Error(String),
+    /// The network worker exited and can no longer service the session.
+    FatalError(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2454,7 +2566,9 @@ impl NetworkControl {
             Self::PlayerSelect(value) => clonk_engine::ControlPacket::PlayerSelect(value),
             Self::Script(value) => clonk_engine::ControlPacket::Script(value),
             Self::Message(value) => clonk_engine::ControlPacket::Message(value),
-            Self::MessageBoardAnswer(value) => clonk_engine::ControlPacket::MessageBoardAnswer(value),
+            Self::MessageBoardAnswer(value) => {
+                clonk_engine::ControlPacket::MessageBoardAnswer(value)
+            }
             Self::CustomCommand(value) => clonk_engine::ControlPacket::CustomCommand(value),
             Self::EmMoveObject(value) => clonk_engine::ControlPacket::EmMoveObject(value),
             Self::EmDrawTool(value) => clonk_engine::ControlPacket::EmDrawTool(value),
@@ -2462,7 +2576,9 @@ impl NetworkControl {
             Self::Player { owner, event } => {
                 return control_packet_for_event(owner, event, HOST_CLIENT_ID);
             }
-            Self::InitScenarioPlayer(value) => clonk_engine::ControlPacket::InitScenarioPlayer(value),
+            Self::InitScenarioPlayer(value) => {
+                clonk_engine::ControlPacket::InitScenarioPlayer(value)
+            }
             Self::Synchronize(value) => clonk_engine::ControlPacket::Synchronize(value),
             Self::SyncCheck(value) => clonk_engine::ControlPacket::SyncCheck(value),
             Self::Set(value) => value.into_control_packet(),
@@ -2635,12 +2751,6 @@ enum NetworkCommand {
     FinalizeTick {
         tick: Tick,
     },
-    ControlTickConsumed {
-        tick: Tick,
-        consumed_at: tokio::time::Instant,
-        client_ids: Vec<ClientId>,
-    },
-    ResetClientPerformance,
     ChangeStatus(NetworkStatus),
     BeginGo {
         status: NetworkStatus,
@@ -2723,9 +2833,7 @@ impl ControlFrameAccumulator {
     }
 
     fn rebase_pending_to_first_activated_tick(&mut self, tick: Tick) {
-        if !self.controls.is_empty()
-            && self.last_sent_tick.is_none_or(|last| last < tick)
-        {
+        if !self.controls.is_empty() && self.last_sent_tick.is_none_or(|last| last < tick) {
             self.current_tick = Some(tick);
         }
     }
@@ -2753,6 +2861,15 @@ impl ControlFrameAccumulator {
             controls,
         })
     }
+}
+
+const NETWORK_RUNTIME_WORKER_THREADS: usize = 4;
+
+fn build_network_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    RuntimeBuilder::new_multi_thread()
+        .worker_threads(NETWORK_RUNTIME_WORKER_THREADS)
+        .enable_all()
+        .build()
 }
 
 impl NetworkManager {
@@ -2794,7 +2911,8 @@ impl NetworkManager {
         };
         let (command_tx, command_rx) = tokio_mpsc::channel(128);
         let (control_tick_tx, control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (control_performance_tx, control_performance_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) =
             mpsc::channel::<std::result::Result<NetworkWorkerReady, NetworkStartError>>();
@@ -2811,21 +2929,20 @@ impl NetworkManager {
                 let worker_netpuncher_state = netpuncher_state.clone();
                 let worker_current_frame = current_frame.clone();
                 move || {
-                    let runtime = RuntimeBuilder::new_multi_thread()
-                        .enable_all()
-                        .build()
-                        .expect("failed to initialise tokio runtime");
+                    let runtime =
+                        build_network_runtime().expect("failed to initialise tokio runtime");
                     if let Err(err) = runtime.block_on(run_worker(
                         mode,
                         command_rx,
                         control_tick_rx,
+                        control_performance_rx,
                         event_tx.clone(),
                         telemetry_tx,
                         local_id_tx,
                         worker_netpuncher_state,
                         worker_current_frame,
                     )) {
-                        let _ = event_tx.send(NetworkEvent::Error(format!("{err:?}")));
+                        let _ = event_tx.send(NetworkEvent::FatalError(format!("{err:?}")));
                     }
                 }
             })
@@ -2853,10 +2970,12 @@ impl NetworkManager {
         Ok(Self {
             command_tx,
             control_tick_tx,
+            control_performance_tx,
             control_tick_probe: Mutex::new(None),
             current_frame,
             event_rx,
             telemetry_rx,
+            event_wake: event_tx.wake.clone(),
             worker: Some(worker),
             local_client_id: ready.local_client_id,
             netpuncher_state,
@@ -2866,6 +2985,7 @@ impl NetworkManager {
             league_runtime_available,
             league_record_runtime: ready.league_record_runtime,
             network_io_statistics: ready.network_io_statistics,
+            control_send_time: ready.control_send_time,
             #[cfg(any(test, feature = "test-hooks"))]
             test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -2927,7 +3047,9 @@ impl NetworkManager {
         #[cfg(any(test, feature = "test-hooks"))]
         if self.worker.is_none() {
             if let Some(mut telemetry) = self.test_lobby_client_telemetry.lock().clone() {
-                let requested = client_ids.into_iter().collect::<std::collections::HashSet<_>>();
+                let requested = client_ids
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>();
                 telemetry
                     .connections
                     .retain(|connection| requested.contains(&connection.client_id));
@@ -3150,7 +3272,11 @@ impl NetworkManager {
     ) -> Result<()> {
         control.by_client = i32::try_from(self.local_client_id)
             .map_err(|_| anyhow!("local client id exceeds the editor-control wire field"))?;
-        self.submit_decided_control(tick, clonk_engine::ControlPacket::EmMoveObject(control), sync)
+        self.submit_decided_control(
+            tick,
+            clonk_engine::ControlPacket::EmMoveObject(control),
+            sync,
+        )
     }
 
     pub fn submit_custom_command(
@@ -3161,7 +3287,11 @@ impl NetworkManager {
     ) -> Result<()> {
         command.by_client = i32::try_from(self.local_client_id)
             .map_err(|_| anyhow!("local client id exceeds the custom-command wire field"))?;
-        self.submit_decided_control(tick, clonk_engine::ControlPacket::CustomCommand(command), sync)
+        self.submit_decided_control(
+            tick,
+            clonk_engine::ControlPacket::CustomCommand(command),
+            sync,
+        )
     }
 
     pub fn submit_message_board_answer(
@@ -3218,7 +3348,10 @@ impl NetworkManager {
             .map_err(|_| anyhow!("network worker is not accepting player-info updates"))
     }
 
-    pub fn submit_client_update(&self, update: clonk_engine::ClientUpdateControlData) -> Result<()> {
+    pub fn submit_client_update(
+        &self,
+        update: clonk_engine::ClientUpdateControlData,
+    ) -> Result<()> {
         if self.role != NetworkRole::Host {
             return Err(anyhow!(
                 "only the network host may submit a synchronized client update"
@@ -3229,7 +3362,10 @@ impl NetworkManager {
             .map_err(|_| anyhow!("network worker is not accepting client updates"))
     }
 
-    pub fn submit_client_remove(&self, remove: clonk_engine::ClientRemoveControlData) -> Result<()> {
+    pub fn submit_client_remove(
+        &self,
+        remove: clonk_engine::ClientRemoveControlData,
+    ) -> Result<()> {
         if self.role != NetworkRole::Host {
             return Err(anyhow!(
                 "only the network host may submit a synchronized client removal"
@@ -3304,11 +3440,13 @@ impl NetworkManager {
             .map_err(|_| anyhow!("local client id exceeds the hostility wire field"))?;
         self.submit_internal_player_script(
             tick,
-            clonk_engine::ControlPacket::ToggleHostility(clonk_engine::ToggleHostilityControlData {
-                opponent,
-                player,
-                by_client,
-            }),
+            clonk_engine::ControlPacket::ToggleHostility(
+                clonk_engine::ToggleHostilityControlData {
+                    opponent,
+                    player,
+                    by_client,
+                },
+            ),
         )
     }
 
@@ -3350,10 +3488,9 @@ impl NetworkManager {
             .map_err(|_| anyhow!("local client id exceeds the eliminate-player wire field"))?;
         self.submit_internal_player_script(
             tick,
-            clonk_engine::ControlPacket::EliminatePlayer(clonk_engine::EliminatePlayerControlData {
-                player,
-                by_client,
-            }),
+            clonk_engine::ControlPacket::EliminatePlayer(
+                clonk_engine::EliminatePlayerControlData { player, by_client },
+            ),
         )
     }
 
@@ -3377,12 +3514,14 @@ impl NetworkManager {
         let by_client = i32::try_from(self.local_client_id)
             .map_err(|_| anyhow!("local client id exceeds the vote wire field"))?;
         self.command_tx
-            .blocking_send(NetworkCommand::SubmitVoteEnd(clonk_engine::VoteControlData {
-                vote_type,
-                approve,
-                data,
-                by_client,
-            }))
+            .blocking_send(NetworkCommand::SubmitVoteEnd(
+                clonk_engine::VoteControlData {
+                    vote_type,
+                    approve,
+                    data,
+                    by_client,
+                },
+            ))
             .map_err(|_| anyhow!("network worker is not accepting vote results"))
     }
 
@@ -3396,7 +3535,10 @@ impl NetworkManager {
             .map_err(|_| anyhow!("network worker is not accepting ready checks"))
     }
 
-    pub fn submit_lobby_countdown(&self, packet: clonk_network::LobbyCountdownPacket) -> Result<()> {
+    pub fn submit_lobby_countdown(
+        &self,
+        packet: clonk_network::LobbyCountdownPacket,
+    ) -> Result<()> {
         if self.role != NetworkRole::Host {
             return Err(anyhow!(
                 "only the network host may submit a lobby countdown"
@@ -3940,18 +4082,18 @@ impl NetworkManager {
         let _ = self.command_tx.blocking_send(command);
     }
 
-    pub fn control_tick_consumed(&self, tick: Tick, client_ids: Vec<ClientId>) {
-        #[cfg(any(test, feature = "test-hooks"))]
-        if self.worker.is_none() {
-            return;
-        }
-        let _ = self
-            .command_tx
-            .blocking_send(NetworkCommand::ControlTickConsumed {
+    pub fn control_tick_consumed(&self, tick: Tick, client_ids: Vec<ClientId>) -> Option<i32> {
+        self.worker.as_ref()?;
+        let consumed_at = tokio::time::Instant::now();
+        let control_send_time_ms = self.control_send_time.sample(&client_ids);
+        self.control_performance_tx
+            .send(ControlPerformanceEvent::TickConsumed {
                 tick,
-                consumed_at: tokio::time::Instant::now(),
+                consumed_at,
                 client_ids,
-            });
+            })
+            .ok()?;
+        Some(control_send_time_ms)
     }
 
     pub fn reset_client_performance(&self) {
@@ -3963,8 +4105,8 @@ impl NetworkManager {
             return;
         }
         let _ = self
-            .command_tx
-            .blocking_send(NetworkCommand::ResetClientPerformance);
+            .control_performance_tx
+            .send(ControlPerformanceEvent::Reset);
     }
 
     pub fn control_tick_reached(
@@ -4288,6 +4430,10 @@ impl NetworkManager {
         events
     }
 
+    pub fn install_event_waker(&self, callback: NetworkEventWakeCallback) {
+        self.event_wake.install(callback);
+    }
+
     pub fn local_client_id(&self) -> ClientId {
         self.local_client_id
     }
@@ -4302,18 +4448,20 @@ impl NetworkManager {
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
-    pub fn test_stub() -> (Self, Sender<NetworkEvent>) {
+    pub fn test_stub() -> (Self, NetworkEventSender) {
         let (command_tx, _command_rx) = tokio_mpsc::channel(8);
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (_telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         (
             Self {
                 command_tx,
                 control_tick_tx: tokio_mpsc::unbounded_channel().0,
+                control_performance_tx: tokio_mpsc::unbounded_channel().0,
                 control_tick_probe: Mutex::new(None),
                 current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
                 telemetry_rx,
+                event_wake: event_tx.wake.clone(),
                 worker: None,
                 local_client_id: HOST_CLIENT_ID,
                 netpuncher_state: Arc::new(Mutex::new(NetworkNetpuncherState::default())),
@@ -4323,6 +4471,7 @@ impl NetworkManager {
                 league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
                 network_io_statistics: clonk_network::NetworkIoStatistics::new(0),
+                control_send_time: clonk_network::ControlSendTimeSnapshot::default(),
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
                 test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
             },
@@ -4331,18 +4480,20 @@ impl NetworkManager {
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
-    pub fn test_stub_for_client_id(local_client_id: ClientId) -> (Self, Sender<NetworkEvent>) {
+    pub fn test_stub_for_client_id(local_client_id: ClientId) -> (Self, NetworkEventSender) {
         let (command_tx, _command_rx) = tokio_mpsc::channel(8);
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (_telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         (
             Self {
                 command_tx,
                 control_tick_tx: tokio_mpsc::unbounded_channel().0,
+                control_performance_tx: tokio_mpsc::unbounded_channel().0,
                 control_tick_probe: Mutex::new(None),
                 current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
                 telemetry_rx,
+                event_wake: event_tx.wake.clone(),
                 worker: None,
                 local_client_id,
                 netpuncher_state: Arc::new(Mutex::new(NetworkNetpuncherState::default())),
@@ -4352,6 +4503,7 @@ impl NetworkManager {
                 league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
                 network_io_statistics: clonk_network::NetworkIoStatistics::new(0),
+                control_send_time: clonk_network::ControlSendTimeSnapshot::default(),
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
                 test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
             },
@@ -4360,35 +4512,41 @@ impl NetworkManager {
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
-    pub fn test_stub_with_league_record_stream(endpoint: String) -> (Self, Sender<NetworkEvent>) {
+    pub fn test_stub_with_league_record_stream(endpoint: String) -> (Self, NetworkEventSender) {
         let (mut manager, event_tx) = Self::test_stub();
         manager.league_record_runtime = Some(
-            spawn_league_record_runtime(endpoint, clonk_network::LeagueHttpTransportConfig::default())
+            spawn_league_record_runtime(
+                endpoint,
+                clonk_network::LeagueHttpTransportConfig::default(),
+            )
             .expect("build test league record runtime"),
         );
         (manager, event_tx)
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
-    pub fn test_stub_with_commands() -> (Self, Sender<NetworkEvent>, TestNetworkCommands) {
+    pub fn test_stub_with_commands() -> (Self, NetworkEventSender, TestNetworkCommands) {
         Self::test_stub_with_commands_for_client_id(HOST_CLIENT_ID)
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn test_stub_with_commands_for_client_id(
         local_client_id: ClientId,
-    ) -> (Self, Sender<NetworkEvent>, TestNetworkCommands) {
+    ) -> (Self, NetworkEventSender, TestNetworkCommands) {
         let (command_tx, command_rx) = tokio_mpsc::channel(8);
-        let (event_tx, event_rx) = mpsc::channel();
+        let (control_performance_tx, control_performance_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (_telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         (
             Self {
                 command_tx,
                 control_tick_tx: tokio_mpsc::unbounded_channel().0,
+                control_performance_tx,
                 control_tick_probe: Mutex::new(None),
                 current_frame: Arc::new(AtomicI32::new(0)),
                 event_rx,
                 telemetry_rx,
+                event_wake: event_tx.wake.clone(),
                 worker: None,
                 local_client_id,
                 netpuncher_state: Arc::new(Mutex::new(NetworkNetpuncherState::default())),
@@ -4402,18 +4560,22 @@ impl NetworkManager {
                 league_runtime_available: AtomicBool::new(false),
                 league_record_runtime: None,
                 network_io_statistics: clonk_network::NetworkIoStatistics::new(0),
+                control_send_time: clonk_network::ControlSendTimeSnapshot::default(),
                 test_runtime_client_states: Arc::new(Mutex::new(Vec::new())),
                 test_lobby_client_telemetry: Arc::new(Mutex::new(None)),
             },
             event_tx,
-            TestNetworkCommands { command_rx },
+            TestNetworkCommands {
+                command_rx,
+                control_performance_rx,
+            },
         )
     }
 
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn test_stub_with_league_commands_for_client_id(
         local_client_id: ClientId,
-    ) -> (Self, Sender<NetworkEvent>, TestNetworkCommands) {
+    ) -> (Self, NetworkEventSender, TestNetworkCommands) {
         let (manager, events, commands) =
             Self::test_stub_with_commands_for_client_id(local_client_id);
         manager
@@ -4475,7 +4637,7 @@ fn apply_league_start_response_to_reference(
 async fn register_league_host(
     config: PreparedLeagueHostConfig,
     reference: &clonk_network::HostGameReference,
-    event_tx: Sender<NetworkEvent>,
+    event_tx: NetworkEventSender,
 ) -> Result<(clonk_network::LeagueStartResponse, LeagueRuntimeHandle)> {
     let transport = clonk_network::LeagueHttpPostTransport::cpp_default()
         .map_err(|error| anyhow!("cannot initialise league HTTP transport: {error}"))?;
@@ -4492,7 +4654,9 @@ async fn register_league_host(
     let (runtime, command_rx, gate) = league_runtime_channels();
     tokio::spawn(run_league_runtime(
         LeagueRuntimeState {
-            heartbeat: Some(clonk_network::LeagueHeartbeat::new(config.update_period_secs)),
+            heartbeat: Some(clonk_network::LeagueHeartbeat::new(
+                config.update_period_secs,
+            )),
             config,
             transport,
             session: Some(session),
@@ -4510,7 +4674,7 @@ async fn register_league_host(
 fn spawn_league_client(
     endpoint: String,
     transport_config: clonk_network::LeagueHttpTransportConfig,
-    event_tx: Sender<NetworkEvent>,
+    event_tx: NetworkEventSender,
 ) -> Result<LeagueRuntimeHandle> {
     let transport = clonk_network::LeagueHttpPostTransport::cpp_default()
         .map_err(|error| anyhow!("cannot initialise league HTTP transport: {error}"))?;
@@ -4637,7 +4801,7 @@ async fn authenticate_league_runtime_player(
         .map_err(|error| error.to_string())?;
     let request =
         clonk_network::encode_league_auth_request(auth, &player_info, league_checksum_start())
-    .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?;
     let reply = state
         .transport
         .post(&state.config.endpoint, &request, &state.config.transport)
@@ -4656,8 +4820,8 @@ async fn check_league_runtime_player(
         .and_then(clonk_network::LeagueHostSession::csid)
         .cloned()
         .ok_or_else(|| "league host session has no CSID".to_string())?;
-    let player_info =
-        clonk_network::encode_league_player_info_section(player).map_err(|error| error.to_string())?;
+    let player_info = clonk_network::encode_league_player_info_section(player)
+        .map_err(|error| error.to_string())?;
     let request = clonk_network::encode_league_join_request(
         &clonk_network::LeagueJoinRequestHead {
             csid,
@@ -4679,7 +4843,7 @@ async fn run_league_runtime(
     mut state: LeagueRuntimeState,
     mut command_rx: tokio_mpsc::Receiver<LeagueRuntimeCommand>,
     gate: Arc<Mutex<LeagueRuntimeGate>>,
-    event_tx: Sender<NetworkEvent>,
+    event_tx: NetworkEventSender,
 ) {
     while let Some(command) = command_rx.recv().await {
         let priority = !matches!(&command, LeagueRuntimeCommand::Update { .. });
@@ -4719,15 +4883,14 @@ async fn run_league_runtime(
                 if !heartbeat.is_due(now) {
                     continue;
                 }
-                let request = match session
-                    .encode_update_request(&reference, league_checksum_start())
-                {
-                    Ok(request) => request,
-                    Err(error) => {
-                        tracing::error!(%error, "failed to encode league Update request");
-                        continue;
-                    }
-                };
+                let request =
+                    match session.encode_update_request(&reference, league_checksum_start()) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            tracing::error!(%error, "failed to encode league Update request");
+                            continue;
+                        }
+                    };
                 heartbeat.update_dispatched(now);
                 match state
                     .transport
@@ -4766,12 +4929,12 @@ async fn run_league_runtime(
                 };
                 let reference =
                     match reference_with_projected_gains(&reference, &state.projected_gains) {
-                    Ok(reference) => reference,
-                    Err(error) => {
-                        tracing::error!(%error, "failed to refresh league End reference");
-                        reference
-                    }
-                };
+                        Ok(reference) => reference,
+                        Err(error) => {
+                            tracing::error!(%error, "failed to refresh league End reference");
+                            reference
+                        }
+                    };
                 let request = match session.encode_end_request(
                     &reference,
                     record.as_ref(),
@@ -4935,7 +5098,11 @@ fn league_end_failure_message(
     phase: LeagueEndFailurePhase,
     error: &str,
 ) -> clonk_engine::LegacyCString {
-    let error = if error.is_empty() { "Empty reply" } else { error };
+    let error = if error.is_empty() {
+        "Empty reply"
+    } else {
+        error
+    };
     let prefix = match phase {
         LeagueEndFailurePhase::Start => "Could not finish game",
         LeagueEndFailurePhase::Send => "Could not send game result",
@@ -5060,7 +5227,8 @@ async fn run_worker(
     mode: WorkerMode,
     mut command_rx: tokio_mpsc::Receiver<NetworkCommand>,
     mut control_tick_rx: tokio_mpsc::UnboundedReceiver<ControlTickProbe>,
-    event_tx: Sender<NetworkEvent>,
+    mut control_performance_rx: tokio_mpsc::UnboundedReceiver<ControlPerformanceEvent>,
+    event_tx: NetworkEventSender,
     telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
     netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
@@ -5076,6 +5244,7 @@ async fn run_worker(
                 local_owner,
                 &mut command_rx,
                 &mut control_tick_rx,
+                &mut control_performance_rx,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
@@ -5093,6 +5262,7 @@ async fn run_worker(
                 local_owner,
                 &mut command_rx,
                 &mut control_tick_rx,
+                &mut control_performance_rx,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
@@ -5110,13 +5280,15 @@ async fn run_host_worker(
     local_owner: i32,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
     control_tick_rx: &mut tokio_mpsc::UnboundedReceiver<ControlTickProbe>,
-    event_tx: Sender<NetworkEvent>,
+    control_performance_rx: &mut tokio_mpsc::UnboundedReceiver<ControlPerformanceEvent>,
+    event_tx: NetworkEventSender,
     telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
     netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
 ) -> Result<()> {
-    let host_name = clonk_engine::LegacyCString::from_bytes(settings.player_name.as_bytes().to_vec())
-        .ok_or_else(|| anyhow!("host player name contains an interior NUL"))?;
+    let host_name =
+        clonk_engine::LegacyCString::from_bytes(settings.player_name.as_bytes().to_vec())
+            .ok_or_else(|| anyhow!("host player name contains an interior NUL"))?;
     let mut prepared = settings.prepared.clone();
     let mut host_config = match prepared.as_ref() {
         Some(prepared) => match prepared.claim_host_config() {
@@ -5152,8 +5324,8 @@ async fn run_host_worker(
         },
     };
     let is_prepared = settings.prepared.is_some();
-    let tcp_bind_address = (!is_prepared || host_config.configured_tcp_port != Some(0))
-        .then_some(settings.bind_addr);
+    let tcp_bind_address =
+        (!is_prepared || host_config.configured_tcp_port != Some(0)).then_some(settings.bind_addr);
     let (listener, bound_addr, tcp_bind_error) = match tcp_bind_address {
         Some(bind_address) => match TcpListener::bind(bind_address).await {
             Ok(listener) => match listener.local_addr() {
@@ -5219,22 +5391,22 @@ async fn run_host_worker(
             );
             let reference =
                 match prepared_host.initial_host_game_reference(false, &registration_addresses) {
-                Ok(reference) => reference,
-                Err(error) => {
-                    let message = format!("cannot build league Start reference: {error}");
-                    let _ = local_id_tx.send(Err(message.clone().into()));
-                    return Err(anyhow!(message));
-                }
-            };
+                    Ok(reference) => reference,
+                    Err(error) => {
+                        let message = format!("cannot build league Start reference: {error}");
+                        let _ = local_id_tx.send(Err(message.clone().into()));
+                        return Err(anyhow!(message));
+                    }
+                };
             let (response, runtime) =
                 match register_league_host(league_config, &reference, event_tx.clone()).await {
-                Ok(result) => result,
-                Err(error) => {
-                    let message = format!("league registration failed: {error}");
-                    let _ = local_id_tx.send(Err(message.clone().into()));
-                    return Err(anyhow!(message));
-                }
-            };
+                    Ok(result) => result,
+                    Err(error) => {
+                        let message = format!("league registration failed: {error}");
+                        let _ = local_id_tx.send(Err(message.clone().into()));
+                        return Err(anyhow!(message));
+                    }
+                };
             if let Err(error) = prepared_host.apply_league_start_response(&response) {
                 if let Err(cleanup_error) = finish_league_runtime(&runtime, reference, None).await {
                     tracing::error!(%cleanup_error, "failed to end rejected league registration");
@@ -5293,8 +5465,7 @@ async fn run_host_worker(
             let puncher_address = clonk_resources::decode_legacy_script_text(
                 prepared_host.netpuncher_address().as_bytes(),
             );
-            host_config.netpuncher_addresses =
-                resolve_netpuncher_addresses(&puncher_address).await;
+            host_config.netpuncher_addresses = resolve_netpuncher_addresses(&puncher_address).await;
         }
     }
     let configured_tcp_port = host_config.configured_tcp_port;
@@ -5336,6 +5507,7 @@ async fn run_host_worker(
     netpuncher_state.lock().local_addresses = local_addresses.clone();
     let _ = local_id_tx.send(Ok(NetworkWorkerReady {
         local_client_id: HOST_CLIENT_ID,
+        control_send_time: host.control_send_time_snapshot(),
         league_start_response,
         league_runtime_available: league_runtime.is_some(),
         league_record_runtime: league_record_runtime.clone(),
@@ -5374,6 +5546,39 @@ async fn run_host_worker(
                     )
                     .await?
                     .map_err(|error| anyhow!("host control-tick stamp failed: {error}"))?;
+                }
+                Some(event) = control_performance_rx.recv() => {
+                    match event {
+                        ControlPerformanceEvent::Reset => {
+                            reset_client_performance_pending = true;
+                        }
+                        ControlPerformanceEvent::TickConsumed {
+                            tick,
+                            consumed_at,
+                            client_ids,
+                        } => {
+                            let reset_performance =
+                                std::mem::take(&mut reset_client_performance_pending);
+                            await_host_operation_while_forwarding_events(
+                                host.control_tick_consumed(
+                                    tick,
+                                    consumed_at,
+                                    client_ids,
+                                    reset_performance,
+                                ),
+                                &mut host_events,
+                                local_owner,
+                                &event_tx,
+                                &telemetry_tx,
+                                &mut player_info_echo_provenance,
+                                &netpuncher_state,
+                            )
+                            .await?
+                            .map_err(|error| {
+                                anyhow!("host control-consumption bookkeeping failed: {error}")
+                            })?;
+                        }
+                    }
                 }
                 maybe_event = host_events.recv() => {
                     match maybe_event {
@@ -5593,7 +5798,7 @@ async fn run_host_worker(
                         });
                     }
                     NetworkCommand::BroadcastPlayerInfo(info) => {
-                        send_player_info_from_host(&host, info, &event_tx).await?;
+                        send_player_info_from_host(&host, info).await?;
                         player_info_echo_provenance.push_back(PlayerInfoEchoProvenance::Normal);
                     }
                     NetworkCommand::BroadcastPreexecutedPlayerInfo {
@@ -5601,7 +5806,7 @@ async fn run_host_worker(
                         join_players_on_echo,
                     } => {
                         let original = info.clone();
-                        send_player_info_from_host(&host, info, &event_tx).await?;
+                        send_player_info_from_host(&host, info).await?;
                         player_info_echo_provenance.push_back(
                             PlayerInfoEchoProvenance::Preexecuted {
                                 original,
@@ -6090,37 +6295,8 @@ async fn run_host_worker(
                     }
                     NetworkCommand::FinalizeTick { tick } => {
                         if let Some(frame) = frame_builder.finalize_tick(tick) {
-                            send_frame_to_host(&host, frame, &event_tx).await?;
+                            send_frame_to_host(&host, frame).await?;
                         }
-                    }
-                    NetworkCommand::ControlTickConsumed {
-                        tick,
-                        consumed_at,
-                        client_ids,
-                    } => {
-                        let reset_performance =
-                            std::mem::take(&mut reset_client_performance_pending);
-                        await_host_operation_while_forwarding_events(
-                            host.control_tick_consumed(
-                                tick,
-                                consumed_at,
-                                client_ids,
-                                reset_performance,
-                            ),
-                            &mut host_events,
-                            local_owner,
-                            &event_tx,
-                            &telemetry_tx,
-                            &mut player_info_echo_provenance,
-                            &netpuncher_state,
-                        )
-                        .await?
-                        .map_err(|error| {
-                            anyhow!("host control-tick consumption failed: {error}")
-                        })?;
-                    }
-                    NetworkCommand::ResetClientPerformance => {
-                        reset_client_performance_pending = true;
                     }
                     NetworkCommand::SetJoinAllowed {
                         allowed,
@@ -6258,7 +6434,7 @@ async fn await_host_operation_while_forwarding_events<F>(
     operation: F,
     host_events: &mut tokio_mpsc::Receiver<HostEvent>,
     local_owner: i32,
-    event_tx: &Sender<NetworkEvent>,
+    event_tx: &NetworkEventSender,
     telemetry_tx: &SyncSender<NetworkEvent>,
     player_info_echo_provenance: &mut VecDeque<PlayerInfoEchoProvenance>,
     netpuncher_state: &Arc<Mutex<NetworkNetpuncherState>>,
@@ -6290,7 +6466,7 @@ where
 async fn handle_host_event(
     event: HostEvent,
     local_owner: i32,
-    event_tx: &Sender<NetworkEvent>,
+    event_tx: &NetworkEventSender,
     _telemetry_tx: &SyncSender<NetworkEvent>,
     player_info_echo_provenance: &mut VecDeque<PlayerInfoEchoProvenance>,
     netpuncher_state: &Arc<Mutex<NetworkNetpuncherState>>,
@@ -6417,11 +6593,14 @@ async fn handle_host_event(
             let status = format!("{packet_type:02x}");
             tracing::error!(?client_id, %status, "Unhandled packet");
         }
+        HostEvent::RecoverableRouteDiagnostic { client_id, error } => {
+            let _ = event_tx.send(NetworkEvent::RecoverableRouteDiagnostic { client_id, error });
+        }
         HostEvent::TransportError { client_id, error } => {
-            let prefix = client_id
-                .map(|id| format!("client {id}: "))
-                .unwrap_or_default();
-            let _ = event_tx.send(NetworkEvent::Error(format!("{prefix}{error}")));
+            let _ = event_tx.send(NetworkEvent::TransportDiagnostic { client_id, error });
+        }
+        HostEvent::FatalError { error } => {
+            let _ = event_tx.send(NetworkEvent::FatalError(error));
         }
         HostEvent::Direct {
             client_id,
@@ -6479,7 +6658,8 @@ async fn run_client_worker(
     local_owner: i32,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
     control_tick_rx: &mut tokio_mpsc::UnboundedReceiver<ControlTickProbe>,
-    event_tx: Sender<NetworkEvent>,
+    control_performance_rx: &mut tokio_mpsc::UnboundedReceiver<ControlPerformanceEvent>,
+    event_tx: NetworkEventSender,
     telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
     netpuncher_state: Arc<Mutex<NetworkNetpuncherState>>,
@@ -6572,6 +6752,7 @@ async fn run_client_worker(
     });
     let _ = local_id_tx.send(Ok(NetworkWorkerReady {
         local_client_id: client_id,
+        control_send_time: client.control_send_time_snapshot(),
         league_start_response: None,
         league_runtime_available: league_runtime.is_some(),
         league_record_runtime: None,
@@ -6605,6 +6786,42 @@ async fn run_client_worker(
                 )
                 .await?
                 .map_err(|error| anyhow!("client control-tick stamp failed: {error}"))?;
+            }
+            Some(event) = control_performance_rx.recv() => {
+                match event {
+                    ControlPerformanceEvent::Reset => {
+                        reset_client_performance_pending = true;
+                    }
+                    ControlPerformanceEvent::TickConsumed {
+                        tick,
+                        consumed_at,
+                        client_ids,
+                    } => {
+                        let reset_performance =
+                            std::mem::take(&mut reset_client_performance_pending);
+                        await_client_operation_while_forwarding_events(
+                            client.control_tick_consumed(
+                                tick,
+                                consumed_at,
+                                client_ids,
+                                reset_performance,
+                            ),
+                            &mut client_events,
+                            &mut client_status,
+                            &mut client_activation,
+                            &mut client_events_open,
+                            local_owner,
+                            client_id,
+                            &event_tx,
+                            &telemetry_tx,
+                            &netpuncher_state,
+                        )
+                        .await?
+                        .map_err(|error| {
+                            anyhow!("client control-consumption bookkeeping failed: {error}")
+                        })?;
+                    }
+                }
             }
             maybe_event = client_events.recv(), if client_events_open => {
                 handle_client_worker_event(
@@ -7130,40 +7347,8 @@ async fn run_client_worker(
                             frame_builder.rebase_pending_to_first_activated_tick(tick);
                         }
                         if let Some(frame) = frame_builder.finalize_tick(tick) {
-                            send_frame_to_client(&client, frame, &event_tx).await?;
+                            send_frame_to_client(&client, frame).await?;
                         }
-                    }
-                    NetworkCommand::ControlTickConsumed {
-                        tick,
-                        consumed_at,
-                        client_ids,
-                    } => {
-                        let reset_performance =
-                            std::mem::take(&mut reset_client_performance_pending);
-                        await_client_operation_while_forwarding_events(
-                            client.control_tick_consumed(
-                                tick,
-                                consumed_at,
-                                client_ids,
-                                reset_performance,
-                            ),
-                            &mut client_events,
-                            &mut client_status,
-                            &mut client_activation,
-                            &mut client_events_open,
-                            local_owner,
-                            client_id,
-                            &event_tx,
-                            &telemetry_tx,
-                            &netpuncher_state,
-                        )
-                        .await?
-                        .map_err(|error| {
-                            anyhow!("client control-tick consumption failed: {error}")
-                        })?;
-                    }
-                    NetworkCommand::ResetClientPerformance => {
-                        reset_client_performance_pending = true;
                     }
                     NetworkCommand::SetJoinAllowed { completion, .. } => {
                         let message =
@@ -7315,7 +7500,7 @@ async fn record_client_control(
 fn announce_connected_client(
     client: &mut ClientHandle,
     player_name: String,
-    event_tx: &Sender<NetworkEvent>,
+    event_tx: &NetworkEventSender,
     local_id_tx: &mpsc::Sender<std::result::Result<NetworkWorkerReady, NetworkStartError>>,
 ) -> Result<(ClientId, NetworkStatus, Option<String>)> {
     let join_data = match client.take_join_data() {
@@ -7358,7 +7543,7 @@ async fn handle_client_worker_event(
     client_events_open: &mut bool,
     local_owner: i32,
     client_id: ClientId,
-    event_tx: &Sender<NetworkEvent>,
+    event_tx: &NetworkEventSender,
     telemetry_tx: &SyncSender<NetworkEvent>,
     netpuncher_state: &Arc<Mutex<NetworkNetpuncherState>>,
 ) -> Result<()> {
@@ -7418,7 +7603,7 @@ async fn await_client_operation_while_forwarding_events<F>(
     client_events_open: &mut bool,
     local_owner: i32,
     client_id: ClientId,
-    event_tx: &Sender<NetworkEvent>,
+    event_tx: &NetworkEventSender,
     telemetry_tx: &SyncSender<NetworkEvent>,
     netpuncher_state: &Arc<Mutex<NetworkNetpuncherState>>,
 ) -> Result<F::Output>
@@ -7450,7 +7635,7 @@ async fn handle_client_event(
     event: ClientEvent,
     local_owner: i32,
     _client_id: ClientId,
-    event_tx: &Sender<NetworkEvent>,
+    event_tx: &NetworkEventSender,
     _telemetry_tx: &SyncSender<NetworkEvent>,
 ) -> Result<()> {
     match event {
@@ -7533,86 +7718,54 @@ async fn handle_client_event(
     Ok(())
 }
 
-async fn send_frame_to_host(
-    host: &HostHandle,
-    frame: LegacyControlFrame,
-    event_tx: &Sender<NetworkEvent>,
-) -> Result<()> {
-    match encode_control_packet(&frame) {
-        Ok(packet) => {
-            host.submit_local_control(packet)
-                .await
-                .map_err(|err| anyhow!("host submit failed: {err}"))?;
-        }
-        Err(err) => {
-            let _ = event_tx.send(NetworkEvent::Error(format!(
-                "failed to encode control packet: {err:?}"
-            )));
-        }
-    }
-    Ok(())
+async fn send_frame_to_host(host: &HostHandle, frame: LegacyControlFrame) -> Result<()> {
+    // A local codec failure makes the next complete-control barrier
+    // unreachable. Propagate to `run_worker` so its sole exit boundary emits
+    // FatalError after the worker has actually stopped.
+    let packet = encode_control_packet(&frame)
+        .map_err(|err| anyhow!("failed to encode host control packet: {err}"))?;
+    host.submit_local_control(packet)
+        .await
+        .map_err(|err| anyhow!("host submit failed: {err}"))
 }
 
-async fn send_player_info_from_host(
-    host: &HostHandle,
-    info: PlayerInfoControlData,
-    event_tx: &Sender<NetworkEvent>,
-) -> Result<()> {
-    match encode_control_entry_payload(&clonk_engine::ControlPacket::PlayerInfo(info)) {
-        Ok(data) => host
-            .submit_packet(ControlDelivery::Direct, data)
-            .await
-            .map_err(|err| anyhow!("host PlayerInfo broadcast failed: {err}")),
-        Err(err) => {
-            let _ = event_tx.send(NetworkEvent::Error(format!(
-                "failed to encode direct PlayerInfo: {err:?}"
-            )));
-            Ok(())
-        }
-    }
+async fn send_player_info_from_host(host: &HostHandle, info: PlayerInfoControlData) -> Result<()> {
+    // PlayerInfo is host-authored admission state; a log-only failure would
+    // leave the already-preexecuted host state different from every client.
+    let data = encode_control_entry_payload(&clonk_engine::ControlPacket::PlayerInfo(info))
+        .map_err(|err| anyhow!("failed to encode authoritative PlayerInfo: {err}"))?;
+    host.submit_packet(ControlDelivery::Direct, data)
+        .await
+        .map_err(|err| anyhow!("host PlayerInfo broadcast failed: {err}"))
 }
 
-async fn send_frame_to_client(
-    client: &ClientHandle,
-    frame: LegacyControlFrame,
-    event_tx: &Sender<NetworkEvent>,
-) -> Result<()> {
-    match encode_control_packet(&frame) {
-        Ok(packet) => {
-            client
-                .submit_control(packet)
-                .await
-                .map_err(|err| anyhow!("client submit failed: {err}"))?;
-        }
-        Err(err) => {
-            let _ = event_tx.send(NetworkEvent::Error(format!(
-                "failed to encode control packet: {err:?}"
-            )));
-        }
-    }
-    Ok(())
+async fn send_frame_to_client(client: &ClientHandle, frame: LegacyControlFrame) -> Result<()> {
+    // The coordinator cannot complete this tick without the local
+    // contribution, so the worker must not survive a compiler failure.
+    let packet = encode_control_packet(&frame)
+        .map_err(|err| anyhow!("failed to encode client control packet: {err}"))?;
+    client
+        .submit_control(packet)
+        .await
+        .map_err(|err| anyhow!("client submit failed: {err}"))
 }
 
 fn handle_ready_packet(
     packet: ControlPacket,
     local_owner: i32,
-    event_tx: &Sender<NetworkEvent>,
+    event_tx: &NetworkEventSender,
 ) -> Result<()> {
-    match decode_control_packet(&packet) {
-        Ok(frame) => emit_frame_controls(frame, local_owner, event_tx),
-        Err(err) => {
-            let _ = event_tx.send(NetworkEvent::Error(format!(
-                "failed to decode control packet: {err:?}"
-            )));
-            Ok(())
-        }
-    }
+    // PID_Control is the authoritative complete tick, unlike malformed direct
+    // peer input which can be isolated to one transport.
+    let frame = decode_control_packet(&packet)
+        .map_err(|err| anyhow!("failed to decode authoritative control packet: {err}"))?;
+    emit_frame_controls(frame, local_owner, event_tx)
 }
 
 fn handle_direct_packet(
     delivery: ControlDelivery,
     data: Vec<u8>,
-    event_tx: &Sender<NetworkEvent>,
+    event_tx: &NetworkEventSender,
 ) -> Result<()> {
     if !matches!(delivery, ControlDelivery::Direct | ControlDelivery::Private) {
         let _ = event_tx.send(NetworkEvent::Error(format!(
@@ -7644,7 +7797,7 @@ fn handle_direct_packet(
 fn emit_frame_controls(
     frame: LegacyControlFrame,
     _local_owner: i32,
-    event_tx: &Sender<NetworkEvent>,
+    event_tx: &NetworkEventSender,
 ) -> Result<()> {
     let tick = frame.tick;
     let controls = frame
@@ -7663,7 +7816,7 @@ fn emit_frame_controls(
 fn emit_scheduled_sync_controls(
     tick: Tick,
     controls: Vec<clonk_engine::ControlPacket>,
-    event_tx: &Sender<NetworkEvent>,
+    event_tx: &NetworkEventSender,
 ) -> Result<()> {
     let controls = controls
         .into_iter()
@@ -7684,15 +7837,21 @@ pub fn network_control_for_packet(control: clonk_engine::ControlPacket) -> Optio
         }
         // Keep the original signed fields through ordered execution. The
         // C++ packet layer counts them before InCom narrows Command to a byte.
-        clonk_engine::ControlPacket::PlayerControl(data) => Some(NetworkControl::PlayerControl(data)),
-        clonk_engine::ControlPacket::PlayerCommand(data) => Some(NetworkControl::PlayerCommand(data)),
+        clonk_engine::ControlPacket::PlayerControl(data) => {
+            Some(NetworkControl::PlayerControl(data))
+        }
+        clonk_engine::ControlPacket::PlayerCommand(data) => {
+            Some(NetworkControl::PlayerCommand(data))
+        }
         clonk_engine::ControlPacket::PlayerSelect(data) => Some(NetworkControl::PlayerSelect(data)),
         clonk_engine::ControlPacket::Script(data) => Some(NetworkControl::Script(data)),
         clonk_engine::ControlPacket::Message(data) => Some(NetworkControl::Message(data)),
         clonk_engine::ControlPacket::MessageBoardAnswer(data) => {
             Some(NetworkControl::MessageBoardAnswer(data))
         }
-        clonk_engine::ControlPacket::CustomCommand(data) => Some(NetworkControl::CustomCommand(data)),
+        clonk_engine::ControlPacket::CustomCommand(data) => {
+            Some(NetworkControl::CustomCommand(data))
+        }
         clonk_engine::ControlPacket::EmMoveObject(data) => Some(NetworkControl::EmMoveObject(data)),
         clonk_engine::ControlPacket::EmDrawTool(data) => Some(NetworkControl::EmDrawTool(data)),
         clonk_engine::ControlPacket::EmDropDef(data) => Some(NetworkControl::EmDropDef(data)),
@@ -7742,12 +7901,14 @@ fn control_packet_for_event(
         event => (control_command_for_event(event)?, 0),
     };
     let by_client = i32::try_from(client_id).ok()?;
-    Some(clonk_engine::ControlPacket::PlayerControl(PlayerControlData {
-        player: owner,
-        command,
-        data,
-        by_client,
-    }))
+    Some(clonk_engine::ControlPacket::PlayerControl(
+        PlayerControlData {
+            player: owner,
+            command,
+            data,
+            by_client,
+        },
+    ))
 }
 
 fn control_command_for_event(event: ControlEvent) -> Option<i32> {
@@ -7824,6 +7985,18 @@ mod tests {
 
     fn test_netpuncher_state() -> Arc<Mutex<NetworkNetpuncherState>> {
         Arc::new(Mutex::new(NetworkNetpuncherState::default()))
+    }
+
+    #[test]
+    fn production_network_runtime_has_a_bounded_worker_budget() {
+        // C++ runs all registered TCP and UDP network procs on one
+        // StdSchedulerThread (oracle-src-pinned src/C4InteractiveThread.cpp:48-67;
+        // src/StdScheduler.cpp:229-244; src/C4Network2IO.cpp:71-88). Rust keeps
+        // enough parallel service capacity for the per-peer UDP tasks without
+        // scaling every game process to the host's CPU count.
+        let runtime = build_network_runtime().expect("build production network runtime");
+
+        assert_eq!(runtime.metrics().num_workers(), 4);
     }
 
     #[test]
@@ -7920,11 +8093,13 @@ mod tests {
                 commands.take_submitted_decided_controls(),
                 vec![(
                     29,
-                    clonk_engine::ControlPacket::Synchronize(clonk_engine::SynchronizeControlData {
-                        save_player_files: false,
-                        sync_clearance: true,
-                        by_client: expected_author,
-                    },),
+                    clonk_engine::ControlPacket::Synchronize(
+                        clonk_engine::SynchronizeControlData {
+                            save_player_files: false,
+                            sync_clearance: true,
+                            by_client: expected_author,
+                        },
+                    ),
                     false,
                 )]
             );
@@ -8044,8 +8219,7 @@ mod tests {
             match TcpListener::bind(address).await {
                 Ok(tcp) => return (tcp, udp, address),
                 Err(error)
-                    if error.kind() == std::io::ErrorKind::AddrInUse
-                        && attempt < MAX_ATTEMPTS => {}
+                    if error.kind() == std::io::ErrorKind::AddrInUse && attempt < MAX_ATTEMPTS => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
                     panic!(
                         "failed to reserve TCP fixture at held UDP endpoints after {MAX_ATTEMPTS} attempts; last endpoint {address}: {error}"
@@ -8082,7 +8256,7 @@ mod tests {
                 .unwrap();
             7
         };
-        let (event_tx, _event_rx) = mpsc::channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(1);
         let mut provenance = VecDeque::new();
         let netpuncher_state = test_netpuncher_state();
@@ -8161,7 +8335,7 @@ mod tests {
                 .unwrap();
             41
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(1);
         let mut provenance = VecDeque::new();
         let netpuncher_state = test_netpuncher_state();
@@ -8253,8 +8427,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn league_record_runtime_posts_terminal_zlib_bytes_to_cpp_url() {
         let (endpoint, request_ready, respond, request) = serve_one_league_record_upload();
-        let runtime =
-            spawn_league_record_runtime(endpoint, clonk_network::LeagueHttpTransportConfig::default())
+        let runtime = spawn_league_record_runtime(
+            endpoint,
+            clonk_network::LeagueHttpTransportConfig::default(),
+        )
         .unwrap();
         assert_eq!(runtime.status(), LeagueRecordStreamStatus::default());
         let (started, start_result) = std::sync::mpsc::channel();
@@ -8265,7 +8441,10 @@ mod tests {
                 completion: started,
             })
             .unwrap();
-        start_result.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        start_result
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
         assert_eq!(
             runtime.status(),
             LeagueRecordStreamStatus {
@@ -8290,16 +8469,17 @@ mod tests {
                 completion: finished,
             })
             .unwrap();
-        finish_result.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        finish_result
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
         let finishing_status = runtime.status();
         assert!(finishing_status.is_streaming());
         assert_eq!(finishing_status.waiting_raw_bytes(), 0);
         assert_eq!(finishing_status.input_position(), source.len() as u64);
         assert!(finishing_status.pending_compressed_bytes() > 0);
         assert_eq!(finishing_status.sent_position(), 0);
-        request_ready
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap();
+        request_ready.recv_timeout(Duration::from_secs(5)).unwrap();
         respond.send(()).unwrap();
         let (shutdown, shut_down) = tokio::sync::oneshot::channel();
         runtime
@@ -8321,9 +8501,7 @@ mod tests {
             .position(|part| part == b"\r\n\r\n")
             .unwrap();
         let header = std::str::from_utf8(&request[..header_end]).unwrap();
-        assert!(header.starts_with(
-            "POST /stream?token=x&pos=0&end=true HTTP/1."
-        ));
+        assert!(header.starts_with("POST /stream?token=x&pos=0&end=true HTTP/1."));
         let mut decoded = Vec::new();
         ZlibDecoder::new(&request[header_end + 4..])
             .read_to_end(&mut decoded)
@@ -8474,8 +8652,12 @@ mod tests {
         let summary = clonk_network::NetworkGameReference {
             icon: 0,
             title: clonk_resources::decode_legacy_script_text(parameters.title.as_bytes()),
-            host_name: clonk_resources::decode_legacy_script_text(config.local_core.name.as_bytes()),
-            host_nick: clonk_resources::decode_legacy_script_text(config.local_core.nick.as_bytes()),
+            host_name: clonk_resources::decode_legacy_script_text(
+                config.local_core.name.as_bytes(),
+            ),
+            host_nick: clonk_resources::decode_legacy_script_text(
+                config.local_core.nick.as_bytes(),
+            ),
             state: "Lobby".to_string(),
             control_mode: config.initial_status.control_mode,
             time: 0,
@@ -8538,9 +8720,9 @@ mod tests {
         let mut metadata = reference.metadata().clone();
         metadata.netpuncher_address =
             clonk_engine::LegacyCString::from_bytes(address.to_string().into_bytes())
-        .expect("socket address has no NUL");
+                .expect("socket address has no NUL");
         clonk_network::HostGameReference::new(summary, metadata, reference.parameters().clone())
-        .expect("netpuncher reference validates")
+            .expect("netpuncher reference validates")
     }
 
     #[test]
@@ -8562,7 +8744,7 @@ mod tests {
 
         let updated =
             reference_with_projected_gains(&reference, &HashMap::from([(17, -8), (99, 42)]))
-        .expect("projected gains preserve reference invariants");
+                .expect("projected gains preserve reference invariants");
 
         assert_eq!(
             updated.parameters().player_infos.clients[0].players[0].league_projected_gain,
@@ -8598,7 +8780,9 @@ mod tests {
                         Err(error) => panic!("accept league request: {error}"),
                     }
                 };
-                stream.set_nonblocking(false).expect("blocking fixture stream");
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking fixture stream");
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -8608,9 +8792,8 @@ mod tests {
                     let count = stream.read(&mut chunk).expect("read league request");
                     assert_ne!(count, 0, "request ended before its headers");
                     request.extend_from_slice(&chunk[..count]);
-                    if let Some(offset) = request
-                        .windows(4)
-                        .position(|window| window == b"\r\n\r\n")
+                    if let Some(offset) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
                     {
                         break offset + 4;
                     }
@@ -8659,7 +8842,7 @@ mod tests {
             b"[Response]\r\nStatus=Failure\r\n",
             b"[Response]\r\nStatus=Success\r\nLeague=done\r\n",
         ]);
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let reference = minimal_league_reference();
         let (start, command_tx) = register_league_host(
             PreparedLeagueHostConfig {
@@ -8727,7 +8910,7 @@ mod tests {
         let (endpoint, server) = league_http_fixture(vec![
             b"[Response]\r\nStatus=Success\r\nCSID=session\r\nLeague=Cup\r\n",
         ]);
-        let (event_tx, _event_rx) = mpsc::channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
         let reference = minimal_league_reference();
         let (_start, command_tx) = register_league_host(
             PreparedLeagueHostConfig {
@@ -8815,7 +8998,7 @@ Message=Server says Andr\xe9\r\n\
             rejected,
             rejected,
         ]);
-        let (event_tx, _event_rx) = mpsc::channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
         let reference = minimal_league_reference();
         let (_start, command_tx) = register_league_host(
             PreparedLeagueHostConfig {
@@ -8918,8 +9101,10 @@ Message=Server says Andr\xe9\r\n\
                 };
                 completion.send(outcome).expect("complete headless End");
             }
-            let LeagueRuntimeCommand::FinalizeEndFailure { packet, completion } =
-                commands.recv().await.expect("headless failure finalization")
+            let LeagueRuntimeCommand::FinalizeEndFailure { packet, completion } = commands
+                .recv()
+                .await
+                .expect("headless failure finalization")
             else {
                 panic!("unexpected final headless league command");
             };
@@ -9027,7 +9212,7 @@ Message=Server says Andr\xe9\r\n\
             b"[Response]\r\nStatus=Success\r\nAccount=Alice\r\nLeague=Cup\r\nScore=12\r\nRank=3\r\nRankSymbol=4\r\nProgressData=ready\r\n",
             b"[Response]\r\nStatus=Success\r\n",
         ]);
-        let (event_tx, _event_rx) = mpsc::channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
         let reference = minimal_league_reference();
         let (_start, runtime) = register_league_host(
             PreparedLeagueHostConfig {
@@ -9199,7 +9384,10 @@ Message=Server says Andr\xe9\r\n\
         );
 
         let abandoned = manager
-            .begin_authenticate_league_player(clonk_network::LeagueAuthRequestHead::default(), &player)
+            .begin_authenticate_league_player(
+                clonk_network::LeagueAuthRequestHead::default(),
+                &player,
+            )
             .expect("begin abandoned Auth")
             .expect("league runtime available");
         let command = commands.receive_league_player_auth();
@@ -9246,7 +9434,8 @@ Message=Server says Andr\xe9\r\n\
         };
         let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
         let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, _event_rx) = mpsc::channel();
+        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
         let netpuncher_state = test_netpuncher_state();
@@ -9257,6 +9446,7 @@ Message=Server says Andr\xe9\r\n\
                 0,
                 &mut command_rx,
                 &mut control_tick_rx,
+                &mut control_performance_rx,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
@@ -9274,10 +9464,7 @@ Message=Server says Andr\xe9\r\n\
         assert_eq!(local_addresses.len(), 2);
         assert_eq!(local_addresses[0].protocol, NetworkProtocol::Tcp);
         assert_eq!(local_addresses[1].protocol, NetworkProtocol::Udp);
-        assert_eq!(
-            local_addresses[0].endpoint,
-            local_addresses[1].endpoint
-        );
+        assert_eq!(local_addresses[0].endpoint, local_addresses[1].endpoint);
         assert_ne!(local_addresses[0].endpoint.port(), 0);
 
         command_tx
@@ -9306,7 +9493,8 @@ Message=Server says Andr\xe9\r\n\
         };
         let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
         let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
         let netpuncher_state = test_netpuncher_state();
@@ -9317,6 +9505,7 @@ Message=Server says Andr\xe9\r\n\
                 0,
                 &mut command_rx,
                 &mut control_tick_rx,
+                &mut control_performance_rx,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
@@ -9367,7 +9556,8 @@ Message=Server says Andr\xe9\r\n\
         };
         let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
         let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
         let netpuncher_state = test_netpuncher_state();
@@ -9378,6 +9568,7 @@ Message=Server says Andr\xe9\r\n\
                 0,
                 &mut command_rx,
                 &mut control_tick_rx,
+                &mut control_performance_rx,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
@@ -9439,7 +9630,8 @@ Message=Server says Andr\xe9\r\n\
         };
         let (_command_tx, mut command_rx) = tokio_mpsc::channel(8);
         let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
         let netpuncher_state = test_netpuncher_state();
@@ -9450,6 +9642,7 @@ Message=Server says Andr\xe9\r\n\
                 0,
                 &mut command_rx,
                 &mut control_tick_rx,
+                &mut control_performance_rx,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
@@ -9514,7 +9707,8 @@ Message=Server says Andr\xe9\r\n\
         };
         let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
         let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
-        let (event_tx, _event_rx) = mpsc::channel();
+        let (_control_performance_tx, mut control_performance_rx) = tokio_mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
         let worker = tokio::spawn(async move {
@@ -9523,6 +9717,7 @@ Message=Server says Andr\xe9\r\n\
                 0,
                 &mut command_rx,
                 &mut control_tick_rx,
+                &mut control_performance_rx,
                 event_tx,
                 telemetry_tx,
                 local_id_tx,
@@ -9585,9 +9780,9 @@ Message=Server says Andr\xe9\r\n\
             .recv_timeout(Duration::from_secs(2))
             .expect("second Start request reaches the HTTP server");
         let mut puncher_stream = tokio::time::timeout(Duration::from_secs(2), puncher.accept())
-        .await
-        .expect("live signup contacts puncher before Start responds")
-        .expect("accept live host puncher session");
+            .await
+            .expect("live signup contacts puncher before Start responds")
+            .expect("accept live host puncher session");
         let puncher_request = tokio::time::timeout(Duration::from_secs(2), async {
             let mut header = [0_u8; 5];
             puncher_stream.read_exact(&mut header).await.unwrap();
@@ -9707,7 +9902,7 @@ Message=Server says Andr\xe9\r\n\
         let mut settings = ClientSettings::new(address, "Alice");
         settings.resource_directory = temporary.path().join("Network");
         let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
-        let (event_tx, _event_rx) = mpsc::channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
         let worker = tokio::spawn(async move {
@@ -9715,6 +9910,7 @@ Message=Server says Andr\xe9\r\n\
                 settings,
                 0,
                 &mut command_rx,
+                &mut tokio_mpsc::unbounded_channel().1,
                 &mut tokio_mpsc::unbounded_channel().1,
                 event_tx,
                 telemetry_tx,
@@ -9769,7 +9965,7 @@ Message=Server says Andr\xe9\r\n\
         let mut settings = ClientSettings::new(address, "Alice");
         settings.resource_directory = temporary.path().join("Network");
         let (command_tx, command_rx) = tokio_mpsc::channel(16);
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
         let worker = tokio::spawn(async move {
@@ -9778,6 +9974,7 @@ Message=Server says Andr\xe9\r\n\
                 settings,
                 0,
                 &mut command_rx,
+                &mut tokio_mpsc::unbounded_channel().1,
                 &mut tokio_mpsc::unbounded_channel().1,
                 event_tx,
                 telemetry_tx,
@@ -9794,11 +9991,12 @@ Message=Server says Andr\xe9\r\n\
             .expect("client worker readiness timeout")
             .expect("client worker readiness");
         assert!(ready.league_runtime_available);
-        let remove = clonk_engine::ControlPacket::ClientRemove(clonk_engine::ClientRemoveControlData {
+        let remove =
+            clonk_engine::ControlPacket::ClientRemove(clonk_engine::ClientRemoveControlData {
                 client_id: i32::try_from(ready.local_client_id).unwrap(),
                 reason: clonk_engine::LegacyCString::default(),
                 by_client: i32::try_from(HOST_CLIENT_ID).unwrap(),
-        });
+            });
         host.submit_packet(
             ControlDelivery::Sync,
             encode_control_entry_payload(&remove).expect("encode client removal"),
@@ -9808,7 +10006,8 @@ Message=Server says Andr\xe9\r\n\
         let disconnect_deadline = std::time::Instant::now() + Duration::from_secs(4);
         let mut seen_events = Vec::new();
         loop {
-            let remaining = disconnect_deadline.saturating_duration_since(std::time::Instant::now());
+            let remaining =
+                disconnect_deadline.saturating_duration_since(std::time::Instant::now());
             let event = event_rx.recv_timeout(remaining).unwrap_or_else(|error| {
                 panic!("client disconnect event timeout ({error}); saw {seen_events:?}")
             });
@@ -9916,7 +10115,7 @@ Message=Server says Andr\xe9\r\n\
             dynamic: snapshot.dynamic,
             parameters,
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (local_id_tx, local_id_rx) = mpsc::channel();
 
         let announced =
@@ -9981,7 +10180,7 @@ Message=Server says Andr\xe9\r\n\
         let mut settings = ClientSettings::new(address, "Alice");
         settings.resource_directory = temporary.path().join("Network");
         let (command_tx, command_rx) = tokio_mpsc::channel(16);
-        let (event_tx, _event_rx) = mpsc::channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, _local_id_rx) = mpsc::channel();
         let worker = tokio::spawn(async move {
@@ -9990,6 +10189,7 @@ Message=Server says Andr\xe9\r\n\
                 settings,
                 0,
                 &mut command_rx,
+                &mut tokio_mpsc::unbounded_channel().1,
                 &mut tokio_mpsc::unbounded_channel().1,
                 event_tx,
                 telemetry_tx,
@@ -10088,7 +10288,7 @@ Message=Server says Andr\xe9\r\n\
         let mut settings = ClientSettings::new(address, "Alice");
         settings.resource_directory = temporary.path().join("Network");
         let (command_tx, command_rx) = tokio_mpsc::channel(32);
-        let (event_tx, _event_rx) = mpsc::channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
         let worker = tokio::spawn(async move {
@@ -10097,6 +10297,7 @@ Message=Server says Andr\xe9\r\n\
                 settings,
                 3,
                 &mut command_rx,
+                &mut tokio_mpsc::unbounded_channel().1,
                 &mut tokio_mpsc::unbounded_channel().1,
                 event_tx,
                 telemetry_tx,
@@ -10207,8 +10408,10 @@ Message=Server says Andr\xe9\r\n\
         };
         host.submit_packet(
             ControlDelivery::Sync,
-            encode_control_entry_payload(&clonk_engine::ControlPacket::ClientUpdate(update.clone()))
-                .expect("encode activation control"),
+            encode_control_entry_payload(&clonk_engine::ControlPacket::ClientUpdate(
+                update.clone(),
+            ))
+            .expect("encode activation control"),
         )
         .await
         .expect("submit activation control");
@@ -10218,7 +10421,8 @@ Message=Server says Andr\xe9\r\n\
                 .expect("activation execution timeout")
             {
                 Some(HostEvent::SyncScheduled { controls, .. })
-                    if controls == vec![clonk_engine::ControlPacket::ClientUpdate(update.clone())] =>
+                    if controls
+                        == vec![clonk_engine::ControlPacket::ClientUpdate(update.clone())] =>
                 {
                     break;
                 }
@@ -10298,7 +10502,7 @@ Message=Server says Andr\xe9\r\n\
             .with_password(password);
         settings.resource_directory = temporary.path().join("Network");
         let (command_tx, command_rx) = tokio_mpsc::channel(8);
-        let (event_tx, _event_rx) = mpsc::channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
         let worker = tokio::spawn(async move {
@@ -10307,6 +10511,7 @@ Message=Server says Andr\xe9\r\n\
                 settings,
                 0,
                 &mut command_rx,
+                &mut tokio_mpsc::unbounded_channel().1,
                 &mut tokio_mpsc::unbounded_channel().1,
                 event_tx,
                 telemetry_tx,
@@ -10328,7 +10533,10 @@ Message=Server says Andr\xe9\r\n\
             .send(NetworkCommand::Shutdown)
             .await
             .expect("stop connected client worker");
-        worker.await.expect("join worker task").expect("stop worker");
+        worker
+            .await
+            .expect("join worker task")
+            .expect("stop worker");
         host.shutdown().await.expect("stop host");
     }
 
@@ -10384,14 +10592,13 @@ Message=Server says Andr\xe9\r\n\
             .expect("bind C++-style host");
         let address = listener.local_addr().expect("host address");
         let host = start_host(listener, host_config).await.expect("start host");
-        let mut settings = ClientSettings::new(address, "Alice").with_join_attempts([
-            NetworkAddress::new(NetworkProtocol::Tcp, address),
-        ]);
+        let mut settings = ClientSettings::new(address, "Alice")
+            .with_join_attempts([NetworkAddress::new(NetworkProtocol::Tcp, address)]);
         settings.mesh_udp_bind_address = None;
         settings.resource_directory = client_root.join("Network");
         settings.local_system_path = Some(client_system.clone());
         let (command_tx, command_rx) = tokio_mpsc::channel(8);
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel();
         let worker = tokio::spawn(async move {
@@ -10400,6 +10607,7 @@ Message=Server says Andr\xe9\r\n\
                 settings,
                 0,
                 &mut command_rx,
+                &mut tokio_mpsc::unbounded_channel().1,
                 &mut tokio_mpsc::unbounded_channel().1,
                 event_tx,
                 telemetry_tx,
@@ -10445,7 +10653,10 @@ Message=Server says Andr\xe9\r\n\
             .send(NetworkCommand::Shutdown)
             .await
             .expect("stop client worker");
-        worker.await.expect("join worker task").expect("stop worker");
+        worker
+            .await
+            .expect("join worker task")
+            .expect("stop worker");
         host.shutdown().await.expect("stop host");
     }
 
@@ -11061,7 +11272,9 @@ Message=Server says Andr\xe9\r\n\
         let (applied, rejected) = caller.join().expect("Go caller");
         applied.expect("first atomic transition applies");
         assert_eq!(
-            rejected.expect_err("worker rejection reaches caller").to_string(),
+            rejected
+                .expect_err("worker rejection reaches caller")
+                .to_string(),
             "host loop rejected Go"
         );
     }
@@ -11334,10 +11547,7 @@ Message=Server says Andr\xe9\r\n\
             None
         );
         assert_eq!(
-            activation.request_tick_if_due(
-                first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL,
-                52,
-            ),
+            activation.request_tick_if_due(first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL, 52,),
             Some(52)
         );
     }
@@ -11469,10 +11679,7 @@ Message=Server says Andr\xe9\r\n\
         );
 
         assert_eq!(
-            activation.request_tick_if_due(
-                first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL,
-                41,
-            ),
+            activation.request_tick_if_due(first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL, 41,),
             None
         );
     }
@@ -11757,7 +11964,7 @@ Message=Server says Andr\xe9\r\n\
                 clonk_engine::ControlPacket::PlayerControl(left.clone()),
             ],
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
 
         emit_frame_controls(frame, 4, &event_tx).expect("emit ready frame");
 
@@ -11796,7 +12003,7 @@ Message=Server says Andr\xe9\r\n\
             timestamp_ms: 0,
             controls: vec![set.into_control_packet()],
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
 
         emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
 
@@ -11811,9 +12018,10 @@ Message=Server says Andr\xe9\r\n\
 
     #[test]
     fn debug_record_projection_round_trips_opaque_bytes() {
-        let packet = clonk_engine::ControlPacket::DebugRecord(clonk_engine::DebugRecordControlData {
-            data: vec![0x00, 0xff, b'C', b'4'],
-        });
+        let packet =
+            clonk_engine::ControlPacket::DebugRecord(clonk_engine::DebugRecordControlData {
+                data: vec![0x00, 0xff, b'C', b'4'],
+            });
 
         let projected = network_control_for_packet(packet.clone())
             .expect("known CID_DebugRec remains in the execution stream");
@@ -11859,7 +12067,7 @@ Message=Server says Andr\xe9\r\n\
                 clonk_engine::ControlPacket::JoinPlayer(join.clone()),
             ],
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
 
         emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
 
@@ -11893,7 +12101,7 @@ Message=Server says Andr\xe9\r\n\
             timestamp_ms: 0,
             controls: vec![clonk_engine::ControlPacket::SurrenderPlayer(surrender)],
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
 
         emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
 
@@ -11922,7 +12130,7 @@ Message=Server says Andr\xe9\r\n\
             timestamp_ms: 0,
             controls: vec![clonk_engine::ControlPacket::InitScenarioPlayer(selection)],
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
 
         emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
 
@@ -11951,7 +12159,7 @@ Message=Server says Andr\xe9\r\n\
             reason: clonk_engine::LegacyCString::from_bytes(b"bye".to_vec()).expect("valid reason"),
             by_client: 0,
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
 
         emit_scheduled_sync_controls(
             23,
@@ -11986,7 +12194,7 @@ Message=Server says Andr\xe9\r\n\
             data: 7,
             by_client: 0,
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
 
         emit_scheduled_sync_controls(
             23,
@@ -12005,13 +12213,392 @@ Message=Server says Andr\xe9\r\n\
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn host_recoverable_route_diagnostic_stays_typed_for_the_app() {
+        // C++ gives only a failed speculative/secondary connection warning
+        // severity because it may have no player impact; ordinary packet
+        // failures remain errors (src/C4Network2IO.cpp:252-261,808-834).
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let mut player_info_echo_provenance = VecDeque::new();
+        let error = "secondary TCP route closed".to_string();
+
+        handle_host_event(
+            HostEvent::RecoverableRouteDiagnostic {
+                client_id: Some(7),
+                error: error.clone(),
+            },
+            0,
+            &event_tx,
+            &telemetry_tx,
+            &mut player_info_echo_provenance,
+            &test_netpuncher_state(),
+        )
+        .await
+        .expect("forward recoverable route diagnostic");
+
+        assert_eq!(
+            event_rx.recv().expect("recoverable route diagnostic"),
+            NetworkEvent::RecoverableRouteDiagnostic {
+                client_id: Some(7),
+                error,
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_transport_diagnostic_preserves_peer_identity_for_the_app() {
+        // Malformed peer input closes only that connection; the host packet
+        // loop remains available to every other client
+        // (src/C4Network2IO.cpp:808-834).
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let mut player_info_echo_provenance = VecDeque::new();
+        let error = "failed to decode direct control packet".to_string();
+
+        handle_host_event(
+            HostEvent::TransportError {
+                client_id: Some(7),
+                error: error.clone(),
+            },
+            0,
+            &event_tx,
+            &telemetry_tx,
+            &mut player_info_echo_provenance,
+            &test_netpuncher_state(),
+        )
+        .await
+        .expect("forward transport diagnostic");
+
+        assert_eq!(
+            event_rx.recv().expect("transport diagnostic"),
+            NetworkEvent::TransportDiagnostic {
+                client_id: Some(7),
+                error,
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fatal_host_lockstep_event_stays_fatal_for_the_app() {
+        // PackCompleteCtrl is the authoritative host path for advancing a
+        // complete control tick. If that path fails after coordination has
+        // advanced, the app must clear network control rather than presenting
+        // a recoverable peer warning
+        // (src/C4GameControlNetwork.cpp:741-777;
+        // src/C4Network2.cpp:746-789).
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let mut player_info_echo_provenance = VecDeque::new();
+        let error = "failed to aggregate ready tick 23".to_string();
+
+        handle_host_event(
+            HostEvent::FatalError {
+                error: error.clone(),
+            },
+            0,
+            &event_tx,
+            &telemetry_tx,
+            &mut player_info_echo_provenance,
+            &test_netpuncher_state(),
+        )
+        .await
+        .expect("forward fatal host event");
+
+        assert_eq!(
+            event_rx.recv().expect("fatal app event"),
+            NetworkEvent::FatalError(error)
+        );
+    }
+
+    fn unsupported_local_control_frame(client_id: ClientId) -> LegacyControlFrame {
+        LegacyControlFrame {
+            client_id,
+            tick: 23,
+            timestamp_ms: 0,
+            controls: vec![clonk_engine::ControlPacket::Unknown {
+                id: clonk_engine::ControlPacketId(0xfe),
+                name: None,
+                fields: HashMap::new(),
+            }],
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_host_control_encode_failure_stops_the_worker_path() {
+        // C4GameControlNetwork cannot advance a tick after its local
+        // C4GameControlPacket fails to compile. Application failure clears
+        // C4Network2 rather than leaving the installed lockstep clock waiting
+        // forever (src/C4GameControlNetwork.cpp:741-777;
+        // src/C4Network2.cpp:475-510,746-789).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind host listener");
+        let host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+
+        let error = send_frame_to_host(&host, unsupported_local_control_frame(HOST_CLIENT_ID))
+            .await
+            .expect_err("unencodable local host control must stop the worker path");
+
+        assert!(error
+            .to_string()
+            .starts_with("failed to encode host control packet:"));
+        host.shutdown().await.expect("shutdown host");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_client_control_encode_failure_stops_the_worker_path() {
+        // A client which cannot compile its own control contribution cannot
+        // satisfy the next complete-control barrier. Native failure tears down
+        // C4Network2 instead of treating that condition as a log-only peer
+        // diagnostic (src/C4GameControlNetwork.cpp:48-60,741-777;
+        // src/C4Network2.cpp:746-789).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind host listener");
+        let address = listener.local_addr().expect("host address");
+        let host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let client = clonk_network::connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .expect("connect client");
+
+        let error =
+            send_frame_to_client(&client, unsupported_local_control_frame(client.client_id()))
+                .await
+                .expect_err("unencodable local client control must stop the worker path");
+
+        assert!(error
+            .to_string()
+            .starts_with("failed to encode client control packet:"));
+        client.graceful_part().await.expect("part client");
+        host.shutdown().await.expect("shutdown host");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn authoritative_player_info_encode_failure_stops_the_host_worker_path() {
+        // C4ControlPlayerInfo is host-authored synchronized state. If it cannot
+        // be compiled, continuing the session would leave host and clients
+        // with different admission state (src/C4Network2Players.cpp:512-544;
+        // src/C4GameControlNetwork.cpp:741-777).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind host listener");
+        let host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let info = PlayerInfoControlData {
+            players: vec![clonk_engine::ControlPlayerInfoEntry {
+                id: 17,
+                flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let error = send_player_info_from_host(&host, info)
+            .await
+            .expect_err("unencodable authoritative PlayerInfo must stop the worker path");
+
+        assert!(error
+            .to_string()
+            .starts_with("failed to encode authoritative PlayerInfo:"));
+        host.shutdown().await.expect("shutdown host");
+    }
+
+    #[test]
+    fn production_worker_reports_authoritative_encode_failure_as_fatal() {
+        // The network-thread boundary must translate an unrecoverable local
+        // compiler failure into FatalError only after the worker has exited.
+        // The application can then follow C4Network2::Clear instead of
+        // retaining a lockstep clock with no producer
+        // (src/C4Network2.cpp:475-510,746-789).
+        let manager = NetworkManager::for_mode(
+            NetworkMode::Host(HostSettings {
+                bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                player_name: "Host".to_string(),
+                prepared: None,
+            }),
+            0,
+        )
+        .expect("start production host worker");
+        manager
+            .broadcast_player_info(PlayerInfoControlData {
+                players: vec![clonk_engine::ControlPlayerInfoEntry {
+                    id: 17,
+                    flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: None,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .expect("queue malformed authoritative PlayerInfo");
+
+        let fatal = loop {
+            match manager.event_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(NetworkEvent::FatalError(error)) => break error,
+                Ok(_) => continue,
+                Err(error) => panic!("fatal worker event was not delivered: {error}"),
+            }
+        };
+
+        assert!(fatal.starts_with("failed to encode authoritative PlayerInfo:"));
+    }
+
+    #[test]
+    fn authoritative_ready_decode_failure_stops_the_worker_path() {
+        // PID_Control is the one complete, authoritative tick released to
+        // C4GameControl. A packet which cannot be decoded cannot be skipped:
+        // the application loop must fail and C4Network2::Clear must remove the
+        // dead network-control clock (src/C4GameControlNetwork.cpp:741-777;
+        // src/C4Network2.cpp:475-510,746-789).
+        let packet = ControlPacket::builder(clonk_network::BROADCAST_CLIENT_ID, 23)
+            .timestamp_ms(0)
+            .payload(Vec::new());
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+
+        let error = handle_ready_packet(packet, 0, &event_tx)
+            .expect_err("malformed authoritative control must stop the worker path");
+
+        assert!(error
+            .to_string()
+            .starts_with("failed to decode authoritative control packet:"));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "the worker boundary owns the single FatalError notification"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn final_route_loss_maps_the_complete_nonfatal_cleanup_sequence() {
+        // Native OnDisconnect logs the lost route, calls OnClientDisconnect
+        // only after the client's final connection is gone, and keeps the
+        // host/lobby alive while CtrlRemove performs synchronized cleanup
+        // (src/C4Network2.cpp:1774-1824).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind host listener");
+        let address = listener.local_addr().expect("host address");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let client = clonk_network::connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .expect("connect client");
+        let client_id = client.client_id();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
+                .await
+                .expect("client join timeout")
+            {
+                Some(HostEvent::ClientJoined {
+                    client_id: joined, ..
+                }) if joined == client_id => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before client join"),
+            }
+        }
+
+        client
+            .graceful_part()
+            .await
+            .expect("part client with native reason");
+        let (event_tx, event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let mut player_info_echo_provenance = VecDeque::new();
+        let netpuncher_state = test_netpuncher_state();
+        let mut forwarded = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(2), host_events.recv())
+                .await
+                .expect("disconnect event timeout")
+                .expect("host event stream during disconnect");
+            handle_host_event(
+                event,
+                0,
+                &event_tx,
+                &telemetry_tx,
+                &mut player_info_echo_provenance,
+                &netpuncher_state,
+            )
+            .await
+            .expect("forward disconnect event");
+            forwarded.extend(event_rx.try_iter());
+            if forwarded.iter().any(|event| {
+                matches!(
+                    event,
+                    NetworkEvent::RecoverableRouteDiagnostic { .. }
+                        | NetworkEvent::TransportDiagnostic { .. }
+                        | NetworkEvent::Error(_)
+                )
+            }) {
+                break;
+            }
+        }
+
+        assert!(
+            !forwarded
+                .iter()
+                .any(|event| matches!(event, NetworkEvent::Error(_))),
+            "ordinary final-route loss became an app-fatal network error: {forwarded:?}"
+        );
+        let failure = forwarded
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    NetworkEvent::PeerConnectionFailed { client_id: failed }
+                        if *failed == client_id
+                )
+            })
+            .expect("peer failure notification");
+        let departure = forwarded
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    NetworkEvent::PeerDisconnected {
+                        client_id: departed,
+                        ..
+                    } if *departed == client_id
+                )
+            })
+            .expect("peer departure notification");
+        let diagnostic = forwarded
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    NetworkEvent::RecoverableRouteDiagnostic {
+                        client_id: Some(source),
+                        error,
+                    } if *source == client_id && error == "removing client"
+                )
+            })
+            .expect("typed final-route diagnostic");
+        assert!(failure < departure && departure < diagnostic);
+
+        host.shutdown().await.expect("shutdown host");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn host_status_change_is_forwarded_to_the_app() {
         let status = NetworkStatus {
             state: clonk_network::NETWORK_STATE_PAUSE,
             control_mode: 1,
             target_tick: 23,
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let mut player_info_echo_provenance = VecDeque::new();
 
@@ -12034,7 +12621,7 @@ Message=Server says Andr\xe9\r\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn runtime_join_data_request_is_forwarded_to_the_app() {
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let mut player_info_echo_provenance = VecDeque::new();
 
@@ -12069,7 +12656,7 @@ Message=Server says Andr\xe9\r\n\
             control_mode: 1,
             target_tick: 23,
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let mut player_info_echo_provenance = VecDeque::new();
 
@@ -12092,7 +12679,7 @@ Message=Server says Andr\xe9\r\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn host_puncher_assignment_publishes_one_atomic_app_snapshot() {
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let state = test_netpuncher_state();
         let mut provenance = VecDeque::new();
@@ -12153,7 +12740,7 @@ Message=Server says Andr\xe9\r\n\
             control_mode: 1,
             target_tick: 23,
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let mut player_info_echo_provenance = VecDeque::new();
 
@@ -12180,7 +12767,7 @@ Message=Server says Andr\xe9\r\n\
         // client receives the same PID_LobbyCountdown through MainDlg
         // (src/C4GameLobby.cpp:392-418,1111-1131).
         let packet = clonk_network::LobbyCountdownPacket::new(5);
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let mut player_info_echo_provenance = VecDeque::new();
 
@@ -12216,7 +12803,7 @@ Message=Server says Andr\xe9\r\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn resource_chunk_progress_is_forwarded_to_the_app_for_host_and_client() {
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let mut player_info_echo_provenance = VecDeque::new();
 
@@ -12271,7 +12858,7 @@ Message=Server says Andr\xe9\r\n\
             client_id: 7,
             data: clonk_network::ReadyCheckData::Ready,
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let mut player_info_echo_provenance = VecDeque::new();
 
@@ -12358,7 +12945,7 @@ Message=Server says Andr\xe9\r\n\
             control_mode: 1,
             target_tick: 23,
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
 
         handle_client_event(ClientEvent::Status(status), 0, 7, &event_tx, &telemetry_tx)
@@ -12380,7 +12967,7 @@ Message=Server says Andr\xe9\r\n\
             client_id: 9,
             data: clonk_network::ReadyCheckData::NotReady,
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
 
         handle_client_event(
@@ -12403,7 +12990,8 @@ Message=Server says Andr\xe9\r\n\
     async fn client_league_round_results_are_forwarded_to_the_app_unchanged() {
         let packet = clonk_network::LeagueRoundResultsPacket {
             success: true,
-            result_string: clonk_engine::LegacyCString::from_bytes(b"Result:\xe4".to_vec()).unwrap(),
+            result_string: clonk_engine::LegacyCString::from_bytes(b"Result:\xe4".to_vec())
+                .unwrap(),
             players: vec![clonk_network::LeagueRoundResultsPlayer {
                 player_info_id: 17,
                 total_playing_time: 1_234,
@@ -12418,7 +13006,7 @@ Message=Server says Andr\xe9\r\n\
                 status: clonk_network::LeagueRoundPlayerStatus::Won,
             }],
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
 
         handle_client_event(
@@ -12449,7 +13037,7 @@ Message=Server says Andr\xe9\r\n\
         // pClient->isHost() before clearing the live network game. The local
         // client ID must never be substituted for that host peer
         // (pristine 9ffa0a5d src/C4Network2.cpp:1758-1765,1786-1817).
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
 
         handle_client_event(
@@ -12483,7 +13071,7 @@ Message=Server says Andr\xe9\r\n\
             control_mode: 2,
             target_tick: 41,
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
 
         handle_client_event(
@@ -12517,7 +13105,7 @@ Message=Server says Andr\xe9\r\n\
             client_id: HOST_CLIENT_ID as i32,
             data: clonk_network::ReadyCheckData::Ready,
         };
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let mut player_info_echo_provenance = VecDeque::new();
 
@@ -12672,7 +13260,7 @@ Message=Server says Andr\xe9\r\n\
             &clonk_engine::ControlPacket::PlayerInfo(info.clone()),
         )
         .expect("encode direct PlayerInfo payload");
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
 
         handle_direct_packet(clonk_network::ControlDelivery::Direct, payload, &event_tx)
             .expect("handle direct PlayerInfo");
@@ -12697,7 +13285,7 @@ Message=Server says Andr\xe9\r\n\
             &clonk_engine::ControlPacket::PlayerInfo(info.clone()),
         )
         .expect("encode direct PlayerInfo payload");
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
         let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let mut provenance = VecDeque::from([PlayerInfoEchoProvenance::Preexecuted {
             original: info.clone(),
@@ -12762,11 +13350,11 @@ Message=Server says Andr\xe9\r\n\
         // (src/C4MessageInput.cpp:423-426;
         // src/C4GameControlNetwork.cpp:558-566).
         let message = message_control(7);
-        let payload = clonk_network::encode_control_entry_payload(&clonk_engine::ControlPacket::Message(
-            message.clone(),
-        ))
+        let payload = clonk_network::encode_control_entry_payload(
+            &clonk_engine::ControlPacket::Message(message.clone()),
+        )
         .expect("encode private CID_Message payload");
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
 
         handle_direct_packet(clonk_network::ControlDelivery::Private, payload, &event_tx)
             .expect("handle private CID_Message");
@@ -12799,7 +13387,7 @@ Message=Server says Andr\xe9\r\n\
             &clonk_engine::ControlPacket::ClientJoin(join.clone()),
         )
         .expect("encode direct ClientJoin payload");
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
 
         handle_direct_packet(clonk_network::ControlDelivery::Direct, payload, &event_tx)
             .expect("handle direct ClientJoin");
@@ -12833,7 +13421,7 @@ Message=Server says Andr\xe9\r\n\
         let payload =
             clonk_network::encode_control_entry_payload(&clonk_engine::ControlPacket::Vote(vote))
                 .expect("encode direct Vote payload");
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
 
         handle_direct_packet(clonk_network::ControlDelivery::Direct, payload, &event_tx)
             .expect("handle direct Vote");
@@ -12854,7 +13442,7 @@ Message=Server says Andr\xe9\r\n\
         };
         let payload = clonk_network::encode_control_entry_payload(&set.into_control_packet())
             .expect("encode direct CID_Set payload");
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = NetworkEventSender::channel();
 
         handle_direct_packet(clonk_network::ControlDelivery::Direct, payload, &event_tx)
             .expect("handle direct CID_Set");
@@ -12893,7 +13481,9 @@ Message=Server says Andr\xe9\r\n\
             clonk_engine::ControlPacket::PlayerControl(expected.clone())
         );
         assert_eq!(
-            network_control_for_packet(clonk_engine::ControlPacket::PlayerControl(expected.clone())),
+            network_control_for_packet(clonk_engine::ControlPacket::PlayerControl(
+                expected.clone()
+            )),
             Some(NetworkControl::PlayerControl(expected)),
             "decoded execution must receive the same signed Data payload"
         );
@@ -12983,7 +13573,9 @@ Message=Server says Andr\xe9\r\n\
             by_client: 4,
         };
         assert_eq!(
-            network_control_for_packet(clonk_engine::ControlPacket::PlayerSelect(selection.clone())),
+            network_control_for_packet(clonk_engine::ControlPacket::PlayerSelect(
+                selection.clone()
+            )),
             Some(NetworkControl::PlayerSelect(selection))
         );
     }
@@ -13031,9 +13623,9 @@ Message=Server says Andr\xe9\r\n\
             by_client: 4,
         };
         assert_eq!(
-            network_control_for_packet(clonk_engine::ControlPacket::CustomCommand(
-                command.clone(),
-            )),
+            network_control_for_packet(
+                clonk_engine::ControlPacket::CustomCommand(command.clone(),)
+            ),
             Some(NetworkControl::CustomCommand(command))
         );
     }
@@ -13052,9 +13644,7 @@ Message=Server says Andr\xe9\r\n\
             by_client: 4,
         };
         assert_eq!(
-            network_control_for_packet(clonk_engine::ControlPacket::EmMoveObject(
-                control.clone(),
-            )),
+            network_control_for_packet(clonk_engine::ControlPacket::EmMoveObject(control.clone(),)),
             Some(NetworkControl::EmMoveObject(control))
         );
     }
@@ -13077,9 +13667,7 @@ Message=Server says Andr\xe9\r\n\
             by_client: 4,
         };
         assert_eq!(
-            network_control_for_packet(clonk_engine::ControlPacket::EmDrawTool(
-                control.clone(),
-            )),
+            network_control_for_packet(clonk_engine::ControlPacket::EmDrawTool(control.clone(),)),
             Some(NetworkControl::EmDrawTool(control))
         );
     }
@@ -13108,17 +13696,21 @@ Message=Server says Andr\xe9\r\n\
                         by_client: 4,
                     },
                 ),
-                NetworkControl::ActivateGameGoalMenu(clonk_engine::ActivateGameGoalMenuControlData {
+                NetworkControl::ActivateGameGoalMenu(
+                    clonk_engine::ActivateGameGoalMenuControlData {
                         player: 3,
                         by_client: 4,
-                }),
+                    },
+                ),
             ),
             (
-                clonk_engine::ControlPacket::ToggleHostility(clonk_engine::ToggleHostilityControlData {
+                clonk_engine::ControlPacket::ToggleHostility(
+                    clonk_engine::ToggleHostilityControlData {
                         opponent: 5,
                         player: 3,
                         by_client: 4,
-                }),
+                    },
+                ),
                 NetworkControl::ToggleHostility(clonk_engine::ToggleHostilityControlData {
                     opponent: 5,
                     player: 3,
@@ -13133,18 +13725,22 @@ Message=Server says Andr\xe9\r\n\
                         by_client: 4,
                     },
                 ),
-                NetworkControl::ActivateGameGoalRule(clonk_engine::ActivateGameGoalRuleControlData {
+                NetworkControl::ActivateGameGoalRule(
+                    clonk_engine::ActivateGameGoalRuleControlData {
                         object: 42,
                         player: 3,
                         by_client: 4,
-                }),
+                    },
+                ),
             ),
             (
-                clonk_engine::ControlPacket::SetPlayerTeam(clonk_engine::SetPlayerTeamControlData {
-                    team: 6,
-                    player: 3,
-                    by_client: 4,
-                }),
+                clonk_engine::ControlPacket::SetPlayerTeam(
+                    clonk_engine::SetPlayerTeamControlData {
+                        team: 6,
+                        player: 3,
+                        by_client: 4,
+                    },
+                ),
                 NetworkControl::SetPlayerTeam(clonk_engine::SetPlayerTeamControlData {
                     team: 6,
                     player: 3,
@@ -13152,10 +13748,12 @@ Message=Server says Andr\xe9\r\n\
                 }),
             ),
             (
-                clonk_engine::ControlPacket::EliminatePlayer(clonk_engine::EliminatePlayerControlData {
+                clonk_engine::ControlPacket::EliminatePlayer(
+                    clonk_engine::EliminatePlayerControlData {
                         player: 3,
                         by_client: 4,
-                }),
+                    },
+                ),
                 NetworkControl::EliminatePlayer(clonk_engine::EliminatePlayerControlData {
                     player: 3,
                     by_client: 4,
@@ -13324,7 +13922,10 @@ Message=Server says Andr\xe9\r\n\
             decode_control_packet(&encoded).expect("decode accumulated frame"),
             frame
         );
-        assert_eq!(frame.controls, vec![clonk_engine::ControlPacket::Script(script)]);
+        assert_eq!(
+            frame.controls,
+            vec![clonk_engine::ControlPacket::Script(script)]
+        );
     }
 
     #[test]
@@ -13467,14 +14068,71 @@ Message=Server says Andr\xe9\r\n\
         let (host, _events, _commands) = NetworkManager::test_stub_with_commands();
         assert!(host
             .runtime_connections()
-                .expect_err("stub has no live route worker")
-                .to_string()
+            .expect_err("stub has no live route worker")
+            .to_string()
             .contains("without a network worker"));
         assert!(host
             .disconnect_runtime_connection(7)
-                .expect_err("stub cannot retire a live route")
-                .to_string()
+            .expect_err("stub cannot retire a live route")
+            .to_string()
             .contains("without a network worker"));
+    }
+
+    #[test]
+    fn manager_control_consumption_does_not_wait_for_the_worker_actor() {
+        // C4GameControlNetwork::CalcPerformance samples the already-owned
+        // route topology synchronously in GetControl; the later network
+        // bookkeeping must not make the game thread wait for scheduler work
+        // (oracle-src-pinned src/C4GameControlNetwork.cpp:382-447).
+        let (mut manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        manager.control_send_time =
+            clonk_network::ControlSendTimeSnapshot::from_preferred_message_routes(
+                0,
+                HOST_CLIENT_ID,
+                [HOST_CLIENT_ID, 7, 8],
+                [(7, 100), (8, 300)],
+            );
+        manager.worker = Some(std::thread::spawn(|| {}));
+        let (result_tx, result_rx) = mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            let before = tokio::time::Instant::now();
+            let sample = manager.control_tick_consumed(7, vec![HOST_CLIENT_ID, 7, 8]);
+            let after = tokio::time::Instant::now();
+            let _ = result_tx.send((sample, before, after));
+            manager
+        });
+
+        let observed = result_rx.recv_timeout(Duration::from_millis(250));
+        let queued = commands.control_performance_rx.try_recv();
+        let queued_consumed_at = match &queued {
+            Ok(ControlPerformanceEvent::TickConsumed {
+                tick: 7,
+                consumed_at,
+                client_ids,
+                ..
+            }) if client_ids == &vec![HOST_CLIENT_ID, 7, 8] => Some(*consumed_at),
+            _ => None,
+        };
+        drop(queued);
+        drop(commands);
+        let manager = caller.join().expect("join game-thread probe");
+        drop(manager);
+
+        let (sample, before, after) =
+            observed.expect("control consumption must not wait for worker command processing");
+        assert_eq!(
+            sample,
+            Some(66),
+            "the game thread reads the latest topology snapshot directly"
+        );
+        let consumed_at =
+            queued_consumed_at.expect("consumption bookkeeping remains queued in order");
+        assert!((before..=after).contains(&consumed_at));
+
+        let mut clock = NetworkControlClock::new(0, 1);
+        clock.observe_control_send_time_ms(sample.expect("live worker sample"));
+        assert_eq!(clock.calculate_performance(), None);
+        assert_eq!(clock.avg_control_send_time(), 440);
     }
 
     #[test]
@@ -13494,14 +14152,15 @@ Message=Server says Andr\xe9\r\n\
 
     #[test]
     fn control_presend_uses_cpp_rolling_average_and_one_to_fifteen_clamp() {
-        // CalcPerformance retains 149/150 of the previous microsecond
-        // average and adds 1/150 of the latest millisecond RTT. These exact
-        // transition edges distinguish the rolling average from replacing it
-        // with the latest sample (src/C4GameControlNetwork.cpp:382-447).
+        // CalcPerformance retains 149/150 of the previous microsecond average
+        // and adds 1/150 of the latest topology-aware millisecond control-send
+        // sample. These exact transition edges distinguish the rolling average
+        // from replacing it with the latest sample
+        // (src/C4GameControlNetwork.cpp:382-447).
         let mut clock = NetworkControlClock::new(0, 1);
         assert_eq!(clock.control_presend(), 1);
         assert_eq!(clock.avg_control_send_time(), 0);
-        clock.observe_round_trip_ms(300);
+        clock.observe_control_send_time_ms(300);
         for _ in 0..13 {
             clock.calculate_performance();
             clock.complete_control_frame();
@@ -13513,7 +14172,7 @@ Message=Server says Andr\xe9\r\n\
         assert_eq!(clock.avg_control_send_time(), 26_813);
 
         let mut saturated = NetworkControlClock::new(0, 1);
-        saturated.observe_round_trip_ms(1_000);
+        saturated.observe_control_send_time_ms(1_000);
         for _ in 0..68 {
             saturated.calculate_performance();
             saturated.complete_control_frame();
@@ -13533,7 +14192,7 @@ Message=Server says Andr\xe9\r\n\
     fn control_presend_uses_live_target_fps_and_reports_only_changes() {
         let mut clock = NetworkControlClock::new(0, 1);
         clock.set_target_fps(76);
-        clock.observe_round_trip_ms(300);
+        clock.observe_control_send_time_ms(300);
         for _ in 0..6 {
             assert_eq!(clock.calculate_performance(), None);
             clock.complete_control_frame();
@@ -13568,7 +14227,7 @@ Message=Server says Andr\xe9\r\n\
     fn control_presend_preserves_native_int32_target_arithmetic() {
         let mut clock = NetworkControlClock::new(0, 1);
         clock.set_target_fps(i32::MAX);
-        clock.observe_round_trip_ms(1);
+        clock.observe_control_send_time_ms(1);
 
         // Native stores the first EWMA sample as 6us, then evaluates the
         // int32 product INT_MAX * 6 as -6. Widening that product would
@@ -13578,7 +14237,7 @@ Message=Server says Andr\xe9\r\n\
         assert_eq!(clock.control_presend(), 1);
 
         let mut ewma = NetworkControlClock::new(0, 1);
-        ewma.observe_round_trip_ms(i32::MAX);
+        ewma.observe_control_send_time_ms(i32::MAX);
         assert_eq!(ewma.calculate_performance(), None);
         assert_eq!(ewma.avg_control_send_time(), -6);
     }

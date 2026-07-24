@@ -1,6 +1,5 @@
 use super::*;
 
-
 fn parse_player_type_filter(value: Option<&Value>, function: &str) -> Result<i32, RuntimeError> {
     match value {
         Some(Value::Int(filter)) => Ok(*filter),
@@ -100,9 +99,10 @@ pub(crate) fn create_script_player(args: &[Value]) -> Result<Value, RuntimeError
         if source_flags & 8 != 0 {
             flags |= crate::PLAYER_INFO_FLAG_INVISIBLE;
         }
-        let name = crate::LegacyCString::from_bytes(clonk_script::c4_string_bytes(name)).ok_or_else(
-            || RuntimeError::new("CreateScriptPlayer: name contains an interior NUL"),
-        )?;
+        let name = crate::LegacyCString::from_bytes(clonk_script::c4_string_bytes(name))
+            .ok_or_else(|| {
+                RuntimeError::new("CreateScriptPlayer: name contains an interior NUL")
+            })?;
         context
             .world
             .player_info_updates
@@ -207,22 +207,22 @@ pub(crate) fn get_player_by_index(args: &[Value]) -> Result<Value, RuntimeError>
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Int(OWNER_NONE));
         };
-        let matching: Vec<i32> = context
+        // C4PlayerList::GetByIndex walks the live player list only until the
+        // requested matching entry (C4PlayerList.cpp:139-153). Preserve that
+        // early-exit behavior instead of materializing every match: Race's
+        // per-frame scoreboard calls this once for every player.
+        let matching = context
             .player_ids()
             .iter()
-            .filter_map(|id| {
+            .copied()
+            .filter(|id| {
                 context
                     .player_state(*id)
-                    .filter(|player| player_type_matches(player, filter))
-                    .map(|_| *id)
+                    .is_some_and(|player| player_type_matches(player, filter))
             })
-            .collect();
-        let idx = index as usize;
-        if idx >= matching.len() {
-            Ok(Value::Int(OWNER_NONE))
-        } else {
-            Ok(Value::Int(matching[idx]))
-        }
+            .nth(index as usize)
+            .unwrap_or(OWNER_NONE);
+        Ok(Value::Int(matching))
     })
 }
 
@@ -572,10 +572,12 @@ pub(crate) fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
             ),
             "Index" => Value::Int(player.id),
             "ID" => Value::Int(player.player_info_id),
-            "Eliminated" => Value::Int(i32::from(matches!(
-                player.status,
-                crate::PlayerStatus::Eliminated | crate::PlayerStatus::Surrendered
-            ) || player.surrendered)),
+            "Eliminated" => Value::Int(i32::from(
+                matches!(
+                    player.status,
+                    crate::PlayerStatus::Eliminated | crate::PlayerStatus::Surrendered
+                ) || player.surrendered,
+            )),
             "Surrendered" => Value::Int(i32::from(
                 player.surrendered || matches!(player.status, crate::PlayerStatus::Surrendered),
             )),
@@ -1065,7 +1067,11 @@ pub(crate) fn set_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-pub(crate) fn set_player_hostility_declaration(player: &mut PlayerState, opponent: i32, hostile: bool) {
+pub(crate) fn set_player_hostility_declaration(
+    player: &mut PlayerState,
+    opponent: i32,
+    hostile: bool,
+) {
     player.set_hostility_entry(opponent, hostile);
 }
 
@@ -1635,11 +1641,8 @@ pub(crate) fn apply_host_crew_experience(
                 .info_physical
                 .or(info_definition_physical)
                 .unwrap_or(scope.definition_physical);
-            scope.info_physical = Some(crate::promotion_updated_physical(
-                physical,
-                info.rank,
-                None,
-            ));
+            scope.info_physical =
+                Some(crate::promotion_updated_physical(physical, info.rank, None));
             scope.record_physicals();
         }
         Some((link, info, promoted))
@@ -1648,17 +1651,14 @@ pub(crate) fn apply_host_crew_experience(
     };
 
     let promotion_rank_name = if promoted {
-        match context
-            .world
-            .definition_rank_names
-            .get(&info.definition_id)
-        {
+        match context.world.definition_rank_names.get(&info.definition_id) {
             Some(names) => usize::try_from(info.rank)
                 .ok()
                 .and_then(|rank| names.get(rank))
                 .map(|name| name.into_owned()),
-            None => default_rank_name(&context.world.default_rank_names, info.rank)
-                .map(str::to_owned),
+            None => {
+                default_rank_name(&context.world.default_rank_names, info.rank).map(str::to_owned)
+            }
         }
     } else {
         None
@@ -1739,7 +1739,9 @@ pub(crate) fn do_crew_exp(args: &[Value]) -> Result<Value, RuntimeError> {
         else {
             return Ok(Value::Bool(false));
         };
-        Ok(Value::Bool(apply_host_crew_experience(context, target, change)))
+        Ok(Value::Bool(apply_host_crew_experience(
+            context, target, change,
+        )))
     })
 }
 
@@ -1836,7 +1838,8 @@ pub(crate) fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
             }
         } else {
             // idSourceDef 0 falls back to the target's live definition.
-            let Some(mut source) = source.or_else(|| context.object_effective_definition_id(target))
+            let Some(mut source) =
+                source.or_else(|| context.object_effective_definition_id(target))
             else {
                 return Ok(Value::Bool(false));
             };
@@ -1852,61 +1855,62 @@ pub(crate) fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
 
             let mut assign_permanently = permanent;
             let mut copy = copy_graphics;
-            let selected = if name == "custom"
-                && info.portraits.fallback.as_ref().is_some_and(|portrait| {
-                    portrait.source.is_none() && portrait.name == "custom"
-                })
-            {
-                // Relinking pCustomPortrait ignores both flags.
-                portraits.current = info.portraits.fallback.clone();
-                info.core.owned_portrait_source.clear();
-                info.core.owned_portrait_name.clear();
-                None
-            } else {
-                let canonical_name = if name == "random" {
-                    if names.is_empty() {
-                        source = "CLNK".to_string();
-                        let Some(metadata) = context.world.definition_metadata(&source) else {
-                            return Ok(Value::Bool(false));
-                        };
-                        names = metadata.portrait_names.clone();
-                        if names.is_empty() {
-                            return Ok(Value::Bool(false));
-                        }
-                        assign_permanently = true;
-                        copy = false;
-                    }
-                    let index = SCRIPT_SAFE_RNG
-                        .with(|rng| rng.borrow_mut().random(names.len() as i32))
-                        as usize;
-                    names[index].clone()
-                } else {
-                    let Some(canonical) = names
-                        .iter()
-                        .find(|candidate| candidate.eq_ignore_ascii_case(&name))
-                    else {
-                        return Ok(Value::Bool(false));
-                    };
-                    canonical.clone()
-                };
-                let selected = if copy {
-                    info.core.owned_portrait_source = source.clone();
-                    info.core.owned_portrait_name = canonical_name.clone();
-                    CrewPortrait {
-                        source: None,
-                        name: "custom".to_string(),
-                    }
-                } else {
+            let selected =
+                if name == "custom"
+                    && info.portraits.fallback.as_ref().is_some_and(|portrait| {
+                        portrait.source.is_none() && portrait.name == "custom"
+                    })
+                {
+                    // Relinking pCustomPortrait ignores both flags.
+                    portraits.current = info.portraits.fallback.clone();
                     info.core.owned_portrait_source.clear();
                     info.core.owned_portrait_name.clear();
-                    CrewPortrait {
-                        source: Some(DefinitionId::from(source.as_str())),
-                        name: canonical_name,
-                    }
+                    None
+                } else {
+                    let canonical_name = if name == "random" {
+                        if names.is_empty() {
+                            source = "CLNK".to_string();
+                            let Some(metadata) = context.world.definition_metadata(&source) else {
+                                return Ok(Value::Bool(false));
+                            };
+                            names = metadata.portrait_names.clone();
+                            if names.is_empty() {
+                                return Ok(Value::Bool(false));
+                            }
+                            assign_permanently = true;
+                            copy = false;
+                        }
+                        let index = SCRIPT_SAFE_RNG
+                            .with(|rng| rng.borrow_mut().random(names.len() as i32))
+                            as usize;
+                        names[index].clone()
+                    } else {
+                        let Some(canonical) = names
+                            .iter()
+                            .find(|candidate| candidate.eq_ignore_ascii_case(&name))
+                        else {
+                            return Ok(Value::Bool(false));
+                        };
+                        canonical.clone()
+                    };
+                    let selected = if copy {
+                        info.core.owned_portrait_source = source.clone();
+                        info.core.owned_portrait_name = canonical_name.clone();
+                        CrewPortrait {
+                            source: None,
+                            name: "custom".to_string(),
+                        }
+                    } else {
+                        info.core.owned_portrait_source.clear();
+                        info.core.owned_portrait_name.clear();
+                        CrewPortrait {
+                            source: Some(DefinitionId::from(source.as_str())),
+                            name: canonical_name,
+                        }
+                    };
+                    portraits.current = Some(selected.clone());
+                    Some(selected)
                 };
-                portraits.current = Some(selected.clone());
-                Some(selected)
-            };
             if let Some(selected) = selected.filter(|_| assign_permanently) {
                 portraits.permanent = CrewPermanentPortrait::Assigned(selected);
             }
@@ -2098,11 +2102,7 @@ pub(crate) fn set_film_view(args: &[Value]) -> Result<Value, RuntimeError> {
             "SetFilmView expects at most 1 argument: player",
         ));
     }
-    let player = value_to_i32(
-        args.first().unwrap_or(&Value::Nil),
-        "SetFilmView",
-        "player",
-    )?;
+    let player = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetFilmView", "player")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let context = borrow.as_ref();
@@ -2111,9 +2111,9 @@ pub(crate) fn set_film_view(args: &[Value]) -> Result<Value, RuntimeError> {
         {
             return Ok(Value::Bool(false));
         }
-        if let Some(context) = context.filter(|context| {
-            context.world.replay_control && context.world.film_viewport_available
-        }) {
+        if let Some(context) = context
+            .filter(|context| context.world.replay_control && context.world.film_viewport_available)
+        {
             context
                 .world
                 .viewport_presentation_requests
@@ -2228,7 +2228,10 @@ pub(crate) fn sync_homebase_material_to_team_live(player: i32) {
             .copied()
             .filter(|candidate| {
                 *candidate != player
-                    && context.player_state(*candidate).and_then(|state| state.team) == Some(team)
+                    && context
+                        .player_state(*candidate)
+                        .and_then(|state| state.team)
+                        == Some(team)
             })
             .collect::<Vec<_>>();
         for teammate in teammates {
@@ -2236,9 +2239,8 @@ pub(crate) fn sync_homebase_material_to_team_live(player: i32) {
                 state.set_home_base_material_entries(material.clone());
             }
         }
-        context.record_player_command(PlayerCommand::SyncHomeBaseMaterialToTeam {
-            player_id: player,
-        });
+        context
+            .record_player_command(PlayerCommand::SyncHomeBaseMaterialToTeam { player_id: player });
     });
 }
 
@@ -3413,8 +3415,7 @@ pub(crate) fn get_mission_access(args: &[Value]) -> Result<Value, RuntimeError> 
                 "using GetMissionAccess may cause desyncs when playing records!"
             );
         }
-        let contains =
-            mission_access_contains(&context.world.mission_access.borrow(), &password);
+        let contains = mission_access_contains(&context.world.mission_access.borrow(), &password);
         contains
     })))
 }
@@ -3774,10 +3775,7 @@ pub(crate) fn retire_host_crew_info(context: &mut EffectHostContext, link: CrewI
 /// The `Info` arm of `C4Object::AssignDeath`: the persistent entry remains
 /// linked to the corpse, but is marked dead, counted and retired before
 /// contents/player pointers are cleared (C4Object.cpp:1185-1190).
-pub(crate) fn assign_death_host_crew_info(
-    context: &mut EffectHostContext,
-    target: ObjectId,
-) {
+pub(crate) fn assign_death_host_crew_info(context: &mut EffectHostContext, target: ObjectId) {
     let Some(link) = context
         .object_scope(target)
         .and_then(ObjectScopeContext::info_link)
@@ -4460,8 +4458,7 @@ pub(crate) fn clear_player_object_pointers_host(target: ObjectId) {
             let Some(player) = context.player_state_mut(player_id) else {
                 return false;
             };
-            let removed_cursor =
-                player.clear_object_pointers_before_cursor_adjust(target);
+            let removed_cursor = player.clear_object_pointers_before_cursor_adjust(target);
             context.record_player_command(PlayerCommand::ClearPlayerObjectPointersBeforeAdjust {
                 player_id,
                 object: target,
@@ -4506,8 +4503,7 @@ pub(crate) fn clear_owner_death_pointers_host(target: ObjectId, owner: i32) {
         let Some(player) = context.player_state_mut(owner) else {
             return false;
         };
-        let removed_cursor =
-            player.clear_object_pointers_before_cursor_adjust(target);
+        let removed_cursor = player.clear_object_pointers_before_cursor_adjust(target);
         context.record_player_command(PlayerCommand::ClearPlayerObjectPointersBeforeAdjust {
             player_id: owner,
             object: target,
@@ -4903,9 +4899,7 @@ pub(crate) fn set_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
         if context.world.player(player_id).is_none() {
             return None;
         }
-        if object.is_some_and(|id| {
-            !context.object_status_present(id)
-        }) {
+        if object.is_some_and(|id| !context.object_status_present(id)) {
             return None;
         }
         let previous = context.player_state(player_id)?.cursor;

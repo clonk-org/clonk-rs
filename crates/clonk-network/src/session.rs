@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
-use std::future::{poll_fn, Future};
 use std::fs::{self, OpenOptions};
+use std::future::{poll_fn, Future};
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -43,6 +43,7 @@ pub use api::*;
 pub(crate) use client_loop::*;
 pub(crate) use client_routes::*;
 pub use connect::*;
+pub use connection_state::ControlSendTimeSnapshot;
 pub(crate) use connection_state::*;
 pub(crate) use host_dispatch::*;
 pub(crate) use host_loop::*;
@@ -63,17 +64,52 @@ mod tests {
     use std::fs;
     use std::future::{pending, ready};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::task::{Context, Poll};
     use std::time::Duration;
-    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, ReadBuf};
     use tokio::net::UdpSocket;
     use tokio::time::{timeout, timeout_at};
 
     const CPP_COMPATIBILITY_BUILD: i32 = CURRENT_GAME_BUILD + 2;
 
-    fn compatibility_test_core(
-        client_id: i32,
-        name: &[u8],
-    ) -> clonk_engine::ClientCoreControlData {
+    struct FailingWriteStream;
+
+    impl AsyncRead for FailingWriteStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for FailingWriteStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "forced writer failure",
+            )))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn test_control_send_time_snapshot() -> ControlSendTimeSnapshot {
+        ControlSendTimeSnapshot::default()
+    }
+
+    fn compatibility_test_core(client_id: i32, name: &[u8]) -> clonk_engine::ClientCoreControlData {
         let name = clonk_engine::LegacyCString::from_bytes(name.to_vec()).unwrap();
         clonk_engine::ClientCoreControlData {
             client_id,
@@ -117,6 +153,42 @@ mod tests {
     }
 
     #[test]
+    fn control_send_time_matches_cpp_decentral_and_central_topologies() {
+        // CalcPerformance samples each activated remote client's preferred
+        // message connection. Direct decentralized paths use half the average;
+        // a tunnel is costed as another host path and disables that halving
+        // (oracle-src-pinned src/C4GameControlNetwork.cpp:382-447).
+        assert_eq!(
+            control_send_time_ms(0, [(7, Some(100)), (8, Some(300))]),
+            66,
+            "an activated host must sample its direct remote clients"
+        );
+        assert_eq!(
+            control_send_time_ms(
+                0,
+                [(HOST_CLIENT_ID, Some(40)), (7, Some(80)), (8, Some(120)),],
+            ),
+            40,
+            "an all-direct client uses half the host/peer average"
+        );
+        assert_eq!(
+            control_send_time_ms(0, [(HOST_CLIENT_ID, Some(40)), (7, Some(100)), (8, None),],),
+            60,
+            "a tunneled client uses the full host-weighted average"
+        );
+        assert_eq!(
+            control_send_time_ms(1, [(HOST_CLIENT_ID, Some(40)), (7, Some(100)), (8, None),],),
+            40,
+            "central control is paced only by the host route"
+        );
+        assert_eq!(
+            control_send_time_ms(1, [(7, Some(100)), (8, Some(300))]),
+            0,
+            "the central host has no remote host route"
+        );
+    }
+
+    #[test]
     fn client_performance_stats_match_signed_cpp_ewma_at_consumption() {
         let base = tokio::time::Instant::now();
         let mut stats = ClientPerformanceStats::new(16);
@@ -144,10 +216,7 @@ mod tests {
                 1 => {
                     stats.record_arrival(7, tick, arrived_at);
                     stats.mark_consumed(tick, consumed_at, [7]);
-                    assert_eq!(
-                        stats.scaled_wait_ms.get(&7).copied(),
-                        before_sample
-                    );
+                    assert_eq!(stats.scaled_wait_ms.get(&7).copied(), before_sample);
                     stats.record_cadence(tick, reached_at);
                 }
                 _ => {
@@ -193,11 +262,7 @@ mod tests {
         assert_eq!(stats.wait_ms(9), 0, "inactive clients are not sampled");
 
         let pre_reset_reached_at = base + Duration::from_secs(30);
-        stats.record_arrival(
-            7,
-            102,
-            pre_reset_reached_at + Duration::from_millis(500),
-        );
+        stats.record_arrival(7, 102, pre_reset_reached_at + Duration::from_millis(500));
         stats.mark_consumed(102, pre_reset_reached_at + Duration::from_secs(1), [7]);
         stats.reset_accumulators();
         stats.record_cadence(102, pre_reset_reached_at);
@@ -205,11 +270,7 @@ mod tests {
         assert_eq!(stats.wait_ms(8), 0);
         let reset_reached_at = base + Duration::from_secs(31);
         stats.record_cadence(103, reset_reached_at);
-        stats.record_arrival(
-            7,
-            103,
-            reset_reached_at + Duration::from_millis(500),
-        );
+        stats.record_arrival(7, 103, reset_reached_at + Duration::from_millis(500));
         stats.mark_consumed(103, reset_reached_at + Duration::from_secs(1), [7]);
         assert_eq!(stats.wait_ms(7), 5);
     }
@@ -342,14 +403,10 @@ mod tests {
         let udp_binding = HostUdpBinding::bind(&config);
         assert!(udp_binding.local_addr().is_some());
         let backend = RecordingPortMappingBackend::default();
-        let host = start_host_with_udp_binding_and_backend(
-            Some(listener),
-            config,
-            udp_binding,
-            &backend,
-        )
-        .await
-        .unwrap();
+        let host =
+            start_host_with_udp_binding_and_backend(Some(listener), config, udp_binding, &backend)
+                .await
+                .unwrap();
         let expected = vec![
             crate::upnp::PortMappingRequest {
                 protocol: crate::upnp::PortMappingProtocol::Tcp,
@@ -408,7 +465,7 @@ mod tests {
             loop {
                 match host.events().recv().await {
                     Some(HostEvent::LocalAddressesChanged { local_addresses }) => {
-                        break local_addresses
+                        break local_addresses;
                     }
                     Some(_) => continue,
                     None => panic!("host event stream ended"),
@@ -484,20 +541,15 @@ mod tests {
     async fn l082_live_host_initializes_one_netpuncher_per_resolved_family() {
         let mut ipv4_puncher =
             crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
-        let mut ipv6_puncher = crate::ReliableUdpSessionHub::bind(SocketAddr::from((
-            [0, 0, 0, 0, 0, 0, 0, 1],
-            0,
-        )))
-        .unwrap();
+        let mut ipv6_puncher =
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 0)))
+                .unwrap();
         let ipv4_address = ipv4_puncher.local_addr();
         let ipv6_address = ipv6_puncher.local_addr();
         let ignored_same_family = SocketAddr::from(([127, 0, 0, 2], ipv4_address.port()));
-        let listener = TcpListener::bind(SocketAddr::from((
-            [0, 0, 0, 0, 0, 0, 0, 1],
-            0,
-        )))
-        .await
-        .unwrap();
+        let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 0)))
+            .await
+            .unwrap();
         let host = start_host(
             listener,
             HostConfig {
@@ -509,13 +561,9 @@ mod tests {
         .await
         .unwrap();
 
-        host.init_netpunchers(vec![
-            ipv4_address,
-            ignored_same_family,
-            ipv6_address,
-        ])
-        .await
-        .unwrap();
+        host.init_netpunchers(vec![ipv4_address, ignored_same_family, ipv6_address])
+            .await
+            .unwrap();
         let (mut ipv4_stream, mut ipv6_stream) = tokio::join!(
             async {
                 timeout(Duration::from_secs(2), ipv4_puncher.accept())
@@ -550,8 +598,8 @@ mod tests {
         route_id: u32,
         peer_id: ClientId,
         protocol: crate::NetworkProtocol,
-    ) -> mpsc::Receiver<ClientRouteCommand> {
-        let (sender, receiver) = mpsc::channel(64);
+    ) -> mpsc::UnboundedReceiver<ClientRouteCommand> {
+        let (sender, receiver) = mpsc::unbounded_channel();
         let (retire, _retire_rx) = watch::channel(false);
         assert!(routes
             .routes
@@ -564,40 +612,795 @@ mod tests {
                     protocol,
                     peer_addr: None,
                     ping: RoutePingLag::default(),
-                    outbound: ClientRouteSender { sender, retire },
+                    outbound: ClientRouteSender {
+                        sender,
+                        retire,
+                        post_failure: PostFailureBuffer::default(),
+                    },
                 },
             )
             .is_none());
         receiver
     }
 
+    fn host_state_with_test_route(client_id: ClientId, outbound: HostOutboundSender) -> HostState {
+        let config = HostConfig::default();
+        let backlog_limit = config.backlog_limit;
+        let mut coordinator = ControlCoordinator::with_start_tick(backlog_limit, config.start_tick);
+        coordinator.register_client(HOST_CLIENT_ID).unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let resource_resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+            &crate::ClientBootstrapLocalCandidates::default(),
+            PathBuf::from("Network"),
+        );
+        let peer_core = compatibility_test_core(client_id as i32, b"Peer");
+
+        HostState {
+            coordinator,
+            backlog: ControlBacklog::new(backlog_limit),
+            client_performance: ClientPerformanceStats::new(backlog_limit),
+            local_control_backlog: ControlBacklog::new(backlog_limit),
+            scheduler: ResyncScheduler::new(config.resync_cooldown),
+            clients: BTreeMap::from([(
+                client_id,
+                ClientConnection {
+                    outbound: outbound.clone(),
+                    core: peer_core.clone(),
+                    peer_addr: "127.0.0.1:11112".parse().unwrap(),
+                    join_data_sent: true,
+                    join_data_needed_emitted: false,
+                },
+            )]),
+            accepted_routes: BTreeMap::from([(
+                1,
+                AcceptedConnectionRoute {
+                    client_id,
+                    remote_connection_id: 2,
+                    peer_addr: "127.0.0.1:11112".parse().unwrap(),
+                    protocol: crate::NetworkProtocol::Tcp,
+                    ping: RoutePingLag::default(),
+                    outbound,
+                },
+            )]),
+            control_send_time_epoch: 0,
+            closed_routes: crate::post_mortem::ClosedConnectionRouter::default(),
+            pending_sync: Vec::new(),
+            status_barrier: StatusBarrier::stable(config.initial_status),
+            last_chase_target_update: None,
+            game_started: false,
+            control_mode: config.initial_status.control_mode,
+            async_control_wait: None,
+            admission: HostAdmission::new(
+                1,
+                true,
+                None,
+                [config.local_core.name.clone(), peer_core.name.clone()],
+            ),
+            client_cores: BTreeMap::from([
+                (HOST_CLIENT_ID as i32, config.local_core.clone()),
+                (client_id as i32, peer_core),
+            ]),
+            client_addresses: BTreeMap::new(),
+            netpuncher_game_ids: NetpuncherGameIds::default(),
+            pending_kinds: BTreeMap::new(),
+            join_snapshot: config.initial_join_snapshot.clone(),
+            resource_catalog: crate::ResourceCatalog::new(HOST_CLIENT_ID as i32),
+            resource_backend: None,
+            published_player_sources: BTreeMap::new(),
+            resource_resolver,
+            resource_epoch: Instant::now(),
+            next_connection_id: 0,
+            pending_route_peers: BTreeMap::new(),
+            pending_route_clients: BTreeMap::new(),
+            pending_admissions: BTreeMap::new(),
+            pending_post_mortems: BTreeMap::new(),
+            removing_clients: BTreeSet::new(),
+            event_tx,
+            config,
+        }
+    }
+
+    fn host_state_with_pending_accept(
+        connection_id: u32,
+        client_id: ClientId,
+    ) -> (HostState, clonk_engine::ClientCoreControlData) {
+        let (seed_outbound, _seed_receiver) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, seed_outbound);
+        let core = compatibility_test_core(client_id as i32, b"Joining peer");
+        state.clients.clear();
+        state.accepted_routes.clear();
+        state
+            .client_cores
+            .retain(|known_client_id, _| *known_client_id == HOST_CLIENT_ID as i32);
+        state.client_cores.insert(core.client_id, core.clone());
+        state.pending_route_clients.insert(connection_id, client_id);
+        state.join_snapshot = Some(synthetic_join_snapshot(
+            state.config.local_core.clone(),
+            state.config.max_players,
+        ));
+        state.client_addresses.insert(
+            HOST_CLIENT_ID as i32,
+            vec![crate::NetworkAddress::new(
+                crate::NetworkProtocol::Tcp,
+                "127.0.0.1:11112".parse().unwrap(),
+            )],
+        );
+        (state, core)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn accepted_host_route_queues_join_prefix_before_general_traffic() {
+        // OnClientConnect calls SendJoinData synchronously, and SendJoinData
+        // appends JoinData plus every address before resource discovery and
+        // before the main network loop can dispatch Status/Control traffic
+        // (oracle-src-pinned src/C4Network2.cpp:1750-1800,1836-1865).
+        let connection_id = 41;
+        let client_id = 7;
+        let (mut state, core) = host_state_with_pending_accept(connection_id, client_id);
+        let (outbound, mut outbound_rx) = HostOutboundSender::channel();
+        let (setup_tx, setup_rx) = oneshot::channel();
+
+        handle_client_accepted(
+            connection_id,
+            91,
+            core,
+            "127.0.0.1:11113".parse().unwrap(),
+            crate::NetworkProtocol::Tcp,
+            outbound,
+            setup_tx,
+            &mut state,
+        )
+        .await;
+        assert!(
+            setup_rx.await.unwrap().is_ok(),
+            "transport setup must remain accepted"
+        );
+
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: 0,
+        };
+        let resource = ResourcePacket::Discover(crate::ResourceDiscoverPacket {
+            resource_ids: vec![17],
+        });
+        let control = legacy_packet(HOST_CLIENT_ID, 0, 0x31);
+        assert!(try_send_host_message(
+            &state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::Status(status),
+        ));
+        assert!(try_send_host_message(
+            &state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::Resource(resource.clone()),
+        ));
+        assert!(try_send_host_message(
+            &state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::Control(control.clone()),
+        ));
+
+        assert!(matches!(
+            outbound_rx.try_recv().unwrap(),
+            HostOutboundMessage::Message(ControlMessage::JoinData(_))
+        ));
+        assert!(matches!(
+            outbound_rx.try_recv().unwrap(),
+            HostOutboundMessage::Message(ControlMessage::Address(crate::AddressPacket {
+                client_id: 0,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            outbound_rx.try_recv().unwrap(),
+            HostOutboundMessage::Message(ControlMessage::Status(received)) if received == status
+        ));
+        assert!(matches!(
+            outbound_rx.try_recv().unwrap(),
+            HostOutboundMessage::Message(ControlMessage::Resource(received))
+                if received == resource
+        ));
+        assert!(matches!(
+            outbound_rx.try_recv().unwrap(),
+            HostOutboundMessage::Message(ControlMessage::Control(received))
+                if received == control
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejected_host_join_prefix_fully_removes_the_accepted_route() {
+        // A failed SendMsg during synchronous OnClientConnect falls through
+        // the ordinary connection-loss path. It must not leave the accepted
+        // route or logical client visible after its outbound queue is gone
+        // (oracle-src-pinned src/C4Network2.cpp:1750-1800;
+        // src/C4Network2IO.cpp:1379-1396).
+        let connection_id = 42;
+        let client_id = 7;
+        let (mut state, core) = host_state_with_pending_accept(connection_id, client_id);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        state.event_tx = event_tx;
+        let (outbound, outbound_rx) = HostOutboundSender::channel();
+        drop(outbound_rx);
+        // The post-failure FIFO deliberately accepts messages after only the
+        // socket writer disappears. Finalized removal closes that final
+        // lossless handoff as well, reproducing a route that cannot accept
+        // JoinData.
+        let _ = outbound.retire_and_take_post_failure();
+        let (setup_tx, setup_rx) = oneshot::channel();
+
+        handle_client_accepted(
+            connection_id,
+            92,
+            core,
+            "127.0.0.1:11114".parse().unwrap(),
+            crate::NetworkProtocol::Tcp,
+            outbound,
+            setup_tx,
+            &mut state,
+        )
+        .await;
+
+        assert!(
+            setup_rx.await.unwrap().is_err(),
+            "the transport task must be released with the setup failure"
+        );
+        assert!(!state.accepted_routes.contains_key(&connection_id));
+        assert!(!state.clients.contains_key(&client_id));
+        assert!(
+            state.removing_clients.contains(&client_id)
+                || !state.client_cores.contains_key(&(client_id as i32)),
+            "cleanup must retain a synchronized removal or finish it immediately"
+        );
+        let mut saw_connection_failed = false;
+        let mut saw_client_left = false;
+        let mut saw_setup_diagnostic = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                HostEvent::ClientConnectionFailed {
+                    client_id: failed_client_id,
+                } if failed_client_id == client_id => saw_connection_failed = true,
+                HostEvent::ClientLeft {
+                    client_id: left_client_id,
+                } if left_client_id == client_id => saw_client_left = true,
+                HostEvent::RecoverableRouteDiagnostic {
+                    client_id: Some(diagnostic_client_id),
+                    error,
+                } if diagnostic_client_id == client_id && error.contains("JoinData") => {
+                    saw_setup_diagnostic = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_connection_failed);
+        assert!(saw_client_left);
+        assert!(saw_setup_diagnostic);
+    }
+
+    #[test]
+    fn activated_host_control_send_time_uses_preferred_remote_message_routes() {
+        // The benchmark's console host remains an activated control client
+        // even without a local player. C++ therefore grows its PreSend from
+        // remote route pings; a client-only HostPing event can never pace this
+        // host (src/C4GameControlNetwork.cpp:389-425).
+        let (first_outbound, _first_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, first_outbound);
+        assert!(state.config.local_core.activated);
+        state
+            .accepted_routes
+            .get_mut(&1)
+            .expect("first message route")
+            .ping
+            .record_pong(100);
+        assert_eq!(
+            host_control_send_time_ms(&state, &[HOST_CLIENT_ID, 7, 99]),
+            25,
+            "an activated ID absent from the logical client registry is ignored"
+        );
+
+        let second_id = 8;
+        let second_core = compatibility_test_core(second_id as i32, b"Second");
+        let (second_outbound, _second_rx) = HostOutboundSender::channel();
+        state.clients.insert(
+            second_id,
+            ClientConnection {
+                outbound: second_outbound.clone(),
+                core: second_core.clone(),
+                peer_addr: "127.0.0.1:11113".parse().unwrap(),
+                join_data_sent: true,
+                join_data_needed_emitted: false,
+            },
+        );
+        state.client_cores.insert(second_id as i32, second_core);
+        assert_eq!(
+            host_control_send_time_ms(&state, &[HOST_CLIENT_ID, 7, second_id]),
+            33,
+            "a known logical client without a message route is a tunnel"
+        );
+        let mut second_ping = RoutePingLag::default();
+        second_ping.record_pong(300);
+        state.accepted_routes.insert(
+            3,
+            AcceptedConnectionRoute {
+                client_id: second_id,
+                remote_connection_id: 4,
+                peer_addr: "127.0.0.1:11113".parse().unwrap(),
+                protocol: crate::NetworkProtocol::Tcp,
+                ping: second_ping,
+                outbound: second_outbound,
+            },
+        );
+
+        assert_eq!(
+            host_control_send_time_ms(&state, &[HOST_CLIENT_ID, 7, second_id]),
+            66
+        );
+        let snapshot = ControlSendTimeSnapshot::default();
+        let game_thread_snapshot = snapshot.clone();
+        publish_host_control_send_time(&state, &snapshot);
+        assert_eq!(
+            game_thread_snapshot.sample(&[HOST_CLIENT_ID, 7, second_id]),
+            66,
+            "a clone handed to the game thread observes later host publications"
+        );
+    }
+
+    #[test]
+    fn host_broadcast_selects_each_clients_preferred_route_in_one_pass() {
+        // C4Network2ClientList::BroadcastMsgToConnClients walks the client
+        // list once and submits to each cached Msg connection
+        // (oracle-src-pinned src/C4Network2Client.cpp:497-513).
+        let first_id = 7;
+        let (first_tcp, mut first_tcp_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(first_id, first_tcp);
+        let (first_udp, mut first_udp_rx) = HostOutboundSender::channel();
+        state.accepted_routes.insert(
+            2,
+            AcceptedConnectionRoute {
+                client_id: first_id,
+                remote_connection_id: 12,
+                peer_addr: "127.0.0.1:11112".parse().unwrap(),
+                protocol: crate::NetworkProtocol::Udp,
+                ping: RoutePingLag::default(),
+                outbound: first_udp,
+            },
+        );
+        let second_id = 8;
+        let second_core = compatibility_test_core(second_id as i32, b"Second");
+        let (second_tcp, mut second_tcp_rx) = HostOutboundSender::channel();
+        state.clients.insert(
+            second_id,
+            ClientConnection {
+                outbound: second_tcp.clone(),
+                core: second_core.clone(),
+                peer_addr: "127.0.0.1:11113".parse().unwrap(),
+                join_data_sent: true,
+                join_data_needed_emitted: false,
+            },
+        );
+        state.client_cores.insert(second_id as i32, second_core);
+        state.accepted_routes.insert(
+            3,
+            AcceptedConnectionRoute {
+                client_id: second_id,
+                remote_connection_id: 13,
+                peer_addr: "127.0.0.1:11113".parse().unwrap(),
+                protocol: crate::NetworkProtocol::Tcp,
+                ping: RoutePingLag::default(),
+                outbound: second_tcp,
+            },
+        );
+        let message = ControlMessage::Status(NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 0,
+            target_tick: 9,
+        });
+
+        assert_eq!(
+            broadcast_host_message(
+                &state,
+                ConnectionTrafficClass::Message,
+                message.clone(),
+                None,
+            ),
+            vec![first_id, second_id]
+        );
+        assert!(
+            first_tcp_rx.try_recv().is_err(),
+            "TCP is not selected while a live UDP message route exists"
+        );
+        assert!(matches!(
+            first_udp_rx.try_recv(),
+            Ok(HostOutboundMessage::Message(observed)) if observed == message
+        ));
+        assert!(matches!(
+            second_tcp_rx.try_recv(),
+            Ok(HostOutboundMessage::Message(observed)) if observed == message
+        ));
+
+        assert_eq!(
+            broadcast_host_message(
+                &state,
+                ConnectionTrafficClass::Message,
+                message.clone(),
+                Some(first_id),
+            ),
+            vec![second_id]
+        );
+        assert!(first_udp_rx.try_recv().is_err());
+        assert!(matches!(
+            second_tcp_rx.try_recv(),
+            Ok(HostOutboundMessage::Message(observed)) if observed == message
+        ));
+    }
+
+    #[tokio::test]
+    async fn client_control_send_time_publishes_only_after_route_or_topology_changes() {
+        let mut routes = ClientRouteManager::new();
+        let _host_tcp =
+            add_test_route_queue(&mut routes, 1, HOST_CLIENT_ID, crate::NetworkProtocol::Tcp);
+        routes.routes.get_mut(&1).unwrap().ping.record_pong(900);
+        let _host_udp =
+            add_test_route_queue(&mut routes, 2, HOST_CLIENT_ID, crate::NetworkProtocol::Udp);
+        routes.routes.get_mut(&2).unwrap().ping.record_pong(40);
+        let _peer = add_test_route_queue(&mut routes, 3, 7, crate::NetworkProtocol::Tcp);
+        routes.routes.get_mut(&3).unwrap().ping.record_pong(100);
+
+        assert_eq!(
+            routes.control_send_time_ms(0, [HOST_CLIENT_ID, 7, 8]),
+            60,
+            "UDP supplies the host message ping and absent peer 8 is a tunnel"
+        );
+        let snapshot = ControlSendTimeSnapshot::default();
+        let game_thread_snapshot = snapshot.clone();
+        routes.publish_control_send_time(
+            &snapshot,
+            0,
+            1,
+            BTreeSet::from([HOST_CLIENT_ID, 1, 7, 8]),
+        );
+        assert_eq!(
+            game_thread_snapshot.sample(&[HOST_CLIENT_ID, 1, 7, 8]),
+            60,
+            "a clone handed to the game thread observes later client publications"
+        );
+        assert!(
+            !routes.control_send_time_needs_publish(),
+            "a complete publication clears the route-topology dirty edge"
+        );
+
+        routes
+            .event_tx
+            .send(ClientRouteEvent::PingMeasured {
+                route_id: 2,
+                round_trip_ms: 80,
+            })
+            .unwrap();
+        assert!(matches!(
+            routes.read_event().await.unwrap(),
+            ClientRouteRead::PingMeasured {
+                peer_id: HOST_CLIENT_ID,
+                round_trip_ms: 80,
+            }
+        ));
+        assert!(
+            routes.control_send_time_needs_publish(),
+            "a preferred-route pong invalidates the synchronous sampler"
+        );
+        routes.publish_control_send_time(
+            &snapshot,
+            0,
+            1,
+            BTreeSet::from([HOST_CLIENT_ID, 1, 7, 8]),
+        );
+        assert_eq!(
+            game_thread_snapshot.sample(&[HOST_CLIENT_ID, 1, 7, 8]),
+            86,
+            "the next publication observes the changed preferred-route ping"
+        );
+
+        routes.invalidate_control_send_time();
+        routes.publish_control_send_time(&snapshot, 1, 1, BTreeSet::from([HOST_CLIENT_ID, 1, 7]));
+        assert_eq!(
+            game_thread_snapshot.sample(&[HOST_CLIENT_ID, 1, 7]),
+            80,
+            "mode and logical-client changes publish even without a route event"
+        );
+    }
+
+    #[tokio::test]
+    async fn decentralized_client_broadcast_selects_one_preferred_route_per_peer() {
+        // C4Network2ClientList::BroadcastMsgToClients selects each logical
+        // client's cached Msg connection once, preferring UDP over TCP
+        // (oracle-src-pinned src/C4Network2Client.cpp:497-541;
+        // src/C4Network2IO.cpp:350-375).
+        let mut routes = ClientRouteManager::new();
+        let mut host =
+            add_test_route_queue(&mut routes, 1, HOST_CLIENT_ID, crate::NetworkProtocol::Udp);
+        let mut peer_tcp = add_test_route_queue(&mut routes, 2, 7, crate::NetworkProtocol::Tcp);
+        let mut peer_udp = add_test_route_queue(&mut routes, 3, 7, crate::NetworkProtocol::Udp);
+        let mut second_peer = add_test_route_queue(&mut routes, 4, 8, crate::NetworkProtocol::Tcp);
+        let message = ControlMessage::Status(NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 0,
+            target_tick: 9,
+        });
+
+        assert_eq!(routes.send_to_connected_peers(message.clone()), vec![7, 8]);
+        assert!(
+            host.try_recv().is_err(),
+            "the host receives its separate send"
+        );
+        assert!(
+            peer_tcp.try_recv().is_err(),
+            "TCP is not selected while the peer has a live UDP message route"
+        );
+        assert!(matches!(
+            peer_udp.try_recv(),
+            Ok(ClientRouteCommand::Message(observed)) if observed == message
+        ));
+        assert!(matches!(
+            second_peer.try_recv(),
+            Ok(ClientRouteCommand::Message(observed)) if observed == message
+        ));
+    }
+
+    #[tokio::test]
+    async fn unencodable_advanced_ready_tick_is_a_fatal_host_event() {
+        // Native PackCompleteCtrl always creates, queues, and publishes the
+        // authoritative complete tick. Once Rust's coordinator has advanced,
+        // failure to do the same cannot be treated as a peer-local warning
+        // because no later lockstep packet can fill that hole
+        // (src/C4GameControlNetwork.cpp:741-777).
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        state.event_tx = event_tx;
+        let unencodable_tick = u32::try_from(i32::MAX).unwrap() + 1;
+        state.coordinator =
+            ControlCoordinator::with_start_tick(state.config.backlog_limit, unencodable_tick);
+        state
+            .coordinator
+            .register_client(HOST_CLIENT_ID)
+            .expect("register host at fatal test tick");
+        let payload = legacy_packet(HOST_CLIENT_ID, 0, 0x71).payload().to_vec();
+
+        ingest_control(
+            ControlPacket::builder(HOST_CLIENT_ID, unencodable_tick).payload(payload),
+            ControlIngress::Local,
+            &mut state,
+        )
+        .await;
+
+        match timeout(EVENT_WAIT, event_rx.recv())
+            .await
+            .expect("fatal ready-tick event timeout")
+        {
+            Some(HostEvent::FatalError { error }) => {
+                assert!(error.contains("failed to aggregate ready tick"));
+            }
+            other => panic!("unpublishable authoritative tick was not fatal: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_local_coordinator_input_is_a_fatal_host_event() {
+        // C++ adds the host's own contribution to the same authoritative
+        // client list PackCompleteCtrl walks. If Rust loses that registration,
+        // the host can no longer publish the next complete control and must
+        // stop instead of presenting a peer-local transport warning
+        // (src/C4GameControlNetwork.cpp:644-727,741-777).
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(7, outbound);
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        state.event_tx = event_tx;
+        state.coordinator = ControlCoordinator::new(state.config.backlog_limit);
+
+        ingest_control(
+            legacy_packet(HOST_CLIENT_ID, 0, 0x72),
+            ControlIngress::Local,
+            &mut state,
+        )
+        .await;
+
+        match timeout(EVENT_WAIT, event_rx.recv())
+            .await
+            .expect("fatal local-coordinator event timeout")
+        {
+            Some(HostEvent::FatalError { error }) => {
+                assert!(error.contains("not registered"));
+            }
+            other => panic!("rejected authoritative host control was not fatal: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_provisional_route_keeps_a_concurrently_accepted_route() {
+        // OnConnectFail calls OnClientDisconnect only when the logical client
+        // has no surviving connection. A second route that completed while
+        // the original admission was pending therefore keeps the client and
+        // receives only the failed-route diagnostic
+        // (src/C4Network2.cpp:1761-1771).
+        let client_id = 7;
+        let (outbound, _outbound_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, outbound);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        state.event_tx = event_tx;
+        state.pending_route_clients.insert(99, client_id);
+        state
+            .pending_admissions
+            .insert(99, i32::try_from(client_id).unwrap());
+
+        handle_admission_failed(99, "original route timed out".to_string(), &mut state).await;
+
+        assert!(state.clients.contains_key(&client_id));
+        assert!(!state.removing_clients.contains(&client_id));
+        assert!(
+            state.pending_sync.is_empty(),
+            "a surviving route must not receive a synchronized ClientRemove"
+        );
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await,
+            Ok(Some(HostEvent::RecoverableRouteDiagnostic {
+                client_id: Some(source),
+                error,
+            })) if source == client_id && error == "original route timed out"
+        ));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "surviving client received a logical disconnect event"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_outbound_queue_is_lossless_beyond_the_udp_retransmit_window() {
+        const PACKET_COUNT: i32 = 10_001;
+
+        // C++ queues app packets without blocking the global scheduler: TCP
+        // appends to OBuf, while UDP separately retains a 10,000-packet
+        // retransmit window (oracle-src-pinned
+        // src/C4NetIO.cpp:1345-1357,1916,2788-2808).
+        let buffered_client_id = 7;
+        let live_client_id = 8;
+        let (buffered, mut buffered_receiver) = HostOutboundSender::channel();
+        let (live, mut live_receiver) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(buffered_client_id, buffered.clone());
+        let delivered = ControlMessage::Status(NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 0,
+            target_tick: 9,
+        });
+        let live_core = compatibility_test_core(live_client_id as i32, b"Live");
+        state.clients.insert(
+            live_client_id,
+            ClientConnection {
+                outbound: live.clone(),
+                core: live_core.clone(),
+                peer_addr: "127.0.0.1:11113".parse().unwrap(),
+                join_data_sent: true,
+                join_data_needed_emitted: false,
+            },
+        );
+        state.client_cores.insert(live_client_id as i32, live_core);
+        state.accepted_routes.insert(
+            3,
+            AcceptedConnectionRoute {
+                client_id: live_client_id,
+                remote_connection_id: 4,
+                peer_addr: "127.0.0.1:11113".parse().unwrap(),
+                protocol: crate::NetworkProtocol::Tcp,
+                ping: RoutePingLag::default(),
+                outbound: live,
+            },
+        );
+
+        for target_tick in 0..PACKET_COUNT {
+            assert!(
+                send_host_message(
+                    &state,
+                    buffered_client_id,
+                    ConnectionTrafficClass::Message,
+                    ControlMessage::Status(NetworkStatus {
+                        state: NETWORK_STATE_LOBBY,
+                        control_mode: 1,
+                        target_tick,
+                    }),
+                )
+                .await,
+                "logical packet {target_tick} was dropped"
+            );
+        }
+        assert!(!buffered.is_closed());
+        assert!(timeout(
+            Duration::from_millis(20),
+            send_host_message(
+                &state,
+                live_client_id,
+                ConnectionTrafficClass::Message,
+                delivered.clone(),
+            ),
+        )
+        .await
+        .expect("one route's backlog must not block another route"));
+        assert!(matches!(
+            live_receiver.recv().await,
+            Some(HostOutboundMessage::Message(message)) if message == delivered
+        ));
+        for target_tick in 0..PACKET_COUNT {
+            assert!(matches!(
+                buffered_receiver.try_recv(),
+                Ok(HostOutboundMessage::Message(ControlMessage::Status(status)))
+                    if status.target_tick == target_tick
+            ));
+        }
+    }
+
+    #[test]
+    fn client_resource_queue_is_lossless_beyond_the_udp_retransmit_window() {
+        const PACKET_COUNT: i32 = 10_001;
+
+        // C4Network2Client::SendMsg delegates to the protocol's nonblocking
+        // buffered Send. Resource fanout therefore does not impose an
+        // app-layer 64/10,000-message loss cliff (oracle-src-pinned
+        // src/C4Network2Client.cpp:121-124;
+        // src/C4NetIO.cpp:1345-1357,1916,2788-2808).
+        let mut routes = ClientRouteManager::new();
+        let mut buffered_receiver =
+            add_test_route_queue(&mut routes, 1, 7, crate::NetworkProtocol::Tcp);
+        let mut live_receiver =
+            add_test_route_queue(&mut routes, 2, 8, crate::NetworkProtocol::Tcp);
+        for resource_id in 0..PACKET_COUNT {
+            routes
+                .try_send_to(
+                    7,
+                    ControlMessage::Resource(ResourcePacket::Discover(
+                        crate::ResourceDiscoverPacket {
+                            resource_ids: vec![resource_id],
+                        },
+                    )),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("resource packet {resource_id} was dropped: {error}")
+                });
+        }
+        assert!(!routes.routes[&1].outbound.is_closed());
+        let delivered = ControlMessage::Status(NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 0,
+            target_tick: 9,
+        });
+        routes.try_send_to(8, delivered.clone()).unwrap();
+        assert!(matches!(
+            live_receiver.try_recv(),
+            Ok(ClientRouteCommand::Message(message)) if message == delivered
+        ));
+        for resource_id in 0..PACKET_COUNT {
+            assert!(matches!(
+                buffered_receiver.try_recv(),
+                Ok(ClientRouteCommand::Message(ControlMessage::Resource(
+                    ResourcePacket::Discover(packet)
+                ))) if packet.resource_ids == [resource_id]
+            ));
+        }
+    }
+
     #[test]
     fn client_runtime_states_use_backlog_and_central_nonhost_special_case() {
         let mut routes = ClientRouteManager::new();
-        let _host_rx = add_test_route_queue(
-            &mut routes,
-            1,
-            HOST_CLIENT_ID,
-            crate::NetworkProtocol::Tcp,
-        );
-        let _peer_rx =
-            add_test_route_queue(&mut routes, 2, 7, crate::NetworkProtocol::Udp);
+        let _host_rx =
+            add_test_route_queue(&mut routes, 1, HOST_CLIENT_ID, crate::NetworkProtocol::Tcp);
+        let _peer_rx = add_test_route_queue(&mut routes, 2, 7, crate::NetworkProtocol::Udp);
         let tick = 9;
         let mut backlog = ControlBacklog::new(16);
         backlog.record_packet(&legacy_packet(7, tick, 0x21));
         let mut performance = ClientPerformanceStats::new(16);
         let reached_at = tokio::time::Instant::now();
         performance.record_cadence(tick, reached_at);
-        performance.record_arrival(
-            7,
-            tick,
-            reached_at + Duration::from_millis(200),
-        );
-        performance.mark_consumed(
-            tick,
-            reached_at + Duration::from_millis(300),
-            [7],
-        );
+        performance.record_arrival(7, tick, reached_at + Duration::from_millis(200));
+        performance.mark_consumed(tick, reached_at + Duration::from_millis(300), [7]);
 
         assert_eq!(
             routes.runtime_client_states(0, tick, [HOST_CLIENT_ID, 7, 9], &backlog, &performance),
@@ -649,7 +1452,9 @@ mod tests {
 
     #[tokio::test]
     async fn client_control_recovery_routes_central_to_host_and_decentral_to_all_peers() {
-        fn take_message(receiver: &mut mpsc::Receiver<ClientRouteCommand>) -> ControlMessage {
+        fn take_message(
+            receiver: &mut mpsc::UnboundedReceiver<ClientRouteCommand>,
+        ) -> ControlMessage {
             match receiver.try_recv().expect("recovery request is queued") {
                 ClientRouteCommand::Message(message) => message,
                 ClientRouteCommand::Flush(_) => panic!("unexpected recovery flush"),
@@ -657,14 +1462,9 @@ mod tests {
         }
 
         let mut routes = ClientRouteManager::new();
-        let mut host = add_test_route_queue(
-            &mut routes,
-            1,
-            HOST_CLIENT_ID,
-            crate::NetworkProtocol::Tcp,
-        );
-        let mut peer =
-            add_test_route_queue(&mut routes, 2, 7, crate::NetworkProtocol::Tcp);
+        let mut host =
+            add_test_route_queue(&mut routes, 1, HOST_CLIENT_ID, crate::NetworkProtocol::Tcp);
+        let mut peer = add_test_route_queue(&mut routes, 2, 7, crate::NetworkProtocol::Tcp);
 
         send_client_recovery_request(&mut routes, 1, 17)
             .await
@@ -689,7 +1489,7 @@ mod tests {
     }
 
     fn take_queued_resource(
-        receiver: &mut mpsc::Receiver<ClientRouteCommand>,
+        receiver: &mut mpsc::UnboundedReceiver<ClientRouteCommand>,
     ) -> ResourcePacket {
         match receiver
             .try_recv()
@@ -705,11 +1505,8 @@ mod tests {
 
     #[tokio::test]
     async fn client_mesh_warms_puncher_and_sends_family_server_request_before_host_join() {
-        let mut puncher = crate::ReliableUdpSessionHub::bind(SocketAddr::from((
-            [127, 0, 0, 1],
-            0,
-        )))
-        .unwrap();
+        let mut puncher =
+            crate::ReliableUdpSessionHub::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
         let puncher_address = puncher.local_addr();
         let config = ClientConfig::new("Client", ParticipantKind::Player)
             .with_mesh_udp_bind_address(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -749,12 +1546,9 @@ mod tests {
             [local_address]
         );
         assert_eq!(
-            timeout(
-                EVENT_WAIT,
-                prepared.puncher_events.as_mut().unwrap().recv()
-            )
-            .await
-            .unwrap(),
+            timeout(EVENT_WAIT, prepared.puncher_events.as_mut().unwrap().recv())
+                .await
+                .unwrap(),
             Some(crate::NetpuncherIoEvent::Connected {
                 family: crate::NetpuncherAddressFamily::Ipv4,
                 puncher_address,
@@ -1761,19 +2555,22 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn host_reports_malformed_nested_forward_requests_without_closing() {
-        // Selected nested packets recursively use the full packet pipeline;
-        // malformed bytes are reported without preventing later traffic.
+    async fn host_closes_only_the_source_route_for_a_malformed_nested_forward() {
+        // Recursive forwarding sends selected nested bytes through the normal
+        // packet unpacker. A compiler failure closes only pConn in release; the
+        // network scheduler and unrelated routes remain live
+        // (src/C4Network2IO.cpp:822-835,1041-1055,1088-1140).
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
         let mut host_events = host.take_event_receiver();
         let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+        let (mut witness, witness_id) = raw_client_transport(address, b"Witness").await;
 
         source
             .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
-                negative_list: true,
-                clients: Vec::new(),
+                negative_list: false,
+                clients: vec![i32::try_from(HOST_CLIENT_ID).unwrap()],
                 nested_packet: vec![0x40],
             }))
             .await
@@ -1782,44 +2579,48 @@ mod tests {
             .await
             .contains("invalid forwarded packet"));
 
-        let mut recursive = vec![crate::PID_FORWARD_REQUEST];
-        recursive.extend(
-            crate::encode_forward_packet_payload(&crate::ForwardPacket {
-                negative_list: true,
-                clients: Vec::new(),
-                nested_packet: vec![0xff],
-            })
-            .unwrap(),
-        );
-        source
-            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
-                negative_list: true,
-                clients: Vec::new(),
-                nested_packet: recursive,
-            }))
-            .await
-            .unwrap();
-        assert!(wait_for_host_error(&mut host_events, source_id)
-            .await
-            .contains("invalid forwarded packet"));
-
-        let ping = crate::PingPacket {
-            sent_at: 17,
-            packet_counter: 3,
-        };
-        source
-            .send_message(ControlMessage::Ping(ping))
-            .await
-            .unwrap();
-        loop {
-            match timeout(EVENT_WAIT, source.read_message()).await.unwrap() {
-                Ok(ControlMessage::Pong(received)) if received == ping => break,
-                Ok(_) => continue,
-                Err(error) => panic!("connection closed after rejected forwarding: {error}"),
+        let mut failed = false;
+        let mut left = false;
+        timeout(EVENT_WAIT, async {
+            while !failed || !left {
+                match host_events.recv().await {
+                    Some(HostEvent::ClientConnectionFailed { client_id })
+                        if client_id == source_id =>
+                    {
+                        failed = true;
+                    }
+                    Some(HostEvent::ClientLeft { client_id }) if client_id == source_id => {
+                        left = true;
+                    }
+                    Some(HostEvent::ClientConnectionFailed { client_id })
+                        if client_id == witness_id =>
+                    {
+                        panic!("malformed source packet closed the witness route")
+                    }
+                    Some(_) => {}
+                    None => panic!("host event stream ended before source-route cleanup"),
+                }
             }
-        }
+        })
+        .await
+        .expect("source route was not closed after malformed forwarding");
+
+        let routes = host.accepted_routes().await;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].1, witness_id);
+        timeout(EVENT_WAIT, async {
+            loop {
+                if source.read_message().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("malformed source TCP route remained open");
+        raw_client_ping_barrier(&mut witness).await;
 
         drop(source);
+        drop(witness);
         host.shutdown().await.unwrap();
     }
 
@@ -1891,6 +2692,7 @@ mod tests {
         let (shutdown_tx, _shutdown_rx) = oneshot::channel();
         let handle = HostHandle {
             command_tx,
+            control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(event_rx),
             shutdown_tx: Some(shutdown_tx),
             join_handle: tokio::spawn(async {}),
@@ -1922,6 +2724,7 @@ mod tests {
         let (shutdown_tx, _shutdown_rx) = oneshot::channel();
         let handle = HostHandle {
             command_tx,
+            control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(event_rx),
             shutdown_tx: Some(shutdown_tx),
             join_handle: tokio::spawn(async {}),
@@ -1963,6 +2766,7 @@ mod tests {
         let (shutdown_tx, _shutdown_rx) = oneshot::channel();
         let handle = HostHandle {
             command_tx,
+            control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(event_rx),
             shutdown_tx: Some(shutdown_tx),
             join_handle: tokio::spawn(async {}),
@@ -2000,14 +2804,14 @@ mod tests {
         host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x11))
             .await
             .unwrap();
-        host.control_tick_consumed(
+        host.control_tick_consumed(0, tokio::time::Instant::now(), vec![HOST_CLIENT_ID], false)
+            .await
+            .unwrap();
+        assert_eq!(
+            host.control_send_time_ms(&[HOST_CLIENT_ID]),
             0,
-            tokio::time::Instant::now(),
-            vec![HOST_CLIENT_ID],
-            false,
-        )
-        .await
-        .unwrap();
+            "a central/decentral host with no remote route has no timing sample"
+        );
 
         assert_eq!(
             host.runtime_client_states(0, false).await.unwrap(),
@@ -2029,12 +2833,200 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn control_tick_consumed_public_handles_only_wait_for_enqueue() {
+        let status = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 0,
+            target_tick: 7,
+        };
+
+        let (host_command_tx, mut host_commands) = mpsc::channel(1);
+        let (host_event_tx, host_event_rx) = mpsc::channel(1);
+        host_event_tx
+            .send(HostEvent::StatusCommitted(status))
+            .await
+            .unwrap();
+        let (host_shutdown_tx, _host_shutdown_rx) = oneshot::channel();
+        let host = HostHandle {
+            command_tx: host_command_tx,
+            control_send_time: test_control_send_time_snapshot(),
+            event_rx: Some(host_event_rx),
+            shutdown_tx: Some(host_shutdown_tx),
+            join_handle: tokio::spawn(async {}),
+            udp_local_addr: None,
+            io_statistics: crate::NetworkIoStatistics::new(0),
+        };
+        timeout(
+            Duration::from_millis(50),
+            host.control_tick_consumed(7, tokio::time::Instant::now(), vec![HOST_CLIENT_ID], false),
+        )
+        .await
+        .expect("full undrained host event queue blocked enqueue-only API")
+        .unwrap();
+        assert!(matches!(
+            host_commands.recv().await,
+            Some(HostCommand::ControlTickConsumed { tick: 7, .. })
+        ));
+
+        let (client_command_tx, mut client_commands) = mpsc::channel(1);
+        let (client_event_tx, client_event_rx) = mpsc::channel(1);
+        client_event_tx
+            .send(ClientEvent::Status(status))
+            .await
+            .unwrap();
+        let (client_shutdown_tx, _client_shutdown_rx) = oneshot::channel();
+        let client = ClientHandle {
+            command_tx: client_command_tx,
+            control_send_time: test_control_send_time_snapshot(),
+            event_rx: Some(client_event_rx),
+            shutdown_tx: Some(client_shutdown_tx),
+            join_handle: tokio::spawn(async {}),
+            client_id: 1,
+            join_data: None,
+            io_statistics: crate::NetworkIoStatistics::new(0),
+        };
+        timeout(
+            Duration::from_millis(50),
+            client.control_tick_consumed(
+                7,
+                tokio::time::Instant::now(),
+                vec![HOST_CLIENT_ID, 1],
+                false,
+            ),
+        )
+        .await
+        .expect("full undrained client event queue blocked enqueue-only API")
+        .unwrap();
+        assert!(matches!(
+            client_commands.recv().await,
+            Some(ClientCommand::ControlTickConsumed { tick: 7, .. })
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn host_commands_are_serviced_while_route_events_remain_saturated() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut client, client_id) = raw_client_transport(address, b"Flood").await;
+        drain_raw_client(&mut client).await;
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let flood = tokio::spawn(async move {
+            while !*stop_rx.borrow_and_update() {
+                let sent_at = (network_statistics_now_ms() as u32).wrapping_sub(100);
+                if client
+                    .send_message(ControlMessage::Pong(crate::PingPacket {
+                        sent_at,
+                        packet_counter: 0,
+                    }))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+
+        timeout(EVENT_WAIT, async {
+            loop {
+                if host.control_send_time_ms(&[HOST_CLIENT_ID, client_id]) > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("route-event flood never reached the host loop");
+
+        timeout(Duration::from_millis(250), host.set_join_allowed(false))
+            .await
+            .expect("unbounded route events starved an acknowledged host command")
+            .unwrap();
+
+        stop_tx.send_replace(true);
+        flood.await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_commands_are_serviced_while_route_events_remain_saturated() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let host_event_drain =
+            tokio::spawn(async move { while host_events.recv().await.is_some() {} });
+        let mut client =
+            connect_client(address, ClientConfig::new("Flood", ParticipantKind::Player))
+                .await
+                .unwrap();
+        let mut events = client.take_event_receiver();
+        let flood_data =
+            encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
+                player: 0,
+                command: 0x55,
+                data: 0,
+                by_client: HOST_CLIENT_ID as i32,
+            }))
+            .unwrap();
+        let (saturated_tx, saturated_rx) = oneshot::channel();
+        let event_drain = tokio::spawn(async move {
+            let mut direct_count = 0;
+            let mut saturated_tx = Some(saturated_tx);
+            while let Some(event) = events.recv().await {
+                if matches!(event, ClientEvent::Direct { .. }) {
+                    direct_count += 1;
+                    if direct_count == 64 {
+                        let _ = saturated_tx.take().expect("one saturation signal").send(());
+                    }
+                }
+            }
+        });
+        let flood_tx = host.command_tx.clone();
+        let flood = tokio::spawn(async move {
+            loop {
+                if flood_tx
+                    .send(HostCommand::SubmitPacket {
+                        delivery: ControlDelivery::Private,
+                        data: flood_data.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        timeout(EVENT_WAIT, saturated_rx)
+            .await
+            .expect("host-to-client route-event flood never became active")
+            .unwrap();
+
+        timeout(
+            Duration::from_millis(250),
+            client.runtime_client_states(0, false),
+        )
+        .await
+        .expect("route events starved an acknowledged client command")
+        .unwrap();
+
+        flood.abort();
+        let _ = flood.await;
+        client.shutdown().await.unwrap();
+        event_drain.await.unwrap();
+        host.shutdown().await.unwrap();
+        host_event_drain.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn host_password_setter_returns_only_after_the_live_state_applies() {
         let (command_tx, mut commands) = mpsc::channel(1);
         let (_event_tx, event_rx) = mpsc::channel(1);
         let (shutdown_tx, _shutdown_rx) = oneshot::channel();
         let handle = HostHandle {
             command_tx,
+            control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(event_rx),
             shutdown_tx: Some(shutdown_tx),
             join_handle: tokio::spawn(async {}),
@@ -2052,7 +3044,10 @@ mod tests {
             panic!("expected password command");
         };
         assert_eq!(password.unwrap().as_bytes(), b"secret");
-        assert!(!setter.is_finished(), "host state has not applied the password");
+        assert!(
+            !setter.is_finished(),
+            "host state has not applied the password"
+        );
         completion.send(()).expect("acknowledge applied password");
         setter
             .await
@@ -2065,12 +3060,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let host = start_host(listener, HostConfig::default()).await.unwrap();
-        let client = connect_client(
-            address,
-            ClientConfig::new("Alice", ParticipantKind::Player),
-        )
-        .await
-        .unwrap();
+        let client = connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .unwrap();
 
         assert_eq!(
             host.runtime_client_states(0, false).await.unwrap(),
@@ -2173,12 +3165,10 @@ mod tests {
 
         client.shutdown().await.unwrap();
 
-        let second_client = connect_client(
-            address,
-            ClientConfig::new("Bob", ParticipantKind::Player),
-        )
-        .await
-        .unwrap();
+        let second_client =
+            connect_client(address, ClientConfig::new("Bob", ParticipantKind::Player))
+                .await
+                .unwrap();
         let second_connections = host.runtime_connections().await.unwrap();
         assert_eq!(second_connections.len(), 1);
         assert_eq!(second_connections[0].client_id, second_client.client_id());
@@ -2210,12 +3200,9 @@ mod tests {
             target_tick: 0,
         };
         let host = start_host(listener, config).await.unwrap();
-        let client = connect_client(
-            address,
-            ClientConfig::new("Alice", ParticipantKind::Player),
-        )
-        .await
-        .unwrap();
+        let client = connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .unwrap();
         let remove = encode_control_entry_payload(&EngineControlPacket::ClientRemove(
             clonk_engine::ClientRemoveControlData {
                 client_id: i32::try_from(client.client_id()).unwrap(),
@@ -2283,7 +3270,10 @@ mod tests {
         assert_eq!(control_commands(&packet), vec![0x34, 0x12]);
 
         let udp_key = crate::ConnectionStatisticsKey::new(0, crate::NetworkProtocol::Udp);
-        assert!(host.io_statistics().connection_statistics(udp_key).is_some());
+        assert!(host
+            .io_statistics()
+            .connection_statistics(udp_key)
+            .is_some());
         assert!(client
             .io_statistics()
             .connection_statistics(udp_key)
@@ -2380,6 +3370,59 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn tcp_accept_failure_keeps_existing_routes_and_retries_the_listener() {
+        // A failed native Accept makes that scheduler pass report false, but
+        // the no-op OnError leaves the TCP proc installed and the scheduler
+        // thread keeps executing it (src/C4NetIO.cpp:610-625,1038-1053;
+        // src/StdScheduler.cpp:160-191,229-244;
+        // src/StdScheduler.h:95-98).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let (mut witness, witness_id) = raw_client_transport(address, b"Witness").await;
+        assert_eq!(host.accepted_routes().await.len(), 1);
+
+        inject_tcp_accept_failure(address);
+        timeout(EVENT_WAIT, async {
+            loop {
+                match host_events.recv().await {
+                    Some(HostEvent::TransportError {
+                        client_id: None,
+                        error,
+                    }) if error.contains("injected TCP accept failure") => break,
+                    Some(_) => continue,
+                    None => panic!("host event stream ended before the accept diagnostic"),
+                }
+            }
+        })
+        .await
+        .expect("host did not report the injected TCP accept failure");
+
+        raw_client_ping_barrier(&mut witness).await;
+        let (mut successor, successor_id) =
+            timeout(EVENT_WAIT, raw_client_transport(address, b"Successor"))
+                .await
+                .expect("host did not retry TCP accept after the injected failure");
+        assert_ne!(successor_id, witness_id);
+        raw_client_ping_barrier(&mut successor).await;
+        let accepted_client_ids = host
+            .accepted_routes()
+            .await
+            .into_iter()
+            .map(|(_, client_id, ..)| client_id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            accepted_client_ids,
+            BTreeSet::from([witness_id, successor_id])
+        );
+
+        drop(witness);
+        drop(successor);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn occupied_client_udp_port_falls_back_to_a_healthy_tcp_route() {
         let occupied = tokio::net::UdpSocket::bind("[::]:0").await.unwrap();
         let occupied_port = occupied.local_addr().unwrap().port();
@@ -2419,10 +3462,7 @@ mod tests {
         let client = connect_client(
             tcp_address,
             ClientConfig::new("Alice", ParticipantKind::Player)
-                .with_mesh_udp_bind_address(SocketAddr::from((
-                    [0_u16; 8],
-                    configured_udp_port,
-                )))
+                .with_mesh_udp_bind_address(SocketAddr::from(([0_u16; 8], configured_udp_port)))
                 .with_mesh_punchers([ClientMeshPuncherConfig {
                     address: puncher_address,
                     game_id: 0x1122_3344,
@@ -2436,12 +3476,10 @@ mod tests {
             .unwrap();
 
         client.shutdown().await.unwrap();
-        let rebound = tokio::net::UdpSocket::bind(SocketAddr::from((
-            [0_u16; 8],
-            configured_udp_port,
-        )))
-        .await
-        .expect("ClientHandle shutdown releases the shared UDP socket");
+        let rebound =
+            tokio::net::UdpSocket::bind(SocketAddr::from(([0_u16; 8], configured_udp_port)))
+                .await
+                .expect("ClientHandle shutdown releases the shared UDP socket");
         drop(rebound);
         host.shutdown().await.unwrap();
         puncher.shutdown().await.unwrap();
@@ -2450,12 +3488,14 @@ mod tests {
     #[tokio::test]
     async fn first_client_mesh_route_sends_one_resource_discover_per_logical_peer() {
         let mut resource_state = ClientResourceState::empty();
-        assert!(resource_state.catalog.register(crate::ResourceRegistration {
-            resource_id: 41,
-            chunk_count: 2,
-            binary_compatible: true,
-            loading: false,
-        }));
+        assert!(resource_state
+            .catalog
+            .register(crate::ResourceRegistration {
+                resource_id: 41,
+                chunk_count: 2,
+                binary_compatible: true,
+                loading: false,
+            }));
         let (event_tx, _event_rx) = mpsc::channel(8);
         let mut routes = ClientRouteManager::new();
         let (tcp_client, tcp_peer) = duplex(4_096);
@@ -2473,25 +3513,18 @@ mod tests {
         );
         assert!(first_route);
         if first_route {
-            dispatch_client_resource_peer_connected(
-                7,
-                &mut resource_state,
-                &mut routes,
-                &event_tx,
-            )
-            .await
-            .unwrap();
+            dispatch_client_resource_peer_connected(7, &mut resource_state, &mut routes, &event_tx)
+                .await
+                .unwrap();
         }
         assert_eq!(
             timeout(EVENT_WAIT, tcp_peer.read_message())
                 .await
                 .unwrap()
                 .unwrap(),
-            ControlMessage::Resource(ResourcePacket::Discover(
-                crate::ResourceDiscoverPacket {
-                    resource_ids: vec![41],
-                },
-            ))
+            ControlMessage::Resource(ResourcePacket::Discover(crate::ResourceDiscoverPacket {
+                resource_ids: vec![41],
+            },))
         );
 
         let (udp_client, udp_peer) = duplex(4_096);
@@ -2508,14 +3541,9 @@ mod tests {
         );
         assert!(!second_route);
         if second_route {
-            dispatch_client_resource_peer_connected(
-                7,
-                &mut resource_state,
-                &mut routes,
-                &event_tx,
-            )
-            .await
-            .unwrap();
+            dispatch_client_resource_peer_connected(7, &mut resource_state, &mut routes, &event_tx)
+                .await
+                .unwrap();
         }
         assert!(timeout(Duration::from_millis(50), udp_peer.read_message())
             .await
@@ -2528,18 +3556,11 @@ mod tests {
     async fn client_resource_dispatch_fans_out_and_selects_cpp_message_and_data_routes() {
         let mut resource_state = ClientResourceState::empty();
         let mut routes = ClientRouteManager::new();
-        let mut host = add_test_route_queue(
-            &mut routes,
-            1,
-            HOST_CLIENT_ID,
-            crate::NetworkProtocol::Tcp,
-        );
-        let mut peer_tcp =
-            add_test_route_queue(&mut routes, 70, 7, crate::NetworkProtocol::Tcp);
-        let mut peer_udp =
-            add_test_route_queue(&mut routes, 71, 7, crate::NetworkProtocol::Udp);
-        let mut second_peer =
-            add_test_route_queue(&mut routes, 90, 9, crate::NetworkProtocol::Tcp);
+        let mut host =
+            add_test_route_queue(&mut routes, 1, HOST_CLIENT_ID, crate::NetworkProtocol::Tcp);
+        let mut peer_tcp = add_test_route_queue(&mut routes, 70, 7, crate::NetworkProtocol::Tcp);
+        let mut peer_udp = add_test_route_queue(&mut routes, 71, 7, crate::NetworkProtocol::Udp);
+        let mut second_peer = add_test_route_queue(&mut routes, 90, 9, crate::NetworkProtocol::Tcp);
         let (event_tx, _event_rx) = mpsc::channel(8);
         let status = ResourcePacket::Status(crate::ResourceStatusPacket {
             resource_id: 12,
@@ -2626,12 +3647,14 @@ mod tests {
     #[tokio::test]
     async fn failed_client_peer_requests_rollback_and_refill_from_live_peers() {
         let mut resource_state = ClientResourceState::empty();
-        assert!(resource_state.catalog.register(crate::ResourceRegistration {
-            resource_id: 91,
-            chunk_count: 64,
-            binary_compatible: true,
-            loading: true,
-        }));
+        assert!(resource_state
+            .catalog
+            .register(crate::ResourceRegistration {
+                resource_id: 91,
+                chunk_count: 64,
+                binary_compatible: true,
+                loading: true,
+            }));
         let availability = crate::ResourceChunkAvailability {
             chunk_count: 64,
             ranges: vec![crate::ResourceChunkRange {
@@ -2675,12 +3698,8 @@ mod tests {
         );
 
         let mut routes = ClientRouteManager::new();
-        let mut host = add_test_route_queue(
-            &mut routes,
-            1,
-            HOST_CLIENT_ID,
-            crate::NetworkProtocol::Tcp,
-        );
+        let mut host =
+            add_test_route_queue(&mut routes, 1, HOST_CLIENT_ID, crate::NetworkProtocol::Tcp);
         let mut receivers = BTreeMap::new();
         for peer_id in 1_u32..=7 {
             receivers.insert(
@@ -2694,21 +3713,16 @@ mod tests {
             );
         }
         let (event_tx, _event_rx) = mpsc::channel(8);
-        dispatch_client_resource_actions(
-            actions,
-            &mut resource_state,
-            &mut routes,
-            &event_tx,
-        )
-        .await
-        .expect("an unavailable mesh source does not tear down the host route");
+        dispatch_client_resource_actions(actions, &mut resource_state, &mut routes, &event_tx)
+            .await
+            .expect("an unavailable mesh source does not tear down the host route");
 
         let mut sent = Vec::new();
         for (peer_id, receiver) in &mut receivers {
             while let Ok(command) = receiver.try_recv() {
-                let ClientRouteCommand::Message(ControlMessage::Resource(
-                    ResourcePacket::Request(request),
-                )) = command
+                let ClientRouteCommand::Message(ControlMessage::Resource(ResourcePacket::Request(
+                    request,
+                ))) = command
                 else {
                     panic!("refill queued a non-request resource command");
                 };
@@ -2718,7 +3732,10 @@ mod tests {
         assert_eq!(resource_state.catalog.outstanding_load_count(91), 19);
         assert_eq!(sent.len(), 19);
         assert_eq!(
-            sent.iter().map(|(_, chunk)| *chunk).collect::<BTreeSet<_>>().len(),
+            sent.iter()
+                .map(|(_, chunk)| *chunk)
+                .collect::<BTreeSet<_>>()
+                .len(),
             19
         );
         assert!(sent.iter().all(|(peer_id, _)| *peer_id < 8));
@@ -2730,9 +3747,8 @@ mod tests {
     async fn client_peer_resource_statuses_fill_cpp_swarm_limits_and_serve_chunks() {
         let directories = SessionResourceDirectories::new();
         let mut resource_state = ClientResourceState::empty();
-        resource_state.backend = Some(
-            crate::ResourceTransferBackend::new(9, directories.client.clone()).unwrap(),
-        );
+        resource_state.backend =
+            Some(crate::ResourceTransferBackend::new(9, directories.client.clone()).unwrap());
         let core = clonk_engine::NetworkResourceCore {
             resource_type: 2,
             id: 77,
@@ -2821,9 +3837,9 @@ mod tests {
 
         for (peer_id, receiver) in &mut receivers {
             while let Ok(command) = receiver.try_recv() {
-                let ClientRouteCommand::Message(ControlMessage::Resource(
-                    ResourcePacket::Request(request),
-                )) = command
+                let ClientRouteCommand::Message(ControlMessage::Resource(ResourcePacket::Request(
+                    request,
+                ))) = command
                 else {
                     panic!("swarm refill queued a non-request resource command");
                 };
@@ -2881,6 +3897,21 @@ mod tests {
 
     #[tokio::test]
     async fn client_route_manager_splits_traffic_falls_back_and_pongs_per_route() {
+        fn flatten_recovery(message: ControlMessage, messages: &mut Vec<ControlMessage>) {
+            match message {
+                ControlMessage::PostMortem(packet) => {
+                    for packet in packet.packets {
+                        if let Some(message) =
+                            crate::transport::parse_complete_packet(&packet).unwrap()
+                        {
+                            flatten_recovery(message, messages);
+                        }
+                    }
+                }
+                message => messages.push(message),
+            }
+        }
+
         let (tcp_client, tcp_peer) = duplex(4096);
         let (udp_client, udp_peer) = duplex(4096);
         let mut tcp = crate::ControlTransport::new(tcp_peer);
@@ -2986,13 +4017,36 @@ mod tests {
             .send_message(ControlMessage::StatusAck(status))
             .await
             .unwrap();
-        assert_eq!(
-            timeout(EVENT_WAIT, tcp.read_message())
-                .await
-                .unwrap()
-                .unwrap(),
-            ControlMessage::StatusAck(status)
-        );
+        timeout(EVENT_WAIT, async {
+            loop {
+                if matches!(
+                    routes.read_event().await.unwrap(),
+                    ClientRouteRead::Disconnected {
+                        protocol: crate::NetworkProtocol::Udp,
+                        routes_remaining: true,
+                        ..
+                    }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("failed UDP route was not removed");
+        let mut recovered = Vec::new();
+        timeout(EVENT_WAIT, async {
+            while !recovered.contains(&ControlMessage::StatusAck(status)) {
+                match tcp.read_message().await.unwrap() {
+                    ControlMessage::Ping(packet) => tcp
+                        .send_message(ControlMessage::Pong(packet))
+                        .await
+                        .unwrap(),
+                    message => flatten_recovery(message, &mut recovered),
+                }
+            }
+        })
+        .await
+        .expect("status was not recovered over the TCP fallback");
 
         let (fallback_udp_client, fallback_udp_peer) = duplex(4096);
         let mut fallback_udp = crate::ControlTransport::new(fallback_udp_peer);
@@ -3030,13 +4084,37 @@ mod tests {
             )))
             .await
             .unwrap();
-        assert_eq!(
-            timeout(EVENT_WAIT, fallback_udp.read_message())
-                .await
-                .unwrap()
-                .unwrap(),
-            ControlMessage::Resource(ResourcePacket::Data(fallback_data))
-        );
+        timeout(EVENT_WAIT, async {
+            loop {
+                if matches!(
+                    routes.read_event().await.unwrap(),
+                    ClientRouteRead::Disconnected {
+                        protocol: crate::NetworkProtocol::Tcp,
+                        routes_remaining: true,
+                        ..
+                    }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("failed TCP route was not removed");
+        let expected = ControlMessage::Resource(ResourcePacket::Data(fallback_data));
+        recovered.clear();
+        timeout(EVENT_WAIT, async {
+            while !recovered.contains(&expected) {
+                match fallback_udp.read_message().await.unwrap() {
+                    ControlMessage::Ping(packet) => fallback_udp
+                        .send_message(ControlMessage::Pong(packet))
+                        .await
+                        .unwrap(),
+                    message => flatten_recovery(message, &mut recovered),
+                }
+            }
+        })
+        .await
+        .expect("resource data was not recovered over the UDP fallback");
         routes.shutdown().await;
     }
 
@@ -3080,7 +4158,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_route_manager_peer_try_send_never_waits_on_a_full_route_queue() {
+    async fn client_route_manager_peer_try_send_queues_without_retiring_a_slow_route() {
+        // C4Network2Client::SendMsg delegates to the selected connection's
+        // buffered nonblocking Send, so application fanout does not retire a
+        // healthy route merely because its socket is slow (oracle-src-pinned
+        // src/C4Network2Client.cpp:121-124;
+        // src/C4NetIO.cpp:1345-1357,2788-2808).
         let (client_stream, _peer_stream) = duplex(1);
         let mut routes = ClientRouteManager::new();
         routes.add_peer_route(
@@ -3098,18 +4181,55 @@ mod tests {
             data: vec![0x55; 1_024],
         };
 
-        let error = (0..128)
-            .find_map(|_| routes.try_send_to(7, message.clone()).err())
-            .expect("bounded peer route queue never reported backpressure");
-        assert!(matches!(
-            error,
-            TransportError::Io(ref error) if error.kind() == io::ErrorKind::BrokenPipe
-        ));
-        assert!(routes.routes[&1].outbound.is_closed());
+        for _ in 0..128 {
+            routes.try_send_to(7, message.clone()).unwrap();
+        }
+        assert!(!routes.routes[&1].outbound.is_closed());
 
         timeout(EVENT_WAIT, routes.shutdown())
             .await
-            .expect("backpressured peer route did not shut down");
+            .expect("slow peer route did not shut down");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_address_burst_only_waits_for_cpp_output_buffer_acceptance() {
+        // SendAddresses only appends each PID_Addr to the connection's OBuf;
+        // it neither waits for the socket to drain nor fails the route on an
+        // EWOULDBLOCK result (oracle-src-pinned
+        // src/C4Network2Client.cpp:319-337,616-621;
+        // src/C4NetIO.cpp:1345-1396).
+        let (client_stream, _host_stream) = duplex(1);
+        let mut routes = ClientRouteManager::new();
+        routes.add_route(
+            1,
+            11,
+            crate::NetworkProtocol::Tcp,
+            None,
+            crate::ControlTransport::new(client_stream),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+        let announcements = (0..160)
+            .map(|index| crate::AddressPacket {
+                client_id: 1,
+                address: crate::NetworkAddress::new(
+                    crate::NetworkProtocol::Tcp,
+                    SocketAddr::from(([127, 0, 0, 1], 10_000 + index)),
+                ),
+            })
+            .collect();
+
+        timeout(
+            Duration::from_millis(50),
+            connect::send_client_route_address_announcements(&mut routes, announcements),
+        )
+        .await
+        .expect("address announcement waited for physical socket drainage")
+        .unwrap();
+        assert!(!routes.routes[&1].outbound.is_closed());
+
+        timeout(EVENT_WAIT, routes.shutdown())
+            .await
+            .expect("backpressured address route did not shut down");
     }
 
     #[tokio::test]
@@ -3140,7 +4260,10 @@ mod tests {
         );
 
         assert!(matches!(
-            timeout(EVENT_WAIT, routes.read_event()).await.unwrap().unwrap(),
+            timeout(EVENT_WAIT, routes.read_event())
+                .await
+                .unwrap()
+                .unwrap(),
             ClientRouteRead::Disconnected {
                 peer_id: 9,
                 protocol: crate::NetworkProtocol::Tcp,
@@ -3185,10 +4308,16 @@ mod tests {
             .send_to(9, ControlMessage::LobbyCountdown(countdown))
             .await
             .unwrap();
-        assert_eq!(peer.read_message().await.unwrap(), ControlMessage::LobbyCountdown(countdown));
+        assert_eq!(
+            peer.read_message().await.unwrap(),
+            ControlMessage::LobbyCountdown(countdown)
+        );
         drop(peer);
 
-        let event = timeout(EVENT_WAIT, routes.read_event()).await.unwrap().unwrap();
+        let event = timeout(EVENT_WAIT, routes.read_event())
+            .await
+            .unwrap()
+            .unwrap();
         let ClientRouteRead::Disconnected {
             peer_id: 9,
             routes_remaining: false,
@@ -3471,7 +4600,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_route_shutdown_interrupts_a_blocked_write_and_full_command_queue() {
+    async fn client_route_shutdown_interrupts_a_blocked_write_with_queued_commands() {
         let (client_stream, _peer_stream) = duplex(1);
         let mut routes = ClientRouteManager::new();
         routes.add_route(
@@ -3484,12 +4613,12 @@ mod tests {
         );
         let outbound = routes.routes[&1].outbound.clone();
         for _ in 0..64 {
-            let _ = outbound.sender.try_send(ClientRouteCommand::Message(
-                ControlMessage::Packet {
+            let _ = outbound
+                .sender
+                .send(ClientRouteCommand::Message(ControlMessage::Packet {
                     delivery: ControlDelivery::Direct,
                     data: vec![0x55; 1_024],
-                },
-            ));
+                }));
         }
         tokio::task::yield_now().await;
 
@@ -3514,13 +4643,12 @@ mod tests {
             .unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let join_handle = tokio::spawn(async move {
-            let _ = event_tx
-                .send(HostEvent::StatusCommitted(status))
-                .await;
+            let _ = event_tx.send(HostEvent::StatusCommitted(status)).await;
             let _ = shutdown_rx.await;
         });
         let handle = HostHandle {
             command_tx,
+            control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(event_rx),
             shutdown_tx: Some(shutdown_tx),
             join_handle,
@@ -3544,19 +4672,15 @@ mod tests {
         let (command_tx, _command_rx) = mpsc::channel(1);
         command_tx.send(ClientCommand::Shutdown).await.unwrap();
         let (event_tx, event_rx) = mpsc::channel(1);
-        event_tx
-            .send(ClientEvent::Status(status))
-            .await
-            .unwrap();
+        event_tx.send(ClientEvent::Status(status)).await.unwrap();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let join_handle = tokio::spawn(async move {
-            let _ = event_tx
-                .send(ClientEvent::Status(status))
-                .await;
+            let _ = event_tx.send(ClientEvent::Status(status)).await;
             let _ = shutdown_rx.await;
         });
         let handle = ClientHandle {
             command_tx,
+            control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(event_rx),
             shutdown_tx: Some(shutdown_tx),
             join_handle,
@@ -3574,9 +4698,9 @@ mod tests {
     #[tokio::test]
     async fn failed_client_route_retains_commands_already_accepted_by_its_queue() {
         let (client_stream, peer_stream) = duplex(256);
-        let (outbound_tx, outbound_rx) = mpsc::channel(2);
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (_retire_tx, retire_rx) = watch::channel(false);
-        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let first = NetworkStatus {
             state: NETWORK_STATE_LOBBY,
             control_mode: 1,
@@ -3589,11 +4713,9 @@ mod tests {
         };
         outbound_tx
             .send(ClientRouteCommand::Message(ControlMessage::Status(first)))
-            .await
             .unwrap();
         outbound_tx
             .send(ClientRouteCommand::Message(ControlMessage::Status(second)))
-            .await
             .unwrap();
         drop(peer_stream);
 
@@ -3602,6 +4724,7 @@ mod tests {
             11,
             None,
             crate::ControlTransport::new(client_stream),
+            outbound_tx.clone(),
             outbound_rx,
             retire_rx,
             event_tx,
@@ -3634,12 +4757,162 @@ mod tests {
         task.await.unwrap();
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_writer_failure_preserves_fifo_across_post_mortem_fallback() {
+        // A closed native connection remains the client's selected message
+        // connection until the main-thread Ev_Net_Disconn handler removes it.
+        // Sends accepted in that interval join the same packet log, so
+        // CreatePostMortem replays A before B on the fallback connection
+        // (oracle-src-pinned src/C4Network2IO.cpp:539-568,1397-1421,
+        // 1451-1491; src/C4Network2.cpp:873-912).
+        let (fallback_stream, fallback_peer) = duplex(4_096);
+        let mut fallback = crate::ControlTransport::new(fallback_peer);
+        let mut routes = ClientRouteManager::new();
+        routes.add_peer_route(
+            7,
+            7,
+            1,
+            11,
+            crate::NetworkProtocol::Udp,
+            None,
+            crate::ControlTransport::new(FailingWriteStream),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+        routes.add_peer_route(
+            7,
+            7,
+            2,
+            12,
+            crate::NetworkProtocol::Tcp,
+            None,
+            crate::ControlTransport::new(fallback_stream),
+            ConnectionLivenessState::new_accepted_system(),
+        );
+        let first = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 1,
+            target_tick: 41,
+        };
+        let second = NetworkStatus {
+            state: NETWORK_STATE_PAUSE,
+            control_mode: 1,
+            target_tick: 42,
+        };
+
+        routes
+            .try_send_to(7, ControlMessage::Status(first))
+            .unwrap();
+        timeout(EVENT_WAIT, async {
+            loop {
+                if routes.routes[&1].outbound.sender.is_closed() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("forced writer failure did not close the route queue");
+        routes.routes[&1].outbound.retire();
+        routes
+            .try_send_to(7, ControlMessage::Status(second))
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, routes.read_event())
+                .await
+                .unwrap()
+                .unwrap(),
+            ClientRouteRead::Disconnected {
+                peer_id: 7,
+                routes_remaining: true,
+                ..
+            }
+        ));
+
+        let mut logical_order = Vec::new();
+        while logical_order.len() < 2 {
+            match timeout(EVENT_WAIT, fallback.read_message())
+                .await
+                .expect("fallback replay stalled")
+                .unwrap()
+            {
+                ControlMessage::PostMortem(packet) => {
+                    logical_order.extend(packet.packets.into_iter().map(|packet| {
+                        crate::transport::parse_complete_packet(&packet)
+                            .unwrap()
+                            .expect("post-mortem entry is typed")
+                    }));
+                }
+                message => logical_order.push(message),
+            }
+        }
+        assert_eq!(
+            logical_order,
+            vec![
+                ControlMessage::Status(first),
+                ControlMessage::Status(second),
+            ]
+        );
+
+        routes.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn client_route_reads_inbound_while_its_socket_write_is_blocked() {
+        // C++ appends would-block output to OBuf, then services readable
+        // sockets independently before the next writable flush
+        // (oracle-src-pinned src/C4NetIO.cpp:690-761,1345-1396).
+        let (client_stream, peer_stream) = duplex(64);
+        let mut peer = crate::ControlTransport::new(peer_stream);
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+        let (retire_tx, retire_rx) = watch::channel(false);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_client_route(
+            1,
+            11,
+            None,
+            crate::ControlTransport::new(client_stream),
+            outbound_tx.clone(),
+            outbound_rx,
+            retire_rx,
+            event_tx,
+            ConnectionLivenessState::new_accepted_system(),
+        ));
+        outbound_tx
+            .send(ClientRouteCommand::Message(ControlMessage::Packet {
+                delivery: ControlDelivery::Direct,
+                data: vec![0x55; 1_024 * 1_024],
+            }))
+            .unwrap();
+        tokio::task::yield_now().await;
+        let inbound = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 1,
+            target_tick: 7,
+        };
+        peer.send_message(ControlMessage::Status(inbound))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            timeout(Duration::from_millis(50), event_rx.recv())
+                .await
+                .expect("blocked output prevented full-duplex inbound progress"),
+            Some(ClientRouteEvent::Packet {
+                packet: crate::transport::InboundPacket::Message(ControlMessage::Status(status)),
+                ..
+            }) if status == inbound
+        ));
+
+        retire_tx.send_replace(true);
+        timeout(EVENT_WAIT, task).await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn retiring_client_route_cancels_an_inflight_write_into_post_mortem() {
         let (client_stream, mut peer_stream) = duplex(1);
-        let (outbound_tx, outbound_rx) = mpsc::channel(1);
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (retire_tx, retire_rx) = watch::channel(false);
-        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let status = NetworkStatus {
             state: NETWORK_STATE_LOBBY,
             control_mode: 1,
@@ -3650,6 +4923,7 @@ mod tests {
             11,
             None,
             crate::ControlTransport::new(client_stream),
+            outbound_tx.clone(),
             outbound_rx,
             retire_rx,
             event_tx,
@@ -3657,7 +4931,6 @@ mod tests {
         ));
         outbound_tx
             .send(ClientRouteCommand::Message(ControlMessage::Status(status)))
-            .await
             .unwrap();
         let mut first_wire_byte = [0_u8; 1];
         timeout(EVENT_WAIT, peer_stream.read_exact(&mut first_wire_byte))
@@ -3755,7 +5028,6 @@ mod tests {
                 route_id: 2,
                 round_trip_ms: 37,
             })
-            .await
             .unwrap();
         assert!(matches!(
             routes.read_event().await.unwrap(),
@@ -3799,7 +5071,6 @@ mod tests {
             routes
                 .event_tx
                 .send(ClientRouteEvent::PingDispatched { route_id })
-                .await
                 .unwrap();
         }
         routes
@@ -3809,7 +5080,6 @@ mod tests {
                 peer_addr: Some(udp_peer_address),
                 packet: crate::transport::InboundPacket::Empty,
             })
-            .await
             .unwrap();
         assert!(matches!(
             routes.read_event().await.unwrap(),
@@ -4205,7 +5475,8 @@ mod tests {
         }
         udp.send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
             ok: true,
-            message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec()).unwrap(),
+            message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
+                .unwrap(),
             wrong_password: false,
         }))
         .await
@@ -4748,6 +6019,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel(2);
         let handle = ClientHandle {
             command_tx,
+            control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(event_rx),
             shutdown_tx: None,
             join_handle: tokio::spawn(async {}),
@@ -4899,7 +6171,8 @@ mod tests {
         let reused = state
             .publish_player_resource(crate::ClientPlayerResourceRequest {
                 source_path: player,
-                wire_name: clonk_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec()).unwrap(),
+                wire_name: clonk_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec())
+                    .unwrap(),
                 group_maker: clonk_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
                     .unwrap(),
             })
@@ -5127,7 +6400,8 @@ mod tests {
         let reused = state
             .publish_player_resource(crate::ClientPlayerResourceRequest {
                 source_path: player,
-                wire_name: clonk_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec()).unwrap(),
+                wire_name: clonk_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec())
+                    .unwrap(),
                 group_maker: clonk_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
                     .unwrap(),
             })
@@ -5217,6 +6491,7 @@ mod tests {
         ));
         let handle = ClientHandle {
             command_tx,
+            control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(event_rx),
             shutdown_tx: Some(shutdown_tx),
             join_handle,
@@ -5337,7 +6612,8 @@ mod tests {
         fs::write(&player, &original).unwrap();
         let publication = crate::ClientPlayerResourceRequest {
             source_path: player.clone(),
-            wire_name: clonk_engine::LegacyCString::from_bytes(b"HostRuntime.c4p".to_vec()).unwrap(),
+            wire_name: clonk_engine::LegacyCString::from_bytes(b"HostRuntime.c4p".to_vec())
+                .unwrap(),
             group_maker: maker,
         };
 
@@ -5528,7 +6804,10 @@ mod tests {
         let local_standalone = local_backend.path(valid_core.id).unwrap();
         assert_ne!(local_standalone, source);
         assert_eq!(local_standalone.parent(), Some(local_work_path.as_path()));
-        assert_eq!(fs::read(local_standalone).unwrap(), fs::read(&source).unwrap());
+        assert_eq!(
+            fs::read(local_standalone).unwrap(),
+            fs::read(&source).unwrap()
+        );
         assert!(local_backend
             .catalog()
             .local_chunks(valid_core.id)
@@ -5581,7 +6860,8 @@ mod tests {
                 ),
                 resource_player(
                     2,
-                    clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE | clonk_engine::PLAYER_INFO_FLAG_REMOVED,
+                    clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE
+                        | clonk_engine::PLAYER_INFO_FLAG_REMOVED,
                     removed_core.clone(),
                 ),
                 resource_player(
@@ -5598,9 +6878,9 @@ mod tests {
             ],
             by_client: 0,
         };
-        let encoded = crate::encode_control_entry_payload(&clonk_engine::ControlPacket::PlayerInfo(
-            info.clone(),
-        ))
+        let encoded = crate::encode_control_entry_payload(
+            &clonk_engine::ControlPacket::PlayerInfo(info.clone()),
+        )
         .unwrap();
         host.submit_packet(ControlDelivery::Direct, encoded.clone())
             .await
@@ -5643,7 +6923,10 @@ mod tests {
             "removed players return before LoadResource mutates their flags"
         );
         for player in &delivered.players[2..] {
-            assert_eq!(player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+            assert_eq!(
+                player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                0
+            );
             assert_eq!(player.resource, None);
         }
         let (completed_core, completed_path, local) = completed.unwrap();
@@ -5819,8 +7102,10 @@ mod tests {
         let reused = host
             .publish_player_resource(crate::ClientPlayerResourceRequest {
                 source_path: source,
-                wire_name: clonk_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec()).unwrap(),
-                group_maker: clonk_engine::LegacyCString::from_bytes(b"Host maker".to_vec()).unwrap(),
+                wire_name: clonk_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec())
+                    .unwrap(),
+                group_maker: clonk_engine::LegacyCString::from_bytes(b"Host maker".to_vec())
+                    .unwrap(),
             })
             .await
             .unwrap();
@@ -6051,9 +7336,8 @@ mod tests {
         snapshot.dynamic = parent.clone();
         host_config.initial_join_snapshot = Some(snapshot);
         host_config.resource_directory = Some(directories.host.clone());
-        host_config.resource_registrations = vec![crate::ResourceRegistration::from_core(
-            &parent, true, false,
-        )];
+        host_config.resource_registrations =
+            vec![crate::ResourceRegistration::from_core(&parent, true, false)];
         host_config.resource_files = vec![HostedResourceFile {
             core: parent.clone(),
             path: host_source.clone(),
@@ -6108,10 +7392,7 @@ mod tests {
         fs::write(&host_source, b"changed").unwrap();
         fs::write(&client_source, b"changed").unwrap();
 
-        let derived = host
-            .finish_resource_derive(host_derivation)
-            .await
-            .unwrap();
+        let derived = host.finish_resource_derive(host_derivation).await.unwrap();
         assert_ne!(derived.id, parent.id);
         assert_eq!(derived.derived_id, parent.id);
         loop {
@@ -6255,11 +7536,7 @@ mod tests {
         fs::create_dir(&host_system_path).unwrap();
         fs::create_dir(&client_system_path).unwrap();
         fs::write(host_system_path.join("Host.c"), b"C++ host system").unwrap();
-        fs::write(
-            client_system_path.join("Client.c"),
-            b"Rust client system",
-        )
-        .unwrap();
+        fs::write(client_system_path.join("Client.c"), b"Rust client system").unwrap();
         let publication = crate::build_host_resource_core(
             &host_system_path,
             &directories.host,
@@ -6567,7 +7844,10 @@ mod tests {
 
         let join_data = client.take_join_data().expect("initial JoinData");
         let player = &join_data.parameters.player_infos.clients[0].players[0];
-        assert_eq!(player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+        assert_eq!(
+            player.flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            0
+        );
         assert_eq!(player.resource, None);
 
         client.shutdown().await.unwrap();
@@ -6800,8 +8080,7 @@ mod tests {
             .expect("encode queued controls")
         };
 
-        validate_queued_control_authors(&packet(controls(7)))
-            .expect("matching queued authors");
+        validate_queued_control_authors(&packet(controls(7))).expect("matching queued authors");
 
         for (name, forged) in [
             "CID_Vote",
@@ -6879,13 +8158,15 @@ mod tests {
                 client_id: 7,
                 tick: 12,
                 timestamp_ms: 0,
-                controls: vec![EngineControlPacket::Script(clonk_engine::ScriptControlData {
-                    target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
-                    strictness: clonk_engine::ScriptStrictness::Strict3,
-                    script: clonk_engine::LegacyCString::from_bytes(b"1+2".to_vec())
-                        .expect("fixture is NUL-free"),
-                    by_client,
-                })],
+                controls: vec![EngineControlPacket::Script(
+                    clonk_engine::ScriptControlData {
+                        target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
+                        strictness: clonk_engine::ScriptStrictness::Strict3,
+                        script: clonk_engine::LegacyCString::from_bytes(b"1+2".to_vec())
+                            .expect("fixture is NUL-free"),
+                        by_client,
+                    },
+                )],
             })
             .expect("encode queued CID_Script")
         };
@@ -7603,9 +8884,12 @@ mod tests {
 
         let mut deferred_probe = [0_u8; 1];
         assert!(
-            timeout(Duration::from_millis(150), deferred.peek(&mut deferred_probe))
-                .await
-                .is_err(),
+            timeout(
+                Duration::from_millis(150),
+                deferred.peek(&mut deferred_probe)
+            )
+            .await
+            .is_err(),
             "the second open route must keep its welcome deferred"
         );
 
@@ -8588,8 +9872,10 @@ mod tests {
             transport
                 .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
                     ok: true,
-                    message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
-                        .unwrap(),
+                    message: clonk_engine::LegacyCString::from_bytes(
+                        b"connection accepted".to_vec(),
+                    )
+                    .unwrap(),
                     wrong_password: false,
                 }))
                 .await
@@ -8797,8 +10083,10 @@ mod tests {
             transport
                 .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
                     ok: true,
-                    message: clonk_engine::LegacyCString::from_bytes(b"connection accepted".to_vec())
-                        .unwrap(),
+                    message: clonk_engine::LegacyCString::from_bytes(
+                        b"connection accepted".to_vec(),
+                    )
+                    .unwrap(),
                     wrong_password: false,
                 }))
                 .await
@@ -9528,7 +10816,8 @@ mod tests {
 
         let result =
             connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player)).await;
-        let messages = server.await.unwrap();
+        let probe = server.await.unwrap();
+        let messages = probe.messages;
 
         let error = result.expect_err("missing non-loadable Dynamic must abort bootstrap");
         assert!(
@@ -9540,6 +10829,10 @@ mod tests {
             messages,
             vec![ControlMessage::Request { from_tick: 0 }],
             "control initialization must precede Dynamic retrieval, but addresses must not"
+        );
+        assert!(
+            probe.disconnected,
+            "C4Network2::HandleJoinData calls Clear immediately after Dynamic bootstrap failure"
         );
     }
 
@@ -9556,7 +10849,8 @@ mod tests {
 
         let result =
             connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player)).await;
-        let messages = server.await.unwrap();
+        let probe = server.await.unwrap();
+        let messages = probe.messages;
 
         let error = result.expect_err("missing non-loadable Scenario must abort bootstrap");
         assert!(
@@ -9571,6 +10865,10 @@ mod tests {
         assert!(
             matches!(messages.get(1), Some(ControlMessage::Address(packet)) if
             packet.client_id == 0 && packet.address.endpoint == address)
+        );
+        assert!(
+            probe.disconnected,
+            "C4Network2::InitClient failure must clear the admitted Scenario route"
         );
     }
 
@@ -9592,7 +10890,8 @@ mod tests {
 
         let result =
             connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player)).await;
-        let messages = server.await.unwrap();
+        let probe = server.await.unwrap();
+        let messages = probe.messages;
 
         let error = result.expect_err("final GameRes retry must fail bootstrap");
         assert!(
@@ -9607,6 +10906,10 @@ mod tests {
         assert!(
             matches!(messages.get(1), Some(ControlMessage::Address(packet)) if
             packet.client_id == 0 && packet.address.endpoint == address)
+        );
+        assert!(
+            probe.disconnected,
+            "C4Network2::InitClient failure must clear the admitted GameRes route"
         );
     }
 
@@ -9628,9 +10931,17 @@ mod tests {
         }
     }
 
+    struct ClientBootstrapProbeResult {
+        messages: Vec<ControlMessage>,
+        disconnected: bool,
+    }
+
     async fn start_client_bootstrap_probe(
         mut snapshot: HostJoinSnapshot,
-    ) -> (SocketAddr, tokio::task::JoinHandle<Vec<ControlMessage>>) {
+    ) -> (
+        SocketAddr,
+        tokio::task::JoinHandle<ClientBootstrapProbeResult>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -9688,13 +10999,21 @@ mod tests {
                 .unwrap();
 
             let mut messages = Vec::new();
+            let mut disconnected = false;
             while messages.len() < 4 {
                 match timeout(Duration::from_millis(250), transport.read_message()).await {
                     Ok(Ok(message)) => messages.push(message),
-                    Ok(Err(_)) | Err(_) => break,
+                    Ok(Err(_)) => {
+                        disconnected = true;
+                        break;
+                    }
+                    Err(_) => break,
                 }
             }
-            messages
+            ClientBootstrapProbeResult {
+                messages,
+                disconnected,
+            }
         });
         (address, server)
     }
@@ -9785,9 +11104,9 @@ mod tests {
         // 1141-1177).
         let (host_stream, client_stream) = duplex(512);
         let mut client = crate::ControlTransport::new(client_stream);
-        let (outbound_tx, outbound_rx) = HostOutboundSender::channel(4);
+        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
         let retire_rx = outbound_tx.subscribe_retire();
-        let (host_tx, mut host_rx) = mpsc::channel(4);
+        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(
             ClientTask {
                 local_connection_id: 3,
@@ -9839,12 +11158,347 @@ mod tests {
         task.await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accepted_host_route_answers_ping_while_setup_is_delayed() {
+        // C4Network2IO::Execute continues servicing every accepted socket
+        // while C4Network2's main thread prepares SendJoinData
+        // (src/C4Network2IO.cpp:611-623,1155-1191;
+        // src/C4Network2.cpp:1107-1133,1836-1865).
+        let (host_stream, client_stream) = duplex(4_096);
+        let (admission_tx, mut admission_rx) = mpsc::channel(1);
+        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
+        let mut route_tasks = tokio::task::JoinSet::new();
+        let host_core = compatibility_test_core(0, b"Host");
+        spawn_host_transport(
+            &mut route_tasks,
+            host_stream,
+            "127.0.0.1:11112".parse().unwrap(),
+            crate::NetworkProtocol::Tcp,
+            host_core,
+            7,
+            crate::NetworkIoStatistics::default(),
+            admission_tx,
+            host_tx,
+        );
+        let admission = tokio::spawn(async move {
+            let request = admission_rx.recv().await.unwrap();
+            let mut assigned = request.request.core.clone();
+            assigned.client_id = 1;
+            request
+                .decision_tx
+                .send(AdmissionDecision::Accept {
+                    peer_core: assigned,
+                    before_reply: Vec::new(),
+                    message: clonk_engine::LegacyCString::default(),
+                })
+                .unwrap();
+        });
+
+        let mut client = crate::ControlTransport::new(client_stream);
+        assert!(matches!(
+            client.read_message().await.unwrap(),
+            ControlMessage::ConnectionRequest(_)
+        ));
+        client
+            .send_message(ControlMessage::ConnectionRequest(
+                crate::ConnectionRequest {
+                    core: compatibility_test_core(-1, b"Alice"),
+                    build: CURRENT_GAME_BUILD,
+                    password: clonk_engine::LegacyCString::default(),
+                    connection_id: 11,
+                },
+            ))
+            .await
+            .unwrap();
+        client
+            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
+                ok: true,
+                message: clonk_engine::LegacyCString::default(),
+                wrong_password: false,
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            client.read_message().await.unwrap(),
+            ControlMessage::ConnectionReply(crate::ConnectionReply { ok: true, .. })
+        ));
+
+        let _delayed_setup = loop {
+            match timeout(EVENT_WAIT, host_rx.recv()).await.unwrap() {
+                Some(HostLoopMessage::ClientAccepted { setup_tx, .. }) => break setup_tx,
+                Some(other) => panic!("unexpected host route event: {other:?}"),
+                None => panic!("host route stopped before acceptance"),
+            }
+        };
+        let ping = crate::PingPacket {
+            sent_at: 17,
+            packet_counter: 0,
+        };
+        client
+            .send_message(ControlMessage::Ping(ping))
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(Duration::from_millis(100), client.read_message())
+                .await
+                .expect("accepted host route stopped reading while setup was delayed")
+                .unwrap(),
+            ControlMessage::Pong(ping)
+        );
+
+        route_tasks.abort_all();
+        while route_tasks.join_next().await.is_some() {}
+        admission.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_route_reads_inbound_while_its_socket_write_is_blocked() {
+        // Native TCP services readable input independently of its pending
+        // output buffer (oracle-src-pinned
+        // src/C4NetIO.cpp:690-761,1345-1396).
+        let (host_stream, peer_stream) = duplex(64);
+        let mut peer = crate::ControlTransport::new(peer_stream);
+        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
+        let retire_rx = outbound_tx.subscribe_retire();
+        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(
+            ClientTask {
+                local_connection_id: 3,
+                remote_connection_id: 5,
+                client_id: 7,
+                transport: crate::ControlTransport::new(host_stream),
+                outbound_rx,
+                retire_rx,
+                host_tx,
+                liveness: ConnectionLivenessState::new_accepted_system(),
+            }
+            .run(),
+        );
+        outbound_tx
+            .send(ControlMessage::Packet {
+                delivery: ControlDelivery::Direct,
+                data: vec![0x55; 1_024 * 1_024],
+            })
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        let inbound = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 1,
+            target_tick: 7,
+        };
+        peer.send_message(ControlMessage::Status(inbound))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            timeout(Duration::from_millis(50), host_rx.recv())
+                .await
+                .expect("blocked output prevented host full-duplex inbound progress"),
+            Some(HostLoopMessage::ClientMessage {
+                message: ControlMessage::Status(status),
+                ..
+            }) if status == inbound
+        ));
+
+        outbound_tx.retire();
+        timeout(EVENT_WAIT, task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_route_keeps_ping_live_beyond_the_old_event_capacity() {
+        // C4InteractiveThread::PushEvent appends ordinary packets to an
+        // uncapped FIFO, while Ping/Pong remains on the network thread. A
+        // stopped main-thread consumer therefore cannot hide a later Ping
+        // behind 128 earlier application events
+        // (oracle-src-pinned src/C4InteractiveThread.cpp:70-100;
+        // src/C4Packet2.cpp:51-73; src/C4Network2IO.cpp:1020-1038).
+        const PACKET_COUNT: usize = 160;
+        let (host_stream, peer_stream) = duplex(32 * 1_024);
+        let mut peer = crate::ControlTransport::new(peer_stream);
+        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
+        let retire_rx = outbound_tx.subscribe_retire();
+        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(
+            ClientTask {
+                local_connection_id: 3,
+                remote_connection_id: 5,
+                client_id: 7,
+                transport: crate::ControlTransport::new(host_stream),
+                outbound_rx,
+                retire_rx,
+                host_tx,
+                liveness: ConnectionLivenessState::new_accepted_system(),
+            }
+            .run(),
+        );
+
+        for sequence in 0..PACKET_COUNT {
+            peer.send_message(ControlMessage::Status(NetworkStatus {
+                state: NETWORK_STATE_LOBBY,
+                control_mode: 1,
+                target_tick: sequence as i32,
+            }))
+            .await
+            .unwrap_or_else(|error| {
+                panic!("host route closed while sending packet {sequence}: {error}")
+            });
+        }
+        let ping = crate::PingPacket {
+            sent_at: 0x1020_3040,
+            packet_counter: PACKET_COUNT as u32,
+        };
+        peer.send_message(ControlMessage::Ping(ping)).await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_millis(100), peer.read_message())
+                .await
+                .expect("full host event queue hid a later Ping")
+                .unwrap(),
+            ControlMessage::Pong(ping)
+        );
+
+        for expected in 0..PACKET_COUNT {
+            let Some(HostLoopMessage::ClientMessage {
+                message: ControlMessage::Status(status),
+                ..
+            }) = host_rx.recv().await
+            else {
+                panic!("host route lost an accepted application event");
+            };
+            assert_eq!(status.target_tick, expected as i32);
+        }
+
+        outbound_tx.retire();
+        timeout(EVENT_WAIT, task)
+            .await
+            .expect("saturated host route did not shut down")
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_route_pong_does_not_overtake_accepted_output_frames() {
+        // TCP Send appends complete frames to one OBuf under OCSec. A Pong
+        // can join that buffer from the network thread, but cannot jump
+        // application frames already accepted into it
+        // (oracle-src-pinned src/C4NetIO.cpp:1284-1299,1345-1396;
+        // src/C4Network2IO.cpp:1020-1029,1451-1491).
+        let (host_stream, peer_stream) = duplex(32);
+        let mut peer = crate::ControlTransport::new(peer_stream);
+        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
+        let retire_rx = outbound_tx.subscribe_retire();
+        let addresses = (0..3)
+            .map(|index| crate::AddressPacket {
+                client_id: 0,
+                address: crate::NetworkAddress::new(
+                    crate::NetworkProtocol::Tcp,
+                    SocketAddr::from(([192, 0, 2, 1], 11_112 + index)),
+                ),
+            })
+            .collect::<Vec<_>>();
+        for address in &addresses {
+            outbound_tx
+                .send(ControlMessage::Address(*address))
+                .await
+                .unwrap();
+        }
+        let (host_tx, _host_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(
+            ClientTask {
+                local_connection_id: 3,
+                remote_connection_id: 5,
+                client_id: 7,
+                transport: crate::ControlTransport::new(host_stream),
+                outbound_rx,
+                retire_rx,
+                host_tx,
+                liveness: ConnectionLivenessState::new_accepted_system(),
+            }
+            .run(),
+        );
+        let ping = crate::PingPacket {
+            sent_at: 0x1020_3040,
+            packet_counter: 0,
+        };
+        peer.send_message(ControlMessage::Ping(ping)).await.unwrap();
+
+        for address in addresses {
+            assert_eq!(
+                timeout(EVENT_WAIT, peer.read_message())
+                    .await
+                    .expect("accepted host output stalled")
+                    .unwrap(),
+                ControlMessage::Address(address)
+            );
+        }
+        assert_eq!(
+            timeout(EVENT_WAIT, peer.read_message())
+                .await
+                .expect("Pong did not follow accepted host output")
+                .unwrap(),
+            ControlMessage::Pong(ping)
+        );
+
+        outbound_tx.retire();
+        timeout(EVENT_WAIT, task)
+            .await
+            .expect("FIFO host route did not shut down")
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_route_close_preempts_an_arbitrary_blocked_backlog() {
+        // C4Network2Client::CloseConns sends one best-effort negative ConnRe
+        // then immediately closes each connection; stale OBuf is not drained
+        // first (oracle-src-pinned src/C4Network2Client.cpp:104-118;
+        // src/C4NetIO.cpp:1458-1468).
+        let (host_stream, _peer_stream) = duplex(1);
+        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
+        let retire_rx = outbound_tx.subscribe_retire();
+        let (host_tx, _host_rx) = mpsc::unbounded_channel();
+        let mut task = tokio::spawn(
+            ClientTask {
+                local_connection_id: 3,
+                remote_connection_id: 5,
+                client_id: 7,
+                transport: crate::ControlTransport::new(host_stream),
+                outbound_rx,
+                retire_rx,
+                host_tx,
+                liveness: ConnectionLivenessState::new_accepted_system(),
+            }
+            .run(),
+        );
+        for _ in 0..10_001 {
+            outbound_tx
+                .send(ControlMessage::Packet {
+                    delivery: ControlDelivery::Direct,
+                    data: vec![0x55; 1_024],
+                })
+                .await
+                .unwrap();
+        }
+        tokio::task::yield_now().await;
+        outbound_tx
+            .try_close(crate::ConnectionReply {
+                ok: false,
+                message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
+                    .unwrap(),
+                wrong_password: false,
+            })
+            .unwrap();
+
+        timeout(Duration::from_millis(100), &mut task)
+            .await
+            .expect("controlled close waited behind the stale outbound backlog")
+            .unwrap();
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn accepted_host_decodes_tcp_sim_open_and_keeps_the_connection() {
         let (host_stream, mut client_stream) = duplex(512);
-        let (outbound_tx, outbound_rx) = mpsc::channel(4);
-        let (_retire_tx, retire_rx) = watch::channel(false);
-        let (host_tx, mut host_rx) = mpsc::channel(4);
+        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
+        let retire_rx = outbound_tx.subscribe_retire();
+        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(
             ClientTask {
                 local_connection_id: 3,
@@ -9980,6 +11634,301 @@ mod tests {
         shutdown_tx.send(()).unwrap();
         drop(command_tx);
         task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_thread_client_services_ping_during_synchronous_resource_probe() {
+        // C4Network2IO remains on C4InteractiveThread while HandleJoinData
+        // probes local groups on the main thread. A single-thread async
+        // embedder must preserve the same independence
+        // (oracle-src-pinned src/C4Network2.cpp:1590-1639;
+        // src/C4Network2IO.cpp:117-197; src/C4Packet2.cpp:51-73).
+        let client_name = b"CurrentThreadBootstrap";
+        let (probe_paused, resume_probe) = pause_client_resource_bootstrap_probe(client_name);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ping_result_tx, ping_result_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut transport = crate::ControlTransport::new(stream);
+            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).unwrap();
+            let host_core = clonk_engine::ClientCoreControlData {
+                client_id: 0,
+                activated: true,
+                name: host_name.clone(),
+                nick: host_name,
+                ..Default::default()
+            };
+            let request = crate::ConnectionRequest {
+                core: host_core.clone(),
+                build: CURRENT_GAME_BUILD,
+                password: clonk_engine::LegacyCString::default(),
+                connection_id: 9,
+            };
+            let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
+            let admission = tokio::spawn(async move {
+                let request = admission_rx.recv().await.unwrap();
+                let mut assigned = request.request.core.clone();
+                assigned.client_id = 1;
+                request
+                    .decision_tx
+                    .send(AdmissionDecision::Accept {
+                        peer_core: assigned.clone(),
+                        before_reply: Vec::new(),
+                        message: clonk_engine::LegacyCString::from_bytes(b"join accepted".to_vec())
+                            .unwrap(),
+                    })
+                    .unwrap();
+                assigned
+            });
+            run_host_connection_handshake(&mut transport, request, &admission_tx)
+                .await
+                .unwrap();
+            let assigned = admission.await.unwrap();
+            let mut snapshot = synthetic_join_snapshot(host_core.clone(), 8);
+            snapshot.parameters.clients =
+                JoinClientRegistrySnapshot::new(vec![host_core, assigned.clone()]);
+            transport
+                .send_message(ControlMessage::JoinData(Box::new(JoinDataEnvelope {
+                    client_id: assigned.client_id,
+                    start_control_tick: snapshot.dynamic_tick,
+                    status: NetworkStatus {
+                        state: NETWORK_STATE_LOBBY,
+                        control_mode: 0,
+                        target_tick: -1,
+                    },
+                    dynamic: snapshot.dynamic,
+                    parameters: snapshot.parameters,
+                })))
+                .await
+                .unwrap();
+            assert_eq!(
+                transport.read_message().await.unwrap(),
+                ControlMessage::Request { from_tick: 0 }
+            );
+
+            let ping = crate::PingPacket {
+                sent_at: 0x5060_7080,
+                packet_counter: 0,
+            };
+            transport
+                .send_message(ControlMessage::Ping(ping))
+                .await
+                .unwrap();
+            let serviced = timeout(Duration::from_millis(500), async {
+                loop {
+                    match transport.read_message().await.unwrap() {
+                        ControlMessage::Pong(reply) if reply == ping => break,
+                        ControlMessage::Ping(probe) => {
+                            transport
+                                .send_message(ControlMessage::Pong(probe))
+                                .await
+                                .unwrap();
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .is_ok();
+            let _ = ping_result_tx.send(serviced);
+
+            while let Ok(message) = transport.read_message().await {
+                if let ControlMessage::Ping(probe) = message {
+                    let _ = transport.send_message(ControlMessage::Pong(probe)).await;
+                }
+            }
+        });
+
+        let client_name = String::from_utf8(client_name.to_vec()).unwrap();
+        let client_thread = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let client = connect_client(
+                        address,
+                        ClientConfig::new(client_name, ParticipantKind::Player),
+                    )
+                    .await?;
+                    client.shutdown().await
+                })
+        });
+
+        probe_paused
+            .await
+            .expect("client did not enter synchronous resource probing");
+        let ping_serviced = ping_result_rx
+            .await
+            .expect("probe server stopped before reporting Ping service");
+        resume_probe
+            .send(())
+            .expect("resource bootstrap worker disappeared");
+        let client_result = tokio::task::spawn_blocking(move || client_thread.join())
+            .await
+            .unwrap()
+            .expect("current-thread client runtime panicked");
+        client_result.expect("client should complete bootstrap after probe release");
+        server.await.unwrap();
+
+        assert!(
+            ping_serviced,
+            "synchronous resource probing blocked the accepted route's Ping/Pong task"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accepted_primary_route_stays_live_and_fifo_during_post_join_bootstrap() {
+        // HandleJoinData performs synchronous local resource probing on the
+        // main thread, but C4Network2IO remains on C4InteractiveThread:
+        // Ping/Pong is handled there and main-thread events append losslessly
+        // even while the bootstrap consumer is stopped
+        // (oracle-src-pinned src/C4Network2.cpp:1590-1639;
+        // src/C4Packet2.cpp:51-73; src/C4InteractiveThread.cpp:70-100).
+        const QUEUED_PACKETS: i32 = 96;
+        let client_name = b"BootstrapRouteLiveness";
+        let (bootstrap_paused, resume_bootstrap) = pause_client_post_join_bootstrap(client_name);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (probe_complete_tx, probe_complete_rx) = oneshot::channel();
+        let (finish_server_tx, finish_server_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut transport = crate::ControlTransport::new(stream);
+            let host_name = clonk_engine::LegacyCString::from_bytes(b"Host".to_vec()).unwrap();
+            let host_core = clonk_engine::ClientCoreControlData {
+                client_id: 0,
+                activated: true,
+                name: host_name.clone(),
+                nick: host_name,
+                ..Default::default()
+            };
+            let request = crate::ConnectionRequest {
+                core: host_core.clone(),
+                build: CURRENT_GAME_BUILD,
+                password: clonk_engine::LegacyCString::default(),
+                connection_id: 9,
+            };
+            let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
+            let admission = tokio::spawn(async move {
+                let request = admission_rx.recv().await.unwrap();
+                let mut assigned = request.request.core.clone();
+                assigned.client_id = 1;
+                request
+                    .decision_tx
+                    .send(AdmissionDecision::Accept {
+                        peer_core: assigned.clone(),
+                        before_reply: Vec::new(),
+                        message: clonk_engine::LegacyCString::from_bytes(b"join accepted".to_vec())
+                            .unwrap(),
+                    })
+                    .unwrap();
+                assigned
+            });
+            run_host_connection_handshake(&mut transport, request, &admission_tx)
+                .await
+                .unwrap();
+            let assigned = admission.await.unwrap();
+            let mut snapshot = synthetic_join_snapshot(host_core.clone(), 8);
+            snapshot.parameters.clients =
+                JoinClientRegistrySnapshot::new(vec![host_core, assigned.clone()]);
+            transport
+                .send_message(ControlMessage::JoinData(Box::new(JoinDataEnvelope {
+                    client_id: assigned.client_id,
+                    start_control_tick: snapshot.dynamic_tick,
+                    status: NetworkStatus {
+                        state: NETWORK_STATE_LOBBY,
+                        control_mode: 0,
+                        target_tick: -1,
+                    },
+                    dynamic: snapshot.dynamic,
+                    parameters: snapshot.parameters,
+                })))
+                .await
+                .unwrap();
+            assert_eq!(
+                transport.read_message().await.unwrap(),
+                ControlMessage::Request { from_tick: 0 }
+            );
+
+            for countdown in 0..QUEUED_PACKETS {
+                transport
+                    .send_message(ControlMessage::LobbyCountdown(LobbyCountdownPacket::new(
+                        countdown,
+                    )))
+                    .await
+                    .unwrap();
+            }
+            let ping = crate::PingPacket {
+                sent_at: 0x1020_3040,
+                packet_counter: 0,
+            };
+            transport
+                .send_message(ControlMessage::Ping(ping))
+                .await
+                .unwrap();
+            timeout(Duration::from_millis(500), async {
+                loop {
+                    match transport.read_message().await.unwrap() {
+                        ControlMessage::Pong(reply) if reply == ping => break,
+                        ControlMessage::Ping(probe) => {
+                            transport
+                                .send_message(ControlMessage::Pong(probe))
+                                .await
+                                .unwrap();
+                        }
+                        other => panic!(
+                            "client started post-bootstrap traffic before release: {other:?}"
+                        ),
+                    }
+                }
+            })
+            .await
+            .expect("accepted primary route did not service Ping during bootstrap");
+            let _ = probe_complete_tx.send(());
+            let _ = finish_server_rx.await;
+        });
+
+        let config = ClientConfig::new(
+            String::from_utf8(client_name.to_vec()).unwrap(),
+            ParticipantKind::Player,
+        );
+        let connect = tokio::spawn(connect_client(address, config));
+        bootstrap_paused
+            .await
+            .expect("client did not reach the post-JoinData bootstrap pause");
+        timeout(Duration::from_secs(1), probe_complete_rx)
+            .await
+            .expect("bootstrap route did not answer the host's probe")
+            .expect("probe server stopped before observing Pong");
+        assert!(
+            !connect.is_finished(),
+            "the main client loop must not start before resource bootstrap completes"
+        );
+        resume_bootstrap
+            .send(())
+            .expect("paused client bootstrap disappeared");
+
+        let mut client = connect.await.unwrap().unwrap();
+        for expected in 0..QUEUED_PACKETS {
+            let event = timeout(EVENT_WAIT, client.events().recv())
+                .await
+                .expect("queued post-JoinData packet stalled")
+                .expect("client event stream ended");
+            let ClientEvent::LobbyCountdown { packet } = event else {
+                panic!("expected queued lobby countdown, got {event:?}");
+            };
+            assert_eq!(
+                packet.countdown(),
+                expected,
+                "post-JoinData packets must retain wire order across bootstrap"
+            );
+        }
+
+        let _ = finish_server_tx.send(());
+        server.await.unwrap();
+        client.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -10151,6 +12100,68 @@ mod tests {
         host.shutdown().await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accepted_host_route_measures_ping_while_join_data_is_delayed() {
+        // C4Network2IO::Execute keeps CheckTimeout/Ping running for every open
+        // accepted connection while SendJoinData waits for a fresh dynamic
+        // (src/C4Network2IO.cpp:611-623,1155-1191;
+        // src/C4Network2.cpp:1107-1133,1836-1865).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut config = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(config.local_core.clone(), config.max_players);
+        config.initial_join_snapshot = None;
+        let mut host = start_host(listener, config).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let client_task = tokio::spawn(connect_client(
+            addr,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        ));
+
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::JoinDataNeeded { client_id: 1, .. }) => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before JoinData was requested"),
+            }
+        }
+
+        let ping_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let measured_ping = loop {
+            let connections = host.runtime_connections().await.unwrap();
+            if let Some(ping_ms) = connections
+                .iter()
+                .find(|connection| connection.client_id == 1)
+                .map(|connection| connection.ping_ms)
+                .filter(|ping_ms| *ping_ms >= 0)
+            {
+                break Some(ping_ms);
+            }
+            if tokio::time::Instant::now() >= ping_deadline {
+                break None;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        assert!(
+            measured_ping.is_some(),
+            "accepted host route must service Ping/Pong before delayed JoinData"
+        );
+        assert!(
+            !client_task.is_finished(),
+            "client must still be waiting for the delayed JoinData"
+        );
+
+        host.publish_join_snapshot(snapshot).await.unwrap();
+        let client = timeout(EVENT_WAIT, client_task)
+            .await
+            .expect("published JoinData did not release the live client")
+            .unwrap()
+            .unwrap();
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn runtime_dynamic_expires_only_after_the_host_advances_past_its_tick() {
         let directories = SessionResourceDirectories::new();
@@ -10242,7 +12253,7 @@ mod tests {
         let mut clients = BTreeMap::new();
         let mut receivers = Vec::new();
         for (client_id, join_data_sent) in [(7, false), (8, false), (9, true)] {
-            let (outbound, receiver) = HostOutboundSender::channel(1);
+            let (outbound, receiver) = HostOutboundSender::channel();
             receivers.push(receiver);
             clients.insert(
                 client_id,
@@ -10461,15 +12472,14 @@ mod tests {
 
         let mut beta_events = beta.take_event_receiver();
         let alpha_id = alpha.client_id();
-        let data = encode_control_entry_payload(&EngineControlPacket::PlayerControl(
-            PlayerControlData {
+        let data =
+            encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
                 player: i32::try_from(alpha_id).unwrap(),
                 command: 0x44,
                 data: 0x55,
                 by_client: i32::try_from(alpha_id).unwrap(),
-            },
-        ))
-        .unwrap();
+            }))
+            .unwrap();
         alpha
             .submit_packet(ControlDelivery::Direct, data.clone())
             .await
@@ -10570,15 +12580,14 @@ mod tests {
 
         let mut beta_events = beta.take_event_receiver();
         let alpha_id = alpha.client_id();
-        let data = encode_control_entry_payload(&EngineControlPacket::PlayerControl(
-            PlayerControlData {
+        let data =
+            encode_control_entry_payload(&EngineControlPacket::PlayerControl(PlayerControlData {
                 player: i32::try_from(alpha_id).unwrap(),
                 command: 0x66,
                 data: 0x77,
                 by_client: i32::try_from(alpha_id).unwrap(),
-            },
-        ))
-        .unwrap();
+            }))
+            .unwrap();
         alpha
             .submit_packet(ControlDelivery::Direct, data.clone())
             .await
@@ -11678,7 +13687,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn host_typed_unpack_rejects_malformed_control_from_an_unregistered_client() {
+    async fn host_typed_unpack_closes_only_the_malformed_control_route() {
+        // PID_Control typed unpack includes its nested control list. A
+        // compiler failure closes only pConn in release builds; the network
+        // scheduler remains available for later clients
+        // (src/C4GameControlNetwork.cpp:867-872;
+        // src/C4Network2IO.cpp:822-835).
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");
@@ -11705,23 +13719,40 @@ mod tests {
             ))
             .await
             .expect("submit malformed inactive control");
-        loop {
-            match timeout(EVENT_WAIT, host_events.recv()).await {
-                Ok(Some(HostEvent::TransportError {
-                    client_id: Some(source),
-                    error,
-                })) if source == client_id => {
-                    assert!(error.contains("invalid complete control packet"));
-                    assert!(error.contains("0x42"));
-                    break;
+        let mut connection_failed = false;
+        let mut client_left = false;
+        let mut diagnostic = false;
+        timeout(EVENT_WAIT, async {
+            while !connection_failed || !client_left || !diagnostic {
+                match host_events.recv().await {
+                    Some(HostEvent::ClientConnectionFailed { client_id: source })
+                        if source == client_id =>
+                    {
+                        connection_failed = true;
+                    }
+                    Some(HostEvent::ClientLeft { client_id: source }) if source == client_id => {
+                        client_left = true;
+                    }
+                    Some(HostEvent::RecoverableRouteDiagnostic {
+                        client_id: Some(source),
+                        error,
+                    }) if source == client_id => {
+                        assert!(error.contains("invalid complete control packet"));
+                        assert!(error.contains("0x42"));
+                        diagnostic = true;
+                    }
+                    Some(_) => continue,
+                    None => panic!("host event stream ended before malformed-route cleanup"),
                 }
-                Ok(Some(_)) => continue,
-                Ok(None) => panic!("host event stream ended before validation error"),
-                Err(_) => panic!("timed out waiting for malformed-control validation"),
             }
-        }
+        })
+        .await
+        .expect("timed out waiting for malformed-route cleanup");
 
         drop(client);
+        let (mut successor, _) = raw_client_transport(addr, b"after-malformed").await;
+        raw_client_ping_barrier(&mut successor).await;
+        drop(successor);
         host.shutdown().await.expect("host shutdown");
     }
 
@@ -12272,7 +14303,7 @@ mod tests {
                 Some(HostEvent::StatusAck { client_id, status })
                     if client_id == beta_id && status == unreachable =>
                 {
-                    break
+                    break;
                 }
                 Some(_) => continue,
                 None => panic!("host event stream ended before Beta acknowledged unreached Go"),
@@ -12571,7 +14602,7 @@ mod tests {
                 Some(HostEvent::StatusAck { client_id, status })
                     if client_id == witness_id && status == unreachable =>
                 {
-                    break
+                    break;
                 }
                 Some(_) => continue,
                 None => panic!("host event stream ended before unreached Go acknowledgement"),
@@ -12653,8 +14684,28 @@ mod tests {
 
         let mut synchronized_remove = None;
         let mut committed = false;
-        while synchronized_remove.is_none() || !committed {
+        let mut connection_failed = false;
+        let mut diagnostic = false;
+        while synchronized_remove.is_none() || !committed || !connection_failed || !diagnostic {
             match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::ClientConnectionFailed { client_id })
+                    if i32::try_from(client_id).ok() == Some(provisional_id) =>
+                {
+                    connection_failed = true;
+                }
+                Some(HostEvent::RecoverableRouteDiagnostic {
+                    client_id: Some(client_id),
+                    error,
+                }) if i32::try_from(client_id).ok() == Some(provisional_id) => {
+                    assert!(error.contains("connection admission from"));
+                    diagnostic = true;
+                }
+                Some(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error,
+                }) if i32::try_from(client_id).ok() == Some(provisional_id) => {
+                    panic!("provisional admission recovery became terminal: {error}");
+                }
                 Some(HostEvent::SyncScheduled {
                     control_tick,
                     controls,
@@ -12762,10 +14813,10 @@ mod tests {
                 Some(HostEvent::ClientLeft { client_id }) if client_id == canonical_id => {
                     panic!("secondary route failure removed the canonical client")
                 }
-                Some(HostEvent::TransportError { client_id, error })
+                Some(HostEvent::RecoverableRouteDiagnostic { client_id, error })
                     if error.contains("connection admission from") =>
                 {
-                    assert_eq!(client_id, None);
+                    assert_eq!(client_id, Some(canonical_id));
                     break;
                 }
                 Some(_) => continue,
@@ -12943,9 +14994,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn central_client_repeats_missing_control_request_on_cpp_interval() {
-        async fn next_request<S>(
-            transport: &mut crate::ControlTransport<S>,
-        ) -> ControlMessage
+        async fn next_request<S>(transport: &mut crate::ControlTransport<S>) -> ControlMessage
         where
             S: AsyncRead + AsyncWrite + Unpin,
         {
@@ -12984,7 +15033,9 @@ mod tests {
             .send_message(ControlMessage::Status(status))
             .await
             .unwrap();
-        assert!(matches!(event_rx.recv().await, Some(ClientEvent::Status(value)) if value == status));
+        assert!(
+            matches!(event_rx.recv().await, Some(ClientEvent::Status(value)) if value == status)
+        );
 
         tokio::time::advance(Duration::from_secs(1)).await;
         let future = legacy_packet(BROADCAST_CLIENT_ID, 1, 0x31);
@@ -12992,15 +15043,16 @@ mod tests {
             .send_message(ControlMessage::Control(future.clone()))
             .await
             .unwrap();
-        assert!(matches!(event_rx.recv().await, Some(ClientEvent::Ready { packet }) if packet == future));
+        assert!(
+            matches!(event_rx.recv().await, Some(ClientEvent::Ready { packet }) if packet == future)
+        );
 
         tokio::time::advance(Duration::from_millis(998)).await;
-        assert!(timeout(
-            Duration::from_millis(1),
-            next_request(&mut host_transport)
-        )
-        .await
-        .is_err());
+        assert!(
+            timeout(Duration::from_millis(1), next_request(&mut host_transport))
+                .await
+                .is_err()
+        );
         tokio::time::advance(Duration::from_millis(1)).await;
         assert_eq!(
             next_request(&mut host_transport).await,
@@ -13008,12 +15060,11 @@ mod tests {
         );
 
         tokio::time::advance(CONTROL_REQUEST_INTERVAL - Duration::from_millis(2)).await;
-        assert!(timeout(
-            Duration::from_millis(1),
-            next_request(&mut host_transport)
-        )
-        .await
-        .is_err());
+        assert!(
+            timeout(Duration::from_millis(1), next_request(&mut host_transport))
+                .await
+                .is_err()
+        );
         tokio::time::advance(Duration::from_millis(1)).await;
         assert_eq!(
             next_request(&mut host_transport).await,
@@ -13032,12 +15083,11 @@ mod tests {
             }
         }
         tokio::time::advance(CONTROL_REQUEST_INTERVAL + Duration::from_secs(1)).await;
-        assert!(timeout(
-            Duration::from_millis(1),
-            next_request(&mut host_transport)
-        )
-        .await
-        .is_err());
+        assert!(
+            timeout(Duration::from_millis(1), next_request(&mut host_transport))
+                .await
+                .is_err()
+        );
 
         shutdown_tx.send(()).ok();
         client_loop.await.unwrap();
@@ -13054,6 +15104,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = ClientHandle {
             command_tx,
+            control_send_time: test_control_send_time_snapshot(),
             event_rx: Some(event_rx),
             shutdown_tx: Some(shutdown_tx),
             join_handle: tokio::spawn(run_client_loop(
@@ -13100,7 +15151,8 @@ mod tests {
         host_transport
             .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
                 ok: false,
-                message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec()).unwrap(),
+                message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
+                    .unwrap(),
                 wrong_password: false,
             }))
             .await
@@ -13158,9 +15210,9 @@ mod tests {
         // not another disconnect when that close becomes EOF
         // (src/C4Network2Client.cpp:104-119,457-492).
         let (host_stream, client_stream) = duplex(128);
-        let (_outbound_tx, outbound_rx) = HostOutboundSender::channel(1);
+        let (_outbound_tx, outbound_rx) = HostOutboundSender::channel();
         let retire_rx = _outbound_tx.subscribe_retire();
-        let (host_tx, mut host_rx) = mpsc::channel(2);
+        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(
             ClientTask {
                 local_connection_id: 3,
@@ -13179,7 +15231,8 @@ mod tests {
         client_transport
             .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
                 ok: false,
-                message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec()).unwrap(),
+                message: clonk_engine::LegacyCString::from_bytes(b"removing client".to_vec())
+                    .unwrap(),
                 wrong_password: false,
             }))
             .await
@@ -13198,6 +15251,7 @@ mod tests {
                 connection_id: 3,
                 client_id: 7,
                 next_inbound_packet: 0,
+                next_outbound_packet: _,
                 post_mortem: None,
                 reason: Some(reason),
             }) if reason == "removing client"
@@ -13212,9 +15266,9 @@ mod tests {
         // (src/C4Network2IO.cpp:520-570,1379-1396;
         // src/C4Network2.cpp:883-905).
         let (host_stream, client_stream) = duplex(256);
-        let (outbound_tx, outbound_rx) = HostOutboundSender::channel(1);
+        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
         let retire_rx = outbound_tx.subscribe_retire();
-        let (host_tx, mut host_rx) = mpsc::channel(1);
+        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(
             ClientTask {
                 local_connection_id: 3,
@@ -13250,6 +15304,7 @@ mod tests {
             connection_id: 3,
             client_id: 7,
             next_inbound_packet: 0,
+            next_outbound_packet: _,
             post_mortem: Some(post_mortem),
             reason: None,
         }) = host_rx.recv().await
@@ -13268,9 +15323,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn failed_host_route_retains_commands_already_accepted_by_its_queue() {
         let (host_stream, client_stream) = duplex(256);
-        let (outbound_tx, outbound_rx) = HostOutboundSender::channel(2);
+        let (outbound_tx, outbound_rx) = HostOutboundSender::channel();
         let retire_rx = outbound_tx.subscribe_retire();
-        let (host_tx, mut host_rx) = mpsc::channel(1);
+        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
         let first = NetworkStatus {
             state: NETWORK_STATE_LOBBY,
             control_mode: 1,
@@ -13327,6 +15382,142 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_writer_failure_preserves_fifo_across_post_mortem_fallback() {
+        // C4Network2::OnDisconn removes the failed message connection before
+        // it creates and queues PID_PostMortem. Until that main-thread event,
+        // C4Network2IOConnection::Send keeps accepting packets into the dead
+        // connection's log, preventing fallback traffic from overtaking it
+        // (oracle-src-pinned src/C4Network2.cpp:873-912;
+        // src/C4Network2Client.cpp:90-102,121-124;
+        // src/C4Network2IO.cpp:1451-1491).
+        let client_id = 7;
+        let (failed, failed_rx) = HostOutboundSender::channel();
+        let retire_rx = failed.subscribe_retire();
+        let (fallback, mut fallback_rx) = HostOutboundSender::channel();
+        let mut state = host_state_with_test_route(client_id, failed.clone());
+        let failed_route = state.accepted_routes.get_mut(&1).unwrap();
+        failed_route.remote_connection_id = 11;
+        failed_route.protocol = crate::NetworkProtocol::Udp;
+        state.accepted_routes.insert(
+            2,
+            AcceptedConnectionRoute {
+                client_id,
+                remote_connection_id: 12,
+                peer_addr: "127.0.0.1:11112".parse().unwrap(),
+                protocol: crate::NetworkProtocol::Tcp,
+                ping: RoutePingLag::default(),
+                outbound: fallback,
+            },
+        );
+        let (host_tx, mut host_rx) = mpsc::unbounded_channel();
+        let route_task = tokio::spawn(
+            ClientTask {
+                local_connection_id: 1,
+                remote_connection_id: 11,
+                client_id,
+                transport: crate::ControlTransport::new(FailingWriteStream),
+                outbound_rx: failed_rx,
+                retire_rx,
+                host_tx,
+                liveness: ConnectionLivenessState::new_accepted_system(),
+            }
+            .run(),
+        );
+        let first = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 1,
+            target_tick: 51,
+        };
+        let second = NetworkStatus {
+            state: NETWORK_STATE_PAUSE,
+            control_mode: 1,
+            target_tick: 52,
+        };
+
+        assert!(try_send_host_message(
+            &state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::Status(first),
+        ));
+        timeout(EVENT_WAIT, async {
+            loop {
+                if failed.writer_channel_is_closed() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("forced host writer failure did not close its route queue");
+        failed.retire();
+        assert!(try_send_host_message(
+            &state,
+            client_id,
+            ConnectionTrafficClass::Message,
+            ControlMessage::Status(second),
+        ));
+
+        let Some(HostLoopMessage::ClientDisconnected {
+            connection_id,
+            client_id: source_client_id,
+            next_inbound_packet,
+            next_outbound_packet,
+            post_mortem,
+            reason,
+        }) = timeout(EVENT_WAIT, host_rx.recv())
+            .await
+            .expect("failed host route did not report disconnection")
+        else {
+            panic!("failed host route did not publish its post-mortem");
+        };
+        handle_client_disconnected(
+            connection_id,
+            source_client_id,
+            next_inbound_packet,
+            next_outbound_packet,
+            post_mortem,
+            reason,
+            &mut state,
+        )
+        .await;
+
+        let mut logical_order = Vec::new();
+        while logical_order.len() < 2 {
+            match timeout(EVENT_WAIT, fallback_rx.recv())
+                .await
+                .expect("host fallback replay stalled")
+                .expect("host fallback route closed")
+            {
+                HostOutboundMessage::Message(ControlMessage::PostMortem(packet)) => {
+                    logical_order.extend(packet.packets.into_iter().map(|packet| {
+                        crate::transport::parse_complete_packet(&packet)
+                            .unwrap()
+                            .expect("post-mortem entry is typed")
+                    }));
+                }
+                HostOutboundMessage::Message(message) => logical_order.push(message),
+                HostOutboundMessage::Raw(packet) => {
+                    logical_order.push(
+                        crate::transport::parse_complete_packet(&packet)
+                            .unwrap()
+                            .expect("raw fallback entry is typed"),
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            logical_order,
+            vec![
+                ControlMessage::Status(first),
+                ControlMessage::Status(second),
+            ]
+        );
+
+        route_task.await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn graceful_client_part_emits_one_host_departure_with_cpp_reason() {
         // DeleteClient closes the accepted peer with "removing client"; the
@@ -13350,7 +15541,7 @@ mod tests {
                 Some(HostEvent::ClientLeft { client_id: left }) if left == client_id => {
                     departures += 1;
                 }
-                Some(HostEvent::TransportError {
+                Some(HostEvent::RecoverableRouteDiagnostic {
                     client_id: Some(source),
                     error,
                 }) if source == client_id && error == "removing client" => {
@@ -14196,7 +16387,10 @@ mod tests {
         });
         let mut backlog = ControlBacklog::new(8);
 
-        assert_eq!(eligible_client_recovery_tick(&resource_state, &backlog), None);
+        assert_eq!(
+            eligible_client_recovery_tick(&resource_state, &backlog),
+            None
+        );
         backlog.record_packet(&legacy_packet(1, 0, 0x11));
         assert_eq!(
             eligible_client_recovery_tick(&resource_state, &backlog),
@@ -14995,6 +17189,7 @@ mod tests {
                 // still trips the timeout because Ready never arrives.
                 Ok(Some(HostEvent::ClientLeft { .. }))
                 | Ok(Some(HostEvent::ClientConnectionFailed { .. }))
+                | Ok(Some(HostEvent::RecoverableRouteDiagnostic { .. }))
                 | Ok(Some(HostEvent::UnhandledPacket { .. }))
                 | Ok(Some(HostEvent::TransportError { .. })) => continue,
                 Ok(Some(HostEvent::Direct { .. }))
@@ -15015,6 +17210,9 @@ mod tests {
                 | Ok(Some(HostEvent::LocalAddressesChanged { .. }))
                 | Ok(Some(HostEvent::NetpuncherStateChanged { .. }))
                 | Ok(Some(HostEvent::StatusCommitted(_))) => continue,
+                Ok(Some(HostEvent::FatalError { error })) => {
+                    panic!("host became fatal while waiting for ready tick: {error}")
+                }
                 Ok(None) => panic!("host event stream ended unexpectedly"),
                 Err(_) => panic!("timed out waiting for host ready event"),
             }

@@ -427,6 +427,32 @@ impl GameApp {
         prepared_go: bool,
     ) -> Result<(), EngineError> {
         let returns_to_startup = self.failed_open_game_returns_to_startup();
+        if prepared_go && returns_to_startup {
+            // A failed InitGame after DoLobby returned still unwinds through
+            // C4Application::QuitGame. Clear the partially initialized
+            // network round before reconstructing the remembered host/join
+            // startup dialog (src/C4Application.cpp:373-400,442-451;
+            // src/C4Game.cpp:452-477).
+            let purpose = if matches!(self.runtime_network_role(), RuntimeNetworkRole::Host)
+                || self.scenario_selector_mode == ScenarioSelectorMode::NetworkHost
+            {
+                StartupNetworkPurpose::StagedHost
+            } else {
+                StartupNetworkPurpose::Join
+            };
+            return self.finish_startup_network_failure(purpose, message);
+        }
+        if prepared_go && self.network.is_some() {
+            // Explicit/direct command-line starts have no startup generation,
+            // but QuitGame still tears down the failed network before the
+            // process exits.
+            let local_client_id = self
+                .network
+                .as_ref()
+                .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                .unwrap_or_else(|| self.offline_local_client_id());
+            self.change_network_control_to_local(local_client_id);
+        }
         if !prepared_go && self.network.is_none() && returns_to_startup {
             // C4Application::OpenGame marks a failed ordinary fullscreen
             // local start, clears the partial game, enters PreInit, restores
@@ -439,8 +465,8 @@ impl GameApp {
             return self.present_startup_restart_diagnostics();
         }
 
-        // Explicit command-line/developer-console starts and an already
-        // prepared network GO do not enter another startup generation.
+        // Explicit command-line/developer-console starts do not enter another
+        // startup generation.
         self.restore_startup_gui_sheets();
         self.active_global_gui_failures.clear();
         self.status_text = message;
@@ -448,7 +474,7 @@ impl GameApp {
         self.network_start_wait = None;
         self.mode = AppMode::Menu;
         self.restore_startup_fonts();
-        if self.failed_record_stream_exits() {
+        if prepared_go || self.failed_record_stream_exits() {
             self.request_exit();
         } else if returns_to_startup {
             if let Some(audio) = self.audio.as_mut() {
@@ -1289,6 +1315,15 @@ impl GameApp {
         engine.configure_sound_samples(sound_samples);
         engine.configure_music_tracks(music_tracks);
 
+        // C4Game::InitRules/InitGoals read the synchronized Game.Parameters
+        // lists after the lobby, not the source Scenario.txt lists
+        // (C4Game.cpp:4056-4076). PreparedGo retains those exact host-snapshot
+        // or client-JoinData lists across asynchronous scenario activation.
+        let synchronized_rule_goal_lists = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .map(|prepared| &prepared.synchronized_rule_goal_lists);
         let initial_record_music_enabled = (!replay
             && (self.recording_enabled || self.network_is_league))
             .then_some(initial_game_data.is_some_and(|game_data| game_data.music_enabled));
@@ -1298,6 +1333,7 @@ impl GameApp {
             initial_game_data,
             prepared_team_configuration,
             prepared_team_registry,
+            synchronized_rule_goal_lists,
             initial_record_music_enabled,
         ) {
             Ok((_, initial_record)) => {

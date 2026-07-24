@@ -20,7 +20,7 @@ pub(crate) enum HostLoopMessage {
         peer_addr: SocketAddr,
         protocol: crate::NetworkProtocol,
         outbound: HostOutboundSender,
-        setup_tx: oneshot::Sender<Result<Option<ClientSetup>, String>>,
+        setup_tx: oneshot::Sender<Result<(), String>>,
     },
     ClientMessage {
         connection_id: u32,
@@ -39,6 +39,7 @@ pub(crate) enum HostLoopMessage {
         connection_id: u32,
         client_id: ClientId,
         next_inbound_packet: u32,
+        next_outbound_packet: u32,
         post_mortem: Option<crate::PostMortemPacket>,
         reason: Option<String>,
     },
@@ -93,6 +94,7 @@ pub(crate) struct HostState {
     pub(crate) scheduler: ResyncScheduler,
     pub(crate) clients: BTreeMap<ClientId, ClientConnection>,
     pub(crate) accepted_routes: BTreeMap<u32, AcceptedConnectionRoute>,
+    pub(crate) control_send_time_epoch: u64,
     pub(crate) closed_routes: crate::post_mortem::ClosedConnectionRouter,
     pub(crate) pending_sync: Vec<clonk_engine::ControlPacket>,
     pub(crate) status_barrier: StatusBarrier,
@@ -118,6 +120,12 @@ pub(crate) struct HostState {
     pub(crate) pending_post_mortems: BTreeMap<u32, (ClientId, crate::PostMortemPacket, i32)>,
     pub(crate) removing_clients: BTreeSet<ClientId>,
     pub(crate) event_tx: mpsc::Sender<HostEvent>,
+}
+
+impl HostState {
+    pub(crate) fn invalidate_control_send_time(&mut self) {
+        self.control_send_time_epoch = self.control_send_time_epoch.wrapping_add(1);
+    }
 }
 
 fn same_peer_host(left: SocketAddr, right: SocketAddr) -> bool {
@@ -205,12 +213,104 @@ pub(crate) fn preferred_host_route(
         })
 }
 
+fn preferred_host_send_route(
+    state: &HostState,
+    client_id: ClientId,
+    traffic: ConnectionTrafficClass,
+) -> Option<&AcceptedConnectionRoute> {
+    state
+        .accepted_routes
+        .values()
+        .filter(|route| route.client_id == client_id && route.outbound.accepts_post_failure_fifo())
+        .min_by_key(|route| match (traffic, route.protocol) {
+            (ConnectionTrafficClass::Message, crate::NetworkProtocol::Udp)
+            | (ConnectionTrafficClass::Data, crate::NetworkProtocol::Tcp) => 0,
+            (ConnectionTrafficClass::Message, crate::NetworkProtocol::Tcp)
+            | (ConnectionTrafficClass::Data, crate::NetworkProtocol::Udp) => 1,
+            _ => 2,
+        })
+}
+
+fn host_control_send_time_topology(
+    state: &HostState,
+) -> (BTreeSet<ClientId>, BTreeMap<ClientId, i32>) {
+    let known_clients = state
+        .client_cores
+        .keys()
+        .filter_map(|client_id| ClientId::try_from(*client_id).ok())
+        .collect::<BTreeSet<_>>();
+    let mut preferred_message_routes = BTreeMap::<ClientId, (u8, u32, i32)>::new();
+
+    for (connection_id, route) in &state.accepted_routes {
+        if route.outbound.is_closed() || !known_clients.contains(&route.client_id) {
+            continue;
+        }
+        let protocol_rank = match route.protocol {
+            crate::NetworkProtocol::Udp => 0,
+            crate::NetworkProtocol::Tcp => 1,
+            _ => 2,
+        };
+        let candidate = (protocol_rank, *connection_id, route.ping.ping_ms());
+        if preferred_message_routes
+            .get(&route.client_id)
+            .is_none_or(|best| {
+                candidate.0 < best.0 || (candidate.0 == best.0 && candidate.1 < best.1)
+            })
+        {
+            preferred_message_routes.insert(route.client_id, candidate);
+        }
+    }
+
+    (
+        known_clients,
+        preferred_message_routes
+            .into_iter()
+            .map(|(client_id, (_, _, ping_ms))| (client_id, ping_ms))
+            .collect(),
+    )
+}
+
+pub(crate) fn publish_host_control_send_time(
+    state: &HostState,
+    snapshot: &ControlSendTimeSnapshot,
+) {
+    let (known_clients, preferred_message_ping_ms) = host_control_send_time_topology(state);
+    snapshot.publish(
+        state.control_mode,
+        HOST_CLIENT_ID,
+        known_clients,
+        preferred_message_ping_ms,
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn host_control_send_time_ms(
+    state: &HostState,
+    activated_client_ids: &[ClientId],
+) -> i32 {
+    let (known_clients, preferred_message_ping_ms) = host_control_send_time_topology(state);
+    control_send_time_ms(
+        state.control_mode,
+        activated_client_ids
+            .iter()
+            .copied()
+            .filter(|client_id| *client_id != HOST_CLIENT_ID)
+            .filter(|client_id| known_clients.contains(client_id))
+            .map(|client_id| {
+                (
+                    client_id,
+                    preferred_message_ping_ms.get(&client_id).copied(),
+                )
+            }),
+    )
+}
+
 fn preferred_host_outbound(
     state: &HostState,
     client_id: ClientId,
     traffic: ConnectionTrafficClass,
 ) -> Option<HostOutboundSender> {
-    preferred_host_route(state, client_id, traffic).map(|route| route.outbound.clone())
+    preferred_host_send_route(state, client_id, traffic).map(|route| route.outbound.clone())
 }
 
 pub(crate) fn host_runtime_connections(state: &HostState) -> Vec<RuntimeNetworkConnection> {
@@ -298,25 +398,20 @@ pub(crate) fn host_runtime_client_states(
         .collect()
 }
 
-pub(crate) fn disconnect_host_runtime_connection(connection_id: u32, state: &HostState) -> bool {
+pub(crate) fn disconnect_host_runtime_connection(
+    connection_id: u32,
+    state: &mut HostState,
+) -> bool {
     let Some(route) = state
         .accepted_routes
         .get(&connection_id)
-        .filter(|route| !route.outbound.is_closed())
+        .filter(|route| !route.outbound.is_retiring())
     else {
         return false;
     };
     route.outbound.retire();
+    state.invalidate_control_send_time();
     true
-}
-
-pub(crate) fn host_target_client_ids(state: &HostState, except_client_id: Option<ClientId>) -> Vec<ClientId> {
-    state
-        .clients
-        .keys()
-        .filter(|client_id| Some(**client_id) != except_client_id)
-        .copied()
-        .collect()
 }
 
 pub(crate) async fn send_host_message(
@@ -340,19 +435,10 @@ pub(crate) async fn send_host_raw(
         };
         match outbound.try_send_raw(packet) {
             Ok(()) => return true,
-            Err(mpsc::error::TrySendError::Full(full)) => {
-                packet = match full {
-                    HostOutboundMessage::Raw(packet) => packet,
-                    HostOutboundMessage::Message(_) => unreachable!("sent a raw packet"),
-                    HostOutboundMessage::Close(_) => unreachable!("sent a raw packet"),
-                };
-                outbound.retire();
-            }
-            Err(mpsc::error::TrySendError::Closed(closed)) => {
+            Err(mpsc::error::SendError(closed)) => {
                 packet = match closed {
                     HostOutboundMessage::Raw(packet) => packet,
                     HostOutboundMessage::Message(_) => unreachable!("sent a raw packet"),
-                    HostOutboundMessage::Close(_) => unreachable!("sent a raw packet"),
                 };
             }
         }
@@ -371,23 +457,71 @@ pub(crate) fn try_send_host_message(
         };
         match outbound.try_send(message) {
             Ok(()) => return true,
-            Err(mpsc::error::TrySendError::Full(full)) => {
-                message = match full {
-                    HostOutboundMessage::Message(message) => message,
-                    HostOutboundMessage::Raw(_) => unreachable!("sent a logical message"),
-                    HostOutboundMessage::Close(_) => unreachable!("sent a logical message"),
-                };
-                outbound.retire();
-            }
-            Err(mpsc::error::TrySendError::Closed(closed)) => {
+            Err(mpsc::error::SendError(closed)) => {
                 message = match closed {
                     HostOutboundMessage::Message(message) => message,
                     HostOutboundMessage::Raw(_) => unreachable!("sent a logical message"),
-                    HostOutboundMessage::Close(_) => unreachable!("sent a logical message"),
                 };
             }
         }
     }
+}
+
+/// Queues one logical message on each target client's preferred route.
+///
+/// C++ caches one message connection on every `C4Network2Client` and performs
+/// a broadcast in one connection-list pass (src/C4Network2Client.cpp:497-541).
+/// Resolve the equivalent Rust routes in one pass as well. Re-running
+/// `preferred_host_send_route` for every client would scan the full route
+/// registry once per peer.
+pub(crate) fn broadcast_host_message(
+    state: &HostState,
+    traffic: ConnectionTrafficClass,
+    message: ControlMessage,
+    except_client_id: Option<ClientId>,
+) -> Vec<ClientId> {
+    let mut preferred = BTreeMap::<ClientId, (u8, u32, HostOutboundSender)>::new();
+    for (connection_id, route) in &state.accepted_routes {
+        if Some(route.client_id) == except_client_id
+            || !state.clients.contains_key(&route.client_id)
+            || !route.outbound.accepts_post_failure_fifo()
+        {
+            continue;
+        }
+        let protocol_rank = match (traffic, route.protocol) {
+            (ConnectionTrafficClass::Message, crate::NetworkProtocol::Udp)
+            | (ConnectionTrafficClass::Data, crate::NetworkProtocol::Tcp) => 0,
+            (ConnectionTrafficClass::Message, crate::NetworkProtocol::Tcp)
+            | (ConnectionTrafficClass::Data, crate::NetworkProtocol::Udp) => 1,
+            _ => 2,
+        };
+        let candidate = (protocol_rank, *connection_id);
+        if preferred
+            .get(&route.client_id)
+            .is_none_or(|(best_rank, best_id, _)| candidate < (*best_rank, *best_id))
+        {
+            preferred.insert(
+                route.client_id,
+                (protocol_rank, *connection_id, route.outbound.clone()),
+            );
+        }
+    }
+
+    let mut sent = Vec::with_capacity(preferred.len());
+    for (client_id, (_, _, outbound)) in preferred {
+        match outbound.try_send(message.clone()) {
+            Ok(()) => sent.push(client_id),
+            Err(mpsc::error::SendError(HostOutboundMessage::Message(message))) => {
+                if try_send_host_message(state, client_id, traffic, message) {
+                    sent.push(client_id);
+                }
+            }
+            Err(mpsc::error::SendError(HostOutboundMessage::Raw(_))) => {
+                unreachable!("logical broadcast only queues logical messages")
+            }
+        }
+    }
+    sent
 }
 
 pub(crate) fn resource_traffic_class(packet: &ResourcePacket) -> ConnectionTrafficClass {
@@ -455,8 +589,8 @@ pub(crate) fn publish_host_runtime_dynamic(
         }
     };
     let source_path = materialize_runtime_dynamic(&network_directory, &dynamic)?;
-    let wire_name = runtime_dynamic_wire_name(&dynamic.group_filename, &source_path)
-        .inspect_err(|_| {
+    let wire_name =
+        runtime_dynamic_wire_name(&dynamic.group_filename, &source_path).inspect_err(|_| {
             let _ = fs::remove_file(&source_path);
         })?;
     let core_spec = crate::HostResourceCoreSpec::new_with_raw_group_maker(
@@ -588,13 +722,11 @@ fn materialize_runtime_dynamic(
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(directory)
         .map_err(|error| format!("could not create network resource directory: {error}"))?;
-    let basename = crate::host_resource_core::network_temp_basename(
-        dynamic.group_filename.as_bytes(),
-    );
+    let basename =
+        crate::host_resource_core::network_temp_basename(dynamic.group_filename.as_bytes());
     for suffix in 1..=MAX_RUNTIME_DYNAMIC_SUFFIX {
         let candidate = crate::host_resource_core::network_temp_candidate(&basename, suffix);
-        let candidate =
-            String::from_utf8(candidate).expect("FindTempResFileName produces ASCII");
+        let candidate = String::from_utf8(candidate).expect("FindTempResFileName produces ASCII");
         let path = directory.join(candidate);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
@@ -782,4 +914,3 @@ pub(crate) fn finish_host_resource_derive(
         .for_each(|published| *published = core.clone());
     Ok((core, events))
 }
-

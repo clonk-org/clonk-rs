@@ -2692,6 +2692,11 @@ fn validate_scene(
     Ok(())
 }
 
+#[inline]
+fn arc_slice_contents_equal<T: PartialEq>(left: &Arc<[T]>, right: &Arc<[T]>) -> bool {
+    Arc::ptr_eq(left, right) || left.as_ref() == right.as_ref()
+}
+
 fn validate_layers(
     layers: &[GpuSceneLayer<'_>],
 ) -> Result<Vec<GpuTextureResource>, GpuRendererError> {
@@ -2728,7 +2733,7 @@ fn validate_layers(
                     if current.extent != resource.extent
                         || current.format != resource.format
                         || current.revision != resource.revision
-                        || current.pixels.as_ref() != resource.pixels.as_ref()
+                        || !arc_slice_contents_equal(&current.pixels, &resource.pixels)
                     {
                         return Err(GpuRendererError::LayerTextureConflict(resource.id));
                     }
@@ -3682,6 +3687,28 @@ mod tests {
             ]),
             Err(GpuRendererError::LayerTextureConflict(conflict)) if conflict == id
         ));
+    }
+
+    #[test]
+    fn shared_arc_backing_skips_content_comparison() {
+        #[derive(Debug)]
+        struct ComparisonMustNotRun;
+
+        impl PartialEq for ComparisonMustNotRun {
+            fn eq(&self, _other: &Self) -> bool {
+                panic!("shared Arc backing must bypass element comparison");
+            }
+        }
+
+        let shared: Arc<[ComparisonMustNotRun]> =
+            Arc::from(vec![ComparisonMustNotRun].into_boxed_slice());
+        assert!(arc_slice_contents_equal(&shared, &shared));
+
+        let first: Arc<[u8]> = Arc::from([1, 2, 3, 4]);
+        let equal: Arc<[u8]> = Arc::from([1, 2, 3, 4]);
+        let different: Arc<[u8]> = Arc::from([1, 2, 3, 5]);
+        assert!(arc_slice_contents_equal(&first, &equal));
+        assert!(!arc_slice_contents_equal(&first, &different));
     }
 
     #[test]

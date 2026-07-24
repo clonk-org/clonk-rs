@@ -33,6 +33,33 @@ struct PendingViewportForeground {
 
 const MAX_TILED_UNDERLAY_CACHE_ENTRIES: usize = 8;
 
+fn object_base_sprite_request(object: &ObjectSnapshot) -> (&str, Option<&str>) {
+    object.base_graphics.as_ref().map_or_else(
+        || (object.definition_id.as_str(), None),
+        |base| (base.definition.as_str(), base.graphics_name.as_deref()),
+    )
+}
+
+/// Resolve C4Object/C4GraphicsOverlay bitmap fallbacks without copying the
+/// selected sprite. In particular, [`DefinitionSprite`] owns the complete
+/// action-graphics map, so cloning it in the object walk duplicates immutable
+/// definition metadata for every visible object and presentation.
+fn sprite_with_fallback<'sprites, T>(
+    sprites: &'sprites HashMap<String, T>,
+    definition_id: &str,
+    graphics_name: Option<&str>,
+    fallback_definition_id: &str,
+) -> Option<&'sprites T> {
+    sprites
+        .get(&sprite_map_key(definition_id, graphics_name))
+        .or_else(|| graphics_name.and_then(|_| sprites.get(&sprite_map_key(definition_id, None))))
+        .or_else(|| {
+            (definition_id != fallback_definition_id)
+                .then(|| sprites.get(&sprite_map_key(fallback_definition_id, None)))
+                .flatten()
+        })
+}
+
 pub(crate) struct TiledUnderlayCacheEntry {
     width: u32,
     height: u32,
@@ -651,10 +678,7 @@ impl GraphicsSystem {
         } else {
             (0.0, 0.0)
         };
-        let chunk_size = (
-            fog.map.resolution_x as f32,
-            fog.map.resolution_y as f32,
-        );
+        let chunk_size = (fog.map.resolution_x as f32, fog.map.resolution_y as f32);
         let sampler = FogSpriteSampler::new_with_chunks(
             &fog,
             (
@@ -850,8 +874,8 @@ impl GraphicsSystem {
             return SurfaceRect::new(0, 0, self.surface_width, self.surface_height);
         }
 
-        let top = hud::upper_board_reserved_height(upper_board_mode)
-            .clamp(0, self.surface_height as i32);
+        let top =
+            hud::upper_board_reserved_height(upper_board_mode).clamp(0, self.surface_height as i32);
         let bottom = self
             .message_board_height()
             .clamp(0, self.surface_height as i32);
@@ -936,12 +960,8 @@ impl GraphicsSystem {
 
         state.view_x = state.view_x.saturating_add(delta.x);
         state.view_y = state.view_y.saturating_add(delta.y);
-        let (view_x, view_y) = state.no_owner_position(
-            view_width,
-            view_height,
-            world_width,
-            world_height,
-        );
+        let (view_x, view_y) =
+            state.no_owner_position(view_width, view_height, world_width, world_height);
 
         // C4Viewport::UpdateViewPosition changes the live projection in the
         // same call. Keep pointer routing and another edge tick observable
@@ -955,12 +975,11 @@ impl GraphicsSystem {
         let border_bottom = (view_height - world_height + view_y)
             .max(0)
             .min(view_height - border_top);
-        let offset_x =
-            scaled_camera_border(border_left, viewport.zoom, viewport.rect.width) as i32;
-        let offset_y =
-            scaled_camera_border(border_top, viewport.zoom, viewport.rect.height) as i32;
+        let offset_x = scaled_camera_border(border_left, viewport.zoom, viewport.rect.width) as i32;
+        let offset_y = scaled_camera_border(border_top, viewport.zoom, viewport.rect.height) as i32;
         let right_pixels = scaled_camera_border(border_right, viewport.zoom, viewport.rect.width);
-        let bottom_pixels = scaled_camera_border(border_bottom, viewport.zoom, viewport.rect.height);
+        let bottom_pixels =
+            scaled_camera_border(border_bottom, viewport.zoom, viewport.rect.height);
         let content_width = viewport
             .rect
             .width
@@ -1039,10 +1058,9 @@ impl GraphicsSystem {
         native_offset: (i32, i32),
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> bool {
-        let Some(image) = cursor_atlas.image_for_scaled_resolution(
-            logical_resolution_width,
-            presentation_scale,
-        ) else {
+        let Some(image) =
+            cursor_atlas.image_for_scaled_resolution(logical_resolution_width, presentation_scale)
+        else {
             return false;
         };
         let cell = image.height() as i32;
@@ -1183,12 +1201,7 @@ impl GraphicsSystem {
             .cursor_atlas
             .image_for_scaled_resolution(self.logical_resolution_width, self.presentation_scale)?;
         let cell = i32::try_from(image.height()).ok()?;
-        let source = SourceRect::new(
-            phase.atlas_phase().saturating_mul(cell),
-            0,
-            cell,
-            cell,
-        );
+        let source = SourceRect::new(phase.atlas_phase().saturating_mul(cell), 0, cell, cell);
         if !Self::source_within_image(&image, &source) {
             return None;
         }
@@ -1559,12 +1572,12 @@ impl GraphicsSystem {
         if rect.width == 0 || rect.height == 0 {
             return None;
         }
-        let right = rect.x.saturating_add(
-            i32::try_from(rect.width.saturating_sub(1)).unwrap_or(i32::MAX),
-        );
-        let bottom = rect.y.saturating_add(
-            i32::try_from(rect.height.saturating_sub(1)).unwrap_or(i32::MAX),
-        );
+        let right = rect
+            .x
+            .saturating_add(i32::try_from(rect.width.saturating_sub(1)).unwrap_or(i32::MAX));
+        let bottom = rect
+            .y
+            .saturating_add(i32::try_from(rect.height.saturating_sub(1)).unwrap_or(i32::MAX));
         let point = GuiPoint::new(
             point.x.clamp(rect.x as f32, right as f32),
             point.y.clamp(rect.y as f32, bottom as f32),
@@ -1651,13 +1664,7 @@ impl GraphicsSystem {
         point: GuiPoint,
         excluded: ObjectId,
     ) -> Option<ObjectId> {
-        self.object_at_point_with_ocf_excluding(
-            snapshot,
-            owner,
-            point,
-            u32::MAX,
-            Some(excluded),
-        )
+        self.object_at_point_with_ocf_excluding(snapshot, owner, point, u32::MAX, Some(excluded))
     }
 
     /// The OCF-filtered form of [`Self::object_at_point`], matching the mask
@@ -1797,9 +1804,12 @@ impl GraphicsSystem {
         self.show_portraits = overlay.show_portraits;
         self.show_commands = overlay.show_commands;
         self.show_command_keys = overlay.show_command_keys;
-        self.debug_hud_text = overlay
-            .debug_hud
-            .then(|| (overlay.frame_text.to_string(), overlay.status_text.to_string()));
+        self.debug_hud_text = overlay.debug_hud.then(|| {
+            (
+                overlay.frame_text.to_string(),
+                overlay.status_text.to_string(),
+            )
+        });
     }
 
     /// Installs the CStdFont-faithful HUD fonts (FontRegular et al).
@@ -1838,9 +1848,7 @@ impl GraphicsSystem {
     }
 
     pub fn upper_board_text_strip_width(&self) -> i32 {
-        hud::upper_board_text_strip_width_for_text_width(
-            self.initialized_upper_board_text_width(),
-        )
+        hud::upper_board_text_strip_width_for_text_width(self.initialized_upper_board_text_width())
     }
 
     fn initialize_upper_board_text_width(&mut self) {
@@ -2103,10 +2111,7 @@ impl GraphicsSystem {
 
     /// Complete the ordered HUD chrome and gamma lifecycle without
     /// materializing the diagnostic sprite atlas.
-    pub fn render_frame_hud_chrome_without_atlas(
-        &mut self,
-        pending: PendingHudChromeFrame<'_>,
-    ) {
+    pub fn render_frame_hud_chrome_without_atlas(&mut self, pending: PendingHudChromeFrame<'_>) {
         let _renderer_config = activate_advanced_renderer_config(self.advanced_renderer_config);
         let pending = pending.0;
         self.assert_pending_frame(&pending);
@@ -2414,12 +2419,8 @@ impl GraphicsSystem {
         if pending_observer_scroll != Vector2::ZERO {
             state.view_x = state.view_x.saturating_add(pending_observer_scroll.x);
             state.view_y = state.view_y.saturating_add(pending_observer_scroll.y);
-            (view_x, view_y) = state.no_owner_position(
-                view_width,
-                view_height,
-                world_width,
-                world_height,
-            );
+            (view_x, view_y) =
+                state.no_owner_position(view_width, view_height, world_width, world_height);
         }
         let offset = if input.owner == OWNER_NONE {
             Vector2::ZERO
@@ -2487,9 +2488,7 @@ impl GraphicsSystem {
             view_width,
             view_height,
         );
-        let fade_transparent = fog_map
-            .as_ref()
-            .is_some_and(|map| map.fade_transparent);
+        let fade_transparent = fog_map.as_ref().is_some_and(|map| map.fade_transparent);
         let has_scroll_borders = offset_x != 0
             || offset_y != 0
             || content_width != rect.width
@@ -2622,12 +2621,7 @@ impl GraphicsSystem {
             ObjectRenderPass::Normal,
             gamma,
         );
-        self.draw_definition_particles(
-            &snapshot.particles,
-            &ParticleLayer::Global,
-            None,
-            gamma,
-        );
+        self.draw_definition_particles(&snapshot.particles, &ParticleLayer::Global, None, gamma);
         self.draw_objects_at_frame(
             snapshot.frame,
             &snapshot.objects,
@@ -2649,14 +2643,9 @@ impl GraphicsSystem {
         if self.viewport_overlays_visible {
             if input.owner != OWNER_NONE {
                 if let Some(focus) = input.focus {
-                    let highlight_ids = Self::collect_highlight_ids(snapshot, input.owner, focus.id);
-                    self.draw_selection_marks(
-                        snapshot,
-                        &highlight_ids,
-                        input.owner,
-                        zoom,
-                        gamma,
-                    );
+                    let highlight_ids =
+                        Self::collect_highlight_ids(snapshot, input.owner, focus.id);
+                    self.draw_selection_marks(snapshot, &highlight_ids, input.owner, zoom, gamma);
                 }
                 self.draw_player_cursors(snapshot, input.owner, origin_x, origin_y, zoom, gamma);
             } else {
@@ -2664,14 +2653,7 @@ impl GraphicsSystem {
                 // cursor flash, while C4Object::DrawSelectMark requires a valid
                 // `iByPlayer` and therefore emits no per-object select marks.
                 for player in &snapshot.players {
-                    self.draw_player_cursors(
-                        snapshot,
-                        player.id,
-                        origin_x,
-                        origin_y,
-                        zoom,
-                        gamma,
-                    );
+                    self.draw_player_cursors(snapshot, player.id, origin_x, origin_y, zoom, gamma);
                 }
             }
         }
@@ -3127,13 +3109,7 @@ impl GraphicsSystem {
         let bottom = Self::sky_fade_color(settings, view_bottom, self.world_height);
         let top = Color::opaque(top.r, top.g, top.b);
         let bottom = Color::opaque(bottom.r, bottom.g, bottom.b);
-        self.fill_vertical_gradient_modulated(
-            top,
-            bottom,
-            lighting,
-            settings.modulation,
-            gamma,
-        );
+        self.fill_vertical_gradient_modulated(top, bottom, lighting, settings.modulation, gamma);
     }
 
     /// C4Sky::GetSkyFadeClr (C4Sky.cpp:230-236): integer fade between
@@ -3141,12 +3117,17 @@ impl GraphicsSystem {
     /// iPos2 = iY*256/GBackHgt, channel = (c1*iPos1 + c2*iPos2) >> 8.
     /// C++ never sees out-of-landscape Y (the viewport is clamped); the
     /// clamp here keeps stray coordinates from wrapping the fixed-point mix.
-    pub(crate) fn sky_fade_color(settings: &SkySettings, world_y: i32, world_height: i32) -> RgbColor {
+    pub(crate) fn sky_fade_color(
+        settings: &SkySettings,
+        world_y: i32,
+        world_height: i32,
+    ) -> RgbColor {
         let height = world_height.max(1);
         let pos2 = (world_y * 256 / height).clamp(0, 256);
         let pos1 = 256 - pos2;
-        let channel =
-            |c1: u8, c2: u8| ((i32::from(c1) * pos1 + i32::from(c2) * pos2) >> 8).clamp(0, 255) as u8;
+        let channel = |c1: u8, c2: u8| {
+            ((i32::from(c1) * pos1 + i32::from(c2) * pos2) >> 8).clamp(0, 255) as u8
+        };
         RgbColor::new(
             channel(settings.fade_top.r, settings.fade_bottom.r),
             channel(settings.fade_top.g, settings.fade_bottom.g),
@@ -3287,8 +3268,7 @@ impl GraphicsSystem {
                                 x_samples[x as usize],
                                 y_samples[y as usize],
                                 |vertex_y| {
-                                    let t = (vertex_y * self.surface_height as f32
-                                        / height as f32)
+                                    let t = (vertex_y * self.surface_height as f32 / height as f32)
                                         .clamp(0.0, 1.0);
                                     color_at_y(t)
                                 },
@@ -3310,8 +3290,8 @@ impl GraphicsSystem {
         lighting: f32,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
-        let visible_pixels = (self.surface_width as usize)
-            .saturating_mul(self.surface_height as usize);
+        let visible_pixels =
+            (self.surface_width as usize).saturating_mul(self.surface_height as usize);
         self.tile_sky_image_with_parallel_rows(
             image,
             settings,
@@ -3748,17 +3728,12 @@ impl GraphicsSystem {
             if &particle.layer != layer {
                 continue;
             }
-            let Some(definition) = self
-                .particle_sprites
-                .get(&particle.definition_id)
-                .cloned()
+            let Some(definition) = self.particle_sprites.get(&particle.definition_id).cloned()
             else {
                 continue;
             };
             match definition.draw_proc {
-                ParticleDrawProc::Smoke => {
-                    self.draw_smoke_particle(particle, &definition, gamma)
-                }
+                ParticleDrawProc::Smoke => self.draw_smoke_particle(particle, &definition, gamma),
                 ParticleDrawProc::Std => {
                     self.draw_std_particle(particle, &definition, target, gamma)
                 }
@@ -4062,10 +4037,7 @@ impl GraphicsSystem {
         x >= left && x < left + width && y >= top && y < top + height
     }
 
-    fn pxs_graphics(
-        &self,
-        material: &MaterialRenderInfo,
-    ) -> Option<(&ImageData, [i32; 6])> {
+    fn pxs_graphics(&self, material: &MaterialRenderInfo) -> Option<(&ImageData, [i32; 6])> {
         let rect = material.pxs_gfx_rect;
         if rect[2] <= 0 || rect[3] <= 0 || material.pxs_gfx_size <= 0 {
             return None;
@@ -4137,14 +4109,7 @@ impl GraphicsSystem {
             let color = fog
                 .as_ref()
                 .map_or(color, |fog| fog.color_at_point(color, end.0, end.1));
-            draw_pxs_pixel(
-                &mut self.surface,
-                end.0,
-                end.1,
-                color,
-                gamma,
-                None,
-            );
+            draw_pxs_pixel(&mut self.surface, end.0, end.1, color, gamma, None);
         }
     }
 
@@ -4169,8 +4134,7 @@ impl GraphicsSystem {
             return;
         }
         let phase_count = (phases_x * phases_y).max(1) as usize;
-        let z = 1
-            + (((slot / phase_count) ^ 341) % material.pxs_gfx_size as usize) as i32;
+        let z = 1 + (((slot / phase_count) ^ 341) % material.pxs_gfx_size as usize) as i32;
         let phase_x = (slot % phases_x as usize) as i32;
         let phase_y = ((slot / phases_x as usize) % phases_y as usize) as i32;
         let world_x = clonk_engine::math::fixtoi(x) + z * rect[4] / facet_width;
@@ -4225,8 +4189,8 @@ impl GraphicsSystem {
         landscape: Option<&Landscape>,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) -> bool {
-        let visible_pixels = (self.surface_width as usize)
-            .saturating_mul(self.surface_height as usize);
+        let visible_pixels =
+            (self.surface_width as usize).saturating_mul(self.surface_height as usize);
         self.draw_ground_textured_with_parallel_rows(
             landscape,
             gamma,
@@ -4690,14 +4654,9 @@ impl GraphicsSystem {
             gamma,
             clip: self.surface.clip(),
             #[cfg(test)]
-            destination_samples: LANDSCAPE_DESTINATION_SAMPLES
-                .with(|samples| Arc::clone(samples)),
+            destination_samples: LANDSCAPE_DESTINATION_SAMPLES.with(|samples| Arc::clone(samples)),
         };
-        draw_ground_textured_rows(
-            &row_context,
-            self.surface.pixels_mut(),
-            parallel_rows,
-        );
+        draw_ground_textured_rows(&row_context, self.surface.pixels_mut(), parallel_rows);
         true
     }
 
@@ -4777,10 +4736,8 @@ impl GraphicsSystem {
                     continue;
                 }
                 for segment in column.segments() {
-                    let mut start =
-                        ((segment.top as f32 - self.viewport_y) * zoom).round() as i32;
-                    let mut end =
-                        ((segment.bottom as f32 - self.viewport_y) * zoom).round() as i32;
+                    let mut start = ((segment.top as f32 - self.viewport_y) * zoom).round() as i32;
+                    let mut end = ((segment.bottom as f32 - self.viewport_y) * zoom).round() as i32;
                     if start > end {
                         std::mem::swap(&mut start, &mut end);
                     }
@@ -4791,8 +4748,7 @@ impl GraphicsSystem {
                     end = end.min(surface_height - 1);
                     has_liquid = true;
                     for screen_y in start..=end {
-                        let offset =
-                            (screen_y as usize * width as usize + screen_x as usize) * 4;
+                        let offset = (screen_y as usize * width as usize + screen_x as usize) * 4;
                         liquid_pixels[offset..offset + 4].copy_from_slice(&[
                             liquid_color.r,
                             liquid_color.g,
@@ -4823,11 +4779,7 @@ impl GraphicsSystem {
         let transform = GraphicsTransform::identity();
         let mut capture_layer = |layer: &Surface| {
             let resource = layer.gpu_texture_resource();
-            let image = ImageData::transient_from_arc(
-                width,
-                height,
-                Arc::clone(&resource.pixels),
-            );
+            let image = ImageData::transient_from_arc(width, height, Arc::clone(&resource.pixels));
             capture_gpu_sprite_with_resource(
                 &mut self.surface,
                 dest,
@@ -4865,12 +4817,7 @@ impl GraphicsSystem {
         if self.draw_ground_textured(landscape, gamma) {
             return true;
         }
-        if self.capture_column_landscape_fallback(
-            ambient_temperature,
-            landscape,
-            lighting,
-            gamma,
-        ) {
+        if self.capture_column_landscape_fallback(ambient_temperature, landscape, lighting, gamma) {
             return true;
         }
         let ground_color = Self::apply_lighting(
@@ -4960,7 +4907,8 @@ impl GraphicsSystem {
         for (index, color) in palette.iter_mut().enumerate() {
             let (source, source_transparency, material) =
                 landscape.surface8_palette_entry(index as u8);
-            let source_color = if landscape.mode() == clonk_engine::landscape::LANDSCAPE_MODE_EXACT {
+            let source_color = if landscape.mode() == clonk_engine::landscape::LANDSCAPE_MODE_EXACT
+            {
                 Color::new(
                     source[0],
                     source[1],
@@ -5246,37 +5194,18 @@ impl GraphicsSystem {
     /// Native output-boundary gate, which runs after the back list but before
     /// command debug, ShowSolidMask, containment and IgnoreFoW suppression.
     fn object_output_bounds_culled(&self, object: &ObjectSnapshot) -> bool {
-        let (base_definition_id, base_graphics_name) =
-            if let Some(base) = object.base_graphics.as_ref() {
-                (base.definition.clone(), base.graphics_name.clone())
-            } else {
-                (object.definition_id.clone(), None)
-            };
-        let mut sprite = self
-            .object_sprites
-            .get(&sprite_map_key(
-                &base_definition_id,
-                base_graphics_name.as_deref(),
-            ))
-            .cloned();
-        if sprite.is_none() && base_graphics_name.is_some() {
-            sprite = self
-                .object_sprites
-                .get(&sprite_map_key(&base_definition_id, None))
-                .cloned();
-        }
-        if sprite.is_none() && base_definition_id != object.definition_id {
-            sprite = self
-                .object_sprites
-                .get(&sprite_map_key(&object.definition_id, None))
-                .cloned();
-        }
+        let (base_definition_id, base_graphics_name) = object_base_sprite_request(object);
+        let sprite = sprite_with_fallback(
+            self.object_sprites.as_ref(),
+            base_definition_id,
+            base_graphics_name,
+            &object.definition_id,
+        );
         let geometry_sprite = self
             .object_sprites
             .get(&sprite_map_key(&object.definition_id, None))
-            .cloned()
             .or(sprite);
-        if let Some(geometry_sprite) = geometry_sprite.as_ref() {
+        if let Some(geometry_sprite) = geometry_sprite {
             let shape = self.live_object_shape(geometry_sprite, object);
             return !self.object_reaches_post_face_draw(object, geometry_sprite, shape);
         }
@@ -5727,7 +5656,9 @@ impl GraphicsSystem {
                 "Acquire" => format!("Acquire {target}"),
                 "Call" => {
                     let call = match &command.data {
-                        clonk_engine::command::CommandData::Text(text) => c4_presentation_text(text),
+                        clonk_engine::command::CommandData::Text(text) => {
+                            c4_presentation_text(text)
+                        }
                         _ => String::new(),
                     };
                     let target = if target.is_empty() {
@@ -5967,9 +5898,7 @@ impl GraphicsSystem {
         let Some(label) = self
             .crew_name_labels
             .iter()
-            .find(|label| {
-                label.object_id == object.id && label.visible_to.contains(&for_player)
-            })
+            .find(|label| label.object_id == object.id && label.visible_to.contains(&for_player))
             .cloned()
         else {
             return;
@@ -5980,24 +5909,21 @@ impl GraphicsSystem {
 
         // The range gate reads the live object shape; the vertical anchor
         // retains the definition shape even after SetShape/Con changes.
-        let Some(definition_sprite) = self
-            .object_sprites
-            .get(&sprite_map_key(&object.definition_id, None))
-            .cloned()
+        let object_sprites = Arc::clone(&self.object_sprites);
+        let Some(definition_sprite) =
+            object_sprites.get(&sprite_map_key(&object.definition_id, None))
         else {
             return;
         };
-        let shape = self.live_object_shape(&definition_sprite, object);
-        let definition_shape = Self::sprite_def_shape(&definition_sprite);
+        let shape = self.live_object_shape(definition_sprite, object);
+        let definition_shape = Self::sprite_def_shape(definition_sprite);
         let (target_x, target_y) = self.object_target_position(object);
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let view_width = ((self.surface_width as f32 / zoom).ceil() as i32).max(1);
         let view_height = ((self.surface_height as f32 / zoom).ceil() as i32).max(1);
         let shape_x = object.position.x + shape.x - target_x as i32;
         let shape_y = object.position.y + shape.y - target_y as i32;
-        let inside = |value: i32, minimum: i32, maximum: i32| {
-            value >= minimum && value <= maximum
-        };
+        let inside = |value: i32, minimum: i32, maximum: i32| value >= minimum && value <= maximum;
         if !inside(shape_x, 1 - shape.width, view_width)
             || !inside(shape_y, 1 - shape.height, view_height)
         {
@@ -6017,9 +5943,8 @@ impl GraphicsSystem {
         } else {
             output_width / 2
         };
-        let unclamped_y = ((object.position.y - definition_shape.height / 2 - 20) as f32
-            - target_y)
-            * zoom;
+        let unclamped_y =
+            ((object.position.y - definition_shape.height / 2 - 20) as f32 - target_y) * zoom;
         let unclamped_y = unclamped_y.round() as i32 - text_height;
         let text_y = if text_height <= output_height {
             unclamped_y.clamp(0, output_height - text_height)
@@ -6134,32 +6059,19 @@ impl GraphicsSystem {
         let (target_x, target_y) = self.object_target_position(object);
         let cox = object.position.x + shape.x - target_x as i32;
         let coy = object.position.y + shape.y - target_y as i32;
-        let inside = |position: i32, size: i32, extent: i32| {
-            position >= 1 - size && position <= extent
-        };
+        let inside =
+            |position: i32, size: i32, extent: i32| position >= 1 - size && position <= extent;
 
-        if let Some(graphics) = Self::live_action_graphics(
-            &definition_sprite.actions,
-            &object.action,
-        ) {
+        if let Some(graphics) =
+            Self::live_action_graphics(&definition_sprite.actions, &object.action)
+        {
             if graphics.facet_target_stretch {
                 return true;
             }
-            if object.rotation == 0
-                && !graphics.facet_base
-                && object.construction <= FULL_CON
-            {
-                let (x, y, width, height) = graphics
-                    .facet
-                    .as_ref()
-                    .map_or((0, 0, 0, 0), |facet| {
-                        (
-                            facet.target_x,
-                            facet.target_y,
-                            facet.width,
-                            facet.height,
-                        )
-                    });
+            if object.rotation == 0 && !graphics.facet_base && object.construction <= FULL_CON {
+                let (x, y, width, height) = graphics.facet.as_ref().map_or((0, 0, 0, 0), |facet| {
+                    (facet.target_x, facet.target_y, facet.width, facet.height)
+                });
                 return inside(cox + x, width, output_width)
                     && inside(coy + y, height, output_height);
             }
@@ -6179,54 +6091,38 @@ impl GraphicsSystem {
         blit: SpriteBlitState,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
-        let (base_definition_id, base_graphics_name) =
-            if let Some(base) = object.base_graphics.as_ref() {
-                (base.definition.clone(), base.graphics_name.clone())
-            } else {
-                (object.definition_id.clone(), None)
-            };
+        let (base_definition_id, base_graphics_name) = object_base_sprite_request(object);
         // SetGraphics swaps only GetGraphics()/the bitmap source. DefCore
         // TopFace, Shape/GrowthType and the live ActMap remain owned by
         // object->Def (C4Object.cpp:357-376,404-425,2639-2667).
-        let mut bitmap_sprite = self
-            .object_sprites
-            .get(&sprite_map_key(
-                &base_definition_id,
-                base_graphics_name.as_deref(),
-            ))
-            .cloned();
-        if bitmap_sprite.is_none() && base_graphics_name.is_some() {
-            bitmap_sprite = self
-                .object_sprites
-                .get(&sprite_map_key(&base_definition_id, None))
-                .cloned();
-        }
-        if bitmap_sprite.is_none() && base_definition_id != object.definition_id {
-            bitmap_sprite = self
-                .object_sprites
-                .get(&sprite_map_key(&object.definition_id, None))
-                .cloned();
-        }
+        // Keep the shared atlas alive independently from `self`: the selected
+        // references can then survive the mutable drawing calls below without
+        // cloning their action maps.
+        let object_sprites = Arc::clone(&self.object_sprites);
+        let bitmap_sprite = sprite_with_fallback(
+            object_sprites.as_ref(),
+            base_definition_id,
+            base_graphics_name,
+            &object.definition_id,
+        );
         let Some(bitmap_sprite) = bitmap_sprite else {
             return;
         };
-        let definition_sprite = self
-            .object_sprites
+        let definition_sprite = object_sprites
             .get(&sprite_map_key(&object.definition_id, None))
-            .cloned()
             // A same-definition named sheet carries identical definition
             // metadata in imported atlases. Preserve that legacy fallback
             // when the default atlas entry itself is unavailable.
             .or_else(|| {
-                (base_definition_id == object.definition_id).then(|| bitmap_sprite.clone())
+                (base_definition_id == object.definition_id.as_str()).then_some(bitmap_sprite)
             });
         let Some(definition_sprite) = definition_sprite else {
             return;
         };
         self.paint_object_top_face_with(
             object,
-            &bitmap_sprite,
-            &definition_sprite,
+            bitmap_sprite,
+            definition_sprite,
             object.draw_transform,
             false,
             blit,
@@ -6457,37 +6353,21 @@ impl GraphicsSystem {
         let screen_y = (object.position.y as f32 - target_y) * zoom;
 
         let base_transform = object.draw_transform;
-        let (base_definition_id, base_graphics_name) =
-            if let Some(base) = object.base_graphics.as_ref() {
-                (base.definition.clone(), base.graphics_name.clone())
-            } else {
-                (object.definition_id.clone(), None)
-            };
-        let mut sprite = self
-            .object_sprites
-            .get(&sprite_map_key(
-                &base_definition_id,
-                base_graphics_name.as_deref(),
-            ))
-            .cloned();
-        if sprite.is_none() && base_graphics_name.is_some() {
-            sprite = self
-                .object_sprites
-                .get(&sprite_map_key(&base_definition_id, None))
-                .cloned();
-        }
-        if sprite.is_none() && base_definition_id != object.definition_id {
-            sprite = self
-                .object_sprites
-                .get(&sprite_map_key(&object.definition_id, None))
-                .cloned();
-        }
-        let geometry_sprite = self
-            .object_sprites
+        let (base_definition_id, base_graphics_name) = object_base_sprite_request(object);
+        // The object walk mutates render state while consuming immutable
+        // definition metadata. Borrow from a local atlas Arc so those
+        // references are independent from the mutable `self` borrow.
+        let object_sprites = Arc::clone(&self.object_sprites);
+        let sprite = sprite_with_fallback(
+            object_sprites.as_ref(),
+            base_definition_id,
+            base_graphics_name,
+            &object.definition_id,
+        );
+        let geometry_sprite = object_sprites
             .get(&sprite_map_key(&object.definition_id, None))
-            .cloned()
-            .or_else(|| sprite.clone());
-        if let Some(geometry_sprite) = geometry_sprite.as_ref() {
+            .or(sprite);
+        if let Some(geometry_sprite) = geometry_sprite {
             let target_position = (target_x, target_y);
             let shape = self.live_object_shape(geometry_sprite, object);
             if !self.object_reaches_post_face_draw(object, geometry_sprite, shape) {
@@ -6523,7 +6403,7 @@ impl GraphicsSystem {
             self.draw_object_face(
                 object,
                 objects,
-                &sprite,
+                sprite,
                 owner_color,
                 zoom,
                 rotation_degrees,
@@ -6681,10 +6561,8 @@ impl GraphicsSystem {
         // function. Texture-only MOD2 modes never alter line RGB. Preserve
         // the modulation activation (MOD2 + zero ColorMod intentionally
         // modulates the line to black), while masking those mode bits out.
-        let primary = modulate_line_palette_color(
-            self.game_palette.color(primary),
-            object_blit.modulation,
-        );
+        let primary =
+            modulate_line_palette_color(self.game_palette.color(primary), object_blit.modulation);
         let marker =
             modulate_line_palette_color(self.game_palette.color(marker), object_blit.modulation);
         let blit = SpriteBlitState {
@@ -6778,18 +6656,13 @@ impl GraphicsSystem {
         }
         let mut shape = Self::sprite_def_shape(sprite);
         if sprite.line == 0 {
-            shape = Self::con_scaled_shape(
-                shape,
-                object.construction.max(0),
-                sprite.stretch_growth,
-            );
+            shape =
+                Self::con_scaled_shape(shape, object.construction.max(0), sprite.stretch_growth);
         }
         // UpdateShape tests raw r, so a loaded r=360 still enlarges the
         // rectangle even though its vertices retain their orientation.
         let rotateable = sprite.rotateable != 0
-            || self
-                .rotateable_definitions
-                .contains(&object.definition_id)
+            || self.rotateable_definitions.contains(&object.definition_id)
             || object.ocf & clonk_engine::ocf::ROTATE != 0;
         if sprite.line == 0 && rotateable && object.rotation != 0 {
             let radius = (((i64::from(shape.x) * i64::from(shape.x)
@@ -7211,10 +7084,7 @@ impl GraphicsSystem {
         }
         let clamped_w = source.width.min(image_w - source.x);
         let clamped_h = source.height.min(image_h - source.y);
-        if !clamped_w.is_finite()
-            || !clamped_h.is_finite()
-            || clamped_w <= 0.0
-            || clamped_h <= 0.0
+        if !clamped_w.is_finite() || !clamped_h.is_finite() || clamped_w <= 0.0 || clamped_h <= 0.0
         {
             return;
         }
@@ -7364,10 +7234,7 @@ impl GraphicsSystem {
             let dest_width = facet.width as f32 * zoom;
             let dest_height = facet.height as f32 * zoom;
             let dest_rect = GuiRect::from_origin_size(
-                GuiPoint::new(
-                    screen_x - dest_width / 2.0,
-                    screen_y - dest_height / 2.0,
-                ),
+                GuiPoint::new(screen_x - dest_width / 2.0, screen_y - dest_height / 2.0),
                 GuiSize::new(dest_width, dest_height),
             );
             draw_image_region_float_source(
@@ -7405,9 +7272,7 @@ impl GraphicsSystem {
                     center.1,
                 ));
             }
-            matrix = matrix.multiply(&GraphicsTransform::set_move_scale(
-                0.0, 0.0, zoom, zoom,
-            ));
+            matrix = matrix.multiply(&GraphicsTransform::set_move_scale(0.0, 0.0, zoom, zoom));
             draw_image_region_transformed_float_source(
                 &mut self.surface,
                 dest,
@@ -7627,17 +7492,21 @@ impl GraphicsSystem {
         let saved_viewport_x = self.viewport_x;
         let saved_viewport_y = self.viewport_y;
         let saved_current_audibility_facet = self.current_audibility_facet;
-        let offset_x = overlay.transform.map_or(0, |transform| transform.offset_x as i32);
-        let offset_y = overlay.transform.map_or(0, |transform| transform.offset_y as i32);
+        let offset_x = overlay
+            .transform
+            .map_or(0, |transform| transform.offset_x as i32);
+        let offset_y = overlay
+            .transform
+            .map_or(0, |transform| transform.offset_y as i32);
         // C++ mutates cgo.TargetX/Y rather than the object's position. Keeping
         // the simulation coordinates intact is important for stretched action
         // facets that inspect their action target while the referenced object
         // is painted at the host's output position.
         let (host_target_x, host_target_y) = self.object_target_position(host);
-        self.viewport_x = host_target_x - host.position.x as f32 + target.position.x as f32
-            - offset_x as f32;
-        self.viewport_y = host_target_y - host.position.y as f32 + target.position.y as f32
-            - offset_y as f32;
+        self.viewport_x =
+            host_target_x - host.position.x as f32 + target.position.x as f32 - offset_x as f32;
+        self.viewport_y =
+            host_target_y - host.position.y as f32 + target.position.y as f32 - offset_y as f32;
         self.current_audibility_facet = saved_current_audibility_facet.map(|facet| {
             let host_target = Self::object_audibility_target_position(host, facet);
             AudibilityFacet {
@@ -7656,31 +7525,14 @@ impl GraphicsSystem {
             }
         });
 
-        let (base_definition_id, base_graphics_name) =
-            if let Some(base) = target.base_graphics.as_ref() {
-                (base.definition.clone(), base.graphics_name.clone())
-            } else {
-                (target.definition_id.clone(), None)
-            };
-        let mut sprite = self
-            .object_sprites
-            .get(&sprite_map_key(
-                &base_definition_id,
-                base_graphics_name.as_deref(),
-            ))
-            .cloned();
-        if sprite.is_none() && base_graphics_name.is_some() {
-            sprite = self
-                .object_sprites
-                .get(&sprite_map_key(&base_definition_id, None))
-                .cloned();
-        }
-        if sprite.is_none() && base_definition_id != target.definition_id {
-            sprite = self
-                .object_sprites
-                .get(&sprite_map_key(&target.definition_id, None))
-                .cloned();
-        }
+        let (base_definition_id, base_graphics_name) = object_base_sprite_request(target);
+        let object_sprites = Arc::clone(&self.object_sprites);
+        let sprite = sprite_with_fallback(
+            object_sprites.as_ref(),
+            base_definition_id,
+            base_graphics_name,
+            &target.definition_id,
+        );
 
         if let Some(sprite) = sprite {
             // MODE_Object's exact Parent sentinel inherits the referenced
@@ -7694,11 +7546,9 @@ impl GraphicsSystem {
             .with_renderer_config(self.advanced_renderer_config);
             let owner_color = Some(object_color_by_owner_tint(target));
             let rotation_degrees = (target.rotation.rem_euclid(360)) as f32;
-            let geometry_sprite = self
-                .object_sprites
+            let geometry_sprite = object_sprites
                 .get(&sprite_map_key(&target.definition_id, None))
-                .cloned()
-                .unwrap_or_else(|| sprite.clone());
+                .unwrap_or(sprite);
             if geometry_sprite.line != 0 {
                 // C4Object::Draw dispatches lines before every draw-mode
                 // branch, including ODM_Overlay.
@@ -7716,8 +7566,7 @@ impl GraphicsSystem {
                 // C4Object::Draw(ODM_Overlay) reaches ShowSolidMask after
                 // the back list and returns before fire, face, recursive
                 // overlays, front particles, and the separate TopFace call.
-                if self.debug_draw_flags.show_solid_mask
-                    && self.object_has_debug_solid_mask(target)
+                if self.debug_draw_flags.show_solid_mask && self.object_has_debug_solid_mask(target)
                 {
                     self.viewport_x = saved_viewport_x;
                     self.viewport_y = saved_viewport_y;
@@ -7738,7 +7587,7 @@ impl GraphicsSystem {
                 }
                 self.draw_object_fire(
                     target,
-                    &geometry_sprite,
+                    geometry_sprite,
                     (self.viewport_x, self.viewport_y),
                     blit,
                     gamma,
@@ -7746,7 +7595,7 @@ impl GraphicsSystem {
                 self.draw_object_face(
                     target,
                     objects,
-                    &sprite,
+                    sprite,
                     owner_color,
                     zoom,
                     rotation_degrees,
@@ -7808,22 +7657,13 @@ impl GraphicsSystem {
             .as_deref()
             .unwrap_or(&object.definition_id);
         let graphics_name = overlay.graphics_name.as_deref();
-        let mut sprite = self
-            .object_sprites
-            .get(&sprite_map_key(definition_id, graphics_name))
-            .cloned();
-        if sprite.is_none() && graphics_name.is_some() {
-            sprite = self
-                .object_sprites
-                .get(&sprite_map_key(definition_id, None))
-                .cloned();
-        }
-        if sprite.is_none() && definition_id != &object.definition_id {
-            sprite = self
-                .object_sprites
-                .get(&sprite_map_key(&object.definition_id, None))
-                .cloned();
-        }
+        let object_sprites = Arc::clone(&self.object_sprites);
+        let sprite = sprite_with_fallback(
+            object_sprites.as_ref(),
+            definition_id,
+            graphics_name,
+            &object.definition_id,
+        );
         let Some(sprite) = sprite else {
             return;
         };
@@ -7837,7 +7677,7 @@ impl GraphicsSystem {
             object.action.phase
         };
         let _ = self.draw_action_graphic(
-            &sprite,
+            sprite,
             action_name,
             phase,
             object.direction,
@@ -7856,28 +7696,21 @@ impl GraphicsSystem {
     /// `FnSetGraphics` derives from the overlay's source definition and
     /// graphics name, falling back to the host's own graphics
     /// (src/C4Script.cpp:4537-4607; src/C4DefGraphics.cpp:226-229).
-    fn overlay_source_sprite(
-        &self,
+    fn overlay_source_sprite<'sprites>(
+        object_sprites: &'sprites HashMap<String, DefinitionSprite>,
         object: &ObjectSnapshot,
         overlay: &ObjectGraphicsOverlay,
-    ) -> Option<DefinitionSprite> {
+    ) -> Option<&'sprites DefinitionSprite> {
         let definition_id = overlay
             .definition
             .as_deref()
             .unwrap_or(&object.definition_id);
-        let graphics_name = overlay.graphics_name.as_deref();
-        self.object_sprites
-            .get(&sprite_map_key(definition_id, graphics_name))
-            .or_else(|| {
-                graphics_name
-                    .and_then(|_| self.object_sprites.get(&sprite_map_key(definition_id, None)))
-            })
-            .or_else(|| {
-                (definition_id != object.definition_id)
-                    .then(|| self.object_sprites.get(&sprite_map_key(&object.definition_id, None)))
-                    .flatten()
-            })
-            .cloned()
+        sprite_with_fallback(
+            object_sprites,
+            definition_id,
+            overlay.graphics_name.as_deref(),
+            &object.definition_id,
+        )
     }
 
     /// `C4GraphicsOverlay` MODE_ExtraGraphics: redraw the HOST object's own
@@ -7898,7 +7731,9 @@ impl GraphicsSystem {
         blit: SpriteBlitState,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
-        let Some(sprite) = self.overlay_source_sprite(object, overlay) else {
+        let object_sprites = Arc::clone(&self.object_sprites);
+        let Some(sprite) = Self::overlay_source_sprite(object_sprites.as_ref(), object, overlay)
+        else {
             return;
         };
         // `trf = *pPrevTrf; trf *= Transform;` — the host's own transform
@@ -7906,13 +7741,9 @@ impl GraphicsSystem {
         // object, so pDrawTransform is never null and the untransformed fast
         // path is unreachable (src/C4DefGraphics.cpp:794-806).
         let overlay_transform = overlay.transform.unwrap_or_else(DrawTransform::identity);
-        let transform = Some(
-            object
-                .draw_transform
-                .map_or(overlay_transform, |previous| {
-                    previous.combined(overlay_transform)
-                }),
-        );
+        let transform = Some(object.draw_transform.map_or(overlay_transform, |previous| {
+            previous.combined(overlay_transform)
+        }));
 
         // The nested Draw runs against the same cgo, whose TargetX/Y the host's
         // own face pass already resolved through TargetPos
@@ -7928,7 +7759,7 @@ impl GraphicsSystem {
         self.draw_object_face(
             object,
             objects,
-            &sprite,
+            sprite,
             owner_color,
             zoom,
             rotation_degrees,
@@ -7936,7 +7767,7 @@ impl GraphicsSystem {
             blit,
             gamma,
         );
-        self.paint_object_top_face_with(object, &sprite, &sprite, transform, true, blit, gamma);
+        self.paint_object_top_face_with(object, sprite, sprite, transform, true, blit, gamma);
 
         self.viewport_x = saved_viewport_x;
         self.viewport_y = saved_viewport_y;
@@ -7960,7 +7791,9 @@ impl GraphicsSystem {
         blit: SpriteBlitState,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
-        let Some(sprite) = self.overlay_source_sprite(object, overlay) else {
+        let object_sprites = Arc::clone(&self.object_sprites);
+        let Some(sprite) = Self::overlay_source_sprite(object_sprites.as_ref(), object, overlay)
+        else {
             return;
         };
         // `pDef` in UpdateFacet is pSourceGfx->pDef — the overlay's source
@@ -7974,11 +7807,10 @@ impl GraphicsSystem {
         // fZoomToShape divides by the HOST object's live shape, guarding the
         // denominator with an integer max before the float divide
         // (src/C4DefGraphics.cpp:821-824).
-        let host_shape = self
-            .object_sprites
+        let host_shape = object_sprites
             .get(&sprite_map_key(&object.definition_id, None))
             .map(|host| self.live_object_shape(host, object))
-            .unwrap_or_else(|| Self::sprite_def_shape(&sprite));
+            .unwrap_or_else(|| Self::sprite_def_shape(sprite));
         let fzoom = (host_shape.width as f32 / facet.width.max(1) as f32)
             .min(host_shape.height as f32 / facet.height.max(1) as f32);
 
@@ -8053,22 +7885,13 @@ impl GraphicsSystem {
             .as_deref()
             .unwrap_or(&object.definition_id);
         let graphics_name = overlay.graphics_name.as_deref();
-        let mut sprite = self
-            .object_sprites
-            .get(&sprite_map_key(definition_id, graphics_name))
-            .cloned();
-        if sprite.is_none() && graphics_name.is_some() {
-            sprite = self
-                .object_sprites
-                .get(&sprite_map_key(definition_id, None))
-                .cloned();
-        }
-        if sprite.is_none() && definition_id != &object.definition_id {
-            sprite = self
-                .object_sprites
-                .get(&sprite_map_key(&object.definition_id, None))
-                .cloned();
-        }
+        let object_sprites = Arc::clone(&self.object_sprites);
+        let sprite = sprite_with_fallback(
+            object_sprites.as_ref(),
+            definition_id,
+            graphics_name,
+            &object.definition_id,
+        );
         let Some(sprite) = sprite else {
             return;
         };
@@ -8130,9 +7953,7 @@ impl GraphicsSystem {
                     center.1,
                 ));
             }
-            matrix = matrix.multiply(&GraphicsTransform::set_move_scale(
-                0.0, 0.0, zoom, zoom,
-            ));
+            matrix = matrix.multiply(&GraphicsTransform::set_move_scale(0.0, 0.0, zoom, zoom));
             draw_image_region_transformed_float_source(
                 &mut self.surface,
                 dest,
@@ -8214,10 +8035,10 @@ impl GraphicsSystem {
         zoom: f32,
         gamma: Option<&clonk_graphics::GammaRamp>,
     ) {
-        let Some(image) = self.cursor_atlas.image_for_scaled_resolution(
-            self.logical_resolution_width,
-            self.presentation_scale,
-        ) else {
+        let Some(image) = self
+            .cursor_atlas
+            .image_for_scaled_resolution(self.logical_resolution_width, self.presentation_scale)
+        else {
             return;
         };
 
@@ -8266,30 +8087,16 @@ impl GraphicsSystem {
         // `coy - cursor->Def->Shape.Hgt / 2 - fctCursor.Hgt`
         // (src/C4Game.cpp:1872): offset by the def shape height, not the
         // sprite-sheet image height.
-        let (cursor_definition_id, cursor_graphics_name) =
-            if let Some(base) = object.base_graphics.as_ref() {
-                (base.definition.clone(), base.graphics_name.clone())
-            } else {
-                (object.definition_id.clone(), None)
-            };
+        let (cursor_definition_id, cursor_graphics_name) = object_base_sprite_request(object);
         let shape_height = {
-            let mut sprite = self.object_sprites.get(&sprite_map_key(
-                &cursor_definition_id,
-                cursor_graphics_name.as_deref(),
-            ));
-            if sprite.is_none() && cursor_graphics_name.is_some() {
-                sprite = self
-                    .object_sprites
-                    .get(&sprite_map_key(&cursor_definition_id, None));
-            }
-            if sprite.is_none() && cursor_definition_id != object.definition_id {
-                sprite = self
-                    .object_sprites
-                    .get(&sprite_map_key(&object.definition_id, None));
-            }
-            sprite
-                .map(|sprite| (Self::sprite_def_shape(sprite).height as f32 * zoom).max(1.0))
-                .unwrap_or(12.0 * zoom)
+            sprite_with_fallback(
+                self.object_sprites.as_ref(),
+                cursor_definition_id,
+                cursor_graphics_name,
+                &object.definition_id,
+            )
+            .map(|sprite| (Self::sprite_def_shape(sprite).height as f32 * zoom).max(1.0))
+            .unwrap_or(12.0 * zoom)
         };
         // DrawT applies an inverse Application.GetScale() transform after
         // choosing a physically sized cursor sheet (src/C4Game.cpp:1859-1880).
@@ -8346,9 +8153,8 @@ impl GraphicsSystem {
             let text_x = screen_x.round() as i32;
             // TextOut is not under DrawT's transform. C++ offsets it by the
             // ordinary logical shape height and trunc(fctCursor.Hgt / scale).
-            let label_mark_top = screen_y
-                - shape_height / 2.0
-                - (cell as f32 * inverse_scale).trunc();
+            let label_mark_top =
+                screen_y - shape_height / 2.0 - (cell as f32 * inverse_scale).trunc();
             let mut text_y = label_mark_top.round() as i32 - 2 - text_height;
             for line in &lines {
                 let color = Color::opaque(0xff, 0x00, 0x00);
@@ -8431,9 +8237,7 @@ impl GraphicsSystem {
                 (height > 0).then(|| SurfaceRect::new(0, 0, self.surface_width, height))
             }
             hud::UpperBoardMode::Full | hud::UpperBoardMode::Small => {
-                let height = self
-                    .upper_board_pixel_height()
-                    .clamp(0, surface_height) as u32;
+                let height = self.upper_board_pixel_height().clamp(0, surface_height) as u32;
                 (height > 0).then(|| SurfaceRect::new(0, 0, self.surface_width, height))
             }
             hud::UpperBoardMode::Mini => {
@@ -9153,5 +8957,56 @@ impl GraphicsSystem {
         let warm = warm as f32;
         let value = cold + (warm - cold) * factor;
         value.round().clamp(0.0, 255.0) as u8
+    }
+}
+
+#[cfg(test)]
+mod sprite_fallback_tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct NonCloneSprite(&'static str);
+
+    fn test_sprites() -> HashMap<String, NonCloneSprite> {
+        HashMap::from([
+            (sprite_map_key("Host", None), NonCloneSprite("host-default")),
+            (
+                sprite_map_key("Source", None),
+                NonCloneSprite("source-default"),
+            ),
+            (
+                sprite_map_key("Source", Some("Named")),
+                NonCloneSprite("source-named"),
+            ),
+        ])
+    }
+
+    #[test]
+    fn sprite_fallback_prefers_the_exact_named_sheet() {
+        let sprites = test_sprites();
+        let resolved = sprite_with_fallback(&sprites, "Source", Some("Named"), "Host").unwrap();
+        let exact = sprites
+            .get(&sprite_map_key("Source", Some("Named")))
+            .unwrap();
+
+        assert!(std::ptr::eq(resolved, exact));
+        assert_eq!(resolved.0, "source-named");
+    }
+
+    #[test]
+    fn sprite_fallback_uses_the_source_default_before_the_host_default() {
+        let sprites = test_sprites();
+        let resolved = sprite_with_fallback(&sprites, "Source", Some("Missing"), "Host").unwrap();
+
+        assert_eq!(resolved.0, "source-default");
+    }
+
+    #[test]
+    fn sprite_fallback_uses_the_host_default_only_when_the_source_is_missing() {
+        let sprites = test_sprites();
+        let resolved = sprite_with_fallback(&sprites, "Missing", Some("Named"), "Host").unwrap();
+
+        assert_eq!(resolved.0, "host-default");
+        assert!(sprite_with_fallback(&sprites, "Missing", None, "Missing").is_none());
     }
 }

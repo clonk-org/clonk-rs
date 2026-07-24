@@ -2549,16 +2549,12 @@ impl GameApp {
                                     item.tooltip.as_str(),
                                 ),
                             };
-                            ContextMenuEntry::new(startup_resource_string(
-                                self.app_paths.as_ref(),
-                                label_key,
-                                label,
-                            ))
-                            .with_tooltip(startup_resource_string(
-                                self.app_paths.as_ref(),
-                                tooltip_key,
-                                tooltip,
-                            ))
+                            ContextMenuEntry::new(
+                                self.runtime_resource_text(label_key, label),
+                            )
+                            .with_tooltip(
+                                self.runtime_resource_text(tooltip_key, tooltip),
+                            )
                             .with_icon(ContextMenuIcon::None)
                             .with_action(AppContextMenuCommand::NetworkJoinEdit(item.command))
                         })
@@ -2637,16 +2633,12 @@ impl GameApp {
                         selected_index.and_then(|index| self.startup_network_join_target(index));
                     let Some(target) = target else {
                         self.status_text.clear();
-                        let message = startup_resource_string(
-                            self.app_paths.as_ref(),
+                        let message = self.runtime_resource_text(
                             "IDS_NET_NOJOIN_NOREF",
                             "No reference selected. Select a game from the list or enter a direct join address below!",
                         );
-                        let caption = startup_resource_string(
-                            self.app_paths.as_ref(),
-                            "IDS_NET_NOJOIN",
-                            "Cannot join game",
-                        );
+                        let caption =
+                            self.runtime_resource_text("IDS_NET_NOJOIN", "Cannot join game");
                         self.push_message_dialog(
                             clonk_frontend::message_dialog::MessageDialogState::regular_ok(
                                 message,
@@ -2666,18 +2658,14 @@ impl GameApp {
                         }
                         StartupNetworkJoinTarget::QueryError(error) => {
                             let message = format_resource_string(
-                                startup_resource_string(
-                                    self.app_paths.as_ref(),
+                                self.runtime_resource_text(
                                     "IDS_NET_NOJOIN_BADREF",
                                     "Cannot join selected game: %s",
                                 ),
                                 &[&error],
                             );
-                            let caption = startup_resource_string(
-                                self.app_paths.as_ref(),
-                                "IDS_NET_NOJOIN",
-                                "Cannot join game",
-                            );
+                            let caption =
+                                self.runtime_resource_text("IDS_NET_NOJOIN", "Cannot join game");
                             self.push_message_dialog(
                                 clonk_frontend::message_dialog::MessageDialogState::regular_ok(
                                     message,
@@ -3313,7 +3301,7 @@ impl GameApp {
         let search_config = load_network_search_settings(self.app_paths.as_ref());
         let masterserver_enabled = search_config.internet_enabled;
         dialog.set_masterserver_entry(Self::startup_masterserver_query_entry(
-            self.app_paths.as_ref(),
+            &self.startup_tooltip_resources,
             &search_config.master_server_url,
         ));
         let reference_config = load_reference_query_settings(self.app_paths.as_ref());
@@ -3952,16 +3940,12 @@ impl GameApp {
                 );
                 match persisted {
                     Ok(()) => {
-                        let message = startup_resource_string(
-                            self.app_paths.as_ref(),
+                        let message = self.runtime_resource_text(
                             "IDS_NET_SERVERREDIRECTDONE",
                             "Server redirection has been applied.",
                         );
-                        let caption = startup_resource_string(
-                            self.app_paths.as_ref(),
-                            "IDS_NET_SERVERREDIRECT",
-                            "Server Redirection",
-                        );
+                        let caption = self
+                            .runtime_resource_text("IDS_NET_SERVERREDIRECT", "Server Redirection");
                         self.push_message_dialog(
                             clonk_frontend::message_dialog::MessageDialogState::regular_ok(
                                 message,

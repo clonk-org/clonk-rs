@@ -1,5 +1,5 @@
-// Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
-// sequence, not a child module, so test ids stay `tests::<fn>`.
+    // Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
+    // sequence, not a child module, so test ids stay `tests::<fn>`.
 
     #[test]
     fn l028_console_lobby_start_is_host_only_and_restarts_countdown() {
@@ -11,6 +11,20 @@
         let mut host = new_menu_app(640, 480);
         host.app_paths = Some(paths);
         let (_events, mut commands) = install_classic_host_network_stub(&mut host);
+        // C4Application::OnCommand forwards non-/start lobby commands through
+        // C4MessageInput::ProcessInput, whose /set maxplayer branch accepts
+        // the network control host (oracle src/C4Application.cpp:622-644;
+        // src/C4MessageInput.cpp:472-490).
+        host.process_console_command("/set maxplayer 24")
+            .expect("console lobby maximum-player command");
+        assert_eq!(
+            commands.take_submitted_control_sets(),
+            vec![clonk_network::LegacyControlSet {
+                value_type: 2,
+                data: 24,
+                by_client: 0,
+            }]
+        );
         host.process_console_command("/start")
             .expect("start configured-default countdown");
         assert_eq!(
@@ -139,10 +153,7 @@
         let key = SoundInstanceKey::new("Loop", None);
         let mut runtime_music_enabled = false;
         snapshot.audio.push(test_sound_command(true));
-        audio.process_audio(
-            &snapshot,
-            &mut runtime_music_enabled,
-        );
+        audio.process_audio(&snapshot, &mut runtime_music_enabled);
         snapshot.audio.clear();
 
         let original_channel = audio.active_channels[&key]
@@ -151,19 +162,13 @@
         assert!(audio.system.channel_is_playing(original_channel));
 
         audio.options.sound_enabled = false;
-        audio.process_audio(
-            &snapshot,
-            &mut runtime_music_enabled,
-        );
+        audio.process_audio(&snapshot, &mut runtime_music_enabled);
         assert!(audio.active_channels.contains_key(&key));
         assert!(audio.active_channels[&key].channel.is_none());
         assert!(!audio.system.channel_is_playing(original_channel));
 
         audio.options.sound_enabled = true;
-        audio.process_audio(
-            &snapshot,
-            &mut runtime_music_enabled,
-        );
+        audio.process_audio(&snapshot, &mut runtime_music_enabled);
         let restored_channel = audio.active_channels[&key]
             .channel
             .expect("unmuted loop reacquires a mixer channel");
@@ -338,10 +343,8 @@
     fn l148_disconnected_startup_worker_reaches_ringbuffer_only_restart_branch() {
         let mut app = new_real_classic_menu_app(800, 600);
         attach_l040_network_dialog(&mut app);
-        let (sender, receiver) = mpsc::channel::<std::result::Result<
-            (NetworkMode, NetworkManager),
-            NetworkStartError,
-        >>();
+        let (sender, receiver) =
+            mpsc::channel::<std::result::Result<(NetworkMode, NetworkManager), NetworkStartError>>();
         drop(sender);
         app.startup_network_connection = Some(StartupNetworkConnection::new(
             receiver,
@@ -445,14 +448,13 @@
 
         app.handle_key(VirtualKeyCode::End, ElementState::Pressed)
             .expect("scroll retained log to end");
-        assert!(
-            app.runtime_client_list
-                .as_ref()
-                .expect("scrolled Error Log info")
-                .visible_info_lines(preferred, &fonts.text)
-                .last()
-                .is_some_and(|line| line.ends_with("TAIL"))
-        );
+        assert!(app
+            .runtime_client_list
+            .as_ref()
+            .expect("scrolled Error Log info")
+            .visible_info_lines(preferred, &fonts.text)
+            .last()
+            .is_some_and(|line| line.ends_with("TAIL")));
         app.handle_key(VirtualKeyCode::End, ElementState::Released)
             .expect("release retained-log scroll key");
         app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
@@ -508,8 +510,7 @@
         let (mut chooser, companion) = install_test_classic_host_team_lobby(&mut app);
         chooser.forced_name =
             LegacyCString::from_bytes(b"Restart Alias".to_vec()).expect("valid forced name");
-        let (network, _events, mut commands) =
-            NetworkManager::test_stub_with_commands_for_client_id(0);
+        let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
         app.network = Some(network);
         app.network_mode = Some(NetworkMode::Host(HostSettings {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -545,10 +546,8 @@
                 &clonk_engine::ScriptControlData {
                     target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
                     strictness: clonk_engine::ScriptStrictness::Strict3,
-                    script: LegacyCString::from_bytes(
-                        b"SetRestoreInfos(RESTORE_PlayerTeams)".to_vec(),
-                    )
-                    .expect("script has no NUL"),
+                    script: LegacyCString::from_bytes(b"SetRestoreInfos(RESTORE_PlayerTeams)".to_vec())
+                        .expect("script has no NUL"),
                     by_client: 0,
                 },
                 ScriptControlPolicy::live(false),
@@ -615,10 +614,8 @@
                 &clonk_engine::ScriptControlData {
                     target_object: clonk_engine::SCRIPT_SCOPE_GLOBAL,
                     strictness: clonk_engine::ScriptStrictness::Strict3,
-                    script: LegacyCString::from_bytes(
-                        b"SetRestoreInfos(RESTORE_PlayerTeams)".to_vec(),
-                    )
-                    .expect("script has no NUL"),
+                    script: LegacyCString::from_bytes(b"SetRestoreInfos(RESTORE_PlayerTeams)".to_vec())
+                        .expect("script has no NUL"),
                     by_client: 0,
                 },
                 ScriptControlPolicy::live(false),
@@ -635,8 +632,7 @@
         );
         assert_eq!(app.mode, AppMode::Menu);
         assert_eq!(
-            app.restart_restore_infos.what,
-            RESTART_RESTORE_PLAYER_TEAMS,
+            app.restart_restore_infos.what, RESTART_RESTORE_PLAYER_TEAMS,
             "the lobby handoff retains the raw SetRestoreInfos mask"
         );
         assert!(
@@ -711,6 +707,7 @@
 
     #[test]
     fn frontend_music_uses_catalog_once_per_startup_entry_and_toggle_restarts() {
+        let _lock = env_lock().lock();
         let dir = tempdir().expect("tempdir");
         let global = dir.path().join("Music.c4g");
         fs::create_dir_all(&global).expect("create music group");
@@ -722,10 +719,9 @@
         let mut app = new_menu_app(320, 200);
         let audio = app.audio.as_mut().expect("test audio");
         audio.stop_music();
-        audio.music_resolver = MusicResolver::with_global_group(
-            Group::open(&global).expect("open global music group"),
-        )
-        .expect("build music resolver");
+        audio.music_resolver =
+            MusicResolver::with_global_group(Group::open(&global).expect("open global music group"))
+                .expect("build music resolver");
         audio.options.menu_music_enabled = false;
         audio.set_scenario_music_level(Some(25));
         let stale_recent = Arc::clone(
@@ -784,8 +780,7 @@
         let mut output = vec![0_i16; mixer.sample_rate() as usize * 2 * 2];
         mixer.mix_i16(&mut output);
         assert!(
-            !app
-                .audio
+            !app.audio
                 .as_ref()
                 .expect("test audio")
                 .system
@@ -810,12 +805,13 @@
 
         app.set_frontend_music_option(false)
             .expect("disable frontend music");
-        assert!(!app
-            .audio
-            .as_ref()
-            .expect("test audio")
-            .options
-            .menu_music_enabled);
+        assert!(
+            !app.audio
+                .as_ref()
+                .expect("test audio")
+                .options
+                .menu_music_enabled
+        );
         assert!(!app
             .audio
             .as_ref()
@@ -850,10 +846,9 @@
         for name in ["A.ogg", "B.ogg", "C.ogg"] {
             fs::write(global.join(name), name.as_bytes()).expect("write music fixture");
         }
-        let mut resolver = MusicResolver::with_global_group(
-            Group::open(&global).expect("open global music group"),
-        )
-        .expect("build music resolver");
+        let mut resolver =
+            MusicResolver::with_global_group(Group::open(&global).expect("open global music group"))
+                .expect("build music resolver");
         resolver.set_playlist(Some("B.*;C.*".to_string()));
 
         assert_eq!(
@@ -885,8 +880,7 @@
 
         let group = Group::open(&global).expect("open global music");
         let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
-        audio.music_resolver =
-            MusicResolver::with_global_group(group).expect("build music resolver");
+        audio.music_resolver = MusicResolver::with_global_group(group).expect("build music resolver");
         let fixture = audio
             .system
             .load_music(&silent_pcm_wav(20))
@@ -900,12 +894,7 @@
 
         let initial_generation = lock_unpoisoned(&audio.music_control).generation;
         let mut runtime_music_enabled = false;
-        audio.handle_events(
-            &[event.clone()],
-            &snapshot,
-            &[],
-            &mut runtime_music_enabled,
-        );
+        audio.handle_events(&[event.clone()], &snapshot, &[], &mut runtime_music_enabled);
         assert_eq!(
             lock_unpoisoned(&audio.music_control).generation,
             initial_generation,
@@ -921,12 +910,7 @@
         );
 
         runtime_music_enabled = true;
-        audio.handle_events(
-            &[event.clone()],
-            &snapshot,
-            &[],
-            &mut runtime_music_enabled,
-        );
+        audio.handle_events(&[event.clone()], &snapshot, &[], &mut runtime_music_enabled);
         assert_ne!(
             lock_unpoisoned(&audio.music_control).generation,
             initial_generation,
@@ -990,10 +974,9 @@
         }
 
         let mut audio = AudioContext::try_new(AudioOptions::default()).expect("audio context");
-        audio.music_resolver = MusicResolver::with_global_group(
-            Group::open(&global).expect("open global music group"),
-        )
-        .expect("build music resolver");
+        audio.music_resolver =
+            MusicResolver::with_global_group(Group::open(&global).expect("open global music group"))
+                .expect("build music resolver");
         let b_identity = Arc::clone(
             &audio
                 .music_resolver
@@ -1189,50 +1172,57 @@
             app.sync_startup_network_game_rows();
             app.netdlg_last_click = Some((0, Instant::now()));
             app.startup_network_last_refresh = Some(Instant::now() - Duration::from_secs(2));
-            assert_eq!(app.startup_network_dialog.as_ref().unwrap().games().len(), 2);
+            assert_eq!(
+                app.startup_network_dialog.as_ref().unwrap().games().len(),
+                2
+            );
 
             // Start the bounded server clock only after the expensive classic
             // app fixture is ready. Under a parallel full-suite run, starting
             // it before app construction can consume the whole accept timeout
             // before Reload/F5 is even able to issue the request.
             let server_title = title.to_string();
-            let start_server = move || thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(12);
-                let (mut stream, _) = loop {
-                    match listener.accept() {
-                        Ok(connection) => break connection,
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            if Instant::now() >= deadline {
-                                return false;
+            let start_server = move || {
+                thread::spawn(move || {
+                    let deadline = Instant::now() + Duration::from_secs(12);
+                    let (mut stream, _) = loop {
+                        match listener.accept() {
+                            Ok(connection) => break connection,
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                if Instant::now() >= deadline {
+                                    return false;
+                                }
+                                thread::sleep(Duration::from_millis(5));
                             }
-                            thread::sleep(Duration::from_millis(5));
+                            Err(error) => panic!("accept L027 masterserver request: {error}"),
                         }
-                        Err(error) => panic!("accept L027 masterserver request: {error}"),
-                    }
-                };
-                stream
-                    .set_nonblocking(false)
-                    .expect("make fixture connection blocking");
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .expect("bound fixture request read");
-                let mut request = [0_u8; 4096];
-                let size = stream.read(&mut request).expect("read masterserver request");
-                assert!(String::from_utf8_lossy(&request[..size]).starts_with("GET / HTTP/1.1"));
-                let body = format!(
-                    "[Reference]\nTitle=\"{server_title}\"\nState=Lobby\nJoinAllowed=1\nAddress=TCP:\"127.0.0.1:31112\"\nGame=LegacyClonk\nVersion=4,9,11,0\nBuild=362\n"
-                );
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                )
-                .expect("write fixture response headers");
-                stream
-                    .write_all(body.as_bytes())
-                    .expect("write fixture response body");
-                true
-            });
+                    };
+                    stream
+                        .set_nonblocking(false)
+                        .expect("make fixture connection blocking");
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .expect("bound fixture request read");
+                    let mut request = [0_u8; 4096];
+                    let size = stream
+                        .read(&mut request)
+                        .expect("read masterserver request");
+                    assert!(String::from_utf8_lossy(&request[..size]).starts_with("GET / HTTP/1.1"));
+                    let body = format!(
+                        "[Reference]\nTitle=\"{server_title}\"\nState=Lobby\nJoinAllowed=1\nAddress=TCP:\"127.0.0.1:31112\"\nGame=LegacyClonk\nVersion=4,9,11,0\nBuild=362\n"
+                    );
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .expect("write fixture response headers");
+                    stream
+                        .write_all(body.as_bytes())
+                        .expect("write fixture response body");
+                    true
+                })
+            };
 
             if use_f5 {
                 app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
@@ -1258,7 +1248,12 @@
 
             assert!(app.startup_game_references.is_empty());
             assert!(app.startup_direct_reference_queries.is_empty());
-            assert!(app.startup_network_dialog.as_ref().unwrap().games().is_empty());
+            assert!(app
+                .startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .games()
+                .is_empty());
             assert!(app.netdlg_last_click.is_none());
             assert!(
                 app.status_text.is_empty(),
@@ -1278,9 +1273,11 @@
                 // Hosts without a usable multicast route report the explicit
                 // LAN probe failure in a modal. L070 freezes the queued
                 // masterserver result until that native prompt is dismissed.
-                if app.message_dialogs.last().is_some_and(|dialog| {
-                    dialog.state.caption() == "Search Error"
-                }) {
+                if app
+                    .message_dialogs
+                    .last()
+                    .is_some_and(|dialog| dialog.state.caption() == "Search Error")
+                {
                     app.finish_message_dialog(
                         clonk_frontend::message_dialog::MessageDialogResult::Cancel,
                     )
@@ -1296,7 +1293,10 @@
                     .collect::<Vec<_>>(),
                 [title]
             );
-            assert_eq!(app.startup_network_dialog.as_ref().unwrap().games().len(), 1);
+            assert_eq!(
+                app.startup_network_dialog.as_ref().unwrap().games().len(),
+                1
+            );
             assert!(
                 app.status_text.is_empty(),
                 "result presentation belongs to the native query/game rows"
@@ -1349,7 +1349,12 @@
         app.netdlg_last_click = Some((0, now));
         let expected_references = app.startup_game_references.clone();
         let expected_queries = app.startup_direct_reference_queries.clone();
-        let expected_games = app.startup_network_dialog.as_ref().unwrap().games().to_vec();
+        let expected_games = app
+            .startup_network_dialog
+            .as_ref()
+            .unwrap()
+            .games()
+            .to_vec();
         let audio = app.audio.as_mut().expect("menu audio context");
         audio.options.menu_sound_enabled = true;
         audio.configure_scenario(Some(&scenario));
@@ -1450,9 +1455,9 @@
     #[test]
     fn l006_named_remaps_drive_chat_scoreboard_abort_menu_and_player_candidates() {
         let config = parse_runtime_key_config(
-            b"[Keys]\nChatOpen=G,Joy2A\nScoreboardToggle=H\nGameAbort=B\nFullscreenMenuDown=J\nKbd1Key1=Shift+T\nKbd1Key2=\\x0042000a\n",
-        )
-        .expect("parse modeled named remaps");
+                b"[Keys]\nChatOpen=G,Joy2A\nScoreboardToggle=H\nGameAbort=B\nFullscreenMenuDown=J\nKbd1Key1=Shift+T\nKbd1Key2=\\x0042000a\n",
+            )
+            .expect("parse modeled named remaps");
         let mut app = new_running_sandbox_app();
         app.runtime_key_config_cache = OnceLock::new();
         app.runtime_key_config_cache
@@ -1463,10 +1468,7 @@
         assert!(app.running_chat_active());
         app.close_running_chat()
             .expect("close custom keyboard chat through the production lifecycle");
-        assert!(!app.handle_running_chat_open_key(
-            VirtualKeyCode::Return,
-            ElementState::Pressed,
-        ));
+        assert!(!app.handle_running_chat_open_key(VirtualKeyCode::Return, ElementState::Pressed,));
         app.handle_gamepad_direction(
             GamepadSlot::new(1),
             ControlButton::Left,
@@ -1477,26 +1479,19 @@
         app.close_running_chat()
             .expect("close custom gamepad chat through the production lifecycle");
 
-        assert!(
-            app.handle_scoreboard_key(VirtualKeyCode::H, ElementState::Pressed)
-                .expect("custom scoreboard callback")
-        );
-        assert!(
-            !app.handle_scoreboard_key(VirtualKeyCode::Tab, ElementState::Pressed)
-                .expect("replaced scoreboard default")
-        );
+        assert!(app
+            .handle_scoreboard_key(VirtualKeyCode::H, ElementState::Pressed)
+            .expect("custom scoreboard callback"));
+        assert!(!app
+            .handle_scoreboard_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("replaced scoreboard default"));
 
-        let shifted = app.runtime_control_candidates_for_keyboard(
-            VirtualKeyCode::T,
-            ElementState::Pressed,
-        );
+        let shifted =
+            app.runtime_control_candidates_for_keyboard(VirtualKeyCode::T, ElementState::Pressed);
         assert!(shifted.is_empty(), "the custom chord requires Shift");
         app.keyboard_modifiers = ModifiersState::SHIFT;
         assert_eq!(
-            app.runtime_control_candidates_for_keyboard(
-                VirtualKeyCode::T,
-                ElementState::Pressed,
-            ),
+            app.runtime_control_candidates_for_keyboard(VirtualKeyCode::T, ElementState::Pressed,),
             vec![KeyboardBindings::control_candidate_for_set(
                 0,
                 ControlBindingId::CursorLeft,
@@ -1506,11 +1501,7 @@
         );
         app.keyboard_modifiers = ModifiersState::empty();
         assert_eq!(
-            app.runtime_control_candidates_for_gamepad_button(
-                0,
-                0,
-                ElementState::Pressed,
-            ),
+            app.runtime_control_candidates_for_gamepad_button(0, 0, ElementState::Pressed,),
             vec![KeyboardBindings::control_candidate_for_set(
                 0,
                 ControlBindingId::CursorToggle,
@@ -1532,13 +1523,9 @@
             .get(OWNER_NONE)
             .expect("ownerless menu")
             .selection();
-        assert!(
-            app.handle_runtime_fullscreen_menu_key(
-                VirtualKeyCode::J,
-                ElementState::Pressed,
-            )
-            .expect("custom ownerless menu callback")
-        );
+        assert!(app
+            .handle_runtime_fullscreen_menu_key(VirtualKeyCode::J, ElementState::Pressed,)
+            .expect("custom ownerless menu callback"));
         assert_ne!(
             app.ingame_menu
                 .get(OWNER_NONE)
@@ -1557,9 +1544,9 @@
 
         let mut context_priority = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         context_priority.runtime_key_config_cache = OnceLock::new();
         context_priority
@@ -1597,8 +1584,7 @@
         context_priority.close_context_menu_silently();
         context_priority
             .open_context_menu_at(
-                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")
-                    .with_hotkey('R')],
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open").with_hotkey('R')],
                 GuiPoint::new(20.0, 20.0),
             )
             .expect("reopen context for hotkey priority");
@@ -1624,14 +1610,16 @@
         );
         gamepad_priority.gamepad_bindings = GamepadBindings::from_config(&gamepad_config);
         gamepad_priority.local_controls = LocalControlRegistry::default();
-        gamepad_priority.local_controls.initialize(LocalControlInit {
-            owner: gamepad_priority.local_owner,
-            preferred_set: 4,
-            prefers_mouse: false,
-            gamepads_enabled: true,
-            replay: false,
-            disable_mouse: false,
-        });
+        gamepad_priority
+            .local_controls
+            .initialize(LocalControlInit {
+                owner: gamepad_priority.local_owner,
+                preferred_set: 4,
+                prefers_mouse: false,
+                gamepads_enabled: true,
+                replay: false,
+                disable_mouse: false,
+            });
         gamepad_priority
             .process_gamepad_event_batch([
                 GamepadEvent::Axis {
@@ -1677,8 +1665,9 @@
         game_over_chat.runtime_key_config_cache = OnceLock::new();
         game_over_chat
             .runtime_key_config_cache
-            .set(Ok(parse_runtime_key_config(b"[Keys]\nChatOpen=G\n")
-                .expect("parse game-over chat remap")))
+            .set(Ok(
+                parse_runtime_key_config(b"[Keys]\nChatOpen=G\n").expect("parse game-over chat remap")
+            ))
             .expect("install game-over chat remap");
         game_over_chat
             .handle_key(VirtualKeyCode::Return, ElementState::Pressed)
@@ -1745,10 +1734,8 @@
                 league_score_gain: 5,
                 league_rank_new: 3,
                 league_rank_symbol_new: 4,
-                league_progress_data: clonk_engine::LegacyCString::from_bytes(
-                    b"progress".to_vec(),
-                )
-                .unwrap(),
+                league_progress_data: clonk_engine::LegacyCString::from_bytes(b"progress".to_vec())
+                    .unwrap(),
                 status: clonk_network::LeagueRoundPlayerStatus::Won,
             }],
         };
@@ -1756,7 +1743,8 @@
             .send(NetworkEvent::LeagueRoundResults(packet))
             .expect("queue league result packet");
 
-        app.process_network_events().expect("apply league result packet");
+        app.process_network_events()
+            .expect("apply league result packet");
 
         let info = app.control_player_infos.get(10).unwrap();
         assert_eq!(
@@ -1793,7 +1781,10 @@
             ),
             (80, 5, 3, 4)
         );
-        assert_eq!(result.league_progress_data.as_deref(), Some(&b"progress"[..]));
+        assert_eq!(
+            result.league_progress_data.as_deref(),
+            Some(&b"progress"[..])
+        );
     }
 
     #[test]
@@ -1828,7 +1819,9 @@
         .expect("execute synchronized activation at frame 400");
 
         for _ in 0..500 {
-            app.engine.tick().expect("advance to activation delay boundary");
+            app.engine
+                .tick()
+                .expect("advance to activation delay boundary");
         }
         app.update().expect("scan activation age 500");
         assert!(commands.take_submitted_client_updates().is_empty());
@@ -2007,10 +2000,7 @@
         );
     }
 
-    fn assert_game_over_resource_boundary(
-        error: &anyhow::Error,
-        expected_missing: Vec<&'static str>,
-    ) {
+    fn assert_game_over_resource_boundary(error: &anyhow::Error, expected_missing: Vec<&'static str>) {
         let expected = ClassicParityBoundary::GameOverResources {
             missing: expected_missing.into_iter().map(str::to_string).collect(),
         };
@@ -2188,8 +2178,7 @@
                 flags: clonk_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
                 players: vec![clonk_engine::ControlPlayerInfoEntry {
                     id: player_info_id,
-                    name: LegacyCString::from_bytes(b"Player".to_vec())
-                        .expect("fixture player name"),
+                    name: LegacyCString::from_bytes(b"Player".to_vec()).expect("fixture player name"),
                     filename: LegacyCString::from_bytes(file_name.as_bytes().to_vec())
                         .expect("fixture player filename"),
                     ..Default::default()
@@ -2267,8 +2256,7 @@
         {
             let name = "Player.png";
             let (image, hud_player) = {
-                let assets = Arc::get_mut(&mut app.assets)
-                    .expect("frontend assets are app-owned");
+                let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
                 let image = assets
                     .startup_dialog_images
                     .remove(name)
@@ -2289,9 +2277,7 @@
             assert_eq!(frame, sentinel, "{name} guard must run before pixels");
 
             let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
-            assets
-                .startup_dialog_images
-                .insert(name.to_string(), image);
+            assets.startup_dialog_images.insert(name.to_string(), image);
             Arc::make_mut(&mut assets.hud_graphics).player = Some(hud_player);
         }
 
@@ -2547,10 +2533,10 @@
 
         let mut negative = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-                   DoScoreboardShow(-1);
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                       DoScoreboardShow(-1);
+                   }"#,
         );
         assert_eq!(
             (
@@ -2571,9 +2557,9 @@
 
         let mut eligible = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "PRIVATE_CELL_TEXT");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "PRIVATE_CELL_TEXT");
+                   }"#,
         );
         eligible.graphics.set_scroll_smooth(1);
         let mut hidden = vec![0_u8; 320 * 200 * 4];
@@ -2608,9 +2594,9 @@
     fn scoreboard_close_uses_cpp_drag_move_and_release_hit_testing() {
         let mut app = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         install_visible_scoreboard_highlight_fixture(&mut app);
         toggle_scoreboard(&mut app, ModifiersState::empty());
@@ -2684,13 +2670,13 @@
     fn scoreboard_title_drag_and_cached_placement_survive_frames_until_data_update() {
         let mut app = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "A scoreboard title");
-               }
-               global func InvalidateLayout()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "A scoreboard title");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "A scoreboard title");
+                   }
+                   global func InvalidateLayout()
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "A scoreboard title");
+                   }"#,
         );
         toggle_scoreboard(&mut app, ModifiersState::empty());
         let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -2705,10 +2691,7 @@
         app.handle_cursor_moved(title)
             .expect("hover scoreboard title");
         assert_eq!(
-            app.classic_dialog_title_tooltip_target_at(GuiPoint::new(
-                title.x as f32,
-                title.y as f32,
-            )),
+            app.classic_dialog_title_tooltip_target_at(GuiPoint::new(title.x as f32, title.y as f32,)),
             Some(StartupTooltip::text("A scoreboard title")),
         );
         app.handle_mouse_button(ElementState::Pressed)
@@ -2746,9 +2729,9 @@
     fn asynchronously_shown_message_stays_active_during_scoreboard_title_drag() {
         let mut app = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         app.resize(1024, 768).expect("resize shared running screen");
         toggle_scoreboard(&mut app, ModifiersState::empty());
@@ -2817,13 +2800,13 @@
     fn scoreboard_pointer_before_draw_cannot_stamp_new_revision_onto_old_matrix() {
         let mut app = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }
-               global func GrowBetweenFrames()
-               {
-                   SetScoreboardData(1, SBRD_Caption, "A much wider second column");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }
+                   global func GrowBetweenFrames()
+                   {
+                       SetScoreboardData(1, SBRD_Caption, "A much wider second column");
+                   }"#,
         );
         toggle_scoreboard(&mut app, ModifiersState::empty());
         let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -2868,11 +2851,11 @@
     fn scoreboard_show_then_grow_keeps_constructor_hit_bounds_until_first_draw() {
         let mut app = new_scoreboard_test_app(
             r#"global func ShowThenGrow()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "S");
-                   DoScoreboardShow(1);
-                   SetScoreboardData(1, SBRD_Caption, "A deliberately huge late column");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "S");
+                       DoScoreboardShow(1);
+                       SetScoreboardData(1, SBRD_Caption, "A deliberately huge late column");
+                   }"#,
         );
         call_scoreboard_function_and_update(&mut app, "ShowThenGrow");
         let request_revision = app
@@ -2910,10 +2893,10 @@
     fn synchronous_scoreboard_show_joins_pointer_routing_before_update_or_draw() {
         let mut app = new_scoreboard_test_app(
             r#"global func ShowNow()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "S");
-                   DoScoreboardShow(1);
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "S");
+                       DoScoreboardShow(1);
+                   }"#,
         );
         app.engine
             .call_scenario_script_function("ShowNow", Vec::new())
@@ -2940,9 +2923,9 @@
     fn scoreboard_resize_releases_title_drag_without_replacing_cached_geometry() {
         let mut app = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         toggle_scoreboard(&mut app, ModifiersState::empty());
         let before = current_scoreboard_test_layout(&mut app);
@@ -2973,9 +2956,9 @@
     #[test]
     fn scoreboard_touch_capture_is_released_when_a_new_message_owns_end_or_cancel() {
         let board = r#"global func Initialize()
-                      {
-                          SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-                      }"#;
+                          {
+                              SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                          }"#;
         let notice = || {
             clonk_frontend::message_dialog::MessageDialogState::regular_ok(
                 "Notice",
@@ -3041,9 +3024,9 @@
     fn scoreboard_bounds_consume_secondary_middle_wheel_and_touch_input() {
         let mut app = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         let (_events, mut commands) = install_running_network_stub(&mut app, 0, 40, 4);
         toggle_scoreboard(&mut app, ModifiersState::empty());
@@ -3104,10 +3087,10 @@
     #[test]
     fn running_context_menu_routes_before_shared_scoreboard_dialogs() {
         const BOARD: &str = r#"global func Initialize()
-        {
-            SetScoreboardData(SBRD_Caption, SBRD_Caption, "A deliberately wide scoreboard");
-            SetScoreboardData(1, 1, "A deliberately wide value");
-        }"#;
+            {
+                SetScoreboardData(SBRD_Caption, SBRD_Caption, "A deliberately wide scoreboard");
+                SetScoreboardData(1, 1, "A deliberately wide value");
+            }"#;
 
         let mut overlap = new_scoreboard_test_app(BOARD);
         overlap
@@ -3211,9 +3194,9 @@
     fn scoreboard_wheel_does_not_scroll_an_overlapped_lower_f4_dialog() {
         let mut app = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         app.resize(1024, 768).expect("resize shared running screen");
         let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
@@ -3272,9 +3255,9 @@
     fn shared_message_dialog_allows_exposed_scoreboard_close_click() {
         let mut app = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         install_visible_scoreboard_highlight_fixture(&mut app);
         app.resize(1024, 768).expect("resize shared running screen");
@@ -3332,9 +3315,9 @@
     #[test]
     fn scoreboard_uses_shared_cpp_show_and_left_activation_stack_order() {
         const BOARD: &str = r#"global func Initialize()
-        {
-            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-        }"#;
+            {
+                SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+            }"#;
 
         let mut f4 = new_scoreboard_test_app(BOARD);
         let (_events, _commands) = install_running_network_stub(&mut f4, 0, 40, 4);
@@ -3410,9 +3393,9 @@
     fn scoreboard_close_restores_the_chat_exposed_beneath_its_activation() {
         let mut app = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         toggle_scoreboard(&mut app, ModifiersState::empty());
         app.start_running_chat(RunningChatMode::All);
@@ -3464,9 +3447,9 @@
     fn activated_chat_under_list_top_scoreboard_does_not_gain_keyboard_focus() {
         let mut app = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         toggle_scoreboard(&mut app, ModifiersState::empty());
         app.start_running_chat(RunningChatMode::All);
@@ -3520,9 +3503,9 @@
     fn ordinary_message_behind_scoreboard_does_not_suppress_gamepad_gameplay() {
         let mut app = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         toggle_scoreboard(&mut app, ModifiersState::empty());
         route_primary_gamepad_to_local_owner(&mut app);
@@ -3572,9 +3555,9 @@
     fn scoreboard_release_clears_an_occluded_f4_button_capture() {
         let mut app = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         app.resize(1024, 768).expect("resize shared running screen");
         let (_events, _commands) = install_running_network_stub(&mut app, 0, 40, 4);
@@ -3635,9 +3618,9 @@
     fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control() {
         let mut app = new_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         app.bindings
             .rebind(ControlBindingId::PlayerMenu, VirtualKeyCode::Tab);
@@ -3706,9 +3689,9 @@
 
         let mut exclusive_release = new_classic_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         exclusive_release
             .bindings
@@ -3746,9 +3729,9 @@
 
         let mut dialog_press = new_classic_scoreboard_test_app(
             r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }"#,
         );
         dialog_press
             .bindings
@@ -3803,9 +3786,9 @@
     #[test]
     fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
         const BOARD: &str = r#"global func Initialize()
-        {
-            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-        }"#;
+            {
+                SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+            }"#;
 
         let mut message = new_scoreboard_test_app(BOARD);
         message
@@ -3953,13 +3936,13 @@
     #[test]
     fn synchronous_scoreboard_callback_is_applied_before_render_and_tab_without_a_tick() {
         const CALLBACK_BOARD: &str = r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "PRIVATE_CALLBACK_CELL");
-               }
-               global func ShowNow()
-               {
-                   DoScoreboardShow(1);
-               }"#;
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "PRIVATE_CALLBACK_CELL");
+                   }
+                   global func ShowNow()
+                   {
+                       DoScoreboardShow(1);
+                   }"#;
 
         let mut render_app = new_scoreboard_test_app(CALLBACK_BOARD);
         render_app
@@ -3997,13 +3980,13 @@
     #[test]
     fn scoreboard_restore_uses_saved_refcount_but_not_the_no_save_user_dialog() {
         const RESTORE_BOARD: &str = r#"global func Initialize()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-               }
-               global func ShowNow()
-               {
-                   DoScoreboardShow(1);
-               }"#;
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   }
+                   global func ShowNow()
+                   {
+                       DoScoreboardShow(1);
+                   }"#;
 
         let mut positive = new_scoreboard_test_app(RESTORE_BOARD);
         call_scoreboard_function_and_update(&mut positive, "ShowNow");
@@ -4064,10 +4047,10 @@
     fn script_scoreboard_lifecycle_uses_ordered_requests_not_final_refcount() {
         let mut empty_then_cell = new_scoreboard_test_app(
             r#"global func EmptyThenCell()
-               {
-                   DoScoreboardShow(1);
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "late");
-               }"#,
+                   {
+                       DoScoreboardShow(1);
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "late");
+                   }"#,
         );
         call_scoreboard_function_and_update(&mut empty_then_cell, "EmptyThenCell");
         assert!(empty_then_cell.snapshot.hud.scoreboard.should_be_shown());
@@ -4082,11 +4065,11 @@
 
         let mut open_then_close = new_scoreboard_test_app(
             r#"global func OpenThenClose()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-                   DoScoreboardShow(1);
-                   DoScoreboardShow(-1);
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                       DoScoreboardShow(1);
+                       DoScoreboardShow(-1);
+                   }"#,
         );
         call_scoreboard_function_and_update(&mut open_then_close, "OpenThenClose");
         assert_eq!(open_then_close.snapshot.hud.scoreboard.show_count(), 0);
@@ -4100,11 +4083,11 @@
     fn later_data_update_collapses_request_time_allocated_empty_title_margin() {
         let mut app = new_scoreboard_test_app(
             r#"global func ShowEmptyThenInvalidate()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "");
-                   DoScoreboardShow(1);
-                   SetScoreboardData(1, SBRD_Caption, "Row");
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "");
+                       DoScoreboardShow(1);
+                       SetScoreboardData(1, SBRD_Caption, "Row");
+                   }"#,
         );
         call_scoreboard_function_and_update(&mut app, "ShowEmptyThenInvalidate");
         let request = app
@@ -4131,13 +4114,13 @@
     fn visible_script_scoreboard_preflights_live_data_and_user_tab_can_close_it() {
         let mut app = new_scoreboard_test_app(
             r#"global func ShowThenGrow()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-                   DoScoreboardShow(1);
-                   SetScoreboardData(SBRD_Caption, 7, "Value");
-                   SetScoreboardData(1, SBRD_Caption, "One");
-                   SetScoreboardData(1, 7, "PRIVATE_LATE_CELL", 42);
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                       DoScoreboardShow(1);
+                       SetScoreboardData(SBRD_Caption, 7, "Value");
+                       SetScoreboardData(1, SBRD_Caption, "One");
+                       SetScoreboardData(1, 7, "PRIVATE_LATE_CELL", 42);
+                   }"#,
         );
         call_scoreboard_function_and_update(&mut app, "ShowThenGrow");
         assert!(app.scoreboard_dialog.is_some());
@@ -4176,11 +4159,11 @@
     fn unresolved_scoreboard_font_image_fails_typed_before_pixels() {
         let mut app = new_scoreboard_test_app(
             r#"global func ShowBroken()
-               {
-                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-                   SetScoreboardData(1, SBRD_Caption, "{{NO_SUCH_DEFINITION}}");
-                   DoScoreboardShow(1);
-               }"#,
+                   {
+                       SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                       SetScoreboardData(1, SBRD_Caption, "{{NO_SUCH_DEFINITION}}");
+                       DoScoreboardShow(1);
+                   }"#,
         );
         call_scoreboard_function_and_update(&mut app, "ShowBroken");
         assert!(app.scoreboard_dialog.is_some());
@@ -4208,15 +4191,15 @@
     #[test]
     fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
         const GAME_OVER_BOARD: &str = r#"global func ShowAndEnd()
-        {
-            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
-            DoScoreboardShow(1);
-            GameOver();
-        }
-        global func Recheck()
-        {
-            DoScoreboardShow(0);
-        }"#;
+            {
+                SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                DoScoreboardShow(1);
+                GameOver();
+            }
+            global func Recheck()
+            {
+                DoScoreboardShow(0);
+            }"#;
         let mut app = new_classic_scoreboard_test_app(GAME_OVER_BOARD);
         app.engine
             .player_mut(app.local_owner)
@@ -4400,10 +4383,11 @@
     fn game_over_mnemonics_use_active_language_resources() {
         let user_data = tempdir().expect("localized game-over user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-        persist_config_value(&paths, "General", "LanguageEx", "DE")
-            .expect("select German resources");
+        persist_config_value(&paths, "General", "LanguageEx", "DE").expect("select German resources");
         let mut app = new_classic_running_sandbox_app();
         app.app_paths = Some(paths);
+        app.reload_application_language_resources()
+            .expect("reload German resources after replacing fixture paths");
         app.handle_game_over()
             .expect("show localized evaluation dialog");
         app.handle_modifiers_changed(ModifiersState::ALT)
@@ -4468,7 +4452,10 @@
             .handle_key(VirtualKeyCode::Return, ElementState::Released)
             .expect("any shared activation-key release activates Continue");
         assert!(keyboard.game_over_dialog.is_none());
-        assert!(keyboard.ui_sound_log.iter().any(|sound| sound == "ArrowHit"));
+        assert!(keyboard
+            .ui_sound_log
+            .iter()
+            .any(|sound| sound == "ArrowHit"));
         assert!(keyboard.ui_sound_log.iter().any(|sound| sound == "Click"));
 
         let mut gamepad = new_game_over_keyboard_app();
@@ -4691,23 +4678,23 @@
         .expect("open message over evaluation");
 
         app.process_gamepad_event_batch([
-                GamepadEvent::GuiButton {
-                    slot: GamepadSlot::new(0),
-                    class: GuiButtonClass::High,
-                    state: ElementState::Pressed,
-                },
-                GamepadEvent::Action {
-                    slot: GamepadSlot::new(0),
-                    action: GamepadActionType::Cancel,
-                    state: ElementState::Pressed,
-                },
-                GamepadEvent::Direction {
-                    slot: GamepadSlot::new(0),
-                    button: ControlButton::Left,
-                    state: ElementState::Pressed,
-                },
-            ])
-            .expect("a later raw direction begins a new receiver cluster");
+            GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                slot: GamepadSlot::new(0),
+                action: GamepadActionType::Cancel,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
+                button: ControlButton::Left,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("a later raw direction begins a new receiver cluster");
         assert!(app.message_dialogs.is_empty());
         assert_eq!(
             app.game_over_dialog
@@ -4851,23 +4838,23 @@
             hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
             assert_game_over_fixture_has_no_sound_activity(&app);
             app.process_gamepad_event_batch([
-                    GamepadEvent::GuiButton {
-                        slot: GamepadSlot::new(0),
-                        class: GuiButtonClass::Low,
-                        state: ElementState::Pressed,
-                    },
-                    GamepadEvent::Action {
-                        slot: GamepadSlot::new(0),
-                        action,
-                        state: ElementState::Pressed,
-                    },
-                    GamepadEvent::Button {
-                        slot: GamepadSlot::new(0),
-                        button,
-                        state: ElementState::Pressed,
-                    },
-                ])
-                .expect("raw Low opens the classic all-chat child");
+                GamepadEvent::GuiButton {
+                    slot: GamepadSlot::new(0),
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Action {
+                    slot: GamepadSlot::new(0),
+                    action,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Button {
+                    slot: GamepadSlot::new(0),
+                    button,
+                    state: ElementState::Pressed,
+                },
+            ])
+            .expect("raw Low opens the classic all-chat child");
             assert_eq!(app.running_chat_text(), Some(""));
             assert!(
                 app.game_over_dialog.is_some(),
@@ -4886,11 +4873,11 @@
             let mut app = new_game_over_keyboard_app();
             hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
             app.process_gamepad_event_batch([GamepadEvent::Direction {
-                    slot: GamepadSlot::new(0),
-                    button,
-                    state: ElementState::Pressed,
-                }])
-                .expect("horizontal D-pad traverses native focus");
+                slot: GamepadSlot::new(0),
+                button,
+                state: ElementState::Pressed,
+            }])
+            .expect("horizontal D-pad traverses native focus");
             assert_eq!(
                 app.game_over_dialog
                     .as_ref()
@@ -5203,7 +5190,7 @@
         assert!(!app.startup_dialog_fade_active());
 
         app.process_sourced_gamepad_event_batch(activate_network_game(24), true)
-        .expect("later physical clusters route to the newly exposed main menu");
+            .expect("later physical clusters route to the newly exposed main menu");
 
         assert_eq!(app.mode, AppMode::Menu);
         assert_eq!(app.startup_view, StartupView::NetworkGame);
@@ -5396,7 +5383,8 @@
             let mut app = new_classic_running_sandbox_app();
             configure_runtime_network_role(&mut app, RuntimeNetworkRole::Host);
             app.network_is_league = true;
-            app.handle_game_over().expect("show pending host evaluation");
+            app.handle_game_over()
+                .expect("show pending host evaluation");
             app
         };
 
@@ -5459,6 +5447,86 @@
             .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("pending client Escape is allowed");
         assert!(client.game_over_dialog.is_none());
+    }
+
+    #[test]
+    fn game_over_show_and_continue_use_offline_pause_lifecycle() {
+        // C4GameOverDlg::OnShown invokes Game.Pause, while only an accepted
+        // Continue close invokes Game.Unpause. Raw dialog teardown does not
+        // resume the round (src/C4GameOverDlg.cpp:349-381;
+        // src/C4Game.cpp:1045-1084).
+        let mut app = new_classic_running_sandbox_app();
+        assert_eq!(app.offline_halt_count, 0);
+
+        app.handle_game_over().expect("show offline evaluation");
+        assert_eq!(
+            app.offline_halt_count, 1,
+            "OnShown acquires the native offline game halt"
+        );
+        app.handle_game_over_action(GameOverAction::Continue)
+            .expect("continue the evaluated round");
+        assert_eq!(app.offline_halt_count, 0);
+        assert!(app.game_over_dialog.is_none());
+
+        let mut raw_teardown = new_classic_running_sandbox_app();
+        raw_teardown
+            .handle_game_over()
+            .expect("show evaluation before raw teardown");
+        raw_teardown.dismiss_game_over_dialog();
+        assert_eq!(
+            raw_teardown.offline_halt_count, 1,
+            "destroying the dialog without Continue must not call Unpause"
+        );
+    }
+
+    #[test]
+    fn game_over_network_pause_lifecycle_is_host_authoritative() {
+        // Evaluated network games skip league voting and preserve the ordinary
+        // host-only Pause/Start authority: OnShown requests GS_Pause and
+        // Continue requests GS_Go on the host, while both calls are consumed
+        // no-ops on clients (src/C4Game.cpp:1045-1084;
+        // src/C4Network2.cpp:527-541).
+        let mut host = new_classic_running_sandbox_app();
+        let (_events, mut host_commands) = install_running_network_stub(&mut host, 0, 0, 2);
+
+        host.handle_game_over().expect("show host evaluation");
+        let pause_changes = host_commands
+            .take_runtime_status_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                network::TestRuntimeStatusCommand::Change(status) => Some(status),
+                network::TestRuntimeStatusCommand::Reached { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pause_changes.len(), 1);
+        assert_eq!(pause_changes[0].state, clonk_network::NETWORK_STATE_PAUSE);
+
+        host.handle_game_over_action(GameOverAction::Continue)
+            .expect("continue host evaluation");
+        let go_changes = host_commands
+            .take_runtime_status_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                network::TestRuntimeStatusCommand::Change(status) => Some(status),
+                network::TestRuntimeStatusCommand::Reached { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(go_changes.len(), 1);
+        assert_eq!(go_changes[0].state, clonk_network::NETWORK_STATE_GO);
+
+        let mut client = new_classic_running_sandbox_app();
+        let (_events, mut client_commands) = install_running_network_stub(&mut client, 7, 0, 2);
+        client.handle_game_over().expect("show client evaluation");
+        assert!(client_commands.take_runtime_status_commands().is_empty());
+
+        // Model the host's committed Pause. Closing the local dialog must not
+        // let a client resume synchronized control independently.
+        client.network_control_running = false;
+        client
+            .handle_game_over_action(GameOverAction::Continue)
+            .expect("close client evaluation");
+        assert!(client_commands.take_runtime_status_commands().is_empty());
+        assert!(!client.network_control_running);
     }
 
     #[test]
@@ -5666,8 +5734,7 @@
     #[test]
     fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
         let mut game_over = new_game_over_keyboard_app();
-        let (_events, mut game_over_commands) =
-            install_running_network_stub(&mut game_over, 0, 40, 4);
+        let (_events, mut game_over_commands) = install_running_network_stub(&mut game_over, 0, 40, 4);
         route_primary_gamepad_to_local_owner(&mut game_over);
         game_over
             .handle_key(VirtualKeyCode::F4, ElementState::Pressed)
@@ -5777,7 +5844,10 @@
                 .handle_key(VirtualKeyCode::Pause, state)
                 .expect("C4 disables Pause throughout round evaluation");
             assert_eq!(runtime_global_ui_snapshot(&game_over), before_game_over);
-            assert_eq!(game_over.offline_halt_count, 0);
+            assert_eq!(
+                game_over.offline_halt_count, 1,
+                "the Pause key cannot release OnShown's evaluation halt"
+            );
         }
 
         let mut message = new_running_sandbox_app();
@@ -5822,8 +5892,15 @@
             assert!(app.running_chat_text().is_none());
         }
 
-        for key in [VirtualKeyCode::F1, VirtualKeyCode::F4, VirtualKeyCode::Pause] {
-            for modifiers in [ModifiersState::ALT, ModifiersState::LOGO | ModifiersState::ALT] {
+        for key in [
+            VirtualKeyCode::F1,
+            VirtualKeyCode::F4,
+            VirtualKeyCode::Pause,
+        ] {
+            for modifiers in [
+                ModifiersState::ALT,
+                ModifiersState::LOGO | ModifiersState::ALT,
+            ] {
                 let mut app = new_game_over_keyboard_app();
                 app.handle_modifiers_changed(modifiers)
                     .expect("set unmatched mnemonic modifiers");
@@ -5929,8 +6006,7 @@
         let mut film_client = new_running_sandbox_app();
         film_client.engine.set_control_host(false);
         set_test_scenario_head_flags(&mut film_client, 0, 2);
-        let (_film_events, _film_commands) =
-            install_running_network_stub(&mut film_client, 7, 0, 1);
+        let (_film_events, _film_commands) = install_running_network_stub(&mut film_client, 7, 0, 1);
         film_client
             .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("Film2 client opens abort confirmation");
@@ -6146,7 +6222,9 @@
             text: "Next tutorial".into(),
             description: "Continue learning".into(),
         };
-        app.engine.restore_state(&state).expect("restore next mission");
+        app.engine
+            .restore_state(&state)
+            .expect("restore next mission");
 
         for (control_host, film, width, expected) in [
             (

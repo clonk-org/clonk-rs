@@ -4,25 +4,131 @@
 //! campaign, see REFACTOR_PLAN.md). Structural only.
 
 use super::*;
+use std::sync::atomic::AtomicBool;
+
+#[derive(Debug)]
+struct PostFailureBufferState<T> {
+    accepting: bool,
+    messages: VecDeque<T>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PostFailureBuffer<T> {
+    state: Arc<Mutex<PostFailureBufferState<T>>>,
+    accepting: Arc<AtomicBool>,
+}
+
+impl<T> Clone for PostFailureBuffer<T> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            accepting: self.accepting.clone(),
+        }
+    }
+}
+
+impl<T> Default for PostFailureBuffer<T> {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(PostFailureBufferState {
+                accepting: true,
+                messages: VecDeque::new(),
+            })),
+            accepting: Arc::new(AtomicBool::new(true)),
+        }
+    }
+}
+
+impl<T> PostFailureBuffer<T> {
+    pub(crate) fn retain(&self, message: T) -> Result<(), T> {
+        let mut state = self.state.lock().expect("post-failure buffer poisoned");
+        if !state.accepting {
+            return Err(message);
+        }
+        state.messages.push_back(message);
+        Ok(())
+    }
+
+    pub(crate) fn is_accepting(&self) -> bool {
+        self.accepting.load(AtomicOrdering::Acquire)
+    }
+
+    pub(crate) fn close_and_drain(&self) -> VecDeque<T> {
+        self.accepting.store(false, AtomicOrdering::Release);
+        let mut state = self.state.lock().expect("post-failure buffer poisoned");
+        state.accepting = false;
+        std::mem::take(&mut state.messages)
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum HostOutboundMessage {
     Message(ControlMessage),
     Raw(Vec<u8>),
-    Close(crate::ConnectionReply),
+}
+
+pub(crate) struct HostOutboundReceiver {
+    sender: mpsc::UnboundedSender<HostOutboundMessage>,
+    messages: mpsc::UnboundedReceiver<HostOutboundMessage>,
+    close: watch::Receiver<Option<crate::ConnectionReply>>,
+}
+
+impl HostOutboundReceiver {
+    #[cfg(test)]
+    pub(crate) async fn recv(&mut self) -> Option<HostOutboundMessage> {
+        self.messages.recv().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_recv(&mut self) -> Result<HostOutboundMessage, mpsc::error::TryRecvError> {
+        self.messages.try_recv()
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        mpsc::UnboundedSender<HostOutboundMessage>,
+        mpsc::UnboundedReceiver<HostOutboundMessage>,
+        watch::Receiver<Option<crate::ConnectionReply>>,
+    ) {
+        (self.sender, self.messages, self.close)
+    }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct HostOutboundSender {
-    sender: mpsc::Sender<HostOutboundMessage>,
+    sender: mpsc::UnboundedSender<HostOutboundMessage>,
+    close: watch::Sender<Option<crate::ConnectionReply>>,
     retire: watch::Sender<bool>,
+    post_failure: PostFailureBuffer<HostOutboundMessage>,
 }
 
 impl HostOutboundSender {
-    pub(crate) fn channel(capacity: usize) -> (Self, mpsc::Receiver<HostOutboundMessage>) {
-        let (sender, receiver) = mpsc::channel(capacity);
+    pub(crate) fn channel() -> (Self, HostOutboundReceiver) {
+        // C++ TCP appends pending packets to OBuf and C4Network2Client::SendMsg
+        // does not impose an app-message count limit. The reliable-UDP layer
+        // separately owns its 10,000-packet ACK/retransmit window
+        // (oracle-src-pinned src/C4Network2Client.cpp:121-124;
+        // src/C4NetIO.cpp:1345-1357,1916,2788-2808). Keep this scheduler-facing
+        // queue lossless and immediately enqueueing so a slow route cannot
+        // block or corrupt fanout to the other routes.
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let (close, close_rx) = watch::channel(None);
         let (retire, _) = watch::channel(false);
-        (Self { sender, retire }, receiver)
+        let post_failure = PostFailureBuffer::default();
+        (
+            Self {
+                sender: sender.clone(),
+                close,
+                retire,
+                post_failure,
+            },
+            HostOutboundReceiver {
+                sender,
+                messages: receiver,
+                close: close_rx,
+            },
+        )
     }
 
     #[cfg(test)]
@@ -30,30 +136,41 @@ impl HostOutboundSender {
         &self,
         message: ControlMessage,
     ) -> Result<(), mpsc::error::SendError<HostOutboundMessage>> {
-        self.sender
-            .send(HostOutboundMessage::Message(message))
-            .await
+        self.try_send(message)
     }
 
     pub(crate) fn try_send_raw(
         &self,
         packet: Vec<u8>,
-    ) -> Result<(), mpsc::error::TrySendError<HostOutboundMessage>> {
-        self.sender.try_send(HostOutboundMessage::Raw(packet))
+    ) -> Result<(), mpsc::error::SendError<HostOutboundMessage>> {
+        self.send_or_retain(HostOutboundMessage::Raw(packet))
     }
 
     pub(crate) fn try_close(
         &self,
         reply: crate::ConnectionReply,
-    ) -> Result<(), mpsc::error::TrySendError<HostOutboundMessage>> {
-        self.sender.try_send(HostOutboundMessage::Close(reply))
+    ) -> Result<(), watch::error::SendError<Option<crate::ConnectionReply>>> {
+        self.close.send(Some(reply))
     }
 
     pub(crate) fn try_send(
         &self,
         message: ControlMessage,
-    ) -> Result<(), mpsc::error::TrySendError<HostOutboundMessage>> {
-        self.sender.try_send(HostOutboundMessage::Message(message))
+    ) -> Result<(), mpsc::error::SendError<HostOutboundMessage>> {
+        self.send_or_retain(HostOutboundMessage::Message(message))
+    }
+
+    fn send_or_retain(
+        &self,
+        message: HostOutboundMessage,
+    ) -> Result<(), mpsc::error::SendError<HostOutboundMessage>> {
+        match self.sender.send(message) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::SendError(message)) => self
+                .post_failure
+                .retain(message)
+                .map_err(mpsc::error::SendError),
+        }
     }
 
     pub(crate) fn same_channel(&self, other: &Self) -> bool {
@@ -61,11 +178,34 @@ impl HostOutboundSender {
     }
 
     pub(crate) fn is_closed(&self) -> bool {
-        self.sender.is_closed() || *self.retire.borrow()
+        self.close.borrow().is_some() || self.is_retiring() || !self.post_failure.is_accepting()
+    }
+
+    pub(crate) fn is_retiring(&self) -> bool {
+        *self.retire.borrow()
+    }
+
+    pub(crate) fn accepts_post_failure_fifo(&self) -> bool {
+        self.close.borrow().is_none() && self.post_failure.is_accepting()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn writer_channel_is_closed(&self) -> bool {
+        self.sender.is_closed()
     }
 
     pub(crate) fn retire(&self) {
+        // Keep accepting logical sends until the owning Disconnected handler
+        // removes this route and drains the post-failure suffix. C++ likewise
+        // leaves the failed connection selected until Ev_Net_Disconn performs
+        // its atomic route-removal/PostMortem handoff.
         self.retire.send_replace(true);
+    }
+
+    pub(crate) fn retire_and_take_post_failure(&self) -> VecDeque<HostOutboundMessage> {
+        let messages = self.post_failure.close_and_drain();
+        self.retire.send_replace(true);
+        messages
     }
 
     pub(crate) fn subscribe_retire(&self) -> watch::Receiver<bool> {
@@ -135,10 +275,8 @@ impl RoutePingLag {
     pub(crate) fn lag_ms(self, now: Instant) -> i32 {
         match (self.measured_ms, self.outstanding_since) {
             (Some(measured), Some(since)) => {
-                let unanswered_ms = i32::try_from(
-                    now.saturating_duration_since(since).as_millis(),
-                )
-                .unwrap_or(i32::MAX);
+                let unanswered_ms = i32::try_from(now.saturating_duration_since(since).as_millis())
+                    .unwrap_or(i32::MAX);
                 unanswered_ms.max(measured)
             }
             _ => self.ping_ms(),
@@ -181,6 +319,134 @@ pub(crate) struct AcceptedConnectionRoute {
 pub(crate) enum ConnectionTrafficClass {
     Message,
     Data,
+}
+
+/// C4GameControlNetwork::CalcPerformance's topology-aware control send time.
+///
+/// Every input is an activated, known, nonlocal network client. `Some(ping)`
+/// is its preferred message connection and `None` is a host tunnel. C++ skips
+/// local clients and control clients which have no corresponding
+/// C4Network2Client before reaching this calculation
+/// (oracle-src-pinned src/C4GameControlNetwork.cpp:382-435).
+pub(crate) fn control_send_time_ms(
+    control_mode: i32,
+    remote_clients: impl IntoIterator<Item = (ClientId, Option<i32>)>,
+) -> i32 {
+    let mut clients_ping = 0_i32;
+    let mut ping_client_count = 0_i32;
+    let mut tunnel_count = 0_i32;
+    let mut host_ping = 0_i32;
+
+    for (client_id, ping_ms) in remote_clients {
+        let Some(ping_ms) = ping_ms else {
+            tunnel_count = tunnel_count.wrapping_add(1);
+            continue;
+        };
+        if client_id == HOST_CLIENT_ID {
+            host_ping = ping_ms;
+        } else {
+            clients_ping = clients_ping.wrapping_add(ping_ms);
+            ping_client_count = ping_client_count.wrapping_add(1);
+        }
+    }
+
+    if control_mode != 0 {
+        return host_ping;
+    }
+
+    let numerator = clients_ping.wrapping_add(host_ping.wrapping_mul(tunnel_count.wrapping_add(1)));
+    let denominator = ping_client_count.wrapping_add(tunnel_count).wrapping_add(1);
+    let mut control_send_time = numerator / denominator;
+    if tunnel_count == 0 {
+        control_send_time /= 2;
+    }
+    control_send_time
+}
+
+#[derive(Debug, Default)]
+struct ControlSendTimeTopology {
+    control_mode: i32,
+    local_client_id: ClientId,
+    known_clients: BTreeSet<ClientId>,
+    preferred_message_ping_ms: BTreeMap<ClientId, i32>,
+}
+
+/// Last complete route-registry view published by the owning session loop.
+///
+/// C++ reads this topology synchronously while holding the network locks.
+/// Rust publishes the same compact view after each loop operation so the game
+/// thread can sample it without waiting behind socket-event or UI-event
+/// backpressure.
+#[derive(Clone, Debug, Default)]
+pub struct ControlSendTimeSnapshot {
+    topology: Arc<std::sync::RwLock<ControlSendTimeTopology>>,
+}
+
+impl ControlSendTimeSnapshot {
+    /// Builds a snapshot from one complete preferred-message-route topology.
+    ///
+    /// `known_clients` includes the local client. A remote known client absent
+    /// from `preferred_message_ping_ms` is sampled as a host tunnel, matching
+    /// `C4GameControlNetwork::CalcPerformance`.
+    pub fn from_preferred_message_routes(
+        control_mode: i32,
+        local_client_id: ClientId,
+        known_clients: impl IntoIterator<Item = ClientId>,
+        preferred_message_ping_ms: impl IntoIterator<Item = (ClientId, i32)>,
+    ) -> Self {
+        let snapshot = Self::default();
+        snapshot.publish(
+            control_mode,
+            local_client_id,
+            known_clients.into_iter().collect(),
+            preferred_message_ping_ms.into_iter().collect(),
+        );
+        snapshot
+    }
+
+    pub(crate) fn publish(
+        &self,
+        control_mode: i32,
+        local_client_id: ClientId,
+        known_clients: BTreeSet<ClientId>,
+        preferred_message_ping_ms: BTreeMap<ClientId, i32>,
+    ) {
+        let mut topology = self
+            .topology
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *topology = ControlSendTimeTopology {
+            control_mode,
+            local_client_id,
+            known_clients,
+            preferred_message_ping_ms,
+        };
+    }
+
+    /// Samples the C++ control-send time for the activated client registry.
+    ///
+    /// This read is synchronous and never waits for a session command to make
+    /// a round trip through the network actor.
+    pub fn sample(&self, activated_client_ids: &[ClientId]) -> i32 {
+        let topology = self
+            .topology
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        control_send_time_ms(
+            topology.control_mode,
+            activated_client_ids
+                .iter()
+                .copied()
+                .filter(|client_id| *client_id != topology.local_client_id)
+                .filter(|client_id| topology.known_clients.contains(client_id))
+                .map(|client_id| {
+                    (
+                        client_id,
+                        topology.preferred_message_ping_ms.get(&client_id).copied(),
+                    )
+                }),
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -395,9 +661,8 @@ impl ClientControlState {
                     clonk_engine::CLIENT_UPDATE_ACTIVATE if update.data != 0 => {
                         self.register(client_id)
                     }
-                    clonk_engine::CLIENT_UPDATE_ACTIVATE | clonk_engine::CLIENT_UPDATE_SET_OBSERVER => {
-                        self.unregister(client_id)
-                    }
+                    clonk_engine::CLIENT_UPDATE_ACTIVATE
+                    | clonk_engine::CLIENT_UPDATE_SET_OBSERVER => self.unregister(client_id),
                     _ => Ok(Vec::new()),
                 }
             }
@@ -411,7 +676,10 @@ impl ClientControlState {
         }
     }
 
-    pub(crate) fn ingest_contribution(&mut self, packet: ControlPacket) -> Result<Vec<ControlPacket>, String> {
+    pub(crate) fn ingest_contribution(
+        &mut self,
+        packet: ControlPacket,
+    ) -> Result<Vec<ControlPacket>, String> {
         if self.mode != 0 || packet.client_id() == BROADCAST_CLIENT_ID {
             return Ok(Vec::new());
         }
@@ -435,7 +703,10 @@ impl ClientControlState {
         self.resolve_ready_with_completes(outcome.ready)
     }
 
-    pub(crate) fn accept_network(&mut self, packet: ControlPacket) -> Result<Vec<ControlPacket>, String> {
+    pub(crate) fn accept_network(
+        &mut self,
+        packet: ControlPacket,
+    ) -> Result<Vec<ControlPacket>, String> {
         validate_control_envelope(&packet).map_err(|error| error.to_string())?;
         if self.mode == 0 {
             if packet.client_id() != BROADCAST_CLIENT_ID {
@@ -484,9 +755,8 @@ impl ClientControlState {
                         complete.push(packet);
                     }
                 } else {
-                    complete.push(
-                        aggregate_ready_batch(&batch).map_err(|error| error.to_string())?,
-                    );
+                    complete
+                        .push(aggregate_ready_batch(&batch).map_err(|error| error.to_string())?);
                 }
             }
 

@@ -865,10 +865,9 @@ impl GameApp {
                     } else {
                         labels.runtime_join_barred
                     };
-                    let charset = load_runtime_language_table(self.app_paths.as_ref())
-                        .map(|table| table.charset)
-                        .unwrap_or(RuntimeHelpCharset::Windows1252);
-                    match self.prepare_runtime_flash_message(&message, charset) {
+                    match self
+                        .prepare_runtime_flash_message(&message, self.runtime_language_charset)
+                    {
                         Ok(message) => self.runtime_flash_message = message,
                         Err(error) => {
                             tracing::warn!(%error, "failed to prepare runtime-join flash message")
@@ -1684,7 +1683,10 @@ impl GameApp {
         // replacement starts on the Program sheet.
         self.gamepads.set_options_open_slot(None);
         let mut dialog = clonk_frontend::startup_options_dlg::OptionsDlgState::with_all(
-            load_options_program_state(self.app_paths.as_ref()),
+            load_options_program_state(
+                self.app_paths.as_ref(),
+                Some(&self.startup_tooltip_resources),
+            ),
             load_options_sound_state(self.audio.as_ref()),
             load_options_graphics_state(self.app_paths.as_ref()),
             load_options_control_state(

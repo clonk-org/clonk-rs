@@ -1,6 +1,5 @@
 use super::*;
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct HostWorldObject {
     pub id: ObjectId,
@@ -358,10 +357,7 @@ impl DefCoreValueStore {
             "SolidMask",
             Self::target_rect(definition.def_core_solid_mask),
         );
-        def_core.insert(
-            "TopFace",
-            Self::target_rect(definition.def_core_top_face),
-        );
+        def_core.insert("TopFace", Self::target_rect(definition.def_core_top_face));
         def_core.insert("Picture", Self::rect(Some(picture)));
         def_core.insert("PictureFE", Vec::new());
         def_core.insert("Entrance", Self::rect(definition.entrance_rect));
@@ -391,10 +387,7 @@ impl DefCoreValueStore {
         def_core.insert("Line", Self::int(definition.line));
         def_core.insert("LineConnect", Self::int(definition.line_connect as i32));
         def_core.insert("LineIntersect", Self::int(definition.line_intersect));
-        def_core.insert(
-            "Prey",
-            reflected_int("Prey", i32::from(definition.prey)),
-        );
+        def_core.insert("Prey", reflected_int("Prey", i32::from(definition.prey)));
         def_core.insert(
             "Edible",
             reflected_int("Edible", i32::from(definition.edible)),
@@ -452,10 +445,7 @@ impl DefCoreValueStore {
             "StretchGrowth",
             reflected_int("StretchGrowth", i32::from(definition.stretch_growth)),
         );
-        def_core.insert(
-            "Basement",
-            reflected_int("Basement", definition.basement),
-        );
+        def_core.insert("Basement", reflected_int("Basement", definition.basement));
         def_core.insert(
             "NoBurnDecay",
             reflected_int("NoBurnDecay", i32::from(definition.no_burn_decay)),
@@ -728,17 +718,11 @@ impl HostSolidMaskImage {
         }
     }
 
-    fn check_mask_rect(
-        &self,
-        mask: crate::DefinitionTargetRect,
-    ) -> crate::DefinitionTargetRect {
+    fn check_mask_rect(&self, mask: crate::DefinitionTargetRect) -> crate::DefinitionTargetRect {
         mask.checked_for_solid_mask_bitmap(self.width, self.height)
     }
 
-    fn pixels_for_checked_mask(
-        &self,
-        mask: crate::DefinitionTargetRect,
-    ) -> Option<Arc<Vec<u8>>> {
+    fn pixels_for_checked_mask(&self, mask: crate::DefinitionTargetRect) -> Option<Arc<Vec<u8>>> {
         crate::solid_mask_pixels_for_checked_bitmap(
             mask,
             self.width,
@@ -926,10 +910,7 @@ pub enum PlayerCommand {
     },
     /// `FnActivateGameGoalMenu`: evaluate the live goals on every peer and
     /// build presentation state only for a locally controlled player.
-    ActivateGameGoalMenu {
-        player_id: i32,
-        open_menu: bool,
-    },
+    ActivateGameGoalMenu { player_id: i32, open_menu: bool },
     /// `FnSetPlayerTeam`'s complete, callback-approved team transition.
     /// The host has already made every field visible to the still-running
     /// VM; this payload lets the authoritative engine repeat the transition
@@ -991,10 +972,7 @@ pub enum PlayerCommand {
     /// command finish inside synchronous script-host execution. Experience
     /// calls crossed by this delta are transported as ordered
     /// `AdjustCrewExperience` commands.
-    AdjustCrewControlCount {
-        link: CrewInfoLink,
-        gain: i32,
-    },
+    AdjustCrewControlCount { link: CrewInfoLink, gain: i32 },
     AdjustHomeBaseMaterial {
         player_id: i32,
         definition_id: DefinitionId,
@@ -1596,9 +1574,9 @@ impl HostDefinitionTables {
 pub(crate) struct LazyHostWorldProvider {
     source: *const (),
     object: unsafe fn(*const (), ObjectId) -> Option<(usize, HostWorldObject)>,
-    objects:
-        unsafe fn(*const (), &HashSet<usize>) -> Vec<(usize, HostWorldObject)>,
+    objects: unsafe fn(*const (), &HashSet<usize>) -> Vec<(usize, HostWorldObject)>,
     landscape: unsafe fn(*const ()) -> Option<Landscape>,
+    legacy_find_object: Option<unsafe fn(*const (), ObjectId, &FindObjectParams) -> Option<bool>>,
 }
 
 impl LazyHostWorldProvider {
@@ -1625,7 +1603,16 @@ impl LazyHostWorldProvider {
             object,
             objects,
             landscape,
+            legacy_find_object: None,
         }
+    }
+
+    pub(crate) fn with_legacy_find_object(
+        mut self,
+        legacy_find_object: unsafe fn(*const (), ObjectId, &FindObjectParams) -> Option<bool>,
+    ) -> Self {
+        self.legacy_find_object = Some(legacy_find_object);
+        self
     }
 
     fn object(self, id: ObjectId) -> Option<(usize, HostWorldObject)> {
@@ -1663,11 +1650,7 @@ impl HostWorldObjectStore {
         // materialization.
         let indices = &self.indices;
         let insert_at = self.order.partition_point(|object_id| {
-            indices
-                .get(object_id)
-                .copied()
-                .unwrap_or(usize::MAX)
-                <= index
+            indices.get(object_id).copied().unwrap_or(usize::MAX) <= index
         });
         self.order.insert(insert_at, id);
     }
@@ -2055,10 +2038,7 @@ impl HostWorldContext {
 
     /// Attach the engine's synchronous lazy source. Empty fixture contexts
     /// remain complete; only engine callback contexts opt into this state.
-    pub(crate) fn with_lazy_world_provider(
-        mut self,
-        provider: LazyHostWorldProvider,
-    ) -> Self {
+    pub(crate) fn with_lazy_world_provider(mut self, provider: LazyHostWorldProvider) -> Self {
         self.lazy_world = Some(provider);
         Rc::make_mut(self.object_store.get_mut()).complete = false;
         if self.landscape.get().is_some_and(Option::is_none) {
@@ -2070,11 +2050,7 @@ impl HostWorldContext {
     /// Seed an object that the callback already owns. This is both the fast
     /// path for ordinary self-only callbacks and the aliasing boundary for a
     /// live engine object held through `&mut` during the script call.
-    pub(crate) fn with_seeded_object(
-        mut self,
-        index: usize,
-        object: HostWorldObject,
-    ) -> Self {
+    pub(crate) fn with_seeded_object(mut self, index: usize, object: HostWorldObject) -> Self {
         self.seed_object(index, object);
         self
     }
@@ -2087,9 +2063,9 @@ impl HostWorldContext {
         store.objects.insert(id, object);
         if !store.order.contains(&id) {
             store.order.push(id);
-            store
-                .order
-                .sort_by_key(|object_id| store.indices.get(object_id).copied().unwrap_or(usize::MAX));
+            store.order.sort_by_key(|object_id| {
+                store.indices.get(object_id).copied().unwrap_or(usize::MAX)
+            });
         }
         self.sectors = RefCell::new(None);
     }
@@ -2407,24 +2383,14 @@ impl HostWorldContext {
         self
     }
 
-    pub(crate) fn player_has_fow_view_object(
-        &self,
-        player: i32,
-        object: ObjectId,
-    ) -> bool {
+    pub(crate) fn player_has_fow_view_object(&self, player: i32, object: ObjectId) -> bool {
         self.player_fow_view_objects
             .get(&player)
             .is_some_and(|objects| objects.contains(&object))
     }
 
-    pub(crate) fn remove_player_fow_view_object(
-        &mut self,
-        player: i32,
-        object: ObjectId,
-    ) {
-        if let Some(objects) =
-            Rc::make_mut(&mut self.player_fow_view_objects).get_mut(&player)
-        {
+    pub(crate) fn remove_player_fow_view_object(&mut self, player: i32, object: ObjectId) {
+        if let Some(objects) = Rc::make_mut(&mut self.player_fow_view_objects).get_mut(&player) {
             objects.remove(&object);
         }
     }
@@ -2605,7 +2571,11 @@ impl HostWorldContext {
             .flatten()
     }
 
-    pub(crate) fn set_player_info_league_progress_data(&mut self, id: i32, data: Option<Vec<u8>>) -> bool {
+    pub(crate) fn set_player_info_league_progress_data(
+        &mut self,
+        id: i32,
+        data: Option<Vec<u8>>,
+    ) -> bool {
         if id == 0 || !self.player_info_ids.contains(&id) {
             return false;
         }
@@ -2627,8 +2597,12 @@ impl HostWorldContext {
     }
 
     pub(crate) fn player_info_league_score(&self, id: i32) -> Option<i32> {
-        (id >= 1 && self.player_info_ids.contains(&id))
-            .then(|| self.player_info_league_scores.get(&id).copied().unwrap_or(0))
+        (id >= 1 && self.player_info_ids.contains(&id)).then(|| {
+            self.player_info_league_scores
+                .get(&id)
+                .copied()
+                .unwrap_or(0)
+        })
     }
 
     pub(crate) fn with_teams(mut self, teams: Rc<Vec<TeamInfo>>) -> Self {
@@ -2918,8 +2892,7 @@ impl HostWorldContext {
                 .script_for_host_identity(resolution.host_identity)
                 .map(|(_, _, script)| script)
                 .or_else(|| {
-                    (script.host_identity() == resolution.host_identity)
-                        .then(|| Arc::clone(script))
+                    (script.host_identity() == resolution.host_identity).then(|| Arc::clone(script))
                 })?;
             Some((exact_script, resolution))
         };
@@ -3062,9 +3035,9 @@ impl HostWorldContext {
             store.objects.insert(id, object);
         }
         store.order = store.objects.keys().copied().collect();
-        store.order.sort_by_key(|id| {
-            store.indices.get(id).copied().unwrap_or(usize::MAX)
-        });
+        store
+            .order
+            .sort_by_key(|id| store.indices.get(id).copied().unwrap_or(usize::MAX));
         store.complete = true;
     }
 
@@ -3091,6 +3064,35 @@ impl HostWorldContext {
         store.objects.insert(id, object.clone());
         store.insert_ordered_by_index(id, index);
         Some(object)
+    }
+
+    pub(crate) fn matches_legacy_find_object_candidate(
+        &self,
+        id: ObjectId,
+        params: &FindObjectParams,
+    ) -> Option<bool> {
+        {
+            let store = self.object_store.borrow();
+            if store.removed.contains(&id) {
+                return None;
+            }
+            if let Some(object) = store.objects.get(&id) {
+                return Some(params.matches_object(object));
+            }
+            if store.complete {
+                return None;
+            }
+        }
+        let Some(provider) = self.lazy_world else {
+            return self.get(id).map(|object| params.matches_object(&object));
+        };
+        let Some(matches) = provider.legacy_find_object else {
+            return self.get(id).map(|object| params.matches_object(&object));
+        };
+        // SAFETY: the same synchronous source-lifetime and object-storage
+        // contract as `LazyHostWorldProvider::object` applies. This callback
+        // only reads the scalar fields C4Game::FindObject itself inspects.
+        unsafe { matches(provider.source, id, params) }
     }
 
     /// Update the callback-visible identity of a live command target while
@@ -3338,19 +3340,13 @@ impl HostWorldContext {
                 else {
                     return;
                 };
-                let bounds = crate::landscape::RasterChangeRect::new(
-                    origin.x,
-                    origin.y,
-                    *width,
-                    *height,
-                );
+                let bounds =
+                    crate::landscape::RasterChangeRect::new(origin.x, origin.y, *width, *height);
                 if landscape.pixel_grid().is_some() {
                     let bakes = Rc::make_mut(&mut self.solid_mask_bakes);
-                    landscape.preview_raster_transaction_with_masks(
-                        bakes,
-                        bounds,
-                        |landscape| landscape.clear_rect_pixels(bounds),
-                    );
+                    landscape.preview_raster_transaction_with_masks(bakes, bounds, |landscape| {
+                        landscape.clear_rect_pixels(bounds)
+                    });
                 } else {
                     let landscape_height = landscape.estimated_height();
                     for row in origin.y..origin.y.saturating_add(*height) {
@@ -3735,8 +3731,7 @@ impl HostWorldContext {
         if self.landscape.get().is_some() {
             self.landscape = OnceCell::from(Some(Rc::new(landscape.clone())));
         }
-        Rc::make_mut(&mut self.movement_solid_masks)
-            .retain(|mask| mask.object_id != mover);
+        Rc::make_mut(&mut self.movement_solid_masks).retain(|mask| mask.object_id != mover);
         self.solid_mask_bakes = Rc::new(bakes);
     }
 
@@ -3810,7 +3805,11 @@ impl HostWorldContext {
         self.definitions.get(id).map(|meta| meta.category)
     }
 
-    pub(crate) fn definition_id_by_index(&self, index: i32, category: i32) -> Option<&DefinitionId> {
+    pub(crate) fn definition_id_by_index(
+        &self,
+        index: i32,
+        category: i32,
+    ) -> Option<&DefinitionId> {
         let index = usize::try_from(index).ok()?;
         let category = if category == 0 { -1 } else { category };
         if category == -1 {
@@ -3891,7 +3890,11 @@ impl HostWorldContext {
     /// Callback-local `C4GameObjects::UpdatePos` for a live position/shape
     /// change. Unlike a status transition this retains the object's existing
     /// sector-list links wherever its covered area did not change.
-    pub(crate) fn preview_object_sector_update(&self, record: SectorObject, master_order: &[ObjectId]) {
+    pub(crate) fn preview_object_sector_update(
+        &self,
+        record: SectorObject,
+        master_order: &[ObjectId],
+    ) {
         if self.sector_map().is_none() {
             return;
         }
@@ -3918,14 +3921,20 @@ impl HostWorldContext {
         })
     }
 
-    pub(crate) fn object_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+    pub(crate) fn object_sector_id_lists_in_rect(
+        &self,
+        rect: DefinitionRect,
+    ) -> Option<Vec<Vec<ObjectId>>> {
         self.sector_map().map(|sectors| {
             let area = sectors.area(rect);
             sectors.object_id_lists_in_area(&area)
         })
     }
 
-    pub(crate) fn shape_sector_id_lists_in_rect(&self, rect: DefinitionRect) -> Option<Vec<Vec<ObjectId>>> {
+    pub(crate) fn shape_sector_id_lists_in_rect(
+        &self,
+        rect: DefinitionRect,
+    ) -> Option<Vec<Vec<ObjectId>>> {
         self.sector_map().map(|sectors| {
             let area = sectors.area(rect);
             sectors.shape_id_lists_in_area(&area)
@@ -3940,7 +3949,12 @@ impl HostWorldContext {
         self.players.get(&id)
     }
 
-    pub(crate) fn control_key_name(&self, control_set: i32, control: i32, short: bool) -> Option<&str> {
+    pub(crate) fn control_key_name(
+        &self,
+        control_set: i32,
+        control: i32,
+        short: bool,
+    ) -> Option<&str> {
         let control = usize::try_from(control).ok()?;
         self.control_key_names
             .get(&control_set)?
@@ -4030,7 +4044,10 @@ pub(crate) fn sector_shape_rect(mut rect: DefinitionRect) -> DefinitionRect {
     rect
 }
 
-pub(crate) fn host_vertex_bounds_rect(position: Vector2, vertices: &[ObjectVertex]) -> Option<DefinitionRect> {
+pub(crate) fn host_vertex_bounds_rect(
+    position: Vector2,
+    vertices: &[ObjectVertex],
+) -> Option<DefinitionRect> {
     let first = vertices.first()?;
     let mut min_x = first.x;
     let mut max_x = first.x;
@@ -4052,6 +4069,14 @@ pub(crate) fn host_vertex_bounds_rect(position: Vector2, vertices: &[ObjectVerte
 
 pub(crate) trait WorldAccessor {
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject>;
+    fn matches_legacy_find_object_candidate(
+        &self,
+        id: ObjectId,
+        params: &FindObjectParams,
+    ) -> Option<bool> {
+        self.get_object(id)
+            .map(|object| params.matches_object(&object))
+    }
     fn object_ids(&self) -> Vec<ObjectId>;
     fn master_object_ids(&self) -> Vec<ObjectId>;
     /// Exact world-space `C4Object::Shape`; no `C4Object::addtop` expansion.
@@ -4130,6 +4155,14 @@ pub(crate) fn sort_object_mass(world: &impl WorldAccessor, target: ObjectId) -> 
 impl WorldAccessor for HostWorldContext {
     fn get_object(&self, id: ObjectId) -> Option<HostWorldObject> {
         self.get(id)
+    }
+
+    fn matches_legacy_find_object_candidate(
+        &self,
+        id: ObjectId,
+        params: &FindObjectParams,
+    ) -> Option<bool> {
+        self.matches_legacy_find_object_candidate(id, params)
     }
 
     fn object_ids(&self) -> Vec<ObjectId> {
@@ -4294,11 +4327,7 @@ pub(crate) fn reload_def(args: &[Value]) -> Result<Value, RuntimeError> {
 /// suppress it during replay and otherwise hand the halt/toggle action to the
 /// embedding app without mutating synchronized engine state.
 pub(crate) fn pause_game(args: &[Value]) -> Result<Value, RuntimeError> {
-    let toggle = value_to_bool(
-        args.first().unwrap_or(&Value::Nil),
-        "PauseGame",
-        "toggle",
-    )?;
+    let toggle = value_to_bool(args.first().unwrap_or(&Value::Nil), "PauseGame", "toggle")?;
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         if let Some(context) = borrow.as_ref() {
@@ -4673,19 +4702,14 @@ pub(crate) fn host_overlap_object(
 /// the legacy 38 FPS default, nonzero values must be in 1..=1000, and league
 /// games reject calls whose caller is a DirectExec temporary script.
 pub(crate) fn set_game_speed(args: &[Value]) -> Result<Value, RuntimeError> {
-    let requested = value_to_i32(
-        args.first().unwrap_or(&Value::Nil),
-        "SetGameSpeed",
-        "speed",
-    )?;
+    let requested = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetGameSpeed", "speed")?;
 
     HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
             return Ok(Value::Bool(false));
         };
-        if context.world.league_game()
-            && clonk_script::caller_is_temporary_script() != Some(false)
+        if context.world.league_game() && clonk_script::caller_is_temporary_script() != Some(false)
         {
             return Ok(Value::Bool(false));
         }

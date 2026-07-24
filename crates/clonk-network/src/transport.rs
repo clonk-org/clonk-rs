@@ -29,8 +29,9 @@ use std::convert::TryFrom;
 use std::io;
 use std::mem::size_of;
 use std::ops::Deref;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 
 const TCP_FRAME_PREFIX: u8 = 0xFF;
 const PID_PING: u8 = 0x00;
@@ -321,8 +322,8 @@ fn cpp_frame_body_size(size: usize) -> Result<u32, TransportError> {
 #[derive(Debug)]
 pub struct ControlTransport<S> {
     stream: S,
-    statistics: Option<AttachedConnectionStatistics>,
-    outbound_packet_log: crate::RecoverablePacketLog,
+    statistics: Option<Arc<AttachedConnectionStatistics>>,
+    outbound_packet_log: Arc<Mutex<crate::RecoverablePacketLog>>,
     /// Accumulated inbound bytes; a partial frame stays buffered here so a
     /// dropped `read_message` future never loses stream position. Mirrors
     /// `C4NetIOTCP::Peer::IBuf` (src/C4NetIO.cpp:1415): incomplete frames are
@@ -347,15 +348,12 @@ impl Drop for AttachedConnectionStatistics {
     }
 }
 
-impl<S> ControlTransport<S>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
+impl<S> ControlTransport<S> {
     pub fn new(stream: S) -> Self {
         Self {
             stream,
             statistics: None,
-            outbound_packet_log: crate::RecoverablePacketLog::default(),
+            outbound_packet_log: Arc::new(Mutex::new(crate::RecoverablePacketLog::default())),
             read_buf: Vec::new(),
         }
     }
@@ -364,25 +362,59 @@ where
     /// Reliable-UDP streams deliberately do not use this hook: their in-memory
     /// framing adapter is not the wire boundary, so the UDP socket driver owns
     /// that accounting instead.
-    pub fn with_statistics(
-        stream: S,
-        statistics: crate::ConnectionStatisticsRecorder,
-    ) -> Self {
+    pub fn with_statistics(stream: S, statistics: crate::ConnectionStatisticsRecorder) -> Self {
         Self {
             stream,
-            statistics: Some(AttachedConnectionStatistics(statistics)),
-            outbound_packet_log: crate::RecoverablePacketLog::default(),
+            statistics: Some(Arc::new(AttachedConnectionStatistics(statistics))),
+            outbound_packet_log: Arc::new(Mutex::new(crate::RecoverablePacketLog::default())),
             read_buf: Vec::new(),
         }
     }
 
     pub fn set_statistics(&mut self, statistics: crate::ConnectionStatisticsRecorder) {
-        self.statistics = Some(AttachedConnectionStatistics(statistics));
+        self.statistics = Some(Arc::new(AttachedConnectionStatistics(statistics)));
     }
 
     /// Returns the underlying stream, discarding any buffered partial frame.
     pub fn into_inner(self) -> S {
         self.stream
+    }
+
+    /// Separates established route reads from potentially backpressured
+    /// writes while retaining one packet log and one statistics lifetime.
+    ///
+    /// Native TCP services readable sockets independently from flushing OBuf
+    /// (oracle-src-pinned src/C4NetIO.cpp:690-761,1345-1396).
+    pub(crate) fn into_split(
+        self,
+    ) -> (
+        ControlTransport<ReadHalf<S>>,
+        ControlTransport<WriteHalf<S>>,
+    )
+    where
+        S: AsyncRead + AsyncWrite,
+    {
+        let Self {
+            stream,
+            statistics,
+            outbound_packet_log,
+            read_buf,
+        } = self;
+        let (reader, writer) = tokio::io::split(stream);
+        (
+            ControlTransport {
+                stream: reader,
+                statistics: statistics.clone(),
+                outbound_packet_log: outbound_packet_log.clone(),
+                read_buf,
+            },
+            ControlTransport {
+                stream: writer,
+                statistics,
+                outbound_packet_log,
+                read_buf: Vec::new(),
+            },
+        )
     }
 
     /// Builds the one C++ recovery envelope permitted for this connection.
@@ -391,7 +423,16 @@ where
         remote_connection_id: u32,
     ) -> Option<crate::PostMortemPacket> {
         self.outbound_packet_log
+            .lock()
+            .expect("outbound packet log poisoned")
             .create_post_mortem(remote_connection_id)
+    }
+
+    pub(crate) fn outbound_packet_counter(&self) -> u32 {
+        self.outbound_packet_log
+            .lock()
+            .expect("outbound packet log poisoned")
+            .next_packet_counter()
     }
 
     /// Reads the next supported logical message, transparently consuming any
@@ -400,7 +441,10 @@ where
     /// Cancel-safe: this future may be dropped mid-frame (e.g. by
     /// `tokio::select!`) without corrupting the stream — partial frames are
     /// kept in the transport's buffer and completed by the next call.
-    pub async fn read_message(&mut self) -> Result<ControlMessage, TransportError> {
+    pub async fn read_message(&mut self) -> Result<ControlMessage, TransportError>
+    where
+        S: AsyncRead + Unpin,
+    {
         loop {
             match self.read_packet().await? {
                 InboundPacket::Message(message) => return Ok(message),
@@ -413,11 +457,16 @@ where
     /// Reads one framed packet, including known C++ packet types whose
     /// handlers have not been ported yet. Session owners use this to preserve
     /// C++ packet-counter accounting before ignoring those packets.
-    pub(crate) async fn read_packet(&mut self) -> Result<InboundPacket, TransportError> {
+    pub(crate) async fn read_packet(&mut self) -> Result<InboundPacket, TransportError>
+    where
+        S: AsyncRead + Unpin,
+    {
         loop {
             if let Some(packet) = self.extract_frame()? {
                 if let InboundPacket::Message(ControlMessage::Ping(ping)) = &packet {
                     self.outbound_packet_log
+                        .lock()
+                        .expect("outbound packet log poisoned")
                         .acknowledge_received(ping.packet_counter);
                 }
                 return Ok(packet);
@@ -601,6 +650,8 @@ where
     ) -> Result<(), TransportError> {
         let frame = Self::encode_message_frame(message)?;
         self.outbound_packet_log
+            .lock()
+            .expect("outbound packet log poisoned")
             .record_outbound(frame[FRAME_HEADER_LEN..].to_vec());
         Ok(())
     }
@@ -610,32 +661,29 @@ where
         packet: Vec<u8>,
     ) -> Result<(), TransportError> {
         cpp_frame_body_size(packet.len())?;
-        self.outbound_packet_log.record_outbound(packet);
+        self.outbound_packet_log
+            .lock()
+            .expect("outbound packet log poisoned")
+            .record_outbound(packet);
         Ok(())
     }
 
-    /// Sends one message as a single contiguous frame, mirroring
-    /// `C4NetIOTCP::PackPacket` (src/C4NetIO.cpp:1286) which writes prefix,
-    /// size and payload into one output buffer.
-    pub async fn send_message(&mut self, message: ControlMessage) -> Result<(), TransportError> {
+    pub(crate) fn prepare_message_frame(
+        &mut self,
+        message: ControlMessage,
+    ) -> Result<Vec<u8>, TransportError> {
         let frame = Self::encode_message_frame(message)?;
         self.outbound_packet_log
+            .lock()
+            .expect("outbound packet log poisoned")
             .record_outbound(frame[FRAME_HEADER_LEN..].to_vec());
-        self.stream.write_all(&frame).await?;
-        if let Some(statistics) = &self.statistics {
-            statistics.record_output(frame.len());
-        }
-        self.stream.flush().await?;
-        Ok(())
+        Ok(frame)
     }
 
-    /// Sends one already-encoded complete packet body without normalizing its
-    /// payload. C++ uses this path when a host directly relays a `PID_FwdReq`
-    /// nested packet to at most two clients.
-    pub(crate) async fn send_complete_packet_bytes(
+    pub(crate) fn prepare_complete_packet_frame(
         &mut self,
         packet: &[u8],
-    ) -> Result<(), TransportError> {
+    ) -> Result<Vec<u8>, TransportError> {
         let size = cpp_frame_body_size(packet.len())?;
         let frame_size = FRAME_HEADER_LEN
             .checked_add(packet.len())
@@ -644,14 +692,55 @@ where
         frame.push(TCP_FRAME_PREFIX);
         frame.extend_from_slice(&size.to_ne_bytes());
         frame.extend_from_slice(packet);
-        self.outbound_packet_log.record_outbound(packet.to_vec());
-        self.stream.write_all(&frame).await?;
+        self.outbound_packet_log
+            .lock()
+            .expect("outbound packet log poisoned")
+            .record_outbound(packet.to_vec());
+        Ok(frame)
+    }
+
+    pub(crate) async fn send_prepared_frame(&mut self, frame: &[u8]) -> Result<(), TransportError>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        self.stream.write_all(frame).await?;
         if let Some(statistics) = &self.statistics {
             statistics.record_output(frame.len());
         }
         self.stream.flush().await?;
         Ok(())
     }
+
+    /// Sends one message as a single contiguous frame, mirroring
+    /// `C4NetIOTCP::PackPacket` (src/C4NetIO.cpp:1286) which writes prefix,
+    /// size and payload into one output buffer.
+    pub async fn send_message(&mut self, message: ControlMessage) -> Result<(), TransportError>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let frame = self.prepare_message_frame(message)?;
+        self.send_prepared_frame(&frame).await
+    }
+
+    /// Sends one already-encoded complete packet body without normalizing its
+    /// payload. C++ uses this path when a host directly relays a `PID_FwdReq`
+    /// nested packet to at most two clients.
+    #[cfg(test)]
+    pub(crate) async fn send_complete_packet_bytes(
+        &mut self,
+        packet: &[u8],
+    ) -> Result<(), TransportError>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let frame = self.prepare_complete_packet_frame(packet)?;
+        self.send_prepared_frame(&frame).await
+    }
+}
+
+pub(crate) fn encode_complete_message(message: ControlMessage) -> Result<Vec<u8>, TransportError> {
+    let frame = ControlTransport::<()>::encode_message_frame(message)?;
+    Ok(frame[FRAME_HEADER_LEN..].to_vec())
 }
 
 pub(crate) fn parse_complete_packet(body: &[u8]) -> Result<Option<ControlMessage>, TransportError> {
@@ -1591,10 +1680,7 @@ mod tests {
         let (client, mut server) = duplex(64);
         let mut transport = ControlTransport::new(client);
 
-        transport
-            .send_complete_packet_bytes(&packet)
-            .await
-            .unwrap();
+        transport.send_complete_packet_bytes(&packet).await.unwrap();
         transport
             .send_complete_packet_bytes(&recoverable)
             .await
@@ -1728,10 +1814,7 @@ mod tests {
             ControlMessage::PostMortem(crate::PostMortemPacket {
                 connection_id: 0x1122_3344,
                 packet_counter: 7,
-                packets: vec![
-                    vec![0x10, 0x02, 0x00, 0xff],
-                    vec![0x40, 0x01, 0x00, 0xff],
-                ],
+                packets: vec![vec![0x10, 0x02, 0x00, 0xff], vec![0x40, 0x01, 0x00, 0xff],],
             })
         );
     }
@@ -1741,10 +1824,7 @@ mod tests {
         let packet = crate::PostMortemPacket {
             connection_id: 0x1122_3344,
             packet_counter: 7,
-            packets: vec![
-                vec![0x10, 0x02, 0x00, 0xff],
-                vec![0x40, 0x01, 0x00, 0xff],
-            ],
+            packets: vec![vec![0x10, 0x02, 0x00, 0xff], vec![0x40, 0x01, 0x00, 0xff]],
         };
         let expected = expect_frame(&[
             0x06, 0x44, 0x33, 0x22, 0x11, 0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04,
@@ -3076,8 +3156,8 @@ mod tests {
 
         assert!(statistics.generate_statistics(1_001));
         let connection = statistics.connection_statistics(key).unwrap();
-        let expected = ((inbound.len() as u64 + crate::TCP_STATISTICS_HEADER_BYTES) * 1_000)
-            / 1_001;
+        let expected =
+            ((inbound.len() as u64 + crate::TCP_STATISTICS_HEADER_BYTES) * 1_000) / 1_001;
         assert_eq!(connection.input_rate, expected);
         assert_eq!(connection.output_rate, expected);
     }

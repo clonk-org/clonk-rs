@@ -38,6 +38,7 @@ code** and the Rust side runs identical inputs and asserts byte-exact equality:
 | `solid_mask_graphics` | `src/C4SolidMaskBitmap.h`, called by `C4SolidMask` | active/default graphics selection and transparent/solid mask sampling after `SetGraphics` |
 | `shake_objects` | complete `C4Game::ShakeObjects` + `C4Object::Fling` bodies | master-order gates, `Random(3)`/`Rnd3()` consumption, attachment material identity, and raw Fling fallback |
 | `blast_free` | complete `C4Landscape::ClearPix`, `BlastFreePix`, and `BlastFree` bodies | exact circle scan, pre-mutation material counts, duplicate-slot BlastShiftTo/DefaultMatTex byte selection, IFT preservation, and RNG order |
+| `network_rule_goal_placement` | complete `C4SGame::ConvertGoals` and `C4Game::InitRules`/`InitGoals` bodies (`src/C4Scenario.cpp:506-556`; `src/C4Game.cpp:4056-4076`) | HarpoonRace's authored RVLR plus default energy realism becomes authoritative RVLR+ENRG parameters; rules use `max(count, 1)`, goals use the exact count, and local scenario lists cannot replace synchronized JoinData lists |
 | `contact_action_bottom_flight` | complete bottom `DFA_FLIGHT` arm of `C4Object::ContactAction` + action helpers | the `(OCF_HitSpeed4 \|\| fDisabled)` FlatUp gate, including low-speed disabled actions |
 | `contact_action_top_side_flight` | complete top/left/right `DFA_FLIGHT` arms + action helpers + unresolved-flight tail | the `(OCF_HitSpeed3 \|\| fDisabled)` Tumble gates, exact transient wall kicks, enabled Hangle/Scale controls, and final slide-free state |
 | `movement` | `src/C4Movement.cpp:260,627` accumulation | the Theme-C core: `fix += dir`, `ydir += gravity` |
@@ -150,6 +151,17 @@ live shadow-diff — see "Phase 2" below.
   `PixelGrid` and compares pre-mutation `BlastMatCount`, every final byte, and
   `RandomHold`/`RandomCount`/`FRndPtr3` before and after the scan. A second
   mechanically extracted call pins the inclusive radius-zero center clear.
+- `network_rule_goal_placement` mechanically extracts and compiles the complete
+  production `C4SGame::ConvertGoals`, `C4Game::InitRules`, and
+  `C4Game::InitGoals` bodies plus the `C4IDList` methods they invoke. The first
+  case uses HarpoonRace's real `Rules=RVLR=1`, `Goals=RACE=1`, and omitted
+  `StructNeedEnergy` default to record RVLR+ENRG and RACE placement. The second
+  deliberately gives local Scenario.txt different counts from the synchronized
+  parameters, proving that Rust applies the authoritative lists and preserves
+  C++'s rule/goal zero-count asymmetry. This is a focused startup-method
+  differential, not a full native network session; the production method
+  bodies are exact while object creation and `UpdateRules` are recording
+  scaffolds.
 - `contact_action_bottom_flight` mechanically extracts the complete first
   `DFA_FLIGHT` switch arm from `C4Object::ContactAction` and the production
   `ObjectActionWalk`, `ObjectActionKneel`, and `ObjectActionFlat` helpers. Its

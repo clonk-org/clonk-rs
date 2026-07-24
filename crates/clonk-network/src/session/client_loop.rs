@@ -5,42 +5,102 @@
 
 use super::*;
 
+enum ClientRouteWriterExit {
+    Cancelled,
+    OutboundClosed,
+    Failed(String),
+}
+
+async fn run_client_route_writer<W>(
+    mut transport: crate::ControlTransport<W>,
+    mut outbound_rx: mpsc::UnboundedReceiver<ClientRouteCommand>,
+    mut cancel_rx: watch::Receiver<bool>,
+) -> ClientRouteWriterExit
+where
+    W: AsyncWrite + Unpin,
+{
+    let exit = loop {
+        let command = tokio::select! {
+            biased;
+            _ = wait_for_route_retirement(&mut cancel_rx) => {
+                break ClientRouteWriterExit::Cancelled;
+            }
+            command = outbound_rx.recv() => {
+                let Some(command) = command else {
+                    break ClientRouteWriterExit::OutboundClosed;
+                };
+                command
+            }
+        };
+        let message = match command {
+            ClientRouteCommand::Message(message) => message,
+            ClientRouteCommand::Flush(completion) => {
+                let _ = completion.send(());
+                continue;
+            }
+        };
+        // Log before the cancellable socket write, matching
+        // C4Network2IOConnection::Send (oracle-src-pinned
+        // src/C4Network2IO.cpp:1451-1491).
+        let frame = match transport.prepare_message_frame(message) {
+            Ok(frame) => frame,
+            Err(error) => break ClientRouteWriterExit::Failed(format!("send failed: {error}")),
+        };
+        let result = tokio::select! {
+            biased;
+            _ = wait_for_route_retirement(&mut cancel_rx) => {
+                break ClientRouteWriterExit::Cancelled;
+            }
+            result = transport.send_prepared_frame(&frame) => result,
+        };
+        if let Err(error) = result {
+            break ClientRouteWriterExit::Failed(format!("send failed: {error}"));
+        }
+    };
+
+    // Every logical send accepted before route failure belongs in the one
+    // PostMortem suffix, even if its frame never reached the socket.
+    outbound_rx.close();
+    while let Ok(command) = outbound_rx.try_recv() {
+        if let ClientRouteCommand::Message(message) = command {
+            let _ = transport.retain_unsent_message(message);
+        }
+    }
+    exit
+}
+
 pub(crate) async fn run_client_route<S>(
     local_connection_id: u32,
     remote_connection_id: u32,
     peer_addr: Option<SocketAddr>,
-    mut transport: crate::ControlTransport<S>,
-    mut outbound_rx: mpsc::Receiver<ClientRouteCommand>,
+    transport: crate::ControlTransport<S>,
+    route_tx: mpsc::UnboundedSender<ClientRouteCommand>,
+    outbound_rx: mpsc::UnboundedReceiver<ClientRouteCommand>,
     mut retire_rx: watch::Receiver<bool>,
-    event_tx: mpsc::Sender<ClientRouteEvent>,
+    event_tx: mpsc::UnboundedSender<ClientRouteEvent>,
     mut liveness: ConnectionLivenessState,
 ) where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let (mut transport, writer) = transport.into_split();
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let mut writer_task = tokio::spawn(run_client_route_writer(writer, outbound_rx, cancel_rx));
+    let mut writer_finished = false;
+    let mut publish_disconnect = true;
     let reason = loop {
         let liveness_deadline = liveness.next_timer_at();
         tokio::select! {
-            biased;
             _ = wait_for_route_retirement(&mut retire_rx) => break None,
-            command = outbound_rx.recv() => {
-                match command {
-                    Some(ClientRouteCommand::Message(message)) => {
-                        let result = tokio::select! {
-                            biased;
-                            result = transport.send_message(message) => Some(result),
-                            _ = wait_for_route_retirement(&mut retire_rx) => None,
-                        };
-                        let Some(result) = result else {
-                            break None;
-                        };
-                        if let Err(error) = result {
-                            break Some(format!("send failed: {error}"));
-                        }
+            writer_result = &mut writer_task => {
+                writer_finished = true;
+                match writer_result {
+                    Ok(ClientRouteWriterExit::Cancelled) => break None,
+                    Ok(ClientRouteWriterExit::OutboundClosed) => {
+                        publish_disconnect = false;
+                        break None;
                     }
-                    Some(ClientRouteCommand::Flush(completion)) => {
-                        let _ = completion.send(());
-                    }
-                    None => return,
+                    Ok(ClientRouteWriterExit::Failed(reason)) => break Some(reason),
+                    Err(error) => break Some(format!("route writer task failed: {error}")),
                 }
             }
             packet = transport.read_packet() => {
@@ -54,18 +114,11 @@ pub(crate) async fn run_client_route<S>(
                 match packet {
                     crate::transport::InboundPacket::Message(ControlMessage::Ping(packet)) => {
                         liveness.record_inbound_message(&ControlMessage::Ping(packet));
-                        let result = tokio::select! {
-                            biased;
-                            result = transport.send_message(ControlMessage::Pong(packet)) => {
-                                Some(result)
-                            },
-                            _ = wait_for_route_retirement(&mut retire_rx) => None,
-                        };
-                        let Some(result) = result else {
-                            break None;
-                        };
-                        if let Err(error) = result {
-                            break Some(format!("pong send failed: {error}"));
+                        if route_tx
+                            .send(ClientRouteCommand::Message(ControlMessage::Pong(packet)))
+                            .is_err()
+                        {
+                            break Some("pong send failed: route writer closed".to_string());
                         }
                     }
                     crate::transport::InboundPacket::Message(ControlMessage::Pong(packet)) => {
@@ -76,10 +129,10 @@ pub(crate) async fn run_client_route<S>(
                                 route_id: local_connection_id,
                                 round_trip_ms,
                             })
-                            .await
                             .is_err()
                         {
-                            return;
+                            publish_disconnect = false;
+                            break None;
                         }
                     }
                     crate::transport::InboundPacket::Message(message) => {
@@ -90,10 +143,10 @@ pub(crate) async fn run_client_route<S>(
                                 peer_addr,
                                 packet: crate::transport::InboundPacket::Message(message),
                             })
-                            .await
                             .is_err()
                         {
-                            return;
+                            publish_disconnect = false;
+                            break None;
                         }
                     }
                     crate::transport::InboundPacket::Ignored(packet_type) => {
@@ -104,10 +157,10 @@ pub(crate) async fn run_client_route<S>(
                                 peer_addr,
                                 packet: crate::transport::InboundPacket::Ignored(packet_type),
                             })
-                            .await
                             .is_err()
                         {
-                            return;
+                            publish_disconnect = false;
+                            break None;
                         }
                     }
                     crate::transport::InboundPacket::Empty => {}
@@ -122,61 +175,60 @@ pub(crate) async fn run_client_route<S>(
                                     error,
                                 },
                             })
-                            .await
                             .is_err()
                         {
-                            return;
+                            publish_disconnect = false;
+                            break None;
                         }
                     }
                 }
             }
             _ = tokio::time::sleep_until(liveness_deadline) => {
-                let result = tokio::select! {
-                    biased;
-                    result = drive_session_liveness_timer(&mut transport, &mut liveness) => {
-                        Some(result)
-                    },
-                    _ = wait_for_route_retirement(&mut retire_rx) => None,
+                let ping = match liveness.timer_tick() {
+                    Ok(ping) => ping,
+                    Err(timeout) => {
+                        break Some(format!("connection {timeout:?} timeout"));
+                    }
                 };
-                let Some(result) = result else {
-                    break None;
-                };
-                match result {
-                    Ok(true) => {
+                match ping {
+                    Some(ping) => {
+                        let sent = route_tx
+                            .send(ClientRouteCommand::Message(ControlMessage::Ping(ping)));
+                        liveness.record_ping_dispatched();
+                        if sent.is_err() {
+                            break Some("ping send failed: route writer closed".to_string());
+                        }
                         if event_tx
                             .send(ClientRouteEvent::PingDispatched {
                                 route_id: local_connection_id,
                             })
-                            .await
                             .is_err()
                         {
-                            return;
+                            publish_disconnect = false;
+                            break None;
                         }
                     }
-                    Ok(false) => {}
-                    Err(reason) => break Some(reason),
+                    None => {}
                 }
             }
         }
     };
-    // Stop accepting new commands before publishing route loss. This makes a
-    // concurrent logical send fail on this sender and retry the surviving
-    // protocol instead of succeeding into a queue this task will drop.
-    outbound_rx.close();
-    while let Ok(command) = outbound_rx.try_recv() {
-        if let ClientRouteCommand::Message(message) = command {
-            let _ = transport.retain_unsent_message(message);
-        }
+    cancel_tx.send_replace(true);
+    drop(route_tx);
+    if !writer_finished {
+        let _ = writer_task.await;
     }
-    let post_mortem = transport.create_post_mortem(remote_connection_id);
-    let _ = event_tx
-        .send(ClientRouteEvent::Disconnected {
+    if publish_disconnect {
+        let next_outbound_packet = transport.outbound_packet_counter();
+        let post_mortem = transport.create_post_mortem(remote_connection_id);
+        let _ = event_tx.send(ClientRouteEvent::Disconnected {
             route_id: local_connection_id,
             next_inbound_packet: liveness.connection().inbound_packet_counter(),
+            next_outbound_packet,
             post_mortem,
             reason,
-        })
-        .await;
+        });
+    }
 }
 
 #[cfg(test)]
@@ -225,8 +277,8 @@ pub(crate) fn eligible_client_recovery_tick(
 ) -> Option<Tick> {
     let request_tick = resource_state.control.recovery_tick()?;
     let local_client_id = ClientId::try_from(resource_state.catalog.local_client_id()).ok();
-    let local_activated = local_client_id
-        .is_some_and(|client_id| resource_state.control.is_registered(client_id));
+    let local_activated =
+        local_client_id.is_some_and(|client_id| resource_state.control.is_registered(client_id));
     (!local_activated
         || local_client_id
             .is_some_and(|client_id| backlog.contains_packet(client_id, request_tick)))
@@ -290,6 +342,7 @@ pub(crate) async fn run_client_loop_with_addresses<S>(
         routes,
         crate::NetworkIoStatistics::new(network_statistics_now_ms()),
         commands,
+        ControlSendTimeSnapshot::default(),
         event_tx,
         shutdown_rx,
         host_peer_addr,
@@ -321,6 +374,7 @@ pub(crate) async fn run_client_loop_with_routes(
     mut transport: ClientRouteManager,
     io_statistics: crate::NetworkIoStatistics,
     mut commands: mpsc::Receiver<ClientCommand>,
+    control_send_time: ControlSendTimeSnapshot,
     event_tx: mpsc::Sender<ClientEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,
     host_peer_addr: Option<SocketAddr>,
@@ -468,23 +522,41 @@ pub(crate) async fn run_client_loop_with_routes(
     }
 
     'outer: loop {
+        if transport.control_send_time_needs_publish() {
+            let local_client_id = ClientId::try_from(resource_state.catalog.local_client_id())
+                .unwrap_or(HOST_CLIENT_ID);
+            let known_clients = client_cores
+                .keys()
+                .filter_map(|client_id| ClientId::try_from(*client_id).ok())
+                .collect();
+            transport.publish_control_send_time(
+                &control_send_time,
+                resource_state.control.mode,
+                local_client_id,
+                known_clients,
+            );
+        }
         let has_pending_secondary = pending_secondary.is_some();
         let has_pending_tcp = pending_tcp.is_some();
         let has_pending_mesh_route = !pending_mesh_routes.is_empty();
         let mesh_tcp_available = mesh_tcp_listener.is_some();
         let mesh_udp_available = mesh_udp_accept_enabled;
-        let can_accept_mesh_tcp = mesh_tcp_available
-            && pending_mesh_routes.len() < CLIENT_MESH_PENDING_LIMIT;
-        let can_accept_mesh_udp = mesh_udp_available
-            && pending_mesh_routes.len() < CLIENT_MESH_PENDING_LIMIT;
+        let can_accept_mesh_tcp =
+            mesh_tcp_available && pending_mesh_routes.len() < CLIENT_MESH_PENDING_LIMIT;
+        let can_accept_mesh_udp =
+            mesh_udp_available && pending_mesh_routes.len() < CLIENT_MESH_PENDING_LIMIT;
         let udp_retry_deadline = udp_retry_at.unwrap_or_else(tokio::time::Instant::now);
         let tcp_retry_deadline = tcp_retry_at.unwrap_or_else(tokio::time::Instant::now);
         let control_recovery_tick = eligible_client_recovery_tick(&resource_state, &backlog);
         let control_request_deadline = next_control_request_at;
+        // Mesh setup and retry sources can all be ready during a join storm.
+        // Give an already-queued game command deterministic service; a
+        // command racing this snapshot waits for at most one network branch.
+        let command_pending = !commands.is_empty();
         tokio::select! {
             biased;
             _ = &mut shutdown_rx => break,
-            _ = tokio::time::sleep_until(control_request_deadline), if control_recovery_tick.is_some() => {
+            _ = tokio::time::sleep_until(control_request_deadline), if !command_pending && control_recovery_tick.is_some() => {
                 let from_tick = control_recovery_tick.expect("guarded recovery tick exists");
                 let control_mode = resource_state.control.mode;
                 let _ = send_client_recovery_request(
@@ -502,7 +574,7 @@ pub(crate) async fn run_client_loop_with_routes(
                 next_control_request_at =
                     tokio::time::Instant::now() + CONTROL_REQUEST_INTERVAL;
             }
-            completed = pending_mesh_routes.join_next(), if has_pending_mesh_route => {
+            completed = pending_mesh_routes.join_next(), if !command_pending && has_pending_mesh_route => {
                 match completed {
                     Some(Ok(completion)) => {
                         if let Some(dial_key) = completion.dial_key {
@@ -538,7 +610,7 @@ pub(crate) async fn run_client_loop_with_routes(
                     None => {}
                 }
             }
-            puncher_event = receive_optional_puncher_event(&mut mesh_puncher_events) => {
+            puncher_event = receive_optional_puncher_event(&mut mesh_puncher_events), if !command_pending => {
                 let Some(puncher_event) = puncher_event else {
                     mesh_puncher_events = None;
                     continue;
@@ -586,7 +658,7 @@ pub(crate) async fn run_client_loop_with_routes(
                     }
                 }
             }
-            incoming = accept_optional_mesh_tcp(&mut mesh_tcp_listener), if can_accept_mesh_tcp => {
+            incoming = accept_optional_mesh_tcp(&mut mesh_tcp_listener), if !command_pending && can_accept_mesh_tcp => {
                 if let Some(Ok((stream, peer_addr))) = incoming {
                     let connection_id = connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
                     let mut known_peers = client_cores.clone();
@@ -610,7 +682,7 @@ pub(crate) async fn run_client_loop_with_routes(
                     });
                 }
             }
-            incoming = accept_optional_mesh_udp(&mut mesh_udp_hub), if can_accept_mesh_udp => {
+            incoming = accept_optional_mesh_udp(&mut mesh_udp_hub), if !command_pending && can_accept_mesh_udp => {
                 match incoming {
                     Some(Ok(stream)) => {
                         let connection_id = connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
@@ -641,7 +713,7 @@ pub(crate) async fn run_client_loop_with_routes(
                     None => {}
                 }
             }
-            route = await_pending_client_route(&mut pending_secondary), if has_pending_secondary => {
+            route = await_pending_client_route(&mut pending_secondary), if !command_pending && has_pending_secondary => {
                 pending_secondary.take();
                 if let Some(route) = route {
                     udp_retry_at = None;
@@ -657,7 +729,7 @@ pub(crate) async fn run_client_loop_with_routes(
                     udp_retry_at = Some(tokio::time::Instant::now() + CLIENT_ROUTE_RETRY_INTERVAL);
                 }
             }
-            _ = tokio::time::sleep_until(udp_retry_deadline), if udp_retry_at.is_some() => {
+            _ = tokio::time::sleep_until(udp_retry_deadline), if !command_pending && udp_retry_at.is_some() => {
                 udp_retry_at = None;
                 if pending_secondary.is_none() {
                     if let Some(reconnect) = udp_reconnect.as_mut() {
@@ -665,7 +737,7 @@ pub(crate) async fn run_client_loop_with_routes(
                     }
                 }
             }
-            route = await_pending_tcp_client_route(&mut pending_tcp), if has_pending_tcp => {
+            route = await_pending_tcp_client_route(&mut pending_tcp), if !command_pending && has_pending_tcp => {
                 pending_tcp.take();
                 if let Some(route) = route {
                     tcp_retry_at = None;
@@ -681,7 +753,7 @@ pub(crate) async fn run_client_loop_with_routes(
                     tcp_retry_at = Some(tokio::time::Instant::now() + CLIENT_ROUTE_RETRY_INTERVAL);
                 }
             }
-            _ = tokio::time::sleep_until(tcp_retry_deadline), if tcp_retry_at.is_some() => {
+            _ = tokio::time::sleep_until(tcp_retry_deadline), if !command_pending && tcp_retry_at.is_some() => {
                 tcp_retry_at = None;
                 if pending_tcp.is_none() {
                     if let Some(reconnect) = tcp_reconnect.as_mut() {
@@ -946,7 +1018,11 @@ pub(crate) async fn run_client_loop_with_routes(
                         if reset_performance {
                             client_performance.reset_accumulators();
                         }
-                        client_performance.mark_consumed(tick, consumed_at, client_ids);
+                        client_performance.mark_consumed(
+                            tick,
+                            consumed_at,
+                            client_ids,
+                        );
                     }
                     ClientCommand::InspectRuntimeClientStates {
                         tick,
@@ -1599,6 +1675,9 @@ pub(crate) async fn run_client_loop_with_routes(
                                     break;
                                 }
                             };
+                            if changed {
+                                transport.invalidate_control_send_time();
+                            }
                             if changed && status.control_mode == 0 {
                                 let has_current_control = backlog
                                     .packets_from(current_tick)
@@ -1801,6 +1880,7 @@ pub(crate) async fn run_client_loop_with_routes(
                                         resource_state.backend.as_mut(),
                                         &control,
                                     );
+                                    transport.invalidate_control_send_time();
                                     if let Some(peer_id) = removed_peer {
                                         transport.retire_peer(peer_id);
                                         if let Ok(peer_id) = i32::try_from(peer_id) {
@@ -1882,6 +1962,7 @@ pub(crate) async fn run_client_loop_with_routes(
                                     resource_state.backend.as_mut(),
                                     control,
                                 );
+                                transport.invalidate_control_send_time();
                                 if let Some(peer_id) = removed_peer {
                                     transport.retire_peer(peer_id);
                                     if let Ok(peer_id) = i32::try_from(peer_id) {
@@ -1987,24 +2068,14 @@ pub(crate) async fn dispatch_client_resource_peer_connected(
         let events = backend
             .on_peer_connected(peer_id, now_seconds, &mut random)
             .map_err(|error| error.to_string())?;
-        dispatch_client_resource_events(
-            events,
-            resource_state,
-            transport,
-            event_tx,
-        )
-        .await
-        .map_err(|error| error.to_string())
+        dispatch_client_resource_events(events, resource_state, transport, event_tx)
+            .await
+            .map_err(|error| error.to_string())
     } else {
         let actions = resource_state.catalog.on_peer_connected(peer_id);
-        dispatch_client_resource_actions(
-            actions,
-            resource_state,
-            transport,
-            event_tx,
-        )
-        .await
-        .map_err(|error| error.to_string())
+        dispatch_client_resource_actions(actions, resource_state, transport, event_tx)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -2024,28 +2095,15 @@ pub(crate) async fn dispatch_client_resource_packet(
         if matches!(packet, ResourcePacket::Derive(_)) {
             let _ = resource_state.catalog.on_packet(peer_id, packet);
         }
-        update_derived_resource_sources(
-            &mut resource_state.local_resource_sources,
-            &events,
-        );
-        dispatch_client_resource_events(
-            events,
-            resource_state,
-            transport,
-            event_tx,
-        )
-        .await
-        .map_err(|error| error.to_string())
+        update_derived_resource_sources(&mut resource_state.local_resource_sources, &events);
+        dispatch_client_resource_events(events, resource_state, transport, event_tx)
+            .await
+            .map_err(|error| error.to_string())
     } else {
         let actions = resource_state.catalog.on_packet(peer_id, packet);
-        dispatch_client_resource_actions(
-            actions,
-            resource_state,
-            transport,
-            event_tx,
-        )
-        .await
-        .map_err(|error| error.to_string())
+        dispatch_client_resource_actions(actions, resource_state, transport, event_tx)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -2110,12 +2168,8 @@ async fn dispatch_client_resource_actions_with_unavailable(
                     ResourcePacket::Request(request) => Some(request.clone()),
                     _ => None,
                 };
-                let outcome = try_dispatch_client_resource_to_peer(
-                    transport,
-                    host_peer_id,
-                    peer_id,
-                    packet,
-                )?;
+                let outcome =
+                    try_dispatch_client_resource_to_peer(transport, host_peer_id, peer_id, packet)?;
                 if outcome == ClientResourceSendOutcome::PeerUnavailable {
                     unavailable_peers.insert(peer_id);
                     if let Some(request) = request {
@@ -2241,4 +2295,3 @@ fn apply_client_membership(
         _ => None,
     }
 }
-

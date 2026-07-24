@@ -833,7 +833,11 @@ impl GameApp {
     pub(crate) fn startup_network_reference_row(
         reference: &clonk_network::NetworkGameReference,
     ) -> clonk_frontend::startup_netdlg::NetDlgGameEntry {
-        Self::startup_network_reference_row_with_config(None, false, reference)
+        Self::startup_network_reference_row_with_config(
+            &embedded_runtime_language_table().entries,
+            false,
+            reference,
+        )
     }
 
     fn startup_network_reference_identity_eq(
@@ -853,7 +857,7 @@ impl GameApp {
     }
 
     pub(crate) fn startup_network_reference_row_with_config(
-        paths: Option<&AppPaths>,
+        resources: &HashMap<String, String>,
         use_alternate_server: bool,
         reference: &clonk_network::NetworkGameReference,
     ) -> clonk_frontend::startup_netdlg::NetDlgGameEntry {
@@ -865,32 +869,42 @@ impl GameApp {
             reference.host_name.as_str()
         };
         let title = format_resource_string(
-            startup_resource_string(paths, "IDS_NET_REFONCLIENT", "%s on %s"),
+            runtime_resource_text_from_table(resources, "IDS_NET_REFONCLIENT", "%s on %s"),
             &[&reference.title, host],
         );
         let goals = if reference.goals.is_empty() {
-            startup_resource_string(paths, "IDS_CTL_NOGOAL", "No game goal")
+            runtime_resource_text_from_table(resources, "IDS_CTL_NOGOAL", "No game goal")
         } else {
             format!(
                 "{}: {}",
-                startup_resource_string(paths, "IDS_MENU_CPGOALS", "Goals"),
+                runtime_resource_text_from_table(resources, "IDS_MENU_CPGOALS", "Goals"),
                 reference.goals.join(", ")
             )
         };
         let state = match reference.state.to_ascii_lowercase().as_str() {
-            "none" => startup_resource_string(paths, "IDS_DESC_NOTINITED", "Not initialised"),
-            "init" => startup_resource_string(
-                paths,
+            "none" => {
+                runtime_resource_text_from_table(resources, "IDS_DESC_NOTINITED", "Not initialised")
+            }
+            "init" => runtime_resource_text_from_table(
+                resources,
                 "IDS_DESC_WAITFORHOST",
                 "Waiting for host connection",
             ),
-            "lobby" => {
-                startup_resource_string(paths, "IDS_DESC_EXPECTING", "Awaiting participants.")
+            "lobby" => runtime_resource_text_from_table(
+                resources,
+                "IDS_DESC_EXPECTING",
+                "Awaiting participants.",
+            ),
+            "paused" => {
+                runtime_resource_text_from_table(resources, "IDS_DESC_GAMEPAUSED", "Game is paused")
             }
-            "paused" => startup_resource_string(paths, "IDS_DESC_GAMEPAUSED", "Game is paused"),
-            "running" => startup_resource_string(paths, "IDS_DESC_GAMERUNNING", "Game is running"),
-            _ => startup_resource_string(
-                paths,
+            "running" => runtime_resource_text_from_table(
+                resources,
+                "IDS_DESC_GAMERUNNING",
+                "Game is running",
+            ),
+            _ => runtime_resource_text_from_table(
+                resources,
                 "IDS_DESC_UNKNOWNGAMESTATE",
                 "Game is in an unknown state",
             ),
@@ -898,7 +912,11 @@ impl GameApp {
         let player_count = reference.player_names.len().to_string();
         let max_players = reference.max_players.to_string();
         let mut details = format_resource_string(
-            startup_resource_string(paths, "IDS_NET_INFOPLRSGOALDESC", "%d/%d players - %s - %s"),
+            runtime_resource_text_from_table(
+                resources,
+                "IDS_NET_INFOPLRSGOALDESC",
+                "%d/%d players - %s - %s",
+            ),
             &[&player_count, &max_players, &goals, &state],
         );
         if reference.time > 0 {
@@ -914,22 +932,22 @@ impl GameApp {
         let version =
             network_game_version_string(&reference.game, reference.version, reference.build);
         let version_line = format_resource_string(
-            startup_resource_string(paths, "IDS_DESC_VERSION", "Engine version: %s"),
+            runtime_resource_text_from_table(resources, "IDS_DESC_VERSION", "Engine version: %s"),
             &[&version],
         );
         let comment_line = format!(
             "{}: {}",
-            startup_resource_string(paths, "IDS_CTL_COMMENT", "Comment"),
+            runtime_resource_text_from_table(resources, "IDS_CTL_COMMENT", "Comment"),
             reference.comment
         );
         let players = if reference.player_names.is_empty() {
-            startup_resource_string(paths, "IDS_CTL_NONE", "none")
+            runtime_resource_text_from_table(resources, "IDS_CTL_NONE", "none")
         } else {
             reference.player_names.join(", ")
         };
         let players_line = format!(
             "{}: {players}",
-            startup_resource_string(paths, "IDS_CTL_PLAYER", "Player")
+            runtime_resource_text_from_table(resources, "IDS_CTL_PLAYER", "Player")
         );
 
         let mut status_icons = Vec::new();
@@ -997,22 +1015,16 @@ impl GameApp {
         query_resource: &str,
         query_fallback: &str,
     ) -> clonk_frontend::startup_netdlg::NetDlgGameEntry {
-        let query_name =
-            startup_resource_string(self.app_paths.as_ref(), query_resource, query_fallback);
-        let title_template =
-            startup_resource_string(self.app_paths.as_ref(), "IDS_NET_CLIENTONNET", "%s on %s");
+        let query_name = self.runtime_resource_text(query_resource, query_fallback);
+        let title_template = self.runtime_resource_text("IDS_NET_CLIENTONNET", "%s on %s");
         let title = format_resource_string(title_template, &[&query_name, address.trim()]);
         let details = match state {
-            StartupDirectReferenceQueryState::Pending => startup_resource_string(
-                self.app_paths.as_ref(),
-                "IDS_NET_INFOQUERY",
-                "Querying game infos...",
-            ),
-            StartupDirectReferenceQueryState::Empty => startup_resource_string(
-                self.app_paths.as_ref(),
-                "IDS_NET_INFONOGAME",
-                "No games found.",
-            ),
+            StartupDirectReferenceQueryState::Pending => {
+                self.runtime_resource_text("IDS_NET_INFOQUERY", "Querying game infos...")
+            }
+            StartupDirectReferenceQueryState::Empty => {
+                self.runtime_resource_text("IDS_NET_INFONOGAME", "No games found.")
+            }
             StartupDirectReferenceQueryState::Failed(error) => error.clone(),
         };
         clonk_frontend::startup_netdlg::NetDlgGameEntry {
@@ -1061,38 +1073,49 @@ impl GameApp {
     }
 
     pub(crate) fn startup_masterserver_query_entry(
-        paths: Option<&AppPaths>,
+        resources: &HashMap<String, String>,
         address: &str,
     ) -> clonk_frontend::startup_netdlg::NetDlgMasterserverEntry {
-        let query_name =
-            startup_resource_string(paths, "IDS_NET_QUERY_MASTERSRV", "Internet server");
+        let query_name = runtime_resource_text_from_table(
+            resources,
+            "IDS_NET_QUERY_MASTERSRV",
+            "Internet server",
+        );
         let server_name = Self::startup_masterserver_display_name(address);
         clonk_frontend::startup_netdlg::NetDlgMasterserverEntry {
             title: format_resource_string(
-                startup_resource_string(paths, "IDS_NET_CLIENTONNET", "%s on %s"),
+                runtime_resource_text_from_table(resources, "IDS_NET_CLIENTONNET", "%s on %s"),
                 &[&query_name, &server_name],
             ),
-            details: startup_resource_string(paths, "IDS_NET_INFOQUERY", "Querying game infos..."),
+            details: runtime_resource_text_from_table(
+                resources,
+                "IDS_NET_INFOQUERY",
+                "Querying game infos...",
+            ),
             extra_lines: Vec::new(),
             row_icon: clonk_frontend::startup_netdlg::NetDlgRowIcon::Query,
         }
     }
 
     pub(crate) fn startup_masterserver_reply_entry(
-        paths: Option<&AppPaths>,
+        resources: &HashMap<String, String>,
         address: &str,
         reply: &clonk_network::MasterserverReplyInfo,
     ) -> clonk_frontend::startup_netdlg::NetDlgMasterserverEntry {
         use clonk_frontend::startup_netdlg::{NetDlgRowIcon, NetDlgTextLine};
 
-        let mut entry = Self::startup_masterserver_query_entry(paths, address);
+        let mut entry = Self::startup_masterserver_query_entry(resources, address);
         let game_count = reply.game_count.to_string();
         let player_count = reply.player_count.to_string();
         entry.details = if reply.game_count == 0 {
-            startup_resource_string(paths, "IDS_NET_INFONOGAME", "No games found.")
+            runtime_resource_text_from_table(resources, "IDS_NET_INFONOGAME", "No games found.")
         } else {
             format_resource_string(
-                startup_resource_string(paths, "IDS_NET_INFOGAMES", "%d game(s) found."),
+                runtime_resource_text_from_table(
+                    resources,
+                    "IDS_NET_INFOGAMES",
+                    "%d game(s) found.",
+                ),
                 &[&game_count, &player_count],
             )
         };
@@ -1101,7 +1124,11 @@ impl GameApp {
             entry
                 .extra_lines
                 .push(NetDlgTextLine::Plain(format_resource_string(
-                    startup_resource_string(paths, "IDS_NET_MOTD", "Message of the day: %s"),
+                    runtime_resource_text_from_table(
+                        resources,
+                        "IDS_NET_MOTD",
+                        "Message of the day: %s",
+                    ),
                     &[&reply.motd],
                 )));
         }
@@ -1118,7 +1145,7 @@ impl GameApp {
     pub(crate) fn reset_startup_masterserver_entry(&mut self) {
         let settings = load_network_search_settings(self.app_paths.as_ref());
         let entry = Self::startup_masterserver_query_entry(
-            self.app_paths.as_ref(),
+            &self.startup_tooltip_resources,
             &settings.master_server_url,
         );
         if let Some(dialog) = self.startup_network_dialog.as_mut() {
@@ -1131,7 +1158,7 @@ impl GameApp {
             Instant::now().checked_add(clonk_network::GAME_SEARCH_INTERVAL);
         let settings = load_network_search_settings(self.app_paths.as_ref());
         let mut entry = Self::startup_masterserver_query_entry(
-            self.app_paths.as_ref(),
+            &self.startup_tooltip_resources,
             &settings.master_server_url,
         );
         entry.details = message;
@@ -1149,7 +1176,7 @@ impl GameApp {
             Instant::now().checked_add(clonk_network::GAME_SEARCH_INTERVAL);
         let settings = load_network_search_settings(self.app_paths.as_ref());
         let entry = Self::startup_masterserver_reply_entry(
-            self.app_paths.as_ref(),
+            &self.startup_tooltip_resources,
             &settings.master_server_url,
             &reply,
         );
@@ -1194,18 +1221,13 @@ impl GameApp {
         }
 
         let message = format_resource_string(
-            startup_resource_string(
-                self.app_paths.as_ref(),
+            self.runtime_resource_text(
                 "IDS_NET_SERVERREDIRECTMSG",
                 "The configured server is no longer active and offers the following server redirection:||%s||Do you want to switch to the new server?",
             ),
             &[&redirect],
         );
-        let caption = startup_resource_string(
-            self.app_paths.as_ref(),
-            "IDS_NET_SERVERREDIRECT",
-            "Server Redirection",
-        );
+        let caption = self.runtime_resource_text("IDS_NET_SERVERREDIRECT", "Server Redirection");
         self.push_message_dialog(
             clonk_frontend::message_dialog::MessageDialogState::new(
                 message,
@@ -1227,7 +1249,7 @@ impl GameApp {
             .iter()
             .map(|reference| {
                 Self::startup_network_reference_row_with_config(
-                    self.app_paths.as_ref(),
+                    &self.startup_tooltip_resources,
                     use_alternate_server,
                     reference,
                 )
@@ -1605,18 +1627,10 @@ impl GameApp {
 
     fn show_startup_discovery_error(&mut self, detail: &str) -> Result<(), EngineError> {
         let message = format_resource_string(
-            startup_resource_string(
-                self.app_paths.as_ref(),
-                "IDS_NET_NODISCOVERY_DESC",
-                "Search failed: %s",
-            ),
+            self.runtime_resource_text("IDS_NET_NODISCOVERY_DESC", "Search failed: %s"),
             &[detail],
         );
-        let caption = startup_resource_string(
-            self.app_paths.as_ref(),
-            "IDS_NET_NODISCOVERY",
-            "Search Error",
-        );
+        let caption = self.runtime_resource_text("IDS_NET_NODISCOVERY", "Search Error");
         self.push_message_dialog(
             clonk_frontend::message_dialog::MessageDialogState::new(
                 message,
@@ -2008,18 +2022,10 @@ impl GameApp {
                 .filter(|targets| !targets.trim().is_empty())
                 .unwrap_or_else(|| "network game".to_string());
             let message = format_resource_string(
-                startup_resource_string(
-                    self.app_paths.as_ref(),
-                    "IDS_NET_CONNECTHOST",
-                    "Connecting to host on %s...",
-                ),
+                self.runtime_resource_text("IDS_NET_CONNECTHOST", "Connecting to host on %s..."),
                 &[&connect_targets],
             );
-            let caption = startup_resource_string(
-                self.app_paths.as_ref(),
-                "IDS_NET_JOINGAME",
-                "Joining network game",
-            );
+            let caption = self.runtime_resource_text("IDS_NET_JOINGAME", "Joining network game");
             self.push_message_dialog(
                 clonk_frontend::message_dialog::MessageDialogState::new(
                     message,
@@ -2485,7 +2491,11 @@ impl GameApp {
                             )
                             .with_external_chat(self.startup_irc_client_active())
                             .with_preloading(
-                                load_options_program_state(self.app_paths.as_ref()).preloading,
+                                load_options_program_state(
+                                    self.app_paths.as_ref(),
+                                    Some(&self.startup_tooltip_resources),
+                                )
+                                .preloading,
                                 self.classic_lobby_labels(),
                             );
                             lobby.select_scenario(identifier, title);
@@ -2608,7 +2618,11 @@ impl GameApp {
                     )
                     .with_external_chat(self.startup_irc_client_active())
                     .with_preloading(
-                        load_options_program_state(self.app_paths.as_ref()).preloading,
+                        load_options_program_state(
+                            self.app_paths.as_ref(),
+                            Some(&self.startup_tooltip_resources),
+                        )
+                        .preloading,
                         self.classic_lobby_labels(),
                     );
                     self.network_game_advertiser = None;
@@ -3052,10 +3066,7 @@ impl GameApp {
         player.pref_control = 0;
         player.pref_control_style = true;
         player.pref_auto_context_menu = true;
-        let comment = load_runtime_language_table(self.app_paths.as_ref())
-            .ok()
-            .and_then(|table| table.entries.get("IDS_PLR_NEWCOMMENT").cloned())
-            .unwrap_or_else(|| "I'm new.".to_string());
+        let comment = self.runtime_resource_text("IDS_PLR_NEWCOMMENT", "I'm new.");
         let portrait = self
             .assets
             .dialog_image(&format!("Portrait{}.png", portrait_index % 5 + 1))

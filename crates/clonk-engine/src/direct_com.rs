@@ -9,28 +9,28 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(test)]
-use crate::Landscape;
 use crate::action::{ActionProcedure, ScriptCallbackTarget};
 use crate::command::{CommandData, CommandId, CommandMode, CommandOperation, CommandRequest};
 use crate::compat;
 use crate::control::{
-    C4MN_ADJUST_POSITION, COM_CLEAR_PRESSED_COMS, COM_CONTENTS, COM_CURSOR_FIRST, COM_CURSOR_LAST,
-    COM_CURSOR_LEFT, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT,
-    COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_FIRST,
-    COM_MENU_LAST, COM_MENU_LEFT, COM_MENU_NAVIGATION1, COM_MENU_NAVIGATION2, COM_MENU_RIGHT,
-    COM_MENU_SELECT, COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_NONE, COM_RELEASE_FIRST,
-    COM_RELEASE_LAST, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2,
-    COM_THROW, COM_UP, COM_WHEEL_DOWN, COM_WHEEL_UP, PlayerCommandControlData,
-    PlayerSelectControlData,
+    PlayerCommandControlData, PlayerSelectControlData, C4MN_ADJUST_POSITION,
+    COM_CLEAR_PRESSED_COMS, COM_CONTENTS, COM_CURSOR_FIRST, COM_CURSOR_LAST, COM_CURSOR_LEFT,
+    COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE,
+    COM_MENU_DOWN, COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_FIRST, COM_MENU_LAST,
+    COM_MENU_LEFT, COM_MENU_NAVIGATION1, COM_MENU_NAVIGATION2, COM_MENU_RIGHT, COM_MENU_SELECT,
+    COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_NONE, COM_RELEASE_FIRST, COM_RELEASE_LAST,
+    COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
+    COM_WHEEL_DOWN, COM_WHEEL_UP,
 };
 use crate::math::{self, itofix};
 use crate::player::CountedControlType;
+#[cfg(test)]
+use crate::Landscape;
 use crate::{
-    C4Fixed, CATEGORY_MOUSE_SELECT, CommandDirection, CrewInfoLink, Direction, Engine, EngineError,
-    DefinitionId, FixedVec2, MessageSpec, MouseDragCarryableCursor, MouseDragSource,
-    ObjectEnterOutcome, ObjectId, PhysicalInfo, Value, Vector2, message, ocf,
-    tolerate_script_error,
+    message, ocf, tolerate_script_error, C4Fixed, CommandDirection, CrewInfoLink, DefinitionId,
+    Direction, Engine, EngineError, FixedVec2, MessageSpec, MouseDragCarryableCursor,
+    MouseDragSource, ObjectEnterOutcome, ObjectId, PhysicalInfo, Value, Vector2,
+    CATEGORY_MOUSE_SELECT,
 };
 
 /// `C4DoubleClick` (C4Constants.h:156): frames within which a repeated com
@@ -561,11 +561,7 @@ impl RemovalSafeContentsIterator {
                 self.cursor = InternalObjectMenuSafeCursor::end(self.cursor.tracker_token);
                 return None;
             }
-            self.cursor = InternalObjectMenuSafeCursor::at(
-                &links,
-                next,
-                self.cursor.tracker_token,
-            );
+            self.cursor = InternalObjectMenuSafeCursor::at(&links, next, self.cursor.tracker_token);
             next
         } else {
             index
@@ -613,9 +609,9 @@ fn internal_object_menu_iterator_next<S: InternalObjectMenuSource>(
     // AssignRemoval callbacks can still observe a Status-zero object until
     // the containing list actually unlinks it.
     let eligible = |index: usize| {
-        source.object(links[index].object).is_some_and(|object| {
-            category_mask == 0 || object.category & category_mask != 0
-        })
+        source
+            .object(links[index].object)
+            .is_some_and(|object| category_mask == 0 || object.category & category_mask != 0)
     };
     while current_index < links.len() && !eligible(current_index) {
         current_index += 1;
@@ -1167,12 +1163,8 @@ impl InternalObjectMenuSource for EngineInternalObjectMenuSource<'_> {
             return Ok(0);
         };
         self.0.objects[command_index].state.menu = Some(menu_before_value.clone());
-        self.0.object_value_in_container_for_menu(
-            command_object,
-            object,
-            container,
-            -1,
-        )
+        self.0
+            .object_value_in_container_for_menu(command_object, object, container, -1)
     }
 
     fn reject_collection(
@@ -2029,14 +2021,10 @@ impl Engine {
         let target_id = self.objects[target_index].id;
         let target_definition = self.objects[target_index].definition_id.clone();
         let target_action = self.objects[target_index].state.action.clone();
-        let target_action_active =
-            self.definitions
-                .get(&target_definition)
-                .is_some_and(|definition| {
-                    !definition
-                        .action_library()
-                        .is_idle_state(&target_action)
-                });
+        let target_action_active = self
+            .definitions
+            .get(&target_definition)
+            .is_some_and(|definition| !definition.action_library().is_idle_state(&target_action));
         let target_action_target = self.objects[target_index].state.action.target;
         let mut items = Vec::new();
 
@@ -3156,7 +3144,8 @@ impl Engine {
         let previous = self
             .players
             .get(&owner)
-            .and_then(|player| player.cursor());
+            .and_then(|player| player.cursor())
+            .or_else(|| self.crew_cursor(owner));
         if previous != hi_rank {
             self.crew_selection
                 .entry(owner)
@@ -3181,7 +3170,8 @@ impl Engine {
         let live_cursor = self
             .players
             .get(&owner)
-            .and_then(|player| player.cursor());
+            .and_then(|player| player.cursor())
+            .or_else(|| self.crew_cursor(owner));
         if let Some(cursor_index) = live_cursor.and_then(|id| self.find_object_index(id)) {
             self.object_do_select(cursor_index, owner, false)?;
         }
@@ -3488,8 +3478,7 @@ impl Engine {
                     .unwrap_or(0);
                 let dx = point.x - object.state.position.x;
                 let dy = point.y - object.state.position.y;
-                if (-width / 3..=width / 3).contains(&dx)
-                    && (-width / 2..=width / 3).contains(&dy)
+                if (-width / 3..=width / 3).contains(&dx) && (-width / 2..=width / 3).contains(&dy)
                 {
                     cursor = MouseWorldCursor::Chop(target);
                 }
@@ -3534,24 +3523,40 @@ impl Engine {
 
         let (command, x, y, target, data) =
             match self.mouse_world_cursor(owner, target, point, control_down) {
-                MouseWorldCursor::Attack(target) => {
-                    (CommandId::Attack, point.x, point.y, target.as_u64() as i32, 0)
-                }
+                MouseWorldCursor::Attack(target) => (
+                    CommandId::Attack,
+                    point.x,
+                    point.y,
+                    target.as_u64() as i32,
+                    0,
+                ),
                 MouseWorldCursor::Grab(target) => {
                     (CommandId::Grab, 0, 0, target.as_u64() as i32, 0)
                 }
-                MouseWorldCursor::Ungrab(target) => {
-                    (CommandId::UnGrab, point.x, point.y, target.as_u64() as i32, 0)
-                }
-                MouseWorldCursor::Build(target) => {
-                    (CommandId::Build, point.x, point.y, target.as_u64() as i32, 0)
-                }
+                MouseWorldCursor::Ungrab(target) => (
+                    CommandId::UnGrab,
+                    point.x,
+                    point.y,
+                    target.as_u64() as i32,
+                    0,
+                ),
+                MouseWorldCursor::Build(target) => (
+                    CommandId::Build,
+                    point.x,
+                    point.y,
+                    target.as_u64() as i32,
+                    0,
+                ),
                 MouseWorldCursor::Chop(target) => {
                     (CommandId::Chop, point.x, point.y, target.as_u64() as i32, 0)
                 }
-                MouseWorldCursor::Enter(target) => {
-                    (CommandId::Enter, point.x, point.y, target.as_u64() as i32, 0)
-                }
+                MouseWorldCursor::Enter(target) => (
+                    CommandId::Enter,
+                    point.x,
+                    point.y,
+                    target.as_u64() as i32,
+                    0,
+                ),
                 MouseWorldCursor::Carryable(target) | MouseWorldCursor::DigObject(target) => {
                     (CommandId::Get, 0, 0, target.as_u64() as i32, 0)
                 }
@@ -3572,8 +3577,7 @@ impl Engine {
             target,
             target2: 0,
             data,
-            add_mode: C4P_COMMAND_SET
-                | if shift_down { C4P_COMMAND_APPEND } else { 0 },
+            add_mode: C4P_COMMAND_SET | if shift_down { C4P_COMMAND_APPEND } else { 0 },
             by_client: -1,
         })
     }
@@ -5177,8 +5181,7 @@ impl Engine {
             .filter_map(|candidate| self.find_object_index(*candidate))
             .filter(|&candidate| {
                 let candidate = &self.objects[candidate];
-                candidate.has_nonzero_status()
-                    && candidate.definition_id == definition_id
+                candidate.has_nonzero_status() && candidate.definition_id == definition_id
             })
             .count();
         i32::try_from(count).unwrap_or(i32::MAX)
@@ -5341,10 +5344,8 @@ impl Engine {
                 continue;
             };
             let definition_id = self.objects[item_index].definition_id.clone();
-            let Some((definition_name, definition_description, no_sell)) = self
-                .definitions
-                .get(&definition_id)
-                .map(|definition| {
+            let Some((definition_name, definition_description, no_sell)) =
+                self.definitions.get(&definition_id).map(|definition| {
                     (
                         definition.name().to_string(),
                         definition.description().unwrap_or_default().to_string(),
@@ -5374,12 +5375,8 @@ impl Engine {
                 .find_object_index(crew_id)
                 .map(|index| self.objects[index].state.owner)
                 .unwrap_or(-1);
-            let value = self.object_value_in_container_for_menu(
-                crew_id,
-                item_id,
-                base_id,
-                for_player,
-            )?;
+            let value =
+                self.object_value_in_container_for_menu(crew_id, item_id, base_id, for_player)?;
             items.push(crate::ObjectMenuItem {
                 caption: format!("Sell {definition_name}"),
                 info_caption: crate::normalize_menu_info_caption(&definition_description),
@@ -5695,11 +5692,7 @@ impl Engine {
         Ok(tolerate_script_error(result)?.unwrap_or(Value::Nil))
     }
 
-    fn object_script_callback(
-        &self,
-        index: usize,
-        function: &str,
-    ) -> Option<ScriptCallbackTarget> {
+    fn object_script_callback(&self, index: usize, function: &str) -> Option<ScriptCallbackTarget> {
         let definition = self
             .definitions
             .get(&self.objects.get(index)?.definition_id)?;
@@ -5783,9 +5776,8 @@ impl Engine {
         let present_contents: Vec<ObjectId> = contents
             .into_iter()
             .filter(|candidate_id| {
-                self.find_object_index(*candidate_id).is_some_and(|candidate| {
-                    self.objects[candidate].has_nonzero_status()
-                })
+                self.find_object_index(*candidate_id)
+                    .is_some_and(|candidate| self.objects[candidate].has_nonzero_status())
             })
             .collect();
         let Some(front_id) = present_contents.first().copied() else {
@@ -5838,9 +5830,8 @@ impl Engine {
             .iter()
             .copied()
             .find(|candidate_id| {
-                self.find_object_index(*candidate_id).is_some_and(|candidate| {
-                    self.objects[candidate].has_nonzero_status()
-                })
+                self.find_object_index(*candidate_id)
+                    .is_some_and(|candidate| self.objects[candidate].has_nonzero_status())
             });
         if front == Some(target_id) {
             return Ok(());
@@ -5973,9 +5964,7 @@ impl Engine {
         let definition_id = self.objects[index].definition_id.clone();
         if physical.can_dig == 0 || !self.action_with_calls(index, &definition_id, "Dig")? {
             let name = self.object_message_name(actor_id);
-            let text = self
-                .object_no_dig_resource_string
-                .replacen("%s", &name, 1);
+            let text = self.object_no_dig_resource_string.replacen("%s", &name, 1);
             self.game_msg_object(actor_id, text);
             return Ok(false);
         }
@@ -7074,14 +7063,13 @@ impl Engine {
                 .map(compat::object_reference_value)
                 .unwrap_or(Value::Nil);
             self.contained_call(index, "Grab", &[target_ref, Value::Bool(false)])?;
-            let actor_has_status = self.find_object_index(object_id).is_some_and(|index| {
-                self.objects[index].has_nonzero_status()
-            });
+            let actor_has_status = self
+                .find_object_index(object_id)
+                .is_some_and(|index| self.objects[index].has_nonzero_status());
             if actor_has_status {
-                if let Some(target_index) =
-                    target
-                        .and_then(|id| self.find_object_index(id))
-                        .filter(|&index| self.objects[index].has_nonzero_status())
+                if let Some(target_index) = target
+                    .and_then(|id| self.find_object_index(id))
+                    .filter(|&index| self.objects[index].has_nonzero_status())
                 {
                     let self_ref = compat::object_reference_value(object_id);
                     self.contained_call(target_index, "Grabbed", &[self_ref, Value::Bool(false)])?;
@@ -7689,11 +7677,9 @@ public func Activate(object clonk)
             .object_snapshot(crew)
             .expect("clonk remains live")
             .position;
-        assert!(
-            engine
-                .at_object(position, ocf::CHOP, Some(crew))
-                .is_some_and(|(_, id, object_ocf)| { id == tree && object_ocf & ocf::CHOP != 0 })
-        );
+        assert!(engine
+            .at_object(position, ocf::CHOP, Some(crew))
+            .is_some_and(|(_, id, object_ocf)| { id == tree && object_ocf & ocf::CHOP != 0 }));
         assert!(
             engine
                 .at_object(position, ocf::LINE_CONSTRUCT, Some(crew))
@@ -7993,11 +7979,7 @@ public func Activate(object clonk)
                 .with_tx(Some(0))
                 .with_ty(Some(0)),
         );
-        finish_native(
-            &mut engine,
-            first,
-            CommandRequest::new(CommandId::Acquire),
-        );
+        finish_native(&mut engine, first, CommandRequest::new(CommandId::Acquire));
         assert_eq!(engine.crew_info_control_count(first), Some(3));
 
         let index = engine.find_object_index(first).expect("actor remains");
@@ -8058,9 +8040,7 @@ public func Activate(object clonk)
                     .with_ty(Some(0)),
             )
             .expect("script-finished command queues");
-        engine.objects[index]
-            .commands
-            .finish_entry_public(0, true);
+        engine.objects[index].commands.finish_entry_public(0, true);
         engine
             .finish_object_command_execution(first)
             .expect("script-finished command clears");
@@ -8452,7 +8432,9 @@ public func MarkFinishedOnly()
             .expect("throw release is ignored");
 
         engine.player_in_com(1, COM_UP, 0).expect("gameplay up");
-        engine.tick_without_snapshot().expect("queued jump executes");
+        engine
+            .tick_without_snapshot()
+            .expect("queued jump executes");
         assert_eq!(
             engine
                 .object_snapshot(crew)
@@ -8678,11 +8660,10 @@ public func MarkFinishedOnly()
             .expect("crew exists")
             .expect("menu stays open");
         assert!(!menu.text_progressing);
-        assert!(
-            menu.items
-                .iter()
-                .all(|item| item.text_display_progress == -1)
-        );
+        assert!(menu
+            .items
+            .iter()
+            .all(|item| item.text_display_progress == -1));
     }
 
     #[test]
@@ -8806,11 +8787,9 @@ protected func Departure(parent)
             .spawn_object(SpawnConfig::new("DDIT").with_container(actor_id))
             .expect("spawn item");
 
-        assert!(
-            engine
-                .object_com_drop(actor_id, item_id)
-                .expect("drop succeeds")
-        );
+        assert!(engine
+            .object_com_drop(actor_id, item_id)
+            .expect("drop succeeds"));
 
         let actor_index = engine.find_object_index(actor_id).expect("actor remains");
         assert_eq!(
@@ -8843,11 +8822,9 @@ protected func Departure(parent)
         engine.objects[crew_index].state.action = ActionState::new("Push");
         engine.objects[crew_index].state.action.target = Some(target);
 
-        assert!(
-            engine
-                .put_away_unused_object(crew, None)
-                .expect("put-away succeeds")
-        );
+        assert!(engine
+            .put_away_unused_object(crew, None)
+            .expect("put-away succeeds"));
 
         let item_index = engine.find_object_index(item).expect("item remains");
         assert_eq!(engine.objects[item_index].state.container, None);
@@ -9152,13 +9129,11 @@ public func ReadNoPushEnter()
                             .with_loaded(true),
                     )
                     .expect("spawn entrance");
-                assert!(
-                    engine
-                        .at_object(Vector2::new(100, 100), ocf::ENTRANCE, Some(lorry))
-                        .is_some_and(|(_, object, object_ocf)| {
-                            object == entrance && object_ocf & ocf::ENTRANCE != 0
-                        })
-                );
+                assert!(engine
+                    .at_object(Vector2::new(100, 100), ocf::ENTRANCE, Some(lorry))
+                    .is_some_and(|(_, object, object_ocf)| {
+                        object == entrance && object_ocf & ocf::ENTRANCE != 0
+                    }));
                 let crew_index = engine.find_object_index(crew).expect("crew exists");
                 engine.objects[crew_index].state.action.name = "Push".to_string();
                 engine.objects[crew_index].state.action.target = Some(lorry);
@@ -9414,17 +9389,15 @@ protected func OnActionJump()
         let velocity_before = engine.objects[index].fixed_velocity;
         let definition_id = engine.objects[index].definition_id.clone();
 
-        assert!(
-            !engine
-                .object_action_tumble(
-                    index,
-                    &definition_id,
-                    Direction::Left,
-                    itofix(9),
-                    itofix(-8),
-                )
-                .expect("ObjectActionTumble runs")
-        );
+        assert!(!engine
+            .object_action_tumble(
+                index,
+                &definition_id,
+                Direction::Left,
+                itofix(9),
+                itofix(-8),
+            )
+            .expect("ObjectActionTumble runs"));
 
         let index = engine.find_object_index(object).expect("actor remains");
         assert_eq!(engine.objects[index].state.action, action_before);
@@ -9506,7 +9479,9 @@ protected func OnActionJump()
             CommandRequest::new(CommandId::Jump).with_tx(Some(target_x)),
         )]);
 
-        engine.tick_without_snapshot().expect("execute targeted jump");
+        engine
+            .tick_without_snapshot()
+            .expect("execute targeted jump");
 
         assert_eq!(
             engine
@@ -10010,13 +9985,11 @@ public func Activate(object clonk)
 
         engine.game_msg_object(target, "new".to_owned());
 
-        assert!(
-            engine
-                .messages
-                .snapshot()
-                .iter()
-                .all(|message| message.target != Some(target))
-        );
+        assert!(engine
+            .messages
+            .snapshot()
+            .iter()
+            .all(|message| message.target != Some(target)));
     }
 
     #[test]
@@ -10257,13 +10230,11 @@ public func Initialize() { SetAction("Connect"); return(1); }
                 .is_none_or(|index| engine.objects[index].destroyed),
             "the connected LNKT is removed"
         );
-        assert!(
-            !engine
-                .object_snapshot(crew)
-                .expect("crew remains live")
-                .contents
-                .contains(&kit)
-        );
+        assert!(!engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .contents
+            .contains(&kit));
         let crew_index = engine.find_object_index(crew).expect("crew remains live");
         assert_eq!(
             engine.objects[crew_index]
@@ -10326,31 +10297,25 @@ public func Initialize() { SetAction("Connect"); return(1); }
             .spawn_object(SpawnConfig::new("POWR").with_position(Vector2::new(100, 120)))
             .expect("structure spawns");
         let crew_index = engine.find_object_index(crew).expect("crew remains live");
-        assert!(
-            engine
-                .at_object(Vector2::new(100, 100), ocf::LINE_CONSTRUCT, Some(crew),)
-                .is_some_and(|(_, id, object_ocf)| {
-                    id == structure && object_ocf & ocf::LINE_CONSTRUCT != 0
-                })
-        );
+        assert!(engine
+            .at_object(Vector2::new(100, 100), ocf::LINE_CONSTRUCT, Some(crew),)
+            .is_some_and(|(_, id, object_ocf)| {
+                id == structure && object_ocf & ocf::LINE_CONSTRUCT != 0
+            }));
 
-        assert!(
-            !engine
-                .object_com_line_construction(crew_index)
-                .expect("line construction returns normally")
-        );
+        assert!(!engine
+            .object_com_line_construction(crew_index)
+            .expect("line construction returns normally"));
 
         let crew = engine.object_snapshot(crew).expect("crew remains live");
         assert_eq!(crew.action.name, "Walk");
         assert_eq!(crew.command_direction, CommandDirection::Stop);
         assert_eq!(crew.velocity, Vector2::ZERO);
         assert!(crew.contents.contains(&kit));
-        assert!(
-            engine
-                .objects
-                .iter()
-                .all(|object| object.definition_id != "PWRL")
-        );
+        assert!(engine
+            .objects
+            .iter()
+            .all(|object| object.definition_id != "PWRL"));
         assert!(engine.messages.snapshot().iter().any(|message| {
             message.target == Some(crew.id)
                 && message.lines == ["CLNK cannot create lines.".to_owned()]
@@ -10513,17 +10478,13 @@ protected func Destruction()
         );
 
         let crew_index = engine.find_object_index(crew).expect("crew remains live");
-        assert!(
-            engine
-                .object_com_line_construction(crew_index)
-                .expect("short circuit completes")
-        );
+        assert!(engine
+            .object_com_line_construction(crew_index)
+            .expect("short circuit completes"));
 
-        assert!(
-            engine
-                .find_object_index(line)
-                .is_none_or(|index| engine.objects[index].destroyed)
-        );
+        assert!(engine
+            .find_object_index(line)
+            .is_none_or(|index| engine.objects[index].destroyed));
         let crew_index = engine.find_object_index(crew).expect("crew remains live");
         assert_eq!(
             engine.objects[crew_index]
@@ -10673,11 +10634,9 @@ protected func Entrance()
         engine.set_landscape(landscape);
 
         let crew_index = engine.find_object_index(crew).expect("clonk remains live");
-        assert!(
-            engine
-                .object_com_line_construction(crew_index)
-                .expect("inactive pickup returns normally")
-        );
+        assert!(engine
+            .object_com_line_construction(crew_index)
+            .expect("inactive pickup returns normally"));
 
         let kit = engine
             .object_snapshot(crew)
@@ -10726,21 +10685,17 @@ protected func Entrance()
             line_pickup_gate_fixture(1, true, false);
         let crew_index = engine.find_object_index(crew).expect("crew remains live");
 
-        assert!(
-            !engine
-                .object_com_line_construction(crew_index)
-                .expect("collection-limit rejection returns normally")
-        );
+        assert!(!engine
+            .object_com_line_construction(crew_index)
+            .expect("collection-limit rejection returns normally"));
 
         let line = engine.object_snapshot(line).expect("line remains live");
         assert_eq!(line.action.target, Some(structure));
         assert_eq!(line.action.target2, Some(endpoint));
-        assert!(
-            engine
-                .objects
-                .iter()
-                .all(|object| object.definition_id != "LNKT")
-        );
+        assert!(engine
+            .objects
+            .iter()
+            .all(|object| object.definition_id != "LNKT"));
     }
 
     #[test]
@@ -10751,11 +10706,9 @@ protected func Entrance()
             line_pickup_gate_fixture(0, false, true);
         let crew_index = engine.find_object_index(crew).expect("crew remains live");
 
-        assert!(
-            !engine
-                .object_com_line_construction(crew_index)
-                .expect("double-kit rejection returns normally")
-        );
+        assert!(!engine
+            .object_com_line_construction(crew_index)
+            .expect("double-kit rejection returns normally"));
 
         let line = engine.object_snapshot(line).expect("line remains live");
         assert_eq!(line.action.target, Some(structure));
@@ -10871,11 +10824,9 @@ protected func Destruction()
             .expect("line spawns");
 
         let crew_index = engine.find_object_index(crew).expect("crew remains live");
-        assert!(
-            !engine
-                .object_com_line_construction(crew_index)
-                .expect("pickup rejection returns normally")
-        );
+        assert!(!engine
+            .object_com_line_construction(crew_index)
+            .expect("pickup rejection returns normally"));
 
         let line = engine.object_snapshot(line).expect("line remains live");
         assert_eq!(line.action.target, Some(structure));
@@ -10889,12 +10840,10 @@ protected func Destruction()
                 .get("rejected_kit_destructions"),
             Some(&Value::Int(1))
         );
-        assert!(
-            engine
-                .objects
-                .iter()
-                .all(|object| { object.definition_id != "LNKT" || object.destroyed })
-        );
+        assert!(engine
+            .objects
+            .iter()
+            .all(|object| { object.definition_id != "LNKT" || object.destroyed }));
     }
 
     #[test]
@@ -11165,9 +11114,8 @@ protected func ContainedControlUpdate()
         ] {
             let mut engine = Engine::new();
             register_clonk(&mut engine, "CLNK", "#strict\n");
-            let mut container =
-                Definition::from_script("CONT", "Container", container_script)
-                    .expect("container script compiles");
+            let mut container = Definition::from_script("CONT", "Container", container_script)
+                .expect("container script compiles");
             container.set_version(version);
             engine
                 .register_definition(container)
@@ -11205,9 +11153,7 @@ protected func ContainedControlUpdate()
             );
             assert_eq!(
                 container.local_vars.get("update_dir"),
-                Some(&Value::Int(
-                    CommandDirection::Left.to_script_value() + 100
-                )),
+                Some(&Value::Int(CommandDirection::Left.to_script_value() + 100)),
                 "{label}"
             );
             assert_eq!(
@@ -11239,9 +11185,7 @@ protected func ContainedControlUpdate()
             );
             assert_eq!(
                 container.local_vars.get("update_dir"),
-                Some(&Value::Int(
-                    CommandDirection::Stop.to_script_value() + 100
-                )),
+                Some(&Value::Int(CommandDirection::Stop.to_script_value() + 100)),
                 "{label}"
             );
             assert_eq!(
@@ -11378,13 +11322,11 @@ protected func ContainedThrow(object clonk)
             .execute_object_command_now(crew)
             .expect("execute Activate");
 
-        assert!(
-            engine
-                .object_snapshot(crew)
-                .expect("crew survives")
-                .command_stack
-                .is_empty()
-        );
+        assert!(engine
+            .object_snapshot(crew)
+            .expect("crew survives")
+            .command_stack
+            .is_empty());
         assert!(engine.pending_menu_requests.is_empty());
         let menu = engine
             .debug_object_menu(crew.as_u64())
@@ -11445,7 +11387,9 @@ protected func ContainedThrow(object clonk)
                 .command_names(),
             ["Exit"]
         );
-        engine.tick_without_snapshot().expect("selected cargo Exit evaluation frame");
+        engine
+            .tick_without_snapshot()
+            .expect("selected cargo Exit evaluation frame");
         let selected_after_evaluation = engine
             .object_snapshot(selected_cargo)
             .expect("selected cargo survives");
@@ -11548,24 +11492,20 @@ protected func ContainedThrow(object clonk)
                 later_full_red,
             ]
         );
-        assert!(
-            !engine.can_concat_picture_with(
-                &engine
-                    .object_snapshot(incomplete_red)
-                    .expect("incomplete exists"),
-                &engine
-                    .object_snapshot(first_full_blue)
-                    .expect("blue exists"),
-            )
-        );
-        assert!(
-            engine.can_concat_picture_with(
-                &engine
-                    .object_snapshot(incomplete_red)
-                    .expect("incomplete exists"),
-                &engine.object_snapshot(later_full_red).expect("red exists"),
-            )
-        );
+        assert!(!engine.can_concat_picture_with(
+            &engine
+                .object_snapshot(incomplete_red)
+                .expect("incomplete exists"),
+            &engine
+                .object_snapshot(first_full_blue)
+                .expect("blue exists"),
+        ));
+        assert!(engine.can_concat_picture_with(
+            &engine
+                .object_snapshot(incomplete_red)
+                .expect("incomplete exists"),
+            &engine.object_snapshot(later_full_red).expect("red exists"),
+        ));
 
         let crew_index = engine.find_object_index(crew).expect("crew exists");
         let container_index = engine
@@ -11647,8 +11587,7 @@ protected func ContainedThrow(object clonk)
             .register_definition(container)
             .expect("container registers");
         for id in ["RAW1", "RAW2"] {
-            let mut item = Definition::from_script(id, id, "#strict 2\n")
-                .expect("item compiles");
+            let mut item = Definition::from_script(id, id, "#strict 2\n").expect("item compiles");
             item.set_category(crate::CATEGORY_OBJECT);
             engine.register_definition(item).expect("item registers");
         }
@@ -11677,7 +11616,9 @@ protected func ContainedThrow(object clonk)
             .expect("live incomplete RAW2 spawns");
 
         for object in [raw1_status_zero, raw2_status_zero_full] {
-            let index = engine.find_object_index(object).expect("object remains linked");
+            let index = engine
+                .find_object_index(object)
+                .expect("object remains linked");
             engine.objects[index].state.status = crate::ObjectStatus::Deleted;
             engine.objects[index].destroyed = true;
             assert_eq!(engine.objects[index].state.container, Some(container));
@@ -11690,14 +11631,14 @@ protected func ContainedThrow(object clonk)
         assert!(contents.contains(&raw2_status_zero_full));
 
         let source = EngineInternalObjectMenuSource(&mut engine);
-        let groups = internal_object_menu_picture_groups(
-            &source,
-            &contents,
-            crate::CATEGORY_OBJECT,
+        let groups =
+            internal_object_menu_picture_groups(&source, &contents, crate::CATEGORY_OBJECT);
+        assert!(
+            groups
+                .iter()
+                .any(|group| { group.representative == raw1_status_zero && group.count == 2 }),
+            "a full-con Status-zero group head remains the raw representative"
         );
-        assert!(groups.iter().any(|group| {
-            group.representative == raw1_status_zero && group.count == 2
-        }), "a full-con Status-zero group head remains the raw representative");
         assert!(groups.iter().any(|group| {
             group.representative == raw2_live_full && group.count == 3
         }), "grouping counts the raw Status-zero link, but Contents.Find skips it when choosing the full-con representative");
@@ -12478,12 +12419,10 @@ protected func CalcValue(object pInBase)
         engine
             .open_context_menu(crew_index, crew_index, false, None)
             .expect("open prior menu");
-        assert!(
-            engine
-                .debug_object_menu(crew.as_u64())
-                .expect("crew exists")
-                .is_some()
-        );
+        assert!(engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .is_some());
         engine.objects[crew_index].apply_command_operations([CommandOperation::PushFront(
             CommandRequest::new(CommandId::Activate).with_target2(Some(container)),
         )]);
@@ -12494,13 +12433,11 @@ protected func CalcValue(object pInBase)
 
         assert_eq!(engine.debug_object_menu(crew.as_u64()), Some(None));
         assert!(engine.pending_menu_requests.is_empty());
-        assert!(
-            engine
-                .object_snapshot(crew)
-                .expect("crew survives")
-                .command_stack
-                .is_empty()
-        );
+        assert!(engine
+            .object_snapshot(crew)
+            .expect("crew survives")
+            .command_stack
+            .is_empty());
     }
 
     #[test]
@@ -12693,12 +12630,18 @@ protected func CalcValue(object pInBase)
             .expect("old contained throw completes");
 
         assert_eq!(
-            engine.object_snapshot(crew).expect("crew remains").container,
+            engine
+                .object_snapshot(crew)
+                .expect("crew remains")
+                .container,
             None,
             "the synchronous Put callback exits the driver before sf->Exec"
         );
         assert_eq!(
-            engine.object_snapshot(flag).expect("flag remains").container,
+            engine
+                .object_snapshot(flag)
+                .expect("flag remains")
+                .container,
             Some(hut)
         );
         let hut_index = engine.find_object_index(hut).expect("hut remains");
@@ -12822,11 +12765,17 @@ protected func CalcValue(object pInBase)
             .expect("old contained throw completes");
 
         assert_eq!(
-            engine.object_snapshot(crew).expect("crew remains").container,
+            engine
+                .object_snapshot(crew)
+                .expect("crew remains")
+                .container,
             Some(destination)
         );
         assert_eq!(
-            engine.object_snapshot(flag).expect("flag remains").container,
+            engine
+                .object_snapshot(flag)
+                .expect("flag remains")
+                .container,
             Some(source)
         );
         let source_index = engine.find_object_index(source).expect("source remains");
@@ -13199,7 +13148,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, seventh) {
         let mut engine = Engine::new();
         let (crew, hut) = contained_base_fixture(&mut engine, 2);
         engine.set_teams(vec![
-            crate::TeamInfo::new(1, "Team", 0).with_player_ids(vec![1, 2]),
+            crate::TeamInfo::new(1, "Team", 0).with_player_ids(vec![1, 2])
         ]);
         engine
             .set_player_team(1, Some(1))
@@ -13276,7 +13225,7 @@ protected func ControlCommand(command, target, tx, ty, target2, data, seventh) {
         let mut engine = Engine::new();
         let (crew, hut) = contained_base_fixture(&mut engine, 2);
         engine.set_teams(vec![
-            crate::TeamInfo::new(1, "Team", 0).with_player_ids(vec![1, 2]),
+            crate::TeamInfo::new(1, "Team", 0).with_player_ids(vec![1, 2])
         ]);
         engine
             .set_player_team(1, Some(1))
@@ -13431,13 +13380,11 @@ protected func ControlCommand(command, target, tx, ty, target2, data, seventh) {
             Some(&1),
             "entering the base precedes all purchase side effects"
         );
-        assert!(
-            engine
-                .snapshot()
-                .objects
-                .iter()
-                .all(|object| object.definition_id != "LORY")
-        );
+        assert!(engine
+            .snapshot()
+            .objects
+            .iter()
+            .all(|object| object.definition_id != "LORY"));
     }
 
     #[test]
@@ -13454,23 +13401,22 @@ protected func ControlCommand(command, target, tx, ty, target2, data, seventh) {
             .expect("base stock");
         let initial_objects = engine.snapshot().objects.len();
 
-        let assert_unchanged = |engine: &Engine| {
-            let owner = engine.player(2).expect("base owner remains");
-            assert_eq!(owner.wealth(), 100);
-            assert_eq!(owner.home_base_material().get("ITEM"), Some(&2));
-            assert_eq!(engine.snapshot().objects.len(), initial_objects);
-            assert!(engine.snapshot().objects.iter().all(|object| {
-                object.definition_id != "ITEM" || !object.status.is_active()
-            }));
-        };
+        let assert_unchanged =
+            |engine: &Engine| {
+                let owner = engine.player(2).expect("base owner remains");
+                assert_eq!(owner.wealth(), 100);
+                assert_eq!(owner.home_base_material().get("ITEM"), Some(&2));
+                assert_eq!(engine.snapshot().objects.len(), initial_objects);
+                assert!(engine.snapshot().objects.iter().all(|object| {
+                    object.definition_id != "ITEM" || !object.status.is_active()
+                }));
+            };
 
         engine.set_hostility(1, 2, true).expect("set hostility");
         execute_buy_command(&mut engine, crew, hut, "ITEM", 1);
         assert_unchanged(&engine);
 
-        engine
-            .set_hostility(1, 2, false)
-            .expect("clear hostility");
+        engine.set_hostility(1, 2, false).expect("clear hostility");
         engine
             .set_player_status(2, PlayerStatus::Eliminated)
             .expect("eliminate base owner");
@@ -13603,8 +13549,7 @@ public func Purchase(int player, object base)
     return true;
 }
 "#;
-        let mut item =
-            Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
+        let mut item = Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
         item.set_value(10);
         engine.register_definition(item).expect("register item");
         engine.set_player_wealth(1, 30).expect("buyer wealth");
@@ -13630,10 +13575,7 @@ public func Purchase(int player, object base)
             base.local_vars.get("purchase_wealth"),
             Some(&Value::Int(20))
         );
-        assert_eq!(
-            base.local_vars.get("purchase_stock"),
-            Some(&Value::Int(1))
-        );
+        assert_eq!(base.local_vars.get("purchase_stock"), Some(&Value::Int(1)));
         assert!(
             engine
                 .snapshot()
@@ -13907,20 +13849,16 @@ protected func Destruction() {{ return sale_base->RecordDestruction({marker}); }
             assert_eq!(snapshot.container, Some(hut));
         }
         assert_eq!(engine.player(1).expect("player").wealth(), 0);
-        assert!(
-            engine
-                .player(1)
-                .expect("player")
-                .home_base_material()
-                .is_empty()
-        );
-        assert!(
-            engine
-                .object_snapshot(crew)
-                .expect("seller survives")
-                .command_stack
-                .is_empty()
-        );
+        assert!(engine
+            .player(1)
+            .expect("player")
+            .home_base_material()
+            .is_empty());
+        assert!(engine
+            .object_snapshot(crew)
+            .expect("seller survives")
+            .command_stack
+            .is_empty());
     }
 
     #[test]
@@ -13949,9 +13887,7 @@ protected func Destruction() {{ return sale_base->RecordDestruction({marker}); }
         execute_sell_command(&mut engine, crew, hut, "ITEM", 1);
         assert_unchanged(&engine);
 
-        engine
-            .set_hostility(1, 2, false)
-            .expect("clear hostility");
+        engine.set_hostility(1, 2, false).expect("clear hostility");
         engine
             .set_player_surrendered(2, true)
             .expect("surrender base owner");
@@ -14255,8 +14191,7 @@ protected func CalcDefValue(object base, int player)
     return 20;
 }
 "#;
-        let mut item =
-            Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
+        let mut item = Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
         item.set_value(99);
         engine.register_definition(item).expect("register item");
         engine
@@ -14843,7 +14778,9 @@ func Enable() {
         );
 
         for _ in 0..34 {
-            engine.tick_without_snapshot().expect("advance before tick-35 refill");
+            engine
+                .tick_without_snapshot()
+                .expect("advance before tick-35 refill");
         }
         assert_eq!(engine.frame(), 34);
         let menu = engine
@@ -16109,11 +16046,9 @@ public func ContextConstruction(object caller)
             .expect("register player");
         let crew = spawn_crew(&mut engine, "CLNK", 1);
 
-        assert!(
-            engine
-                .player_context_command(1, crew)
-                .expect("queue context command")
-        );
+        assert!(engine
+            .player_context_command(1, crew)
+            .expect("queue context command"));
         engine
             .execute_object_command_now(crew)
             .expect("open context menu");
@@ -16564,9 +16499,7 @@ public func GetCustomComponents(object builder)
             "DragImagePicture crops the raw PictureRect from Graphics, not the scaled menu image"
         );
         assert_ne!(picture.pixels().as_ref(), menu_picture_pixels.as_ref());
-        assert!(engine
-            .definition_construction_drag_image("NONE")
-            .is_none());
+        assert!(engine.definition_construction_drag_image("NONE").is_none());
     }
 
     #[test]
@@ -16671,8 +16604,7 @@ public func ContextMagic(object caller)
                 .expect("mage exists")
                 .expect("context menu opens");
             assert_eq!(
-                menu.location,
-                None,
+                menu.location, None,
                 "x={x}, y={y} keeps default Right|Bottom alignment"
             );
             assert_ne!(
@@ -16795,8 +16727,12 @@ public func ContextMagic(object caller)
             "Put-all resolves one of the carried flags"
         );
         engine.tick_without_snapshot().expect("advance Put count");
-        engine.tick_without_snapshot().expect("put the remaining carried object");
-        engine.tick_without_snapshot().expect("complete Put-all command");
+        engine
+            .tick_without_snapshot()
+            .expect("put the remaining carried object");
+        engine
+            .tick_without_snapshot()
+            .expect("complete Put-all command");
 
         for flag in [second_flag, third_flag] {
             assert_eq!(
@@ -17127,7 +17063,9 @@ public func ContextMagic(object caller)
             lorry_after_activate.command_stack.command_names(),
             vec!["Exit"]
         );
-        engine.tick_without_snapshot().expect("target Exit evaluation frame");
+        engine
+            .tick_without_snapshot()
+            .expect("target Exit evaluation frame");
         let lorry_after_evaluation = engine.object_snapshot(lorry).expect("lorry survives");
         assert_eq!(
             lorry_after_evaluation.container,
@@ -17138,7 +17076,9 @@ public func ContextMagic(object caller)
             lorry_after_evaluation.command_stack.command_names(),
             vec!["Exit"]
         );
-        engine.tick_without_snapshot().expect("target evaluated Exit frame");
+        engine
+            .tick_without_snapshot()
+            .expect("target evaluated Exit frame");
         assert_eq!(
             engine
                 .object_snapshot(lorry)
@@ -17293,7 +17233,9 @@ public func ContextMagic(object caller)
             ["Exit"],
             "the selected row executes C4CMD_Activate on the contained cargo"
         );
-        engine.tick_without_snapshot().expect("execute cargo Exit evaluation frame");
+        engine
+            .tick_without_snapshot()
+            .expect("execute cargo Exit evaluation frame");
         let cargo_after_evaluation = engine.object_snapshot(cargo).expect("cargo survives");
         assert_eq!(cargo_after_evaluation.container, Some(hut));
         assert_eq!(
@@ -17301,7 +17243,9 @@ public func ContextMagic(object caller)
             ["Exit"],
             "Exit remains queued after its InitEvaluation frame"
         );
-        engine.tick_without_snapshot().expect("execute evaluated cargo Exit command");
+        engine
+            .tick_without_snapshot()
+            .expect("execute evaluated cargo Exit command");
         assert_eq!(
             engine
                 .object_snapshot(cargo)
@@ -17470,11 +17414,9 @@ protected func RejectCollect(id definition, object item)
             .expect("Contents menu exists");
         assert_eq!(menu.items.len(), 1);
         assert_eq!(menu.items[0].caption, "Get Flag");
-        assert!(
-            menu.items[0]
-                .command
-                .contains(&format!("\"Get\", Object({})", boxed_flag.as_u64()))
-        );
+        assert!(menu.items[0]
+            .command
+            .contains(&format!("\"Get\", Object({})", boxed_flag.as_u64())));
         let crew_index = engine.find_object_index(crew).expect("crew exists");
         assert_eq!(
             engine.objects[crew_index]
@@ -17651,11 +17593,9 @@ protected func RejectCollect(id definition, object item)
                     .contains(&format!("Object({})", first_flag.as_u64()))
         );
         assert!(menu.items[0].command2.contains(",2,0,,0,FLAG"));
-        assert!(
-            menu.items[1]
-                .command
-                .contains(&format!("Object({})", lorry.as_u64()))
-        );
+        assert!(menu.items[1]
+            .command
+            .contains(&format!("Object({})", lorry.as_u64())));
 
         engine
             .player_in_com(1, COM_THROW, 0)
@@ -17710,8 +17650,7 @@ protected func CalcValue(object base, int player)
     return 41;
 }
 "#;
-        let mut item =
-            Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
+        let mut item = Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
         item.set_category(crate::CATEGORY_OBJECT);
         item.set_value(99);
         engine.register_definition(item).expect("register item");
@@ -17838,14 +17777,12 @@ protected func CalcValue(object base, int player)
                 },
             )
             .expect("activated flint changes its picture");
-        assert!(
-            !engine.can_concat_picture_with(
-                &engine.object_snapshot(idle).expect("idle flint exists"),
-                &engine
-                    .object_snapshot(activated)
-                    .expect("activated flint exists"),
-            )
-        );
+        assert!(!engine.can_concat_picture_with(
+            &engine.object_snapshot(idle).expect("idle flint exists"),
+            &engine
+                .object_snapshot(activated)
+                .expect("activated flint exists"),
+        ));
 
         engine
             .open_base_sell_menu(crew_index, hut_index)
@@ -17862,11 +17799,10 @@ protected func CalcValue(object base, int player)
             vec![("TFLN", 1), ("TFLN", 1)],
             "different per-object pictures occupy separate C++ menu rows"
         );
-        assert!(
-            sell.items
-                .iter()
-                .all(|item| item.command2.contains(",2,0,,0,TFLN"))
-        );
+        assert!(sell
+            .items
+            .iter()
+            .all(|item| item.command2.contains(",2,0,,0,TFLN")));
         let ordered_flints = engine.object_snapshot(hut).expect("hut exists").contents;
         assert_eq!(ordered_flints.len(), 2);
         assert_eq!(
@@ -17878,10 +17814,9 @@ protected func CalcValue(object base, int player)
             "C4ObjectMenu draws each row from the representative returned by C4ObjectListIterator (C4ObjectMenu.cpp:246-264; C4ObjectList.cpp:849-903)"
         );
         for (row, object) in sell.items.iter().zip(&ordered_flints) {
-            assert!(
-                row.command
-                    .contains(&format!("Object({})", object.as_u64()))
-            );
+            assert!(row
+                .command
+                .contains(&format!("Object({})", object.as_u64())));
         }
         engine
             .player_in_com(1, COM_RIGHT, 0)
@@ -17998,11 +17933,9 @@ protected func CalcValue(object base, int player)
         assert_eq!(menu.items.len(), 1);
         assert_eq!(menu.items[0].count, 2);
         assert_eq!(menu.items[0].picture_object, Some(full));
-        assert!(
-            menu.items[0]
-                .command
-                .contains(&format!("Object({})", full.as_u64()))
-        );
+        assert!(menu.items[0]
+            .command
+            .contains(&format!("Object({})", full.as_u64())));
     }
 
     #[test]
@@ -18221,7 +18154,9 @@ protected func CalcValue(object base, int player)
         );
         // The first ordinary frame observes SetRefillObject's zero-valued
         // cache. Add the second object only after that count is established.
-        engine.tick_without_snapshot().expect("prime refill-object count");
+        engine
+            .tick_without_snapshot()
+            .expect("prime refill-object count");
         assert_eq!(engine.frame(), 1);
         engine
             .spawn_object(SpawnConfig::new("ITEM").with_container(hut))
@@ -18653,11 +18588,9 @@ protected func ControlContents(idTarget) { return(1); }
         engine.select_crew(1, [a, b, c]).expect("select all");
         engine.set_crew_cursor(1, Some(a)).expect("oldest cursor");
 
-        assert!(
-            engine
-                .player_mouse_select_next(1)
-                .expect("mouse select-next control")
-        );
+        assert!(engine
+            .player_mouse_select_next(1)
+            .expect("mouse select-next control"));
         assert_eq!(engine.crew_cursor(1), Some(c));
         assert_eq!(engine.selected_crew(1), vec![c]);
         assert_eq!(control_state(&engine, 1).cursor_selection, 0);
@@ -18719,15 +18652,13 @@ protected func ControlContents(idTarget) { return(1); }
             .spawn_object(SpawnConfig::new("PICK"))
             .expect("selectable spawns");
 
-        assert!(
-            engine
-                .execute_player_select(&PlayerSelectControlData {
-                    player: 1,
-                    objects: vec![target.as_u64() as i32],
-                    by_client: 4,
-                })
-                .expect("selection packet executes")
-        );
+        assert!(engine
+            .execute_player_select(&PlayerSelectControlData {
+                player: 1,
+                objects: vec![target.as_u64() as i32],
+                by_client: 4,
+            })
+            .expect("selection packet executes"));
 
         assert_eq!(
             engine
@@ -18921,16 +18852,9 @@ protected func ControlContents(idTarget) { return(1); }
             .spawn_object(SpawnConfig::new("GOLD").with_container(crew))
             .expect("spawn second item");
 
-        assert!(
-            engine
-                .player_mouse_drag_objects(
-                    1,
-                    CommandId::Drop,
-                    [second, first],
-                    Vector2::new(25, 30),
-                )
-                .expect("mouse object controls execute")
-        );
+        assert!(engine
+            .player_mouse_drag_objects(1, CommandId::Drop, [second, first], Vector2::new(25, 30),)
+            .expect("mouse object controls execute"));
         let commands = engine
             .object_snapshot(crew)
             .expect("crew remains live")
@@ -19147,11 +19071,9 @@ protected func ControlContents(idTarget) { return(1); }
             .spawn_object(SpawnConfig::new("HUT1"))
             .expect("spawn hut");
 
-        assert!(
-            engine
-                .player_mouse_drag_put(1, [second, first], hut, false)
-                .expect("mouse Put controls execute")
-        );
+        assert!(engine
+            .player_mouse_drag_put(1, [second, first], hut, false)
+            .expect("mouse Put controls execute"));
         let commands = engine
             .object_snapshot(crew)
             .expect("crew remains live")
@@ -19266,22 +19188,29 @@ protected func ControlContents(idTarget) { return(1); }
             )
             .expect("spawn cursor crew");
         engine.select_crew(1, [crew]).expect("select cursor crew");
-        engine.set_crew_cursor(1, Some(crew)).expect("set cursor crew");
+        engine
+            .set_crew_cursor(1, Some(crew))
+            .expect("set cursor crew");
         engine.set_landscape(Landscape::flat(512, 300));
 
         let mut entrance =
             Definition::from_script("ENTR", "Entrance", "#strict\n").expect("entrance");
         entrance.set_entrance_rect(Some(crate::DefinitionRect::new(-2, -2, 4, 4)));
-        engine.register_definition(entrance).expect("register entrance");
+        engine
+            .register_definition(entrance)
+            .expect("register entrance");
 
-        let mut vehicle =
-            Definition::from_script("VEH1", "Vehicle", "#strict\n").expect("vehicle");
+        let mut vehicle = Definition::from_script("VEH1", "Vehicle", "#strict\n").expect("vehicle");
         vehicle.set_grab(1);
-        engine.register_definition(vehicle).expect("register vehicle");
+        engine
+            .register_definition(vehicle)
+            .expect("register vehicle");
         let mut grab_two =
             Definition::from_script("VEH2", "Grab two", "#strict\n").expect("grab two");
         grab_two.set_grab(2);
-        engine.register_definition(grab_two).expect("register grab two");
+        engine
+            .register_definition(grab_two)
+            .expect("register grab two");
 
         let mut tree = Definition::from_script("TREE", "Tree", "#strict\n").expect("tree");
         tree.set_shape_rect(Some(crate::DefinitionRect::new(-15, -45, 30, 90)));
@@ -19301,34 +19230,22 @@ protected func ControlContents(idTarget) { return(1); }
         }
 
         let entrance = engine
-            .spawn_object(
-                SpawnConfig::new("ENTR").with_position(Vector2::new(40, 40)),
-            )
+            .spawn_object(SpawnConfig::new("ENTR").with_position(Vector2::new(40, 40)))
             .expect("spawn entrance");
         let vehicle = engine
-            .spawn_object(
-                SpawnConfig::new("VEH1").with_position(Vector2::new(70, 40)),
-            )
+            .spawn_object(SpawnConfig::new("VEH1").with_position(Vector2::new(70, 40)))
             .expect("spawn vehicle");
         let grab_two = engine
-            .spawn_object(
-                SpawnConfig::new("VEH2").with_position(Vector2::new(100, 40)),
-            )
+            .spawn_object(SpawnConfig::new("VEH2").with_position(Vector2::new(100, 40)))
             .expect("spawn grab-two target");
         let tree = engine
-            .spawn_object(
-                SpawnConfig::new("TREE").with_position(Vector2::new(140, 80)),
-            )
+            .spawn_object(SpawnConfig::new("TREE").with_position(Vector2::new(140, 80)))
             .expect("spawn tree");
         let site = engine
-            .spawn_object(
-                SpawnConfig::new("SITE").with_position(Vector2::new(190, 40)),
-            )
+            .spawn_object(SpawnConfig::new("SITE").with_position(Vector2::new(190, 40)))
             .expect("spawn construction site");
         let item = engine
-            .spawn_object(
-                SpawnConfig::new("ITEM").with_position(Vector2::new(230, 40)),
-            )
+            .spawn_object(SpawnConfig::new("ITEM").with_position(Vector2::new(230, 40)))
             .expect("spawn carryable");
         let enemy = engine
             .spawn_object(
@@ -19338,9 +19255,7 @@ protected func ControlContents(idTarget) { return(1); }
             )
             .expect("spawn enemy");
         let exclusive = engine
-            .spawn_object(
-                SpawnConfig::new("EXCL").with_position(Vector2::new(310, 320)),
-            )
+            .spawn_object(SpawnConfig::new("EXCL").with_position(Vector2::new(310, 320)))
             .expect("spawn exclusive blocker");
 
         let set_ocf = |engine: &mut Engine, object, value| {
@@ -19384,13 +19299,7 @@ protected func ControlContents(idTarget) { return(1); }
 
         let entrance_point = Vector2::new(45, 45);
         assert_eq!(
-            engine.mouse_left_double_command(
-                1,
-                Some(entrance),
-                entrance_point,
-                false,
-                false,
-            ),
+            engine.mouse_left_double_command(1, Some(entrance), entrance_point, false, false,),
             Some(packet(
                 CommandId::Enter,
                 entrance_point.x,
@@ -19404,25 +19313,13 @@ protected func ControlContents(idTarget) { return(1); }
 
         let vehicle_point = Vector2::new(70, 40);
         assert_eq!(
-            engine.mouse_left_double_command(
-                1,
-                Some(vehicle),
-                vehicle_point,
-                false,
-                false,
-            ),
+            engine.mouse_left_double_command(1, Some(vehicle), vehicle_point, false, false,),
             Some(packet(CommandId::Grab, 0, 0, Some(vehicle), 0, false)),
         );
         engine.objects[crew_index].state.action = ActionState::new("Push");
         engine.objects[crew_index].state.action.target = Some(vehicle);
         assert_eq!(
-            engine.mouse_left_double_command(
-                1,
-                Some(vehicle),
-                vehicle_point,
-                false,
-                false,
-            ),
+            engine.mouse_left_double_command(1, Some(vehicle), vehicle_point, false, false,),
             Some(packet(
                 CommandId::UnGrab,
                 vehicle_point.x,
@@ -19435,13 +19332,8 @@ protected func ControlContents(idTarget) { return(1); }
         engine.objects[crew_index].state.action = ActionState::new("Walk");
 
         assert_eq!(
-            engine.mouse_left_double_command(
-                1,
-                Some(grab_two),
-                Vector2::new(100, 40),
-                false,
-                true,
-            ),
+            engine
+                .mouse_left_double_command(1, Some(grab_two), Vector2::new(100, 40), false, true,),
             Some(packet(CommandId::Grab, 0, 0, Some(grab_two), 0, true)),
             "Grab=2 is still a double-click Grab and Shift appends it",
         );
@@ -19487,13 +19379,7 @@ protected func ControlContents(idTarget) { return(1); }
             "Build overrides both Carryable and Grab",
         );
         assert_eq!(
-            engine.mouse_left_double_command(
-                1,
-                Some(item),
-                Vector2::new(230, 40),
-                false,
-                false,
-            ),
+            engine.mouse_left_double_command(1, Some(item), Vector2::new(230, 40), false, false,),
             Some(packet(CommandId::Get, 0, 0, Some(item), 0, false)),
         );
 
@@ -19518,13 +19404,7 @@ protected func ControlContents(idTarget) { return(1); }
             "MouseSelect has no LeftDouble command",
         );
         assert_eq!(
-            engine.mouse_left_double_command(
-                1,
-                Some(crew),
-                Vector2::new(400, 100),
-                false,
-                false,
-            ),
+            engine.mouse_left_double_command(1, Some(crew), Vector2::new(400, 100), false, false,),
             None,
             "own-crew Select has no LeftDouble command",
         );
@@ -19551,13 +19431,7 @@ protected func ControlContents(idTarget) { return(1); }
             "an OCF_Exclusive-only pick suppresses landscape Dig",
         );
         assert_eq!(
-            engine.mouse_left_double_command(
-                1,
-                Some(item),
-                Vector2::new(408, 85),
-                false,
-                false,
-            ),
+            engine.mouse_left_double_command(1, Some(item), Vector2::new(408, 85), false, false,),
             None,
             "the last-evaluated Jump cursor suppresses Get",
         );
@@ -19759,7 +19633,9 @@ protected func ControlContents(idTarget) { return(1); }
             "the no-container right-drag branch still goes through Selection.Add"
         );
         engine.objects[first_index].state.container = original_container;
-        let second_index = engine.find_object_index(second).expect("second item exists");
+        let second_index = engine
+            .find_object_index(second)
+            .expect("second item exists");
         engine.objects[second_index].state.status = crate::ObjectStatus::Deleted;
         engine.objects[second_index].destroyed = true;
         assert!(
@@ -19802,17 +19678,15 @@ protected func ControlContents(idTarget) { return(1); }
             .spawn_object(SpawnConfig::new("CONT"))
             .expect("spawn destination");
 
-        assert!(
-            engine
-                .player_mouse_drag_vehicles(
-                    1,
-                    [second, first],
-                    Vector2::new(70, 80),
-                    Some(destination),
-                    false,
-                )
-                .expect("vehicle commands execute")
-        );
+        assert!(engine
+            .player_mouse_drag_vehicles(
+                1,
+                [second, first],
+                Vector2::new(70, 80),
+                Some(destination),
+                false,
+            )
+            .expect("vehicle commands execute"));
         let commands = engine
             .object_snapshot(crew)
             .expect("crew remains live")
@@ -19822,22 +19696,16 @@ protected func ControlContents(idTarget) { return(1); }
         assert!(commands.iter().all(|command| command.name == "PushTo"));
         assert_eq!(commands[0].target, Some(second));
         assert_eq!(commands[1].target, Some(first));
-        assert!(
-            commands
-                .iter()
-                .all(|command| command.target2 == Some(destination))
-        );
-        assert!(
-            commands
-                .iter()
-                .all(|command| command.tx == Some(70) && command.ty == Some(80))
-        );
+        assert!(commands
+            .iter()
+            .all(|command| command.target2 == Some(destination)));
+        assert!(commands
+            .iter()
+            .all(|command| command.tx == Some(70) && command.ty == Some(80)));
 
-        assert!(
-            engine
-                .player_mouse_drag_vehicles(1, [first], Vector2::new(90, 100), None, true,)
-                .expect("Shift-append vehicle command executes")
-        );
+        assert!(engine
+            .player_mouse_drag_vehicles(1, [first], Vector2::new(90, 100), None, true,)
+            .expect("Shift-append vehicle command executes"));
         let commands = engine
             .object_snapshot(crew)
             .expect("crew remains live")

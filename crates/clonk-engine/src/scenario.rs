@@ -6,23 +6,23 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use image::{ImageError, ImageFormat, load_from_memory};
 use clonk_resources::definition::{
     ActionFacet as ResourceActionFacet, DefCore as ResourceDefCore,
     DefinitionGraphicsVariant as ResourceGraphicsVariant,
 };
 use clonk_resources::{
+    decode_legacy_script_text, localize_script_source_with_components,
     ActionDefinition as ResourceActionDefinition, ActionMap as ResourceActionMap, ColorByOwnerMask,
     ComponentGroups, DefinitionError as ResourceDefinitionError, GraphicsImage, Group, GroupError,
     LanguagePacks, ParticleDefinition as ResourceParticleDefinition, RankNameTable,
     ResourceDefinition as ResourceDefinitionData,
-    decode_legacy_script_text,
-    localize_script_source_with_components,
 };
+use image::{load_from_memory, ImageError, ImageFormat};
 use serde::de::Error as _;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
+use crate::action::is_builtin_idle_name;
 use crate::landscape::{
     LandscapeRasterState, RuntimeTexMapLookup, RuntimeTexMapMaterial, RuntimeTexMapState,
 };
@@ -40,7 +40,6 @@ use crate::{
     TeamInfo, Vector2, FULL_CON, LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT,
     LANDSCAPE_MODE_STATIC,
 };
-use crate::action::is_builtin_idle_name;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScenarioError {
@@ -68,9 +67,7 @@ pub enum ScenarioError {
     Definition(#[from] ResourceDefinitionError),
     #[error("invalid legacy scenario data: {0}")]
     LegacyParse(String),
-    #[error(
-        "classic scenario title cannot be truncated at byte {limit} without splitting UTF-8"
-    )]
+    #[error("classic scenario title cannot be truncated at byte {limit} without splitting UTF-8")]
     LoaderTitleTruncationBoundary { limit: usize },
     #[error("legacy objects file `Objects.txt` is not valid UTF-8")]
     LegacyObjectsEncoding,
@@ -334,12 +331,9 @@ fn scenario_map_callback_functions(
                     .find(|definition| definition.id.eq_ignore_ascii_case(id))
                     .ok_or_else(|| ScenarioError::UnknownDefinition(id.clone()))?;
                 let name = definition.name.as_deref().unwrap_or(&definition.id);
-                let mut compiled = Definition::from_script(
-                    &definition.id,
-                    name,
-                    &definition.script,
-                )
-                .or_else(|_| Definition::from_script(&definition.id, name, ""))?;
+                let mut compiled =
+                    Definition::from_script(&definition.id, name, &definition.script)
+                        .or_else(|_| Definition::from_script(&definition.id, name, ""))?;
                 if let Some(script_name) = &definition.script_name {
                     compiled.set_script_name(script_name.clone());
                 }
@@ -401,9 +395,7 @@ fn definition_requires_newer_engine(definition: &ScenarioDefinition) -> bool {
         std::cmp::Ordering::Less => false,
         // CompareVersion treats a non-positive definition build as a
         // wildcard and only compares positive candidate builds.
-        std::cmp::Ordering::Equal => {
-            version[4] > 0 && version[4] > DEFINITION_ENGINE_VERSION[4]
-        }
+        std::cmp::Ordering::Equal => version[4] > 0 && version[4] > DEFINITION_ENGINE_VERSION[4],
     }
 }
 
@@ -563,6 +555,30 @@ impl ScenarioIdListEntry {
             id: id.into(),
             count,
         }
+    }
+}
+
+/// The authoritative `C4GameParameters::Rules` and `Goals` lists used by
+/// `C4Game::InitRules`/`InitGoals`. Network startup supplies these from
+/// JoinData so every peer places the same post-conversion, lobby-adjusted
+/// objects instead of rereading its local Scenario.txt lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameParameterRuleGoalLists {
+    rules: Vec<ScenarioIdListEntry>,
+    goals: Vec<ScenarioIdListEntry>,
+}
+
+impl GameParameterRuleGoalLists {
+    pub fn new(rules: Vec<ScenarioIdListEntry>, goals: Vec<ScenarioIdListEntry>) -> Self {
+        Self { rules, goals }
+    }
+
+    pub fn rules(&self) -> &[ScenarioIdListEntry] {
+        &self.rules
+    }
+
+    pub fn goals(&self) -> &[ScenarioIdListEntry] {
+        &self.goals
     }
 }
 
@@ -847,9 +863,7 @@ impl ScenarioLoaderHead {
     /// registration without resolving or validating the presentation title.
     /// The returned head deliberately has an empty `scenario_title`; callers
     /// must use this only for Origin/Definitions/Extra resource setup.
-    pub fn load_from_group_for_resource_registration(
-        group: &Group,
-    ) -> Result<Self, ScenarioError> {
+    pub fn load_from_group_for_resource_registration(group: &Group) -> Result<Self, ScenarioError> {
         let manifest = parse_legacy_scenario_manifest(group)?;
         let savegame_definition_override =
             load_savegame_definition_override(group, manifest.core.head.save_game != 0)?;
@@ -1156,8 +1170,11 @@ impl ScenarioLobbyDefinitions {
     }
 
     pub fn resolved_load_resources(&self) -> Option<&[PathBuf]> {
-        matches!(&self.savegame_override, ScenarioSavegameDefinitionOverride::None)
-            .then_some(self.resolved_load_resources.as_slice())
+        matches!(
+            &self.savegame_override,
+            ScenarioSavegameDefinitionOverride::None
+        )
+        .then_some(self.resolved_load_resources.as_slice())
     }
 
     /// The load vector is final only when this is `None`. Old exact saves may
@@ -1167,8 +1184,11 @@ impl ScenarioLobbyDefinitions {
     }
 
     pub fn effective_modules(&self) -> Option<&[String]> {
-        matches!(&self.savegame_override, ScenarioSavegameDefinitionOverride::None)
-            .then_some(self.requested_modules.as_slice())
+        matches!(
+            &self.savegame_override,
+            ScenarioSavegameDefinitionOverride::None
+        )
+        .then_some(self.requested_modules.as_slice())
     }
 }
 
@@ -1422,16 +1442,12 @@ impl ScenarioGameParameterOverrides {
                 .unwrap_or(defaults.startup_player_count),
             max_players: self.max_players.unwrap_or(defaults.max_players),
             use_fair_crew: self.use_fair_crew.unwrap_or(defaults.use_fair_crew),
-            fair_crew_forced: self
-                .fair_crew_forced
-                .unwrap_or(defaults.fair_crew_forced),
+            fair_crew_forced: self.fair_crew_forced.unwrap_or(defaults.fair_crew_forced),
             fair_crew_strength: self
                 .fair_crew_strength
                 .unwrap_or(defaults.fair_crew_strength),
             allow_debug: self.allow_debug.unwrap_or(defaults.allow_debug),
-            is_network_game: self
-                .is_network_game
-                .unwrap_or(defaults.is_network_game),
+            is_network_game: self.is_network_game.unwrap_or(defaults.is_network_game),
             control_rate: self.control_rate.unwrap_or(defaults.control_rate),
             auto_frame_skip: self.auto_frame_skip.unwrap_or(defaults.auto_frame_skip),
             rules: self.rules.clone().unwrap_or_else(|| defaults.rules.clone()),
@@ -1514,16 +1530,8 @@ impl ScenarioLobbyTeam {
             return ScenarioTeamColor::Explicit(self.configured_color);
         }
         const DEFAULT_COLORS: [u32; 10] = [
-            0xF4_00_00,
-            0x00_C8_00,
-            0xFC_F4_1C,
-            0x20_20_FF,
-            0xC4_84_44,
-            0xFF_FF_FF,
-            0x84_84_84,
-            0xFF_00_EF,
-            0x00_FF_FF,
-            0x78_48_30,
+            0xF4_00_00, 0x00_C8_00, 0xFC_F4_1C, 0x20_20_FF, 0xC4_84_44, 0xFF_FF_FF, 0x84_84_84,
+            0xFF_00_EF, 0x00_FF_FF, 0x78_48_30,
         ];
         if (1..=10).contains(&self.id) {
             ScenarioTeamColor::DefaultForId(DEFAULT_COLORS[(self.id - 1) as usize])
@@ -1750,9 +1758,7 @@ pub trait LegacyDefinitionResolver {
             Ok(groups) => Ok(groups),
             Err(ScenarioError::LegacyDefinitionNotFound { .. }) => Ok(Vec::new()),
             Err(ScenarioError::Resources(
-                GroupError::Missing(_)
-                | GroupError::EntryNotFound(_)
-                | GroupError::NotDirectory(_),
+                GroupError::Missing(_) | GroupError::EntryNotFound(_) | GroupError::NotDirectory(_),
             )) => Ok(Vec::new()),
             Err(error) => Err(error),
         }
@@ -1766,9 +1772,7 @@ pub trait LegacyDefinitionResolver {
             Ok(groups) => Ok(groups),
             Err(ScenarioError::LegacyDefinitionNotFound { .. }) => Ok(Vec::new()),
             Err(ScenarioError::Resources(
-                GroupError::Missing(_)
-                | GroupError::EntryNotFound(_)
-                | GroupError::NotDirectory(_),
+                GroupError::Missing(_) | GroupError::EntryNotFound(_) | GroupError::NotDirectory(_),
             )) => Ok(Vec::new()),
             Err(error) => Err(error),
         }
@@ -1884,10 +1888,8 @@ impl Scenario {
         let parameters = load_legacy_game_parameter_overrides(group, &defaults)?
             .map(|overrides| overrides.apply_to(&defaults))
             .unwrap_or(defaults);
-        let startup_player_count = replay_startup_player_count_from_group(
-            group,
-            parameters.startup_player_count,
-        )?;
+        let startup_player_count =
+            replay_startup_player_count_from_group(group, parameters.startup_player_count)?;
         Ok(Some(ReplayScenarioStartupPreflight {
             random_seed: parameters.random_seed,
             startup_player_count,
@@ -2942,30 +2944,30 @@ impl Scenario {
             .unwrap_or_else(|| manifest.definition_specs.clone());
         let (definition_specs, selected_definition_spellings, definition_selection_source) =
             match definition_modules {
-            Some(modules) => (
-                modules,
-                definition_spellings
-                    .filter(|spellings| spellings.len() == modules.len())
-                    .unwrap_or(modules),
-                ScenarioDefinitionSelectionSource::FixedCallerSelection,
-            ),
-            None if !manifest.core.definitions.local_only
-                && !manifest.definition_specs.is_empty() =>
-            {
-                (
-                    manifest.definition_specs.as_slice(),
-                    configured_definition_spellings.as_slice(),
-                    ScenarioDefinitionSelectionSource::ScenarioPreset,
-                )
-            }
-            None => (
-                initial_definition_modules,
-                initial_definition_spellings
-                    .filter(|spellings| spellings.len() == initial_definition_modules.len())
-                    .unwrap_or(initial_definition_modules),
-                ScenarioDefinitionSelectionSource::CallerDefaults,
-            ),
-        };
+                Some(modules) => (
+                    modules,
+                    definition_spellings
+                        .filter(|spellings| spellings.len() == modules.len())
+                        .unwrap_or(modules),
+                    ScenarioDefinitionSelectionSource::FixedCallerSelection,
+                ),
+                None if !manifest.core.definitions.local_only
+                    && !manifest.definition_specs.is_empty() =>
+                {
+                    (
+                        manifest.definition_specs.as_slice(),
+                        configured_definition_spellings.as_slice(),
+                        ScenarioDefinitionSelectionSource::ScenarioPreset,
+                    )
+                }
+                None => (
+                    initial_definition_modules,
+                    initial_definition_spellings
+                        .filter(|spellings| spellings.len() == initial_definition_modules.len())
+                        .unwrap_or(initial_definition_modules),
+                    ScenarioDefinitionSelectionSource::CallerDefaults,
+                ),
+            };
         let requested_definition_modules = definition_specs.to_vec();
         let requested_definition_spellings = selected_definition_spellings.to_vec();
         report_progress(8, "Definition selection resolved");
@@ -3155,8 +3157,7 @@ impl Scenario {
             .and_then(MapPixelClassifier::material_library)
             .cloned();
         report_progress(60, "Material library prepared");
-        let mut post_init_map_callbacks =
-            crate::map_creator_s2::PostInitMapCallbacks::default();
+        let mut post_init_map_callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
         let mut prepared_map_creator = None;
         let mut landscape = load_legacy_landscape(
             group,
@@ -3352,8 +3353,8 @@ impl Scenario {
                 animals: id_list_pairs(&manifest.core.animals.free_life),
                 nests: id_list_pairs(&manifest.core.animals.earth_nest),
                 environment: id_list_pairs(&manifest.core.environment.objects),
-                goals: id_list_pairs(&manifest.core.game.goals),
-                rules: id_list_pairs(&manifest.core.game.rules),
+                goals: id_list_pairs(&converted_core.game.goals),
+                rules: id_list_pairs(&converted_core.game.rules),
                 earth_material: manifest.core.landscape.material.clone(),
             }),
         })
@@ -3496,7 +3497,9 @@ impl Scenario {
         &self,
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
-        self.apply_before_players_with_final_synchronize(engine, true, None, None, None, true, None)
+        self.apply_before_players_with_final_synchronize(
+            engine, true, None, None, None, None, true, None,
+        )
     }
 
     /// Applies a fresh or restored scenario after installing the authoritative
@@ -3512,6 +3515,7 @@ impl Scenario {
             engine,
             true,
             Some(team_configuration),
+            None,
             None,
             None,
             true,
@@ -3536,6 +3540,7 @@ impl Scenario {
             true,
             team_configuration,
             None,
+            None,
             Some(game_data),
             true,
             None,
@@ -3552,7 +3557,7 @@ impl Scenario {
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
         self.apply_before_players_with_final_synchronize(
-            engine, true, None, None, None, false, None,
+            engine, true, None, None, None, None, false, None,
         )
     }
 
@@ -3568,6 +3573,7 @@ impl Scenario {
             Some(team_configuration),
             None,
             None,
+            None,
             false,
             None,
         )
@@ -3581,7 +3587,7 @@ impl Scenario {
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
         self.apply_before_players_with_final_synchronize(
-            engine, false, None, None, None, true, None,
+            engine, false, None, None, None, None, true, None,
         )
     }
 
@@ -3597,6 +3603,7 @@ impl Scenario {
             engine,
             false,
             Some(team_configuration),
+            None,
             None,
             None,
             true,
@@ -3620,6 +3627,7 @@ impl Scenario {
             Some(team_configuration),
             Some(teams),
             None,
+            None,
             true,
             None,
         )
@@ -3642,6 +3650,7 @@ impl Scenario {
             false,
             team_configuration,
             team_registry,
+            None,
             Some(game_data),
             true,
             None,
@@ -3660,6 +3669,7 @@ impl Scenario {
         game_data: Option<&InitialNetworkGameData>,
         team_configuration: Option<crate::TeamConfiguration>,
         team_registry: Option<Vec<TeamInfo>>,
+        game_parameter_rule_goal_lists: Option<&GameParameterRuleGoalLists>,
         initial_record_music_enabled: Option<bool>,
     ) -> Result<
         (
@@ -3676,6 +3686,7 @@ impl Scenario {
             !network_game,
             team_configuration,
             network_game.then_some(team_registry).flatten(),
+            game_parameter_rule_goal_lists,
             game_data,
             true,
             capture,
@@ -3723,10 +3734,8 @@ impl Scenario {
         else {
             return Ok(());
         };
-        let Some((mut creator, mut map_rng, map_seed, modulation, texmap)) = engine
-            .landscape
-            .as_ref()
-            .and_then(|landscape| {
+        let Some((mut creator, mut map_rng, map_seed, modulation, texmap)) =
+            engine.landscape.as_ref().and_then(|landscape| {
                 let raster = landscape.raster_state()?;
                 let creator = raster.map_creator()?.clone();
                 Some((
@@ -3742,9 +3751,7 @@ impl Scenario {
         };
 
         let bitmap = {
-            let mut call = |rng: &mut crate::rng::LcgRng,
-                            function: &str,
-                            args: [i32; 4]| {
+            let mut call = |rng: &mut crate::rng::LcgRng, function: &str, args: [i32; 4]| {
                 engine.call_map_script_algorithm(rng, function, args)
             };
             crate::map_creator_s2::rerender_last_s2_map_with_script_algo(
@@ -3797,6 +3804,7 @@ impl Scenario {
         final_synchronize: bool,
         team_configuration_override: Option<crate::TeamConfiguration>,
         team_registry_override: Option<Vec<TeamInfo>>,
+        game_parameter_rule_goal_lists: Option<&GameParameterRuleGoalLists>,
         initial_network_game: Option<&InitialNetworkGameData>,
         execute_post_init_map_callbacks: bool,
         initial_record_capture: Option<(
@@ -4216,12 +4224,7 @@ impl Scenario {
             .collect::<Vec<_>>();
         let legacy_contained_handles = pending
             .iter()
-            .filter_map(|spawn| {
-                Some((
-                    spawn.handle.clone()?,
-                    spawn.container_handle.clone()?,
-                ))
-            })
+            .filter_map(|spawn| Some((spawn.handle.clone()?, spawn.container_handle.clone()?)))
             .collect::<Vec<_>>();
         let mut handles: HashMap<String, ObjectId> = HashMap::new();
         let mut created = Vec::with_capacity(pending.len() + 4);
@@ -4262,85 +4265,85 @@ impl Scenario {
                 created.push(id);
             }
         } else {
-        while !pending.is_empty() {
-            let mut progress = false;
-            let mut idx = 0;
-            while idx < pending.len() {
-                let ready = match &pending[idx].container_handle {
-                    Some(handle) => handles.contains_key(handle),
-                    None => true,
-                };
+            while !pending.is_empty() {
+                let mut progress = false;
+                let mut idx = 0;
+                while idx < pending.len() {
+                    let ready = match &pending[idx].container_handle {
+                        Some(handle) => handles.contains_key(handle),
+                        None => true,
+                    };
 
-                if !ready {
-                    idx += 1;
-                    continue;
-                }
-
-                let mut config = pending[idx].config.clone();
-                if let Some(handle) = &pending[idx].container_handle {
-                    let container = *handles
-                        .get(handle)
-                        .ok_or_else(|| ScenarioError::UnknownContainerHandle(handle.clone()))?;
-                    config = config.with_container(container);
-                }
-
-                let id = engine.spawn_object(config)?;
-                if let Some(handle) = &pending[idx].handle {
-                    if handles.contains_key(handle) {
-                        return Err(ScenarioError::DuplicateHandle(handle.clone()));
+                    if !ready {
+                        idx += 1;
+                        continue;
                     }
-                    handles.insert(handle.clone(), id);
-                }
-                created.push(id);
-                pending.remove(idx);
-                progress = true;
-                break;
-            }
 
-            if !progress {
-                // C++ creates every object first and resolves Contained by
-                // number afterwards (denumeration): a container that never
-                // materializes — e.g. its definition was skipped — leaves
-                // the contents uncontained, never a failure.
-                let producible: HashSet<String> = pending
-                    .iter()
-                    .filter_map(|spawn| spawn.handle.clone())
-                    .collect();
-                let mut cleared = false;
-                for spawn in pending.iter_mut() {
-                    let orphaned = spawn
-                        .container_handle
-                        .as_deref()
-                        .map(|handle| !producible.contains(handle))
-                        .unwrap_or(false);
-                    if orphaned {
-                        tracing::warn!(
-                            container = spawn.container_handle.as_deref().unwrap_or_default(),
-                            "container never materialized; placing the object uncontained \
+                    let mut config = pending[idx].config.clone();
+                    if let Some(handle) = &pending[idx].container_handle {
+                        let container = *handles
+                            .get(handle)
+                            .ok_or_else(|| ScenarioError::UnknownContainerHandle(handle.clone()))?;
+                        config = config.with_container(container);
+                    }
+
+                    let id = engine.spawn_object(config)?;
+                    if let Some(handle) = &pending[idx].handle {
+                        if handles.contains_key(handle) {
+                            return Err(ScenarioError::DuplicateHandle(handle.clone()));
+                        }
+                        handles.insert(handle.clone(), id);
+                    }
+                    created.push(id);
+                    pending.remove(idx);
+                    progress = true;
+                    break;
+                }
+
+                if !progress {
+                    // C++ creates every object first and resolves Contained by
+                    // number afterwards (denumeration): a container that never
+                    // materializes — e.g. its definition was skipped — leaves
+                    // the contents uncontained, never a failure.
+                    let producible: HashSet<String> = pending
+                        .iter()
+                        .filter_map(|spawn| spawn.handle.clone())
+                        .collect();
+                    let mut cleared = false;
+                    for spawn in pending.iter_mut() {
+                        let orphaned = spawn
+                            .container_handle
+                            .as_deref()
+                            .map(|handle| !producible.contains(handle))
+                            .unwrap_or(false);
+                        if orphaned {
+                            tracing::warn!(
+                                container = spawn.container_handle.as_deref().unwrap_or_default(),
+                                "container never materialized; placing the object uncontained \
                              (C++ denumerates missing containers to null)"
-                        );
-                        spawn.container_handle = None;
-                        cleared = true;
+                            );
+                            spawn.container_handle = None;
+                            cleared = true;
+                        }
                     }
-                }
-                if !cleared {
-                    // A genuine containment cycle: C++'s two-phase
-                    // denumeration would keep the mutual containment; the
-                    // sequential spawn model breaks one edge instead
-                    // (documented divergence).
-                    if let Some(spawn) = pending.first_mut() {
-                        tracing::warn!(
-                            container = spawn.container_handle.as_deref().unwrap_or_default(),
-                            "containment cycle broken by placing one object uncontained \
+                    if !cleared {
+                        // A genuine containment cycle: C++'s two-phase
+                        // denumeration would keep the mutual containment; the
+                        // sequential spawn model breaks one edge instead
+                        // (documented divergence).
+                        if let Some(spawn) = pending.first_mut() {
+                            tracing::warn!(
+                                container = spawn.container_handle.as_deref().unwrap_or_default(),
+                                "containment cycle broken by placing one object uncontained \
                              (C++ keeps mutual containment via denumeration)"
-                        );
-                        spawn.container_handle = None;
-                    } else {
-                        break;
+                            );
+                            spawn.container_handle = None;
+                        } else {
+                            break;
+                        }
                     }
                 }
             }
-        }
         }
 
         if self.legacy_core.is_some() {
@@ -4358,9 +4361,7 @@ impl Scenario {
                 .collect::<Vec<_>>();
             let contained_links = legacy_contained_handles
                 .into_iter()
-                .filter_map(|(child, parent)| {
-                    Some((*handles.get(&child)?, *handles.get(&parent)?))
-                })
+                .filter_map(|(child, parent)| Some((*handles.get(&child)?, *handles.get(&parent)?)))
                 .collect::<Vec<_>>();
             engine.restore_legacy_object_links(&contained_links, &contents_orders);
             engine.finish_legacy_object_load();
@@ -4413,7 +4414,27 @@ impl Scenario {
             .as_ref()
             .filter(|placement| !placement.no_initialize && self.landscape.is_some())
         {
-            engine.run_legacy_init_placements(placement);
+            // InitRules/InitGoals consume Game.Parameters, whose lists have
+            // already passed C4SGame::ConvertGoals and may have been changed
+            // by synchronized lobby parameters. Scenario.txt remains the
+            // source for every other placement list (C4Game.cpp:2493-2503,
+            // 4056-4076).
+            let authoritative_placement = game_parameter_rule_goal_lists.map(|lists| {
+                let mut placement = placement.clone();
+                placement.rules = lists
+                    .rules()
+                    .iter()
+                    .map(|entry| (entry.id.clone(), entry.count))
+                    .collect();
+                placement.goals = lists
+                    .goals()
+                    .iter()
+                    .map(|entry| (entry.id.clone(), entry.count))
+                    .collect();
+                placement
+            });
+            engine
+                .run_legacy_init_placements(authoritative_placement.as_ref().unwrap_or(placement));
             // C4Landscape::PostInitMap follows InitGoals inside the same
             // !NoInitialize/LandscapeLoaded block. Callback arrays execute
             // in field-registration order and each bitset in descending
@@ -5819,19 +5840,22 @@ impl ScenarioValueStore {
             .unwrap_or_default();
 
         ["MELE", "MEL2"].into_iter().any(|wanted| {
-            goals.chunks(2).find_map(|pair| {
-                let ScenarioValue::C4Id(id) = pair.first()? else {
-                    return None;
-                };
-                (id == wanted).then(|| {
-                    pair.get(1)
-                        .and_then(|value| match value {
-                            ScenarioValue::Int(count) => Some(*count),
-                            _ => None,
-                        })
-                        .unwrap_or(0)
+            goals
+                .chunks(2)
+                .find_map(|pair| {
+                    let ScenarioValue::C4Id(id) = pair.first()? else {
+                        return None;
+                    };
+                    (id == wanted).then(|| {
+                        pair.get(1)
+                            .and_then(|value| match value {
+                                ScenarioValue::Int(count) => Some(*count),
+                                _ => None,
+                            })
+                            .unwrap_or(0)
+                    })
                 })
-            }).is_some_and(|count| count != 0)
+                .is_some_and(|count| count != 0)
         })
     }
 
@@ -6056,8 +6080,7 @@ fn parse_legacy_name_list(_field: &str, raw: &str) -> Result<LegacyNameList, Sce
         } else {
             String::new()
         };
-        let has_count =
-            consume_name_list_separator(raw, &mut position, &mut reenter, b'=');
+        let has_count = consume_name_list_separator(raw, &mut position, &mut reenter, b'=');
         let count = if has_count {
             position
                 .as_mut()
@@ -6089,14 +6112,13 @@ fn parse_base_functionality_number(raw: &str, position: &mut usize) -> Option<i3
     let mut cursor = number_start;
     // StdCompilerINIRead selects base 16 only for an unsigned token that
     // starts with 0x. A sign therefore makes `-0x10` decimal -0 plus junk.
-    let radix = if bytes.get(cursor) == Some(&b'0')
-        && matches!(bytes.get(cursor + 1), Some(b'x' | b'X'))
-    {
-        cursor += 2;
-        16u32
-    } else {
-        10u32
-    };
+    let radix =
+        if bytes.get(cursor) == Some(&b'0') && matches!(bytes.get(cursor + 1), Some(b'x' | b'X')) {
+            cursor += 2;
+            16u32
+        } else {
+            10u32
+        };
     let negative = if radix == 10 {
         match bytes.get(cursor) {
             Some(b'-') => {
@@ -6189,11 +6211,7 @@ fn parse_base_functionality(field: &str, raw: &str) -> Result<i32, ScenarioError
                 "BASEFUNC_RejectEntrance" => BASEFUNC_REJECT_ENTRANCE,
                 "BASEFUNC_Extinguish" => BASEFUNC_EXTINGUISH,
                 _ => {
-                    tracing::warn!(
-                        field,
-                        token = entry,
-                        "unknown BaseFunctionality bit name"
-                    );
+                    tracing::warn!(field, token = entry, "unknown BaseFunctionality bit name");
                     0
                 }
             };
@@ -6597,9 +6615,7 @@ impl LegacyGame {
                 }
                 "fowcolor" => {
                     self.fow_color = parse_std_u32(raw).ok_or_else(|| {
-                        ScenarioError::LegacyParse(format!(
-                            "invalid value `{raw}` for `{key}`"
-                        ))
+                        ScenarioError::LegacyParse(format!("invalid value `{raw}` for `{key}`"))
                     })?;
                 }
                 _ => {}
@@ -6954,8 +6970,7 @@ impl LegacyScenarioCore {
         // SCopy(..., C4MaxTitle) copies the native C string through the first
         // NUL and keeps at most C4MaxTitle bytes (C4GameSave.cpp:84;
         // C4Strings.cpp:67-81).
-        saved.head.title =
-            truncate_legacy_c4_string(scenario_title.to_owned(), C4_MAX_TITLE);
+        saved.head.title = truncate_legacy_c4_string(scenario_title.to_owned(), C4_MAX_TITLE);
         saved.head.mission_access.clear();
         // SaveCore resets NetworkGame before the save specialization applies
         // its own flags. NetworkRuntimeJoin is deliberately retained here.
@@ -7123,17 +7138,13 @@ impl LegacyScenarioCore {
         saved.definitions.reflected_definitions = None;
         saved.definitions.local_only = definition_modules.is_empty();
         if saved.head.origin.as_deref().is_none_or(str::is_empty) {
-            saved.head.origin = (!scenario_origin.is_empty())
-                .then(|| normalize_legacy_path(scenario_origin));
+            saved.head.origin =
+                (!scenario_origin.is_empty()).then(|| normalize_legacy_path(scenario_origin));
         }
         saved
     }
 
-    fn serialize_section(
-        &self,
-        force_exact: bool,
-        head_defaults: Option<[i32; 2]>,
-    ) -> Vec<u8> {
+    fn serialize_section(&self, force_exact: bool, head_defaults: Option<[i32; 2]>) -> Vec<u8> {
         let mut writer = LegacyScenarioIniWriter::default();
         let [context_menu_default, control_style_default] = head_defaults.unwrap_or([
             self.head.forced_auto_context_menu,
@@ -8099,16 +8110,13 @@ fn try_read_group_file_case_insensitive(
     group: &Group,
     name: &str,
 ) -> Result<Option<Vec<u8>>, GroupError> {
-    let entry = group
-        .entries()?
-        .into_iter()
-        .find(|entry| {
-            entry.relative_path.components().count() == 1
-                && entry
-                    .relative_path
-                    .to_str()
-                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
-        });
+    let entry = group.entries()?.into_iter().find(|entry| {
+        entry.relative_path.components().count() == 1
+            && entry
+                .relative_path
+                .to_str()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+    });
     entry
         .map(|entry| group.read_file(entry.relative_path))
         .transpose()
@@ -8570,9 +8578,7 @@ fn insert_validated_scenario_section<T: Default>(
     let mut entries = Vec::new();
     for child in tree.nodes[section].children.iter().copied() {
         let node = &tree.nodes[child];
-        if node.section
-            || !allowed.contains(node.name.as_str())
-            || !seen.insert(node.name.clone())
+        if node.section || !allowed.contains(node.name.as_str()) || !seen.insert(node.name.clone())
         {
             continue;
         }
@@ -8677,10 +8683,7 @@ fn find_entry(entries: &[(String, String)], key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn find_entry_including_empty<'a>(
-    entries: &'a [(String, String)],
-    key: &str,
-) -> Option<&'a str> {
+fn find_entry_including_empty<'a>(entries: &'a [(String, String)], key: &str) -> Option<&'a str> {
     entries
         .iter()
         .find(|(entry_key, _)| entry_key.eq_ignore_ascii_case(key))
@@ -8864,10 +8867,7 @@ fn localize_legacy_team_source<S: AsRef<str>>(
             .unwrap_or_default()
             .to_vec());
     };
-    let table = table
-        .split(|byte| *byte == 0)
-        .next()
-        .unwrap_or_default();
+    let table = table.split(|byte| *byte == 0).next().unwrap_or_default();
     let mut entries: Vec<(&[u8], &[u8])> = Vec::new();
     for line in table.split(|byte| matches!(*byte, b'\r' | b'\n')) {
         let Some(separator) = line.iter().position(|byte| *byte == b'=') else {
@@ -8880,19 +8880,13 @@ fn localize_legacy_team_source<S: AsRef<str>>(
         entries.push((key, &line[separator + 1..]));
     }
 
-    let source = source
-        .split(|byte| *byte == 0)
-        .next()
-        .unwrap_or_default();
+    let source = source.split(|byte| *byte == 0).next().unwrap_or_default();
     let mut localized = Vec::with_capacity(source.len());
     let mut cursor = 0;
     while let Some(open_offset) = source[cursor..].iter().position(|byte| *byte == b'$') {
         let open = cursor + open_offset;
         let key_start = open + 1;
-        let Some(close_offset) = source[key_start..]
-            .iter()
-            .position(|byte| *byte == b'$')
-        else {
+        let Some(close_offset) = source[key_start..].iter().position(|byte| *byte == b'$') else {
             break;
         };
         let close = key_start + close_offset;
@@ -8960,7 +8954,9 @@ fn team_infos_from_initial_network_metadata(
             )
             .with_player_start_index(team.player_start_index)
             .with_max_players(team.max_players)
-            .with_icon_spec(clonk_script::c4_string_from_bytes(team.icon_spec.as_bytes()))
+            .with_icon_spec(clonk_script::c4_string_from_bytes(
+                team.icon_spec.as_bytes(),
+            ))
         })
         .collect()
 }
@@ -9112,11 +9108,7 @@ fn parse_legacy_team_metadata_source(
         metadata.teams.push(team.finish()?);
     }
 
-    let largest_team_id = metadata
-        .teams
-        .iter()
-        .map(|team| team.id)
-        .fold(0, i32::max);
+    let largest_team_id = metadata.teams.iter().map(|team| team.id).fold(0, i32::max);
     metadata.last_team_id = metadata.last_team_id.max(largest_team_id);
     if metadata.teams.is_empty() {
         metadata.auto_generate_teams = true;
@@ -9266,8 +9258,7 @@ fn parse_team_bool(value: &str) -> Option<bool> {
     let bytes = value.as_bytes();
     if bytes.first() == Some(&b'1') && bytes.get(1).is_none_or(|byte| !byte.is_ascii_digit()) {
         Some(true)
-    } else if bytes.first() == Some(&b'0')
-        && bytes.get(1).is_none_or(|byte| !byte.is_ascii_digit())
+    } else if bytes.first() == Some(&b'0') && bytes.get(1).is_none_or(|byte| !byte.is_ascii_digit())
     {
         Some(false)
     } else if bytes.starts_with(b"true") {
@@ -9482,11 +9473,7 @@ fn parse_legacy_teams_source(source: &str) -> ScenarioLobbyTeams {
     if metadata.teams.is_empty() {
         metadata.auto_generate = true;
     }
-    let largest = metadata
-        .teams
-        .iter()
-        .map(|team| team.id)
-        .fold(0, i32::max);
+    let largest = metadata.teams.iter().map(|team| team.id).fold(0, i32::max);
     metadata.last_team_id = metadata.last_team_id.max(largest);
     metadata
 }
@@ -9581,11 +9568,13 @@ fn load_runtime_landscape_data(
     group: &Group,
     savegame_defaults: bool,
 ) -> Result<Option<LandscapeGameData>, ScenarioError> {
-    Ok(match try_read_group_file_case_insensitive(group, "Game.txt")? {
-        Some(bytes) => Some(parse_landscape_game_data(&bytes)),
-        None if savegame_defaults => Some(LandscapeGameData::default()),
-        None => None,
-    })
+    Ok(
+        match try_read_group_file_case_insensitive(group, "Game.txt")? {
+            Some(bytes) => Some(parse_landscape_game_data(&bytes)),
+            None if savegame_defaults => Some(LandscapeGameData::default()),
+            None => None,
+        },
+    )
 }
 
 fn load_runtime_current_scenario_section(group: &Group) -> Result<String, ScenarioError> {
@@ -9660,12 +9649,10 @@ fn parse_legacy_game_parameter_overrides(
         "FairCrewStrength",
         defaults.fair_crew_strength,
     );
-    overrides.allow_debug =
-        ini_optional_bool(&tree, section, "AllowDebug", defaults.allow_debug);
+    overrides.allow_debug = ini_optional_bool(&tree, section, "AllowDebug", defaults.allow_debug);
     overrides.is_network_game =
         ini_optional_bool(&tree, section, "IsNetworkGame", defaults.is_network_game);
-    overrides.control_rate =
-        ini_optional_i32(&tree, section, "ControlRate", defaults.control_rate);
+    overrides.control_rate = ini_optional_i32(&tree, section, "ControlRate", defaults.control_rate);
     overrides.auto_frame_skip =
         ini_optional_bool(&tree, section, "AutoFrameSkip", defaults.auto_frame_skip);
     overrides.rules = ini_optional_id_list(&tree, section, "Rules", &defaults.rules);
@@ -10353,10 +10340,7 @@ fn load_scenario_system_scripts<S: AsRef<str>>(
 /// Evaluate `[Landscape] MapZoom` with the C4S default
 /// `C4SVal(10, 0, 5, 15)` (C4Scenario.cpp:307,353) against the local
 /// FixRandom map-creation ledger.
-fn legacy_map_zoom(
-    section: Option<&Vec<(String, String)>>,
-    rng: &mut crate::rng::LcgRng,
-) -> u32 {
+fn legacy_map_zoom(section: Option<&Vec<(String, String)>>, rng: &mut crate::rng::LcgRng) -> u32 {
     legacy_map_zoom_value(section).evaluate(rng) as u32
 }
 
@@ -10676,9 +10660,9 @@ pub(crate) fn build_map_pixel_classifier(
     // C++ still calls LoadEnumeration after an empty material loop, and a
     // listed name must then fail against Num=0.
     let enumeration = match try_read_group_file_case_insensitive(group, "MatMap.txt")? {
-        Some(source) if !source.is_empty() => {
-            Some(clonk_resources::material::MaterialEnumeration::parse(&source)?)
-        }
+        Some(source) if !source.is_empty() => Some(
+            clonk_resources::material::MaterialEnumeration::parse(&source)?,
+        ),
         Some(_) | None => None,
     };
     let mut material_groups = Vec::new();
@@ -10704,10 +10688,10 @@ pub(crate) fn build_map_pixel_classifier(
             .as_ref()
             .and_then(|enumeration| enumeration.names().first())
         {
-            return Err(clonk_resources::material::MaterialEnumerationError::MissingMaterial(
-                name.clone(),
-            )
-            .into());
+            return Err(
+                clonk_resources::material::MaterialEnumerationError::MissingMaterial(name.clone())
+                    .into(),
+            );
         }
         return Ok(None);
     };
@@ -10735,7 +10719,9 @@ pub(crate) fn build_map_pixel_classifier(
             let Ok(source) = material_group.read_file("TexMap.txt") else {
                 break;
             };
-            Some(clonk_resources::texmap::TextureMap::parse_flags_bytes(&source))
+            Some(clonk_resources::texmap::TextureMap::parse_flags_bytes(
+                &source,
+            ))
         };
         let flags = later_texmap.as_ref().or(texmap.as_ref());
         let mut next_materials = flags.is_some_and(|flags| flags.overload_materials);
@@ -10792,9 +10778,10 @@ pub(crate) fn build_map_pixel_classifier(
                     // Duplicate detection precedes the fixed-name copy. A
                     // long candidate therefore never equals a stored 15-byte
                     // prefix and every long prefix collision is admitted.
-                    if texture_inventory.iter().any(|stored| {
-                        clonk_resources::material::c4_names_equal(stored, &full_stem)
-                    }) {
+                    if texture_inventory
+                        .iter()
+                        .any(|stored| clonk_resources::material::c4_names_equal(stored, &full_stem))
+                    {
                         continue;
                     }
                     // GroupReadSurfacePNG returns an allocated surface even
@@ -10836,7 +10823,10 @@ pub(crate) fn build_map_pixel_classifier(
     // applies this pairwise-swap ledger after every material source has
     // loaded but before TextureMap.Init and CrossMapMaterials
     // (C4Game.cpp:979-993; C4Material.cpp:510-558).
-    if let Some(enumeration) = enumeration.as_ref().filter(|enumeration| !enumeration.is_empty()) {
+    if let Some(enumeration) = enumeration
+        .as_ref()
+        .filter(|enumeration| !enumeration.is_empty())
+    {
         let library = material_library.as_mut().ok_or_else(|| {
             clonk_resources::material::MaterialEnumerationError::MissingMaterial(
                 enumeration.names()[0].clone(),
@@ -10884,9 +10874,7 @@ pub(crate) fn build_map_pixel_classifier(
         if (25..50).contains(&*slot)
             && grid_textures[index]
                 .as_deref()
-                .is_some_and(|texture| {
-                    clonk_resources::material::c4_names_equal(texture, "Smooth")
-                })
+                .is_some_and(|texture| clonk_resources::material::c4_names_equal(texture, "Smooth"))
         {
             grid_textures[index] = Some("Liquid".to_string());
         }
@@ -11026,10 +11014,9 @@ fn convert_exact_landscape_indices(
         for (slot, byte) in indices.iter_mut().enumerate() {
             let source = *byte;
             let old_index = usize::from(source & 63);
-            let material = (source >= 128
-                && old_index < material_count.saturating_mul(3))
-            .then_some(old_index / 3)
-            .ok_or_else(|| invalid_exact_landscape_pixel(bitmap.width, slot, source))?;
+            let material = (source >= 128 && old_index < material_count.saturating_mul(3))
+                .then_some(old_index / 3)
+                .ok_or_else(|| invalid_exact_landscape_pixel(bitmap.width, slot, source))?;
             // Native Mat2PixColDefault(MNone) indexes outside the material
             // array for malformed format-0 input. Reject that undefined case
             // rather than manufacturing a material byte.
@@ -11090,11 +11077,7 @@ fn convert_exact_landscape_indices(
     Ok(indices)
 }
 
-fn decode_exact_landscape_png(
-    source: &[u8],
-    width: u32,
-    height: u32,
-) -> Result<Vec<u32>, String> {
+fn decode_exact_landscape_png(source: &[u8], width: u32, height: u32) -> Result<Vec<u32>, String> {
     let rgba = image::load_from_memory_with_format(source, ImageFormat::Png)
         .map_err(|error| error.to_string())?
         .to_rgba8();
@@ -11240,8 +11223,7 @@ pub(crate) fn classified_landscape(
         classifier.state.texture_names.clone(),
     ));
     landscape.refresh_all_raster_columns();
-    let mut raster_state =
-        LandscapeRasterState::new(zoom, map_seed, classifier.state.clone());
+    let mut raster_state = LandscapeRasterState::new(zoom, map_seed, classifier.state.clone());
     raster_state.set_map(bitmap);
     landscape.set_raster_state(raster_state);
 
@@ -11276,17 +11258,17 @@ fn load_legacy_landscape(
         map_callback_functions,
         post_init_map_callbacks,
         prepared_map_creator,
-    )? else {
+    )?
+    else {
         return Ok(None);
     };
     landscape.set_shade_materials(manifest.core.landscape.shade_materials);
     // C4Landscape::Init captures pInitial before attempting to load the
     // optional legacy diff. ApplyDiff failure is non-fatal, including a
     // missing or unreadable DiffLandscape.bmp.
-    let diff = if let Some(bytes) =
-        try_read_group_file_case_insensitive(group, "DiffLandscape.bmp")
-            .ok()
-            .flatten()
+    let diff = if let Some(bytes) = try_read_group_file_case_insensitive(group, "DiffLandscape.bmp")
+        .ok()
+        .flatten()
     {
         clonk_resources::bitmap::IndexedBitmap::decode(&bytes).ok()
     } else {
@@ -11341,7 +11323,9 @@ fn load_legacy_landscape_body(
         .map(|runtime| runtime.map_seed)
         .filter(|seed| *seed != 0)
         .unwrap_or_else(|| legacy_map_seed(random_seed));
-    let precompiled_mode = runtime.map(|runtime| runtime.mode).filter(|mode| *mode != 0);
+    let precompiled_mode = runtime
+        .map(|runtime| runtime.mode)
+        .filter(|mode| *mode != 0);
     let set_initial_mode = |landscape: &mut Landscape, inferred| {
         if let Some(mode) = precompiled_mode {
             landscape.set_runtime_mode(mode);
@@ -11391,9 +11375,7 @@ fn load_legacy_landscape_body(
     if let Some(bytes) = map_bytes {
         let retained_indexed =
             clonk_resources::bitmap::IndexedBitmap::decode_with_palette(&bytes).ok();
-        let retained_indexed_map = retained_indexed
-            .as_ref()
-            .map(|(bitmap, _)| bitmap.clone());
+        let retained_indexed_map = retained_indexed.as_ref().map(|(bitmap, _)| bitmap.clone());
         // Material-classified path: the map's 8-bit palette indices are
         // texmap keys (GroupReadSurface8 keeps the index bytes). Without
         // a TexMap or for non-indexed images, the sky-pixel heuristic
@@ -11410,18 +11392,16 @@ fn load_legacy_landscape_body(
                     )?
                 } else {
                     let map_zoom_u32 = legacy_map_zoom(landscape_section, &mut map_rng);
-                    classified_landscape(
-                        bitmap,
-                        classifier,
-                        map_zoom_u32 as i32,
-                        map_seed,
-                    )?
+                    classified_landscape(bitmap, classifier, map_zoom_u32 as i32, map_seed)?
                 };
-                set_initial_mode(&mut landscape, if exact_landscape {
-                    LANDSCAPE_MODE_EXACT
-                } else {
-                    LANDSCAPE_MODE_STATIC
-                });
+                set_initial_mode(
+                    &mut landscape,
+                    if exact_landscape {
+                        LANDSCAPE_MODE_EXACT
+                    } else {
+                        LANDSCAPE_MODE_STATIC
+                    },
+                );
                 if exact_landscape {
                     landscape
                         .raster_state_mut()
@@ -11446,8 +11426,8 @@ fn load_legacy_landscape_body(
             return Err(ScenarioError::LegacyMapEmpty);
         }
 
-        let map_zoom_u32 = map_zoom_override
-            .unwrap_or_else(|| legacy_map_zoom(landscape_section, &mut map_rng));
+        let map_zoom_u32 =
+            map_zoom_override.unwrap_or_else(|| legacy_map_zoom(landscape_section, &mut map_rng));
         let map_zoom_i32 = map_zoom_u32 as i32;
         let sky_pixel = rgba.get_pixel(0, 0).0;
         let rendered_height = (height as i32).saturating_mul(map_zoom_i32).max(0);
@@ -11496,11 +11476,14 @@ fn load_legacy_landscape_body(
         // GBackHgt is known exactly here (map height × zoom); placement
         // searches and `Random(GBackHgt - 32)` draws bound on it.
         landscape.set_world_height(world_height);
-        set_initial_mode(&mut landscape, if exact_landscape {
-            LANDSCAPE_MODE_EXACT
-        } else {
-            LANDSCAPE_MODE_STATIC
-        });
+        set_initial_mode(
+            &mut landscape,
+            if exact_landscape {
+                LANDSCAPE_MODE_EXACT
+            } else {
+                LANDSCAPE_MODE_STATIC
+            },
+        );
         let mut raster_state = LandscapeRasterState::new(
             if exact_landscape { 0 } else { map_zoom_i32 },
             map_seed,
@@ -11571,12 +11554,7 @@ fn load_legacy_landscape_body(
                     // Dynamic map by scenario (C4Landscape.cpp:612-614) is
                     // available only during initial, non-overload creation.
                     let params = basic_map_params(landscape_core);
-                    crate::map_creator::create_basic_map(
-                        &params,
-                        classifier,
-                        players,
-                        &mut map_rng,
-                    )
+                    crate::map_creator::create_basic_map(&params, classifier, players, &mut map_rng)
                 }
             }
         } else {
@@ -11589,12 +11567,8 @@ fn load_legacy_landscape_body(
             creator.set_callback_map_zoom(map_zoom_u32 as i32);
         }
         *prepared_map_creator = retained_creator.clone();
-        let mut landscape = classified_landscape(
-            &bitmap,
-            classifier,
-            map_zoom_u32 as i32,
-            map_seed,
-        )?;
+        let mut landscape =
+            classified_landscape(&bitmap, classifier, map_zoom_u32 as i32, map_seed)?;
         landscape
             .raster_state_mut()
             .expect("classified landscapes carry raster state")
@@ -11663,11 +11637,8 @@ fn load_legacy_landscape_body(
     let mut landscape = Landscape::flat(width_u32, fallback_height);
     landscape.set_world_height(fallback_height);
     if discarded_creator.is_some() {
-        let mut raster_state = LandscapeRasterState::new(
-            map_zoom_u32 as i32,
-            map_seed,
-            RuntimeTexMapState::default(),
-        );
+        let mut raster_state =
+            LandscapeRasterState::new(map_zoom_u32 as i32, map_seed, RuntimeTexMapState::default());
         raster_state.set_map_creator(discarded_creator);
         landscape.set_raster_state(raster_state);
     }
@@ -12105,9 +12076,7 @@ fn legacy_scenario_section_name(path: &Path) -> Result<Option<String>, ScenarioE
     Ok(Some(name.to_owned()))
 }
 
-fn load_legacy_landscape_systems(
-    group: &Group,
-) -> Result<ScenarioLandscapeSystems, ScenarioError> {
+fn load_legacy_landscape_systems(group: &Group) -> Result<ScenarioLandscapeSystems, ScenarioError> {
     let mut ignore_progress = |_: i32, _: &'static str| {};
     load_legacy_landscape_systems_with_progress(group, &mut ignore_progress)
 }
@@ -12257,8 +12226,7 @@ fn load_legacy_scenario_sections(
             .ok()
             .flatten()
             .and_then(|bytes| clonk_resources::bitmap::IndexedBitmap::decode(&bytes).ok());
-        let mut post_init_map_callbacks =
-            crate::map_creator_s2::PostInitMapCallbacks::default();
+        let mut post_init_map_callbacks = crate::map_creator_s2::PostInitMapCallbacks::default();
         let mut prepared_map_creator = None;
         let mut landscape = load_legacy_landscape(
             &section_group,
@@ -12286,11 +12254,9 @@ fn load_legacy_scenario_sections(
                 .and_then(Landscape::raster_state)
                 .is_some_and(|state| state.map().is_some() && state.map_creator().is_none());
         let environment = derive_legacy_environment(manifest)?;
-        let scenario_values = ScenarioValueStore::from_runtime_core(
-            &manifest.core,
-            has_sky_surface,
-        )
-        .with_section_head_defaults(&main_manifest.core.head);
+        let scenario_values =
+            ScenarioValueStore::from_runtime_core(&manifest.core, has_sky_surface)
+                .with_section_head_defaults(&main_manifest.core.head);
         let has_s2_overload = prepared_map_creator.is_some() && s2_source.is_some();
         sections.push(ScenarioSectionSpec {
             name,
@@ -12301,25 +12267,27 @@ fn load_legacy_scenario_sections(
             texmap_lookups,
             resynthesize_static_map,
             map_creator: prepared_map_creator,
-            s2_overload: has_s2_overload.then(|| {
-                s2_source.map(|source| ScenarioSectionS2Spec {
-                    source,
-                    map_width: manifest.core.landscape.map_width,
-                    map_height: manifest.core.landscape.map_height,
-                    map_player_extend: manifest.core.landscape.map_player_extend,
-                    player_count: startup_player_count,
-                    map_zoom: manifest.core.landscape.map_zoom,
-                    diff: s2_diff,
-                    left_open: manifest.core.landscape.left_open,
-                    right_open: manifest.core.landscape.right_open,
-                    top_open: manifest.core.landscape.top_open,
-                    bottom_open: manifest.core.landscape.bottom_open,
-                    auto_scan_side_open: manifest.core.landscape.auto_scan_side_open,
-                    no_scan: manifest.core.landscape.no_scan,
-                    shade_materials: manifest.core.landscape.shade_materials,
-                    script_functions: map_callback_functions.clone(),
+            s2_overload: has_s2_overload
+                .then(|| {
+                    s2_source.map(|source| ScenarioSectionS2Spec {
+                        source,
+                        map_width: manifest.core.landscape.map_width,
+                        map_height: manifest.core.landscape.map_height,
+                        map_player_extend: manifest.core.landscape.map_player_extend,
+                        player_count: startup_player_count,
+                        map_zoom: manifest.core.landscape.map_zoom,
+                        diff: s2_diff,
+                        left_open: manifest.core.landscape.left_open,
+                        right_open: manifest.core.landscape.right_open,
+                        top_open: manifest.core.landscape.top_open,
+                        bottom_open: manifest.core.landscape.bottom_open,
+                        auto_scan_side_open: manifest.core.landscape.auto_scan_side_open,
+                        no_scan: manifest.core.landscape.no_scan,
+                        shade_materials: manifest.core.landscape.shade_materials,
+                        script_functions: map_callback_functions.clone(),
+                    })
                 })
-            }).flatten(),
+                .flatten(),
             gravity: manifest.core.landscape.gravity,
             post_init_map_callbacks,
             keep_map_creator: manifest.core.landscape.keep_map_creator,
@@ -12702,10 +12670,7 @@ impl SerializedObjectGraphicsOverlay {
             phase: self.phase,
             blit_mode: self.blit_mode,
             color_modulation: self.color_modulation,
-            overlay_object: denumerate_legacy_object_number(
-                self.overlay_object,
-                object_numbers,
-            ),
+            overlay_object: denumerate_legacy_object_number(self.overlay_object, object_numbers),
             transform: Some(self.transform),
         }
     }
@@ -12728,18 +12693,12 @@ impl SerializedLegacyCommand {
         Ok(crate::command::LegacyCommandSave {
             view: crate::command::CommandView {
                 name: self.name,
-                target: denumerate_legacy_object_number(
-                    self.target,
-                    resolution.object_numbers,
-                ),
+                target: denumerate_legacy_object_number(self.target, resolution.object_numbers),
                 tx,
                 tx_value: Some(tx_value),
                 tx_definition,
                 ty: Some(self.ty),
-                target2: denumerate_legacy_object_number(
-                    self.target2,
-                    resolution.object_numbers,
-                ),
+                target2: denumerate_legacy_object_number(self.target2, resolution.object_numbers),
                 data: crate::command::CommandData::Integer(self.data),
                 legacy_data: is_call.then_some(self.data),
                 finished: self.finished != 0,
@@ -13123,25 +13082,14 @@ impl LegacyObjectRecord {
                 })?);
             }
             "attachx" => {
-                self.shape_attach_x = Some(parse_object_i32(
-                    trimmed_value,
-                    self.line,
-                    "AttachX",
-                )?);
+                self.shape_attach_x = Some(parse_object_i32(trimmed_value, self.line, "AttachX")?);
             }
             "attachy" => {
-                self.shape_attach_y = Some(parse_object_i32(
-                    trimmed_value,
-                    self.line,
-                    "AttachY",
-                )?);
+                self.shape_attach_y = Some(parse_object_i32(trimmed_value, self.line, "AttachY")?);
             }
             "attachvtx" => {
-                self.shape_attach_vertex = Some(parse_object_i32(
-                    trimmed_value,
-                    self.line,
-                    "AttachVtx",
-                )?);
+                self.shape_attach_vertex =
+                    Some(parse_object_i32(trimmed_value, self.line, "AttachVtx")?);
             }
             "ownmass" => {
                 self.own_mass = Some(parse_object_i32(trimmed_value, self.line, "OwnMass")?);
@@ -13164,11 +13112,7 @@ impl LegacyObjectRecord {
                 self.breath = Some(parse_object_i32(trimmed_value, self.line, "Breath")?);
             }
             "firephase" => {
-                self.fire_phase = Some(parse_object_i32(
-                    trimmed_value,
-                    self.line,
-                    "FirePhase",
-                )?);
+                self.fire_phase = Some(parse_object_i32(trimmed_value, self.line, "FirePhase")?);
             }
             "needenergy" => {
                 let need_energy = parse_bool(trimmed_value).ok_or_else(|| {
@@ -13357,25 +13301,14 @@ impl LegacyObjectRecord {
                 })?);
             }
             "blitmode" => {
-                self.blit_mode = Some(parse_object_u32(
-                    trimmed_value,
-                    self.line,
-                    "BlitMode",
-                )?);
+                self.blit_mode = Some(parse_object_u32(trimmed_value, self.line, "BlitMode")?);
             }
             "color" | "colordw" => {
-                self.color = Some(parse_object_u32(
-                    trimmed_value,
-                    self.line,
-                    "ColorDw",
-                )?);
+                self.color = Some(parse_object_u32(trimmed_value, self.line, "ColorDw")?);
             }
             "colormod" => {
-                self.color_modulation = Some(parse_object_u32(
-                    trimmed_value,
-                    self.line,
-                    "ColorMod",
-                )?);
+                self.color_modulation =
+                    Some(parse_object_u32(trimmed_value, self.line, "ColorMod")?);
             }
             "picture" => {
                 let values = parse_i32_list(trimmed_value, self.line, "Picture")?;
@@ -13391,18 +13324,12 @@ impl LegacyObjectRecord {
                 ));
             }
             "plrviewrange" => {
-                self.plr_view_range = Some(parse_object_i32(
-                    trimmed_value,
-                    self.line,
-                    "PlrViewRange",
-                )?);
+                self.plr_view_range =
+                    Some(parse_object_i32(trimmed_value, self.line, "PlrViewRange")?);
             }
             "crewdisabled" => {
-                self.crew_disabled = Some(parse_object_bool(
-                    trimmed_value,
-                    self.line,
-                    "CrewDisabled",
-                )?);
+                self.crew_disabled =
+                    Some(parse_object_bool(trimmed_value, self.line, "CrewDisabled")?);
             }
             "graphics" => {
                 self.base_graphics = Some(parse_legacy_object_graphics(
@@ -13422,10 +13349,8 @@ impl LegacyObjectRecord {
                 self.effects = Some(parse_legacy_object_effects(trimmed_value, self.line)?);
             }
             "gfxoverlay" => {
-                self.graphics_overlays = Some(parse_legacy_graphics_overlays(
-                    trimmed_value,
-                    self.line,
-                )?);
+                self.graphics_overlays =
+                    Some(parse_legacy_graphics_overlays(trimmed_value, self.line)?);
             }
             "component" => {
                 self.components = Some(parse_legacy_object_components(trimmed_value, self.line)?);
@@ -13497,10 +13422,10 @@ impl LegacyObjectRecord {
             .temporary_physical
             .get_or_insert_with(crate::PhysicalInfo::default);
         let parsed = match key {
-            "Energy" | "Breath" | "Walk" | "Jump" | "Scale" | "Hangle" | "Dig"
-            | "Swim" | "Throw" | "Push" | "Fight" | "Magic" | "Float" | "CanScale"
-            | "CanHangle" | "CanDig" | "CanConstruct" | "CanChop" | "CanFly"
-            | "CorrosionResist" | "BreatheWater" => {
+            "Energy" | "Breath" | "Walk" | "Jump" | "Scale" | "Hangle" | "Dig" | "Swim"
+            | "Throw" | "Push" | "Fight" | "Magic" | "Float" | "CanScale" | "CanHangle"
+            | "CanDig" | "CanConstruct" | "CanChop" | "CanFly" | "CorrosionResist"
+            | "BreatheWater" => {
                 // Every physical field is wrapped in mkNamingAdapt(..., 0).
                 // A malformed first naming is consumed and defaults to zero.
                 parse_std_i32(value).unwrap_or_default()
@@ -13754,10 +13679,7 @@ impl LegacyObjectRecord {
             .into_iter()
             .map(|overlay| overlay.resolve(value_resolution.object_numbers))
             .collect();
-        if shape_attach_x.is_some()
-            || shape_attach_y.is_some()
-            || shape_attach_vertex.is_some()
-        {
+        if shape_attach_x.is_some() || shape_attach_y.is_some() || shape_attach_vertex.is_some() {
             config.shape_attach = Some(crate::ShapeAttachRecord {
                 // AttachMat is deliberately not compiled by C4Shape.
                 mat_valid: false,
@@ -13806,14 +13728,12 @@ impl LegacyObjectRecord {
         }
         if !resolved_commands.is_empty() {
             config.command_stack = Some(
-                crate::command::CommandStackSnapshot::from_legacy_save_commands(
-                    resolved_commands,
-                )
-                .map_err(|error| {
-                    ScenarioError::LegacyObjectsParse(format!(
-                        "Objects.txt line {line}: invalid [Commands] stack ({error:?})"
-                    ))
-                })?,
+                crate::command::CommandStackSnapshot::from_legacy_save_commands(resolved_commands)
+                    .map_err(|error| {
+                        ScenarioError::LegacyObjectsParse(format!(
+                            "Objects.txt line {line}: invalid [Commands] stack ({error:?})"
+                        ))
+                    })?,
             );
         }
 
@@ -14073,9 +13993,10 @@ fn parse_legacy_ini_section_name(line: &str) -> Option<&str> {
         return None;
     }
     let mut position = 1usize;
-    while bytes.get(position).is_some_and(|byte| {
-        byte.is_ascii_alphanumeric() || matches!(*byte, b' ' | b'_')
-    }) {
+    while bytes
+        .get(position)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b' ' | b'_'))
+    {
         position += 1;
     }
     let name_end = position;
@@ -14094,9 +14015,10 @@ fn parse_legacy_ini_property(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     let mut position = 0usize;
-    while bytes.get(position).is_some_and(|byte| {
-        byte.is_ascii_alphanumeric() || matches!(*byte, b' ' | b'_')
-    }) {
+    while bytes
+        .get(position)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b' ' | b'_'))
+    {
         position += 1;
     }
     let name_end = position;
@@ -14258,13 +14180,9 @@ fn parse_object_bool(value: &str, line: usize, key: &str) -> Result<bool, Scenar
 /// surrounding default adaptor and becomes false.
 fn parse_object_compiler_bool(value: &str) -> bool {
     let bytes = value.as_bytes();
-    if bytes.first() == Some(&b'1')
-        && !bytes.get(1).is_some_and(u8::is_ascii_digit)
-    {
+    if bytes.first() == Some(&b'1') && !bytes.get(1).is_some_and(u8::is_ascii_digit) {
         true
-    } else if bytes.first() == Some(&b'0')
-        && !bytes.get(1).is_some_and(u8::is_ascii_digit)
-    {
+    } else if bytes.first() == Some(&b'0') && !bytes.get(1).is_some_and(u8::is_ascii_digit) {
         false
     } else if value.starts_with("true") {
         true
@@ -14411,7 +14329,9 @@ fn parse_legacy_graphics_overlay(
     Ok(SerializedObjectGraphicsOverlay {
         id: parse_object_i32(fields[0].trim(), line, "GfxOverlay id")?,
         mode,
-        definition: graphics.as_ref().map(|graphics| graphics.definition.clone()),
+        definition: graphics
+            .as_ref()
+            .map(|graphics| graphics.definition.clone()),
         graphics_name: graphics.and_then(|graphics| graphics.graphics_name),
         action: (!fields[3].trim().is_empty()).then(|| fields[3].trim().to_string()),
         blit_mode: parse_object_u32(fields[4].trim(), line, "GfxOverlay blit mode")?,
@@ -14536,9 +14456,7 @@ fn parse_legacy_object_command(
             "unknown C4 command",
         ));
     }
-    let integer = |index: usize, label: &str| {
-        parse_object_i32(fields[index].trim(), line, label)
-    };
+    let integer = |index: usize, label: &str| parse_object_i32(fields[index].trim(), line, label);
     let base_mode = if version > 0 {
         integer(13, "Command BaseMode")?
     } else {
@@ -14579,9 +14497,8 @@ fn parse_legacy_object_effects(
         .map(str::trim)
         .filter(|effect| !effect.is_empty())
         .map(|effect| {
-            parse_serialized_effect_state(effect, line).map_err(|detail| {
-                object_property_error(line, "Effects", effect, detail.as_str())
-            })
+            parse_serialized_effect_state(effect, line)
+                .map_err(|detail| object_property_error(line, "Effects", effect, detail.as_str()))
         })
         .collect()
 }
@@ -15282,9 +15199,7 @@ impl SerializedC4Value {
                         .iter()
                         .position(|(existing, _)| existing == &key)
                     {
-                        if value.is_compiled_nil()
-                            && !compiled_entries[index].1.is_compiled_nil()
-                        {
+                        if value.is_compiled_nil() && !compiled_entries[index].1.is_compiled_nil() {
                             compiled_entries.remove(index);
                             compiled_empty_value_count += 1;
                         } else {
@@ -16047,7 +15962,10 @@ fn resolve_rooted_definition_group(root: &Path, spec: &str) -> Result<Group, Sce
 /// Applies C4Game's exact `DefinitionPath + module` operation. Unlike
 /// `Path::join`, this neither inserts a separator nor lets an absolute module
 /// replace the configured prefix.
-fn resolve_prefixed_definition_group(prefix: &Path, spelling: &str) -> Result<Group, ScenarioError> {
+fn resolve_prefixed_definition_group(
+    prefix: &Path,
+    spelling: &str,
+) -> Result<Group, ScenarioError> {
     let mut candidate = legacy_path_bytes(prefix);
     candidate.extend(clonk_script::c4_string_bytes(spelling));
     for byte in &mut candidate {
@@ -16185,10 +16103,9 @@ fn collect_definitions_from_group<S: AsRef<str>>(
                 ) {
                     Ok(resource) => {
                         if resource.graphics_image.is_none() {
-                            tracing::warn!(
-                                group = %group.root().display(),
-                                error = "required Graphics.png/Graphics.bmp is missing or invalid",
-                                "definition failed to load; skipping"
+                            warn_rejected_definition(
+                                group,
+                                &"required Graphics.png/Graphics.bmp is missing or invalid",
                             );
                         } else {
                             primary_definition = true;
@@ -16273,7 +16190,7 @@ fn is_rejected_definition_error(error: &ResourceDefinitionError) -> bool {
     )
 }
 
-fn warn_rejected_definition(group: &Group, error: &ResourceDefinitionError) {
+fn warn_rejected_definition(group: &Group, error: &impl fmt::Display) {
     tracing::warn!(
         group = %group.root().display(),
         error = %error,
@@ -16285,13 +16202,9 @@ fn scenario_definition_from_resource(
     resource: ResourceDefinitionData,
     source_group: Option<Group>,
 ) -> ScenarioDefinition {
-    let script_name = source_group.as_ref().map(|group| {
-        group
-            .root()
-            .join("Script.c")
-            .to_string_lossy()
-            .into_owned()
-    });
+    let script_name = source_group
+        .as_ref()
+        .map(|group| group.root().join("Script.c").to_string_lossy().into_owned());
     let description = resource.description().map(str::to_owned);
     let ResourceDefinitionData {
         core,
@@ -17282,11 +17195,11 @@ fn write_test_definition_graphics(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ColorType, Rgba, RgbaImage, codecs::bmp::BmpEncoder};
+    use image::{codecs::bmp::BmpEncoder, ColorType, Rgba, RgbaImage};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use tracing::field::{Field, Visit};
-    use tracing::{Level, subscriber};
+    use tracing::{subscriber, Level};
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use tracing_subscriber::registry::Registry;
 
@@ -17318,10 +17231,8 @@ mod tests {
 
         let mut engine = Engine::new();
         engine.adopt_legacy_string_table(registrations);
-        let literal = clonk_script::register_c4_literal_string(
-            &engine.script_string_registrations,
-            "same",
-        );
+        let literal =
+            clonk_script::register_c4_literal_string(&engine.script_string_registrations, "same");
         assert!(repeated.ptr_eq(&literal));
     }
 
@@ -17407,7 +17318,10 @@ global func Step(state, frame, random)
         .expect("saved action builds");
 
         assert_eq!(state.name, "Walk");
-        assert_eq!(clonk_script::c4_string_bytes(state.compiled_name()), b"Walk");
+        assert_eq!(
+            clonk_script::c4_string_bytes(state.compiled_name()),
+            b"Walk"
+        );
     }
 
     #[test]
@@ -17427,7 +17341,10 @@ global func Step(state, frame, random)
                 ("Probe".to_string(), duplicate),
             ],
         });
-        let spec = converted.specs.get("Probe").expect("runtime action retained");
+        let spec = converted
+            .specs
+            .get("Probe")
+            .expect("runtime action retained");
         assert_eq!(
             spec.length,
             Some(7),
@@ -17437,7 +17354,10 @@ global func Step(state, frame, random)
             .reflections
             .get("Probe")
             .expect("exact compiler view retained");
-        assert_eq!(reflection.get("Length", 0), Some(clonk_script::Value::Int(-3)));
+        assert_eq!(
+            reflection.get("Length", 0),
+            Some(clonk_script::Value::Int(-3))
+        );
         assert_eq!(
             reflection.get("Sound", 0),
             Some(clonk_script::Value::String("Zap".into()))
@@ -17480,8 +17400,8 @@ global func Step(state, frame, random)
         // C4Object::CompileFunc reads Size directly into Con. Loaded object
         // state may therefore remain above FullCon even independently of a
         // later DoCon clamp decision (C4Object.cpp:2763).
-        let records = parse_legacy_objects("[Object]\nid=OVSZ\nSize=150000\n")
-            .expect("Objects.txt parses");
+        let records =
+            parse_legacy_objects("[Object]\nid=OVSZ\nSize=150000\n").expect("Objects.txt parses");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].construction, Some(150_000));
     }
@@ -18136,11 +18056,7 @@ global func Step(state, frame, random)
         let lower_umlaut_prefix = clonk_script::c4_string_from_bytes(b"/g\xe4me/");
         let upper_umlaut_module = clonk_script::c4_string_from_bytes(b"/G\xc4ME/Pack.c4d");
         assert_eq!(
-            set_legacy_definition_modules(
-                &[upper_umlaut_module],
-                &lower_umlaut_prefix,
-                "",
-            ),
+            set_legacy_definition_modules(&[upper_umlaut_module], &lower_umlaut_prefix, "",),
             vec!["Pack.c4d".to_owned()],
             "SEqualNoCase applies the C++ CharCapital umlaut folding"
         );
@@ -18148,11 +18064,9 @@ global func Step(state, frame, random)
 
     #[test]
     fn initial_game_save_serializes_the_effective_modules_not_the_authored_reflection() {
-        let core = parse_legacy_scenario_text(
-            "[Definitions]\nDefinitions=Old.c4d\n",
-        )
-        .expect("legacy core parses")
-        .core;
+        let core = parse_legacy_scenario_text("[Definitions]\nDefinitions=Old.c4d\n")
+            .expect("legacy core parses")
+            .core;
         let modules = vec!["Effective.c4d".to_owned()];
 
         for saved in [
@@ -18695,8 +18609,7 @@ RandomTeamCount=2
         }
         for group in [&directory_group, &packed_group] {
             assert_eq!(
-                try_read_group_file_case_insensitive(group, "Missing.map")
-                    .expect("missing lookup"),
+                try_read_group_file_case_insensitive(group, "Missing.map").expect("missing lookup"),
                 None
             );
         }
@@ -19201,13 +19114,7 @@ RandomTeamCount=2
         for (name, child, data) in entries {
             if *child {
                 group
-                    .add_packed_child_with_metadata(
-                        (*name).to_owned(),
-                        data.to_vec(),
-                        0,
-                        0,
-                        false,
-                    )
+                    .add_packed_child_with_metadata((*name).to_owned(), data.to_vec(), 0, 0, false)
                     .expect("packed child adds");
             } else {
                 group
@@ -19306,8 +19213,8 @@ RandomTeamCount=2
         );
         let crlf = lf.replace('\n', "\r\n");
         let cr = lf.replace('\n', "\r");
-        let expected = parse_legacy_team_metadata_source(&crlf)
-            .expect("CRLF exact Teams.txt metadata parses");
+        let expected =
+            parse_legacy_team_metadata_source(&crlf).expect("CRLF exact Teams.txt metadata parses");
 
         for (label, source) in [("LF", lf), ("CR", cr.as_str())] {
             let parsed = parse_legacy_team_metadata_source(source)
@@ -19326,8 +19233,8 @@ RandomTeamCount=2
             ("CRLF", invalid_lf.replace('\n', "\r\n")),
             ("CR", invalid_lf.replace('\n', "\r")),
         ] {
-            let error = parse_legacy_team_metadata_source(&source)
-                .expect_err("invalid team id must fail");
+            let error =
+                parse_legacy_team_metadata_source(&source).expect_err("invalid team id must fail");
             assert!(
                 error.to_string().contains("Teams.txt line 3:"),
                 "{label} diagnostics preserve physical line numbers: {error}"
@@ -19533,10 +19440,8 @@ RandomTeamCount=2
             .expect("read scenario")
             .replace("SaveGame=1", "SaveGame=0")
             .replace("Replay=0", "Replay=1");
-        std::fs::write(scenario_dir.join("Scenario.txt"), replay_core)
-            .expect("write replay core");
-        let replay =
-            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("replay loads");
+        std::fs::write(scenario_dir.join("Scenario.txt"), replay_core).expect("write replay core");
+        let replay = Scenario::load_from_path_with(&scenario_dir, &resolver).expect("replay loads");
         let replay_lobby = replay.lobby_metadata().expect("replay metadata");
         assert!(replay_lobby.head().is_replay());
         assert!(!replay_lobby.head().is_save_game());
@@ -19647,10 +19552,7 @@ RandomTeamCount=2
         fn evaluate(source: &str) -> Engine {
             let parsed = parse_legacy_scenario_text(source).expect("scenario core parses");
             let mut engine = Engine::new();
-            engine.set_scenario_values(ScenarioValueStore::from_runtime_core(
-                &parsed.core,
-                false,
-            ));
+            engine.set_scenario_values(ScenarioValueStore::from_runtime_core(&parsed.core, false));
             engine
                 .register_player(
                     crate::PlayerConfig::new(0, "Winner")
@@ -19723,18 +19625,18 @@ RandomTeamCount=2
         let before = melee.capture_state();
         melee.evaluate_game().expect("second evaluation is ignored");
         assert_eq!(melee.capture_state().players, before.players);
-        assert_eq!(melee.capture_state().crew_info_rosters, before.crew_info_rosters);
+        assert_eq!(
+            melee.capture_state().crew_info_rosters,
+            before.crew_info_rosters
+        );
     }
 
     #[test]
     fn delayed_player_retirement_uses_the_same_melee_and_crew_evaluation() {
-        let parsed = parse_legacy_scenario_text("[Game]\nGoals=MELE=1\n")
-            .expect("melee core parses");
+        let parsed =
+            parse_legacy_scenario_text("[Game]\nGoals=MELE=1\n").expect("melee core parses");
         let mut engine = Engine::new();
-        engine.set_scenario_values(ScenarioValueStore::from_runtime_core(
-            &parsed.core,
-            false,
-        ));
+        engine.set_scenario_values(ScenarioValueStore::from_runtime_core(&parsed.core, false));
         engine
             .register_player(
                 crate::PlayerConfig::new(3, "Retiring")
@@ -19783,9 +19685,17 @@ RandomTeamCount=2
         );
 
         let retired = engine.retire_player(3).expect("player retires");
-        assert_eq!(retired.score(), 50, "melee uses personal gain 40, not average 70");
         assert_eq!(
-            (retired.rounds(), retired.rounds_won(), retired.rounds_lost()),
+            retired.score(),
+            50,
+            "melee uses personal gain 40, not average 70"
+        );
+        assert_eq!(
+            (
+                retired.rounds(),
+                retired.rounds_won(),
+                retired.rounds_lost()
+            ),
             (3, 1, 2)
         );
         assert!(
@@ -19823,15 +19733,13 @@ RandomTeamCount=2
         assert_eq!(teams.teams()[0].name(), "Nested // retained");
         assert_eq!(teams.teams()[0].icon_spec(), Some("\"not escaped\""));
 
-        let unknown_distribution =
-            parse_legacy_teams_source("[Teams]\nTeamDistribution=random\n");
+        let unknown_distribution = parse_legacy_teams_source("[Teams]\nTeamDistribution=random\n");
         assert_eq!(
             unknown_distribution.distribution(),
             ScenarioTeamDistribution::Free
         );
 
-        let core = parse_legacy_scenario_text("[Head]\nForcedNoCrew=2\n")
-            .expect("default core");
+        let core = parse_legacy_scenario_text("[Head]\nForcedNoCrew=2\n").expect("default core");
         let defaults = game_parameter_defaults(&core.core);
         let parameters = parse_legacy_game_parameter_overrides(
             concat!(
@@ -19846,10 +19754,12 @@ RandomTeamCount=2
         );
         assert_eq!(parameters.use_fair_crew(), Some(false));
         assert_eq!(parameters.control_rate(), Some(-1));
-        assert!(parameters.clients().is_empty(), "unindented Client is ignored");
+        assert!(
+            parameters.clients().is_empty(),
+            "unindented Client is ignored"
+        );
 
-        let empty_team_file =
-            parse_legacy_teams_source("[Teams]\nAutoGenerateTeams=0\n");
+        let empty_team_file = parse_legacy_teams_source("[Teams]\nAutoGenerateTeams=0\n");
         assert!(!empty_team_file.configured_auto_generate());
         assert!(empty_team_file.auto_generates_teams());
     }
@@ -19883,7 +19793,10 @@ RandomTeamCount=2
         assert_eq!(manifest.core.head.save_game, 0);
         assert!(!manifest.core.head.network_game);
         assert_eq!(manifest.core.head.loader, "Loader* // literal  ");
-        assert_eq!(manifest.description.as_deref(), Some("Searchable // literal  "));
+        assert_eq!(
+            manifest.description.as_deref(),
+            Some("Searchable // literal  ")
+        );
         assert_eq!(manifest.core.game.goals.len(), 1);
         assert_eq!(manifest.core.game.goals[0].id, "MELE");
         assert_eq!(manifest.core.game.goals[0].count, Some(0));
@@ -19930,8 +19843,7 @@ RandomTeamCount=2
 
     #[test]
     fn parameters_recover_containers_validate_clients_and_sort_by_id() {
-        let core = parse_legacy_scenario_text("[Head]\nForcedNoCrew=2\n")
-            .expect("default core");
+        let core = parse_legacy_scenario_text("[Head]\nForcedNoCrew=2\n").expect("default core");
         let defaults = game_parameter_defaults(&core.core);
         let parameters = parse_legacy_game_parameter_overrides(
             concat!(
@@ -20382,8 +20294,8 @@ RandomTeamCount=2
 
     #[test]
     fn legacy_fow_color_minus_one_reinterprets_as_u32_max() {
-        let manifest = parse_legacy_scenario_text("[Game]\nFoWColor=-1\n")
-            .expect("signed FoWColor parses");
+        let manifest =
+            parse_legacy_scenario_text("[Game]\nFoWColor=-1\n").expect("signed FoWColor parses");
 
         assert_eq!(manifest.core.game.fow_color, u32::MAX);
     }
@@ -20415,8 +20327,8 @@ RandomTeamCount=2
 
     #[test]
     fn scenario_value_store_reinterprets_fow_color_as_signed_i32() {
-        let manifest = parse_legacy_scenario_text("[Game]\nFoWColor=-1\n")
-            .expect("signed FoWColor parses");
+        let manifest =
+            parse_legacy_scenario_text("[Game]\nFoWColor=-1\n").expect("signed FoWColor parses");
         let values = ScenarioValueStore::from_runtime_core(&manifest.core, false);
 
         assert_eq!(
@@ -20429,8 +20341,8 @@ RandomTeamCount=2
 
     #[test]
     fn scenario_value_store_projects_fow_resolution_for_the_renderer() {
-        let manifest = parse_legacy_scenario_text("[Landscape]\nFoWRes=96\n")
-            .expect("FoWRes parses");
+        let manifest =
+            parse_legacy_scenario_text("[Landscape]\nFoWRes=96\n").expect("FoWRes parses");
         let values = ScenarioValueStore::from_runtime_core(&manifest.core, false);
 
         assert_eq!(values.fow_resolution(), 96);
@@ -22011,7 +21923,9 @@ global func Step(state, frame, random)
         let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
             .expect("combined runtime scenario loads");
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("runtime scenario applies");
+        scenario
+            .apply(&mut engine)
+            .expect("runtime scenario applies");
 
         let restored = engine.capture_state().round_results;
         assert_eq!(restored.goal_counts, vec![("GOOD".to_owned(), 0)]);
@@ -22040,8 +21954,8 @@ global func Step(state, frame, random)
     fn missing_round_results_component_uses_cpp_melee_default() {
         let dir = tempdir().expect("tempdir");
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
-        let source = std::fs::read_to_string(scenario_dir.join("Scenario.txt"))
-            .expect("read scenario core");
+        let source =
+            std::fs::read_to_string(scenario_dir.join("Scenario.txt")).expect("read scenario core");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
             format!("{source}\n[Game]\nGoals=MELE=1\n"),
@@ -22051,8 +21965,8 @@ global func Step(state, frame, random)
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
         };
-        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
-            .expect("melee scenario loads");
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("melee scenario loads");
         let mut engine = Engine::with_seed(0);
         scenario.apply(&mut engine).expect("melee scenario applies");
         assert!(engine.capture_state().round_results.hide_settlement_score);
@@ -22136,9 +22050,8 @@ global func Step(state, frame, random)
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
         };
-        let (loaded, warnings) = capture_definition_warnings(|| {
-            Scenario::load_from_path_with(&scenario_dir, &resolver)
-        });
+        let (loaded, warnings) =
+            capture_definition_warnings(|| Scenario::load_from_path_with(&scenario_dir, &resolver));
         let scenario = loaded.expect("one malformed definition does not abort the scenario");
         let mut ids = scenario
             .definitions
@@ -22190,9 +22103,8 @@ global func Step(state, frame, random)
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
         };
-        let (loaded, warnings) = capture_definition_warnings(|| {
-            Scenario::load_from_path_with(&scenario_dir, &resolver)
-        });
+        let (loaded, warnings) =
+            capture_definition_warnings(|| Scenario::load_from_path_with(&scenario_dir, &resolver));
         let scenario = loaded.expect("zero-size text components do not abort the scenario");
         let mut ids = scenario
             .definitions
@@ -22248,9 +22160,8 @@ global func Step(state, frame, random)
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
         };
-        let (loaded, warnings) = capture_definition_warnings(|| {
-            Scenario::load_from_path_with(&scenario_dir, &resolver)
-        });
+        let (loaded, warnings) =
+            capture_definition_warnings(|| Scenario::load_from_path_with(&scenario_dir, &resolver));
         let scenario = loaded.expect("one malformed ActMap does not abort the scenario");
         let mut ids = scenario
             .definitions
@@ -22306,9 +22217,8 @@ global func Step(state, frame, random)
         let resolver = FileSystemResolver {
             roots: vec![dir.path().to_path_buf()],
         };
-        let (loaded, warnings) = capture_definition_warnings(|| {
-            Scenario::load_from_path_with(&scenario_dir, &resolver)
-        });
+        let (loaded, warnings) =
+            capture_definition_warnings(|| Scenario::load_from_path_with(&scenario_dir, &resolver));
         let scenario = loaded.expect("bad graphics reject only their definition");
         let mut ids = scenario
             .definitions
@@ -22368,23 +22278,16 @@ global func Step(state, frame, random)
 
         let mislabeled_png = write_core(&defs, "MislabeledPng", "[DefCore]\nid=MSLB\n");
         image::RgbaImage::from_pixel(1, 1, image::Rgba([13, 14, 15, 255]))
-            .save_with_format(
-                mislabeled_png.join("Graphics.png"),
-                image::ImageFormat::Bmp,
-            )
+            .save_with_format(mislabeled_png.join("Graphics.png"), image::ImageFormat::Bmp)
             .expect("write BMP bytes under the PNG base name");
         image::RgbaImage::from_pixel(1, 1, image::Rgba([16, 17, 18, 255]))
             .save(mislabeled_png.join("Graphics.bmp"))
             .expect("write valid BMP fallback candidate");
 
-        let corrupt_additional =
-            write_core(&defs, "CorruptAdditional", "[DefCore]\nid=CADD\n");
+        let corrupt_additional = write_core(&defs, "CorruptAdditional", "[DefCore]\nid=CADD\n");
         write_test_definition_graphics(&corrupt_additional);
-        std::fs::write(
-            corrupt_additional.join("GraphicsBad.png"),
-            b"not a png",
-        )
-        .expect("write corrupt recognized additional Graphics");
+        std::fs::write(corrupt_additional.join("GraphicsBad.png"), b"not a png")
+            .expect("write corrupt recognized additional Graphics");
 
         let dual_base = write_core(&defs, "DualBase", "[DefCore]\nid=DUAL\nColorByOwner=1\n");
         write_test_definition_graphics(&dual_base);
@@ -22442,14 +22345,17 @@ global func Step(state, frame, random)
                     .as_deref()
                     .is_some_and(|error| error.contains("Overlay.png"))
         }));
-        assert!(warnings.iter().any(|warning| {
-            warning.message.as_deref() == Some("definition failed to load; skipping")
-                && warning.group.as_deref() == Some(missing.to_string_lossy().as_ref())
-                && warning
-                    .error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("Graphics.png/Graphics.bmp"))
-        }));
+        assert!(
+            warnings.iter().any(|warning| {
+                warning.message.as_deref() == Some("definition failed to load; skipping")
+                    && warning.group.as_deref() == Some(missing.to_string_lossy().as_ref())
+                    && warning
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("Graphics.png/Graphics.bmp"))
+            }),
+            "captured warnings: {warnings:#?}"
+        );
         for rejected in [&corrupt_png, &mislabeled_png] {
             assert!(warnings.iter().any(|warning| {
                 warning.message.as_deref() == Some("definition failed to load; skipping")
@@ -22462,8 +22368,7 @@ global func Step(state, frame, random)
         }
         assert!(warnings.iter().any(|warning| {
             warning.message.as_deref() == Some("definition failed to load; skipping")
-                && warning.group.as_deref()
-                    == Some(corrupt_additional.to_string_lossy().as_ref())
+                && warning.group.as_deref() == Some(corrupt_additional.to_string_lossy().as_ref())
                 && warning
                     .error
                     .as_deref()
@@ -22791,12 +22696,7 @@ global func Step(state, frame, random)
             )
             .expect("add child-marked System entry");
         packed
-            .add_file_bytes_with_metadata(
-                b"Alpha.c".to_vec(),
-                b"// alpha\n".to_vec(),
-                1,
-                false,
-            )
+            .add_file_bytes_with_metadata(b"Alpha.c".to_vec(), b"// alpha\n".to_vec(), 1, false)
             .expect("add final native-order System entry");
         let group = Group::from_raw_memory(
             PathBuf::from("System.c4g"),
@@ -22975,7 +22875,9 @@ global func Step(state, frame, random)
                 .borrow()
                 .get("def_system_value")
                 .map(|cell| cell.borrow().clone()),
-            Some(clonk_script::Value::String("definition pack".to_string().into()))
+            Some(clonk_script::Value::String(
+                "definition pack".to_string().into()
+            ))
         );
         assert_eq!(
             engine
@@ -22983,7 +22885,9 @@ global func Step(state, frame, random)
                 .borrow()
                 .get("scenario_system_value")
                 .map(|cell| cell.borrow().clone()),
-            Some(clonk_script::Value::String("scenario pack".to_string().into()))
+            Some(clonk_script::Value::String(
+                "scenario pack".to_string().into()
+            ))
         );
     }
 
@@ -23070,12 +22974,10 @@ global func Step(state, frame, random)
         };
         let scenario =
             Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
-        assert!(
-            scenario
-                .script
-                .as_ref()
-                .is_some_and(|script| clonk_script::c4_string_bytes(&script.source).contains(&0xff))
-        );
+        assert!(scenario
+            .script
+            .as_ref()
+            .is_some_and(|script| clonk_script::c4_string_bytes(&script.source).contains(&0xff)));
 
         let mut engine = Engine::with_seed(0);
         scenario.apply(&mut engine).expect("raw scripts compile");
@@ -23217,7 +23119,10 @@ global func Step(state, frame, random)
         )
         .expect("write unrelated script");
         let source = loaded_source(localized.path(), &localized_scenario, &["DE-extra", "US"]);
-        assert_eq!(clonk_script::c4_string_bytes(&source), b"\n// localized only");
+        assert_eq!(
+            clonk_script::c4_string_bytes(&source),
+            b"\n// localized only"
+        );
 
         // The preferred ScriptDE.c exists but is not readable as a file, so
         // its segment falls through to US. C4Script restarts at the empty DE
@@ -24843,20 +24748,20 @@ public func ActualizePhase(pClonk)
             .expect("remote player joins");
         let player = joined.number();
 
-        assert!(!engine.execute_surrender_player_control(
-            crate::SurrenderPlayerControlData {
+        assert!(
+            !engine.execute_surrender_player_control(crate::SurrenderPlayerControlData {
                 player,
                 by_client: 7,
-            }
-        ));
+            })
+        );
         assert!(!engine.player(player).expect("player exists").surrendered());
 
-        assert!(engine.execute_surrender_player_control(
-            crate::SurrenderPlayerControlData {
+        assert!(
+            engine.execute_surrender_player_control(crate::SurrenderPlayerControlData {
                 player,
                 by_client: 3,
-            }
-        ));
+            })
+        );
         assert!(engine.player(player).expect("player exists").surrendered());
         for _ in 0..59 {
             engine
@@ -25061,7 +24966,10 @@ public func ActualizePhase(pClonk)
         let player = engine.player(number).expect("player remains registered");
         assert_eq!(player.status(), crate::PlayerStatus::Active);
         assert_eq!(player.team(), Some(1));
-        assert_ne!(engine.rng, rng_before, "ScenarioInit consumed its RNG ledger");
+        assert_ne!(
+            engine.rng, rng_before,
+            "ScenarioInit consumed its RNG ledger"
+        );
         assert!(
             engine.snapshot().objects.len() > object_count_before,
             "ready crew was placed"
@@ -25075,7 +24983,10 @@ public func ActualizePhase(pClonk)
         };
         assert_eq!(global("preinit_count"), Some(clonk_script::Value::Int(1)));
         assert_eq!(global("init_count"), Some(clonk_script::Value::Int(1)));
-        assert_eq!(global("initialized_team"), Some(clonk_script::Value::Int(1)));
+        assert_eq!(
+            global("initialized_team"),
+            Some(clonk_script::Value::Int(1))
+        );
     }
 
     #[test]
@@ -25446,7 +25357,9 @@ public func ActualizePhase(pClonk)
                 .borrow()
                 .get("initialized_name")
                 .map(|cell| cell.borrow().clone()),
-            Some(clonk_script::Value::String("<c 55cc88>Solo</c>".to_string().into())),
+            Some(clonk_script::Value::String(
+                "<c 55cc88>Solo</c>".to_string().into()
+            )),
             "InitializePlayer retains the player-info color"
         );
     }
@@ -25761,11 +25674,8 @@ public func ActualizePhase(pClonk)
             "Jim\nBob\nJoe\n",
         )
         .expect("write clonk names");
-        std::fs::write(
-            dir.path().join("Defs.c4d/Good.c4d/ClonkNamesUS.txt"),
-            [],
-        )
-        .expect("write empty localized clonk names");
+        std::fs::write(dir.path().join("Defs.c4d/Good.c4d/ClonkNamesUS.txt"), [])
+            .expect("write empty localized clonk names");
         let plain = dir.path().join("Defs.c4d/Plain.c4d");
         std::fs::create_dir_all(&plain).expect("plain def dir");
         std::fs::write(
@@ -26000,7 +25910,7 @@ public func ActualizePhase(pClonk)
         starts[1].enforce_position = true;
         engine.set_player_starts(starts);
         engine.set_teams(vec![
-            TeamInfo::new(7, "Indexed", 0).with_player_start_index(2),
+            TeamInfo::new(7, "Indexed", 0).with_player_start_index(2)
         ]);
 
         let joined = engine
@@ -26070,9 +25980,7 @@ public func ActualizePhase(pClonk)
         assert_eq!(parsed_base_functionality("-0x10|4"), 0);
         assert_eq!(parsed_base_functionality("077"), 77);
         assert_eq!(
-            parsed_base_functionality(
-                "BASEFUNC_Buy|8junk|BASEFUNC_AutoSellContents"
-            ),
+            parsed_base_functionality("BASEFUNC_Buy|8junk|BASEFUNC_AutoSellContents"),
             BASEFUNC_BUY | BASEFUNC_SELL,
             "strtol consumes the numeric prefix and the junk terminates the list"
         );
@@ -26096,9 +26004,7 @@ public func ActualizePhase(pClonk)
     #[test]
     fn base_functionality_unknown_names_warn_without_dropping_known_elements() {
         let (parsed, warnings) = capture_definition_warnings(|| {
-            parsed_base_functionality(
-                "BASEFUNC_Buy|BASEFUNC_Bogus|BASEFUNC_AutoSellContents",
-            )
+            parsed_base_functionality("BASEFUNC_Buy|BASEFUNC_Bogus|BASEFUNC_AutoSellContents")
         });
 
         assert_eq!(parsed, BASEFUNC_BUY | BASEFUNC_AUTO_SELL_CONTENTS);
@@ -26274,11 +26180,8 @@ public func ActualizePhase(pClonk)
         let dir = tempdir().expect("tempdir");
         let root = dir.path().join("Defs.c4d");
         write_definition(&root.join("Lowercase.c4d"), "Clonk");
-        std::fs::write(
-            root.join("Lowercase.c4d/ActMap.txt"),
-            "not an action map",
-        )
-        .expect("write malformed skipped ActMap");
+        std::fs::write(root.join("Lowercase.c4d/ActMap.txt"), "not an action map")
+            .expect("write malformed skipped ActMap");
         write_definition(&root.join("Lowercase.c4d/Child.c4d"), "CHLD");
         write_definition(&root.join("Long.c4d"), "CLONKX");
         write_definition(&root.join("Numeric.c4d"), "1337");
@@ -26469,8 +26372,14 @@ public func ActualizePhase(pClonk)
         {
             use std::os::unix::ffi::OsStrExt as _;
 
-            assert_eq!(entries[0].relative_path.as_os_str().as_bytes(), U_CHILD_NAME);
-            assert_eq!(entries[1].relative_path.as_os_str().as_bytes(), O_CHILD_NAME);
+            assert_eq!(
+                entries[0].relative_path.as_os_str().as_bytes(),
+                U_CHILD_NAME
+            );
+            assert_eq!(
+                entries[1].relative_path.as_os_str().as_bytes(),
+                O_CHILD_NAME
+            );
             assert_ne!(entries[0].relative_path, entries[1].relative_path);
         }
 
@@ -26493,8 +26402,8 @@ public func ActualizePhase(pClonk)
                 .iter()
                 .filter_map(|item| match item {
                     CollectedDefinition::Definition(definition) => Some(definition.id.as_str()),
-                    CollectedDefinition::SystemScripts(_)
-                    | CollectedDefinition::Particle(_) => None,
+                    CollectedDefinition::SystemScripts(_) | CollectedDefinition::Particle(_) =>
+                        None,
                 })
                 .collect::<Vec<_>>(),
             ["UDEF", "ODEF"]
@@ -27982,7 +27891,10 @@ public func ActualizePhase(pClonk)
 
         let mut engine = Engine::with_seed(0);
         let created = scenario.apply(&mut engine).expect("scenario applies");
-        let mut registered = engine.definition_ids().map(str::to_owned).collect::<Vec<_>>();
+        let mut registered = engine
+            .definition_ids()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         registered.sort();
         assert_eq!(registered, ["CURR", "CYCA", "CYCB", "GOOD", "WILD"]);
         assert_eq!(created.len(), 1, "the future-version object is skipped");
@@ -28340,9 +28252,9 @@ public func ActualizePhase(pClonk)
         std::fs::create_dir_all(&scenario_path).expect("scenario directory");
         let scenario = Group::open(&scenario_path).expect("open scenario group");
 
-        let absolute_path = dir
-            .path()
-            .join(std::ffi::OsString::from_vec(b"Absolute-\xe2\x98\x83.c4d".to_vec()));
+        let absolute_path = dir.path().join(std::ffi::OsString::from_vec(
+            b"Absolute-\xe2\x98\x83.c4d".to_vec(),
+        ));
         std::fs::create_dir_all(&absolute_path).expect("absolute definition directory");
         let absolute_spec =
             clonk_script::c4_string_from_bytes(absolute_path.as_os_str().as_bytes());
@@ -28401,17 +28313,18 @@ public func ActualizePhase(pClonk)
         .expect("scenario core");
         let scenario_group = Group::open(&scenario_path).expect("open scenario");
         let modules = vec!["Objects.c4d".to_owned(), "./Preset.c4d".to_owned()];
-        let scenario = Scenario::load_from_group_with_languages_and_definition_selection_and_prefix(
-            &scenario_group,
-            &FileSystemResolver {
-                roots: vec![dir.path().to_path_buf()],
-            },
-            &["US"],
-            &[] as &[String],
-            Some(modules.as_slice()),
-            Some(&prefix),
-        )
-        .expect("literal prefix vector loads");
+        let scenario =
+            Scenario::load_from_group_with_languages_and_definition_selection_and_prefix(
+                &scenario_group,
+                &FileSystemResolver {
+                    roots: vec![dir.path().to_path_buf()],
+                },
+                &["US"],
+                &[] as &[String],
+                Some(modules.as_slice()),
+                Some(&prefix),
+            )
+            .expect("literal prefix vector loads");
 
         assert_eq!(
             scenario.definition_resource_paths(),
@@ -28423,7 +28336,10 @@ public func ActualizePhase(pClonk)
             ]
         );
         let definitions = scenario.lobby_metadata().unwrap().definitions();
-        assert_eq!(definitions.requested_modules(), ["Objects.c4d", "Preset.c4d"]);
+        assert_eq!(
+            definitions.requested_modules(),
+            ["Objects.c4d", "Preset.c4d"]
+        );
         assert_eq!(
             definitions.requested_module_spellings(),
             ["Objects.c4d", "./Preset.c4d"]
@@ -29074,11 +28990,9 @@ public func ActualizePhase(pClonk)
     fn legacy_command_versions_follow_cpp_field_layouts() {
         // Shipped 4.9 scenarios use `$1`: it already carries BaseMode, but
         // retains the pre-v2 compatibility rule that textual `0` is empty.
-        let version_one = parse_legacy_object_command(
-            "$1,MoveTo,i517,177,0,0,0,0,1,0,0,0,0,0,1,0",
-            7,
-        )
-        .expect("shipped $1 command parses");
+        let version_one =
+            parse_legacy_object_command("$1,MoveTo,i517,177,0,0,0,0,1,0,0,0,0,0,1,0", 7)
+                .expect("shipped $1 command parses");
         assert_eq!(version_one.name, "MoveTo");
         assert_eq!(
             version_one.tx,
@@ -29089,27 +29003,21 @@ public func ActualizePhase(pClonk)
         assert_eq!(version_one.base_mode, 1);
         assert!(version_one.text.is_empty());
 
-        let unversioned = parse_legacy_object_command(
-            "MoveTo,i5,6,7,8,9,10,11,12,13,14,15,16,0",
-            8,
-        )
-        .expect("unversioned command parses");
+        let unversioned =
+            parse_legacy_object_command("MoveTo,i5,6,7,8,9,10,11,12,13,14,15,16,0", 8)
+                .expect("unversioned command parses");
         assert_eq!(unversioned.base_mode, 0);
         assert!(unversioned.text.is_empty());
 
-        let explicit_zero = parse_legacy_object_command(
-            "$0,MoveTo,i5,6,7,8,9,10,11,12,13,14,15,16,0",
-            9,
-        )
-        .expect("explicit version zero command parses");
+        let explicit_zero =
+            parse_legacy_object_command("$0,MoveTo,i5,6,7,8,9,10,11,12,13,14,15,16,0", 9)
+                .expect("explicit version zero command parses");
         assert_eq!(explicit_zero.base_mode, 0);
         assert!(explicit_zero.text.is_empty());
 
-        let version_two = parse_legacy_object_command(
-            "$2,MoveTo,i5,6,7,8,9,10,11,12,13,14,15,16,0,0",
-            10,
-        )
-        .expect("current command parses");
+        let version_two =
+            parse_legacy_object_command("$2,MoveTo,i5,6,7,8,9,10,11,12,13,14,15,16,0,0", 10)
+                .expect("current command parses");
         assert_eq!(version_two.base_mode, 0);
         assert_eq!(version_two.text, "0");
     }
@@ -29455,11 +29363,9 @@ public func ActualizePhase(pClonk)
                 ..crate::PhysicalInfo::default()
             })
         );
-        assert!(
-            configs
-                .iter()
-                .all(|config| config.physical_changes.is_empty())
-        );
+        assert!(configs
+            .iter()
+            .all(|config| config.physical_changes.is_empty()));
     }
 
     #[test]
@@ -29566,12 +29472,12 @@ public func ActualizePhase(pClonk)
             .temporary_physical
             .as_ref()
             .expect("[Physical] was captured");
-        assert_eq!((physical.energy, physical.breath, physical.walk), (50, 60, 70));
-        assert_eq!(first.commands.len(), 3);
         assert_eq!(
-            first.commands.get(&1).expect("Command1").text,
-            "raw,text"
+            (physical.energy, physical.breath, physical.walk),
+            (50, 60, 70)
         );
+        assert_eq!(first.commands.len(), 3);
+        assert_eq!(first.commands.get(&1).expect("Command1").text, "raw,text");
         assert_eq!(first.draw_transform, Some(crate::DrawTransform::identity()));
         assert!(matches!(
             first
@@ -29585,11 +29491,7 @@ public func ActualizePhase(pClonk)
         let definition_ids = HashSet::from(["GOOD"]);
         let object_numbers = HashSet::from([1_u64, 2]);
         let string_registrations = clonk_script::new_string_registrations();
-        clonk_script::register_loaded_c4_string(
-            &string_registrations,
-            0,
-            "saved text",
-        );
+        clonk_script::register_loaded_c4_string(&string_registrations, 0, "saved text");
         let resolution = SerializedC4ValueResolution {
             object_numbers: &object_numbers,
             string_registrations: &string_registrations,
@@ -29643,7 +29545,10 @@ public func ActualizePhase(pClonk)
                 .and_then(|graphics| graphics.graphics_name.as_deref()),
             Some("Alternate")
         );
-        assert_eq!(config.draw_transform, Some(crate::DrawTransform::identity()));
+        assert_eq!(
+            config.draw_transform,
+            Some(crate::DrawTransform::identity())
+        );
         let overlay = config.graphics_overlays.first().expect("overlay restored");
         assert_eq!(overlay.id, 7);
         assert_eq!(overlay.overlay_object, Some(ObjectId::new(2)));
@@ -29656,7 +29561,10 @@ public func ActualizePhase(pClonk)
             .temporary_physical
             .as_ref()
             .expect("temporary physical restored");
-        assert_eq!((temporary.energy, temporary.breath, temporary.walk), (50, 60, 70));
+        assert_eq!(
+            (temporary.energy, temporary.breath, temporary.walk),
+            (50, 60, 70)
+        );
         assert_eq!(config.physical_changes.len(), 3);
         let command_stack = config.command_stack.as_ref().expect("commands restored");
         assert_eq!(command_stack.command_names(), ["Call", "MoveTo", "Wait"]);
@@ -29710,8 +29618,7 @@ public func ActualizePhase(pClonk)
             "[DefCore]\nid=CMND\nName=Command object\nCategory=17\n",
         )
         .expect("definition core");
-        std::fs::write(definition.join("Script.c"), "#strict\n")
-            .expect("definition script");
+        std::fs::write(definition.join("Script.c"), "#strict\n").expect("definition script");
         write_test_definition_graphics(&definition);
 
         let scenario_dir = dir.path().join("Commands.c4s");
@@ -29749,7 +29656,9 @@ public func ActualizePhase(pClonk)
         let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
             .expect("command scenario loads");
         let mut engine = Engine::with_seed(221);
-        scenario.apply(&mut engine).expect("command scenario applies");
+        scenario
+            .apply(&mut engine)
+            .expect("command scenario applies");
 
         let assert_stack = |engine: &Engine| {
             let actor_index = engine
@@ -29795,17 +29704,13 @@ public func ActualizePhase(pClonk)
                 (call.evaluated, call.path_checked, call.finished),
                 (-2, 3, 0)
             );
-            assert_eq!(
-                (call.failures, call.retries, call.permit),
-                (-5, -6, -7)
-            );
+            assert_eq!((call.failures, call.retries, call.permit), (-5, -6, -7));
             assert_eq!(call.base_mode, 9, "unknown int32 BaseMode is retained");
             assert_eq!(call.text, "raw,text // exact  ");
 
             let move_to = &saved[1];
             assert_eq!(
-                move_to.view.target,
-                None,
+                move_to.view.target, None,
                 "missing Target denumerates to null"
             );
             assert_eq!(move_to.view.target2, Some(ObjectId::new(101)));
@@ -29814,10 +29719,7 @@ public func ActualizePhase(pClonk)
                 Some(clonk_script::Value::Object(102)),
             );
             assert_eq!(move_to.view.ty, Some(44));
-            assert_eq!(
-                move_to.view.data,
-                crate::command::CommandData::Integer(-55)
-            );
+            assert_eq!(move_to.view.data, crate::command::CommandData::Integer(-55));
             assert_eq!(move_to.update_interval, -66);
             assert_eq!(
                 (move_to.evaluated, move_to.path_checked, move_to.finished),
@@ -29846,7 +29748,9 @@ public func ActualizePhase(pClonk)
         let encoded = serde_json::to_string(&engine.capture_state())
             .expect("command-bearing engine state serializes");
         let restored = serde_json::from_str(&encoded).expect("engine state deserializes");
-        engine.restore_state(&restored).expect("engine state restores");
+        engine
+            .restore_state(&restored)
+            .expect("engine state restores");
         assert_stack(&engine);
 
         // A section's Objects.Load resolves against objects retained from the
@@ -29889,10 +29793,9 @@ public func ActualizePhase(pClonk)
     fn legacy_objects_restore_remaining_runtime_fields_and_info_links() {
         let dir = tempdir().expect("tempdir");
         let defs_root = dir.path().join("Defs.c4d");
-        for (folder, id, crew_member, category) in [
-            ("Clonk.c4d", "CLNK", 1, 17),
-            ("Thing.c4d", "THNG", 0, 17),
-        ] {
+        for (folder, id, crew_member, category) in
+            [("Clonk.c4d", "CLNK", 1, 17), ("Thing.c4d", "THNG", 0, 17)]
+        {
             let definition = defs_root.join(folder);
             std::fs::create_dir_all(&definition).expect("definition directory");
             std::fs::write(
@@ -29902,8 +29805,7 @@ public func ActualizePhase(pClonk)
                 ),
             )
             .expect("definition core");
-            std::fs::write(definition.join("Script.c"), "#strict\n")
-                .expect("definition script");
+            std::fs::write(definition.join("Script.c"), "#strict\n").expect("definition script");
             write_test_definition_graphics(&definition);
         }
 
@@ -30015,7 +29917,10 @@ public func ActualizePhase(pClonk)
             crew.state.effects[0].priority, 0,
             "fDoCalls=false leaves the compatibility node dead"
         );
-        assert_eq!(crew.state.effects[0].interval, crate::C4FX_FIRE_TIMER_INTERVAL);
+        assert_eq!(
+            crew.state.effects[0].interval,
+            crate::C4FX_FIRE_TIMER_INTERVAL
+        );
         assert_eq!(crew.state.effects[0].timer, 0);
         assert!(crew.state.effects[0].start_dispatched);
 
@@ -30223,8 +30128,7 @@ public func ActualizePhase(pClonk)
         );
         let captured = engine.capture_state();
         assert_eq!(
-            captured.objects[gem_index].compiler_cache,
-            engine.objects[gem_index].compiler_cache,
+            captured.objects[gem_index].compiler_cache, engine.objects[gem_index].compiler_cache,
             "exact engine snapshots preserve stale compiler caches",
         );
         assert_eq!(gem_snapshot.definition_id, "GEM1");
@@ -30501,9 +30405,7 @@ public func ActualizePhase(pClonk)
         for (name, density) in [("A", 60), ("B", 70), ("C", 80)] {
             std::fs::write(
                 materials.join(format!("{name}.c4m")),
-                format!(
-                    "[Material]\nName={name}\nDensity={density}\nTextureOverlay=Smooth\n"
-                ),
+                format!("[Material]\nName={name}\nDensity={density}\nTextureOverlay=Smooth\n"),
             )
             .expect("write material");
         }
@@ -30655,8 +30557,12 @@ public func ActualizePhase(pClonk)
             "immobile objects keep the stale flag (C4Movement.cpp:567)"
         );
         assert!(flag(&engine, 81), "stale flag survives while demobilized");
-        engine.tick_without_snapshot().expect("mobilization tick succeeds");
-        engine.tick_without_snapshot().expect("first movement tick succeeds");
+        engine
+            .tick_without_snapshot()
+            .expect("mobilization tick succeeds");
+        engine
+            .tick_without_snapshot()
+            .expect("first movement tick succeeds");
         assert!(
             flag(&engine, 80),
             "movement sets the flag in liquid (C4Movement.cpp:443-460)"
@@ -30675,16 +30581,22 @@ public func ActualizePhase(pClonk)
         let runtime =
             InitialNetworkRuntimeState::parse(&data).expect("nested compatibility spelling stages");
         let string_registrations = clonk_script::new_string_registrations();
-        let (globals, effects) = runtime
-            .resolve_post_object_state(&HashSet::new(), &string_registrations);
+        let (globals, effects) =
+            runtime.resolve_post_object_state(&HashSet::new(), &string_registrations);
         assert!(effects.is_empty());
-        assert_eq!(globals.numbered.get(&0), Some(&clonk_script::Value::Int(17)));
+        assert_eq!(
+            globals.numbered.get(&0),
+            Some(&clonk_script::Value::Int(17))
+        );
         assert_eq!(globals.numbered.get(&1), Some(&clonk_script::Value::Nil));
         assert_eq!(
             globals.numbered.get(&2),
             Some(&clonk_script::Value::Bool(true))
         );
-        assert_eq!(globals.named.get("saved"), Some(&clonk_script::Value::Int(23)));
+        assert_eq!(
+            globals.named.get("saved"),
+            Some(&clonk_script::Value::Int(23))
+        );
     }
 
     #[test]
@@ -30905,15 +30817,13 @@ public func ActualizePhase(pClonk)
             object_numbers: &object_numbers,
             string_registrations: &registrations,
         };
-        let clonk_script::Value::Proplist(map) =
-            parse_serialized_c4value("m[2;S0=o999;i1=S0]", 1)
-                .expect("sibling-string map parses")
-                .resolve(&resolution)
+        let clonk_script::Value::Proplist(map) = parse_serialized_c4value("m[2;S0=o999;i1=S0]", 1)
+            .expect("sibling-string map parses")
+            .resolve(&resolution)
         else {
             panic!("expected resolved map");
         };
-        let Some(clonk_script::Value::String(sibling)) =
-            map.get_key(&clonk_script::Value::Int(1))
+        let Some(clonk_script::Value::String(sibling)) = map.get_key(&clonk_script::Value::Int(1))
         else {
             panic!("resolved sibling string remains visible");
         };
@@ -30929,9 +30839,10 @@ public func ActualizePhase(pClonk)
             object_numbers: &object_numbers,
             string_registrations: &registrations,
         };
-        let clonk_script::Value::Proplist(mut map) = parse_serialized_c4value("m[2;o999=S0;i1=i2]", 1)
-            .expect("missing-key map parses")
-            .resolve(&resolution)
+        let clonk_script::Value::Proplist(mut map) =
+            parse_serialized_c4value("m[2;o999=S0;i1=i2]", 1)
+                .expect("missing-key map parses")
+                .resolve(&resolution)
         else {
             panic!("expected resolved map");
         };
@@ -30960,10 +30871,9 @@ public func ActualizePhase(pClonk)
             object_numbers: &object_numbers,
             string_registrations: &registrations,
         };
-        let clonk_script::Value::Proplist(map) =
-            parse_serialized_c4value("m[2;i1=S0;i1=o999]", 1)
-                .expect("duplicate-key map parses")
-                .resolve(&resolution)
+        let clonk_script::Value::Proplist(map) = parse_serialized_c4value("m[2;i1=S0;i1=o999]", 1)
+            .expect("duplicate-key map parses")
+            .resolve(&resolution)
         else {
             panic!("expected resolved map");
         };
@@ -30980,10 +30890,9 @@ public func ActualizePhase(pClonk)
             object_numbers: &object_numbers,
             string_registrations: &registrations,
         };
-        let clonk_script::Value::Proplist(map) =
-            parse_serialized_c4value("m[2;i1=o999;i1=S0]", 1)
-                .expect("reverse duplicate-key map parses")
-                .resolve(&resolution)
+        let clonk_script::Value::Proplist(map) = parse_serialized_c4value("m[2;i1=o999;i1=S0]", 1)
+            .expect("reverse duplicate-key map parses")
+            .resolve(&resolution)
         else {
             panic!("expected resolved map");
         };
@@ -31248,30 +31157,24 @@ public func ActualizePhase(pClonk)
             Some(&clonk_script::Value::String("same".to_string().into()))
         );
         assert_eq!(
-            locals
-                .get("sFirst")
-                .and_then(|value| match value {
-                    clonk_script::Value::String(value) => Some(value.enum_id()),
-                    _ => None,
-                }),
+            locals.get("sFirst").and_then(|value| match value {
+                clonk_script::Value::String(value) => Some(value.enum_id()),
+                _ => None,
+            }),
             Some(0)
         );
         assert_eq!(
-            locals
-                .get("sUmlaut")
-                .and_then(|value| match value {
-                    clonk_script::Value::String(value) => Some(value.enum_id()),
-                    _ => None,
-                }),
+            locals.get("sUmlaut").and_then(|value| match value {
+                clonk_script::Value::String(value) => Some(value.enum_id()),
+                _ => None,
+            }),
             Some(1)
         );
         assert_eq!(
-            locals
-                .get("sDuplicate")
-                .and_then(|value| match value {
-                    clonk_script::Value::String(value) => Some(value.enum_id()),
-                    _ => None,
-                }),
+            locals.get("sDuplicate").and_then(|value| match value {
+                clonk_script::Value::String(value) => Some(value.enum_id()),
+                _ => None,
+            }),
             Some(3),
             "the resolved C4Value retains the duplicate line's overwritten native ID"
         );
@@ -31882,9 +31785,10 @@ public func ActualizePhase(pClonk)
         };
         let scenario =
             Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
-        let library =
-            clonk_resources::MaterialLibrary::parse("[Material]\nName=Earth\nDensity=100\nSoil=1\n")
-                .expect("materials parse");
+        let library = clonk_resources::MaterialLibrary::parse(
+            "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
+        )
+        .expect("materials parse");
         let mut engine = Engine::with_seed(7);
         engine.configure_materials_from_library(&library);
         scenario.apply(&mut engine).expect("scenario applies");
@@ -31953,6 +31857,220 @@ public func ActualizePhase(pClonk)
         };
         assert_eq!(count("TREE"), 0, "NoInitialize skips vegetation");
         assert_eq!(count("GOAL"), 0, "NoInitialize skips goals");
+    }
+
+    fn legacy_rule_goal_placement_scenario() -> (tempfile::TempDir, Scenario) {
+        let dir = tempdir().expect("tempdir");
+        let defs_root = dir.path().join("Defs.c4d");
+        for (folder, id, category) in [
+            ("Revivals.c4d", "RVLR", 8192),
+            ("Energy.c4d", "ENRG", 8192),
+            ("Race.c4d", "RACE", 4096),
+            ("Melee.c4d", "MELE", 4096),
+            ("GoalController.c4d", "GOAL", 8192),
+        ] {
+            let def_dir = defs_root.join(folder);
+            std::fs::create_dir_all(&def_dir).expect("definition dir");
+            std::fs::write(
+                def_dir.join("DefCore.txt"),
+                format!("[DefCore]\nid={id}\nName={id}\nCategory={category}\n"),
+            )
+            .expect("write defcore");
+            write_test_definition_graphics(&def_dir);
+        }
+
+        let scenario_dir = dir.path().join("RuleGoalSync.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=RuleGoalSync\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Game]\nMode=1\nGoals=RACE=1;\nRules=RVLR=1;\n\n\
+             [Landscape]\nMapZoom=10\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[&[0, 0], &[0, 0]]),
+        )
+        .expect("write map");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        (dir, scenario)
+    }
+
+    fn assert_converted_rule_goal_placements(engine: &Engine) {
+        let snapshot = engine.snapshot();
+        let count = |definition_id: &str| {
+            snapshot
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == definition_id)
+                .count()
+        };
+        assert_eq!(count("RVLR"), 1, "the authored rule is placed");
+        assert_eq!(
+            count("ENRG"),
+            1,
+            "the default StructNeedEnergy selector is converted and placed"
+        );
+        assert_eq!(count("RACE"), 1, "the authored goal is placed");
+        assert_eq!(
+            count("MELE"),
+            1,
+            "the legacy Mode selector is converted and placed"
+        );
+    }
+
+    #[test]
+    fn offline_game_start_places_converted_game_parameter_defaults() {
+        // C4Scenario::Load converts the scenario in place before
+        // C4GameParameters copies its default Rules/Goals
+        // (oracle-src-pinned C4Scenario.cpp:86-97,503-540;
+        // C4GameParameters.cpp:555-568). InitRules/InitGoals later consume
+        // those parameters, never the pre-conversion lists
+        // (C4Game.cpp:2511-2520,4016-4036).
+        let (_dir, scenario) = legacy_rule_goal_placement_scenario();
+        let mut engine = Engine::with_seed(7);
+
+        scenario
+            .apply_before_players(&mut engine)
+            .expect("offline scenario applies");
+
+        assert_converted_rule_goal_placements(&engine);
+    }
+
+    #[test]
+    fn network_game_without_join_data_places_converted_game_parameter_defaults() {
+        // A missing network override retains the same post-ConvertGoals
+        // C4GameParameters defaults used by offline startup. JoinData may
+        // replace these lists, but absence cannot expose pre-load Scenario.txt
+        // state (oracle-src-pinned C4Scenario.cpp:86-97;
+        // C4GameParameters.cpp:555-568; C4Game.cpp:4016-4036).
+        let (_dir, scenario) = legacy_rule_goal_placement_scenario();
+        let mut engine = Engine::with_seed(7);
+
+        scenario
+            .apply_before_players_for_game_start(&mut engine, true, None, None, None, None, None)
+            .expect("network scenario applies");
+
+        assert_converted_rule_goal_placements(&engine);
+    }
+
+    #[test]
+    fn network_game_start_retains_authoritative_empty_rule_goal_lists() {
+        // JoinData compiles directly into C4GameParameters and its synchronized
+        // lists remain authoritative at InitRules/InitGoals
+        // (oracle-src-pinned C4GameParameters.cpp:555-568;
+        // C4Game.cpp:4016-4036). An explicit empty list therefore must not
+        // fall back to the converted scenario defaults.
+        let (_dir, scenario) = legacy_rule_goal_placement_scenario();
+        let authoritative = GameParameterRuleGoalLists::new(Vec::new(), Vec::new());
+        let mut engine = Engine::with_seed(7);
+
+        scenario
+            .apply_before_players_for_game_start(
+                &mut engine,
+                true,
+                None,
+                None,
+                None,
+                Some(&authoritative),
+                None,
+            )
+            .expect("network scenario applies");
+
+        let snapshot = engine.snapshot();
+        for definition_id in ["RVLR", "ENRG", "RACE", "MELE", "GOAL"] {
+            assert!(
+                snapshot
+                    .objects
+                    .iter()
+                    .all(|object| object.definition_id != definition_id),
+                "explicit empty JoinData suppresses {definition_id}"
+            );
+        }
+    }
+
+    // C4Game::InitRules/InitGoals read the synchronized
+    // Game.Parameters.Rules/Goals lists, not the raw C4S.Game lists
+    // (C4Game.cpp:4056-4076). This matters for legacy conversion: HarpoonRace
+    // authors RVLR only, while C4SGame::ConvertGoals adds the default ENRG
+    // rule to the parameters distributed in JoinData.
+    #[test]
+    fn network_game_start_places_synchronized_rules_and_goals_on_every_peer() {
+        let (_dir, scenario) = legacy_rule_goal_placement_scenario();
+        let parameters = scenario
+            .lobby_metadata()
+            .expect("legacy lobby metadata")
+            .game_parameter_defaults();
+        let synchronized = GameParameterRuleGoalLists::new(
+            parameters
+                .rules()
+                .iter()
+                .map(|entry| ScenarioIdListEntry::new(entry.id(), entry.count()))
+                .collect(),
+            parameters
+                .goals()
+                .iter()
+                .map(|entry| ScenarioIdListEntry::new(entry.id(), entry.count()))
+                .collect(),
+        );
+        assert_eq!(
+            synchronized
+                .rules()
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["RVLR", "ENRG"],
+            "legacy conversion adds ENRG to the synchronized parameter list"
+        );
+
+        let mut host = Engine::with_seed(7);
+        scenario
+            .apply_before_players_for_game_start(
+                &mut host,
+                true,
+                None,
+                None,
+                None,
+                Some(&synchronized),
+                None,
+            )
+            .expect("host scenario applies");
+        let mut client = Engine::with_seed(7);
+        scenario
+            .apply_before_players_for_game_start(
+                &mut client,
+                true,
+                None,
+                None,
+                None,
+                Some(&synchronized),
+                None,
+            )
+            .expect("client scenario applies");
+
+        for engine in [&host, &client] {
+            assert_eq!(
+                engine
+                    .snapshot()
+                    .objects
+                    .iter()
+                    .filter(|object| object.definition_id == "ENRG")
+                    .count(),
+                1,
+                "every peer places converted ENRG from Game.Parameters.Rules"
+            );
+        }
+        assert_eq!(
+            host.sync_check(0),
+            client.sync_check(0),
+            "host and client placement must produce the same synchronization digest"
+        );
     }
 
     // Objects.txt Mobile/FixX/FixY/FixR/RDir ingestion
@@ -32292,8 +32410,7 @@ public func ActualizePhase(pClonk)
         .expect("write landscape script");
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
@@ -32385,8 +32502,7 @@ public func ActualizePhase(pClonk)
         .expect("write landscape script");
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
@@ -32469,8 +32585,7 @@ public func ActualizePhase(pClonk)
         .expect("write landscape script");
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
@@ -32519,7 +32634,10 @@ public func ActualizePhase(pClonk)
                 .borrow()
                 .get("callback_weather")
                 .map(|cell| cell.borrow().clone()),
-            Some(clonk_script::Value::Array(vec![clonk_script::Value::Int(0); 4])),
+            Some(clonk_script::Value::Array(vec![
+                clonk_script::Value::Int(0);
+                4
+            ])),
             "PostInitMap still sees C4Weather::Default"
         );
         assert_eq!(
@@ -32563,8 +32681,8 @@ public func ActualizePhase(pClonk)
             "save restoration must not replay original-scenario PostInitMap callbacks"
         );
 
-        let scenario_core = std::fs::read_to_string(scenario_dir.join("Scenario.txt"))
-            .expect("read scenario core");
+        let scenario_core =
+            std::fs::read_to_string(scenario_dir.join("Scenario.txt")).expect("read scenario core");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
             scenario_core.replace("Title=Map callbacks", "Title=Map callbacks\nNoInitialize=1"),
@@ -32573,7 +32691,9 @@ public func ActualizePhase(pClonk)
         let scenario =
             Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario reloads");
         let mut engine = Engine::with_seed(0);
-        scenario.apply(&mut engine).expect("no-initialize scenario applies");
+        scenario
+            .apply(&mut engine)
+            .expect("no-initialize scenario applies");
         assert_eq!(
             engine
                 .script_globals
@@ -32613,8 +32733,7 @@ public func ActualizePhase(pClonk)
         .expect("write landscape script");
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
@@ -32683,10 +32802,7 @@ public func ActualizePhase(pClonk)
 
         let mut engine = Engine::with_seed(0);
         scenario.apply(&mut engine).expect("scenario applies");
-        engine.set_legacy_string_table(HashMap::from([(
-            0,
-            "first-activation-only".to_string(),
-        )]));
+        engine.set_legacy_string_table(HashMap::from([(0, "first-activation-only".to_string())]));
         assert!(engine
             .load_scenario_section("Next", 0, Vec::new())
             .expect("first source activation succeeds"));
@@ -32703,10 +32819,7 @@ public func ActualizePhase(pClonk)
             .load_scenario_section("Main", 0, Vec::new())
             .expect("main reloads"));
         write_objects(77);
-        engine.set_legacy_string_table(HashMap::from([(
-            0,
-            "second-activation-only".to_string(),
-        )]));
+        engine.set_legacy_string_table(HashMap::from([(0, "second-activation-only".to_string())]));
         assert!(engine
             .load_scenario_section("Next", 0, Vec::new())
             .expect("second source activation succeeds"));
@@ -32716,7 +32829,9 @@ public func ActualizePhase(pClonk)
         assert_eq!(second.position.x, 77, "source Objects.txt is reparsed");
         assert_eq!(
             second.local_vars.get("probe"),
-            Some(&clonk_script::Value::String("second-activation-only".into()))
+            Some(&clonk_script::Value::String(
+                "second-activation-only".into()
+            ))
         );
         drop(first);
         drop(second);
@@ -32742,11 +32857,8 @@ public func ActualizePhase(pClonk)
                 .is_some_and(|section| section.saved_objects.is_none()),
             "serializer scratch snapshots are discarded after freezing"
         );
-        let frozen_group = Group::from_raw_memory(
-            PathBuf::from("SectNext.c4g"),
-            frozen,
-        )
-        .expect("frozen group opens");
+        let frozen_group = Group::from_raw_memory(PathBuf::from("SectNext.c4g"), frozen)
+            .expect("frozen group opens");
         let frozen_objects = String::from_utf8(
             frozen_group
                 .read_file("Objects.txt")
@@ -32782,7 +32894,9 @@ public func ActualizePhase(pClonk)
         assert_eq!(frozen.position.x, 77, "frozen group wins over source edits");
         assert_eq!(
             frozen.local_vars.get("probe"),
-            Some(&clonk_script::Value::String("frozen-activation-only".into()))
+            Some(&clonk_script::Value::String(
+                "frozen-activation-only".into()
+            ))
         );
     }
 
@@ -33007,8 +33121,7 @@ public func ActualizePhase(pClonk)
         .expect("write section landscape");
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
@@ -33023,11 +33136,9 @@ public func ActualizePhase(pClonk)
             Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
         let mut engine = Engine::with_seed(0);
         scenario.apply(&mut engine).expect("scenario applies");
-        assert!(
-            engine
-                .load_scenario_section("Next", 0, Vec::new())
-                .expect("section load succeeds")
-        );
+        assert!(engine
+            .load_scenario_section("Next", 0, Vec::new())
+            .expect("section load succeeds"));
 
         assert_eq!(
             engine
@@ -33183,8 +33294,7 @@ public func ActualizePhase(pClonk)
 
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
@@ -33264,8 +33374,7 @@ public func ActualizePhase(pClonk)
 
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
@@ -33286,11 +33395,9 @@ public func ActualizePhase(pClonk)
         .expect("scenario loads");
         let mut engine = Engine::with_seed(0);
         scenario.apply(&mut engine).expect("scenario applies");
-        assert!(
-            engine
-                .load_scenario_section("Next", 0, Vec::new())
-                .expect("section load succeeds")
-        );
+        assert!(engine
+            .load_scenario_section("Next", 0, Vec::new())
+            .expect("section load succeeds"));
         let raster = engine
             .landscape()
             .and_then(Landscape::raster_state)
@@ -33341,8 +33448,7 @@ public func ActualizePhase(pClonk)
         .expect("write mapless section core");
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
@@ -33392,33 +33498,47 @@ public func ActualizePhase(pClonk)
         let mut engine = Engine::with_seed(0);
         scenario.apply(&mut engine).expect("scenario applies");
         assert!(engine.pxs_system.peek_slot(0, 3).is_some());
-        assert_eq!(engine.mass_movers.slot(0).map(|mover| (mover.x, mover.y)), Some((4, 7)));
+        assert_eq!(
+            engine.mass_movers.slot(0).map(|mover| (mover.x, mover.y)),
+            Some((4, 7))
+        );
         engine.pxs_system.note_executed();
-        assert!(
-            engine
-                .load_scenario_section("Keep", 0, Vec::new())
-                .expect("mapless section load succeeds")
-        );
+        assert!(engine
+            .load_scenario_section("Keep", 0, Vec::new())
+            .expect("mapless section load succeeds"));
         assert!(engine.pxs_system.peek_slot(0, 3).is_some());
-        assert_eq!(engine.mass_movers.slot(0).map(|mover| (mover.x, mover.y)), Some((4, 7)));
-        assert_eq!(engine.pxs_system.execute_count(), 1);
-        assert!(
-            engine
-                .load_scenario_section("Next", 0, Vec::new())
-                .expect("section load succeeds")
+        assert_eq!(
+            engine.mass_movers.slot(0).map(|mover| (mover.x, mover.y)),
+            Some((4, 7))
         );
+        assert_eq!(engine.pxs_system.execute_count(), 1);
+        assert!(engine
+            .load_scenario_section("Next", 0, Vec::new())
+            .expect("section load succeeds"));
 
-        let pixel = engine.pxs_system.peek_slot(0, 3).expect("PXS slot restores");
+        let pixel = engine
+            .pxs_system
+            .peek_slot(0, 3)
+            .expect("PXS slot restores");
         assert_eq!(pixel.mat.index(), 0);
         assert_eq!(
-            [pixel.x.val(), pixel.y.val(), pixel.xdir.val(), pixel.ydir.val()],
+            [
+                pixel.x.val(),
+                pixel.y.val(),
+                pixel.xdir.val(),
+                pixel.ydir.val()
+            ],
             [98_304, -147_456, 8_192, -32_768]
         );
         let mover = engine.mass_movers.slot(0).expect("mover slot restores");
         assert_eq!((mover.mat.index(), mover.x, mover.y), (0, 4, 7));
         assert_eq!(engine.mass_movers.count(), 1);
         assert_eq!(engine.mass_movers.create_ptr(), 0);
-        assert_eq!(engine.pxs_system.execute_count(), 1, "PXS Load leaves Count intact");
+        assert_eq!(
+            engine.pxs_system.execute_count(),
+            1,
+            "PXS Load leaves Count intact"
+        );
     }
 
     #[test]
@@ -33470,8 +33590,7 @@ public func ActualizePhase(pClonk)
 
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\nShape=0\n",
@@ -33611,8 +33730,7 @@ public func ActualizePhase(pClonk)
 
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "1=Earth-Rough\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
@@ -33758,9 +33876,7 @@ public func ActualizePhase(pClonk)
         ] {
             std::fs::write(
                 local.join(file),
-                format!(
-                    "[Material]\nName={name}\nDensity={density}\nTextureOverlay={overlay}\n"
-                ),
+                format!("[Material]\nName={name}\nDensity={density}\nTextureOverlay={overlay}\n"),
             )
             .expect("write local material");
         }
@@ -33794,7 +33910,9 @@ public func ActualizePhase(pClonk)
             vec!["Global", "Dup", "dUp", "LocalOnly"]
         );
         assert_eq!(
-            library.get("dup").and_then(|material| material.int("density")),
+            library
+                .get("dup")
+                .and_then(|material| material.int("density")),
             Some(10),
             "name lookup resolves the first same-load duplicate"
         );
@@ -33803,7 +33921,10 @@ public func ActualizePhase(pClonk)
         assert_eq!(materials.len(), 4, "duplicates retain numeric slots");
         assert_eq!(materials.id_of("DUP").map(|id| id.index()), Some(1));
         assert_eq!(
-            materials.iter().map(|material| material.name()).collect::<Vec<_>>(),
+            materials
+                .iter()
+                .map(|material| material.name())
+                .collect::<Vec<_>>(),
             vec!["Global", "Dup", "dUp", "LocalOnly"]
         );
 
@@ -33815,7 +33936,10 @@ public func ActualizePhase(pClonk)
             .map(|(_, slot)| *slot)
             .collect::<Vec<_>>();
         assert_eq!(duplicate_defaults.len(), 2);
-        assert_eq!(classifier.state.default_material_entry("dup"), Some(duplicate_defaults[0]));
+        assert_eq!(
+            classifier.state.default_material_entry("dup"),
+            Some(duplicate_defaults[0])
+        );
         assert_eq!(
             classifier.state.default_material_entry_by_index(1),
             Some(duplicate_defaults[0])
@@ -33888,9 +34012,7 @@ public func ActualizePhase(pClonk)
         materials
             .add_file("B.c4m", material_source(&material_long_b, 72))
             .unwrap();
-        materials
-            .add_file("TexMap.txt", texmap_source)
-            .unwrap();
+        materials.add_file("TexMap.txt", texmap_source).unwrap();
         let texture_bitmap = encode_indexed_bmp(&[&[0u8]]);
         for stem in [&texture_long_a, &texture_long_b] {
             let mut filename = stem.to_vec();
@@ -33916,28 +34038,25 @@ public func ActualizePhase(pClonk)
                 false,
             )
             .unwrap();
-        let group = Group::from_raw_memory(
-            PathBuf::from("ByteNames.c4s"),
-            scenario.pack_raw().unwrap(),
-        )
-        .unwrap();
-        let classifier = build_map_pixel_classifier(
-            &group,
-            &FileSystemResolver { roots: Vec::new() },
-        )
-        .unwrap()
-        .unwrap();
+        let group =
+            Group::from_raw_memory(PathBuf::from("ByteNames.c4s"), scenario.pack_raw().unwrap())
+                .unwrap();
+        let classifier =
+            build_map_pixel_classifier(&group, &FileSystemResolver { roots: Vec::new() })
+                .unwrap()
+                .unwrap();
         let library = classifier.material_library().unwrap();
         let names = library
             .iter()
             .map(|material| clonk_script::c4_string_bytes(material.name()))
             .collect::<Vec<_>>();
-        assert_eq!(names, vec![material_prefix.to_vec(), material_prefix.to_vec()]);
+        assert_eq!(
+            names,
+            vec![material_prefix.to_vec(), material_prefix.to_vec()]
+        );
         for material in library.iter() {
             assert_eq!(
-                material
-                    .value("Name")
-                    .map(clonk_script::c4_string_bytes),
+                material.value("Name").map(clonk_script::c4_string_bytes),
                 Some(material_prefix.to_vec()),
                 "compiled Name reflection matches the fixed live core"
             );
@@ -34162,8 +34281,7 @@ public func ActualizePhase(pClonk)
         .expect("write static map");
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nColor=1,2,3,4,5,6,7,8,9\nDensity=100\nShape=2\n",
@@ -34183,7 +34301,10 @@ public func ActualizePhase(pClonk)
         assert_eq!(landscape.map_seed(), -7);
         assert_eq!(landscape.left_open(), -1);
         assert_eq!(landscape.right_open(), 42);
-        assert!(!landscape.top_open(), "omitted runtime TopOpen defaults false");
+        assert!(
+            !landscape.top_open(),
+            "omitted runtime TopOpen defaults false"
+        );
         assert!(landscape.bottom_open());
         assert_eq!(landscape.modulation(), 4_278_255_360);
         assert_eq!(
@@ -34194,18 +34315,11 @@ public func ActualizePhase(pClonk)
         let mut shapes = vec![None; 128];
         shapes[30] = Some(crate::chunky::ChunkShape::Smooth);
         let indices = [0, 0, 0, 30, 30, 30];
-        let expected = crate::chunky::synthesize_landscape(&indices, 3, 2, 5, -7, &shapes)
-            .into_bytes();
+        let expected =
+            crate::chunky::synthesize_landscape(&indices, 3, 2, 5, -7, &shapes).into_bytes();
         let generated_seed = map_seed_from_random_seed(0);
-        let wrong = crate::chunky::synthesize_landscape(
-            &indices,
-            3,
-            2,
-            5,
-            generated_seed,
-            &shapes,
-        )
-        .into_bytes();
+        let wrong = crate::chunky::synthesize_landscape(&indices, 3, 2, 5, generated_seed, &shapes)
+            .into_bytes();
         assert_ne!(expected, wrong, "fixture must distinguish the runtime seed");
         let grid = landscape.pixel_grid().expect("static Surface8 restored");
         for row in 0..10 {
@@ -34220,7 +34334,11 @@ public func ActualizePhase(pClonk)
             crate::network_game_data::LANDSCAPE_DEFAULT_GRAVITY_RAW,
             "omitted runtime Gravity defaults to raw FIXED100(20)"
         );
-        assert_eq!(engine.physics().gravity, 100, "GetGravity projection restores too");
+        assert_eq!(
+            engine.physics().gravity,
+            100,
+            "GetGravity projection restores too"
+        );
         let mut edited_physics = engine.physics();
         edited_physics.gravity = 200;
         assert_eq!(
@@ -34235,7 +34353,10 @@ public func ActualizePhase(pClonk)
             "a stale hidden override is not serialized"
         );
         engine.set_physics(edited_physics);
-        assert_eq!(engine.physics().gravity_raw(), (crate::math::fixed100(200) / 5).val());
+        assert_eq!(
+            engine.physics().gravity_raw(),
+            (crate::math::fixed100(200) / 5).val()
+        );
 
         // Initial network dynamics carry exact Game.txt data without turning
         // Scenario.txt into a savegame. MapSeed/Mode/Modulation are compiled
@@ -34249,7 +34370,9 @@ public func ActualizePhase(pClonk)
         let scenario =
             Scenario::load_from_path_with(&scenario_dir, &resolver).expect("initial dynamic loads");
         let mut initial = Engine::with_seed(0);
-        scenario.apply(&mut initial).expect("initial dynamic applies");
+        scenario
+            .apply(&mut initial)
+            .expect("initial dynamic applies");
         let landscape = initial.landscape().unwrap();
         assert_eq!(landscape.map_seed(), -7);
         assert_eq!(landscape.mode(), LANDSCAPE_MODE_STATIC);
@@ -34365,9 +34488,7 @@ public func ActualizePhase(pClonk)
         ] {
             std::fs::write(
                 local.join(file),
-                format!(
-                    "[Material]\nName={name}\nDensity={density}\nTextureOverlay={overlay}\n"
-                ),
+                format!("[Material]\nName={name}\nDensity={density}\nTextureOverlay={overlay}\n"),
             )
             .expect("write local material");
         }
@@ -34415,7 +34536,10 @@ public func ActualizePhase(pClonk)
                 classifier.state.default_material_entry(name),
                 Some(slot as u8)
             );
-            assert_eq!(classifier.state.material_names[slot].as_deref(), Some(*name));
+            assert_eq!(
+                classifier.state.material_names[slot].as_deref(),
+                Some(*name)
+            );
             assert_eq!(
                 classifier.state.match_texture_names[slot].as_deref(),
                 Some(expected_texture)
@@ -34455,13 +34579,15 @@ public func ActualizePhase(pClonk)
         // swaps the requested entry with slot zero rather than stably moving
         // it. The same order must drive both MaterialIds and dynamic texmap
         // allocation (before CrossMapMaterials).
-        let classifier = build_material_enumeration_classifier(Some(
-            b"ignored [Enumeration]\r\nC\r\n",
-        ))
-        .expect("enumerated classifier builds");
+        let classifier =
+            build_material_enumeration_classifier(Some(b"ignored [Enumeration]\r\nC\r\n"))
+                .expect("enumerated classifier builds");
         let library = classifier.material_library().expect("materials loaded");
         assert_eq!(
-            library.iter().map(|material| material.name()).collect::<Vec<_>>(),
+            library
+                .iter()
+                .map(|material| material.name())
+                .collect::<Vec<_>>(),
             vec!["C", "B", "A"]
         );
 
@@ -34476,12 +34602,11 @@ public func ActualizePhase(pClonk)
 
     #[test]
     fn material_enumeration_missing_name_fails_scenario_material_load() {
-        let error = match build_material_enumeration_classifier(Some(
-            b"[Enumeration]\r\nMissing\r\n",
-        )) {
-            Ok(_) => panic!("missing enumeration material must fail"),
-            Err(error) => error,
-        };
+        let error =
+            match build_material_enumeration_classifier(Some(b"[Enumeration]\r\nMissing\r\n")) {
+                Ok(_) => panic!("missing enumeration material must fail"),
+                Err(error) => error,
+            };
         assert!(matches!(
             error,
             ScenarioError::MaterialEnumeration(
@@ -34557,8 +34682,7 @@ public func ActualizePhase(pClonk)
         assert_eq!(classifier.state.material_crossmap_entries, vec![30]);
 
         let encoded = serde_json::to_string(&classifier.state).expect("texmap serializes");
-        let restored: RuntimeTexMapState =
-            serde_json::from_str(&encoded).expect("texmap restores");
+        let restored: RuntimeTexMapState = serde_json::from_str(&encoded).expect("texmap restores");
         assert_eq!(restored, classifier.state);
     }
 
@@ -34635,8 +34759,7 @@ public func ActualizePhase(pClonk)
         let dir = tempdir().expect("tempdir");
         let materials = dir.path().join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "25=Water-Smooth\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "25=Water-Smooth\n").expect("write texmap");
         std::fs::write(
             materials.join("Water.c4m"),
             "[Material]\nName=Water\nDensity=25\n",
@@ -34708,10 +34831,7 @@ public func ActualizePhase(pClonk)
             classifier.state.material_names[30].as_deref(),
             Some("Earth")
         );
-        assert_eq!(
-            classifier.state.texture_names[30].as_deref(),
-            Some("Rough")
-        );
+        assert_eq!(classifier.state.texture_names[30].as_deref(), Some("Rough"));
     }
 
     #[test]
@@ -34724,9 +34844,10 @@ public func ActualizePhase(pClonk)
         for (slot, name) in names.iter_mut().enumerate().take(127).skip(1) {
             *name = Some(format!("Taken{slot}"));
         }
-        let library =
-            clonk_resources::MaterialLibrary::parse("[Material]\nName=Earth\nDensity=100\nShape=2\n")
-                .expect("material parses");
+        let library = clonk_resources::MaterialLibrary::parse(
+            "[Material]\nName=Earth\nDensity=100\nShape=2\n",
+        )
+        .expect("material parses");
         let mut classifier = MapPixelClassifier::from_slots_with_library(
             [0; 128],
             names,
@@ -34767,8 +34888,7 @@ public func ActualizePhase(pClonk)
         .expect("write scenario core");
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\n",
@@ -34798,7 +34918,10 @@ public func ActualizePhase(pClonk)
 
         assert_eq!(
             (
-                one.landscape.as_ref().expect("one-player landscape").width(),
+                one.landscape
+                    .as_ref()
+                    .expect("one-player landscape")
+                    .width(),
                 three
                     .landscape
                     .as_ref()
@@ -34868,10 +34991,13 @@ public func ActualizePhase(pClonk)
             &mut callbacks,
             &mut creator,
         )
-            .expect("fallback landscape loads")
-            .expect("fallback landscape exists");
+        .expect("fallback landscape loads")
+        .expect("fallback landscape exists");
 
-        assert_eq!((landscape.width(), landscape.estimated_height()), (100, 100));
+        assert_eq!(
+            (landscape.width(), landscape.estimated_height()),
+            (100, 100)
+        );
     }
 
     #[test]
@@ -34985,13 +35111,8 @@ public func ActualizePhase(pClonk)
                 vec![None; 128],
             );
 
-            let landscape = load_legacy_landscape_body_for_test(
-                &group,
-                &manifest,
-                Some(&mut classifier),
-                0,
-                1,
-            )
+            let landscape =
+                load_legacy_landscape_body_for_test(&group, &manifest, Some(&mut classifier), 0, 1)
                     .expect("shipped landscape loads")
                     .expect("shipped landscape exists");
             assert!(
@@ -35091,7 +35212,10 @@ public func ActualizePhase(pClonk)
         let grid = landscape
             .pixel_grid()
             .expect("classified maps build Surface8");
-        assert_eq!((landscape.width(), landscape.estimated_height()), (100, 100));
+        assert_eq!(
+            (landscape.width(), landscape.estimated_height()),
+            (100, 100)
+        );
         assert_eq!((grid.width(), grid.height()), (100, 100));
         assert_eq!(grid.byte_at(79, 49), Some(30), "map reaches its own edge");
         for y in 0..50 {
@@ -35104,9 +35228,18 @@ public func ActualizePhase(pClonk)
                 assert_eq!(grid.byte_at(x, y), Some(0), "bottom padding at ({x},{y})");
             }
         }
-        assert!(!landscape.is_solid_at(99, 99), "last in-bounds pixel is sky");
-        assert!(landscape.is_solid_at(100, 99), "right border starts at x=100");
-        assert!(landscape.is_solid_at(99, 100), "bottom border starts at y=100");
+        assert!(
+            !landscape.is_solid_at(99, 99),
+            "last in-bounds pixel is sky"
+        );
+        assert!(
+            landscape.is_solid_at(100, 99),
+            "right border starts at x=100"
+        );
+        assert!(
+            landscape.is_solid_at(99, 100),
+            "bottom border starts at y=100"
+        );
     }
 
     #[test]
@@ -35122,21 +35255,10 @@ public func ActualizePhase(pClonk)
         names[30] = Some("Earth".into());
         let mut shapes = vec![None; 128];
         shapes[30] = Some(crate::chunky::ChunkShape::Flat);
-        let classifier = MapPixelClassifier::from_slots(
-            densities,
-            names,
-            vec![None; 128],
-            shapes.clone(),
-        );
-        let expected = crate::chunky::synthesize_landscape(
-            &bitmap.indices,
-            11,
-            10,
-            10,
-            0,
-            &shapes,
-        )
-        .into_bytes();
+        let classifier =
+            MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes.clone());
+        let expected = crate::chunky::synthesize_landscape(&bitmap.indices, 11, 10, 10, 0, &shapes)
+            .into_bytes();
 
         let landscape =
             classified_landscape(&bitmap, &classifier, 10, 0).expect("landscape builds");
@@ -35144,7 +35266,11 @@ public func ActualizePhase(pClonk)
             .pixel_grid()
             .expect("classified maps build Surface8");
         assert_eq!((grid.width(), grid.height()), (110, 100));
-        assert_eq!(grid.bytes(), expected, "unclamped planes stay byte-identical");
+        assert_eq!(
+            grid.bytes(),
+            expected,
+            "unclamped planes stay byte-identical"
+        );
     }
 
     #[test]
@@ -35223,15 +35349,10 @@ public func ActualizePhase(pClonk)
         let mut classifier =
             MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
 
-        let landscape = load_legacy_landscape_body_for_test(
-            &group,
-            &manifest,
-            Some(&mut classifier),
-            0,
-            1,
-        )
-            .expect("exact landscape loads")
-            .expect("exact landscape exists");
+        let landscape =
+            load_legacy_landscape_body_for_test(&group, &manifest, Some(&mut classifier), 0, 1)
+                .expect("exact landscape loads")
+                .expect("exact landscape exists");
         let grid = landscape
             .pixel_grid()
             .expect("exact indexed landscape keeps Surface8");
@@ -35259,19 +35380,14 @@ public func ActualizePhase(pClonk)
     fn exact_landscape_honors_new_style_version_png_and_invalid_bytes() {
         fn classifier() -> MapPixelClassifier {
             let mut state = RuntimeTexMapState::default();
-            state.materials = [
-                ("Dup", 60),
-                ("dUp", 61),
-                ("Vehicle", 100),
-                ("Tunnel", 50),
-            ]
-            .into_iter()
-            .map(|(name, density)| RuntimeTexMapMaterial {
-                name: name.to_string(),
-                density,
-                shape: crate::chunky::ChunkShape::Flat,
-            })
-            .collect();
+            state.materials = [("Dup", 60), ("dUp", 61), ("Vehicle", 100), ("Tunnel", 50)]
+                .into_iter()
+                .map(|(name, density)| RuntimeTexMapMaterial {
+                    name: name.to_string(),
+                    density,
+                    shape: crate::chunky::ChunkShape::Flat,
+                })
+                .collect();
             state.default_material_entries = vec![
                 ("Dup".to_string(), 30),
                 ("dUp".to_string(), 31),
@@ -35311,16 +35427,11 @@ public func ActualizePhase(pClonk)
         ) -> Result<Landscape, ScenarioError> {
             let scenario_dir = root.join(format!("{name}.c4s"));
             std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
-            let source = format!(
-                "[Landscape]\nExactLandscape=1\nNewStyleLandscape={format}\n"
-            );
+            let source = format!("[Landscape]\nExactLandscape=1\nNewStyleLandscape={format}\n");
             std::fs::write(scenario_dir.join("Scenario.txt"), &source)
                 .expect("write scenario core");
-            std::fs::write(
-                scenario_dir.join("Landscape.bmp"),
-                encode_indexed_bmp(rows),
-            )
-            .expect("write Landscape.bmp");
+            std::fs::write(scenario_dir.join("Landscape.bmp"), encode_indexed_bmp(rows))
+                .expect("write Landscape.bmp");
             if let Some(png) = png {
                 std::fs::write(scenario_dir.join("lAnDsCaPe.PnG"), png)
                     .expect("write Landscape.png");
@@ -35435,7 +35546,10 @@ public func ActualizePhase(pClonk)
         let ScenarioError::InvalidLandscape(detail) = error else {
             panic!("unexpected invalid-byte error: {error:?}");
         };
-        assert!(detail.contains("(1/1)"), "wrong invalid-byte coordinate: {detail}");
+        assert!(
+            detail.contains("(1/1)"),
+            "wrong invalid-byte coordinate: {detail}"
+        );
         assert!(detail.contains("42"), "wrong invalid-byte value: {detail}");
     }
 
@@ -35465,10 +35579,9 @@ public func ActualizePhase(pClonk)
         .expect("write mixed-case diff landscape");
 
         let group = Group::open(&scenario_dir).expect("scenario group opens");
-        let manifest = parse_legacy_scenario_text(
-            "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n",
-        )
-        .expect("scenario core parses");
+        let manifest =
+            parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n")
+                .expect("scenario core parses");
         let mut densities = [0i32; 128];
         let mut names = vec![None; 128];
         let mut shapes = vec![None; 128];
@@ -35498,10 +35611,7 @@ public func ActualizePhase(pClonk)
         .expect("legacy landscape exists");
 
         assert_eq!(
-            landscape
-                .pixel_grid()
-                .expect("loaded Surface8")
-                .bytes(),
+            landscape.pixel_grid().expect("loaded Surface8").bytes(),
             &[1, 7, 3, 0, 5, 8],
             "0xff preserves the base while every other differing byte applies"
         );
@@ -35525,8 +35635,7 @@ public func ActualizePhase(pClonk)
             encode_indexed_bmp(&[&[1]]),
         )
         .expect("write exact landscape");
-        let source =
-            "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\nShadeMaterials=0\n";
+        let source = "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\nShadeMaterials=0\n";
         let group = Group::open(&scenario_dir).expect("scenario group opens");
         let manifest = parse_legacy_scenario_text(source).expect("scenario core parses");
         let mut densities = [0i32; 128];
@@ -35559,10 +35668,9 @@ public func ActualizePhase(pClonk)
             !landscape.shade_materials(),
             "the parsed scenario flag rides the runtime landscape snapshot"
         );
-        let restored: Landscape = serde_json::from_str(
-            &serde_json::to_string(&landscape).expect("landscape serializes"),
-        )
-        .expect("landscape restores");
+        let restored: Landscape =
+            serde_json::from_str(&serde_json::to_string(&landscape).expect("landscape serializes"))
+                .expect("landscape restores");
         assert!(!restored.shade_materials());
     }
 
@@ -35579,10 +35687,9 @@ public func ActualizePhase(pClonk)
         )
         .expect("write static map only");
         let group = Group::open(&scenario_dir).expect("scenario group opens");
-        let manifest = parse_legacy_scenario_text(
-            "[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n",
-        )
-        .expect("scenario core parses");
+        let manifest =
+            parse_legacy_scenario_text("[Landscape]\nExactLandscape=1\nNewStyleLandscape=2\n")
+                .expect("scenario core parses");
 
         let error = load_legacy_landscape_body_for_test(&group, &manifest, None, 0, 1)
             .expect_err("exact load must require Landscape.bmp");
@@ -35693,7 +35800,10 @@ public func ActualizePhase(pClonk)
         // the rendered map is 20x20 with ground starting at y=5, while
         // C4Landscape::Init pads both axes to 100. The column-only fallback
         // represents the right-hand padding as all-sky columns.
-        assert_eq!((landscape.width(), landscape.estimated_height()), (100, 100));
+        assert_eq!(
+            (landscape.width(), landscape.estimated_height()),
+            (100, 100)
+        );
         assert_eq!(&landscape.surface()[..20], vec![5; 20].as_slice());
         assert_eq!(&landscape.surface()[20..], vec![100; 80].as_slice());
     }
@@ -36081,7 +36191,14 @@ mod game_start_sync {
             .object_snapshot(ObjectId::new(100))
             .expect("passive object");
         assert_eq!(passive.action.name, "Passive");
-        assert_eq!((passive.action.time, passive.action.phase, passive.action.ticks), (-7, -2, -3));
+        assert_eq!(
+            (
+                passive.action.time,
+                passive.action.phase,
+                passive.action.ticks
+            ),
+            (-7, -2, -3)
+        );
         assert_eq!(
             passive.action.data, 41,
             "ActIdle -> DFA_NONE preserves Action.Data"
@@ -36099,7 +36216,14 @@ mod game_start_sync {
             .object_snapshot(ObjectId::new(101))
             .expect("attached object");
         assert_eq!(attached.action.name, "Attached");
-        assert_eq!((attached.action.time, attached.action.phase, attached.action.ticks), (-8, -4, -5));
+        assert_eq!(
+            (
+                attached.action.time,
+                attached.action.phase,
+                attached.action.ticks
+            ),
+            (-8, -4, -5)
+        );
         assert_eq!(
             attached.action.data, 0,
             "ActIdle -> non-NONE procedure clears Action.Data"
@@ -36111,7 +36235,14 @@ mod game_start_sync {
         assert_eq!(missing.action.name, crate::action::DEFAULT_ACTION_NAME);
         assert_eq!(missing.action.act_map_index, None);
         assert_eq!(missing.action.raw_name.as_deref(), Some("Missing"));
-        assert_eq!((missing.action.time, missing.action.phase, missing.action.ticks), (-9, -6, -7));
+        assert_eq!(
+            (
+                missing.action.time,
+                missing.action.phase,
+                missing.action.ticks
+            ),
+            (-9, -6, -7)
+        );
         assert_eq!(missing.action.data, 43);
         let missing_index = engine
             .find_object_index(ObjectId::new(102))
@@ -36130,7 +36261,14 @@ mod game_start_sync {
             .expect("partial object");
         assert_eq!(partial.action.name, crate::action::DEFAULT_ACTION_NAME);
         assert_eq!(partial.action.compiled_name(), "");
-        assert_eq!((partial.action.time, partial.action.phase, partial.action.ticks), (-10, -8, -9));
+        assert_eq!(
+            (
+                partial.action.time,
+                partial.action.phase,
+                partial.action.ticks
+            ),
+            (-10, -8, -9)
+        );
         assert_eq!(
             partial.action.data, 44,
             "incomplete-object coercion remains DFA_NONE -> DFA_NONE"
@@ -36226,7 +36364,10 @@ mod game_start_sync {
             .find_object_index(ObjectId::new(101))
             .expect("unresolved object exists");
         let unresolved = &engine.objects[unresolved_index];
-        assert_eq!(unresolved.state.action.name, crate::action::DEFAULT_ACTION_NAME);
+        assert_eq!(
+            unresolved.state.action.name,
+            crate::action::DEFAULT_ACTION_NAME
+        );
         assert_eq!(
             unresolved.state.action.raw_name.as_deref(),
             Some(unresolved_name.as_str()),
@@ -36415,8 +36556,7 @@ mod game_start_sync {
         .expect("objects");
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "# dynamic slots only\n")
-            .expect("texmap");
+        std::fs::write(materials.join("TexMap.txt"), "# dynamic slots only\n").expect("texmap");
         std::fs::write(
             materials.join("Vehicle.c4m"),
             "[Material]\nName=Vehicle\nDensity=100\nTextureOverlay=Smooth\n",

@@ -14,28 +14,35 @@
     clippy::vec_init_then_push
 )]
 
-#[doc(hidden)] pub mod action;
+#[doc(hidden)]
+pub mod action;
 mod chunky;
-#[doc(hidden)] pub mod command;
-#[doc(hidden)] pub mod compat;
+#[doc(hidden)]
+pub mod command;
+#[doc(hidden)]
+pub mod compat;
 mod control;
 mod control_execution;
 mod direct_com;
-#[doc(hidden)] pub mod effect;
+#[doc(hidden)]
+pub mod effect;
 pub mod fixtures;
 mod init_placement;
 mod input;
-#[doc(hidden)] pub mod landscape;
+#[doc(hidden)]
+pub mod landscape;
 mod live_c4_player;
 mod live_c4_save;
 mod map_creator;
 mod map_creator_s2;
 mod mass_mover;
-#[doc(hidden)] pub mod material;
-#[doc(hidden)] pub use clonk_engine_core::math;
+#[doc(hidden)]
+pub mod material;
+#[doc(hidden)]
+pub use clonk_engine_core::math;
 mod message;
-mod network_game_data;
 mod native_function_parameters;
+mod network_game_data;
 pub mod ocf;
 #[cfg(test)]
 mod parity_differential;
@@ -47,17 +54,20 @@ use player_file::PlayerInfoCoreState;
 pub mod pxs;
 mod record;
 mod runtime_join_player_restore;
-#[doc(hidden)] pub use clonk_engine_core::rng;
+#[doc(hidden)]
+pub use clonk_engine_core::rng;
 mod round_results;
 pub mod scenario;
-mod script_constants;
 mod scoreboard;
-#[doc(hidden)] pub mod sector;
+mod script_constants;
+#[doc(hidden)]
+pub mod sector;
 mod sky;
 #[cfg(test)]
 mod test_game_call_ex;
 pub mod text_spec;
-#[doc(hidden)] pub mod transfer;
+#[doc(hidden)]
+pub mod transfer;
 
 pub use action::{
     ActionLibrary, ActionProcedure, ActionSpec, ActionState, ActionUpdate, ActionUpdateResult,
@@ -68,51 +78,43 @@ pub use command::{CommandStackSnapshot, MenuRequest, MenuRequestKind};
 pub use compat::BlastReplay;
 pub use control::{
     append_control_packet_ini, encode_control_packet_ini, interpret_player_control_command,
-    ActivateGameGoalMenuControlData,
+    parse_control_ini, parse_replay_player_infos_ini, ActivateGameGoalMenuControlData,
     ActivateGameGoalRuleControlData, ClientCoreControlData, ClientJoinControlData,
     ClientRemoveControlData, ClientUpdateControlData, CommandKind, ControlButton, ControlCommand,
     ControlEvent, ControlIniEncodeError, ControlIniPacketMode, ControlPacket, ControlPacketId,
-    ControlPlayerInfoEntry, CustomCommandControlData,
-    DebugRecordControlData, EliminatePlayerControlData, EmDrawToolControlData, EmDropDefControlData,
-    EmMoveObjectControlData,
-    InitScenarioPlayerControlData,
-    JoinPlayerControlData,
+    ControlParseError, ControlPlayerInfoEntry, CustomCommandControlData, DebugRecordControlData,
+    EliminatePlayerControlData, EmDrawToolControlData, EmDropDefControlData,
+    EmMoveObjectControlData, InitScenarioPlayerControlData, JoinPlayerControlData,
     JoinPlayerSource, LegacyCString, MessageBoardAnswerControlData, MessageControlData,
     NetworkResourceCore, PlayerCommandControlData, PlayerControlData, PlayerInfoControlData,
-    PlayerInfoUpdateRequest, PlayerSelectControlData, RemovePlayerControlData, ScriptControlData,
-    ScriptStrictness, SetControlData, SetPlayerTeamControlData, SurrenderPlayerControlData,
-    ControlParseError, ReplayPlayerInfosDocument, SyncCheckPacket, parse_control_ini,
-    parse_replay_player_infos_ini,
-    SynchronizeControlData, ToggleHostilityControlData, VoteControlData,
-    CLIENT_UPDATE_ACTIVATE,
-    CLIENT_UPDATE_SET_OBSERVER,
+    PlayerInfoUpdateRequest, PlayerSelectControlData, RemovePlayerControlData,
+    ReplayPlayerInfosDocument, ScriptControlData, ScriptStrictness, SetControlData,
+    SetPlayerTeamControlData, SurrenderPlayerControlData, SyncCheckPacket, SynchronizeControlData,
+    ToggleHostilityControlData, VoteControlData, C4MN_ADJUST_POSITION,
     CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
-    CLIENT_PLAYER_INFO_FLAG_UPDATED, COM_CHAT, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT,
-    COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_HELP, COM_LEFT,
-    COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_LEFT,
-    COM_MENU_RIGHT, COM_MENU_SELECT, COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_PLAYER_MENU,
-    COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
-    COM_WHEEL_DOWN, COM_WHEEL_UP,
-    C4MN_ADJUST_POSITION, EMDT_BRUSH, EMDT_FILL, EMDT_LINE, EMDT_RECT, EMDT_SET_MODE,
-    EMMO_DUPLICATE, EMMO_ENTER, EMMO_EXIT, EMMO_MOVE, EMMO_REMOVE, EMMO_SCRIPT,
-    MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL, MESSAGE_TYPE_PRIVATE,
-    MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM, MESSAGE_TYPE_TEAM,
-    NETWORK_RESOURCE_TYPE_NULL,
-    PLAYER_INFO_FLAG_ATTRIBUTES_FIXED, PLAYER_INFO_FLAG_DISCONNECTED, PLAYER_INFO_FLAG_HAS_RESOURCE,
-    PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_IN_SCENARIO_FILE, PLAYER_INFO_FLAG_JOINED,
-    PLAYER_INFO_FLAG_JOIN_ISSUED, PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK,
-    PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
+    CLIENT_PLAYER_INFO_FLAG_UPDATED, CLIENT_UPDATE_ACTIVATE, CLIENT_UPDATE_SET_OBSERVER, COM_CHAT,
+    COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG,
+    COM_DOUBLE, COM_DOWN, COM_HELP, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN, COM_MENU_ENTER,
+    COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT, COM_MENU_SHOW_TEXT,
+    COM_MENU_UP, COM_PLAYER_MENU, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL,
+    COM_SPECIAL2, COM_THROW, COM_UP, COM_WHEEL_DOWN, COM_WHEEL_UP, EMDT_BRUSH, EMDT_FILL,
+    EMDT_LINE, EMDT_RECT, EMDT_SET_MODE, EMMO_DUPLICATE, EMMO_ENTER, EMMO_EXIT, EMMO_MOVE,
+    EMMO_REMOVE, EMMO_SCRIPT, MESSAGE_TYPE_ALERT, MESSAGE_TYPE_ME, MESSAGE_TYPE_NORMAL,
+    MESSAGE_TYPE_PRIVATE, MESSAGE_TYPE_SAY, MESSAGE_TYPE_SOUND, MESSAGE_TYPE_SYSTEM,
+    MESSAGE_TYPE_TEAM, NETWORK_RESOURCE_TYPE_NULL, PLAYER_INFO_FLAG_ATTRIBUTES_FIXED,
+    PLAYER_INFO_FLAG_DISCONNECTED, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
+    PLAYER_INFO_FLAG_IN_SCENARIO_FILE, PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_JOIN_ISSUED,
+    PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK, PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
     PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_FLAG_SAVEGAME_JOIN, PLAYER_INFO_FLAG_VOTED_OUT,
     PLAYER_INFO_FLAG_WON, PLAYER_INFO_TYPE_NONE, PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
     SCRIPT_SCOPE_CONSOLE, SCRIPT_SCOPE_GLOBAL, SET_VALUE_CONTROL_RATE, SET_VALUE_DISABLE_DEBUG,
     SET_VALUE_FAIR_CREW, SET_VALUE_MAX_PLAYER, SET_VALUE_NONE, SET_VALUE_TEAM_COLORS,
-    SET_VALUE_TEAM_DISTRIBUTION,
-    VOTE_TYPE_CANCEL, VOTE_TYPE_KICK, VOTE_TYPE_NONE, VOTE_TYPE_PAUSE,
+    SET_VALUE_TEAM_DISTRIBUTION, VOTE_TYPE_CANCEL, VOTE_TYPE_KICK, VOTE_TYPE_NONE, VOTE_TYPE_PAUSE,
 };
 pub use control_execution::{
-    AdmittedPlayerTeamUpdate, assign_initial_host_player_teams, assign_initial_offline_player_teams,
+    assign_initial_host_player_teams, assign_initial_offline_player_teams,
     generate_default_initial_team, prepare_join_player_config, resolve_remote_embedded_player_data,
-    resolve_remote_embedded_player_data_with_engine,
+    resolve_remote_embedded_player_data_with_engine, AdmittedPlayerTeamUpdate,
     ControlClientRegistry, ControlClientState, ControlPlayerInfoRegistry,
     InitialHostTeamAssignmentOracle, JoinPlayerPreparation, PlayerInfoAdmission,
     PrepareJoinPlayerError, RemoteEmbeddedPlayerData, ResolveRemoteEmbeddedPlayerDataError,
@@ -151,9 +153,8 @@ pub use network_game_data::{
     parse_initial_network_game_data, parse_landscape_game_data, serialize_initial_network_game,
     InitialNetworkCompiledSections, InitialNetworkGameApplyError, InitialNetworkGameData,
     InitialNetworkGameError, InitialNetworkMessageBoardCommand, LandscapeGameData,
-    MessageBoardCommandRestriction,
-    UnsupportedInitialNetworkGameState, INITIAL_NETWORK_DEFAULT_SYNC_RATE,
-    LANDSCAPE_DEFAULT_GRAVITY_RAW,
+    MessageBoardCommandRestriction, UnsupportedInitialNetworkGameState,
+    INITIAL_NETWORK_DEFAULT_SYNC_RATE, LANDSCAPE_DEFAULT_GRAVITY_RAW,
 };
 pub use pathfinder::{
     PathFinder, PathWaypoint, PathfinderDebugRay, PathfinderDebugRayStatus,
@@ -176,21 +177,20 @@ pub use runtime_join_player_restore::{
     RestoredRuntimeJoinPlayer, RuntimeJoinPlayerRestoreError, RuntimeJoinPlayerSource,
 };
 pub use scenario::{
-    InitialNetworkScenarioMetadata, InitialNetworkTeam, InitialNetworkTeamDistribution,
-    InitialNetworkTeamMetadata, LegacyC4SVal, PlayerStart, Scenario,
-    ScenarioDefinitionSelectionSource, ScenarioError, ScenarioFairCrewForce,
-    ScenarioGameParameterOverrides, ScenarioGameParameterResolution, ScenarioGameParameterValues,
-    ScenarioIdListEntry, ScenarioLoaderMetadata, ScenarioLoaderSelection, ScenarioLobbyClient,
-    ScenarioLobbyDefinitions, ScenarioLobbyHead, ScenarioLobbyIdEntry, ScenarioLobbyMetadata,
-    ScenarioLobbyTeam, ScenarioLobbyTeams, ScenarioObjectives, ScenarioSavegameDefinitionOverride,
-    ReplayScenarioStartupPreflight, ScenarioTeamColor, ScenarioTeamDistribution,
-    ScenarioTeamsSource, SkyConfig,
-    MAX_PLAYER_STARTS,
+    GameParameterRuleGoalLists, InitialNetworkScenarioMetadata, InitialNetworkTeam,
+    InitialNetworkTeamDistribution, InitialNetworkTeamMetadata, LegacyC4SVal, PlayerStart,
+    ReplayScenarioStartupPreflight, Scenario, ScenarioDefinitionSelectionSource, ScenarioError,
+    ScenarioFairCrewForce, ScenarioGameParameterOverrides, ScenarioGameParameterResolution,
+    ScenarioGameParameterValues, ScenarioIdListEntry, ScenarioLoaderMetadata,
+    ScenarioLoaderSelection, ScenarioLobbyClient, ScenarioLobbyDefinitions, ScenarioLobbyHead,
+    ScenarioLobbyIdEntry, ScenarioLobbyMetadata, ScenarioLobbyTeam, ScenarioLobbyTeams,
+    ScenarioObjectives, ScenarioSavegameDefinitionOverride, ScenarioTeamColor,
+    ScenarioTeamDistribution, ScenarioTeamsSource, SkyConfig, MAX_PLAYER_STARTS,
 };
+use scoreboard::ScoreboardPresentationSink;
 pub use scoreboard::{
     ScoreboardCell, ScoreboardPresentationRequest, ScoreboardState, SCOREBOARD_CAPTION,
 };
-use scoreboard::ScoreboardPresentationSink;
 pub use sky::{SkyFrame, SkyParallaxMode, SkySettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,8 +232,7 @@ mod command_definition_snapshot_cache_regression {
     }
 
     #[test]
-    fn definition_and_script_boundaries_invalidate_shared_host_tables() -> Result<(), EngineError>
-    {
+    fn definition_and_script_boundaries_invalidate_shared_host_tables() -> Result<(), EngineError> {
         let mut engine = Engine::new();
         engine.register_definition(Definition::from_script("BASE", "Base", "")?)?;
 
@@ -252,10 +251,7 @@ mod command_definition_snapshot_cache_regression {
         assert!(!Rc::ptr_eq(&after_definition, &after_script));
 
         engine.set_standard_names(Some("Ada\nGrace".to_string()));
-        assert!(!Rc::ptr_eq(
-            &after_script,
-            &engine.host_definition_tables()
-        ));
+        assert!(!Rc::ptr_eq(&after_script, &engine.host_definition_tables()));
         Ok(())
     }
 }
@@ -296,8 +292,7 @@ mod signed_action_direction_regression {
             engine.set_exec_action_direction(index, &definition_id, Direction::Right)?;
 
             assert_eq!(
-                engine.objects[index].state.direction,
-                expected,
+                engine.objects[index].state.direction, expected,
                 "Directions={raw_directions}"
             );
         }
@@ -310,10 +305,7 @@ mod stale_phase_call_regression {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    fn install_physical_actions(
-        definition: &mut Definition,
-        actions: Vec<(&str, ActionSpec)>,
-    ) {
+    fn install_physical_actions(definition: &mut Definition, actions: Vec<(&str, ActionSpec)>) {
         definition.configure_actions(
             None,
             actions
@@ -442,8 +434,8 @@ protected func NewOneStart() { marker = marker * 10 + 3; return 1; }
     }
 
     #[test]
-    fn removed_phase_receiver_still_runs_phase_end_start_before_stopping(
-    ) -> Result<(), EngineError> {
+    fn removed_phase_receiver_still_runs_phase_end_start_before_stopping() -> Result<(), EngineError>
+    {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut hooks = DebuggerHooks::new();
         {
@@ -529,14 +521,8 @@ protected func OldAborted(phase)
         install_physical_actions(
             &mut definition,
             vec![
-                (
-                    "Old",
-                    ActionSpec::default().with_abort_call("OldAborted"),
-                ),
-                (
-                    "Walk",
-                    ActionSpec::default().with_start_call("WalkStarted"),
-                ),
+                ("Old", ActionSpec::default().with_abort_call("OldAborted")),
+                ("Walk", ActionSpec::default().with_start_call("WalkStarted")),
             ],
         );
 
@@ -578,8 +564,7 @@ protected func OldAborted(phase)
     }
 
     #[test]
-    fn natural_phase_end_refreshes_ocf_before_start_and_end_callbacks(
-    ) -> Result<(), EngineError> {
+    fn natural_phase_end_refreshes_ocf_before_start_and_end_callbacks() -> Result<(), EngineError> {
         let mut definition = Definition::from_script(
             "POCF",
             "Natural action OCF refresh",
@@ -639,7 +624,10 @@ protected func SourceEnded()
             (state.action.name.as_str(), state.action.act_map_index),
             ("Target", Some(1)),
         );
-        assert_eq!(state.local_vars.get("callback_order"), Some(&Value::Int(12)));
+        assert_eq!(
+            state.local_vars.get("callback_order"),
+            Some(&Value::Int(12))
+        );
         assert_eq!(
             state.local_vars.get("start_saw_fight_ready"),
             Some(&Value::Int(1)),
@@ -735,16 +723,15 @@ fn script_context_function_metadata(function: &clonk_script::Function) -> Script
 use command::{
     definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandData,
     CommandDefinitionSnapshot, CommandEvent, CommandEventInstanceKind, CommandFailureFeedback,
-    CommandId, CommandObjectSnapshot, CommandOperation, CommandMode, CommandPlayerSnapshot, CommandRequest,
-    CommandRuntimeContext, CommandStack, CommandStepResult, GetAttemptDisposition,
+    CommandId, CommandMode, CommandObjectSnapshot, CommandOperation, CommandPlayerSnapshot,
+    CommandRequest, CommandRuntimeContext, CommandStack, CommandStepResult, GetAttemptDisposition,
 };
 use compat::{
-    BlastPixelReplay,
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
-    object_reference_value, AudioRegistry, DefinitionMetadata, EffectContextOutcome,
-    EnvironmentDelta, HostSolidMaskImage, HostSolidMaskMetadata, HostWorldContext, HostWorldObject,
-    LandscapeOperation, LazyHostWorldProvider, NextMissionCommand, ObjectOrderCommand,
-    ObjectOrderFunction, PhysicsDelta, PlayerCommand,
+    object_reference_value, AudioRegistry, BlastPixelReplay, DefinitionMetadata,
+    EffectContextOutcome, EnvironmentDelta, HostSolidMaskImage, HostSolidMaskMetadata,
+    HostWorldContext, HostWorldObject, LandscapeOperation, LazyHostWorldProvider,
+    NextMissionCommand, ObjectOrderCommand, ObjectOrderFunction, PhysicsDelta, PlayerCommand,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use material::{
@@ -768,6 +755,7 @@ use std::sync::{Arc, OnceLock};
 std::thread_local! {
     static HOST_WORLD_OBJECT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
     static HOST_WORLD_LANDSCAPE_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 use crate::math::{
@@ -778,11 +766,11 @@ use clonk_resources::definition::{
     ActionFacet as ResourceActionFacet, TargetRect as ResourceTargetRect,
 };
 pub use clonk_resources::definition::{APS_COLOR, APS_GRAPHICS, APS_NAME, APS_OVERLAY};
+pub use clonk_resources::PhysicalInfo;
 use clonk_resources::{
     ActionDefinition as ResourceActionDefinition, PictureRect as ResourcePictureRect,
     RankNameTable, ResourceDefinition as ResourceDefinitionData, C4_MAX_PHYSICAL,
 };
-pub use clonk_resources::PhysicalInfo;
 pub use clonk_script::ScriptError;
 
 use clonk_script::{DebuggerHooks, Engine as ScriptEngine, Value, ValueMap};
@@ -967,10 +955,7 @@ fn us_default_rank_names() -> Vec<String> {
 /// boundaries, but the component list only follows these refresh points.
 pub(crate) fn docon_refreshes_construction(before: i32, after: i32) -> bool {
     let step_size = FULL_CON / 100;
-    before / step_size != after / step_size
-        || after >= FULL_CON
-        || after == 0
-        || before >= FULL_CON
+    before / step_size != after / step_size || after >= FULL_CON || after == 0 || before >= FULL_CON
 }
 
 /// `ComponentConCutoff` / `ComponentConGain` (C4Object.cpp:510-526).
@@ -1250,17 +1235,20 @@ impl DrawTransform {
         let matrix = self.matrix();
         let rhs = delta.matrix();
 
-        Self::from_matrix_with_flip_dir([
-            matrix[0] * rhs[0] + matrix[3] * rhs[1] + matrix[6] * rhs[2],
-            matrix[1] * rhs[0] + matrix[4] * rhs[1] + matrix[7] * rhs[2],
-            matrix[2] * rhs[0] + matrix[5] * rhs[1] + matrix[8] * rhs[2],
-            matrix[0] * rhs[3] + matrix[3] * rhs[4] + matrix[6] * rhs[5],
-            matrix[1] * rhs[3] + matrix[4] * rhs[4] + matrix[7] * rhs[5],
-            matrix[2] * rhs[3] + matrix[5] * rhs[4] + matrix[8] * rhs[5],
-            matrix[0] * rhs[6] + matrix[3] * rhs[7] + matrix[6] * rhs[8],
-            matrix[1] * rhs[6] + matrix[4] * rhs[7] + matrix[7] * rhs[8],
-            matrix[2] * rhs[6] + matrix[5] * rhs[7] + matrix[8] * rhs[8],
-        ], self.flip_dir)
+        Self::from_matrix_with_flip_dir(
+            [
+                matrix[0] * rhs[0] + matrix[3] * rhs[1] + matrix[6] * rhs[2],
+                matrix[1] * rhs[0] + matrix[4] * rhs[1] + matrix[7] * rhs[2],
+                matrix[2] * rhs[0] + matrix[5] * rhs[1] + matrix[8] * rhs[2],
+                matrix[0] * rhs[3] + matrix[3] * rhs[4] + matrix[6] * rhs[5],
+                matrix[1] * rhs[3] + matrix[4] * rhs[4] + matrix[7] * rhs[5],
+                matrix[2] * rhs[3] + matrix[5] * rhs[4] + matrix[8] * rhs[5],
+                matrix[0] * rhs[6] + matrix[3] * rhs[7] + matrix[6] * rhs[8],
+                matrix[1] * rhs[6] + matrix[4] * rhs[7] + matrix[7] * rhs[8],
+                matrix[2] * rhs[6] + matrix[5] * rhs[7] + matrix[8] * rhs[8],
+            ],
+            self.flip_dir,
+        )
     }
 }
 
@@ -1270,10 +1258,9 @@ mod draw_transform_tests {
 
     #[test]
     fn legacy_serialized_transform_defaults_new_matrix_components() {
-        let transform: DrawTransform = serde_json::from_str(
-            r#"{"scale_x":2.0,"scale_y":3.0,"offset_x":4.0,"offset_y":5.0}"#,
-        )
-        .expect("legacy draw transform deserializes");
+        let transform: DrawTransform =
+            serde_json::from_str(r#"{"scale_x":2.0,"scale_y":3.0,"offset_x":4.0,"offset_y":5.0}"#)
+                .expect("legacy draw transform deserializes");
 
         assert_eq!(
             transform.matrix(),
@@ -1292,9 +1279,7 @@ mod draw_transform_tests {
 
     #[test]
     fn full_matrix_round_trips_through_serde() {
-        let transform = DrawTransform::from_matrix([
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0,
-        ]);
+        let transform = DrawTransform::from_matrix([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
         let serialized = serde_json::to_string(&transform).expect("draw transform serializes");
         let decoded: DrawTransform =
             serde_json::from_str(&serialized).expect("draw transform deserializes");
@@ -1397,7 +1382,8 @@ pub(crate) fn resolved_graphics_equal(
     right_definition: Option<&str>,
     right_name: Option<&str>,
 ) -> bool {
-    let (Some(left_definition), Some(right_definition)) = (left_definition, right_definition) else {
+    let (Some(left_definition), Some(right_definition)) = (left_definition, right_definition)
+    else {
         // A null pSourceGfx compares by pointer value; no serialized name can
         // make two null references different.
         return left_definition.is_none() && right_definition.is_none();
@@ -1839,9 +1825,8 @@ impl GammaControlState {
                 }
                 *value = (*value).clamp(0, 255);
             }
-            *output = ((channels[0] as u32) << 16)
-                | ((channels[1] as u32) << 8)
-                | channels[2] as u32;
+            *output =
+                ((channels[0] as u32) << 16) | ((channels[1] as u32) << 8) | channels[2] as u32;
         }
         combined
     }
@@ -1969,7 +1954,11 @@ impl ControlKeyName {
     }
 
     fn display(&self, short: bool) -> &str {
-        if short { &self.short } else { &self.long }
+        if short {
+            &self.short
+        } else {
+            &self.long
+        }
     }
 }
 
@@ -3286,8 +3275,10 @@ impl Default for MovementProfile {
 #[derive(Clone, Copy)]
 #[doc(hidden)]
 pub struct BridgeParameters {
-    #[doc(hidden)] pub duration: i32,
-    #[doc(hidden)] pub move_clonk: bool,
+    #[doc(hidden)]
+    pub duration: i32,
+    #[doc(hidden)]
+    pub move_clonk: bool,
     wall: bool,
     material: Option<MaterialId>,
 }
@@ -3502,13 +3493,7 @@ impl EnvironmentSettings {
     /// `C4Weather::Execute` re-evaluates these exact Std/Rnd/Min/Max fields;
     /// deriving a smaller variation from the bounded initial value changes
     /// both the RNG range and the resulting target wind.
-    pub(crate) fn set_legacy_wind_value(
-        &mut self,
-        std: i32,
-        rnd: i32,
-        min: i32,
-        max: i32,
-    ) {
+    pub(crate) fn set_legacy_wind_value(&mut self, std: i32, rnd: i32, min: i32, max: i32) {
         self.base_wind = std;
         self.wind_variation = rnd;
         self.wind_period = if rnd == 0 { 0 } else { 2_000 };
@@ -5062,10 +5047,8 @@ impl ObjectState {
         }
         let mut energy_died = false;
         if let Some(energy) = delta.energy {
-            energy_died = !delta.host_energy_death_checked
-                && self.alive
-                && self.energy != 0
-                && energy == 0;
+            energy_died =
+                !delta.host_energy_death_checked && self.alive && self.energy != 0 && energy == 0;
             self.energy = energy;
         }
         if let Some(breath) = delta.breath {
@@ -5438,15 +5421,14 @@ impl ObjectDelta {
         }
         let writes_construction = update.construction.is_some();
         let construction_via_docon = update.construction_via_docon;
-        let construction_preserves_fixed_position =
-            update.construction_preserves_fixed_position;
+        let construction_preserves_fixed_position = update.construction_preserves_fixed_position;
         let resynchronizes_fixed_position = update.position.is_some()
             || update
                 .action
                 .as_ref()
                 .is_some_and(|action| action.name.is_some());
-        let replaces_docon_position = update.position.is_some()
-            || (writes_construction && !construction_via_docon);
+        let replaces_docon_position =
+            update.position.is_some() || (writes_construction && !construction_via_docon);
         if replaces_docon_position && update.resolved_docon_position.is_none() {
             self.resolved_docon_position = None;
         }
@@ -5546,8 +5528,7 @@ impl ObjectDelta {
         }
         if writes_construction {
             self.construction_via_docon = construction_via_docon;
-            self.construction_preserves_fixed_position =
-                construction_preserves_fixed_position;
+            self.construction_preserves_fixed_position = construction_preserves_fixed_position;
         } else if resynchronizes_fixed_position {
             self.construction_preserves_fixed_position = false;
         }
@@ -5692,8 +5673,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             fire_flag: update.fire_flag,
             construction: update.construction,
             construction_via_docon: update.construction_via_docon,
-            construction_preserves_fixed_position: update
-                .construction_preserves_fixed_position,
+            construction_preserves_fixed_position: update.construction_preserves_fixed_position,
             resolved_docon_position: update.resolved_docon_position,
             resolved_docon_fixed_position: update.resolved_docon_fixed_position,
             damage: update.damage,
@@ -6498,8 +6478,10 @@ pub struct Object {
     pub fixed_velocity: FixedVec2,
     /// C4Object::motion_x/motion_y: whole-pixel displacement accumulated by
     /// DoMotion during the most recent DoMovement invocation.
-    #[doc(hidden)] pub motion_x: i32,
-    #[doc(hidden)] pub motion_y: i32,
+    #[doc(hidden)]
+    pub motion_x: i32,
+    #[doc(hidden)]
+    pub motion_y: i32,
     /// Raw fields consumed by C4Object::CompileFunc rather than reconstructed
     /// from their associated live pointers. C4EnumeratedObjectPtr keeps its
     /// signed enumeration word independent of the resolved Object pointer.
@@ -6561,12 +6543,14 @@ pub struct Object {
     last_attach_movement_frame: i32,
     /// Last energy-loss causing player (C4Object::LastEnergyLossCausePlayer,
     /// read by AssignDeath for kill attribution).
-    #[doc(hidden)] pub last_energy_loss_cause: i32,
+    #[doc(hidden)]
+    pub last_energy_loss_cause: i32,
     /// Transient C4Object::InMat cache. SetOCF/UpdateOCF sample it; ExecLife
     /// deliberately reads that cached, normally pre-movement material.
     in_mat: Option<MaterialId>,
     command_queue: VecDeque<QueuedCommand>,
-    #[doc(hidden)] pub commands: CommandStack,
+    #[doc(hidden)]
+    pub commands: CommandStack,
     pending_action_events: VecDeque<ActionTransitionEvent>,
     /// The DFA_SWIM free-fall exit `return`ed out of ExecAction this
     /// frame BEFORE any t_attach assignment — the frame's movement runs
@@ -6581,7 +6565,8 @@ pub struct Object {
     /// SetShape and loaded-object shape data until UpdateShape rebuilds the
     /// complete shape from DefCore (C4Shape.cpp:495-510).
     shape_fire_top: i32,
-    #[doc(hidden)] pub own_shape_vertices: Option<Vec<ObjectVertex>>,
+    #[doc(hidden)]
+    pub own_shape_vertices: Option<Vec<ObjectVertex>>,
 }
 
 /// Private C4Object compiler caches exposed verbatim by GetObjectVal. Pointer
@@ -7042,6 +7027,8 @@ impl Object {
     /// scope's GetXDir/GetYDir read the live C4Fixed values like C++
     /// (C4Script.cpp:1160-1180) instead of the int-quantized mirror.
     fn script_state_snapshot(&self) -> ObjectState {
+        #[cfg(test)]
+        SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         let mut state = self.state.clone();
         // A handful of engine-internal temporary shape probes replace the
         // active Vec directly before dispatching callbacks. Preserve the raw
@@ -7532,9 +7519,7 @@ impl Object {
             // 383.8/ydir 0.8 where cpp settled at 383.0/0).
             let override_x = candidate.x != original.x;
             let override_y = candidate.y != original.y;
-            if (override_x || override_y)
-                && coach_debug_id() == Some(movement.object_id.as_u64())
-            {
+            if (override_x || override_y) && coach_debug_id() == Some(movement.object_id.as_u64()) {
                 crate::rng::rng_trace_line(&format!(
                     "ATTOVR cand=({},{}) orig=({},{}) attach={}",
                     candidate.x,
@@ -7606,10 +7591,9 @@ impl Object {
                         layer.position.x + layer.shape_rect.x + layer.shape_rect.width + shape_x,
                     )
                 };
-                for cnat in
-                    target_bounds(target_x, low, high, CNAT_LEFT, CNAT_RIGHT)
-                        .into_iter()
-                        .flatten()
+                for cnat in target_bounds(target_x, low, high, CNAT_LEFT, CNAT_RIGHT)
+                    .into_iter()
+                    .flatten()
                 {
                     self.fixed_velocity.x = C4Fixed::ZERO;
                     self.state.velocity = self.velocity_pixels();
@@ -7667,10 +7651,9 @@ impl Object {
                         layer.position.y + layer.shape_rect.y + layer.shape_rect.height + shape_y,
                     )
                 };
-                for cnat in
-                    target_bounds(target_y, low, high, CNAT_TOP, CNAT_BOTTOM)
-                        .into_iter()
-                        .flatten()
+                for cnat in target_bounds(target_y, low, high, CNAT_TOP, CNAT_BOTTOM)
+                    .into_iter()
+                    .flatten()
                 {
                     self.fixed_velocity.y = C4Fixed::ZERO;
                     self.state.velocity = self.velocity_pixels();
@@ -7868,11 +7851,7 @@ impl Object {
                     // (C4Movement.cpp:392-425).
                     self.fixed_rotation = itofix(previous_rotation);
                     if contact_count == 1 && !redirect_yr {
-                        redirect_force(
-                            &mut self.rotation_velocity,
-                            &mut self.fixed_velocity.y,
-                            -1,
-                        );
+                        redirect_force(&mut self.rotation_velocity, &mut self.fixed_velocity.y, -1);
                     }
                     self.rotation_velocity = C4Fixed::ZERO;
                     self.refresh_velocity_from_fixed();
@@ -8316,14 +8295,15 @@ impl Object {
             let delta: ObjectDelta = command.update.into();
             if let Some(new_def) = delta.change_def.as_deref() {
                 if let Some(definition) = definitions.get(new_def) {
-                    let owner_color = players
-                        .get(&self.state.owner)
-                        .and_then(Player::color)
-                        .map(|color| {
-                            u32::from(color.r) << 16
-                                | u32::from(color.g) << 8
-                                | u32::from(color.b)
-                        });
+                    let owner_color =
+                        players
+                            .get(&self.state.owner)
+                            .and_then(Player::color)
+                            .map(|color| {
+                                u32::from(color.r) << 16
+                                    | u32::from(color.g) << 8
+                                    | u32::from(color.b)
+                            });
                     Engine::apply_change_object_def_to_object(
                         self,
                         new_def,
@@ -8504,11 +8484,12 @@ fn update_custom_rank_fields(
 pub(crate) fn adjust_crew_experience(info: &mut CrewObjectInfo, change: i32) -> bool {
     const MAX_EXPERIENCE: i32 = 100_000_000;
 
-    info.experience = info.experience.wrapping_add(change).clamp(0, MAX_EXPERIENCE);
+    info.experience = info
+        .experience
+        .wrapping_add(change)
+        .clamp(0, MAX_EXPERIENCE);
     let next_rank = info.rank.saturating_add(1);
-    if info.experience < MAX_EXPERIENCE
-        && info.experience >= crew_rank_experience(next_rank)
-    {
+    if info.experience < MAX_EXPERIENCE && info.experience >= crew_rank_experience(next_rank) {
         info.rank = next_rank;
         true
     } else {
@@ -8641,38 +8622,34 @@ fn apply_fair_crew_physical_script(
     if !script.has_function("GetFairCrewPhysical") {
         return physical;
     }
-    compat::with_fair_crew_definition_context(
-        definition_id.clone(),
-        definition_physical,
-        || {
-            for name in FAIR_CREW_PHYSICAL_NAMES {
-                let current = physical.value_by_name(name).unwrap_or_default();
-                let args = [Value::from(name), Value::Int(rank), Value::Int(current)];
-                match script.call_with_ref_args("GetFairCrewPhysical", &args) {
-                    Ok((commit, final_args)) if compat::value_raw_truthy(&commit) => {
-                        let value = final_args
-                            .get(2)
-                            .and_then(Value::as_c4_int)
-                            .unwrap_or_default();
-                        physical.set_by_name(name, value);
-                        cache.borrow_mut().insert(definition_id.clone(), physical);
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            definition = %definition_id,
-                            function = "GetFairCrewPhysical",
-                            field = name,
-                            error = %error,
-                            "script error in fair-crew physical callback; retaining numeric value"
-                        );
-                        log_runtime_call_frames(&definition_id, error.call_frames());
-                    }
+    compat::with_fair_crew_definition_context(definition_id.clone(), definition_physical, || {
+        for name in FAIR_CREW_PHYSICAL_NAMES {
+            let current = physical.value_by_name(name).unwrap_or_default();
+            let args = [Value::from(name), Value::Int(rank), Value::Int(current)];
+            match script.call_with_ref_args("GetFairCrewPhysical", &args) {
+                Ok((commit, final_args)) if compat::value_raw_truthy(&commit) => {
+                    let value = final_args
+                        .get(2)
+                        .and_then(Value::as_c4_int)
+                        .unwrap_or_default();
+                    physical.set_by_name(name, value);
+                    cache.borrow_mut().insert(definition_id.clone(), physical);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        definition = %definition_id,
+                        function = "GetFairCrewPhysical",
+                        field = name,
+                        error = %error,
+                        "script error in fair-crew physical callback; retaining numeric value"
+                    );
+                    log_runtime_call_frames(&definition_id, error.call_frames());
                 }
             }
-            physical
         }
-    )
+        physical
+    })
 }
 
 fn fair_crew_physical_with_script(
@@ -8760,7 +8737,7 @@ mod failsafe_call_stack_diagnostic_regression {
     use std::fmt;
     use std::sync::{Arc, Mutex};
     use tracing::field::{Field, Visit};
-    use tracing::{Level, subscriber};
+    use tracing::{subscriber, Level};
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use tracing_subscriber::registry::Registry;
 
@@ -8912,7 +8889,9 @@ public func Lone() { return MissingFromLone(); }
             .filter(|message| message.starts_with(" by: "))
             .collect::<Vec<_>>();
         assert_eq!(frames.len(), 3, "raw fail-safe path logs every frame");
-        assert!(frames.iter().all(|frame| frame.contains("(def Stack fixture)")));
+        assert!(frames
+            .iter()
+            .all(|frame| frame.contains("(def Stack fixture)")));
         assert!(frames.iter().all(|frame| !frame.contains("(obj ")));
 
         let mut scenario_host = ScriptEngine::new();
@@ -8964,7 +8943,11 @@ public func Lone() { return MissingFromLone(); }
             .iter()
             .filter(|message| message.starts_with(" by: "))
             .collect::<Vec<_>>();
-        assert_eq!(frames.len(), 1, "recovered frames must not leak into later calls");
+        assert_eq!(
+            frames.len(),
+            1,
+            "recovered frames must not leak into later calls"
+        );
         assert!(frames[0].contains("Lone()"));
         assert!(!frames[0].contains("Inner") && !frames[0].contains("Outer"));
     }
@@ -9888,9 +9871,7 @@ pub(crate) fn denumerate_script_value(value: &Value, object_numbers: &HashSet<u6
                 .map(|value| denumerate_script_value(value, object_numbers))
                 .collect(),
         ),
-        Value::Proplist(entries) => {
-            Value::Proplist(denumerate_script_map(entries, object_numbers))
-        }
+        Value::Proplist(entries) => Value::Proplist(denumerate_script_map(entries, object_numbers)),
         value => value.clone(),
     }
 }
@@ -10176,9 +10157,8 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
     }
 
     let mut engine = Engine::new();
-    let mut definition =
-        Definition::from_script("VBND", "Vertical bounds fixture", "")
-            .expect("definition compiles");
+    let mut definition = Definition::from_script("VBND", "Vertical bounds fixture", "")
+        .expect("definition compiles");
     definition.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
     engine
         .register_definition(definition)
@@ -10186,9 +10166,7 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
     let object_id = engine
         .spawn_object(SpawnConfig::new("VBND"))
         .expect("object spawns");
-    let object_index = engine
-        .find_object_index(object_id)
-        .expect("object index");
+    let object_index = engine.find_object_index(object_id).expect("object index");
     let landscape = Landscape::flat(8, 20);
     let live = Cell::new(MovementLiveConfig {
         border_bound: 0,
@@ -10268,8 +10246,7 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
         });
         let object = &mut engine.objects[object_index];
         object.fixed_position = original_fixed_position;
-        object.fixed_velocity =
-            FixedVec2::new(itofix(2), itofix(case.initial_ydir));
+        object.fixed_velocity = FixedVec2::new(itofix(2), itofix(case.initial_ydir));
         object.state.velocity = object.velocity_pixels();
         object.frame_t_contact = CNAT_LEFT;
         object.frame_shape_contact_cnat = CNAT_RIGHT;
@@ -10279,9 +10256,7 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
         let mut contacts = Vec::new();
         {
             let mut on_contact =
-                |object: &mut Object,
-                 _: &Landscape,
-                 dispatch: MovementContactDispatch| {
+                |object: &mut Object, _: &Landscape, dispatch: MovementContactDispatch| {
                     let MovementContactDispatch::Direct(cnat) = dispatch else {
                         panic!("TargetBounds must dispatch a direct contact");
                     };
@@ -10295,12 +10270,7 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
                     Ok(())
                 };
             object
-                .apply_vertical_bounds(
-                    &mut target,
-                    &landscape,
-                    movement,
-                    &mut on_contact,
-                )
+                .apply_vertical_bounds(&mut target, &landscape, movement, &mut on_contact)
                 .expect(case.name);
         }
 
@@ -10315,11 +10285,7 @@ fn vertical_bounds_preserve_cpp_million_pixel_sentinels() {
             .map(|cnat| (cnat, itofix(2).val(), 0, 2, 0))
             .collect::<Vec<_>>();
         assert_eq!(target, case.expected_target, "{} target", case.name);
-        assert_eq!(
-            object.fixed_velocity.y, expected_ydir,
-            "{} ydir",
-            case.name
-        );
+        assert_eq!(object.fixed_velocity.y, expected_ydir, "{} ydir", case.name);
         assert_eq!(
             object.state.velocity.y,
             fixtoi(expected_ydir),
@@ -10935,8 +10901,7 @@ pub fn object_visible_for_player(
             return false;
         };
         first != second
-            && (first_player.is_hostile_towards(second)
-                || second_player.is_hostile_towards(first))
+            && (first_player.is_hostile_towards(second) || second_player.is_hostile_towards(first))
     }
 
     fn inner(
@@ -11610,9 +11575,7 @@ pub(crate) fn solid_mask_pixels_for_checked_bitmap(
         return None;
     }
     let stride = usize::try_from(bitmap_width).ok()?.checked_mul(4)?;
-    let mut solid = Vec::with_capacity(
-        usize::try_from(mask.width.checked_mul(mask.height)?).ok()?,
-    );
+    let mut solid = Vec::with_capacity(usize::try_from(mask.width.checked_mul(mask.height)?).ok()?);
     for y in 0..mask.height {
         for x in 0..mask.width {
             let Some(source_x) = mask.x.checked_add(x) else {
@@ -11623,10 +11586,7 @@ pub(crate) fn solid_mask_pixels_for_checked_bitmap(
                 solid.push(1);
                 continue;
             };
-            if source_x < 0
-                || source_y < 0
-                || source_x >= bitmap_width
-                || source_y >= bitmap_height
+            if source_x < 0 || source_y < 0 || source_x >= bitmap_width || source_y >= bitmap_height
             {
                 solid.push(1);
                 continue;
@@ -11791,11 +11751,8 @@ impl DefinitionPictureImage {
             if (mask.width, mask.height) != (image.width(), image.height()) {
                 return None;
             }
-            let channels = definition_color_mask_channels(
-                &mask.pixels,
-                image.width(),
-                image.height(),
-            )?;
+            let channels =
+                definition_color_mask_channels(&mask.pixels, image.width(), image.height())?;
             definition_color_mask_has_coverage(&mask.pixels, channels)
                 .then(|| Arc::from(mask.pixels.clone().into_boxed_slice()))
         });
@@ -11827,10 +11784,8 @@ impl DefinitionPictureImage {
             pixels.extend_from_slice(sprite.pixels.get(start..end)?);
         }
         let color_mask = sprite.color_mask.as_ref().and_then(|mask| {
-            let channels =
-                definition_color_mask_channels(mask, sprite.width, sprite.height)?;
-            let mut cropped =
-                Vec::with_capacity(width as usize * height as usize * channels);
+            let channels = definition_color_mask_channels(mask, sprite.width, sprite.height)?;
+            let mut cropped = Vec::with_capacity(width as usize * height as usize * channels);
             for row in y..y + height {
                 let start = (row * sprite.width + x) as usize * channels;
                 let end = start + width as usize * channels;
@@ -11861,9 +11816,10 @@ impl DefinitionPictureImage {
         }
         let pixel_count = usize::try_from(u64::from(width).checked_mul(u64::from(height))?).ok()?;
         let mut pixels = vec![0; pixel_count.checked_mul(4)?];
-        let color_mask_channels = sprite.color_mask.as_ref().and_then(|mask| {
-            definition_color_mask_channels(mask, sprite.width, sprite.height)
-        });
+        let color_mask_channels = sprite
+            .color_mask
+            .as_ref()
+            .and_then(|mask| definition_color_mask_channels(mask, sprite.width, sprite.height));
         let mut color_mask = color_mask_channels
             .and_then(|channels| pixel_count.checked_mul(channels))
             .map(|len| vec![0; len]);
@@ -11894,19 +11850,16 @@ impl DefinitionPictureImage {
                     (color_mask.as_mut(), sprite.color_mask.as_ref())
                 {
                     let channels = color_mask_channels?;
-                    let source_start = usize::try_from(
-                        source_y * i64::from(sprite.width) + left,
-                    )
-                    .ok()?
-                    .checked_mul(channels)?;
-                    let source_end =
-                        source_start.checked_add(copy_width.checked_mul(channels)?)?;
+                    let source_start = usize::try_from(source_y * i64::from(sprite.width) + left)
+                        .ok()?
+                        .checked_mul(channels)?;
+                    let source_end = source_start.checked_add(copy_width.checked_mul(channels)?)?;
                     let destination_start = destination_y
                         .checked_mul(width as usize)?
                         .checked_add(destination_x)?;
                     let destination_start = destination_start.checked_mul(channels)?;
-                    let destination_end = destination_start
-                        .checked_add(copy_width.checked_mul(channels)?)?;
+                    let destination_end =
+                        destination_start.checked_add(copy_width.checked_mul(channels)?)?;
                     destination_mask
                         .get_mut(destination_start..destination_end)?
                         .copy_from_slice(source_mask.get(source_start..source_end)?);
@@ -11949,10 +11902,14 @@ impl DefinitionPictureImage {
 
 #[derive(Clone)]
 pub struct DefinitionSpriteImage {
-    #[doc(hidden)] pub width: u32,
-    #[doc(hidden)] pub height: u32,
-    #[doc(hidden)] pub pixels: Arc<[u8]>,
-    #[doc(hidden)] pub color_mask: Option<Arc<[u8]>>,
+    #[doc(hidden)]
+    pub width: u32,
+    #[doc(hidden)]
+    pub height: u32,
+    #[doc(hidden)]
+    pub pixels: Arc<[u8]>,
+    #[doc(hidden)]
+    pub color_mask: Option<Arc<[u8]>>,
 }
 
 impl DefinitionSpriteImage {
@@ -11964,11 +11921,8 @@ impl DefinitionSpriteImage {
             if mask.width != image.width() || mask.height != image.height() {
                 return None;
             }
-            let channels = definition_color_mask_channels(
-                &mask.pixels,
-                image.width(),
-                image.height(),
-            )?;
+            let channels =
+                definition_color_mask_channels(&mask.pixels, image.width(), image.height())?;
             if !definition_color_mask_has_coverage(&mask.pixels, channels) {
                 return None;
             }
@@ -12011,10 +11965,7 @@ impl DefinitionSpriteImage {
             return Arc::clone(&self.pixels);
         };
         let mut pixels = self.pixels.to_vec();
-        for (base, overlay) in pixels
-            .chunks_exact_mut(4)
-            .zip(overlay.chunks_exact(4))
-        {
+        for (base, overlay) in pixels.chunks_exact_mut(4).zip(overlay.chunks_exact(4)) {
             // C4Surface::GetPixDw composites the owner surface before
             // IsPixTransparent samples a solid mask. With C4's inverse-alpha
             // BltAlpha helper this is a saturating sum of conventional
@@ -12376,7 +12327,10 @@ impl ActionCallbackKind {
 /// Rust compatibility adapters reuse the expression evaluator for native C++
 /// calls; those must not appear in C4Aul's DirectExec trace/profiler totals.
 fn is_cpp_direct_exec_context(context: &str) -> bool {
-    matches!(context, "console script" | "internal script" | "MenuCommand")
+    matches!(
+        context,
+        "console script" | "internal script" | "MenuCommand"
+    )
 }
 
 impl Definition {
@@ -12609,8 +12563,7 @@ impl Definition {
     /// prefix). Unlike the public Context-menu projection above, native
     /// AddContextFunctions also enumerates functions with no description.
     pub(crate) fn script_menu_functions(&self, prefix: &str) -> Vec<ScriptContextFunction> {
-        self
-            .script
+        self.script
             .local_functions_in_get_sfunc_order()
             .filter(|(name, _)| name.starts_with(prefix))
             .map(|(_, function)| {
@@ -12752,8 +12705,7 @@ impl Definition {
     /// the engine-owned global value cells.
     fn reset_script_links(&mut self) {
         self.mark_callbacks_unlinked();
-        Arc::make_mut(&mut self.script)
-            .replace_script_deferred(self.base_script.clone(), false);
+        Arc::make_mut(&mut self.script).replace_script_deferred(self.base_script.clone(), false);
         self.includes_resolved = false;
         if !self.rank_names_owned {
             self.rank_names = None;
@@ -13316,11 +13268,7 @@ impl Definition {
     /// Live SetOCF variant. `C4ObjectList::ObjectCount` ignores removed list
     /// holes but retains C4OS_INACTIVE entries, so Engine callers supply the
     /// count resolved against the authoritative object table.
-    fn compute_ocf_with_contents_count(
-        &self,
-        state: &ObjectState,
-        contents_count: usize,
-    ) -> u32 {
+    fn compute_ocf_with_contents_count(&self, state: &ObjectState, contents_count: usize) -> u32 {
         // OCF_Normal: the OCF is never zero (SetOCF, C4Object.cpp:547-548)
         let mut ocf = self.ocf_base | OCF_NORMAL;
         // OCF_NotContained (SetOCF, C4Object.cpp:627-629); OCF_Available
@@ -13425,14 +13373,11 @@ impl Definition {
         }
         // OCF_LineConstruct: FullCon + any LineConnect bit besides
         // C4D_EnergyHolder (SetOCF, C4Object.cpp:611-614)
-        if ocf & crate::ocf::FULL_CON != 0 && self.line_connect & !LINE_CONNECT_ENERGY_HOLDER != 0
-        {
+        if ocf & crate::ocf::FULL_CON != 0 && self.line_connect & !LINE_CONNECT_ENERGY_HOLDER != 0 {
             ocf |= crate::ocf::LINE_CONSTRUCT;
         }
         // OCF_PowerConsumer (SetOCF, C4Object.cpp:649-652)
-        if self.line_connect & LINE_CONNECT_POWER_CONSUMER != 0
-            && ocf & crate::ocf::FULL_CON != 0
-        {
+        if self.line_connect & LINE_CONNECT_POWER_CONSUMER != 0 && ocf & crate::ocf::FULL_CON != 0 {
             ocf |= crate::ocf::POWER_CONSUMER;
         }
         // OCF_PowerSupply: a generator, or an energized power output
@@ -13469,9 +13414,7 @@ impl Definition {
         (self.ocf_base & crate::ocf::FULL_CON != 0
             || state.construction >= FULL_CON
             || self.incomplete_activity)
-            && self
-                .collection_rect
-                .is_some_and(|rect| rect.is_positive())
+            && self.collection_rect.is_some_and(|rect| rect.is_positive())
             && !collection_limit_reached(self.collection_limit, contents_len)
             && !self
                 .action_library
@@ -13862,14 +13805,9 @@ impl Definition {
         let image_width = i32::try_from(image.width).unwrap_or(i32::MAX);
         let image_height = i32::try_from(image.height).unwrap_or(i32::MAX);
         let pixels = image.solid_mask_source_pixels();
-        solid_mask_pixels_for_checked_bitmap(
-            mask,
-            image_width,
-            image_height,
-            pixels.as_ref(),
-        )
-        .map(SolidMaskPixels::Alpha)
-        .unwrap_or(SolidMaskPixels::OutOfBounds)
+        solid_mask_pixels_for_checked_bitmap(mask, image_width, image_height, pixels.as_ref())
+            .map(SolidMaskPixels::Alpha)
+            .unwrap_or(SolidMaskPixels::OutOfBounds)
     }
 
     /// Extract the SolidMask alpha pixels from the sprite (alpha != 0 =
@@ -14513,7 +14451,9 @@ impl Definition {
         if !host_player_commands.is_empty() {
             batch.player_commands.extend(host_player_commands);
         }
-        batch.object_order_commands.extend(host_object_order_commands);
+        batch
+            .object_order_commands
+            .extend(host_object_order_commands);
         batch
             .next_mission_commands
             .extend(host_next_mission_commands);
@@ -14741,7 +14681,9 @@ impl Definition {
         if !host_player_commands.is_empty() {
             batch.player_commands.extend(host_player_commands);
         }
-        batch.object_order_commands.extend(host_object_order_commands);
+        batch
+            .object_order_commands
+            .extend(host_object_order_commands);
         batch
             .next_mission_commands
             .extend(host_next_mission_commands);
@@ -14925,7 +14867,9 @@ impl Definition {
         if !host_player_commands.is_empty() {
             batch.player_commands.extend(host_player_commands);
         }
-        batch.object_order_commands.extend(host_object_order_commands);
+        batch
+            .object_order_commands
+            .extend(host_object_order_commands);
         batch
             .next_mission_commands
             .extend(host_next_mission_commands);
@@ -15100,14 +15044,7 @@ impl Definition {
             world,
             next_object_id,
             game_over_triggered,
-            || {
-                self.run_live_object_callback_session(
-                    callback,
-                    &args,
-                    &state.local_vars,
-                    object_id,
-                )
-            },
+            || self.run_live_object_callback_session(callback, &args, &state.local_vars, object_id),
         );
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
@@ -15564,9 +15501,7 @@ impl Definition {
         game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(Value, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
-        if callback.resolution().is_none()
-            && !self.script.has_function(callback.function_name())
-        {
+        if callback.resolution().is_none() && !self.script.has_function(callback.function_name()) {
             let next_object_id = world.next_object_id();
             return Ok((
                 Value::Nil,
@@ -15661,10 +15596,7 @@ impl Definition {
         world: HostWorldContext,
         game_over_triggered: bool,
         audio: AudioRegistry,
-    ) -> Result<
-        (i32, compat::EffectContextOutcome, AudioRegistry, LcgRng),
-        EngineError,
-    > {
+    ) -> Result<(i32, compat::EffectContextOutcome, AudioRegistry, LcgRng), EngineError> {
         let args = [
             compat::object_reference_value(object_id),
             Value::Nil,
@@ -16742,7 +16674,11 @@ impl Definition {
             .and_then(|callback| callback.command_object)
             .or_else(|| {
                 native_fire_start
-                    .then(|| effect.command_target.map(|target| ObjectId::new(target as u64)))
+                    .then(|| {
+                        effect
+                            .command_target
+                            .map(|target| ObjectId::new(target as u64))
+                    })
                     .flatten()
                     .filter(|target| world.get(*target).is_some())
             });
@@ -16945,11 +16881,7 @@ impl Definition {
             if context_is_self {
                 commands.context_locals = Some(updated_locals);
             } else if let Some(context_object) = context_object {
-                append_effect_command_target_locals(
-                    &mut commands,
-                    context_object,
-                    updated_locals,
-                );
+                append_effect_command_target_locals(&mut commands, context_object, updated_locals);
             }
             value
         });
@@ -16998,11 +16930,8 @@ fn collection_ocf_scalar_overrides_match_materialized_state() -> Result<(), Engi
 
     definition.set_ocf_base(crate::ocf::COLLECTION);
     definition.set_collection_rect(None);
-    let seeded = definition.collection_ocf_enabled(
-        &state,
-        state.contents.len(),
-        state.no_collect_delay,
-    );
+    let seeded =
+        definition.collection_ocf_enabled(&state, state.contents.len(), state.no_collect_delay);
     assert!(seeded, "raw OCF fixture seed bypasses dynamic gates");
     assert_eq!(
         seeded,
@@ -17035,13 +16964,14 @@ impl ScenarioScript {
         let mut script = ScriptEngine::new();
         script.set_script_name(name.clone());
         script.set_game_script_name(name.clone());
-        let compiled =
-            clonk_script::Script::compile_c4_string(source).map_err(|source| EngineError::Script {
+        let compiled = clonk_script::Script::compile_c4_string(source).map_err(|source| {
+            EngineError::Script {
                 definition: name.clone(),
                 function: "load".to_string(),
                 source: ScriptError::from(source),
                 recovery: None,
-            })?;
+            }
+        })?;
         for diagnostic in compiled.parse_diagnostics() {
             tracing::warn!(
                 script = %name,
@@ -17079,8 +17009,7 @@ impl ScenarioScript {
     }
 
     fn reset_script_links(&mut self) {
-        Arc::make_mut(&mut self.script)
-            .replace_script_deferred(self.base_script.clone(), false);
+        Arc::make_mut(&mut self.script).replace_script_deferred(self.base_script.clone(), false);
         self.includes_resolved = false;
         self.has_initialize = self.script.has_function("Initialize");
         self.has_step = self.script.has_function("Step");
@@ -17355,7 +17284,9 @@ impl ScenarioScript {
         if !host_player_commands.is_empty() {
             batch.player_commands.extend(host_player_commands);
         }
-        batch.object_order_commands.extend(host_object_order_commands);
+        batch
+            .object_order_commands
+            .extend(host_object_order_commands);
         batch
             .next_mission_commands
             .extend(host_next_mission_commands);
@@ -17620,7 +17551,9 @@ impl ScenarioScript {
             ..ScenarioBatch::default()
         };
         batch.player_commands.extend(host_player_commands);
-        batch.object_order_commands.extend(host_object_order_commands);
+        batch
+            .object_order_commands
+            .extend(host_object_order_commands);
         batch
             .next_mission_commands
             .extend(host_next_mission_commands);
@@ -17796,26 +17729,45 @@ pub struct HostRasterPreviewState(Option<compat::HostRasterPreview>);
 #[derive(Debug, Default)]
 #[doc(hidden)]
 pub struct ScenarioBatch {
-    #[doc(hidden)] pub spawns: Vec<SpawnConfig>,
+    #[doc(hidden)]
+    pub spawns: Vec<SpawnConfig>,
     /// Nested-call mutations to other objects (Find_Func reentrancy).
-    #[doc(hidden)] pub other_objects: Vec<compat::NestedObjectOutcome>,
-    #[doc(hidden)] pub global_effects: Vec<EffectCommand>,
-    #[doc(hidden)] pub environment: Option<EnvironmentDelta>,
-    #[doc(hidden)] pub physics: Option<PhysicsDelta>,
-    #[doc(hidden)] pub landscape_ops: Vec<LandscapeOperation>,
-    #[doc(hidden)] pub solid_mask_operations: HostSolidMaskOperations,
-    #[doc(hidden)] pub host_raster_preview: HostRasterPreviewState,
-    #[doc(hidden)] pub landscape: Vec<LandscapeCommand>,
-    #[doc(hidden)] pub particles: Vec<ParticleCommand>,
-    #[doc(hidden)] pub transfer_zones: Vec<TransferZoneCommand>,
-    #[doc(hidden)] pub audio: Vec<AudioCommand>,
-    #[doc(hidden)] pub messages: Vec<MessageCommand>,
-    #[doc(hidden)] pub player_commands: Vec<PlayerCommand>,
-    #[doc(hidden)] pub object_order_commands: Vec<ObjectOrderCommand>,
-    #[doc(hidden)] pub next_mission_commands: Vec<NextMissionCommand>,
-    #[doc(hidden)] pub trigger_game_over: bool,
-    #[doc(hidden)] pub script_go: Option<bool>,
-    #[doc(hidden)] pub script_counter: Option<i32>,
+    #[doc(hidden)]
+    pub other_objects: Vec<compat::NestedObjectOutcome>,
+    #[doc(hidden)]
+    pub global_effects: Vec<EffectCommand>,
+    #[doc(hidden)]
+    pub environment: Option<EnvironmentDelta>,
+    #[doc(hidden)]
+    pub physics: Option<PhysicsDelta>,
+    #[doc(hidden)]
+    pub landscape_ops: Vec<LandscapeOperation>,
+    #[doc(hidden)]
+    pub solid_mask_operations: HostSolidMaskOperations,
+    #[doc(hidden)]
+    pub host_raster_preview: HostRasterPreviewState,
+    #[doc(hidden)]
+    pub landscape: Vec<LandscapeCommand>,
+    #[doc(hidden)]
+    pub particles: Vec<ParticleCommand>,
+    #[doc(hidden)]
+    pub transfer_zones: Vec<TransferZoneCommand>,
+    #[doc(hidden)]
+    pub audio: Vec<AudioCommand>,
+    #[doc(hidden)]
+    pub messages: Vec<MessageCommand>,
+    #[doc(hidden)]
+    pub player_commands: Vec<PlayerCommand>,
+    #[doc(hidden)]
+    pub object_order_commands: Vec<ObjectOrderCommand>,
+    #[doc(hidden)]
+    pub next_mission_commands: Vec<NextMissionCommand>,
+    #[doc(hidden)]
+    pub trigger_game_over: bool,
+    #[doc(hidden)]
+    pub script_go: Option<bool>,
+    #[doc(hidden)]
+    pub script_counter: Option<i32>,
 }
 
 #[derive(Clone)]
@@ -18142,13 +18094,17 @@ fn mission_access_store_can_be_shared_across_engines() {
 #[test]
 fn mission_access_store_updates_semicolon_modules_case_insensitively() {
     let store = MissionAccessStore::new("Alpha; Beta");
-    assert_eq!(store.update_modules("beta;Gamma", false), "Alpha;Beta;Gamma");
+    assert_eq!(
+        store.update_modules("beta;Gamma", false),
+        "Alpha;Beta;Gamma"
+    );
     assert_eq!(store.snapshot(), "Alpha;Beta;Gamma");
     assert_eq!(store.update_modules("alpha;GAMMA", true), "Beta");
 }
 
 pub struct Engine {
-    #[doc(hidden)] pub(crate) definitions: HashMap<DefinitionId, Definition>,
+    #[doc(hidden)]
+    pub(crate) definitions: HashMap<DefinitionId, Definition>,
     /// Definition registration order — C++ links scripts in child
     /// registration order (C4AulScript::Child0 walk, C4AulLink.cpp:31),
     /// which decides the overload chain when several appends hit the same
@@ -18212,18 +18168,20 @@ pub struct Engine {
     fair_crew_physical_cache: FairCrewPhysicalCache,
     /// Definition/script lookup data shared by copied host worlds. These
     /// tables change only at definition-load or script-relink boundaries.
-    host_definition_tables_cache:
-        std::cell::RefCell<Option<Rc<compat::HostDefinitionTables>>>,
+    host_definition_tables_cache: std::cell::RefCell<Option<Rc<compat::HostDefinitionTables>>>,
     /// Cached pending-spawn solid-mask descriptors. Sprite pixel payloads
     /// remain Arc-shared; host contexts only clone this Rc table.
     solid_mask_metadata_cache:
         std::cell::RefCell<Option<Rc<HashMap<DefinitionId, compat::HostSolidMaskMetadata>>>>,
-    #[doc(hidden)] pub materials: MaterialSet,
+    #[doc(hidden)]
+    pub materials: MaterialSet,
     /// Shared view of `materials` for host contexts (FnMaterial);
     /// invalidated when the library is (re)configured.
     materials_shared: std::cell::RefCell<Option<Rc<MaterialSet>>>,
-    #[doc(hidden)] pub objects: Vec<Object>,
-    #[doc(hidden)] pub next_object_id: u64,
+    #[doc(hidden)]
+    pub objects: Vec<Object>,
+    #[doc(hidden)]
+    pub next_object_id: u64,
     /// Next C4SolidMask construction-order token. Runtime-only: native
     /// pSolidMaskData is NoSave and is rebuilt after a load.
     next_solid_mask_instance_sequence: u64,
@@ -18236,10 +18194,12 @@ pub struct Engine {
     /// Exact callback-final raster exposed to synchronous callbacks that run
     /// before the outermost chronological stream reaches authoritative replay.
     deferred_host_raster_preview: Option<compat::HostRasterPreview>,
-    #[doc(hidden)] pub rng: LcgRng,
+    #[doc(hidden)]
+    pub rng: LcgRng,
     /// Game.Script.Go — the scenario Script%d counter gate (FnScriptGo,
     /// C4Script.cpp:2782-2786).
-    #[doc(hidden)] pub scenario_script_go: bool,
+    #[doc(hidden)]
+    pub scenario_script_go: bool,
     /// Game.Script.Counter — the next Script%d section
     /// (C4GameScriptHost::Execute, C4ScriptHost.cpp:222-232).
     scenario_script_counter: i32,
@@ -18348,7 +18308,8 @@ pub struct Engine {
     /// Maintained by `insert_into_exec_list` (C4ObjectList::Add stMain
     /// semantics) on spawn and pruned of removed ids each tick. Enter/Exit
     /// never touch it (C4Object.cpp:1513-1615 only move Contents).
-    #[doc(hidden)] pub exec_list: Vec<ObjectId>,
+    #[doc(hidden)]
+    pub exec_list: Vec<ObjectId>,
     /// Bumped whenever `insert_exec_link` adds or re-adds a main-list link.
     /// Such insertions can happen during the live object walk, so command
     /// snapshots use this to refresh their forward-list tie-break ranks.
@@ -18361,7 +18322,8 @@ pub struct Engine {
     inactive_exec_list: Vec<ObjectId>,
     /// Deferred category resorts plus FnSetObjectOrder requests. Category
     /// work runs first; relative requests execute newest-first afterward.
-    #[doc(hidden)] pub pending_object_order_commands: Vec<ObjectOrderCommand>,
+    #[doc(hidden)]
+    pub pending_object_order_commands: Vec<ObjectOrderCommand>,
     /// Native `C4Game::fResortAnyObject`. This is deliberately independent
     /// of ResortProc: relative and category-order requests do not set it.
     resort_any_object: bool,
@@ -18369,22 +18331,30 @@ pub struct Engine {
     /// before this cursor have already missed the C++ iterator; insertions at
     /// or after it still execute this frame.
     exec_cursor: Option<usize>,
-    #[doc(hidden)] pub frame: u64,
+    #[doc(hidden)]
+    pub frame: u64,
     /// Process-local C4Application timer state. It is deliberately excluded
     /// from save/sync snapshots; synchronized custom commands update every
     /// peer's application timer independently.
     game_tick_delay_ms: Rc<std::cell::Cell<u64>>,
     game_tick_delay_revision: Rc<std::cell::Cell<u64>>,
     /// `C4Game::Time` seconds, advanced only by `sec1_timer`.
-    #[doc(hidden)] pub game_time: i32,
+    #[doc(hidden)]
+    pub game_time: i32,
     /// Runtime-only one-second latch (`C4Game::TimeGo`), never serialized.
-    #[doc(hidden)] pub time_go: bool,
-    #[doc(hidden)] pub landscape: Option<Landscape>,
-    #[doc(hidden)] pub sectors: Option<SectorMap>,
-    #[doc(hidden)] pub physics: PhysicsSettings,
-    #[doc(hidden)] pub environment: EnvironmentSettings,
+    #[doc(hidden)]
+    pub time_go: bool,
+    #[doc(hidden)]
+    pub landscape: Option<Landscape>,
+    #[doc(hidden)]
+    pub sectors: Option<SectorMap>,
+    #[doc(hidden)]
+    pub physics: PhysicsSettings,
+    #[doc(hidden)]
+    pub environment: EnvironmentSettings,
     /// Game.GraphicsSystem.dwGamma: nine independently additive ramps.
-    #[doc(hidden)] pub gamma: GammaControlState,
+    #[doc(hidden)]
+    pub gamma: GammaControlState,
     sky: Option<SkyState>,
     global_effects: Vec<EffectState>,
     particles: Vec<ActiveParticle>,
@@ -18392,21 +18362,27 @@ pub struct Engine {
     /// `particles` Vec above only serves def-less legacy fixture particles.
     particle_system: particles::ParticleSystem,
     /// C4PXSSystem port (sync-relevant pixel sprites, src/C4PXS.cpp).
-    #[doc(hidden)] pub pxs_system: pxs::PxsSystem,
+    #[doc(hidden)]
+    pub pxs_system: pxs::PxsSystem,
     /// Control/sync-check state machine (C4GameControl): ControlTick advances
     /// every ControlRate frames; a sync check is digested every SyncRate
     /// frames (C4SyncCheckRate = 100) and kept for 50 frames.
-    #[doc(hidden)] pub control_rate: i32,
-    #[doc(hidden)] pub control_tick: i32,
-    #[doc(hidden)] pub sync_rate: i32,
+    #[doc(hidden)]
+    pub control_rate: i32,
+    #[doc(hidden)]
+    pub control_tick: i32,
+    #[doc(hidden)]
+    pub sync_rate: i32,
     do_sync: bool,
     sync_checks: Vec<SyncCheckPacket>,
-    #[doc(hidden)] pub mass_movers: MassMoverSet,
+    #[doc(hidden)]
+    pub mass_movers: MassMoverSet,
     weather_events: Vec<WeatherEvent>,
     scenario_script: Option<ScenarioScript>,
     /// The System.c4g global-function table (Game.ScriptEngine in C++),
     /// shared into every script host.
-    #[doc(hidden)] pub global_script_functions: Option<Arc<HashMap<String, clonk_script::Function>>>,
+    #[doc(hidden)]
+    pub global_script_functions: Option<Arc<HashMap<String, clonk_script::Function>>>,
     /// Physical `Game.ScriptEngine` SFunc insertion order (`Func0` to
     /// `FuncL`). Context menus enumerate this ledger backward and suppress
     /// older exact-name overloads just like `C4AulScript::GetSFunc`.
@@ -18421,11 +18397,13 @@ pub struct Engine {
     game_evaluated: bool,
     /// C4RoundResults, kept distinct from the game-over trigger and runtime
     /// evaluation guard (C4Game.cpp:845-854).
-    #[doc(hidden)] pub round_results: RoundResultsState,
+    #[doc(hidden)]
+    pub round_results: RoundResultsState,
     objectives: ScenarioObjectives,
     objective_check_counter: u8,
     players_registered: bool,
-    #[doc(hidden)] pub players: HashMap<i32, Player>,
+    #[doc(hidden)]
+    pub players: HashMap<i32, Player>,
     /// Exact `C4PlayerList` link order. Player numbers normally sort ascending,
     /// but native `RecheckPlayerSort` has observable insertion edge cases that
     /// cannot be reconstructed from the map alone.
@@ -18435,7 +18413,8 @@ pub struct Engine {
     /// not only while runtime team choice is pending.
     pending_player_joins: HashMap<i32, JoinPlayerConfig>,
     /// C4PlayerInfoList::iLastPlayerID, persisted and repaired across loads.
-    #[doc(hidden)] pub last_player_info_id: i32,
+    #[doc(hidden)]
+    pub last_player_info_id: i32,
     /// Scenario `[Head] ForcedAutoStopControl`, separate from each player's
     /// effective `PlayerControlState::control_style` preference.
     forced_control_style: Option<bool>,
@@ -18546,8 +18525,10 @@ pub struct Engine {
     /// `Game.PathFinder`; excluded from saves and sync checks.
     pathfinder_debug: Rc<RefCell<PathfinderDebugSnapshot>>,
     audio_registry: AudioRegistry,
-    #[doc(hidden)] pub pending_audio: Vec<AudioCommand>,
-    #[doc(hidden)] pub pending_menu_requests: Vec<MenuRequest>,
+    #[doc(hidden)]
+    pub pending_audio: Vec<AudioCommand>,
+    #[doc(hidden)]
+    pub pending_menu_requests: Vec<MenuRequest>,
     messages: MessageManager,
     /// Engine-held mission-password surrogate for process config. This stays
     /// outside EngineState/save serialization, like C++ Config.
@@ -18975,10 +18956,10 @@ fn put_solid_mask_raster(
     let mb2 = negated.cos_deg();
     let center_x = shape_x + mask.target_x + mask.width / 2;
     let center_y = shape_y + mask.target_y + mask.height / 2;
-    let xstart = position.x + fixtoi(ma1 * itofix(center_x) - ma2 * itofix(center_y))
-        - mat_buff_pitch / 2;
-    let ystart = position.y + fixtoi(-mb1 * itofix(center_x) + mb2 * itofix(center_y))
-        - mat_buff_pitch / 2;
+    let xstart =
+        position.x + fixtoi(ma1 * itofix(center_x) - ma2 * itofix(center_y)) - mat_buff_pitch / 2;
+    let ystart =
+        position.y + fixtoi(-mb1 * itofix(center_x) + mb2 * itofix(center_y)) - mat_buff_pitch / 2;
     let mut rect_x = xstart;
     let mut tx = 0;
     if rect_x < 0 {
@@ -19093,7 +19074,8 @@ struct MovementStepOutcome {
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 pub struct ExecMovementOutcome {
-    #[doc(hidden)] pub alive: bool,
+    #[doc(hidden)]
+    pub alive: bool,
     /// Whether the positional integration reached C4Object::DoMotion.
     /// Only that path removes the solid mask with attachment backup;
     /// rotation-only updates use UpdateSolidMask(false) in C++.
@@ -20647,9 +20629,9 @@ impl Engine {
             exec_cursor: None,
             frame: 0,
             game_tick_delay_ms: Rc::new(std::cell::Cell::new(DEFAULT_GAME_TICK_DELAY_MS)),
-            game_tick_delay_revision: Rc::new(std::cell::Cell::new(
-                next_game_tick_delay_revision(),
-            )),
+            game_tick_delay_revision: Rc::new(
+                std::cell::Cell::new(next_game_tick_delay_revision()),
+            ),
             game_time: 0,
             time_go: false,
             landscape: None,
@@ -20764,8 +20746,7 @@ impl Engine {
             || self.pending_object_order_commands.iter().any(|command| {
                 matches!(
                     command,
-                    ObjectOrderCommand::ResortObject(_)
-                        | ObjectOrderCommand::ResortUnsortedSweep
+                    ObjectOrderCommand::ResortObject(_) | ObjectOrderCommand::ResortUnsortedSweep
                 )
             })
     }
@@ -20871,7 +20852,10 @@ impl Engine {
             .filter(|object| object.state.status != ObjectStatus::Deleted)
             .map(|object| (object.id.as_u64(), object.definition_id.clone()))
             .collect::<HashMap<_, _>>();
-        let object_numbers = object_definition_ids.keys().copied().collect::<HashSet<_>>();
+        let object_numbers = object_definition_ids
+            .keys()
+            .copied()
+            .collect::<HashSet<_>>();
         for effect in &mut global_effects {
             denumerate_loaded_effect(effect, &object_numbers, &object_definition_ids);
         }
@@ -21082,9 +21066,9 @@ impl Engine {
     pub fn recheck_team_player_info_memberships(&mut self, memberships: &[(i32, i32)]) {
         for team in Rc::make_mut(&mut self.teams) {
             team.player_ids.retain(|player_info_id| {
-                memberships.iter().any(|(id, assigned_team)| {
-                    id == player_info_id && *assigned_team == team.id
-                })
+                memberships
+                    .iter()
+                    .any(|(id, assigned_team)| id == player_info_id && *assigned_team == team.id)
             });
             for &(player_info_id, assigned_team) in memberships {
                 if assigned_team == team.id && !team.player_ids.contains(&player_info_id) {
@@ -21229,10 +21213,7 @@ impl Engine {
 
     /// Installs the frontend's process-local control-binding display names.
     /// Control indices use the legacy `CON_*` order (0 through 11).
-    pub fn set_control_key_names(
-        &mut self,
-        names: HashMap<i32, Vec<ControlKeyName>>,
-    ) {
+    pub fn set_control_key_names(&mut self, names: HashMap<i32, Vec<ControlKeyName>>) {
         self.control_key_names = Rc::new(names);
     }
 
@@ -21605,8 +21586,7 @@ impl Engine {
             }));
         }
         self.preinitialize_joining_player(number)?;
-        let joined =
-            self.scenario_init_for_player(number, &config, semantics.extra_id.as_ref())?;
+        let joined = self.scenario_init_for_player(number, &config, semantics.extra_id.as_ref())?;
         self.finalize_joining_player(number, true, true)?;
         Ok(JoinPlayerOutcome::Initialized(joined))
     }
@@ -21853,13 +21833,12 @@ impl Engine {
         player_info_core.rounds_won = config.rounds_won;
         player_info_core.rounds_lost = config.rounds_lost;
         player_info_core.total_playing_time = config.total_playing_time;
-        let preferred_control_style_value = if (player_info_core.pref_control_style_value != 0)
-            == config.control_style
-        {
-            player_info_core.pref_control_style_value
-        } else {
-            i32::from(config.control_style)
-        };
+        let preferred_control_style_value =
+            if (player_info_core.pref_control_style_value != 0) == config.control_style {
+                player_info_core.pref_control_style_value
+            } else {
+                i32::from(config.control_style)
+            };
         let preferred_auto_context_menu_value =
             if (player_info_core.pref_auto_context_menu_value != 0) == config.auto_context_menu {
                 player_info_core.pref_auto_context_menu_value
@@ -23039,9 +23018,7 @@ impl Engine {
             let Some(info) = roster.get(index) else {
                 continue;
             };
-            let Some(definition) = self
-                .definitions
-                .get(&DefinitionId::from(info.id.as_str()))
+            let Some(definition) = self.definitions.get(&DefinitionId::from(info.id.as_str()))
             else {
                 continue;
             };
@@ -23214,9 +23191,9 @@ impl Engine {
         player
             .control
             .set_control_style_value(i32::from(control_style));
-        player.control.set_auto_context_menu_value(i32::from(
-            self.forced_auto_context_menu.unwrap_or(false),
-        ));
+        player
+            .control
+            .set_auto_context_menu_value(i32::from(self.forced_auto_context_menu.unwrap_or(false)));
         // C4Player::InitControl flashes both markers at the join
         // (C4Player.cpp:1747).
         player.control.select_flash = 30;
@@ -23501,18 +23478,15 @@ impl Engine {
             .definitions
             .get(&graphics_definition_id)
             .is_some_and(Definition::color_by_owner);
-        let owner_color = (new_owner != OWNER_NONE && color_by_owner)
-            .then(|| {
-                self.players
-                    .get(&new_owner)
-                    .and_then(Player::color)
-                    .map(|color| {
-                        u32::from(color.r) << 16
-                            | u32::from(color.g) << 8
-                            | u32::from(color.b)
-                    })
-                    .unwrap_or(0)
-            });
+        let owner_color = (new_owner != OWNER_NONE && color_by_owner).then(|| {
+            self.players
+                .get(&new_owner)
+                .and_then(Player::color)
+                .map(|color| {
+                    u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
+                })
+                .unwrap_or(0)
+        });
 
         let old_owner = self.objects[index].state.owner;
         if let Some(color) = owner_color {
@@ -23529,8 +23503,7 @@ impl Engine {
             let object = &mut self.objects[index];
             object.state.owner = new_owner;
             object.state.controller = new_owner;
-            (definition_id.as_str() == "FLAG"
-                && object.state.action.name == "FlyBase")
+            (definition_id.as_str() == "FLAG" && object.state.action.name == "FlyBase")
                 .then_some(object.state.action.target)
                 .flatten()
         };
@@ -23643,10 +23616,7 @@ impl Engine {
     /// The result-only evaluation performed by `C4PlayerList::Remove`.
     /// Unlike `C4Player::Evaluate`, this neither marks the player evaluated
     /// nor changes score, round counters, crew participation, or play time.
-    fn snapshot_player_round_results_for_removal(
-        &mut self,
-        id: i32,
-    ) -> Result<(), EngineError> {
+    fn snapshot_player_round_results_for_removal(&mut self, id: i32) -> Result<(), EngineError> {
         let player = self
             .players
             .get(&id)
@@ -23799,8 +23769,8 @@ impl Engine {
                 continue;
             };
             let already_in_crew = player.crew().contains(&object_id);
-            let named_assignment = !already_in_crew
-                && info_name.as_deref().is_some_and(|name| !name.is_empty());
+            let named_assignment =
+                !already_in_crew && info_name.as_deref().is_some_and(|name| !name.is_empty());
             if !already_in_crew && !named_assignment {
                 continue;
             }
@@ -24206,10 +24176,7 @@ impl Engine {
                 )
                 && !player.surrendered()
         });
-        allowed
-            && self
-                .set_player_surrendered(control.player, true)
-                .is_ok()
+        allowed && self.set_player_surrendered(control.player, true).is_ok()
     }
 
     pub fn set_player_wealth(&mut self, id: i32, wealth: i32) -> Result<(), EngineError> {
@@ -24577,8 +24544,8 @@ impl Engine {
             // clears with C++'s per-pixel instability probes. Retain the old
             // post-pass for that synthetic fallback only.
             for ycnt in -radius..=radius {
-                let remaining = i64::from(radius) * i64::from(radius)
-                    - i64::from(ycnt) * i64::from(ycnt);
+                let remaining =
+                    i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
                 let lwdt = (remaining as f64).sqrt() as i32;
                 let dpy = center.y + ycnt;
                 for xcnt in -lwdt..lwdt + i32::from(lwdt == 0) {
@@ -24603,8 +24570,8 @@ impl Engine {
     fn blast_raster_circle(&mut self, center: Vector2, radius: i32) -> BlastResult {
         let mut result = BlastResult::default();
         for ycnt in -radius..=radius {
-            let remaining = i64::from(radius) * i64::from(radius)
-                - i64::from(ycnt) * i64::from(ycnt);
+            let remaining =
+                i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
             let lwdt = (remaining as f64).sqrt() as i32;
             let y = center.y + ycnt;
             for xcnt in -lwdt..lwdt + i32::from(lwdt == 0) {
@@ -24614,10 +24581,7 @@ impl Engine {
                     .as_ref()
                     .and_then(|landscape| landscape.border_material_at(x, y))
                 {
-                    *result
-                        .pixel_count_by_material
-                        .entry(material)
-                        .or_insert(0) += 1;
+                    *result.pixel_count_by_material.entry(material).or_insert(0) += 1;
                 }
             }
         }
@@ -24627,8 +24591,8 @@ impl Engine {
         let shift_threshold = (blast_size * grade) / 6;
         let mut changed_columns = HashSet::new();
         for ycnt in -radius..=radius {
-            let remaining = i64::from(radius) * i64::from(radius)
-                - i64::from(ycnt) * i64::from(ycnt);
+            let remaining =
+                i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
             let lwdt = (remaining as f64).sqrt() as i32;
             let y = center.y + ycnt;
             for xcnt in -lwdt..lwdt + i32::from(lwdt == 0) {
@@ -24649,19 +24613,20 @@ impl Engine {
                             )
                         })
                         .unwrap_or((false, None, None));
-                    let shift_byte = shift_spec
-                        .as_deref()
-                        .zip(shift_target)
-                        .and_then(|(spec, fallback)| {
-                            self.landscape.as_ref().and_then(|landscape| {
-                                landscape.crossmapped_material_texture_byte(
-                                    spec,
-                                    material,
-                                    &self.materials,
-                                    fallback,
-                                )
-                            })
-                        });
+                    let shift_byte =
+                        shift_spec
+                            .as_deref()
+                            .zip(shift_target)
+                            .and_then(|(spec, fallback)| {
+                                self.landscape.as_ref().and_then(|landscape| {
+                                    landscape.crossmapped_material_texture_byte(
+                                        spec,
+                                        material,
+                                        &self.materials,
+                                        fallback,
+                                    )
+                                })
+                            });
                     if let Some(shift_byte) = shift_byte {
                         let material_count = result
                             .pixel_count_by_material
@@ -24691,11 +24656,7 @@ impl Engine {
             }
         }
 
-        if let Some((width, _)) = self
-            .landscape
-            .as_ref()
-            .and_then(Landscape::grid_dimensions)
-        {
+        if let Some((width, _)) = self.landscape.as_ref().and_then(Landscape::grid_dimensions) {
             let start = center.x.saturating_sub(radius).clamp(0, width) as usize;
             let end = center
                 .x
@@ -25139,9 +25100,8 @@ impl Engine {
     /// mutating Set type, this is intentionally not restricted to the host.
     pub fn disable_debug(&mut self) {
         if self.debug_mode {
-            self.message_board_commands.retain(|command| {
-                clonk_script::c4_string_bytes(&command.name) != b"speed"
-            });
+            self.message_board_commands
+                .retain(|command| clonk_script::c4_string_bytes(&command.name) != b"speed");
         }
         self.debug_mode = false;
         self.allow_debug = false;
@@ -25263,8 +25223,7 @@ impl Engine {
         result: RoundResultsNetworkResult,
         result_message: Option<Vec<u8>>,
     ) {
-        self.round_results
-            .evaluate_network(result, result_message);
+        self.round_results.evaluate_network(result, result_message);
     }
 
     /// Close the process-local query input and build its synchronized answer
@@ -25350,11 +25309,7 @@ impl Engine {
         }
     }
 
-    fn sprintf_custom_command(
-        format: &str,
-        argument: &str,
-        specifier: char,
-    ) -> Option<String> {
+    fn sprintf_custom_command(format: &str, argument: &str, specifier: char) -> Option<String> {
         // The registered command supplies one printf argument. Preserve %%
         // and consume exactly one literal matching %d/%s. Fail closed for
         // other, repeated, mixed, or malformed conversions instead of
@@ -25435,9 +25390,7 @@ impl Engine {
             return Ok(false);
         }
 
-        let object_id = |number: i32| {
-            u64::try_from(number).ok().map(ObjectId::new)
-        };
+        let object_id = |number: i32| u64::try_from(number).ok().map(ObjectId::new);
 
         match control.action {
             EMMO_MOVE => {
@@ -25681,10 +25634,7 @@ impl Engine {
                 definition_expression, x, y, FULL_CON
             )
         } else {
-            format!(
-                "CreateObject({},{},{},-1)",
-                definition_expression, x, y
-            )
+            format!("CreateObject({},{},{},-1)", definition_expression, x, y)
         };
         self.execute_internal_script_at_scope(SCRIPT_SCOPE_GLOBAL, &source)?;
         Ok(true)
@@ -25846,9 +25796,9 @@ impl Engine {
     ) -> Result<bool, EngineError> {
         const NO_OWNER: i32 = -1;
         if control.player != NO_OWNER
-            && !self.player(control.player).is_some_and(|player| {
-                player.at_client() == PlayerAtClient::new(control.by_client)
-            })
+            && !self
+                .player(control.player)
+                .is_some_and(|player| player.at_client() == PlayerAtClient::new(control.by_client))
         {
             return Ok(false);
         }
@@ -26477,14 +26427,10 @@ impl Engine {
         &mut self,
         command: InitialNetworkMessageBoardCommand,
     ) -> bool {
-        if self
-            .message_board_commands
-            .iter()
-            .any(|registered| {
-                clonk_script::c4_string_bytes(&registered.name)
-                    == clonk_script::c4_string_bytes(&command.name)
-            })
-        {
+        if self.message_board_commands.iter().any(|registered| {
+            clonk_script::c4_string_bytes(&registered.name)
+                == clonk_script::c4_string_bytes(&command.name)
+        }) {
             return false;
         }
         self.message_board_commands.push(command);
@@ -26686,18 +26632,20 @@ impl Engine {
             self.definitions
                 .iter()
                 .map(|(id, definition)| {
-                    let chop_action = definition
-                        .action_library()
-                        .specs()
-                        .iter()
-                        .find_map(|(name, spec)| {
-                            spec.procedure
-                                .as_deref()
-                                .filter(|procedure| {
-                                    ActionProcedure::from_name(procedure) == ActionProcedure::Chop
-                                })
-                                .map(|_| name.clone())
-                        });
+                    let chop_action =
+                        definition
+                            .action_library()
+                            .specs()
+                            .iter()
+                            .find_map(|(name, spec)| {
+                                spec.procedure
+                                    .as_deref()
+                                    .filter(|procedure| {
+                                        ActionProcedure::from_name(procedure)
+                                            == ActionProcedure::Chop
+                                    })
+                                    .map(|_| name.clone())
+                            });
                     (
                         id.clone(),
                         CommandDefinitionSnapshot {
@@ -26823,11 +26771,9 @@ impl Engine {
                         .sprite_variant_keys()
                         .into_iter()
                         .filter_map(|name| {
-                            definition
-                                .sprite_image_variant(Some(&name))
-                                .map(|sprite| {
-                                    (clonk_resources::material::c4_name_key(&name), image(sprite))
-                                })
+                            definition.sprite_image_variant(Some(&name)).map(|sprite| {
+                                (clonk_resources::material::c4_name_key(&name), image(sprite))
+                            })
                         })
                         .collect();
                     (
@@ -26850,6 +26796,18 @@ impl Engine {
     fn host_world_object(
         definitions: &HashMap<DefinitionId, Definition>,
         object: &Object,
+    ) -> HostWorldObject {
+        Self::host_world_object_with_snapshot(
+            definitions,
+            object,
+            Rc::new(object.script_state_snapshot()),
+        )
+    }
+
+    fn host_world_object_with_snapshot(
+        definitions: &HashMap<DefinitionId, Definition>,
+        object: &Object,
+        state_snapshot: Rc<ObjectState>,
     ) -> HostWorldObject {
         #[cfg(test)]
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
@@ -26915,24 +26873,22 @@ impl Engine {
         .with_collection_available_ignoring_delay(definition.is_some_and(|definition| {
             definition.collection_ocf_enabled(&object.state, object.state.contents.len(), 0)
         }))
-        .with_collection_enabled(definition.is_some_and(|definition| {
-            definition.collection_ocf_enabled(&object.state, 0, 0)
-        }))
+        .with_collection_enabled(
+            definition
+                .is_some_and(|definition| definition.collection_ocf_enabled(&object.state, 0, 0)),
+        )
         .with_no_collect_delay(object.state.no_collect_delay)
         .with_collection_limit(definition.map_or(0, Definition::collection_limit))
         .with_in_liquid(object.state.in_liquid)
         .with_ocf(ocf)
         .with_commands(object.commands.command_views())
         .with_command_stack(object.commands.snapshot())
-        .with_full_state(Rc::new(object.script_state_snapshot()))
+        .with_full_state(state_snapshot)
         .with_material_contents(object.material_contents.clone())
         .with_last_energy_loss_cause(object.last_energy_loss_cause)
     }
 
-    fn host_retained_contents_count(
-        world: &HostWorldContext,
-        contents: &[ObjectId],
-    ) -> usize {
+    fn host_retained_contents_count(world: &HostWorldContext, contents: &[ObjectId]) -> usize {
         contents
             .iter()
             .filter(|content_id| {
@@ -26972,6 +26928,31 @@ impl Engine {
         }
         let definitions = unsafe { &*std::ptr::addr_of!((*engine).definitions) };
         Some((index, Self::host_world_object(definitions, object)))
+    }
+
+    /// Test the scalar fields read by legacy C4Game::FindObject without
+    /// cloning the candidate's complete callback state.
+    ///
+    /// # Safety
+    ///
+    /// The `lazy_host_world_object` contract applies. Seeded/exclusively
+    /// borrowed objects are resolved from the callback-local object store
+    /// before this provider is called.
+    unsafe fn lazy_host_world_object_matches(
+        source: *const (),
+        id: ObjectId,
+        params: &compat::FindObjectParams,
+    ) -> Option<bool> {
+        let engine = source.cast::<Self>();
+        // SAFETY: guaranteed by the provider contract above.
+        let cache = unsafe { &*std::ptr::addr_of!((*engine).object_index_cache) }.borrow();
+        let index = cache.1.get(&id).copied()?;
+        drop(cache);
+        // SAFETY: object storage is frozen and callback-local seeds prevent
+        // this path from reading an outstanding exclusive object borrow.
+        let objects = unsafe { &*std::ptr::addr_of!((*engine).objects) };
+        let object = unsafe { &*objects.as_ptr().add(index) };
+        (object.id == id).then(|| params.matches_engine_object(object))
     }
 
     /// Fill every not-yet-seeded object in storage order.
@@ -27131,10 +27112,7 @@ impl Engine {
         .with_network_control_mode(self.network_control_mode)
         .with_control_sync_mode(self.control_sync_mode())
         .with_edit_cursor_target(self.edit_cursor_target)
-        .with_pause_game_requests(
-            self.replay_control,
-            Rc::clone(&self.pause_game_requests),
-        )
+        .with_pause_game_requests(self.replay_control, Rc::clone(&self.pause_game_requests))
         .with_network_target_fps_requests(Rc::clone(&self.network_target_fps_requests))
         .with_viewport_presentation_requests(
             self.replay_control,
@@ -27194,15 +27172,29 @@ impl Engine {
                 Self::lazy_host_world_objects,
                 Self::lazy_host_world_landscape,
             )
+            .with_legacy_find_object(Self::lazy_host_world_object_matches)
         };
         self.host_world_context_base()
             .with_lazy_world_provider(provider)
     }
 
     fn host_world_context_for_object(&self, index: usize) -> HostWorldContext {
+        let state_snapshot = Rc::new(self.objects[index].script_state_snapshot());
+        self.host_world_context_for_object_with_snapshot(index, state_snapshot)
+    }
+
+    fn host_world_context_for_object_with_snapshot(
+        &self,
+        index: usize,
+        state_snapshot: Rc<ObjectState>,
+    ) -> HostWorldContext {
         self.host_world_context().with_seeded_object(
             index,
-            Self::host_world_object(&self.definitions, &self.objects[index]),
+            Self::host_world_object_with_snapshot(
+                &self.definitions,
+                &self.objects[index],
+                state_snapshot,
+            ),
         )
     }
 
@@ -27377,8 +27369,7 @@ impl Engine {
             if let Some(previous) = functions.remove(&name) {
                 function.push_overload(previous);
             }
-            Arc::make_mut(&mut script.script)
-                .link_global_access_function(&name, function.clone());
+            Arc::make_mut(&mut script.script).link_global_access_function(&name, function.clone());
             functions.insert(name, function);
             changed = true;
         }
@@ -27528,9 +27519,8 @@ impl Engine {
             // Rust retains an inactive object's old exec-list ledger slot;
             // C++ has already moved that link to InactiveObjects.
             .filter(|&id| {
-                self.find_object_index(id).is_some_and(|index| {
-                    self.objects[index].state.status != ObjectStatus::Inactive
-                })
+                self.find_object_index(id)
+                    .is_some_and(|index| self.objects[index].state.status != ObjectStatus::Inactive)
             })
             .collect();
         for object_id in broadcast_targets {
@@ -27676,17 +27666,13 @@ impl Engine {
                     continue;
                 };
                 let args = args.into_iter().map(Value::Int).collect();
-                let _ = tolerate_script_error(
-                    self.call_scenario_script_function(&function, args),
-                )?;
+                let _ = tolerate_script_error(self.call_scenario_script_function(&function, args))?;
             }
         }
         Ok(())
     }
 
-    fn live_post_init_map_callbacks(
-        &self,
-    ) -> Option<&map_creator_s2::PostInitMapCallbacks> {
+    fn live_post_init_map_callbacks(&self) -> Option<&map_creator_s2::PostInitMapCallbacks> {
         self.landscape
             .as_ref()
             .and_then(Landscape::raster_state)
@@ -27713,14 +27699,12 @@ impl Engine {
     }
 
     fn has_active_players(&self) -> bool {
-        self.players
-            .values()
-            .any(|player| {
-                !matches!(
-                    player.status(),
-                    PlayerStatus::Eliminated | PlayerStatus::Surrendered
-                ) && !player.surrendered()
-            })
+        self.players.values().any(|player| {
+            !matches!(
+                player.status(),
+                PlayerStatus::Eliminated | PlayerStatus::Surrendered
+            ) && !player.surrendered()
+        })
     }
 
     fn should_evaluate_objectives(&self) -> bool {
@@ -27952,19 +27936,15 @@ impl Engine {
         &mut self,
         player: i32,
     ) -> Result<(Vec<DefinitionId>, Vec<DefinitionId>), EngineError> {
-        let rivalry = self
-            .exec_list
-            .iter()
-            .rev()
-            .any(|&object_id| {
-                let Some(index) = self.find_object_index(object_id) else {
-                    return false;
-                };
-                let object = &self.objects[index];
-                !object.destroyed
-                    && object.state.status.is_active()
-                    && object.definition_id.as_str() == "RVLR"
-            });
+        let rivalry = self.exec_list.iter().rev().any(|&object_id| {
+            let Some(index) = self.find_object_index(object_id) else {
+                return false;
+            };
+            let object = &self.objects[index];
+            !object.destroyed
+                && object.state.status.is_active()
+                && object.definition_id.as_str() == "RVLR"
+        });
 
         let mut goals = Vec::new();
         let mut fulfilled = Vec::new();
@@ -28084,10 +28064,8 @@ impl Engine {
         let solid_mask_operations = batch.solid_mask_operations.0.clone();
         let host_raster_preview = batch.host_raster_preview.0.clone();
         let was_deferred = self.defer_solid_mask_updates;
-        let mut outermost = self.stage_host_solid_mask_operations(
-            solid_mask_operations,
-            host_raster_preview,
-        );
+        let mut outermost =
+            self.stage_host_solid_mask_operations(solid_mask_operations, host_raster_preview);
         let result = self.apply_scenario_batch_inner(batch);
         outermost |= !was_deferred && self.defer_solid_mask_updates;
         self.finish_host_solid_mask_operations(outermost, result)
@@ -28122,7 +28100,8 @@ impl Engine {
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
         }
-        self.pending_object_order_commands.extend(object_order_commands);
+        self.pending_object_order_commands
+            .extend(object_order_commands);
         self.apply_next_mission_commands(next_mission_commands);
 
         if !landscape_ops.is_empty() {
@@ -28221,11 +28200,10 @@ impl Engine {
                 .iter()
                 .copied()
                 .filter(|id| {
-                    self.find_object_index(*id)
-                        .is_some_and(|index| {
-                            let object = &self.objects[index];
-                            !object.destroyed && object.state.status != ObjectStatus::Deleted
-                        })
+                    self.find_object_index(*id).is_some_and(|index| {
+                        let object = &self.objects[index];
+                        !object.destroyed && object.state.status != ObjectStatus::Deleted
+                    })
                 })
                 .collect();
         }
@@ -28464,7 +28442,7 @@ impl Engine {
             .position(|object| object.id == object_id)
             .ok_or(EngineError::UnknownObject(object_id))?;
         let definition_id = self.objects[index].definition_id.clone();
-        let state_snapshot = self.objects[index].script_state_snapshot();
+        let state_snapshot = Rc::new(self.objects[index].script_state_snapshot());
         let definition = self
             .definitions
             .get(&definition_id)
@@ -28478,9 +28456,10 @@ impl Engine {
         let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context_for_object(index);
+        let world =
+            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
         let (mut entries, audio_state, new_rng) = definition.call_menu_entries(
-            &state_snapshot,
+            state_snapshot.as_ref(),
             object_id,
             rng_state,
             &global_view,
@@ -28536,7 +28515,7 @@ impl Engine {
             .position(|object| object.id == crew_id)
             .ok_or(EngineError::UnknownObject(crew_id))?;
         let definition_id = self.objects[index].definition_id.clone();
-        let state_snapshot = self.objects[index].script_state_snapshot();
+        let state_snapshot = Rc::new(self.objects[index].script_state_snapshot());
         let definition = self
             .definitions
             .get(&definition_id)
@@ -28545,9 +28524,10 @@ impl Engine {
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context_for_object(index);
+        let world =
+            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
         let (handled, outcome, audio_state, new_rng) = definition.call_menu_command(
-            &state_snapshot,
+            state_snapshot.as_ref(),
             crew_id,
             kind,
             &selection,
@@ -28583,7 +28563,7 @@ impl Engine {
             .position(|object| object.id == object_id)
             .ok_or(EngineError::UnknownObject(object_id))?;
         let definition_id = self.objects[index].definition_id.clone();
-        let state_snapshot = self.objects[index].script_state_snapshot();
+        let state_snapshot = Rc::new(self.objects[index].script_state_snapshot());
         let definition = self
             .definitions
             .get(&definition_id)
@@ -28609,9 +28589,10 @@ impl Engine {
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context_for_object(index);
+        let world =
+            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
         let (handled, outcome, audio_state, new_rng) = definition.call_menu_callback(
-            &state_snapshot,
+            state_snapshot.as_ref(),
             object_id,
             function,
             rng_state,
@@ -28642,11 +28623,7 @@ impl Engine {
         function: &str,
         args: Vec<Value>,
     ) -> Result<Value, EngineError> {
-        self.call_object_callback(
-            index,
-            &ScriptCallbackTarget::unlinked(function),
-            args,
-        )
+        self.call_object_callback(index, &ScriptCallbackTarget::unlinked(function), args)
     }
 
     fn call_object_callback(
@@ -28765,7 +28742,7 @@ impl Engine {
             (
                 object.id,
                 object.definition_id.clone(),
-                object.script_state_snapshot(),
+                Rc::new(object.script_state_snapshot()),
             )
         };
         let object_definition = self
@@ -28782,10 +28759,11 @@ impl Engine {
         let action_library = object_definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context_for_object(index);
+        let world =
+            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
         let call = callback_definition.call_object_callback(
             object_definition,
-            &state_snapshot,
+            state_snapshot.as_ref(),
             object_id,
             callback,
             &args,
@@ -28862,7 +28840,7 @@ impl Engine {
             (
                 object.id,
                 object.definition_id.clone(),
-                object.script_state_snapshot(),
+                Rc::new(object.script_state_snapshot()),
             )
         };
         let definition = self
@@ -28872,10 +28850,11 @@ impl Engine {
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context_for_object(index);
+        let world =
+            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
         let call = match strict_level {
             Some(strict_level) => definition.direct_exec_object_expression_at_strict(
-                &state_snapshot,
+                state_snapshot.as_ref(),
                 object_id,
                 source,
                 label,
@@ -28890,7 +28869,7 @@ impl Engine {
                 self.audio_registry.clone(),
             ),
             None => definition.direct_exec_object_expression(
-                &state_snapshot,
+                state_snapshot.as_ref(),
                 object_id,
                 source,
                 label,
@@ -29042,11 +29021,12 @@ impl Engine {
         object_id: ObjectId,
         definition_id: &str,
     ) -> Result<Value, EngineError> {
-        let state_snapshot = self
-            .objects
-            .get(index)
-            .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?
-            .script_state_snapshot();
+        let state_snapshot = Rc::new(
+            self.objects
+                .get(index)
+                .ok_or_else(|| EngineError::UnknownObject(ObjectId::new(u64::MAX)))?
+                .script_state_snapshot(),
+        );
         let definition = self
             .definitions
             .get(definition_id)
@@ -29054,9 +29034,10 @@ impl Engine {
         let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context_for_object(index);
+        let world =
+            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
         let call = definition.call_object_function(
-            &state_snapshot,
+            state_snapshot.as_ref(),
             object_id,
             function,
             args,
@@ -29174,7 +29155,7 @@ impl Engine {
         }
 
         let definition_id = self.objects[index].definition_id.clone();
-        let state_snapshot = self.objects[index].script_state_snapshot();
+        let state_snapshot = Rc::new(self.objects[index].script_state_snapshot());
         let definition = self
             .definitions
             .get(&definition_id)
@@ -29183,9 +29164,10 @@ impl Engine {
         let action_library = definition.action_library().clone();
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context_for_object(index);
+        let world =
+            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
         let call = definition.call_control(
-            &state_snapshot,
+            state_snapshot.as_ref(),
             cursor,
             &function_name,
             rng_state,
@@ -30365,12 +30347,7 @@ impl Engine {
                 self.game_over_triggered,
                 || {
                     compat::calculated_definition_value(definition_id, base, player)
-                        .map(|value| {
-                            (
-                                value.map(Value::Int).unwrap_or(Value::Nil),
-                                Vec::new(),
-                            )
-                        })
+                        .map(|value| (value.map(Value::Int).unwrap_or(Value::Nil), Vec::new()))
                         .map_err(Into::into)
                 },
             );
@@ -30383,9 +30360,7 @@ impl Engine {
                 other => Err(other),
             };
         }
-        Ok(Some(
-            value.and_then(|value| value.as_c4_int()).unwrap_or(0),
-        ))
+        Ok(Some(value.and_then(|value| value.as_c4_int()).unwrap_or(0)))
     }
 
     pub fn definition_mass(&self, definition_id: &str) -> Option<i32> {
@@ -30677,8 +30652,7 @@ impl Engine {
                     scaled(picture.width),
                     scaled(picture.height),
                 );
-                let sprite = definition
-                    .sprite_image_variant(overlay.graphics_name.as_deref())?;
+                let sprite = definition.sprite_image_variant(overlay.graphics_name.as_deref())?;
                 DefinitionPictureImage::from_sprite_rect_clipped(sprite, rect)
                     .map(|image| (overlay.clone(), image))
             })
@@ -30714,8 +30688,7 @@ impl Engine {
                     scaled(picture.width),
                     scaled(picture.height),
                 );
-                let sprite = definition
-                    .sprite_image_variant(overlay.graphics_name.as_deref())?;
+                let sprite = definition.sprite_image_variant(overlay.graphics_name.as_deref())?;
                 DefinitionPictureImage::from_sprite_rect_clipped(sprite, rect)
                     .map(|image| (overlay.clone(), image))
             })
@@ -31238,11 +31211,7 @@ impl Engine {
     /// `C4Object::SetOwner` removes the old membership, but its NO_OWNER arm
     /// does not call `PlrFoWActualize` and therefore does not immediately add
     /// the object to every player.
-    fn actualize_object_fow_after_owner_change(
-        &mut self,
-        object_id: ObjectId,
-        new_owner: i32,
-    ) {
+    fn actualize_object_fow_after_owner_change(&mut self, object_id: ObjectId, new_owner: i32) {
         self.remove_object_from_fow_view_lists(object_id);
         if new_owner != OWNER_NONE {
             self.actualize_object_fow_view_range(object_id);
@@ -31348,24 +31317,21 @@ impl Engine {
         if self.frame % 35 == 0 && normal_status {
             let team = self.players.get(&id).and_then(Player::team);
             let valid_team_home_base = team.filter(|team| {
-                self.team_home_base_rule
-                    && self.teams.iter().any(|candidate| candidate.id == *team)
+                self.team_home_base_rule && self.teams.iter().any(|candidate| candidate.id == *team)
             });
             let should_produce = match valid_team_home_base {
-                Some(team) => {
-                    self.runtime_team_members_in_order(team).first().copied() == Some(id)
-                }
+                Some(team) => self.runtime_team_members_in_order(team).first().copied() == Some(id),
                 _ => true,
             };
             let team_update = self.players.get_mut(&id).and_then(|player| {
                 (player.advance_home_base_production_as_leader(should_produce)
                     && valid_team_home_base.is_some())
-                    .then(|| {
-                        player
-                            .team()
-                            .map(|team| (team, player.home_base_material_entries().to_vec()))
-                    })
-                    .flatten()
+                .then(|| {
+                    player
+                        .team()
+                        .map(|team| (team, player.home_base_material_entries().to_vec()))
+                })
+                .flatten()
             });
             if let Some((team, material)) = team_update {
                 for player in self
@@ -31379,13 +31345,9 @@ impl Engine {
             self.update_player_asset_value(id)?;
             if check_elimination
                 && !crew_nonempty
-                && self
-                    .players
-                    .get(&id)
-                    .is_some_and(|player| {
-                        player.status() == PlayerStatus::Active
-                            && !player.no_elimination_check()
-                    })
+                && self.players.get(&id).is_some_and(|player| {
+                    player.status() == PlayerStatus::Active && !player.no_elimination_check()
+                })
             {
                 self.eliminated_crew_owners.insert(id);
                 if let Some(player) = self.players.get_mut(&id) {
@@ -31472,9 +31434,7 @@ impl Engine {
             .filter_map(|(&id, player)| {
                 matches!(
                     player.status(),
-                    PlayerStatus::Active
-                        | PlayerStatus::Eliminated
-                        | PlayerStatus::Surrendered
+                    PlayerStatus::Active | PlayerStatus::Eliminated | PlayerStatus::Surrendered
                 )
                 .then_some(id)
             })
@@ -31498,21 +31458,21 @@ impl Engine {
             (
                 object.definition_id.clone(),
                 object.state.construction,
-                object.script_state_snapshot(),
+                Rc::new(object.script_state_snapshot()),
             )
         };
         let definition = self
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
-        if !definition.has_function("CalcValue")
-            && !definition.has_function("CalcDefValue")
-        {
+        if !definition.has_function("CalcValue") && !definition.has_function("CalcDefValue") {
             return Ok(definition.value().wrapping_mul(construction) / FULL_CON);
         }
         let action_library = definition.action_library().clone();
+        let world =
+            self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state_snapshot));
         let call = definition.player_asset_object_value(
-            &state_snapshot,
+            state_snapshot.as_ref(),
             object_id,
             player,
             self.rng.clone(),
@@ -31520,7 +31480,7 @@ impl Engine {
             self.physics,
             self.environment,
             self.frame,
-            self.host_world_context_for_object(index),
+            world,
             self.game_over_triggered,
             self.audio_registry.clone(),
         );
@@ -31652,8 +31612,7 @@ impl Engine {
         if !self.definitions.contains_key(LIGHTNING_DEFINITION) {
             return Ok(true);
         }
-        let config = SpawnConfig::new(LIGHTNING_DEFINITION)
-            .with_position(Vector2::new(50, 50));
+        let config = SpawnConfig::new(LIGHTNING_DEFINITION).with_position(Vector2::new(50, 50));
         let lightning_id = match self.spawn_object(config) {
             Ok(id) => id,
             Err(EngineError::UnknownDefinition(_)) => return Ok(true),
@@ -31685,8 +31644,7 @@ impl Engine {
             return;
         }
         let volume = self.environment.wind.abs().saturating_sub(30) * 2;
-        self.audio_registry
-            .sound_level("Wind", None, volume);
+        self.audio_registry.sound_level("Wind", None, volume);
         self.pending_audio.extend(self.audio_registry.take_events());
     }
 
@@ -31817,8 +31775,7 @@ impl Engine {
         }
         // LaunchVolcano creates FXV1 at C4Game::CreateObject's native
         // default (50,50) and passes requested x/y only to Activate.
-        let config = SpawnConfig::new(VOLCANO_DEFINITION)
-            .with_position(Vector2::new(50, 50));
+        let config = SpawnConfig::new(VOLCANO_DEFINITION).with_position(Vector2::new(50, 50));
         let volcano_id = match self.spawn_object(config) {
             Ok(id) => id,
             Err(EngineError::UnknownDefinition(_)) => return Ok(true),
@@ -31902,12 +31859,10 @@ impl Engine {
             .get(&object.definition_id)
             .map(|definition| {
                 (
-                    definition
-                        .action_library()
-                        .procedure_for_entry(
-                            &object.state.action.name,
-                            object.state.action.act_map_index,
-                        ),
+                    definition.action_library().procedure_for_entry(
+                        &object.state.action.name,
+                        object.state.action.act_map_index,
+                    ),
                     definition.line_connect(),
                     definition.is_collectible(),
                     definition.move_to_range(),
@@ -32180,9 +32135,7 @@ impl Engine {
                         surrendered: player.surrendered(),
                         wealth: player.wealth(),
                         home_base_material: player.home_base_material().clone(),
-                        home_base_material_entries: player
-                            .home_base_material_entries()
-                            .to_vec(),
+                        home_base_material_entries: player.home_base_material_entries().to_vec(),
                         knowledge: player.knowledge().cloned().collect(),
                         hostile_to: self
                             .players
@@ -32432,12 +32385,10 @@ impl Engine {
                 .definitions
                 .get(&object.definition_id)
                 .map(|definition| {
-                    let procedure = definition
-                        .action_library()
-                        .procedure_for_entry(
-                            &object.state.action.name,
-                            object.state.action.act_map_index,
-                        );
+                    let procedure = definition.action_library().procedure_for_entry(
+                        &object.state.action.name,
+                        object.state.action.act_map_index,
+                    );
                     (
                         procedure,
                         definition.line_connect(),
@@ -32539,9 +32490,7 @@ impl Engine {
                         surrendered: player.surrendered(),
                         wealth: player.wealth(),
                         home_base_material: player.home_base_material().clone(),
-                        home_base_material_entries: player
-                            .home_base_material_entries()
-                            .to_vec(),
+                        home_base_material_entries: player.home_base_material_entries().to_vec(),
                         knowledge: player.knowledge().cloned().collect(),
                         hostile_to: self
                             .players
@@ -32716,8 +32665,7 @@ impl Engine {
             let mut actor_snapshot = self.live_command_snapshot(idx);
             actor_snapshot.physical_deferred = self.object_physical_will_fill_fair_cache(idx);
             command_snapshots.insert(current_id, actor_snapshot);
-            let (mut definition_id, mut action_library) =
-                self.object_definition_context(idx)?;
+            let (mut definition_id, mut action_library) = self.object_definition_context(idx)?;
             let previous_action_state = self.objects[idx].state.action.clone();
             let previous_action_name = previous_action_state.name.clone();
             let mut landscape_slot = self.landscape.take();
@@ -33033,10 +32981,9 @@ impl Engine {
                     // fixtoi(swimlimit*10) with the PHYSICAL limit, not the
                     // velocity (:5010-ish "iPhaseAdvance = fixtoi(lLimit*10)"),
                     // DIG fixtoi(diglimit*40) (:4894-4895); everything else 1.
-                    let phase_advance =
-                        match exec_action_library
-                            .procedure_for_entry(&exec_action_source, exec_action_index)
-                        {
+                    let phase_advance = match exec_action_library
+                        .procedure_for_entry(&exec_action_source, exec_action_index)
+                    {
                         ActionProcedure::Walk | ActionProcedure::Hang => {
                             math::fixtoi(object.fixed_velocity.x.abs() * 10)
                         }
@@ -33112,8 +33059,8 @@ impl Engine {
                             .definitions
                             .get(&current_definition_id)
                             .is_some_and(Definition::incomplete_activity);
-                    advance_outcome.wrapped =
-                        exec_action_library.finish_phase_end_against_with_activity(
+                    advance_outcome.wrapped = exec_action_library
+                        .finish_phase_end_against_with_activity(
                             &mut self.objects[idx].state.action,
                             &phase_end,
                             &current_action_library,
@@ -33264,13 +33211,11 @@ impl Engine {
             // this same frame (C4Effect.cpp:319-363).
             let mut effect_cursor = None;
             loop {
-                if self.objects[idx].destroyed
-                    || !self.objects[idx].state.status.is_active()
-                {
+                if self.objects[idx].destroyed || !self.objects[idx].state.status.is_active() {
                     break;
                 }
-                let Some((next_cursor, timer_event)) = self.objects[idx]
-                    .advance_effect_frame_cursor(effect_cursor)
+                let Some((next_cursor, timer_event)) =
+                    self.objects[idx].advance_effect_frame_cursor(effect_cursor)
                 else {
                     break;
                 };
@@ -33315,9 +33260,7 @@ impl Engine {
                     self.dispatch_object_effect_events(idx, &definition_id, stop_events)?;
                 }
             }
-            if self.objects[idx].destroyed
-                || !self.objects[idx].state.status.is_active()
-            {
+            if self.objects[idx].destroyed || !self.objects[idx].state.status.is_active() {
                 // pEffects->Execute may remove the object; C++ returns
                 // before ExecLife/ExecBase/Timer (C4Object.cpp:1087-1090).
                 continue;
@@ -33392,7 +33335,7 @@ impl Engine {
                 .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?
                 .has_step;
             let command = if definition_has_step {
-                let state_snapshot = self.objects[idx].script_state_snapshot();
+                let state_snapshot = Rc::new(self.objects[idx].script_state_snapshot());
                 let random = self.next_random_i32();
 
                 let rng_state = self.rng.clone();
@@ -33401,8 +33344,12 @@ impl Engine {
                         .definitions
                         .get(&definition_id)
                         .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+                    let world = self.host_world_context_for_object_with_snapshot(
+                        idx,
+                        Rc::clone(&state_snapshot),
+                    );
                     definition.call_step(
-                        &state_snapshot,
+                        state_snapshot.as_ref(),
                         object_id,
                         frame,
                         random,
@@ -33410,7 +33357,7 @@ impl Engine {
                         &self.global_effects,
                         self.physics,
                         self.environment,
-                        self.host_world_context_for_object(idx),
+                        world,
                         self.game_over_triggered,
                         self.audio_registry.clone(),
                     )?
@@ -33479,7 +33426,8 @@ impl Engine {
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
                 }
-                self.pending_object_order_commands.extend(object_order_commands);
+                self.pending_object_order_commands
+                    .extend(object_order_commands);
                 self.apply_next_mission_commands(next_mission_commands);
 
                 if !landscape_ops.is_empty() {
@@ -33747,12 +33695,10 @@ impl Engine {
                 .get(&self.objects[idx].definition_id)
                 .map(|definition| {
                     (
-                        definition
-                            .action_library()
-                            .procedure_for_entry(
-                                &self.objects[idx].state.action.name,
-                                self.objects[idx].state.action.act_map_index,
-                            ),
+                        definition.action_library().procedure_for_entry(
+                            &self.objects[idx].state.action.name,
+                            self.objects[idx].state.action.act_map_index,
+                        ),
                         definition.line_connect(),
                         definition.is_collectible(),
                         definition.move_to_range(),
@@ -34718,19 +34664,29 @@ impl Engine {
             "action callback"
         );
         let object_id = self.objects[index].id;
-        let state_snapshot = match state_override {
-            Some(state) => state,
-            None => self.objects[index].script_state_snapshot(),
+        let (state_snapshot, world) = match state_override {
+            Some(state) => (
+                Rc::new(state),
+                // An explicit action-state override can intentionally differ
+                // from the object's current live state. Preserve the existing
+                // host-world view in that case.
+                self.host_world_context_for_object(index),
+            ),
+            None => {
+                let state = Rc::new(self.objects[index].script_state_snapshot());
+                let world =
+                    self.host_world_context_for_object_with_snapshot(index, Rc::clone(&state));
+                (state, world)
+            }
         };
         let definitions_ref = &self.definitions;
         let rng_state = self.rng.clone();
         let global_view = self.global_effects.clone();
-        let world = self.host_world_context_for_object(index);
         let callback = callback_definition.call_action_callback(
             object_definition,
             &callback,
             kind,
-            &state_snapshot,
+            state_snapshot.as_ref(),
             object_id,
             action_name,
             abort_phase,
@@ -34853,10 +34809,8 @@ impl Engine {
         // their channel-local mask folds, then replay the captured C++ call
         // order against the now-materialized objects.
         let was_deferred = self.defer_solid_mask_updates;
-        let mut outermost = self.stage_host_solid_mask_operations(
-            solid_mask_operations,
-            host_raster_preview,
-        );
+        let mut outermost =
+            self.stage_host_solid_mask_operations(solid_mask_operations, host_raster_preview);
         let result = self.apply_callback_outcome_inner(
             index,
             outcome,
@@ -34964,7 +34918,8 @@ impl Engine {
         if !player_commands.is_empty() {
             self.apply_player_commands(player_commands)?;
         }
-        self.pending_object_order_commands.extend(object_order_commands);
+        self.pending_object_order_commands
+            .extend(object_order_commands);
         self.apply_next_mission_commands(next_mission_commands);
 
         if let Some(update) = environment {
@@ -35047,10 +35002,7 @@ impl Engine {
                         self.open_object_info_menu(crew_index, target_index)?;
                     }
                 }
-                MenuRequestKind::Context {
-                    target,
-                    position,
-                } => {
+                MenuRequestKind::Context { target, position } => {
                     if let Some(target_index) = self.find_object_index(target) {
                         self.open_context_menu(crew_index, target_index, false, position)?;
                     }
@@ -35298,7 +35250,8 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
-            self.pending_object_order_commands.extend(object_order_commands);
+            self.pending_object_order_commands
+                .extend(object_order_commands);
             self.apply_next_mission_commands(next_mission_commands);
             if !audio_events.is_empty() {
                 self.pending_audio.extend(audio_events);
@@ -35441,16 +35394,13 @@ impl Engine {
                     object.state.status,
                 )
             };
-            let solid_mask_changed = outcome
-                .update
-                .as_ref()
-                .is_some_and(|update| {
-                    update.change_def.is_some()
-                        || update.solid_mask_override.is_some()
-                        || update.position.is_some()
-                        || update.rotation.is_some()
-                        || update.construction.is_some()
-                });
+            let solid_mask_changed = outcome.update.as_ref().is_some_and(|update| {
+                update.change_def.is_some()
+                    || update.solid_mask_override.is_some()
+                    || update.position.is_some()
+                    || update.rotation.is_some()
+                    || update.construction.is_some()
+            });
             let mut change_def_reinsert = outcome
                 .update
                 .as_ref()
@@ -35463,14 +35413,8 @@ impl Engine {
                 .update
                 .as_ref()
                 .and_then(|update| update.ocf_override);
-            let info_rank_update = outcome
-                .update
-                .as_ref()
-                .and_then(|update| update.info_rank);
-            let info_link_update = outcome
-                .update
-                .as_ref()
-                .and_then(|update| update.info_link);
+            let info_rank_update = outcome.update.as_ref().and_then(|update| update.info_rank);
+            let info_link_update = outcome.update.as_ref().and_then(|update| update.info_link);
             let crew_status_change = outcome
                 .update
                 .as_ref()
@@ -35677,7 +35621,8 @@ impl Engine {
                 if !player_commands.is_empty() {
                     self.apply_player_commands(player_commands)?;
                 }
-                self.pending_object_order_commands.extend(object_order_commands);
+                self.pending_object_order_commands
+                    .extend(object_order_commands);
                 self.apply_next_mission_commands(next_mission_commands);
                 if !audio_events.is_empty() {
                     self.pending_audio.extend(audio_events);
@@ -36100,8 +36045,7 @@ impl Engine {
                 .count(),
         )
         .unwrap_or(i32::MAX);
-        let object_enumeration_index =
-            saturating_u64_to_i32(self.next_object_id.saturating_sub(1));
+        let object_enumeration_index = saturating_u64_to_i32(self.next_object_id.saturating_sub(1));
         let sector_shape_sum = self
             .sectors
             .as_ref()
@@ -36592,9 +36536,8 @@ impl Engine {
             restart: false,
         });
         let music_level = self.audio_registry.restore_music_level(state.music_level);
-        self.pending_audio.push(AudioCommand::SetMusicLevel {
-            level: music_level,
-        });
+        self.pending_audio
+            .push(AudioCommand::SetMusicLevel { level: music_level });
         self.landscape_insert_thrust = state.landscape_insert_thrust;
         self.structures_snow_in = state.structures_snow_in;
         self.flag_removeable = state.flag_removeable;
@@ -37650,8 +37593,7 @@ impl Engine {
                                 .map(EffectEvent::temp_removed)
                                 .collect();
                             sequence.push(event);
-                            sequence
-                                .extend(uppers.into_iter().map(EffectEvent::temp_readded));
+                            sequence.extend(uppers.into_iter().map(EffectEvent::temp_readded));
                             for queued in sequence.into_iter().rev() {
                                 queue.push_front(queued);
                             }
@@ -37738,11 +37680,8 @@ impl Engine {
             // an effect killed inside its temp Stop.
             match event.kind {
                 EffectEventKind::TempRemoved => {
-                    let Some(effect) = object
-                        .state
-                        .effects
-                        .iter_mut()
-                        .find(|effect| {
+                    let Some(effect) =
+                        object.state.effects.iter_mut().find(|effect| {
                             effect.number == event.effect.number && effect.priority > 0
                         })
                     else {
@@ -37753,11 +37692,8 @@ impl Engine {
                     state_snapshot.effects = object.state.effects.clone();
                 }
                 EffectEventKind::TempReadded => {
-                    let Some(effect) = object
-                        .state
-                        .effects
-                        .iter_mut()
-                        .find(|effect| {
+                    let Some(effect) =
+                        object.state.effects.iter_mut().find(|effect| {
                             effect.number == event.effect.number && effect.priority < 0
                         })
                     else {
@@ -37786,14 +37722,13 @@ impl Engine {
                 }
                 insert_effect_into_stack(&mut snapshot_for_call.effects, linked);
             }
-            let dispatch_definition =
-                resolve_effect_dispatch_definition(
-                    &event.effect,
-                    &world,
-                    definitions,
-                    Some((object_id, object.definition_id.as_str())),
-                    definitions.get(&object.definition_id).unwrap_or(definition),
-                );
+            let dispatch_definition = resolve_effect_dispatch_definition(
+                &event.effect,
+                &world,
+                definitions,
+                Some((object_id, object.definition_id.as_str())),
+                definitions.get(&object.definition_id).unwrap_or(definition),
+            );
             // Engine-internal fire callbacks: when no script overload
             // shadows the engine function (AddFunc C4Script.cpp:6994-6996),
             // Fx*Stop clears the OnFire flag — real and temp removals alike
@@ -37906,10 +37841,9 @@ impl Engine {
                                 | EffectStopReason::Cleared
                                 | EffectStopReason::Death
                                 | EffectStopReason::Destroyed
-                        )
-                            && stop_result
-                                .as_ref()
-                                .is_some_and(|value| compat::value_as_i32(value) == -1);
+                        ) && stop_result
+                            .as_ref()
+                            .is_some_and(|value| compat::value_as_i32(value) == -1);
                         (outcome, audio_state, new_rng)
                     }),
                 EffectEventKind::Check { ref pending } => dispatch_definition
@@ -38210,10 +38144,8 @@ impl Engine {
                 let outcome = object.apply_delta(&delta, callback_action_library);
                 if definition_changed {
                     if let Some(current_definition) = definitions.get(&object.definition_id) {
-                        let contents_count = Self::host_retained_contents_count(
-                            &world,
-                            &object.state.contents,
-                        );
+                        let contents_count =
+                            Self::host_retained_contents_count(&world, &object.state.contents);
                         object.state.ocf = current_definition
                             .compute_ocf_with_contents_count(&object.state, contents_count);
                     }
@@ -38351,8 +38283,8 @@ impl Engine {
         *environment = current_environment;
 
         let next_object_id = world.next_object_id();
-        let host_raster_preview = (!pending_solid_mask_operations.is_empty())
-            .then(|| world.host_raster_preview());
+        let host_raster_preview =
+            (!pending_solid_mask_operations.is_empty()).then(|| world.host_raster_preview());
         Ok((
             global_commands,
             pending_particles,
@@ -38405,7 +38337,11 @@ impl Engine {
     }
 
     fn remove_from_selection(&mut self, owner: i32, object_id: ObjectId) {
-        if let Some(object) = self.objects.iter_mut().find(|object| object.id == object_id) {
+        if let Some(object) = self
+            .objects
+            .iter_mut()
+            .find(|object| object.id == object_id)
+        {
             object.state.selected = false;
         }
         if self.crew_cursor(owner) == Some(object_id) {
@@ -38523,12 +38459,8 @@ impl Engine {
         let contents_specs = pending
             .iter()
             .filter_map(|spawn| {
-                (!spawn.contents_handles.is_empty()).then(|| {
-                    (
-                        spawn.handle.clone(),
-                        spawn.contents_handles.clone(),
-                    )
-                })
+                (!spawn.contents_handles.is_empty())
+                    .then(|| (spawn.handle.clone(), spawn.contents_handles.clone()))
             })
             .collect::<Vec<_>>();
 
@@ -38668,9 +38600,7 @@ impl Engine {
                     .iter()
                     .filter(|object| object.snapshot.status.is_active())
                     .filter(|object| !preserved.contains(&object.snapshot.id))
-                    .filter(|object| {
-                        !self.is_user_player_object_snapshot(&object.snapshot)
-                    })
+                    .filter(|object| !self.is_user_player_object_snapshot(&object.snapshot))
                     .cloned()
                     .collect::<Vec<_>>()
             });
@@ -38724,8 +38654,7 @@ impl Engine {
                 current.map_creator = None;
                 // A saved section landscape reloads as ExactLandscape;
                 // C++ has no S2 creator or callback masks to replay.
-                current.post_init_map_callbacks =
-                    map_creator_s2::PostInitMapCallbacks::default();
+                current.post_init_map_callbacks = map_creator_s2::PostInitMapCallbacks::default();
                 if let Some(raster) = current
                     .landscape
                     .as_mut()
@@ -38734,8 +38663,7 @@ impl Engine {
                     raster.set_map_creator(None);
                 }
                 current.scenario_values = self.scenario_values.as_ref().clone();
-                current.base_reject_entrance_enabled =
-                    self.base_reject_entrance_enabled;
+                current.base_reject_entrance_enabled = self.base_reject_entrance_enabled;
                 current.base_extinguish_enabled = self.base_extinguish_enabled;
                 current.environment = self.environment;
                 current.landscape_systems = saved_landscape_systems
@@ -38828,9 +38756,7 @@ impl Engine {
                 landscape
                     .raster_state()
                     .map(landscape::LandscapeRasterState::map_zoom),
-                landscape
-                    .raster_state()
-                    .map(|state| state.texmap().clone()),
+                landscape.raster_state().map(|state| state.texmap().clone()),
                 landscape
                     .raster_state()
                     .and_then(landscape::LandscapeRasterState::map_creator)
@@ -38873,10 +38799,9 @@ impl Engine {
                     .and_then(|(_, _, _, _, _, creator)| creator.clone());
                 let mut classifier = scenario::MapPixelClassifier::from_runtime_state(live_texmap);
                 let creation = {
-                    let mut script_algo =
-                        |rng: &mut LcgRng, function: &str, args: [i32; 4]| {
-                            self.call_map_script_algorithm(rng, function, args)
-                        };
+                    let mut script_algo = |rng: &mut LcgRng, function: &str, args: [i32; 4]| {
+                        self.call_map_script_algorithm(rng, function, args)
+                    };
                     map_creator_s2::create_s2_map_for_section_with_state_and_functions_with_script_algo(
                         live_creator,
                         &spec.source,
@@ -38938,13 +38863,12 @@ impl Engine {
                         .raster_state_mut()
                         .expect("classified section landscapes carry raster state")
                         .set_map_creator(retained_creator);
-                    let mode = if target.exact_landscape
-                        && previous_mode == LANDSCAPE_MODE_UNDEFINED
-                    {
-                        LANDSCAPE_MODE_EXACT
-                    } else {
-                        LANDSCAPE_MODE_UNDEFINED
-                    };
+                    let mode =
+                        if target.exact_landscape && previous_mode == LANDSCAPE_MODE_UNDEFINED {
+                            LANDSCAPE_MODE_EXACT
+                        } else {
+                            LANDSCAPE_MODE_UNDEFINED
+                        };
                     landscape.set_runtime_mode(mode);
                     state.landscape = Some(landscape);
                     landscape_loaded = true;
@@ -38952,11 +38876,8 @@ impl Engine {
                     landscape_loaded = false;
                     if let Some(landscape) = state.landscape.as_mut() {
                         if !landscape.replace_runtime_texmap_state(runtime_texmap.clone()) {
-                            let mut raster = landscape::LandscapeRasterState::new(
-                                1,
-                                map_seed,
-                                runtime_texmap,
-                            );
+                            let mut raster =
+                                landscape::LandscapeRasterState::new(1, map_seed, runtime_texmap);
                             raster.set_map_creator(Some(creation.creator));
                             landscape.set_raster_state(raster);
                         } else if let Some(raster) = landscape.raster_state_mut() {
@@ -38989,10 +38910,8 @@ impl Engine {
                         if target.texmap_lookups.is_empty() {
                             landscape.replace_runtime_texmap_state_and_repaint(texmap);
                         } else {
-                            landscape.merge_runtime_texmap_for_section(
-                                texmap,
-                                &target.texmap_lookups,
-                            );
+                            landscape
+                                .merge_runtime_texmap_for_section(texmap, &target.texmap_lookups);
                         }
                     }
                     if target.resynthesize_static_map {
@@ -39028,13 +38947,12 @@ impl Engine {
                     if let Some(state) = landscape.raster_state_mut() {
                         state.set_map_creator(creator);
                     }
-                    let mode = if target.exact_landscape
-                        && previous_mode == LANDSCAPE_MODE_UNDEFINED
-                    {
-                        LANDSCAPE_MODE_EXACT
-                    } else {
-                        LANDSCAPE_MODE_UNDEFINED
-                    };
+                    let mode =
+                        if target.exact_landscape && previous_mode == LANDSCAPE_MODE_UNDEFINED {
+                            LANDSCAPE_MODE_EXACT
+                        } else {
+                            LANDSCAPE_MODE_UNDEFINED
+                        };
                     landscape.set_runtime_mode(mode);
                 }
             }
@@ -39042,8 +38960,8 @@ impl Engine {
             let mut prepared_creator = target.map_creator.clone();
             if let Some(landscape) = state.landscape.as_mut() {
                 if !target.texmap_lookups.is_empty() {
-                    if let Some(remap) = landscape
-                        .replay_empty_section_texmap_lookups(&target.texmap_lookups)
+                    if let Some(remap) =
+                        landscape.replay_empty_section_texmap_lookups(&target.texmap_lookups)
                     {
                         if let Some(creator) = prepared_creator.as_mut() {
                             creator.remap_material_colors(&remap);
@@ -39126,16 +39044,14 @@ impl Engine {
     fn is_user_player_object_snapshot(&self, object: &ObjectSnapshot) -> bool {
         self.players.get(&object.owner).is_some_and(|player| {
             !player.is_script_player()
-                && (object.definition_id.as_str() == "FLAG"
-                    || player.crew().contains(&object.id))
+                && (object.definition_id.as_str() == "FLAG" || player.crew().contains(&object.id))
         })
     }
 
     fn is_script_player_object_snapshot(&self, object: &ObjectSnapshot) -> bool {
         self.players.get(&object.owner).is_some_and(|player| {
             player.is_script_player()
-                && (object.definition_id.as_str() == "FLAG"
-                    || player.crew().contains(&object.id))
+                && (object.definition_id.as_str() == "FLAG" || player.crew().contains(&object.id))
         })
     }
 
@@ -39533,8 +39449,7 @@ impl Engine {
                     player_id,
                     open_menu,
                 } => {
-                    let (goals, fulfilled_goals) =
-                        self.evaluate_goals_for_player(player_id)?;
+                    let (goals, fulfilled_goals) = self.evaluate_goals_for_player(player_id)?;
                     self.pending_game_goal_menu_requests
                         .push(GameGoalMenuRequest {
                             player: player_id,
@@ -39601,9 +39516,9 @@ impl Engine {
                         entry.has_died = true;
                         entry.death_count = entry.death_count.wrapping_add(1);
                         if entry.in_action {
-                            entry.total_playing_time = entry.total_playing_time.wrapping_add(
-                                self.game_time.wrapping_sub(entry.in_action_time),
-                            );
+                            entry.total_playing_time = entry
+                                .total_playing_time
+                                .wrapping_add(self.game_time.wrapping_sub(entry.in_action_time));
                             entry.in_action = false;
                         }
                         info_update = Some((
@@ -39637,11 +39552,7 @@ impl Engine {
                     has_died,
                 } => {
                     let recruited_rank_name = recruit.then(|| {
-                        self.recruit_rank_name(
-                            &info.definition_id,
-                            info.rank,
-                            &info.rank_name,
-                        )
+                        self.recruit_rank_name(&info.definition_id, info.rank, &info.rank_name)
                     });
                     if let Some(link) = link {
                         let roster = self.crew_rosters.entry(link.player_id).or_default();
@@ -39708,8 +39619,7 @@ impl Engine {
                     link,
                     change,
                 } => {
-                    if let Some(info) =
-                        self.adjust_object_info_experience(object_id, link, change)
+                    if let Some(info) = self.adjust_object_info_experience(object_id, link, change)
                     {
                         if let Some(rank_name) = self.promotion_rank_name(&info) {
                             self.set_object_info_rank_name(object_id, link, rank_name);
@@ -39948,11 +39858,7 @@ impl Engine {
                     value,
                 } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
-                        match player
-                            .extra_data
-                            .iter_mut()
-                            .find(|(slot, _)| *slot == name)
-                        {
+                        match player.extra_data.iter_mut().find(|(slot, _)| *slot == name) {
                             Some((_, stored)) => *stored = value,
                             None => player.extra_data.push((name, value)),
                         }
@@ -40038,7 +39944,11 @@ impl Engine {
 
     fn runtime_team_order_id(player: &Player) -> i32 {
         let info_id = player.player_info_id();
-        if info_id > 0 { info_id } else { player.id() }
+        if info_id > 0 {
+            info_id
+        } else {
+            player.id()
+        }
     }
 
     /// Mirrors `C4Team::RecheckPlayers`: retain configured/persisted order,
@@ -40127,8 +40037,7 @@ impl Engine {
                 object.state.crew_member
             } else {
                 listed.contains(&object.id)
-                    || (!self.players.contains_key(&object.state.owner)
-                        && object.state.crew_member)
+                    || (!self.players.contains_key(&object.state.owner) && object.state.crew_member)
             };
             if !member || object.destroyed || object.state.status == ObjectStatus::Deleted {
                 object.state.selected = false;
@@ -40284,8 +40193,7 @@ impl Engine {
             .iter()
             .position(|other| {
                 self.find_object_index(*other).is_some_and(|other_index| {
-                    self.objects[other_index].state.category & CATEGORY_SORT_LIMIT
-                        <= sort_category
+                    self.objects[other_index].state.category & CATEGORY_SORT_LIMIT <= sort_category
                 })
             })
             .unwrap_or(roster.len())
@@ -40420,8 +40328,7 @@ impl Engine {
             .landscape
             .as_ref()
             .map(|landscape| {
-                let solid_masks =
-                    self.solid_masks_for_movement(&self.active_solid_mask_indices());
+                let solid_masks = self.solid_masks_for_movement(&self.active_solid_mask_indices());
                 shape_contact_check(
                     &self.objects[idx].state.vertices,
                     position,
@@ -40551,7 +40458,10 @@ impl Engine {
                 }
                 let index = self.find_object_index(object_id)?;
                 let object = &self.objects[index];
-                let shape_x = object.current_shape_rect().map(|shape| shape.x).unwrap_or(0);
+                let shape_x = object
+                    .current_shape_rect()
+                    .map(|shape| shape.x)
+                    .unwrap_or(0);
                 let (low, high) = if object.state.category & CATEGORY_STATIC_BACK != 0 {
                     (
                         layer.position.x + layer.shape_rect.x,
@@ -40563,13 +40473,7 @@ impl Engine {
                         layer.position.x + layer.shape_rect.x + layer.shape_rect.width + shape_x,
                     )
                 };
-                Some(target_bounds(
-                    target_x,
-                    low,
-                    high,
-                    CNAT_LEFT,
-                    CNAT_RIGHT,
-                ))
+                Some(target_bounds(target_x, low, high, CNAT_LEFT, CNAT_RIGHT))
             })
             .unwrap_or([None, None]);
         for cnat in layer_contacts.into_iter().flatten() {
@@ -40579,10 +40483,7 @@ impl Engine {
             let object = &mut self.objects[index];
             object.fixed_velocity.x = C4Fixed::ZERO;
             object.refresh_velocity_from_fixed();
-            self.dispatch_live_movement_contact(
-                object_id,
-                MovementContactDispatch::Direct(cnat),
-            )?;
+            self.dispatch_live_movement_contact(object_id, MovementContactDispatch::Direct(cnat))?;
             self.refresh_live_movement_solid_masks(solid_masks);
         }
 
@@ -40620,10 +40521,7 @@ impl Engine {
             let object = &mut self.objects[index];
             object.fixed_velocity.x = C4Fixed::ZERO;
             object.refresh_velocity_from_fixed();
-            self.dispatch_live_movement_contact(
-                object_id,
-                MovementContactDispatch::Direct(cnat),
-            )?;
+            self.dispatch_live_movement_contact(object_id, MovementContactDispatch::Direct(cnat))?;
             self.refresh_live_movement_solid_masks(solid_masks);
         }
         Ok(())
@@ -40647,7 +40545,10 @@ impl Engine {
                 }
                 let index = self.find_object_index(object_id)?;
                 let object = &self.objects[index];
-                let shape_y = object.current_shape_rect().map(|shape| shape.y).unwrap_or(0);
+                let shape_y = object
+                    .current_shape_rect()
+                    .map(|shape| shape.y)
+                    .unwrap_or(0);
                 let (low, high) = if object.state.category & CATEGORY_STATIC_BACK != 0 {
                     (
                         layer.position.y + layer.shape_rect.y,
@@ -40659,13 +40560,7 @@ impl Engine {
                         layer.position.y + layer.shape_rect.y + layer.shape_rect.height + shape_y,
                     )
                 };
-                Some(target_bounds(
-                    target_y,
-                    low,
-                    high,
-                    CNAT_TOP,
-                    CNAT_BOTTOM,
-                ))
+                Some(target_bounds(target_y, low, high, CNAT_TOP, CNAT_BOTTOM))
             })
             .unwrap_or([None, None]);
         for cnat in layer_contacts.into_iter().flatten() {
@@ -40675,10 +40570,7 @@ impl Engine {
             let object = &mut self.objects[index];
             object.fixed_velocity.y = C4Fixed::ZERO;
             object.refresh_velocity_from_fixed();
-            self.dispatch_live_movement_contact(
-                object_id,
-                MovementContactDispatch::Direct(cnat),
-            )?;
+            self.dispatch_live_movement_contact(object_id, MovementContactDispatch::Direct(cnat))?;
             self.refresh_live_movement_solid_masks(solid_masks);
         }
 
@@ -40693,15 +40585,9 @@ impl Engine {
                 .current_shape_rect()
                 .map(|shape| shape.y)
                 .unwrap_or(0);
-            for cnat in target_bounds(
-                target_y,
-                -shape_y,
-                1_000_000,
-                CNAT_TOP,
-                CNAT_BOTTOM,
-            )
-            .into_iter()
-            .flatten()
+            for cnat in target_bounds(target_y, -shape_y, 1_000_000, CNAT_TOP, CNAT_BOTTOM)
+                .into_iter()
+                .flatten()
             {
                 let Some(index) = self.find_object_index(object_id) else {
                     return Ok(());
@@ -40733,15 +40619,9 @@ impl Engine {
                 .map(Landscape::estimated_height)
                 .unwrap_or(0)
                 .saturating_add(shape_y);
-            for cnat in target_bounds(
-                target_y,
-                -1_000_000,
-                bottom,
-                CNAT_TOP,
-                CNAT_BOTTOM,
-            )
-            .into_iter()
-            .flatten()
+            for cnat in target_bounds(target_y, -1_000_000, bottom, CNAT_TOP, CNAT_BOTTOM)
+                .into_iter()
+                .flatten()
             {
                 let Some(index) = self.find_object_index(object_id) else {
                     return Ok(());
@@ -40790,16 +40670,13 @@ impl Engine {
         let contacted = contact.is_contact();
         self.objects[index].latch_shape_contact(&contact);
         if contacted {
-            self.dispatch_live_movement_contact(
-                object_id,
-                MovementContactDispatch::ShapeProbe,
-            )?;
+            self.dispatch_live_movement_contact(object_id, MovementContactDispatch::ShapeProbe)?;
             self.refresh_live_movement_solid_masks(solid_masks);
         }
         Ok(contacted
-            && self.find_object_index(object_id).is_some_and(|index| {
-                self.objects[index].frame_shape_contact_count != 0
-            }))
+            && self
+                .find_object_index(object_id)
+                .is_some_and(|index| self.objects[index].frame_shape_contact_count != 0))
     }
 
     fn begin_live_object_motion(
@@ -40911,11 +40788,7 @@ impl Engine {
 
             let override_x = candidate.x != original.x;
             let override_y = candidate.y != original.y;
-            self.begin_live_object_motion(
-                object_id,
-                &mut solid_mask_removed,
-                mask_attachments,
-            );
+            self.begin_live_object_motion(object_id, &mut solid_mask_removed, mask_attachments);
             let Some(index) = self.find_object_index(object_id) else {
                 break;
             };
@@ -41031,11 +40904,7 @@ impl Engine {
                 apply_contact_friction(&mut object.fixed_velocity.y, friction);
                 break;
             }
-            self.begin_live_object_motion(
-                object_id,
-                &mut solid_mask_removed,
-                mask_attachments,
-            );
+            self.begin_live_object_motion(object_id, &mut solid_mask_removed, mask_attachments);
             let Some(index) = self.find_object_index(object_id) else {
                 break;
             };
@@ -41115,11 +40984,7 @@ impl Engine {
                 }
                 break;
             }
-            self.begin_live_object_motion(
-                object_id,
-                &mut solid_mask_removed,
-                mask_attachments,
-            );
+            self.begin_live_object_motion(object_id, &mut solid_mask_removed, mask_attachments);
             let Some(index) = self.find_object_index(object_id) else {
                 break;
             };
@@ -41240,8 +41105,7 @@ impl Engine {
                 };
                 let shape_updated = {
                     let object = &mut self.objects[index];
-                    object.state.rotation +=
-                        sign_i32(target_rotation - object.state.rotation);
+                    object.state.rotation += sign_i32(target_rotation - object.state.rotation);
                     let shape_updated = object.shape_template.line == 0;
                     if shape_updated {
                         object.refresh_shape_geometry();
@@ -41364,12 +41228,8 @@ impl Engine {
         solid_mask_indices: &[usize],
     ) -> Result<ExecMovementOutcome, EngineError> {
         let object_id = self.objects[idx].id;
-        let outcome = self.exec_object_movement(
-            idx,
-            action_library,
-            definition_id,
-            solid_mask_indices,
-        )?;
+        let outcome =
+            self.exec_object_movement(idx, action_library, definition_id, solid_mask_indices)?;
         let Some(idx) = self.find_object_index(object_id) else {
             return Ok(outcome);
         };
@@ -41477,10 +41337,7 @@ impl Engine {
             });
         };
         self.update_solid_mask(idx);
-        self.restore_solid_mask_attachments(
-            idx,
-            did_motion.then_some(mask_attachments).flatten(),
-        );
+        self.restore_solid_mask_attachments(idx, did_motion.then_some(mask_attachments).flatten());
         // C4Object::InLiquid update, inline in DoMovement after
         // integration and BEFORE ContactAction/NoAttachAction
         // (C4Movement.cpp:443-460): IsInLiquidCheck probes
@@ -41969,8 +41826,7 @@ impl Engine {
                 movement_profile,
                 &definition_id,
                 physical,
-            )?
-            {
+            )? {
                 return Ok(true);
             }
             push_handled = true;
@@ -41984,8 +41840,7 @@ impl Engine {
                 movement_profile,
                 &definition_id,
                 physical,
-            )?
-            {
+            )? {
                 return Ok(true);
             }
             pull_handled = true;
@@ -42660,7 +42515,8 @@ impl Engine {
         if action_library.is_idle_entry(&action_name, action_index) {
             return;
         }
-        let Some(dig_free_value) = action_library.dig_free_for_entry(&action_name, action_index) else {
+        let Some(dig_free_value) = action_library.dig_free_for_entry(&action_name, action_index)
+        else {
             return;
         };
 
@@ -42874,9 +42730,7 @@ impl Engine {
         // Shape.CheckContact(cx, cy-1) runs before drawing. A blocked moving
         // bridge rewrites the remaining bridge as stationary and immediately
         // retries at Action.Time 0 (C4Object.cpp:4631-4646).
-        if move_clonk
-            && self.object_shape_contacts_at(idx, Vector2::new(clonk_x, clonk_y - 1))
-        {
+        if move_clonk && self.object_shape_contacts_at(idx, Vector2::new(clonk_x, clonk_y - 1)) {
             let mut remaining = parameters.duration.saturating_sub(action_time);
             let mut retry_time = 0;
             if parameters.wall && command_direction == CommandDirection::Up {
@@ -42947,8 +42801,7 @@ impl Engine {
                     // MatDigFree(MNone) is 1 (C4Wrappers.h:153-157).
                     .unwrap_or(1);
                 if bridge_density > current_density
-                    || (bridge_density == current_density
-                        && bridge_dig_free <= current_dig_free)
+                    || (bridge_density == current_density && bridge_dig_free <= current_dig_free)
                 {
                     let _ = landscape.insert_material_pix(target_x, target_y, material);
                 }
@@ -42992,13 +42845,10 @@ impl Engine {
                     !container.state.need_energy
                         && self.definitions.get(&container.definition_id).is_some_and(
                             |definition| {
-                                definition
-                                    .action_library()
-                                    .procedure_for_entry(
-                                        &container.state.action.name,
-                                        container.state.action.act_map_index,
-                                    )
-                                    == ActionProcedure::Build
+                                definition.action_library().procedure_for_entry(
+                                    &container.state.action.name,
+                                    container.state.action.act_map_index,
+                                ) == ActionProcedure::Build
                             },
                         )
                 });
@@ -43015,10 +42865,10 @@ impl Engine {
         let shape = self.objects[target_idx]
             .current_shape_rect()
             .unwrap_or_default();
-        let dx = i64::from(builder_position.x)
-            - (i64::from(target_position.x) + i64::from(shape.x));
-        let dy = i64::from(builder_position.y)
-            - (i64::from(target_position.y) + i64::from(shape.y));
+        let dx =
+            i64::from(builder_position.x) - (i64::from(target_position.x) + i64::from(shape.x));
+        let dy =
+            i64::from(builder_position.y) - (i64::from(target_position.y) + i64::from(shape.y));
         let in_target_area = dx >= 0
             && dx <= i64::from(shape.width)
             && dy >= -16
@@ -43168,15 +43018,13 @@ impl Engine {
             .map(Definition::mass)
             .unwrap_or(100);
         let target_mass = if target_mass == 0 { 1 } else { target_mass };
-        let delta = (i64::from(level) * i64::from(build_speed) * 150)
-            / i64::from(target_mass);
+        let delta = (i64::from(level) * i64::from(build_speed) * 150) / i64::from(target_mass);
         let delta = delta.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
         let current_construction = self.objects[target_idx].state.construction;
         let desired_construction = current_construction
             .saturating_add(delta)
             .clamp(0, FULL_CON);
-        let crossed_full_con = current_construction < FULL_CON
-            && desired_construction >= FULL_CON;
+        let crossed_full_con = current_construction < FULL_CON && desired_construction >= FULL_CON;
         let refresh_components = !need_material
             && docon_refreshes_construction(current_construction, desired_construction);
         let gained_components = refresh_components.then(|| {
@@ -43271,10 +43119,8 @@ impl Engine {
         definition_id: &DefinitionId,
         builder_id: ObjectId,
     ) -> Result<Vec<DefinitionComponent>, EngineError> {
-        let Some((script, static_components, has_custom_components)) = self
-            .definitions
-            .get(definition_id)
-            .map(|definition| {
+        let Some((script, static_components, has_custom_components)) =
+            self.definitions.get(definition_id).map(|definition| {
                 (
                     definition.script_arc(),
                     definition.components().to_vec(),
@@ -43857,12 +43703,9 @@ impl Engine {
             (0usize, self.objects[idx].state.action.target),
             (1usize, self.objects[idx].state.action.target2),
         ] {
-            let resolved =
-                target_id
-                    .and_then(|id| self.find_object_index(id))
-                    .filter(|&target_idx| {
-                        self.objects[target_idx].state.construction >= FULL_CON
-                    });
+            let resolved = target_id
+                .and_then(|id| self.find_object_index(id))
+                .filter(|&target_idx| self.objects[target_idx].state.construction >= FULL_CON);
             match resolved {
                 None => broke = true,
                 Some(target_idx) => {
@@ -43993,10 +43836,8 @@ impl Engine {
         definition_id: &DefinitionId,
         direction: Direction,
     ) -> Result<(), EngineError> {
-        let Some((current_direction, turn_action)) = self
-            .definitions
-            .get(definition_id)
-            .and_then(|definition| {
+        let Some((current_direction, turn_action)) =
+            self.definitions.get(definition_id).and_then(|definition| {
                 let library = definition.action_library();
                 let action = &self.objects[idx].state.action;
                 let raw_direction = direction.to_script_value();
@@ -44004,14 +43845,14 @@ impl Engine {
                     && raw_direction >= 0
                     && raw_direction
                         < library.directions_for_entry(&action.name, action.act_map_index))
-                    .then(|| {
-                        (
-                            self.objects[idx].state.direction,
-                            library
-                                .turn_action_for_entry(&action.name, action.act_map_index)
-                                .map(str::to_string),
-                        )
-                    })
+                .then(|| {
+                    (
+                        self.objects[idx].state.direction,
+                        library
+                            .turn_action_for_entry(&action.name, action.act_map_index)
+                            .map(str::to_string),
+                    )
+                })
             })
         else {
             return Ok(());
@@ -44036,10 +43877,8 @@ impl Engine {
         direction: Direction,
     ) -> Result<(), EngineError> {
         let object_id = self.objects[idx].id;
-        let Some((current_direction, turn_action)) = self
-            .definitions
-            .get(definition_id)
-            .and_then(|definition| {
+        let Some((current_direction, turn_action)) =
+            self.definitions.get(definition_id).and_then(|definition| {
                 let library = definition.action_library();
                 let action = &self.objects[idx].state.action;
                 let raw_direction = direction.to_script_value();
@@ -44247,8 +44086,7 @@ impl Engine {
             return Ok(());
         }
         let procedure = library.procedure_for_entry(&action_name, action.act_map_index);
-        let action_disabled =
-            library.disables_object_for_entry(&action_name, action.act_map_index);
+        let action_disabled = library.disables_object_for_entry(&action_name, action.act_map_index);
         let can_scale = physical.can_scale != 0;
         let can_hangle = physical.can_hangle != 0;
 
@@ -44307,8 +44145,7 @@ impl Engine {
                         if self.action_with_calls(idx, &definition_id, "Walk")? {
                             if let Some(idx) = self.find_object_index(object_id) {
                                 let object = &mut self.objects[idx];
-                                object.fixed_velocity =
-                                    FixedVec2::new(last_xdir, C4Fixed::ZERO);
+                                object.fixed_velocity = FixedVec2::new(last_xdir, C4Fixed::ZERO);
                                 object.state.velocity = object.velocity_pixels();
                             }
                         }
@@ -44416,8 +44253,7 @@ impl Engine {
                     };
                     let direction = self.objects[idx].state.direction;
                     let definition_id = self.objects[idx].definition_id.clone();
-                    if self.objects[idx].state.ocf & crate::ocf::HIT_SPEED3 != 0
-                        || action_disabled
+                    if self.objects[idx].state.ocf & crate::ocf::HIT_SPEED3 != 0 || action_disabled
                     {
                         self.object_action_tumble(
                             idx,
@@ -44471,8 +44307,7 @@ impl Engine {
             match procedure {
                 ActionProcedure::Flight => {
                     let definition_id = self.objects[idx].definition_id.clone();
-                    if self.objects[idx].state.ocf & crate::ocf::HIT_SPEED3 != 0
-                        || action_disabled
+                    if self.objects[idx].state.ocf & crate::ocf::HIT_SPEED3 != 0 || action_disabled
                     {
                         self.object_action_tumble(
                             idx,
@@ -44551,8 +44386,7 @@ impl Engine {
             };
             let velocity = self.objects[idx].fixed_velocity;
             if !velocity.y.is_nonzero() {
-                let allow_down =
-                    i32::from(self.objects[idx].frame_t_contact & CNAT_BOTTOM == 0);
+                let allow_down = i32::from(self.objects[idx].frame_t_contact & CNAT_BOTTOM == 0);
                 if self.objects[idx].frame_t_contact & CNAT_RIGHT != 0 {
                     let position = self.objects[idx].state.position;
                     self.force_object_position(
@@ -44581,9 +44415,7 @@ impl Engine {
                 return Ok(());
             };
             let velocity = self.objects[idx].fixed_velocity;
-            if !velocity.x.is_nonzero()
-                && self.objects[idx].frame_t_contact & CNAT_TOP != 0
-            {
+            if !velocity.x.is_nonzero() && self.objects[idx].frame_t_contact & CNAT_TOP != 0 {
                 let position = self.objects[idx].state.position;
                 self.force_object_position(idx, Vector2::new(position.x, position.y + 1));
                 let object = &mut self.objects[idx];
@@ -44858,10 +44690,8 @@ impl Engine {
             let Some(function_name) = contact_callback_name(cnat) else {
                 continue;
             };
-            let Some((callback_definition_id, action_library, has_function)) = self
-                .objects
-                .get(idx)
-                .and_then(|object| {
+            let Some((callback_definition_id, action_library, has_function)) =
+                self.objects.get(idx).and_then(|object| {
                     self.definitions
                         .get(&object.definition_id)
                         .map(|definition| {
@@ -44915,24 +44745,19 @@ impl Engine {
         const CORNER_RANGE: i32 = ATTACH_RANGE + 2;
         let corner_okay =
             |engine: &mut Engine, range_x: i32, range_y: i32| -> Result<bool, EngineError> {
-            let (position, direction) = {
-                let object = &engine.objects[idx];
-                (object.state.position, object.state.direction)
-            };
-            let cty = position.y - range_y;
-            let ctx = if direction == Direction::Left {
-                position.x - range_x
-            } else {
-                position.x + range_x
-            };
-            Ok(engine
-                .object_contact_check_at(
-                    idx,
-                    Vector2::new(ctx, cty),
-                    solid_mask_indices,
-                )
-                ?
-                .is_some_and(|contact| contact.contact_cnat == 0))
+                let (position, direction) = {
+                    let object = &engine.objects[idx];
+                    (object.state.position, object.state.direction)
+                };
+                let cty = position.y - range_y;
+                let ctx = if direction == Direction::Left {
+                    position.x - range_x
+                } else {
+                    position.x + range_x
+                };
+                Ok(engine
+                    .object_contact_check_at(idx, Vector2::new(ctx, cty), solid_mask_indices)?
+                    .is_some_and(|contact| contact.contact_cnat == 0))
             };
         let (range_x, range_y) = if matches!(procedure, ActionProcedure::Scale) {
             // Scaling: range max to min (CheckCornerScale).
@@ -45037,7 +44862,8 @@ impl Engine {
         let scaling_upward = matches!(
             command_direction,
             CommandDirection::Up | CommandDirection::UpLeft | CommandDirection::UpRight
-        ) || (command_direction == CommandDirection::Left && direction == Direction::Left)
+        ) || (command_direction == CommandDirection::Left
+            && direction == Direction::Left)
             || (command_direction == CommandDirection::Right && direction == Direction::Right);
         if matches!(procedure, ActionProcedure::Scale) && scaling_upward {
             let corner_scaled = self.object_action_corner_scale(
@@ -45206,10 +45032,13 @@ impl Engine {
             self.notify_attach_target_lost(object_id)?;
             return Ok(false);
         };
-        let Some(live_target_idx) = self.find_object_index(live_target_id).filter(|&target_idx| {
-            !self.objects[target_idx].destroyed
-                && self.objects[target_idx].state.status != ObjectStatus::Deleted
-        }) else {
+        let Some(live_target_idx) = self
+            .find_object_index(live_target_id)
+            .filter(|&target_idx| {
+                !self.objects[target_idx].destroyed
+                    && self.objects[target_idx].state.status != ObjectStatus::Deleted
+            })
+        else {
             if self.objects[live_idx].state.action.target == Some(live_target_id) {
                 self.objects[live_idx].state.action.target = None;
                 self.objects[live_idx].compiler_cache.action_target1 = 0;
@@ -45331,12 +45160,10 @@ impl Engine {
             .definitions
             .get(&self.objects[target_idx].definition_id)
             .map(|definition| {
-                definition
-                    .action_library()
-                    .procedure_for_entry(
-                        &self.objects[target_idx].state.action.name,
-                        self.objects[target_idx].state.action.act_map_index,
-                    )
+                definition.action_library().procedure_for_entry(
+                    &self.objects[target_idx].state.action.name,
+                    self.objects[target_idx].state.action.act_map_index,
+                )
             })
             .unwrap_or_default();
         if matches!(
@@ -46327,12 +46154,10 @@ impl Engine {
             self.definitions
                 .get(&definition_id)
                 .map(|definition| {
-                    definition
-                        .action_library()
-                        .procedure_for_entry(
-                            &object.state.action.name,
-                            object.state.action.act_map_index,
-                        )
+                    definition.action_library().procedure_for_entry(
+                        &object.state.action.name,
+                        object.state.action.act_map_index,
+                    )
                 })
                 .unwrap_or_default()
         };
@@ -46754,12 +46579,10 @@ impl Engine {
                             .definitions
                             .get(&definition_id)
                             .map(|definition| {
-                                definition
-                                    .action_library()
-                                    .procedure_for_entry(
-                                        &self.objects[idx].state.action.name,
-                                        self.objects[idx].state.action.act_map_index,
-                                    )
+                                definition.action_library().procedure_for_entry(
+                                    &self.objects[idx].state.action.name,
+                                    self.objects[idx].state.action.act_map_index,
+                                )
                             })
                             .unwrap_or_default();
                         let has_action = !self.objects[idx].state.action.name.is_empty();
@@ -46860,15 +46683,20 @@ impl Engine {
             .ok_or(EngineError::UnknownObject(actor_id))?;
         let (definition_id, state_snapshot) = {
             let object = &self.objects[idx];
-            (object.definition_id.clone(), object.script_state_snapshot())
+            (
+                object.definition_id.clone(),
+                Rc::new(object.script_state_snapshot()),
+            )
         };
         let definition = self
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
         let action_library = definition.action_library().clone();
+        let world =
+            self.host_world_context_for_object_with_snapshot(idx, Rc::clone(&state_snapshot));
         let call = definition.command_buy_value(
-            &state_snapshot,
+            state_snapshot.as_ref(),
             actor_id,
             item_definition,
             base_id,
@@ -46878,7 +46706,7 @@ impl Engine {
             self.physics,
             self.environment,
             self.frame,
-            self.host_world_context_for_object(idx),
+            world,
             self.game_over_triggered,
             self.audio_registry.clone(),
         );
@@ -46921,15 +46749,20 @@ impl Engine {
             .ok_or(EngineError::UnknownObject(actor_id))?;
         let (definition_id, state_snapshot) = {
             let object = &self.objects[idx];
-            (object.definition_id.clone(), object.script_state_snapshot())
+            (
+                object.definition_id.clone(),
+                Rc::new(object.script_state_snapshot()),
+            )
         };
         let definition = self
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
         let action_library = definition.action_library().clone();
+        let world =
+            self.host_world_context_for_object_with_snapshot(idx, Rc::clone(&state_snapshot));
         let call = definition.command_buy_item(
-            &state_snapshot,
+            state_snapshot.as_ref(),
             actor_id,
             item_definition,
             buyer,
@@ -46940,7 +46773,7 @@ impl Engine {
             self.physics,
             self.environment,
             self.frame,
-            self.host_world_context_for_object(idx),
+            world,
             self.game_over_triggered,
             self.audio_registry.clone(),
         );
@@ -46981,15 +46814,20 @@ impl Engine {
             .ok_or(EngineError::UnknownObject(context_object))?;
         let (definition_id, state_snapshot) = {
             let object = &self.objects[idx];
-            (object.definition_id.clone(), object.script_state_snapshot())
+            (
+                object.definition_id.clone(),
+                Rc::new(object.script_state_snapshot()),
+            )
         };
         let definition = self
             .definitions
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
         let action_library = definition.action_library().clone();
+        let world =
+            self.host_world_context_for_object_with_snapshot(idx, Rc::clone(&state_snapshot));
         let call = definition.command_sell_item(
-            &state_snapshot,
+            state_snapshot.as_ref(),
             context_object,
             sold_object,
             base_owner,
@@ -46998,7 +46836,7 @@ impl Engine {
             self.physics,
             self.environment,
             self.frame,
-            self.host_world_context_for_object(idx),
+            world,
             self.game_over_triggered,
             self.audio_registry.clone(),
         );
@@ -47049,7 +46887,7 @@ impl Engine {
             (
                 object.id,
                 object.definition_id.clone(),
-                object.script_state_snapshot(),
+                Rc::new(object.script_state_snapshot()),
             )
         };
         let definition = self
@@ -47057,8 +46895,10 @@ impl Engine {
             .get(&definition_id)
             .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
         let action_library = definition.action_library().clone();
+        let world =
+            self.host_world_context_for_object_with_snapshot(idx, Rc::clone(&state_snapshot));
         let call = definition.incinerate_object(
-            &state_snapshot,
+            state_snapshot.as_ref(),
             object_id,
             caused_by,
             blasted,
@@ -47068,7 +46908,7 @@ impl Engine {
             self.physics,
             self.environment,
             self.frame,
-            self.host_world_context_for_object(idx),
+            world,
             self.game_over_triggered,
             self.audio_registry.clone(),
         );
@@ -47367,16 +47207,18 @@ impl Engine {
                         // Exit/Enter callbacks may have removed or moved the
                         // head even when the requested transfer reported
                         // false. C++ re-reads Contents.GetObject() each pass.
-                        let same_head = self
-                            .find_object_index(object_id)
-                            .and_then(|parent_index| {
-                                self.objects[parent_index].state.contents.iter().copied().find(
-                                    |candidate| {
+                        let same_head =
+                            self.find_object_index(object_id).and_then(|parent_index| {
+                                self.objects[parent_index]
+                                    .state
+                                    .contents
+                                    .iter()
+                                    .copied()
+                                    .find(|candidate| {
                                         self.find_object_index(*candidate).is_some_and(|index| {
                                             self.objects[index].has_nonzero_status()
                                         })
-                                    },
-                                )
+                                    })
                             }) == Some(child);
                         if same_head {
                             break;
@@ -47912,9 +47754,7 @@ impl Engine {
                     let _ = self.sell_object_to_home(object_id, object_id, base_owner)?;
                 }
             }
-            if self.object_is_base_auto_sell(outer_id)
-                && self.player_can_sell_objects(base_owner)
-            {
+            if self.object_is_base_auto_sell(outer_id) && self.player_can_sell_objects(base_owner) {
                 let _ = self.exit_object_at_current_position(outer_id)?;
                 let _ = self.sell_object_to_home(outer_id, outer_id, base_owner)?;
             }
@@ -47923,14 +47763,12 @@ impl Engine {
     }
 
     fn player_can_sell_objects(&self, player: i32) -> bool {
-        self.players
-            .get(&player)
-            .is_some_and(|player| {
-                !matches!(
-                    player.status(),
-                    PlayerStatus::Eliminated | PlayerStatus::Surrendered
-                ) && !player.surrendered()
-            })
+        self.players.get(&player).is_some_and(|player| {
+            !matches!(
+                player.status(),
+                PlayerStatus::Eliminated | PlayerStatus::Surrendered
+            ) && !player.surrendered()
+        })
     }
 
     fn object_is_base_auto_sell(&self, object_id: ObjectId) -> bool {
@@ -47960,8 +47798,7 @@ impl Engine {
                 let flag = self.objects[idx].state.contents.iter().copied().find(|id| {
                     self.find_object_index(*id).is_some_and(|flag_index| {
                         let flag = &self.objects[flag_index];
-                        flag.has_nonzero_status()
-                            && flag.definition_id.as_str() == "FLAG"
+                        flag.has_nonzero_status() && flag.definition_id.as_str() == "FLAG"
                     })
                 });
                 if let Some(flag_id) = flag {
@@ -48450,8 +48287,7 @@ impl Engine {
                 self.game_over_triggered,
                 self.audio_registry.clone(),
             );
-            let Some((outcome, audio_state, new_rng, result)) =
-                tolerate_script_error(callback)?
+            let Some((outcome, audio_state, new_rng, result)) = tolerate_script_error(callback)?
             else {
                 continue;
             };
@@ -48690,10 +48526,11 @@ impl Engine {
                 .iter()
                 .copied()
                 .find(|&content_id| {
-                    self.find_object_index(content_id).is_some_and(|content_idx| {
-                        let content = &self.objects[content_idx];
-                        !content.destroyed && content.state.status != ObjectStatus::Deleted
-                    })
+                    self.find_object_index(content_id)
+                        .is_some_and(|content_idx| {
+                            let content = &self.objects[content_idx];
+                            !content.destroyed && content.state.status != ObjectStatus::Deleted
+                        })
                 });
             let Some(content_id) = content_id else {
                 break;
@@ -48792,8 +48629,8 @@ impl Engine {
         let height = landscape.estimated_height();
         let x = object.state.position.x;
         let y = object.state.position.y;
-        let outside_unbounded_side = (x < 0 || x > width)
-            && definition.border_bound() & C4D_BORDER_SIDES == 0;
+        let outside_unbounded_side =
+            (x < 0 || x > width) && definition.border_bound() & C4D_BORDER_SIDES == 0;
         let outside_unbounded_bottom =
             y > height && definition.border_bound() & C4D_BORDER_BOTTOM == 0;
         if !outside_unbounded_side && !outside_unbounded_bottom {
@@ -48802,10 +48639,7 @@ impl Engine {
         let attached_to_target = matches!(
             definition
                 .action_library()
-                .procedure_for_entry(
-                    &object.state.action.name,
-                    object.state.action.act_map_index,
-                ),
+                .procedure_for_entry(&object.state.action.name, object.state.action.act_map_index,),
             ActionProcedure::Attach
         ) && object.state.action.target.is_some();
         if attached_to_target {
@@ -49039,8 +48873,7 @@ impl Engine {
         Rc::make_mut(&mut self.crew_object_infos).remove(&object_id);
         Rc::make_mut(&mut self.crew_ranks).remove(&object_id.as_u64());
         if let Some(index) = self.find_object_index(object_id) {
-            self.objects[index].retired_info_physical =
-                self.objects[index].state.info_physical;
+            self.objects[index].retired_info_physical = self.objects[index].state.info_physical;
             self.objects[index].state.info_physical = None;
         }
 
@@ -49106,8 +48939,8 @@ impl Engine {
             material_capacity,
             owner_color,
         );
-        let ocf = definition
-            .compute_ocf_with_contents_count(&self.objects[idx].state, contents_count);
+        let ocf =
+            definition.compute_ocf_with_contents_count(&self.objects[idx].state, contents_count);
         self.objects[idx].state.ocf = ocf;
     }
 
@@ -49509,9 +49342,7 @@ impl Engine {
                 Value::Int(strength),
             ],
         ))?;
-        Ok(value
-            .as_ref()
-            .is_some_and(compat::value_raw_truthy))
+        Ok(value.as_ref().is_some_and(compat::value_raw_truthy))
     }
 
     /// Debug/test helper: (definition, action name, phase, position, fix)
@@ -49707,9 +49538,7 @@ impl Engine {
                 continue;
             };
             for (roster_index, info) in roster.iter_mut().enumerate() {
-                let definition = self
-                    .definitions
-                    .get(&DefinitionId::from(info.id.as_str()));
+                let definition = self.definitions.get(&DefinitionId::from(info.id.as_str()));
                 if definition.is_some_and(|definition| definition.temporary_crew != 0) {
                     continue;
                 }
@@ -49831,10 +49660,7 @@ impl Engine {
 
     /// Install the separately compiled C4ObjectList links once all numbered
     /// objects exist, preserving the exact saved Contents order.
-    pub(crate) fn restore_legacy_contents_order(
-        &mut self,
-        orders: &[(ObjectId, Vec<ObjectId>)],
-    ) {
+    pub(crate) fn restore_legacy_contents_order(&mut self, orders: &[(ObjectId, Vec<ObjectId>)]) {
         self.restore_legacy_object_links(&[], orders);
     }
 
@@ -49948,10 +49774,7 @@ impl Engine {
                 &mut object.state.action.target2,
                 &object_numbers,
             );
-            denumerate_legacy_enumerated_object_reference(
-                &mut object.state.layer,
-                &object_numbers,
-            );
+            denumerate_legacy_enumerated_object_reference(&mut object.state.layer, &object_numbers);
             denumerate_legacy_enumerated_object_reference(
                 &mut object.state.container,
                 &object_numbers,
@@ -49968,7 +49791,9 @@ impl Engine {
                     &object_numbers,
                 );
             }
-            object.commands.denumerate_object_references(&object_numbers);
+            object
+                .commands
+                .denumerate_object_references(&object_numbers);
         }
         let refreshed_ocf = self
             .objects
@@ -49978,10 +49803,7 @@ impl Engine {
                 self.definitions
                     .get(&object.definition_id)
                     .map(|definition| {
-                        definition.compute_ocf_with_contents_count(
-                            &object.state,
-                            contents_count,
-                        )
+                        definition.compute_ocf_with_contents_count(&object.state, contents_count)
                     })
                     .unwrap_or(OCF_NORMAL)
             })
@@ -50053,11 +49875,7 @@ impl Engine {
         definition: &mut Definition,
         core: &clonk_resources::definition::DefCore,
     ) {
-        definition.set_name(
-            core.name
-                .clone()
-                .unwrap_or_else(|| "Undefined".to_string()),
-        );
+        definition.set_name(core.name.clone().unwrap_or_else(|| "Undefined".to_string()));
         definition.set_version(core.version);
         definition.require_defs = core.require_defs.clone();
         definition.set_crew_member_value(core.crew_member);
@@ -50153,8 +49971,7 @@ impl Engine {
         definition.set_timer_call(core.timer_call.clone());
         if !core.components.is_empty() {
             definition.set_components(
-                core
-                    .components
+                core.components
                     .iter()
                     .map(|component| DefinitionComponent {
                         id: component.id.clone(),
@@ -50473,15 +50290,15 @@ impl Engine {
                 self.call_scenario_script_value("MenuQueryCancel", &pars)
                     .map(|value| value.is_some_and(|value| value.as_bool()))
             } else if let Some(command_object) = menu.command_object {
-                let command_index = self
-                    .find_object_index(command_object)
-                    .filter(|&command_index| {
-                        self.definitions
-                            .get(&self.objects[command_index].definition_id)
-                            .is_some_and(|definition| {
-                                definition.has_function("MenuQueryCancel")
-                            })
-                    });
+                let command_index =
+                    self.find_object_index(command_object)
+                        .filter(|&command_index| {
+                            self.definitions
+                                .get(&self.objects[command_index].definition_id)
+                                .is_some_and(|definition| {
+                                    definition.has_function("MenuQueryCancel")
+                                })
+                        });
                 match command_index {
                     Some(command_index) => tolerate_script_error(self.call_object_function(
                         command_index,
@@ -50526,7 +50343,9 @@ impl Engine {
     /// dialog. CreateMenu may target an arbitrary object, not only a player's
     /// current cursor, so presentation ownership must use the global scan.
     pub fn has_active_object_menu(&self) -> bool {
-        self.objects.iter().any(|object| object.state.menu.is_some())
+        self.objects
+            .iter()
+            .any(|object| object.state.menu.is_some())
     }
 
     /// Resolve `C4MenuItem::IsDragElement` for an item in the owner's live
@@ -50739,10 +50558,7 @@ impl Engine {
     /// silently relocates ChangeDef's Unsorted link on a later frame.
     fn fix_exec_list_order(&mut self) {
         if std::env::var("LC_EXECDBG").is_ok() {
-            crate::rng::rng_trace_line(&format!(
-                "FIXORDER len={}",
-                self.exec_list.len()
-            ));
+            crate::rng::rng_trace_line(&format!("FIXORDER len={}", self.exec_list.len()));
         }
         let mut keyed: Vec<(i32, usize, ObjectId)> = Vec::with_capacity(self.exec_list.len());
         for (position, &id) in self.exec_list.iter().enumerate() {
@@ -50764,8 +50580,7 @@ impl Engine {
             } else {
                 let lowest = masked & masked.wrapping_neg();
                 if lowest != masked {
-                    self.objects[index].state.category =
-                        (raw & !CATEGORY_SORT_LIMIT) | lowest;
+                    self.objects[index].state.category = (raw & !CATEGORY_SORT_LIMIT) | lowest;
                 }
                 lowest
             };
@@ -50776,10 +50591,7 @@ impl Engine {
             .map(|&(_, position, _)| position)
             .collect::<Vec<_>>();
         keyed.sort_by_key(|&(sort_bit, position, _)| (sort_bit, position));
-        let sorted_ids = keyed
-            .into_iter()
-            .map(|(_, _, id)| id)
-            .collect::<Vec<_>>();
+        let sorted_ids = keyed.into_iter().map(|(_, _, id)| id).collect::<Vec<_>>();
         for (position, id) in positions.into_iter().zip(sorted_ids) {
             self.exec_list[position] = id;
         }
@@ -51320,8 +51132,7 @@ impl Engine {
             return false;
         }
         logical_links.remove(object_position);
-        let Some(relative_position) = logical_links.iter().position(|id| *id == relative_to)
-        else {
+        let Some(relative_position) = logical_links.iter().position(|id| *id == relative_to) else {
             return false;
         };
         let insert_at = if after {
@@ -51350,11 +51161,10 @@ impl Engine {
             .rev()
             .copied()
             .filter(|object| {
-                self.find_object_index(*object)
-                    .is_some_and(|index| {
-                        let object = &self.objects[index];
-                        object.unsorted && object.state.status != ObjectStatus::Inactive
-                    })
+                self.find_object_index(*object).is_some_and(|index| {
+                    let object = &self.objects[index];
+                    object.unsorted && object.state.status != ObjectStatus::Inactive
+                })
             })
             .collect::<Vec<_>>();
         let mut unprocessed_resorts = resort_order.iter().copied().collect::<HashSet<_>>();
@@ -51480,9 +51290,7 @@ impl Engine {
             // Main-list BEFORE is exec-list AFTER.
             object_position > relative_position
         };
-        if !already_satisfied
-            && !self.move_object_order_relative(object, relative_to, after)
-        {
+        if !already_satisfied && !self.move_object_order_relative(object, relative_to, after) {
             return false;
         }
         true
@@ -51672,20 +51480,16 @@ impl Engine {
         let live_index = |engine: &Self, other: ObjectId| {
             (id != Some(other)
                 && ignored.is_none_or(|ignored| !ignored.contains(&other))
-                && engine
-                    .find_object_index(other)
-                    .is_some_and(|index| {
-                        let object = &engine.objects[index];
-                        !object.destroyed
-                            && object.state.status.is_active()
-                            && !object.unsorted
-                    }))
-                .then(|| engine.find_object_index(other))
-                .flatten()
-                .filter(|&other_index| {
-                    let object = &engine.objects[other_index];
-                    !object.destroyed && object.state.status == ObjectStatus::Normal
-                })
+                && engine.find_object_index(other).is_some_and(|index| {
+                    let object = &engine.objects[index];
+                    !object.destroyed && object.state.status.is_active() && !object.unsorted
+                }))
+            .then(|| engine.find_object_index(other))
+            .flatten()
+            .filter(|&other_index| {
+                let object = &engine.objects[other_index];
+                !object.destroyed && object.state.status == ObjectStatus::Normal
+            })
         };
         let mut predecessor = None;
         let mut found_cluster = false;
@@ -52240,12 +52044,7 @@ impl Engine {
                 // is the exceptional Remove(false, false) caller
                 // (C4SolidMask.cpp:244-257; C4GameObjects.cpp:296-303).
                 if cause_instability {
-                    mass_movers.check_instability_range_for_landscape(
-                        landscape,
-                        materials,
-                        lx,
-                        ly,
-                    );
+                    mass_movers.check_instability_range_for_landscape(landscape, materials, lx, ly);
                 }
             }
         }
@@ -52308,7 +52107,7 @@ impl Engine {
                     .shape_id_lists_in_area(&area)
                     .into_iter()
                     .flatten()
-                .collect()
+                    .collect()
             },
         );
         let candidates = before
@@ -52336,13 +52135,10 @@ impl Engine {
                 definition
                     .action_library()
                     .is_idle_state(&object.state.action)
-                    || definition
-                        .action_library()
-                        .procedure_for_entry(
-                            &object.state.action.name,
-                            object.state.action.act_map_index,
-                        )
-                        != ActionProcedure::Float
+                    || definition.action_library().procedure_for_entry(
+                        &object.state.action.name,
+                        object.state.action.act_map_index,
+                    ) != ActionProcedure::Float
             })
             .filter(|object| {
                 !shape_contact_check(
@@ -52404,8 +52200,7 @@ impl Engine {
         if object.state.status != ObjectStatus::Normal
             || object.state.category & (CATEGORY_STATIC_BACK | CATEGORY_STRUCTURE) != 0
             || object.state.container.is_some()
-            || (object.state.category & CATEGORY_VEHICLE != 0
-                && object.state.ocf & ocf::GRAB == 0)
+            || (object.state.category & CATEGORY_VEHICLE != 0 && object.state.ocf & ocf::GRAB == 0)
         {
             return false;
         }
@@ -52417,10 +52212,7 @@ impl Engine {
             .is_idle_state(&object.state.action)
             || definition
                 .action_library()
-                .procedure_for_entry(
-                    &object.state.action.name,
-                    object.state.action.act_map_index,
-                )
+                .procedure_for_entry(&object.state.action.name, object.state.action.act_map_index)
                 != ActionProcedure::Float
     }
 
@@ -52450,11 +52242,7 @@ impl Engine {
         .is_empty()
     }
 
-    fn object_contacts_solid_mask_bake(
-        object: &Object,
-        bake: &SolidMaskBake,
-        vehicle: u8,
-    ) -> bool {
+    fn object_contacts_solid_mask_bake(object: &Object, bake: &SolidMaskBake, vehicle: u8) -> bool {
         // C4SolidMask::DensityProvider returns C4M_Solid (50) for a mask
         // pixel, and C4Shape::GetVertexContact compares it inclusively to
         // the candidate shape's live ContactDensity.
@@ -52468,8 +52256,7 @@ impl Engine {
             }
             let x = object.state.position.x + vertex.x;
             let y = object.state.position.y + vertex.y;
-            (check_mask & CNAT_CENTER != 0
-                && bake.provides_attachment_density_at(vehicle, x, y))
+            (check_mask & CNAT_CENTER != 0 && bake.provides_attachment_density_at(vehicle, x, y))
                 || (check_mask & CNAT_LEFT != 0
                     && bake.provides_attachment_density_at(vehicle, x - 1, y))
                 || (check_mask & CNAT_RIGHT != 0
@@ -52482,9 +52269,9 @@ impl Engine {
     }
 
     fn object_contacts_solid_mask(&self, index: usize, bake: &SolidMaskBake, vehicle: u8) -> bool {
-        self.objects.get(index).is_some_and(|object| {
-            Self::object_contacts_solid_mask_bake(object, bake, vehicle)
-        })
+        self.objects
+            .get(index)
+            .is_some_and(|object| Self::object_contacts_solid_mask_bake(object, bake, vehicle))
     }
 
     fn capture_solid_mask_attachments(
@@ -52697,8 +52484,7 @@ impl Engine {
             .iter()
             .filter_map(|operation| match operation {
                 HostSolidMaskOperation::Put {
-                    instance_sequence,
-                    ..
+                    instance_sequence, ..
                 } => instance_sequence.checked_add(1),
                 HostSolidMaskOperation::Remove { .. }
                 | HostSolidMaskOperation::Landscape { .. } => None,
@@ -52917,8 +52703,7 @@ impl Engine {
             .map(|_| self.ocf_solid_mask_overlay())
             .unwrap_or_default();
         let masked = |x: i32, y: i32| solid_masks.iter().any(|mask| mask.contains(x, y));
-        let solid =
-            |x: i32, y: i32| landscape.is_some_and(|l| l.is_solid_at(x, y)) || masked(x, y);
+        let solid = |x: i32, y: i32| landscape.is_some_and(|l| l.is_solid_at(x, y)) || masked(x, y);
         let semi_solid =
             |x: i32, y: i32| landscape.is_some_and(|l| l.is_semi_solid_at(x, y)) || masked(x, y);
         let x = object.state.position.x;
@@ -53183,10 +52968,7 @@ impl Engine {
                             })
                         });
                     crate::direct_com::track_internal_object_menu_link_removal(
-                        prev_id,
-                        object_id,
-                        generation,
-                        successor,
+                        prev_id, object_id, generation, successor,
                     );
                 }
                 let contents = &mut self.objects[prev_index].state.contents;
@@ -53242,9 +53024,7 @@ impl Engine {
                         .state
                         .contents
                         .insert(position, object_id);
-                    let generation = &mut self.objects[object_index]
-                        .state
-                        .contents_link_generation;
+                    let generation = &mut self.objects[object_index].state.contents_link_generation;
                     *generation = generation.checked_add(1).unwrap_or(1);
                 }
 
@@ -53373,9 +53153,7 @@ impl Engine {
             .iter()
             .position(|&child| child == object_id)
         {
-            let generation = self.objects[object_index]
-                .state
-                .contents_link_generation;
+            let generation = self.objects[object_index].state.contents_link_generation;
             let successor = self.objects[container_index]
                 .state
                 .contents
@@ -53414,9 +53192,7 @@ impl Engine {
             .state
             .contents
             .insert(position, object_id);
-        let generation = &mut self.objects[object_index]
-            .state
-            .contents_link_generation;
+        let generation = &mut self.objects[object_index].state.contents_link_generation;
         *generation = generation.checked_add(1).unwrap_or(1);
         self.refresh_object_ocf(container_index);
         self.refresh_object_ocf(object_index);
@@ -53595,10 +53371,7 @@ impl Engine {
                 object.state.velocity = object.velocity_pixels();
             }
             if let Some(index) = self.find_object_index(object_id) {
-                self.dispatch_contact_callbacks(
-                    index,
-                    MovementContactDispatch::Direct(low_cnat),
-                )?;
+                self.dispatch_contact_callbacks(index, MovementContactDispatch::Direct(low_cnat))?;
             }
         }
         if *coordinate > high {
@@ -53613,10 +53386,7 @@ impl Engine {
                 object.state.velocity = object.velocity_pixels();
             }
             if let Some(index) = self.find_object_index(object_id) {
-                self.dispatch_contact_callbacks(
-                    index,
-                    MovementContactDispatch::Direct(high_cnat),
-                )?;
+                self.dispatch_contact_callbacks(index, MovementContactDispatch::Direct(high_cnat))?;
             }
         }
         Ok(())
@@ -53703,7 +53473,10 @@ impl Engine {
             if definition.border_bound() & C4D_BORDER_SIDES == 0 {
                 return None;
             }
-            let shape_x = object.current_shape_rect().map(|shape| shape.x).unwrap_or(0);
+            let shape_x = object
+                .current_shape_rect()
+                .map(|shape| shape.x)
+                .unwrap_or(0);
             let width = self
                 .landscape
                 .as_ref()
@@ -53738,7 +53511,10 @@ impl Engine {
             if definition.border_bound() & C4D_BORDER_TOP == 0 {
                 return None;
             }
-            let shape_y = object.current_shape_rect().map(|shape| shape.y).unwrap_or(0);
+            let shape_y = object
+                .current_shape_rect()
+                .map(|shape| shape.y)
+                .unwrap_or(0);
             Some((-shape_y, 1_000_000))
         });
         if let Some((low, high)) = top_bounds {
@@ -53758,7 +53534,10 @@ impl Engine {
             if definition.border_bound() & C4D_BORDER_BOTTOM == 0 {
                 return None;
             }
-            let shape_y = object.current_shape_rect().map(|shape| shape.y).unwrap_or(0);
+            let shape_y = object
+                .current_shape_rect()
+                .map(|shape| shape.y)
+                .unwrap_or(0);
             let height = self
                 .landscape
                 .as_ref()
@@ -54099,13 +53878,10 @@ impl Engine {
             self.definitions
                 .get(&object.definition_id)
                 .is_some_and(|definition| {
-                    definition
-                        .action_library()
-                        .procedure_for_entry(
-                            &object.state.action.name,
-                            object.state.action.act_map_index,
-                        )
-                        == ActionProcedure::Attach
+                    definition.action_library().procedure_for_entry(
+                        &object.state.action.name,
+                        object.state.action.act_map_index,
+                    ) == ActionProcedure::Attach
                 })
         });
         if attached {
@@ -54335,12 +54111,10 @@ impl Engine {
                 .definitions
                 .get(&actor.definition_id)
                 .map(|definition| {
-                    definition
-                        .action_library()
-                        .procedure_for_entry(
-                            &actor.state.action.name,
-                            actor.state.action.act_map_index,
-                        )
+                    definition.action_library().procedure_for_entry(
+                        &actor.state.action.name,
+                        actor.state.action.act_map_index,
+                    )
                 })
                 .unwrap_or_default();
             (procedure, actor.state.action.target, actor.state.container)
@@ -54364,8 +54138,7 @@ impl Engine {
                             .with_mode(CommandMode::SilentSub),
                     ),
                     CommandOperation::PushFront(
-                        CommandRequest::new(CommandId::Exit)
-                            .with_mode(CommandMode::SilentSub),
+                        CommandRequest::new(CommandId::Exit).with_mode(CommandMode::SilentSub),
                     ),
                 ]);
                 return Ok(true);
@@ -54618,15 +54391,12 @@ impl Engine {
         let seller = self.objects[actor_index].state.owner;
         let base_owner = self.objects[base_index].state.base;
         if !self.players.contains_key(&seller)
-            || self
-                .players
-                .get(&base_owner)
-                .is_none_or(|player| {
-                    matches!(
-                        player.status(),
-                        PlayerStatus::Eliminated | PlayerStatus::Surrendered
-                    ) || player.surrendered()
-                })
+            || self.players.get(&base_owner).is_none_or(|player| {
+                matches!(
+                    player.status(),
+                    PlayerStatus::Eliminated | PlayerStatus::Surrendered
+                ) || player.surrendered()
+            })
             || self.players_hostile(seller, base_owner)
         {
             return None;
@@ -54638,8 +54408,7 @@ impl Engine {
             .filter(|candidate| {
                 self.find_object_index(*candidate).is_some_and(|index| {
                     let object = &self.objects[index];
-                    object.has_nonzero_status()
-                        && object.state.container == Some(base_id)
+                    object.has_nonzero_status() && object.state.container == Some(base_id)
                 })
             })
             .or_else(|| {
@@ -54679,11 +54448,12 @@ impl Engine {
         kind: CommandEventInstanceKind,
         command_instance_id: u64,
     ) -> u64 {
-        self.find_object_index(object_id).map_or(command_instance_id, |index| {
-            self.objects[index]
-                .commands
-                .resolve_event_instance_id(kind, command_instance_id)
-        })
+        self.find_object_index(object_id)
+            .map_or(command_instance_id, |index| {
+                self.objects[index]
+                    .commands
+                    .resolve_event_instance_id(kind, command_instance_id)
+            })
     }
 
     fn resolve_call_result_instance_id(
@@ -54798,18 +54568,17 @@ impl Engine {
                     CommandEventInstanceKind::Get,
                     command_instance_id,
                 );
-                let (disposition, message) = match self
-                    .try_get_object_enter(actor_id, object_id, command_instance_id)?
-                {
-                    GetEnterOutcome::Entered | GetEnterOutcome::Retry => {
-                        (GetAttemptDisposition::Continue, None)
-                    }
-                    GetEnterOutcome::Completed => (GetAttemptDisposition::Complete, None),
-                    GetEnterOutcome::MinimumConstructionDenied(message) => {
-                        (GetAttemptDisposition::Fail, Some(message))
-                    }
-                    GetEnterOutcome::Failed => (GetAttemptDisposition::Fail, None),
-                };
+                let (disposition, message) =
+                    match self.try_get_object_enter(actor_id, object_id, command_instance_id)? {
+                        GetEnterOutcome::Entered | GetEnterOutcome::Retry => {
+                            (GetAttemptDisposition::Continue, None)
+                        }
+                        GetEnterOutcome::Completed => (GetAttemptDisposition::Complete, None),
+                        GetEnterOutcome::MinimumConstructionDenied(message) => {
+                            (GetAttemptDisposition::Fail, Some(message))
+                        }
+                        GetEnterOutcome::Failed => (GetAttemptDisposition::Fail, None),
+                    };
                 if let Some(actor_index) = self.find_object_index(actor_id) {
                     let resolution = self.objects[actor_index]
                         .commands
@@ -54992,13 +54761,11 @@ impl Engine {
                             .push_front(CommandRequest::new(CommandId::UnGrab));
                     }
                 }
-                let feedback = self
-                    .find_object_index(actor_id)
-                    .and_then(|index| {
-                        self.objects[index]
-                            .commands
-                            .resolve_put_attempt(command_instance_id, succeeded)
-                    });
+                let feedback = self.find_object_index(actor_id).and_then(|index| {
+                    self.objects[index]
+                        .commands
+                        .resolve_put_attempt(command_instance_id, succeeded)
+                });
                 if let Some(feedback) = feedback {
                     self.execute_command_failure_feedback(actor_id, feedback, None)?;
                 }
@@ -55099,8 +54866,7 @@ impl Engine {
                     let _ = self.object_com_ungrab(actor_index)?;
                 }
                 if let Some(actor_index) = self.find_object_index(actor_id) {
-                    self.objects[actor_index].state.command_direction =
-                        CommandDirection::Stop;
+                    self.objects[actor_index].state.command_direction = CommandDirection::Stop;
                     self.objects[actor_index]
                         .commands
                         .finish_command_instance(CommandId::UnGrab, command_instance_id);
@@ -55559,9 +55325,11 @@ impl Engine {
                 args.push(object_reference_value(caller));
                 args.push(
                     tx_value
-                        .or_else(|| tx_definition
-                        .map(Value::C4Id)
-                        .or_else(|| tx.map(Value::Int)))
+                        .or_else(|| {
+                            tx_definition
+                                .map(Value::C4Id)
+                                .or_else(|| tx.map(Value::Int))
+                        })
                         .unwrap_or(Value::Nil),
                 );
                 let ty_value = Value::Int(ty.unwrap_or(0));
@@ -55570,12 +55338,7 @@ impl Engine {
                 args.push(target2_value);
                 let value = self.call_object_function(index, &function, args)?;
                 if let Some(action) = on_result {
-                    self.apply_call_result(
-                        action,
-                        caller,
-                        value.as_bool(),
-                        command_instance_id,
-                    )?;
+                    self.apply_call_result(action, caller, value.as_bool(), command_instance_id)?;
                 }
             }
             CommandEvent::ActivateEntrance {
@@ -55594,9 +55357,7 @@ impl Engine {
                             self.find_object_index(caller).and_then(|index| {
                                 self.objects[index]
                                     .commands
-                                    .pending_exit_activation_failure_feedback(
-                                        command_instance_id,
-                                    )
+                                    .pending_exit_activation_failure_feedback(command_instance_id)
                             })
                         })
                         .flatten();
@@ -55673,10 +55434,7 @@ impl Engine {
                             self.open_object_info_menu(crew_index, target_index)?;
                         }
                     }
-                    MenuRequestKind::Context {
-                        target,
-                        position,
-                    } => {
+                    MenuRequestKind::Context { target, position } => {
                         if let Some(target_index) = self.find_object_index(target) {
                             self.open_context_menu(crew_index, target_index, false, position)?;
                         }
@@ -55865,9 +55623,7 @@ impl Engine {
         let command = feedback.command;
         match command.name.as_str() {
             "Call" => {
-                if let (Some(target), CommandData::Text(text)) =
-                    (command.target, &command.data)
-                {
+                if let (Some(target), CommandData::Text(text)) = (command.target, &command.data) {
                     if !text.is_empty() {
                         if let Some(target_index) = self.find_object_index(target) {
                             let args = vec![
@@ -56119,12 +55875,7 @@ impl Engine {
                 }
             }
             CallResultAction::ResolveExitActivation => {
-                self.resolve_exit_activation_result(
-                    caller,
-                    result,
-                    command_instance_id,
-                    None,
-                )?;
+                self.resolve_exit_activation_result(caller, result, command_instance_id, None)?;
             }
         }
         Ok(())
@@ -56137,13 +55888,11 @@ impl Engine {
         command_instance_id: u64,
         detached_feedback: Option<CommandFailureFeedback>,
     ) -> Result<(), EngineError> {
-        let resolution = self
-            .find_object_index(caller)
-            .and_then(|index| {
-                self.objects[index]
-                    .commands
-                    .resolve_exit_activation(result, command_instance_id)
-            });
+        let resolution = self.find_object_index(caller).and_then(|index| {
+            self.objects[index]
+                .commands
+                .resolve_exit_activation(result, command_instance_id)
+        });
         let feedback = match resolution {
             Some(resolution) => resolution.feedback,
             None if !result => detached_feedback,
@@ -56624,7 +56373,8 @@ impl Engine {
                 self.player_adjust_cursor_command(owner)?;
             }
         }
-        self.crew_selection.retain(|_, selection| !selection.is_empty());
+        self.crew_selection
+            .retain(|_, selection| !selection.is_empty());
         self.sync_all_player_cursors();
         if let Some(index) = self.find_object_index(target) {
             self.objects[index].state.crew_member = false;
@@ -56822,11 +56572,7 @@ impl Engine {
                     old_index,
                     new_index,
                 } => {
-                    let _ = self.apply_runtime_texture_index_move(
-                        texmap,
-                        old_index,
-                        new_index,
-                    );
+                    let _ = self.apply_runtime_texture_index_move(texmap, old_index, new_index);
                 }
                 LandscapeOperation::RemoveUnusedTexMapEntries { .. } => {
                     let _ = self.remove_unused_runtime_texmap_entries();
@@ -56901,14 +56647,11 @@ impl Engine {
                         usize::try_from(material).ok().and_then(MaterialId::new)
                     {
                         for _ in 0..amount {
-                            if self.landscape_material(position.x, position.y)
-                                != Some(material_id)
+                            if self.landscape_material(position.x, position.y) != Some(material_id)
                             {
                                 break;
                             }
-                            if self.extract_material(position.x, position.y)
-                                != Some(material_id)
-                            {
+                            if self.extract_material(position.x, position.y) != Some(material_id) {
                                 break;
                             }
                         }
@@ -57078,8 +56821,8 @@ impl Engine {
             // row's line width for the bottom edge.
             let mut line_width = 0;
             for ycnt in -radius..radius {
-                let remaining = i64::from(radius) * i64::from(radius)
-                    - i64::from(ycnt) * i64::from(ycnt);
+                let remaining =
+                    i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
                 line_width = (remaining as f64).sqrt() as i32;
                 let line_y = center.y + ycnt;
                 let extend = i32::from(line_width == 0);
@@ -57141,20 +56884,10 @@ impl Engine {
         requested: bool,
         by_object: Option<ObjectId>,
     ) {
-        self.execute_dig_rect_operation_inner(
-            origin,
-            width,
-            height,
-            Some((requested, by_object)),
-        );
+        self.execute_dig_rect_operation_inner(origin, width, height, Some((requested, by_object)));
     }
 
-    fn execute_dig_rect_pixels_only(
-        &mut self,
-        origin: Vector2,
-        width: i32,
-        height: i32,
-    ) {
+    fn execute_dig_rect_pixels_only(&mut self, origin: Vector2, width: i32, height: i32) {
         self.execute_dig_rect_operation_inner(origin, width, height, None);
     }
 
@@ -57352,12 +57085,7 @@ impl Engine {
         let _ = self.blast_circle(center, radius, controller);
     }
 
-    fn execute_blast_replay(
-        &mut self,
-        center: Vector2,
-        radius: i32,
-        replay: BlastReplay,
-    ) {
+    fn execute_blast_replay(&mut self, center: Vector2, radius: i32, replay: BlastReplay) {
         match replay.pixels {
             BlastPixelReplay::Raster {
                 steps,
@@ -57392,10 +57120,8 @@ impl Engine {
                     }
                     self.check_instability_range(step.position.x, step.position.y);
                 }
-                if let Some((width, _)) = self
-                    .landscape
-                    .as_ref()
-                    .and_then(Landscape::grid_dimensions)
+                if let Some((width, _)) =
+                    self.landscape.as_ref().and_then(Landscape::grid_dimensions)
                 {
                     let start = center.x.saturating_sub(radius).clamp(0, width) as usize;
                     let end = center
@@ -57435,8 +57161,8 @@ impl Engine {
                     }
                 }
                 for ycnt in -radius..=radius {
-                    let remaining = i64::from(radius) * i64::from(radius)
-                        - i64::from(ycnt) * i64::from(ycnt);
+                    let remaining =
+                        i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
                     let line_width = (remaining.max(0) as f64).sqrt() as i32;
                     let y = center.y.saturating_add(ycnt);
                     for xcnt in -line_width..line_width + i32::from(line_width == 0) {
@@ -57445,7 +57171,6 @@ impl Engine {
                 }
             }
         }
-
     }
 
     #[doc(hidden)]
@@ -57463,8 +57188,8 @@ impl Engine {
             // its zero-velocity PXS, then probes instability; non-DigFree
             // material is left in place (C4Landscape.cpp:928-938,999-1010).
             for ycnt in (-radius..radius).rev() {
-                let remaining = i64::from(radius) * i64::from(radius)
-                    - i64::from(ycnt) * i64::from(ycnt);
+                let remaining =
+                    i64::from(radius) * i64::from(radius) - i64::from(ycnt) * i64::from(ycnt);
                 let line_width = (remaining as f64).sqrt() as i32;
                 let y = center.y + ycnt;
                 for xcnt in -line_width..line_width + i32::from(line_width == 0) {
@@ -58468,14 +58193,7 @@ impl Engine {
     /// scenario's primitive or push-pull destination path, then run the
     /// FindMatSlide loop, reaction below (meePXSPos), and dead-material write
     /// with the insert-thrust recursion.
-    fn insert_material(
-        &mut self,
-        mut mat: MaterialId,
-        tx: i32,
-        ty: i32,
-        vx: i32,
-        vy: i32,
-    ) -> bool {
+    fn insert_material(&mut self, mut mat: MaterialId, tx: i32, ty: i32, vx: i32, vy: i32) -> bool {
         if std::env::var("LC_RUST_RNG_TRACE").is_ok() && (15..=19).contains(&self.frame) {
             crate::rng::rng_trace_line(&format!(
                 "INSMAT {} {tx} {ty} {vx} {vy} {}",
@@ -58493,21 +58211,17 @@ impl Engine {
         let max_slide = material.max_slide();
         let instable = material.instable();
         let landscape_push_pull = self.scenario_values.landscape_push_pull();
-        let Some(destination) = self
-            .landscape
-            .as_ref()
-            .and_then(|landscape| {
-                landscape.insert_material_destination(
-                    tx,
-                    ty,
-                    mdens,
-                    landscape_push_pull,
-                    max_slide,
-                    instable,
-                    &self.materials,
-                )
-            })
-        else {
+        let Some(destination) = self.landscape.as_ref().and_then(|landscape| {
+            landscape.insert_material_destination(
+                tx,
+                ty,
+                mdens,
+                landscape_push_pull,
+                max_slide,
+                instable,
+                &self.materials,
+            )
+        }) else {
             return false;
         };
         let (mut tx, mut ty) = match destination {
@@ -58920,10 +58634,8 @@ impl Engine {
                 rng,
             } = outcome?;
             let was_deferred = self.defer_solid_mask_updates;
-            let mut outermost = self.stage_host_solid_mask_operations(
-                solid_mask_operations,
-                host_raster_preview,
-            );
+            let mut outermost =
+                self.stage_host_solid_mask_operations(solid_mask_operations, host_raster_preview);
             let fold_result = (|| -> Result<(), EngineError> {
                 self.rng = rng;
                 self.audio_registry = audio_state;
@@ -59085,91 +58797,91 @@ impl Engine {
             let mut stop_denied = false;
             let call_result = match event.kind {
                 EffectEventKind::Timer => dispatch_global_effect_callback(
-                        &event.effect,
-                        "Timer",
-                        "FxTimer",
-                        vec![Value::Int(event.effect.timer)],
-                        rng,
-                        global_effects,
-                        current_physics,
-                        current_environment,
-                        frame,
-                        world.clone(),
-                        game_over_triggered,
-                        current_audio,
-                    )
-                    .map(|(outcome, audio_state, new_rng, timer_result)| {
-                        // C4Effect::Execute (C4Effect.cpp:342-357): Fx*Timer
-                        // returning C4Fx_Execute_Kill (-1, C4Effects.h:40)
-                        // kills the effect; an elapsed interval with NO
-                        // timer function kills too (:355-357).
-                        timer_kill = timer_result
-                            .as_ref()
-                            .is_none_or(|value| compat::value_as_i32(value) == -1);
-                        (outcome, audio_state, new_rng)
-                    }),
+                    &event.effect,
+                    "Timer",
+                    "FxTimer",
+                    vec![Value::Int(event.effect.timer)],
+                    rng,
+                    global_effects,
+                    current_physics,
+                    current_environment,
+                    frame,
+                    world.clone(),
+                    game_over_triggered,
+                    current_audio,
+                )
+                .map(|(outcome, audio_state, new_rng, timer_result)| {
+                    // C4Effect::Execute (C4Effect.cpp:342-357): Fx*Timer
+                    // returning C4Fx_Execute_Kill (-1, C4Effects.h:40)
+                    // kills the effect; an elapsed interval with NO
+                    // timer function kills too (:355-357).
+                    timer_kill = timer_result
+                        .as_ref()
+                        .is_none_or(|value| compat::value_as_i32(value) == -1);
+                    (outcome, audio_state, new_rng)
+                }),
                 EffectEventKind::Stopped(reason) => dispatch_global_effect_callback(
-                        &event.effect,
-                        "Stop",
-                        "FxStop",
-                        vec![effect_stop_reason_value(reason)],
-                        rng,
-                        global_effects,
-                        current_physics,
-                        current_environment,
-                        frame,
-                        world.clone(),
-                        game_over_triggered,
-                        current_audio,
-                    )
-                    .map(|(outcome, audio_state, new_rng, stop_result)| {
-                        // C4Fx_Stop_Deny (-1, C4Effects.h:42): the effect
-                        // refuses its removal and recovers
-                        // (C4Effect.cpp:389-396).
-                        stop_denied = matches!(reason, EffectStopReason::Removed)
-                            && stop_result
-                                .as_ref()
-                                .is_some_and(|value| compat::value_as_i32(value) == -1);
-                        (outcome, audio_state, new_rng)
-                    }),
+                    &event.effect,
+                    "Stop",
+                    "FxStop",
+                    vec![effect_stop_reason_value(reason)],
+                    rng,
+                    global_effects,
+                    current_physics,
+                    current_environment,
+                    frame,
+                    world.clone(),
+                    game_over_triggered,
+                    current_audio,
+                )
+                .map(|(outcome, audio_state, new_rng, stop_result)| {
+                    // C4Fx_Stop_Deny (-1, C4Effects.h:42): the effect
+                    // refuses its removal and recovers
+                    // (C4Effect.cpp:389-396).
+                    stop_denied = matches!(reason, EffectStopReason::Removed)
+                        && stop_result
+                            .as_ref()
+                            .is_some_and(|value| compat::value_as_i32(value) == -1);
+                    (outcome, audio_state, new_rng)
+                }),
                 EffectEventKind::TempRemoved => dispatch_global_effect_callback(
-                        &event.effect,
-                        "Stop",
-                        "FxStop",
-                        vec![Value::Int(1), Value::Bool(true)],
-                        rng,
-                        global_effects,
-                        current_physics,
-                        current_environment,
-                        frame,
-                        world.clone(),
-                        game_over_triggered,
-                        current_audio,
-                    )
-                    .map(|(outcome, audio_state, new_rng, _temp_result)| {
-                        // The temp stop's result is ignored
-                        // (C4Effect.cpp:489 does not check it).
-                        (outcome, audio_state, new_rng)
-                    }),
+                    &event.effect,
+                    "Stop",
+                    "FxStop",
+                    vec![Value::Int(1), Value::Bool(true)],
+                    rng,
+                    global_effects,
+                    current_physics,
+                    current_environment,
+                    frame,
+                    world.clone(),
+                    game_over_triggered,
+                    current_audio,
+                )
+                .map(|(outcome, audio_state, new_rng, _temp_result)| {
+                    // The temp stop's result is ignored
+                    // (C4Effect.cpp:489 does not check it).
+                    (outcome, audio_state, new_rng)
+                }),
                 EffectEventKind::TempReadded => dispatch_global_effect_callback(
-                        &event.effect,
-                        "Start",
-                        "FxStart",
-                        vec![Value::Int(1)],
-                        rng,
-                        global_effects,
-                        current_physics,
-                        current_environment,
-                        frame,
-                        world.clone(),
-                        game_over_triggered,
-                        current_audio,
-                    )
-                    .map(|(outcome, audio_state, new_rng, _temp_result)| {
-                        // The temp readd's result is ignored
-                        // (C4Effect.cpp:505 does not check it).
-                        (outcome, audio_state, new_rng)
-                    }),
+                    &event.effect,
+                    "Start",
+                    "FxStart",
+                    vec![Value::Int(1)],
+                    rng,
+                    global_effects,
+                    current_physics,
+                    current_environment,
+                    frame,
+                    world.clone(),
+                    game_over_triggered,
+                    current_audio,
+                )
+                .map(|(outcome, audio_state, new_rng, _temp_result)| {
+                    // The temp readd's result is ignored
+                    // (C4Effect.cpp:505 does not check it).
+                    (outcome, audio_state, new_rng)
+                }),
                 // Started runs synchronously inside FnAddEffect for global
                 // effects; Check/AddTo (the priority check chain) are not
                 // generated for the global list (documented residual).
@@ -59317,8 +59029,8 @@ impl Engine {
 
         *environment = current_environment;
         let next_object_id = world.next_object_id();
-        let host_raster_preview = (!pending_solid_mask_operations.is_empty())
-            .then(|| world.host_raster_preview());
+        let host_raster_preview =
+            (!pending_solid_mask_operations.is_empty()).then(|| world.host_raster_preview());
         Ok(GlobalEffectRunOutcome {
             particles: pending_particles,
             physics_delta: accumulated_physics,
@@ -59660,14 +59372,12 @@ impl Engine {
                     .as_ref()
                     .map(ShapeVertexBuffer::active_vec)
                     .unwrap_or_default(),
-                owns_shape_vertices
-                    .unwrap_or(false)
-                    .then(|| {
-                        saved_shape_vertices
-                            .as_ref()
-                            .map(ShapeVertexBuffer::own_original_vertices)
-                            .unwrap_or_default()
-                    }),
+                owns_shape_vertices.unwrap_or(false).then(|| {
+                    saved_shape_vertices
+                        .as_ref()
+                        .map(ShapeVertexBuffer::own_original_vertices)
+                        .unwrap_or_default()
+                }),
             )
         } else if loaded && owns_vertices {
             (vertices.clone(), None)
@@ -59880,9 +59590,7 @@ impl Engine {
                     .and_then(Definition::solid_mask)
             });
             if let Some(raw_mask) = raw_mask {
-                if let Some(checked) =
-                    self.checked_solid_mask_rect_for_object(&object, raw_mask)
-                {
+                if let Some(checked) = self.checked_solid_mask_rect_for_object(&object, raw_mask) {
                     if explicit_mask || checked != raw_mask {
                         object.state.solid_mask_override = Some(checked);
                     }
@@ -60112,7 +59820,8 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
-            self.pending_object_order_commands.extend(object_order_commands);
+            self.pending_object_order_commands
+                .extend(object_order_commands);
             self.apply_next_mission_commands(next_mission_commands);
             if destroy {
                 destroy_requested = true;
@@ -60124,13 +59833,12 @@ impl Engine {
                     .definitions
                     .get(new_def)
                     .ok_or_else(|| EngineError::UnknownDefinition(new_def.to_string()))?;
-                let owner_color = self.players
+                let owner_color = self
+                    .players
                     .get(&object.state.owner)
                     .and_then(Player::color)
                     .map(|color| {
-                        u32::from(color.r) << 16
-                            | u32::from(color.g) << 8
-                            | u32::from(color.b)
+                        u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
                     });
                 Self::apply_change_object_def_to_object(
                     &mut object,
@@ -60321,7 +60029,8 @@ impl Engine {
             if !player_commands.is_empty() {
                 self.apply_player_commands(player_commands)?;
             }
-            self.pending_object_order_commands.extend(object_order_commands);
+            self.pending_object_order_commands
+                .extend(object_order_commands);
             self.apply_next_mission_commands(next_mission_commands);
             if destroy {
                 destroy_requested = true;
@@ -60333,13 +60042,12 @@ impl Engine {
                     .definitions
                     .get(new_def)
                     .ok_or_else(|| EngineError::UnknownDefinition(new_def.to_string()))?;
-                let owner_color = self.players
+                let owner_color = self
+                    .players
                     .get(&object.state.owner)
                     .and_then(Player::color)
                     .map(|color| {
-                        u32::from(color.r) << 16
-                            | u32::from(color.g) << 8
-                            | u32::from(color.b)
+                        u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
                     });
                 Self::apply_change_object_def_to_object(
                     &mut object,
@@ -60573,8 +60281,7 @@ impl Engine {
         // have no C4SolidMask instance until StatusActivate calls
         // UpdateFace(true). Runtime deactivation is deliberately different:
         // it leaves an already-put mask intact.
-        let loaded_inactive = loaded
-            && self.objects[index].state.status == ObjectStatus::Inactive;
+        let loaded_inactive = loaded && self.objects[index].state.status == ObjectStatus::Inactive;
         if !loaded_inactive {
             if !destroy_requested {
                 self.stage_materialized_spawn_solid_mask(index);
@@ -60835,10 +60542,13 @@ fn build_state_value(
             action.insert("target2".into(), Value::Nil);
         }
     }
-    if let Some(procedure) = library
-        .procedure_name_for_entry(&state.action.name, state.action.act_map_index)
+    if let Some(procedure) =
+        library.procedure_name_for_entry(&state.action.name, state.action.act_map_index)
     {
-        action.insert("procedure".into(), Value::String(procedure.to_string().into()));
+        action.insert(
+            "procedure".into(),
+            Value::String(procedure.to_string().into()),
+        );
     }
     map.insert("action".into(), Value::Proplist(action));
     let effects: Vec<_> = state
@@ -60854,10 +60564,7 @@ fn build_state_value(
                 props.insert("command_target".into(), Value::Int(target));
             }
             if let Some(id) = &effect.command_id {
-                props.insert(
-                    "command_target_id".into(),
-                    Value::String(id.clone().into()),
-                );
+                props.insert("command_target_id".into(), Value::String(id.clone().into()));
             }
             Value::Proplist(props)
         })
@@ -60968,10 +60675,7 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
         }
     }
     if let Some(procedure) = &snapshot.action_procedure {
-        action.insert(
-            "procedure".into(),
-            Value::String(procedure.clone().into()),
-        );
+        action.insert("procedure".into(), Value::String(procedure.clone().into()));
     }
     map.insert("action".into(), Value::Proplist(action));
     let effects: Vec<_> = snapshot.effects.iter().map(build_effect_value).collect();
@@ -61488,29 +61192,26 @@ fn recover_effect_callback_error(
 ) -> Result<Option<(Value, HashMap<String, Value>)>, EngineError> {
     match result {
         Ok(result) => Ok(result),
-        Err(source) => match script_execution_error(
-            definition,
-            "EffectCallback".to_string(),
-            source,
-            None,
-        ) {
-            EngineError::Script {
-                definition,
-                function,
-                source,
-                recovery: _,
-            } => {
-                tracing::warn!(
-                    %definition,
+        Err(source) => {
+            match script_execution_error(definition, "EffectCallback".to_string(), source, None) {
+                EngineError::Script {
+                    definition,
                     function,
-                    error = %source,
-                    "script error in effect callback; continuing like the C++ fail-safe exec"
-                );
-                log_runtime_call_frames(&definition, source.call_frames());
-                Ok(Some((Value::Nil, context_cells.snapshot())))
+                    source,
+                    recovery: _,
+                } => {
+                    tracing::warn!(
+                        %definition,
+                        function,
+                        error = %source,
+                        "script error in effect callback; continuing like the C++ fail-safe exec"
+                    );
+                    log_runtime_call_frames(&definition, source.call_frames());
+                    Ok(Some((Value::Nil, context_cells.snapshot())))
+                }
+                fatal => Err(fatal),
             }
-            fatal => Err(fatal),
-        },
+        }
     }
 }
 
@@ -61687,11 +61388,7 @@ fn dispatch_global_effect_callback(
     }
     let callback_result = callback_result.map(|(value, updated_locals)| {
         if let Some(context_object) = context_object {
-            append_effect_command_target_locals(
-                &mut commands,
-                context_object,
-                updated_locals,
-            );
+            append_effect_command_target_locals(&mut commands, context_object, updated_locals);
         }
         value
     });
@@ -61755,8 +61452,7 @@ fn effect_frame_cursor_next_index(
             .iter()
             .position(|effect| {
                 effect.number == cursor.number
-                    && (effect.priority == 0
-                        || effect.priority.unsigned_abs() == cursor.priority)
+                    && (effect.priority == 0 || effect.priority.unsigned_abs() == cursor.priority)
             })
             .map(|index| index + 1)
             .unwrap_or_else(|| {
@@ -61814,9 +61510,7 @@ fn upper_effects_of(effects: &[EffectState], anchor: &EffectState) -> Vec<Effect
     effects
         .iter()
         .filter(|existing| {
-            existing.number != anchor.number
-                && existing.priority > 0
-                && existing.priority != 1
+            existing.number != anchor.number && existing.priority > 0 && existing.priority != 1
         })
         .filter(|existing| {
             let (upper, base) = (
@@ -61840,9 +61534,7 @@ fn remove_effect_from_stack(stack: &mut Vec<EffectState>, number: i32) -> Option
 fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[EffectCommand]) {
     for command in commands {
         match command {
-            EffectCommand::Add { effect, .. } => {
-                insert_effect_into_stack(target, effect.clone())
-            }
+            EffectCommand::Add { effect, .. } => insert_effect_into_stack(target, effect.clone()),
             EffectCommand::Update(effect) => {
                 if let Some(existing) = target
                     .iter_mut()
@@ -63087,26 +62779,38 @@ mod control_message_say_regression {
             (1, 1, true),
             (1, 2, true),
         ] {
-            engine.set_scenario_values(
-                scenario::ScenarioValueStore::with_replay_film_for_test(replay, film),
+            engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(
+                replay, film,
+            ));
+            assert_eq!(
+                engine.film_replay(),
+                expected,
+                "Replay={replay}, Film={film}"
             );
-            assert_eq!(engine.film_replay(), expected, "Replay={replay}, Film={film}");
         }
     }
 
     #[test]
     fn l052_fullscreen_film_fallback_requires_replay_and_nonzero_film_mode() {
         let mut engine = Engine::new();
-        engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(0, 1));
+        engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(
+            0, 1,
+        ));
         assert!(!engine.is_replay_film());
 
-        engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(1, 1));
+        engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(
+            1, 1,
+        ));
         assert!(engine.is_replay_film());
 
-        engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(1, 0));
+        engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(
+            1, 0,
+        ));
         assert!(!engine.is_replay_film());
 
-        engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(-1, 2));
+        engine.set_scenario_values(scenario::ScenarioValueStore::with_replay_film_for_test(
+            -1, 2,
+        ));
         engine.set_replay_control(true);
         engine.finish_replay().expect("finish replay control");
         assert!(
@@ -63124,9 +62828,9 @@ mod l049_scenario_value_gain_regression {
     fn l049_scenario_value_gain_uses_cpp_integer_truthiness() {
         let mut engine = Engine::new();
         for (value_gain, expected) in [(0, false), (1, true), (-1, true)] {
-            engine.set_scenario_values(
-                scenario::ScenarioValueStore::with_value_gain_for_test(value_gain),
-            );
+            engine.set_scenario_values(scenario::ScenarioValueStore::with_value_gain_for_test(
+                value_gain,
+            ));
             assert_eq!(
                 engine.scenario_value_gain_enabled(),
                 expected,
@@ -63175,11 +62879,7 @@ mod legacy_contents_order_regression {
         assert_eq!(engine.objects[index].fixed_velocity, fixed_velocity);
 
         let fixture = engine
-            .spawn_object(
-                SpawnConfig::new("STAT")
-                    .with_loaded(true)
-                    .with_alive(true),
-            )
+            .spawn_object(SpawnConfig::new("STAT").with_loaded(true).with_alive(true))
             .expect("generic loaded fixture spawns");
         let fixture = engine.find_object_index(fixture).expect("fixture exists");
         assert_eq!(engine.objects[fixture].state.category, CATEGORY_STATIC_BACK);
@@ -63231,8 +62931,7 @@ mod legacy_contents_order_regression {
         let mut engine = Engine::new();
         engine
             .register_definition(
-                Definition::from_script("CYCL", "Cycle", "")
-                    .expect("fixture definition compiles"),
+                Definition::from_script("CYCL", "Cycle", "").expect("fixture definition compiles"),
             )
             .expect("fixture definition registers");
         let first = engine
@@ -63295,9 +62994,8 @@ mod legacy_contents_order_regression {
             .register_definition(mass)
             .expect("mass definition registers");
 
-        let mut no_component =
-            Definition::from_script("NCMP", "No component mass", "")
-                .expect("NoComponentMass definition compiles");
+        let mut no_component = Definition::from_script("NCMP", "No component mass", "")
+            .expect("NoComponentMass definition compiles");
         no_component.set_mass(7);
         no_component.set_no_component_mass(true);
         engine
@@ -63317,18 +63015,12 @@ mod legacy_contents_order_regression {
         let mut chain = vec![root];
         let mut expected_mass = 10;
         for depth in 1..=12 {
-            let construction = if depth == 5 {
-                FULL_CON / 2
-            } else {
-                FULL_CON
-            };
+            let construction = if depth == 5 { FULL_CON / 2 } else { FULL_CON };
             let mut config = SpawnConfig::new("MASS")
                 .with_container(*chain.last().expect("chain has a parent"))
                 .with_construction(construction);
             config.own_mass = Some(depth);
-            let child = engine
-                .spawn_object(config)
-                .expect("nested object spawns");
+            let child = engine.spawn_object(config).expect("nested object spawns");
             chain.push(child);
             expected_mass += ((10 + depth) * construction / FULL_CON).max(1);
         }
@@ -63396,15 +63088,15 @@ mod legacy_contents_order_regression {
         let inactive = engine
             .spawn_object(SpawnConfig::new("MITM").with_container(carrier))
             .expect("inactive item spawns");
-        let deleted_index = engine.find_object_index(deleted).expect("deleted item exists");
+        let deleted_index = engine
+            .find_object_index(deleted)
+            .expect("deleted item exists");
         let _ = engine.objects[deleted_index].mark_destroyed();
         let inactive_index = engine
             .find_object_index(inactive)
             .expect("inactive item exists");
         engine.objects[inactive_index].state.status = ObjectStatus::Inactive;
-        let carrier_index = engine
-            .find_object_index(carrier)
-            .expect("carrier exists");
+        let carrier_index = engine.find_object_index(carrier).expect("carrier exists");
         engine.objects[carrier_index].state.contents = vec![deleted, inactive];
 
         engine.refresh_object_ocf(carrier_index);
@@ -63723,10 +63415,7 @@ mod player_list_order_regression {
         assert_eq!(register_joining_player(&mut two_players, "Zero again"), 0);
         assert_eq!(two_players.first_player_id(), Some(1));
         assert_eq!(
-            two_players
-                .players()
-                .map(Player::id)
-                .collect::<Vec<_>>(),
+            two_players.players().map(Player::id).collect::<Vec<_>>(),
             vec![1, 0],
             "public iteration follows C4PlayerList links"
         );
@@ -63774,7 +63463,9 @@ mod player_list_order_regression {
 
         let state = two_players.capture_state();
         let mut restored = Engine::new();
-        restored.restore_state(&state).expect("restore player order");
+        restored
+            .restore_state(&state)
+            .expect("restore player order");
         assert_eq!(restored.first_player_id(), Some(1));
         restored.retain_restored_players([0]);
         assert_eq!(restored.first_player_id(), Some(0));
@@ -64030,8 +63721,7 @@ func ReadCallbackLog() { return callback_log; }
             .expect("crew definition registers");
         engine
             .register_definition(
-                Definition::from_script("OWND", "Owned", "")
-                    .expect("owned definition compiles"),
+                Definition::from_script("OWND", "Owned", "").expect("owned definition compiles"),
             )
             .expect("owned definition registers");
         engine
@@ -64097,11 +63787,12 @@ func ReadCallbackLog() { return callback_log; }
         assert!(engine.crew_object_info(crew).is_none());
         assert!(!engine.crew_info_links.contains_key(&crew));
 
-        let owned_index = engine.find_object_index(owned).expect("owned object remains");
+        let owned_index = engine
+            .find_object_index(owned)
+            .expect("owned object remains");
         assert_eq!(engine.objects[owned_index].state.owner, OWNER_NONE);
         assert_ne!(
-            engine.objects[owned_index].state.owner,
-            4,
+            engine.objects[owned_index].state.owner, 4,
             "NotifyOwnedObjects must not transfer to the preserved teammate"
         );
 
@@ -64155,17 +63846,17 @@ func ReadCallbackLog() { return callback_log; }
             removed.iter().map(Player::id).collect::<Vec<_>>(),
             vec![0, 2]
         );
-        assert_eq!(engine.players().map(Player::id).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            engine.players().map(Player::id).collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     #[test]
     fn initialized_join_player_can_repeat_scenario_and_team_init() {
         let mut engine = Engine::new();
         engine.set_landscape(Landscape::flat(100, 100));
-        engine.set_teams(vec![
-            TeamInfo::new(1, "One", 0),
-            TeamInfo::new(2, "Two", 0),
-        ]);
+        engine.set_teams(vec![TeamInfo::new(1, "One", 0), TeamInfo::new(2, "Two", 0)]);
         engine
             .load_scenario_script_with_convention(
                 "RepeatedScenarioInit",
@@ -64191,10 +63882,7 @@ func ReadCallbackLog() { return callback_log; }
             .number();
         assert_eq!(
             engine
-                .call_scenario_script_value(
-                    "RepeatInit",
-                    &[Value::Int(number), Value::Int(2)],
-                )
+                .call_scenario_script_value("RepeatInit", &[Value::Int(number), Value::Int(2)],)
                 .expect("script-host repeated init succeeds"),
             Some(Value::Bool(true))
         );
@@ -64278,10 +63966,7 @@ mod player_view_scroll_regression {
             .register_player(PlayerConfig::new(7, "Player"))
             .expect("player registers");
         engine
-            .replace_player_viewports(
-                7,
-                vec![PlayerViewport::new(Vector2::new(15, 995))],
-            )
+            .replace_player_viewports(7, vec![PlayerViewport::new(Vector2::new(15, 995))])
             .expect("viewport installs");
 
         engine
@@ -64365,10 +64050,7 @@ mod frozen_blast_crossmap_regression {
             shapes: vec![None; 128],
             materials: runtime_materials,
             texture_inventory: vec!["Rough".to_string(), "Smooth".to_string()],
-            default_material_entries: vec![
-                ("Rock".to_string(), 10),
-                ("Target".to_string(), 40),
-            ],
+            default_material_entries: vec![("Rock".to_string(), 10), ("Target".to_string(), 40)],
             material_crossmap_entries: vec![40],
             ..Default::default()
         };
@@ -64384,8 +64066,7 @@ mod frozen_blast_crossmap_regression {
                 .expect("raster state exists")
                 .texmap()
                 .clone();
-            let (success, indices) =
-                moved_texmap.set_texture_index("Target-Smooth", 5, false);
+            let (success, indices) = moved_texmap.set_texture_index("Target-Smooth", 5, false);
             assert!(success);
             assert_eq!(indices, Some((40, 5)));
             assert!(landscape.apply_runtime_texture_index_move(moved_texmap, 40, 5));
@@ -64415,9 +64096,18 @@ mod frozen_blast_crossmap_regression {
 
         assert_eq!(baseline_result.pixel_count_by_material[&baseline_rock], 1);
         assert_eq!(moved_result.pixel_count_by_material[&moved_rock], 1);
-        assert_eq!(baseline.landscape().unwrap().grid_byte_at(2, 2), Some(40 | 0x80));
-        assert_eq!(moved.landscape().unwrap().grid_byte_at(2, 2), Some(40 | 0x80));
-        assert_ne!(moved.landscape().unwrap().grid_byte_at(2, 2), Some(5 | 0x80));
+        assert_eq!(
+            baseline.landscape().unwrap().grid_byte_at(2, 2),
+            Some(40 | 0x80)
+        );
+        assert_eq!(
+            moved.landscape().unwrap().grid_byte_at(2, 2),
+            Some(40 | 0x80)
+        );
+        assert_ne!(
+            moved.landscape().unwrap().grid_byte_at(2, 2),
+            Some(5 | 0x80)
+        );
         assert_eq!(baseline.rng, expected_baseline_rng);
         assert_eq!(moved.rng, expected_moved_rng);
         let texmap = moved
@@ -64449,7 +64139,10 @@ mod frozen_blast_crossmap_regression {
             .expect("blast runs");
 
         assert_eq!(result.pixel_count_by_material[&rock], 1);
-        assert_eq!(engine.landscape().unwrap().grid_byte_at(2, 2), Some(10 | 0x80));
+        assert_eq!(
+            engine.landscape().unwrap().grid_byte_at(2, 2),
+            Some(10 | 0x80)
+        );
         assert_eq!(engine.rng, before_rng);
     }
 
@@ -64464,7 +64157,10 @@ mod frozen_blast_crossmap_regression {
             .expect("blast runs");
 
         assert_eq!(result.pixel_count_by_material[&rock], 1);
-        assert_eq!(engine.landscape().unwrap().grid_byte_at(2, 2), Some(40 | 0x80));
+        assert_eq!(
+            engine.landscape().unwrap().grid_byte_at(2, 2),
+            Some(40 | 0x80)
+        );
         assert_eq!(engine.rng, expected_rng);
     }
 }
@@ -64486,14 +64182,7 @@ mod closed_border_landscape_accounting_regression {
         .expect("material fixture parses");
         let materials = MaterialSet::from_resource_library(&library);
         let vehicle = materials.id_of("Vehicle").expect("Vehicle exists");
-        let grid = PixelGrid::new(
-            7,
-            3,
-            vec![0; 21],
-            vec![0],
-            vec![None],
-            vec![None],
-        );
+        let grid = PixelGrid::new(7, 3, vec![0; 21], vec![0], vec![None], vec![None]);
         let mut landscape = Landscape::new(7, vec![3; 7]).expect("landscape builds");
         landscape.set_world_height(3);
         landscape.set_pixel_grid(grid);
@@ -64508,8 +64197,7 @@ mod closed_border_landscape_accounting_regression {
     fn spawn_digger(engine: &mut Engine) -> ObjectId {
         engine
             .register_definition(
-                Definition::from_script("DGRR", "Digger", "#strict\n")
-                    .expect("digger compiles"),
+                Definition::from_script("DGRR", "Digger", "#strict\n").expect("digger compiles"),
             )
             .expect("digger registers");
         engine
@@ -64891,10 +64579,7 @@ mod signed_material_runtime_regression {
             );
 
             let mut converted = conversion_engine(true);
-            let water = converted
-                .materials
-                .id_of("Water")
-                .expect("Water exists");
+            let water = converted.materials.id_of("Water").expect("Water exists");
             assert_eq!(
                 run_depth_conversion(&mut converted, source),
                 (water, true),
@@ -64933,8 +64618,7 @@ mod signed_material_runtime_regression {
         engine.set_materials(materials);
         engine
             .register_definition(
-                Definition::from_script("DGRR", "Digger", "#strict\n")
-                    .expect("digger compiles"),
+                Definition::from_script("DGRR", "Digger", "#strict\n").expect("digger compiles"),
             )
             .expect("digger registers");
         engine
@@ -64989,14 +64673,7 @@ mod dig_out_material_cast_tick5_regression {
         let materials = MaterialSet::from_resource_library(&library);
         let vehicle = materials.id_of("Vehicle").expect("Vehicle exists");
 
-        let grid = PixelGrid::new(
-            9,
-            5,
-            vec![0; 45],
-            vec![0],
-            vec![None],
-            vec![None],
-        );
+        let grid = PixelGrid::new(9, 5, vec![0; 45], vec![0], vec![None], vec![None]);
         let mut landscape = Landscape::new(9, vec![0; 9]).expect("landscape builds");
         landscape.set_world_height(5);
         landscape.set_pixel_grid(grid);
@@ -65006,8 +64683,7 @@ mod dig_out_material_cast_tick5_regression {
         engine.set_landscape(landscape);
         engine
             .register_definition(
-                Definition::from_script("DGRR", "Digger", "#strict\n")
-                    .expect("digger compiles"),
+                Definition::from_script("DGRR", "Digger", "#strict\n").expect("digger compiles"),
             )
             .expect("digger registers");
         let digger = engine
@@ -65092,8 +64768,7 @@ mod dig_out_material_cast_tick5_regression {
         engine.set_landscape(landscape);
         engine
             .register_definition(
-                Definition::from_script("DGRR", "Digger", "#strict\n")
-                    .expect("digger compiles"),
+                Definition::from_script("DGRR", "Digger", "#strict\n").expect("digger compiles"),
             )
             .expect("digger registers");
         engine
@@ -65180,8 +64855,7 @@ mod dig_out_material_cast_tick5_regression {
         engine.set_landscape(landscape);
         engine
             .register_definition(
-                Definition::from_script("DGRR", "Digger", "#strict\n")
-                    .expect("digger compiles"),
+                Definition::from_script("DGRR", "Digger", "#strict\n").expect("digger compiles"),
             )
             .expect("digger registers");
         engine
@@ -65209,7 +64883,8 @@ mod dig_out_material_cast_tick5_regression {
                 .filter(|object| object.definition_id == "GEM_" && !object.destroyed)
                 .count();
             assert_eq!(
-                spawns, CPP_CUMULATIVE_SPAWNS[frame_index],
+                spawns,
+                CPP_CUMULATIVE_SPAWNS[frame_index],
                 "C++ cumulative Dig2Object census diverged on frame {}",
                 frame_index + 1
             );
@@ -65250,7 +64925,9 @@ mod startup_player_count_regression {
         let legacy: EngineState = serde_json::from_value(legacy).expect("legacy state parses");
         let mut seeded = Engine::new();
         seeded.freeze_startup_player_count(3);
-        seeded.restore_state(&legacy).expect("legacy state restores");
+        seeded
+            .restore_state(&legacy)
+            .expect("legacy state restores");
         assert_eq!(seeded.startup_player_count(), Some(3));
     }
 }
@@ -65341,11 +65018,7 @@ func EvalSpeed() { return eval("SetGameSpeed(76)"); }
 
         assert_eq!(
             engine
-                .direct_exec_script_control_global(
-                    "SetGameSpeed(38)",
-                    "internal script",
-                    Some(3),
-                )
+                .direct_exec_script_control_global("SetGameSpeed(38)", "internal script", Some(3),)
                 .expect("direct league expression executes its false branch"),
             Value::Bool(false)
         );
@@ -65466,7 +65139,10 @@ mod custom_command_control_parity {
         );
 
         let mut engine = Engine::new();
-        assert_eq!(engine.message_board_commands(), &[InitialNetworkMessageBoardCommand::speed()]);
+        assert_eq!(
+            engine.message_board_commands(),
+            &[InitialNetworkMessageBoardCommand::speed()]
+        );
         assert!(engine.add_message_board_command(registered(
             "probe",
             "Capture(1)",
@@ -65480,7 +65156,10 @@ mod custom_command_control_parity {
 
         let snapshot = InitialNetworkGameData::from_engine(&engine)
             .expect("command-only engine is representable in JoinData");
-        assert_eq!(snapshot.message_board_commands, engine.message_board_commands());
+        assert_eq!(
+            snapshot.message_board_commands,
+            engine.message_board_commands()
+        );
         assert_eq!(snapshot.message_board_commands[1].script, "Capture(1)");
 
         let encoded = engine
@@ -65492,7 +65171,10 @@ mod custom_command_control_parity {
         restored
             .restore_state(&state)
             .expect("command registry restores");
-        assert_eq!(restored.message_board_commands(), engine.message_board_commands());
+        assert_eq!(
+            restored.message_board_commands(),
+            engine.message_board_commands()
+        );
 
         engine.set_debug_mode(true);
         engine.disable_debug();
@@ -65656,19 +65338,16 @@ func RegisterFromEval()
             (&b"2147483648"[..], 0),
         ] {
             assert!(
-                execute(
-                    &mut engine,
-                    &command(b"number", argument, -1, 55),
-                    true,
-                ),
+                execute(&mut engine, &command(b"number", argument, -1, 55), true,),
                 "argument {argument:?}"
             );
-            assert_eq!(probe(&engine), Value::Int(expected), "argument {argument:?}");
+            assert_eq!(
+                probe(&engine),
+                Value::Int(expected),
+                "argument {argument:?}"
+            );
         }
-        assert_eq!(
-            Engine::custom_command_integer(b"-2147483648tail"),
-            i32::MIN
-        );
+        assert_eq!(Engine::custom_command_integer(b"-2147483648tail"), i32::MIN);
 
         assert!(engine.add_message_board_command(registered(
             "percent",
@@ -65735,11 +65414,7 @@ func RegisterFromEval()
         ));
         assert_eq!(probe(&engine), Value::String("a\\\"b".to_string().into()));
 
-        assert!(execute(
-            &mut engine,
-            &command(b"plain", b"37", -1, 4),
-            true,
-        ));
+        assert!(execute(&mut engine, &command(b"plain", b"37", -1, 4), true,));
         assert_eq!(probe(&engine), Value::Int(37));
 
         assert!(execute(
@@ -65765,11 +65440,7 @@ func RegisterFromEval()
             "Capture(73)",
             MessageBoardCommandRestriction::Plain,
         )));
-        assert!(execute(
-            &mut engine,
-            &command(&[0xff], b"", -1, 4),
-            true,
-        ));
+        assert!(execute(&mut engine, &command(&[0xff], b"", -1, 4), true,));
         assert_eq!(probe(&engine), Value::Int(73));
     }
 }
@@ -65822,8 +65493,7 @@ func Probe() {
         let encoded = state
             .to_json_string()
             .expect("music level state serializes");
-        let decoded =
-            EngineState::from_json_str(&encoded).expect("music level state deserializes");
+        let decoded = EngineState::from_json_str(&encoded).expect("music level state deserializes");
         let mut restored = Engine::new();
         restored
             .restore_state(&decoded)
@@ -66233,7 +65903,9 @@ mod component_con_regression {
         let partial = engine
             .spawn_object(SpawnConfig::new("PART").with_construction(FULL_CON / 2))
             .expect("partial-con object spawns");
-        let partial = engine.object_snapshot(partial).expect("partial object exists");
+        let partial = engine
+            .object_snapshot(partial)
+            .expect("partial object exists");
         assert_eq!(partial.components.get("ROCK"), Some(&2));
         assert_eq!(
             partial.components.get("NEGA"),
@@ -66268,8 +65940,7 @@ mod component_con_regression {
                 Definition::from_script("BLDR", "Builder", "").expect("builder compiles"),
             )
             .expect("builder registers");
-        let mut target =
-            Definition::from_script("SITE", "Site", "").expect("site compiles");
+        let mut target = Definition::from_script("SITE", "Site", "").expect("site compiles");
         target.set_components(vec![DefinitionComponent {
             id: "ZERO".to_owned(),
             count: 0,
@@ -66281,8 +65952,7 @@ mod component_con_regression {
             .expect("builder spawns");
         let site = engine
             .spawn_object(
-                SpawnConfig::new("SITE")
-                    .with_ordered_components(vec![("ZERO".to_owned(), -1)]),
+                SpawnConfig::new("SITE").with_ordered_components(vec![("ZERO".to_owned(), -1)]),
             )
             .expect("site spawns");
         engine
@@ -66521,9 +66191,7 @@ mod command_contact_regression {
             .register_definition(definition)
             .expect("definition registers");
         let object_id = engine
-            .spawn_object(
-                SpawnConfig::new("ROUT").with_action(ActionState::new("Route")),
-            )
+            .spawn_object(SpawnConfig::new("ROUT").with_action(ActionState::new("Route")))
             .expect("object spawns");
         let index = engine.find_object_index(object_id).expect("object exists");
 
@@ -66539,8 +66207,8 @@ mod command_contact_regression {
     #[test]
     fn lazy_host_world_call_object_materializes_only_on_world_access() {
         let mut engine = Engine::with_seed(0);
-        let mut landscape = Landscape::with_default_material(100, vec![100; 100], None)
-            .expect("query landscape");
+        let mut landscape =
+            Landscape::with_default_material(100, vec![100; 100], None).expect("query landscape");
         landscape.set_world_height(100);
         let mut pixels = vec![0; 100 * 100];
         pixels[50 * 100 + 52] = 1;
@@ -66556,8 +66224,7 @@ mod command_contact_regression {
 
         engine
             .register_definition(
-                Definition::from_script("FILL", "Filler", "#strict\n")
-                    .expect("filler compiles"),
+                Definition::from_script("FILL", "Filler", "#strict\n").expect("filler compiles"),
             )
             .expect("filler registers");
         let mut caller = Definition::from_script(
@@ -66585,9 +66252,7 @@ protected func QueryWorld()
             .expect("caller registers");
         for x in 0..64 {
             engine
-                .spawn_object(
-                    SpawnConfig::new("FILL").with_position(Vector2::new(x % 100, 10)),
-                )
+                .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(x % 100, 10)))
                 .expect("filler spawns");
         }
         let caller = engine
@@ -66597,6 +66262,7 @@ protected func QueryWorld()
 
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
+        SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(0));
         assert_eq!(
             engine
                 .call_object_function(caller_index, "SelfOnly", Vec::new())
@@ -66607,6 +66273,11 @@ protected func QueryWorld()
             HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
             1,
             "callback setup copies only the executing object"
+        );
+        assert_eq!(
+            SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(Cell::get),
+            1,
+            "the callback and its seeded host-world object share one actor-state snapshot"
         );
         assert_eq!(
             HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
@@ -66647,8 +66318,7 @@ protected func QueryWorld()
         let mut engine = Engine::with_seed(0);
         engine
             .register_definition(
-                Definition::from_script("FILL", "Filler", "#strict\n")
-                    .expect("filler compiles"),
+                Definition::from_script("FILL", "Filler", "#strict\n").expect("filler compiles"),
             )
             .expect("filler registers");
         let mut actor = Definition::from_script(
@@ -66679,6 +66349,7 @@ protected func QueryWorld()
 
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
+        SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(|count| count.set(0));
         engine
             .invoke_action_callback(
                 actor_index,
@@ -66697,15 +66368,101 @@ protected func QueryWorld()
             "a self-only PhaseCall copies no unrelated object"
         );
         assert_eq!(
-            HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
-            0,
+            SCRIPT_STATE_SNAPSHOT_MATERIALIZATIONS.with(Cell::get),
+            1,
+            "ordinary action callbacks reuse their actor-state snapshot in the host world"
         );
+        assert_eq!(HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get), 0,);
         assert_eq!(
             engine.objects[actor_index]
                 .state
                 .local_vars
                 .get("phase_calls"),
             Some(&Value::Int(1)),
+        );
+    }
+
+    #[test]
+    fn legacy_find_object_rejects_nonmatches_without_full_state_materialization() {
+        // C4Game::FindObject walks Game.Objects from First -> Next and tests
+        // scalar C4Object fields in place (C4Game.cpp:1337-1424). The first
+        // matching object must therefore stay master-order authoritative,
+        // without copying every rejected object's full script state.
+        let mut engine = Engine::with_seed(0);
+        for definition in [
+            Definition::from_script("TARG", "Target", "#strict\n").expect("target compiles"),
+            Definition::from_script("FILL", "Filler", "#strict\n").expect("filler compiles"),
+        ] {
+            engine
+                .register_definition(definition)
+                .expect("definition registers");
+        }
+        let mut searcher = Definition::from_script(
+            "SRCH",
+            "Searcher",
+            "#strict\n\
+             protected func FindTarget() { return(FindObject(TARG)); }\n\
+             protected func FindOwned() { return(FindObjectOwner(TARG, 3)); }\n",
+        )
+        .expect("searcher compiles");
+        searcher.set_c4_callback_convention(true);
+        engine
+            .register_definition(searcher)
+            .expect("searcher registers");
+        for player in [2, 3] {
+            engine
+                .register_player(PlayerConfig::new(player, format!("Player {player}")))
+                .expect("player registers");
+        }
+
+        let older_target = engine
+            .spawn_object(SpawnConfig::new("TARG").with_owner(3))
+            .expect("older target spawns");
+        for x in 0..64 {
+            engine
+                .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)))
+                .expect("filler spawns");
+        }
+        let newer_target = engine
+            .spawn_object(SpawnConfig::new("TARG").with_owner(2))
+            .expect("newer target spawns");
+        for x in 64..128 {
+            engine
+                .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(x, 10)))
+                .expect("filler spawns");
+        }
+        let searcher = engine
+            .spawn_object(SpawnConfig::new("SRCH"))
+            .expect("searcher spawns");
+        let searcher_index = engine.find_object_index(searcher).expect("searcher exists");
+
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+        assert_eq!(
+            engine
+                .call_object_function(searcher_index, "FindTarget", Vec::new())
+                .expect("FindObject succeeds"),
+            object_reference_value(newer_target),
+            "the newer target is first in C++ forward master-list order"
+        );
+        assert_ne!(newer_target, older_target);
+        assert_eq!(
+            HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+            1,
+            "only the already-required executing-object snapshot is materialized"
+        );
+
+        HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
+        assert_eq!(
+            engine
+                .call_object_function(searcher_index, "FindOwned", Vec::new())
+                .expect("FindObjectOwner succeeds"),
+            object_reference_value(older_target),
+            "the owner predicate skips the newer target without disturbing order"
+        );
+        assert_eq!(
+            HOST_WORLD_OBJECT_MATERIALIZATIONS.with(Cell::get),
+            1,
+            "FindObjectOwner also rejects candidates through scalar fields"
         );
     }
 
@@ -66737,8 +66494,7 @@ protected func QueryWorld()
             .expect("effect definition registers");
         engine
             .register_definition(
-                Definition::from_script("FILL", "Filler", "#strict\n")
-                    .expect("filler compiles"),
+                Definition::from_script("FILL", "Filler", "#strict\n").expect("filler compiles"),
             )
             .expect("filler registers");
         for x in 0..64 {
@@ -66761,17 +66517,14 @@ protected func QueryWorld()
             0,
             "a nil-target global callback copies no object"
         );
-        assert_eq!(
-            HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
-            0,
-        );
+        assert_eq!(HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get), 0,);
     }
 
     #[test]
     fn lazy_host_world_contact_materialization_is_deferred_until_query() {
         let mut engine = Engine::with_seed(0);
-        let mut landscape = Landscape::with_default_material(100, vec![100; 100], None)
-            .expect("contact landscape");
+        let mut landscape =
+            Landscape::with_default_material(100, vec![100; 100], None).expect("contact landscape");
         landscape.set_world_height(100);
         landscape.set_pixel_grid(PixelGrid::new(
             100,
@@ -66785,8 +66538,7 @@ protected func QueryWorld()
 
         engine
             .register_definition(
-                Definition::from_script("FILL", "Filler", "#strict\n")
-                    .expect("filler compiles"),
+                Definition::from_script("FILL", "Filler", "#strict\n").expect("filler compiles"),
             )
             .expect("filler registers");
         let mut swimmer = Definition::from_script(
@@ -66814,9 +66566,7 @@ protected func ContactRight()
 
         for x in 0..128 {
             engine
-                .spawn_object(
-                    SpawnConfig::new("FILL").with_position(Vector2::new(x % 100, 10)),
-                )
+                .spawn_object(SpawnConfig::new("FILL").with_position(Vector2::new(x % 100, 10)))
                 .expect("filler spawns");
         }
         let swimmer = engine
@@ -66827,9 +66577,7 @@ protected func ContactRight()
                     .with_mobile(true),
             )
             .expect("swimmer spawns");
-        let swimmer_index = engine
-            .find_object_index(swimmer)
-            .expect("swimmer exists");
+        let swimmer_index = engine.find_object_index(swimmer).expect("swimmer exists");
         let definition_id = engine.objects[swimmer_index].definition_id.clone();
         let action_library = engine
             .definitions
@@ -66867,8 +66615,7 @@ protected func ContactRight()
             .grid_write_byte(54, 50, 1);
         // Cross one free pixel first so DoMotion mutably reborrows the
         // non-mover slices before the same movement reaches ContactRight.
-        engine.objects[swimmer_index]
-            .set_fixed_velocity(FixedVec2::from_ints(2, 0));
+        engine.objects[swimmer_index].set_fixed_velocity(FixedVec2::from_ints(2, 0));
         HOST_WORLD_OBJECT_MATERIALIZATIONS.with(|count| count.set(0));
         HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
         engine
@@ -66918,8 +66665,8 @@ protected func ContactRight()
     #[test]
     fn rejected_step_latches_contact_for_next_move_to_jump() {
         let mut engine = Engine::with_seed(0);
-        let mut landscape = Landscape::with_default_material(200, vec![200; 200], None)
-            .expect("contact landscape");
+        let mut landscape =
+            Landscape::with_default_material(200, vec![200; 200], None).expect("contact landscape");
         landscape.set_world_height(200);
         let mut pixels = vec![0; 200 * 200];
         // The current left vertex is free at (96,103), but the candidate
@@ -67089,12 +66836,11 @@ mod material_colorization_regression {
     use std::fmt;
     use std::sync::{Arc, Mutex};
     use tracing::field::{Field, Visit};
-    use tracing::{Level, subscriber};
+    use tracing::{subscriber, Level};
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use tracing_subscriber::registry::Registry;
 
-    const TEST_GAME_PALETTE: &[u8; 256 * 3] =
-        include_bytes!("../../../planet/Graphics.c4g/C4.PAL");
+    const TEST_GAME_PALETTE: &[u8; 256 * 3] = include_bytes!("../../../planet/Graphics.c4g/C4.PAL");
 
     fn palette_pixel(index: u8) -> [u8; 4] {
         let offset = usize::from(index) * 3;
@@ -67211,10 +66957,8 @@ mod material_colorization_regression {
             clonk_resources::material::c4_name_key(&lowercase_name),
             sprite(&[[1, 2, 3, 255]]),
         )]));
-        definition.set_portrait_graphics(vec![(
-            lowercase_name.clone(),
-            picture(&[[4, 5, 6, 255]]),
-        )]);
+        definition
+            .set_portrait_graphics(vec![(lowercase_name.clone(), picture(&[[4, 5, 6, 255]]))]);
 
         assert_eq!(
             definition
@@ -67269,10 +67013,7 @@ mod material_colorization_regression {
         definition.set_picture_image(Some(picture(&[palette_pixel(6)])));
         definition.set_portrait_image(Some(picture(&[palette_pixel(4)])));
         definition.set_portrait_graphics_image(Some(picture(&[palette_pixel(5)])));
-        definition.set_portrait_graphics(vec![(
-            "1".to_string(),
-            picture(&[palette_pixel(6)]),
-        )]);
+        definition.set_portrait_graphics(vec![("1".to_string(), picture(&[palette_pixel(6)]))]);
 
         let mut engine = Engine::new();
         engine.set_materials(gold_materials());
@@ -67367,7 +67108,7 @@ mod missing_include_regression {
     use std::fmt;
     use std::sync::{Arc, Mutex};
     use tracing::field::{Field, Visit};
-    use tracing::{Level, subscriber};
+    use tracing::{subscriber, Level};
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use tracing_subscriber::registry::Registry;
 
@@ -67464,10 +67205,7 @@ mod missing_include_regression {
         .expect("missing-callback fixture compiles");
         definition.set_c4_callback_convention(true);
         definition.set_debugger_hooks(hooks);
-        definition.configure_actions(
-            None,
-            HashMap::from([("Probe".to_string(), probe.clone())]),
-        );
+        definition.configure_actions(None, HashMap::from([("Probe".to_string(), probe.clone())]));
         definition.configure_physical_actions(vec![("Probe".to_string(), probe)]);
         definition.set_timer(1);
         definition.set_timer_call(Some("MissingTimer".to_string()));
@@ -67493,7 +67231,9 @@ private func MissingAbort(int old_phase) { return old_phase; }
 private func MissingTimer() { return 1; }
 "#;
         assert_eq!(
-            capture_warnings(|| engine.resolve_includes().expect("initial callback link succeeds")),
+            capture_warnings(|| engine
+                .resolve_includes()
+                .expect("initial callback link succeeds")),
             expected,
         );
 
@@ -67717,16 +67457,8 @@ private func MissingTimer() { return 1; }
                 "registration order: {order:?}",
             );
 
-            let first_function = if order[0] == "CYCA" {
-                "AOnly"
-            } else {
-                "BOnly"
-            };
-            let second_function = if order[1] == "CYCA" {
-                "AOnly"
-            } else {
-                "BOnly"
-            };
+            let first_function = if order[0] == "CYCA" { "AOnly" } else { "BOnly" };
+            let second_function = if order[1] == "CYCA" { "AOnly" } else { "BOnly" };
             assert!(engine.definition_script_has_function(order[0], first_function));
             assert!(engine.definition_script_has_function(order[0], second_function));
             assert!(engine.definition_script_has_function(order[1], second_function));
@@ -67750,7 +67482,9 @@ private func MissingTimer() { return 1; }
             "CDCH",
             "#include CDPA\npublic func ControlUp() { [|Image=CDCH] return 1; }\npublic func ControlDown() { return 1; }",
         );
-        engine.resolve_includes().expect("control descriptions link");
+        engine
+            .resolve_includes()
+            .expect("control descriptions link");
 
         assert_eq!(
             engine.definition_control_description("CDCH", "ControlSpecial"),
@@ -67919,7 +67653,9 @@ mod script_relink_regression {
             "Parse must set Hold on the constant's preparsed identity"
         );
 
-        engine.relink_scripts().expect("native Clear/reparse succeeds");
+        engine
+            .relink_scripts()
+            .expect("native Clear/reparse succeeds");
         let source = engine
             .script_link_sources
             .iter()
@@ -67984,22 +67720,19 @@ mod script_relink_regression {
         assert_eq!(call(&mut engine, child, "Layer"), Value::Int(11_111));
         assert_eq!(call(&mut engine, base, "Seed"), Value::Int(41));
 
-        assert!(
-            engine
-                .reload_definition_script(
-                    "APNY",
-                    "#strict\n#appendto BASE\nfunc Layer() { return 20000 + inherited(); }",
-                )
-                .expect("append source reloads")
-        );
+        assert!(engine
+            .reload_definition_script(
+                "APNY",
+                "#strict\n#appendto BASE\nfunc Layer() { return 20000 + inherited(); }",
+            )
+            .expect("append source reloads"));
         assert_eq!(call(&mut engine, base, "Layer"), Value::Int(21_111));
         assert_eq!(call(&mut engine, child, "Layer"), Value::Int(21_111));
 
-        assert!(
-            engine
-                .reload_definition_script(
-                    "BASE",
-                    "#strict 2\n\
+        assert!(engine
+            .reload_definition_script(
+                "BASE",
+                "#strict 2\n\
                      #include INCA\n\
                      #include INCB\n\
                      static Kept;\n\
@@ -68007,9 +67740,8 @@ mod script_relink_regression {
                      func Seed() { Kept = 99; return Kept; }\n\
                      func Globals() { return [Kept, ReloadConst]; }\n\
                      func Layer() { return 200 + inherited(); }",
-                )
-                .expect("base source reloads")
-        );
+            )
+            .expect("base source reloads"));
         assert_eq!(call(&mut engine, base, "Layer"), Value::Int(21_211));
         assert_eq!(call(&mut engine, child, "Layer"), Value::Int(21_211));
         assert_eq!(
@@ -68033,11 +67765,9 @@ mod script_relink_regression {
             call(&mut engine, base, "Globals"),
             Value::Array(vec![Value::Int(41), Value::Int(9)])
         );
-        assert!(
-            !engine
-                .reload_definition_script("MISS", "func Nope() {}")
-                .expect("unknown reload is a clean miss")
-        );
+        assert!(!engine
+            .reload_definition_script("MISS", "func Nope() {}")
+            .expect("unknown reload is a clean miss"));
     }
 
     #[test]
@@ -68249,9 +67979,7 @@ mod script_relink_regression {
             .script_link_sources
             .iter()
             .find_map(|source| match source {
-                ScriptLinkSource::Script { name, script, .. }
-                    if name == "System/Order.c" =>
-                {
+                ScriptLinkSource::Script { name, script, .. } if name == "System/Order.c" => {
                     Some(Arc::clone(script))
                 }
                 _ => None,
@@ -68294,8 +68022,8 @@ mod script_relink_regression {
         );
         register(
             &mut engine,
-             "BDEF",
-             "global func Cmp(object first, object second) {\n\
+            "BDEF",
+            "global func Cmp(object first, object second) {\n\
                  return Helper();\n\
              }\n\
              func Helper() {\n\
@@ -68360,15 +68088,13 @@ mod script_relink_regression {
             .expect("second object spawns");
         assert_eq!(call(&mut engine, first, "Trigger"), Value::Bool(true));
 
-        assert!(
-            engine
-                .reload_definition_script(
-                    "BDEF",
-                    "global func Cmp(object first, object second) { return 1; }\n\
+        assert!(engine
+            .reload_definition_script(
+                "BDEF",
+                "global func Cmp(object first, object second) { return 1; }\n\
                      func Trigger() { return Queue(); }",
-                )
-                .expect("comparator definition reloads")
-        );
+            )
+            .expect("comparator definition reloads"));
         engine.execute_object_order_commands();
         assert_eq!(
             engine.debug_exec_order(),
@@ -68416,16 +68142,14 @@ mod script_relink_regression {
         assert_eq!(call(&mut engine, late, "Own"), Value::Int(123));
         assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(123));
 
-        assert!(
-            engine
-                .reload_definition_script(
-                    "EARL",
-                    "#strict\n\
+        assert!(engine
+            .reload_definition_script(
+                "EARL",
+                "#strict\n\
                      global func Layer() { return inherited() * 10 + 4; }\n\
                      func Own() { return Layer(); }",
-                )
-                .expect("early definition reloads")
-        );
+            )
+            .expect("early definition reloads"));
         assert_eq!(call(&mut engine, early, "Own"), Value::Int(134));
         assert_eq!(call(&mut engine, late, "Own"), Value::Int(134));
         assert_eq!(call(&mut engine, caller, "Probe"), Value::Int(134));
@@ -68464,20 +68188,16 @@ mod script_relink_regression {
         assert_eq!(child.clonk_names(), Some("Alpha"));
         assert!(child.has_step);
 
-        assert!(
-            engine
-                .reload_definition_script("META", "#include PRBB")
-                .expect("child source reloads")
-        );
+        assert!(engine
+            .reload_definition_script("META", "#include PRBB")
+            .expect("child source reloads"));
         let child = engine.definitions.get("META").expect("child definition");
         assert_eq!(child.clonk_names(), Some("Beta"));
         assert!(!child.has_step);
 
-        assert!(
-            engine
-                .reload_definition_script("META", "")
-                .expect("include removal reloads")
-        );
+        assert!(engine
+            .reload_definition_script("META", "")
+            .expect("include removal reloads"));
         let child = engine.definitions.get("META").expect("child definition");
         assert_eq!(child.clonk_names(), Some("Append"));
         assert!(!child.has_step);
@@ -68617,18 +68337,21 @@ mod internal_player_script_control_parity {
             )
             .expect("owned object spawns");
 
-        assert!(
-            engine
-                .apply_admitted_player_team_update(41, 2, Some(new_color))
-                .expect("live AddPlayer update applies")
-        );
+        assert!(engine
+            .apply_admitted_player_team_update(41, 2, Some(new_color))
+            .expect("live AddPlayer update applies"));
 
         assert_eq!(engine.player(4).unwrap().team(), Some(2));
-        assert_eq!(engine.player(4).unwrap().color(), Some(RgbColor::new(0, 0xc8, 0)));
+        assert_eq!(
+            engine.player(4).unwrap().color(),
+            Some(RgbColor::new(0, 0xc8, 0))
+        );
         assert_eq!(engine.player(4).unwrap().color_dw(), new_color);
         assert!(engine.teams()[0].player_ids.is_empty());
         assert_eq!(engine.teams()[1].player_ids, vec![41]);
-        let owned_index = engine.find_object_index(owned).expect("owned object remains live");
+        let owned_index = engine
+            .find_object_index(owned)
+            .expect("owned object remains live");
         assert_eq!(engine.objects[owned_index].state.color, 0xaa00_c800);
         let missing_applied = engine
             .apply_admitted_player_team_update(99, 1, None)
@@ -68869,7 +68592,13 @@ mod em_move_object_control_parity {
             .expect("inactive object spawns");
         let mut packet = control(
             EMMO_MOVE,
-            vec![number(active), number(active), number(inactive), -1, 999_999],
+            vec![
+                number(active),
+                number(active),
+                number(inactive),
+                -1,
+                999_999,
+            ],
         );
         packet.tx = 2;
         packet.ty = -3;
@@ -68990,7 +68719,10 @@ mod em_move_object_control_parity {
             .expect("enter executes"));
         let child_index = engine.find_object_index(child).unwrap();
         assert_eq!(engine.objects[child_index].state.container, Some(container));
-        assert_eq!(engine.objects[child_index].state.position, Vector2::new(50, 60));
+        assert_eq!(
+            engine.objects[child_index].state.position,
+            Vector2::new(50, 60)
+        );
 
         assert!(engine
             .execute_em_move_object_control(
@@ -69015,11 +68747,15 @@ mod em_move_object_control_parity {
             )
             .expect("remove executes"));
         assert_eq!(
-            engine.objects[engine.find_object_index(child).unwrap()].state.status,
+            engine.objects[engine.find_object_index(child).unwrap()]
+                .state
+                .status,
             ObjectStatus::Deleted
         );
         assert_eq!(
-            engine.objects[engine.find_object_index(content).unwrap()].state.status,
+            engine.objects[engine.find_object_index(content).unwrap()]
+                .state
+                .status,
             ObjectStatus::Deleted
         );
     }
@@ -69042,10 +68778,7 @@ mod em_move_object_control_parity {
         let object = engine
             .spawn_object(SpawnConfig::new("SCRP"))
             .expect("script object spawns");
-        let mut packet = control(
-            EMMO_SCRIPT,
-            vec![number(object), 999_999, number(object)],
-        );
+        let mut packet = control(EMMO_SCRIPT, vec![number(object), 999_999, number(object)]);
         packet.script = LegacyCString::from_bytes(b"Mark()".to_vec()).unwrap();
         assert!(engine
             .execute_em_move_object_control(&packet, ScriptControlPolicy::replay(false))
@@ -69241,7 +68974,11 @@ mod em_draw_tool_control_parity {
     #[test]
     fn fill_uses_y_then_x_draws_and_exactly_two_draws_per_grade() {
         let mut engine = editor_engine(23);
-        let _ = engine.landscape.as_mut().unwrap().set_mode(LANDSCAPE_MODE_EXACT);
+        let _ = engine
+            .landscape
+            .as_mut()
+            .unwrap()
+            .set_mode(LANDSCAPE_MODE_EXACT);
         let mut fill = control(EMDT_FILL);
         fill.x = 14;
         fill.y = 12;
@@ -69266,7 +69003,10 @@ mod em_draw_tool_control_parity {
             .iter_slots()
             .map(|(_, _, pxs)| (fixtoi(pxs.x), fixtoi(pxs.y)))
             .collect::<Vec<_>>();
-        assert_eq!(actual, expected, "each PXS keeps the y-first coordinate pair");
+        assert_eq!(
+            actual, expected,
+            "each PXS keeps the y-first coordinate pair"
+        );
     }
 
     #[test]
@@ -69280,7 +69020,11 @@ mod em_draw_tool_control_parity {
         assert_eq!(undefined.debug_landscape_byte(0, 0), Some(0));
 
         let mut engine = editor_engine(29);
-        let _ = engine.landscape.as_mut().unwrap().set_mode(LANDSCAPE_MODE_EXACT);
+        let _ = engine
+            .landscape
+            .as_mut()
+            .unwrap()
+            .set_mode(LANDSCAPE_MODE_EXACT);
         let mut fill = control(EMDT_FILL);
         fill.grade = 3;
         fill.x = 10;
@@ -69312,7 +69056,11 @@ mod em_draw_tool_control_parity {
     #[test]
     fn static_rect_updates_the_retained_map_and_exact_to_static_restores_it() {
         let mut engine = editor_engine(31);
-        let _ = engine.landscape.as_mut().unwrap().set_mode(LANDSCAPE_MODE_STATIC);
+        let _ = engine
+            .landscape
+            .as_mut()
+            .unwrap()
+            .set_mode(LANDSCAPE_MODE_STATIC);
 
         // A static radius-one brush uses Map::SetPix, not the asymmetric
         // two-pixel CSurface8 circle used in Exact mode.
@@ -69348,7 +69096,11 @@ mod em_draw_tool_control_parity {
         assert_ne!(engine.debug_landscape_byte(3, 3), Some(0));
         assert_eq!(engine.debug_landscape_byte(25, 25), Some(0x81));
 
-        let _ = engine.landscape.as_mut().unwrap().set_mode(LANDSCAPE_MODE_EXACT);
+        let _ = engine
+            .landscape
+            .as_mut()
+            .unwrap()
+            .set_mode(LANDSCAPE_MODE_EXACT);
         let mut sky = control(EMDT_RECT);
         sky.material = bytes("Sky");
         sky.x = 3;
@@ -69378,13 +69130,15 @@ mod em_draw_tool_control_parity {
         exact_landscape.set_map_changed();
         exact_without_map.set_landscape(exact_landscape);
         assert!(!exact_without_map
-            .save_changed_c4_landscape_map(&mut clonk_resources::MutableGroup::new(
-                "Scenario.c4s",
-            ))
+            .save_changed_c4_landscape_map(&mut clonk_resources::MutableGroup::new("Scenario.c4s",))
             .expect("fMapChanged without a retained Map is a no-op"));
 
         let mut engine = editor_engine(37);
-        let _ = engine.landscape.as_mut().unwrap().set_mode(LANDSCAPE_MODE_STATIC);
+        let _ = engine
+            .landscape
+            .as_mut()
+            .unwrap()
+            .set_mode(LANDSCAPE_MODE_STATIC);
         engine
             .landscape
             .as_mut()
@@ -69421,7 +69175,10 @@ mod em_draw_tool_control_parity {
         assert!(engine
             .save_changed_c4_landscape_map(&mut gated)
             .expect("changed map saves"));
-        assert!(engine.landscape().unwrap().map_changed(), "save does not clear the gate");
+        assert!(
+            engine.landscape().unwrap().map_changed(),
+            "save does not clear the gate"
+        );
 
         let root = clonk_resources::Group::from_memory(
             std::path::PathBuf::from("Scenario.c4s"),
@@ -69473,7 +69230,9 @@ mod em_draw_tool_control_parity {
             .add_file("Sentinel.bin", b"untouched".to_vec())
             .unwrap();
         let mut clean_root = clonk_resources::MutableGroup::new("Scenario.c4s");
-        clean_root.add_child("Material.c4g", clean_material).unwrap();
+        clean_root
+            .add_child("Material.c4g", clean_material)
+            .unwrap();
         assert!(!engine
             .save_c4_landscape_textures(&mut clean_root)
             .expect("clean existing child is untouched"));
@@ -69487,7 +69246,10 @@ mod em_draw_tool_control_parity {
             clean_material.read_file("TexMap.txt").unwrap(),
             b"leave stale bytes alone"
         );
-        assert_eq!(clean_material.read_file("Sentinel.bin").unwrap(), b"untouched");
+        assert_eq!(
+            clean_material.read_file("Sentinel.bin").unwrap(),
+            b"untouched"
+        );
 
         let slot = engine
             .landscape
@@ -69548,7 +69310,10 @@ mod em_draw_tool_control_parity {
             .expect("rewritten material child opens");
         assert_eq!(material.read_file("Earth.c4m").unwrap(), b"sentinel");
         assert_eq!(material.read_file("TexMap.txt").unwrap(), expected);
-        assert!(engine.landscape().unwrap().texture_map_entries_added(), "save does not clear the gate");
+        assert!(
+            engine.landscape().unwrap().texture_map_entries_added(),
+            "save does not clear the gate"
+        );
 
         let mut file_root = clonk_resources::MutableGroup::new("Scenario.c4s");
         file_root
@@ -69621,8 +69386,8 @@ mod em_drop_def_control_parity {
         let mut engine = Engine::new();
         engine.set_materials(materials);
         engine.set_landscape(landscape);
-        let mut structure = Definition::from_script("HUT1", "Hut", "#strict\n")
-            .expect("structure compiles");
+        let mut structure =
+            Definition::from_script("HUT1", "Hut", "#strict\n").expect("structure compiles");
         structure.set_category(CATEGORY_STRUCTURE);
         structure.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 8)));
         structure.set_basement(1);
@@ -69669,8 +69434,7 @@ mod em_drop_def_control_parity {
     #[test]
     fn nonstructures_use_create_object_and_invalid_drops_are_noops() {
         let mut engine = Engine::new();
-        let mut item =
-            Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles");
+        let mut item = Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles");
         item.set_category(CATEGORY_OBJECT);
         engine.register_definition(item).expect("item registers");
         let mut numeric_underscore =
@@ -69983,7 +69747,9 @@ mod script_control_execution_tests {
                     .expect("object scope executes"),
                 Some(Value::Int(marker)),
             );
-            let index = engine.find_object_index(object).expect("object remains present");
+            let index = engine
+                .find_object_index(object)
+                .expect("object remains present");
             assert_eq!(
                 engine
                     .call_object_function(index, "ReadMarker", Vec::new())
@@ -70077,9 +69843,8 @@ mod object_action_no_other_regression {
     #[test]
     fn object_action_fight_respects_no_other_action() {
         let mut engine = Engine::new();
-        let mut definition =
-            Definition::from_script("FLOK", "Fight-locked actor", "#strict\n")
-                .expect("fight actor compiles");
+        let mut definition = Definition::from_script("FLOK", "Fight-locked actor", "#strict\n")
+            .expect("fight actor compiles");
         definition.configure_actions(
             Some("Fight".to_string()),
             HashMap::from([
@@ -70264,15 +70029,12 @@ protected func Departure(pTarget)
             Definition::from_script("TARG", "Target", target_script).expect("target compiles");
         target.set_c4_callback_convention(true);
         target.set_grab_put_get(GRAB_PUT_GET_PUT);
-        let mut item =
-            Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
+        let mut item = Definition::from_script("ITEM", "Item", item_script).expect("item compiles");
         item.set_c4_callback_convention(true);
         item.set_collectible(true);
 
         let mut engine = Engine::with_seed(118);
-        engine
-            .register_definition(actor)
-            .expect("actor registers");
+        engine.register_definition(actor).expect("actor registers");
         engine
             .register_definition(target)
             .expect("target registers");
@@ -70371,7 +70133,8 @@ protected func Departure(pTarget)
         assert!(engine
             .try_object_com_put(actor, target, item)
             .expect("ObjectComPut executes"));
-        let item_state = &engine.objects[engine.find_object_index(item).expect("item remains")].state;
+        let item_state =
+            &engine.objects[engine.find_object_index(item).expect("item remains")].state;
         assert_eq!(item_state.container, Some(target));
         assert_eq!(
             item_state.local_vars.get("callback_order"),
@@ -70448,12 +70211,8 @@ protected func Departure(pTarget)
   return(1);
 }
 "#;
-        let mut reentering = Definition::from_script(
-            "RITM",
-            "Reentering item",
-            reentering_script,
-        )
-        .expect("reentering item compiles");
+        let mut reentering = Definition::from_script("RITM", "Reentering item", reentering_script)
+            .expect("reentering item compiles");
         reentering.set_c4_callback_convention(true);
         engine
             .register_definition(reentering)
@@ -70549,8 +70308,7 @@ protected func Departure(pTarget)
             Some(1)
         );
 
-        let (rejected_actor, rejected_item, _) =
-            spawn_push_put_triplet(&mut engine, true);
+        let (rejected_actor, rejected_item, _) = spawn_push_put_triplet(&mut engine, true);
         engine
             .execute_object_command_now(rejected_actor)
             .expect("rejected Put resolves");
@@ -70593,7 +70351,7 @@ protected func Departure(pTarget)
             let item_state = &accepted.objects[accepted
                 .find_object_index(item)
                 .expect("accepted item remains")]
-                .state;
+            .state;
             assert_eq!(item_state.container, Some(target), "{command:?} transfers");
             assert_eq!(
                 item_state.local_vars.get("callback_order"),
@@ -70604,22 +70362,21 @@ protected func Departure(pTarget)
                 accepted.objects[accepted
                     .find_object_index(actor)
                     .expect("accepted actor remains")]
-                    .commands
-                    .snapshot()
-                    .is_empty(),
+                .commands
+                .snapshot()
+                .is_empty(),
                 "{command:?} finishes after the callback tail"
             );
 
             let mut rejected = put_fixture_engine();
-            let (actor, item, _) =
-                spawn_contained_put_take_triplet(&mut rejected, true, command);
+            let (actor, item, _) = spawn_contained_put_take_triplet(&mut rejected, true, command);
             rejected
                 .execute_object_command_now(actor)
                 .expect("rejected ObjectComPutTake executes");
             let item_state = &rejected.objects[rejected
                 .find_object_index(item)
                 .expect("rejected item remains")]
-                .state;
+            .state;
             assert_eq!(
                 item_state.container,
                 Some(actor),
@@ -70634,9 +70391,9 @@ protected func Departure(pTarget)
                 rejected.objects[rejected
                     .find_object_index(actor)
                     .expect("rejected actor remains")]
-                    .commands
-                    .snapshot()
-                    .is_empty(),
+                .commands
+                .snapshot()
+                .is_empty(),
                 "{command:?} ignores the helper result and still finishes"
             );
         }
@@ -70661,7 +70418,9 @@ protected func Departure(pTarget)
 
             let deleted_index = engine.find_object_index(deleted).expect("tombstone exists");
             let _ = engine.objects[deleted_index].mark_destroyed();
-            let inactive_index = engine.find_object_index(inactive).expect("inactive item exists");
+            let inactive_index = engine
+                .find_object_index(inactive)
+                .expect("inactive item exists");
             engine.objects[inactive_index].state.status = ObjectStatus::Inactive;
             let actor_index = engine.find_object_index(actor).expect("actor exists");
             engine.objects[actor_index].state.contents = vec![deleted, inactive];
@@ -70716,7 +70475,9 @@ protected func Departure(pTarget)
 
         let deleted_index = engine.find_object_index(deleted).expect("tombstone exists");
         let _ = engine.objects[deleted_index].mark_destroyed();
-        let inactive_index = engine.find_object_index(inactive).expect("inactive item exists");
+        let inactive_index = engine
+            .find_object_index(inactive)
+            .expect("inactive item exists");
         engine.objects[inactive_index].state.status = ObjectStatus::Inactive;
         engine.objects[base_index].state.contents = vec![deleted, inactive];
 
@@ -70812,17 +70573,20 @@ protected func Departure(pTarget)
             .expect("replacement item spawns");
         let target_index = engine.find_object_index(target).expect("target exists");
         engine.objects[target_index].state.local_vars.extend([
-            ("nested_put_actor".to_string(), object_reference_value(actor)),
+            (
+                "nested_put_actor".to_string(),
+                object_reference_value(actor),
+            ),
             (
                 "nested_put_item".to_string(),
                 object_reference_value(replacement_item),
             ),
         ]);
         let actor_index = engine.find_object_index(actor).expect("actor exists");
-        engine.objects[actor_index]
-            .state
-            .local_vars
-            .insert("tracked".to_string(), object_reference_value(replacement_item));
+        engine.objects[actor_index].state.local_vars.insert(
+            "tracked".to_string(),
+            object_reference_value(replacement_item),
+        );
         engine.objects[actor_index]
             .commands
             .push_front(
@@ -70911,7 +70675,10 @@ protected func Departure(pTarget)
         );
         for item in [first_item, second_item] {
             assert_eq!(
-                engine.object_snapshot(item).expect("item remains").container,
+                engine
+                    .object_snapshot(item)
+                    .expect("item remains")
+                    .container,
                 Some(target)
             );
         }
@@ -70995,7 +70762,10 @@ protected func Departure(pTarget)
         );
         assert!(engine.objects[actor_index].commands.snapshot().is_empty());
         assert_eq!(
-            engine.object_snapshot(item).expect("item remains").container,
+            engine
+                .object_snapshot(item)
+                .expect("item remains")
+                .container,
             None
         );
     }
@@ -71009,9 +70779,8 @@ public func RunExecute()
   return(1);
 }
 "#;
-        let mut actor =
-            Definition::from_script("NDIG", "NoOtherAction digger", script)
-                .expect("actor compiles");
+        let mut actor = Definition::from_script("NDIG", "NoOtherAction digger", script)
+            .expect("actor compiles");
         actor.set_c4_callback_convention(true);
         actor.configure_actions(
             None,
@@ -71032,9 +70801,8 @@ public func RunExecute()
                 ),
             ]),
         );
-        let mut item =
-            Definition::from_script("NDIT", "NoOtherAction item", "#strict")
-                .expect("item compiles");
+        let mut item = Definition::from_script("NDIT", "NoOtherAction item", "#strict")
+            .expect("item compiles");
         item.set_collectible(true);
 
         let mut engine = Engine::with_seed(119);
@@ -71073,7 +70841,10 @@ public func RunExecute()
             "ObjectActionStand writes ComDir before its rejected Walk"
         );
         assert_eq!(
-            engine.object_snapshot(item).expect("item remains").container,
+            engine
+                .object_snapshot(item)
+                .expect("item remains")
+                .container,
             Some(actor),
             "ObjectComThrow rejects the still-Dig procedure"
         );
@@ -71100,8 +70871,8 @@ protected func StartWalk()
   return(1);
 }
 "#;
-        let mut actor = Definition::from_script("DDIG", "Digging dropper", script)
-            .expect("actor compiles");
+        let mut actor =
+            Definition::from_script("DDIG", "Digging dropper", script).expect("actor compiles");
         actor.set_c4_callback_convention(true);
         actor.configure_actions(
             None,
@@ -71120,8 +70891,8 @@ protected func StartWalk()
                 ),
             ]),
         );
-        let mut item = Definition::from_script("DDIT", "Dropped item", "#strict")
-            .expect("item compiles");
+        let mut item =
+            Definition::from_script("DDIT", "Dropped item", "#strict").expect("item compiles");
         item.set_collectible(true);
 
         let mut engine = Engine::with_seed(121);
@@ -71159,7 +70930,10 @@ protected func StartWalk()
             "Dig Abort and Walk Start finish before ObjectComDrop"
         );
         assert_eq!(
-            engine.object_snapshot(item).expect("item remains").container,
+            engine
+                .object_snapshot(item)
+                .expect("item remains")
+                .container,
             None
         );
         assert!(engine.objects[actor_index].commands.snapshot().is_empty());
@@ -71183,8 +70957,8 @@ protected func Grabbed(object actor, bool grab)
   return(1);
 }
 "#;
-        let mut actor = Definition::from_script("UNGA", "Locked pusher", actor_script)
-            .expect("actor compiles");
+        let mut actor =
+            Definition::from_script("UNGA", "Locked pusher", actor_script).expect("actor compiles");
         actor.set_c4_callback_convention(true);
         actor.configure_actions(
             None,
@@ -71201,13 +70975,15 @@ protected func Grabbed(object actor, bool grab)
                 ),
             ]),
         );
-        let mut target = Definition::from_script("UNGT", "Push target", target_script)
-            .expect("target compiles");
+        let mut target =
+            Definition::from_script("UNGT", "Push target", target_script).expect("target compiles");
         target.set_c4_callback_convention(true);
 
         let mut engine = Engine::new();
         engine.register_definition(actor).expect("actor registers");
-        engine.register_definition(target).expect("target registers");
+        engine
+            .register_definition(target)
+            .expect("target registers");
         let target = engine
             .spawn_object(SpawnConfig::new("UNGT"))
             .expect("target spawns");
@@ -71233,7 +71009,10 @@ protected func Grabbed(object actor, bool grab)
 
         let actor_index = engine.find_object_index(actor).expect("actor remains");
         assert_eq!(engine.objects[actor_index].state.action.name, "Push");
-        assert_eq!(engine.objects[actor_index].state.action.target, Some(target));
+        assert_eq!(
+            engine.objects[actor_index].state.action.target,
+            Some(target)
+        );
         assert_eq!(
             engine.objects[actor_index].fixed_velocity,
             FixedVec2::from_ints(4, -2)
@@ -71244,7 +71023,10 @@ protected func Grabbed(object actor, bool grab)
             "C4Command::UnGrab writes Stop even when ObjectComUnGrab fails"
         );
         assert_eq!(
-            engine.objects[actor_index].state.local_vars.get("grab_calls"),
+            engine.objects[actor_index]
+                .state
+                .local_vars
+                .get("grab_calls"),
             None
         );
         let target_index = engine.find_object_index(target).expect("target remains");
@@ -71286,8 +71068,8 @@ protected func Grabbed(object actor, bool grab)
   return(1);
 }
 "#;
-        let mut actor = Definition::from_script("UGMA", "Menu pusher", actor_script)
-            .expect("actor compiles");
+        let mut actor =
+            Definition::from_script("UGMA", "Menu pusher", actor_script).expect("actor compiles");
         actor.set_c4_callback_convention(true);
         actor.configure_actions(
             None,
@@ -71308,7 +71090,9 @@ protected func Grabbed(object actor, bool grab)
 
         let mut engine = Engine::new();
         engine.register_definition(actor).expect("actor registers");
-        engine.register_definition(target).expect("target registers");
+        engine
+            .register_definition(target)
+            .expect("target registers");
         let target = engine
             .spawn_object(SpawnConfig::new("UGMT"))
             .expect("target spawns");
@@ -71450,8 +71234,8 @@ protected func Grabbed(object actor, bool grab)
   return(1);
 }
 "#;
-        let mut actor = Definition::from_script("UGRA", "Pusher", actor_script)
-            .expect("actor compiles");
+        let mut actor =
+            Definition::from_script("UGRA", "Pusher", actor_script).expect("actor compiles");
         actor.set_c4_callback_convention(true);
         actor.configure_actions(
             None,
@@ -71571,8 +71355,7 @@ protected func StartThrow()
 }
 "#;
         let mut actor =
-            Definition::from_script("TTRN", "Turning thrower", script)
-                .expect("actor compiles");
+            Definition::from_script("TTRN", "Turning thrower", script).expect("actor compiles");
         actor.set_c4_callback_convention(true);
         actor.set_shape_rect(Some(DefinitionRect::new(-8, -10, 16, 20)));
         actor.set_physical(PhysicalInfo {
@@ -71604,9 +71387,8 @@ protected func StartThrow()
                 ),
             ]),
         );
-        let mut item =
-            Definition::from_script("TIT2", "Turning throw item", "#strict")
-                .expect("item compiles");
+        let mut item = Definition::from_script("TIT2", "Turning throw item", "#strict")
+            .expect("item compiles");
         item.set_collectible(true);
 
         let mut engine = Engine::with_seed(120);
@@ -71662,7 +71444,10 @@ protected func StartThrow()
             "SetDir's TurnAction completes before Throw's StartCall"
         );
         assert_eq!(
-            engine.object_snapshot(item).expect("item remains").container,
+            engine
+                .object_snapshot(item)
+                .expect("item remains")
+                .container,
             None
         );
         assert!(engine.objects[actor_index].commands.snapshot().is_empty());
@@ -71717,9 +71502,7 @@ protected func Departure(pContainer)
             throw: 50_000,
             ..PhysicalInfo::default()
         });
-        engine
-            .register_definition(actor)
-            .expect("actor registers");
+        engine.register_definition(actor).expect("actor registers");
 
         let mut item =
             Definition::from_script("TITM", "Thrown item", item_script).expect("item compiles");
@@ -71741,11 +71524,9 @@ protected func Departure(pContainer)
             .spawn_object(SpawnConfig::new("TITM").with_container(actor))
             .expect("item spawns");
         let item_index = engine.find_object_index(item).expect("item exists");
-        engine.objects[item_index].state.shape_override =
-            Some(DefinitionRect::new(0, 0, 6, 6));
+        engine.objects[item_index].state.shape_override = Some(DefinitionRect::new(0, 0, 6, 6));
         engine.objects[item_index].shape_rect = Some(DefinitionRect::new(0, 0, 6, 6));
-        engine.objects[item_index].fixed_velocity =
-            FixedVec2::new(itofix(7), itofix(-9));
+        engine.objects[item_index].fixed_velocity = FixedVec2::new(itofix(7), itofix(-9));
 
         assert!(engine
             .try_object_action_throw(actor, item)
@@ -71770,8 +71551,7 @@ protected func Departure(pContainer)
     fn nested_empty_put_take_runs_reject_contents_and_opens_menu_before_return() {
         let mut engine = put_fixture_engine();
         let mut new_item =
-            Definition::from_script("NITM", "New menu item", "#strict")
-                .expect("new item compiles");
+            Definition::from_script("NITM", "New menu item", "#strict").expect("new item compiles");
         new_item.set_category(CATEGORY_STRUCTURE);
         engine
             .register_definition(new_item)
@@ -71841,7 +71621,10 @@ protected func Departure(pContainer)
             Some(&Value::Int(-1)),
             "selection adjustment stays frozen until the full refill completes"
         );
-        let menu = actor_state.menu.as_ref().expect("activate menu remains open");
+        let menu = actor_state
+            .menu
+            .as_ref()
+            .expect("activate menu remains open");
         assert_eq!(menu.identification, Value::Int(6));
         assert_eq!(menu.refill_object, Some(target));
         assert_eq!((menu.columns, menu.lines), (3, 4));
@@ -72004,9 +71787,8 @@ protected func Departure(pContainer)
     fn empty_pushing_throw_and_drop_open_get_only_for_grab_get_targets() {
         for command in [CommandId::Throw, CommandId::Drop] {
             let mut engine = put_fixture_engine();
-            let mut target_definition =
-                Definition::from_script("GETT", "Get target", "#strict")
-                    .expect("get target compiles");
+            let mut target_definition = Definition::from_script("GETT", "Get target", "#strict")
+                .expect("get target compiles");
             target_definition.set_grab_put_get(GRAB_PUT_GET_GET);
             engine
                 .register_definition(target_definition)
@@ -72073,9 +71855,7 @@ mod owner_overlay_solid_mask_regression {
             width: 2,
             height: 1,
             pixels: Arc::from([10, 20, 30, 40, 50, 60, 70, 200]),
-            color_mask: Some(Arc::from([
-                128, 128, 128, 90, 255, 255, 255, 0,
-            ])),
+            color_mask: Some(Arc::from([128, 128, 128, 90, 255, 255, 255, 0])),
         };
         let pixels = image.solid_mask_source_pixels();
         assert_eq!(pixels[3], 130, "base and overlay opacity saturating-add");
@@ -72110,8 +71890,8 @@ mod solid_mask_state_regression {
         ));
         landscape.grid_write_byte(10, 10, 1);
 
-        let mut mask = Definition::from_script("OMSK", "Ordered mask", "")
-            .expect("mask definition compiles");
+        let mut mask =
+            Definition::from_script("OMSK", "Ordered mask", "").expect("mask definition compiles");
         mask.set_shape_rect(Some(DefinitionRect::new(0, 0, 1, 1)));
         mask.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 1, 1, 0, 0)));
         mask.set_sprite_image(Some(DefinitionSpriteImage {
@@ -72183,8 +71963,7 @@ mod solid_mask_state_regression {
 mod scenario_section_random_regression {
     use super::*;
     use crate::landscape::{
-        LandscapeRasterState, RuntimeTexMapLookup, RuntimeTexMapMaterial,
-        RuntimeTexMapState,
+        LandscapeRasterState, RuntimeTexMapLookup, RuntimeTexMapMaterial, RuntimeTexMapState,
     };
 
     fn section(
@@ -72215,8 +71994,8 @@ mod scenario_section_random_regression {
     }
 
     fn vehicle_section_landscape(width: u32, height: u32) -> Landscape {
-        let mut landscape = Landscape::new(width, vec![0; width as usize])
-            .expect("section landscape builds");
+        let mut landscape =
+            Landscape::new(width, vec![0; width as usize]).expect("section landscape builds");
         landscape.set_world_height(height as i32);
         landscape.set_pixel_grid(landscape::PixelGrid::new(
             width,
@@ -72268,10 +72047,8 @@ mod scenario_section_random_regression {
 
     fn resumed_non_main_root_engine() -> Engine {
         let mut engine = Engine::with_seed(5);
-        engine.configure_scenario_sections(&[
-            section("Cave", 80, true),
-            section("Main", 120, true),
-        ]);
+        engine
+            .configure_scenario_sections(&[section("Cave", 80, true), section("Main", 120, true)]);
         engine.set_landscape(vehicle_section_landscape(80, 40));
         engine
             .apply_initial_network_game_data(&InitialNetworkGameData {
@@ -72331,11 +72108,9 @@ mod scenario_section_random_regression {
     fn resumed_non_main_implicit_root_cannot_reopen_after_unsaved_departure() {
         let mut engine = resumed_non_main_root_engine();
 
-        assert!(
-            engine
-                .load_scenario_section("Main", 0, Vec::new())
-                .expect("named Main section loads")
-        );
+        assert!(engine
+            .load_scenario_section("Main", 0, Vec::new())
+            .expect("named Main section loads"));
         assert_eq!(engine.debug_current_scenario_section(), "Main");
         assert!(
             !engine
@@ -72351,11 +72126,9 @@ mod scenario_section_random_regression {
     fn resumed_non_main_implicit_root_reopens_after_saved_departure() {
         let mut engine = resumed_non_main_root_engine();
 
-        assert!(
-            engine
-                .load_scenario_section("Main", 3, Vec::new())
-                .expect("named Main section loads after freezing Cave")
-        );
+        assert!(engine
+            .load_scenario_section("Main", 3, Vec::new())
+            .expect("named Main section loads after freezing Cave"));
         assert!(
             engine
                 .scenario_sections
@@ -72363,11 +72136,9 @@ mod scenario_section_random_regression {
                 .is_some_and(|section| section.frozen_group.is_some()),
             "C4S_SAVE_LANDSCAPE | C4S_SAVE_OBJECTS creates the temp group"
         );
-        assert!(
-            engine
-                .load_scenario_section("Cave", 0, Vec::new())
-                .expect("frozen Cave section reloads")
-        );
+        assert!(engine
+            .load_scenario_section("Cave", 0, Vec::new())
+            .expect("frozen Cave section reloads"));
         assert_eq!(engine.debug_current_scenario_section(), "Cave");
         assert_eq!(engine.landscape().map(Landscape::width), Some(80));
     }
@@ -72383,10 +72154,8 @@ mod scenario_section_random_regression {
                 Definition::from_script("ITEM", "Item", "").expect("item compiles"),
             )
             .expect("item registers");
-        engine.configure_scenario_sections(&[
-            section("main", 80, true),
-            section("next", 100, true),
-        ]);
+        engine
+            .configure_scenario_sections(&[section("main", 80, true), section("next", 100, true)]);
         engine.set_landscape(vehicle_section_landscape(80, 40));
 
         let active = engine
@@ -72402,9 +72171,7 @@ mod scenario_section_random_regression {
         let active_index = engine.find_object_index(active).expect("active index");
         engine.objects[active_index].state.action.target = Some(inactive);
         engine.objects[active_index].compiler_cache.action_target1 = 991;
-        let inactive_index = engine
-            .find_object_index(inactive)
-            .expect("inactive index");
+        let inactive_index = engine.find_object_index(inactive).expect("inactive index");
         engine.objects[inactive_index].state.action.target = Some(inactive);
         engine.objects[inactive_index].compiler_cache.action_target1 = 992;
         let preserved_index = engine
@@ -72413,7 +72180,9 @@ mod scenario_section_random_regression {
         let off_list = ObjectId::new(999);
         engine.objects[preserved_index].state.action.target = Some(off_list);
         engine.objects[preserved_index].state.layer = Some(off_list);
-        engine.objects[preserved_index].compiler_cache.action_target1 = 993;
+        engine.objects[preserved_index]
+            .compiler_cache
+            .action_target1 = 993;
         engine.objects[preserved_index].compiler_cache.layer = 994;
 
         assert!(engine
@@ -72443,8 +72212,7 @@ mod scenario_section_random_regression {
             .find_object_index(inactive)
             .expect("inactive object survives section switch");
         assert_eq!(
-            engine.objects[inactive_index].compiler_cache.action_target1,
-            inactive_number,
+            engine.objects[inactive_index].compiler_cache.action_target1, inactive_number,
             "inactive wrappers receive the same enumeration side effect",
         );
         assert_eq!(
@@ -72489,11 +72257,9 @@ mod scenario_section_random_regression {
 
         engine.rng.random(17);
         engine.rng.rnd3();
-        assert!(
-            engine
-                .load_scenario_section("next", 0, Vec::new())
-                .expect("known section loads")
-        );
+        assert!(engine
+            .load_scenario_section("next", 0, Vec::new())
+            .expect("known section loads"));
         assert_eq!(engine.landscape().expect("section landscape").width(), 240);
         assert!(
             !engine.base_extinguish_enabled,
@@ -72532,11 +72298,8 @@ mod scenario_section_random_regression {
                 shape: crate::chunky::ChunkShape::Flat,
             },
         ];
-        live_texmap.texture_inventory = vec![
-            "Rough".to_owned(),
-            "Smooth".to_owned(),
-            "Liquid".to_owned(),
-        ];
+        live_texmap.texture_inventory =
+            vec!["Rough".to_owned(), "Smooth".to_owned(), "Liquid".to_owned()];
         live_texmap.entries_added = true;
         main.set_raster_state(LandscapeRasterState::new(7, -7, live_texmap));
         main.set_modulation(0xaabb_ccdd);
@@ -72760,10 +72523,7 @@ mod scenario_section_random_regression {
         empty.gravity = scenario::LegacyC4SVal::new(150, 0, 10, 200);
 
         let mut engine = Engine::with_seed(29);
-        engine.configure_scenario_sections(&[
-            vehicle_section("main", main.clone()),
-            empty,
-        ]);
+        engine.configure_scenario_sections(&[vehicle_section("main", main.clone()), empty]);
         engine.set_landscape(main);
         engine.set_physics(PhysicsSettings::new(77, 12, -20));
         engine.rng.random(9);
@@ -72835,16 +72595,12 @@ mod scenario_section_random_regression {
             Some(2)
         );
 
-        assert!(
-            engine
-                .load_scenario_section("next", 3, Vec::new())
-                .expect("next section loads")
-        );
-        assert!(
-            engine
-                .load_scenario_section("main", 3, Vec::new())
-                .expect("main section reloads")
-        );
+        assert!(engine
+            .load_scenario_section("next", 3, Vec::new())
+            .expect("next section loads"));
+        assert!(engine
+            .load_scenario_section("main", 3, Vec::new())
+            .expect("main section reloads"));
         assert_eq!(
             engine
                 .landscape()
@@ -73064,10 +72820,7 @@ mod scenario_section_random_regression {
         let water = materials.id_of("Water").expect("Water exists");
         let mut engine = Engine::with_seed(37);
         engine.set_materials(materials);
-        engine.configure_scenario_sections(&[
-            section("main", 20, true),
-            section("next", 20, true),
-        ]);
+        engine.configure_scenario_sections(&[section("main", 20, true), section("next", 20, true)]);
         engine.set_landscape(vehicle_section_landscape(20, 40));
         assert!(engine.pxs_system.create_at(
             3,
@@ -73098,24 +72851,28 @@ mod scenario_section_random_regression {
         );
         engine.pxs_system.note_executed();
 
-        assert!(
-            engine
-                .load_scenario_section("next", 1, Vec::new())
-                .expect("next section loads")
-        );
+        assert!(engine
+            .load_scenario_section("next", 1, Vec::new())
+            .expect("next section loads"));
         assert_eq!(engine.pxs_system.count(), 0);
         assert_eq!(engine.pxs_system.execute_count(), 0);
         assert_eq!(engine.mass_movers.live_movers(), 0);
-        assert!(
-            engine
-                .load_scenario_section("main", 1, Vec::new())
-                .expect("main section reloads")
-        );
+        assert!(engine
+            .load_scenario_section("main", 1, Vec::new())
+            .expect("main section reloads"));
 
-        let pixel = engine.pxs_system.peek_slot(0, 4).expect("packed PXS restores");
+        let pixel = engine
+            .pxs_system
+            .peek_slot(0, 4)
+            .expect("packed PXS restores");
         assert_eq!(pixel.mat, earth);
         assert_eq!(
-            [pixel.x.val(), pixel.y.val(), pixel.xdir.val(), pixel.ydir.val()],
+            [
+                pixel.x.val(),
+                pixel.y.val(),
+                pixel.xdir.val(),
+                pixel.ydir.val()
+            ],
             [98_304, -147_456, 8_192, -32_768]
         );
         assert!(!engine.pxs_system.chunk_allocated(3));
@@ -73143,10 +72900,9 @@ mod scenario_section_random_regression {
 
     #[test]
     fn section_without_landscape_or_components_retains_pxs_and_movers() {
-        let library = clonk_resources::MaterialLibrary::parse(
-            "[Material Earth]\nName=Earth\nDensity=100\n",
-        )
-        .expect("materials parse");
+        let library =
+            clonk_resources::MaterialLibrary::parse("[Material Earth]\nName=Earth\nDensity=100\n")
+                .expect("materials parse");
         let materials = MaterialSet::from_resource_library(&library);
         let earth = materials.id_of("Earth").expect("Earth exists");
         let mut next = section("next", 20, true);
@@ -73175,18 +72931,19 @@ mod scenario_section_random_regression {
             },
         );
 
-        assert!(
-            engine
-                .load_scenario_section("next", 0, Vec::new())
-                .expect("section loads")
-        );
+        assert!(engine
+            .load_scenario_section("next", 0, Vec::new())
+            .expect("section loads"));
         assert_eq!(
             engine.landscape().map(|landscape| landscape.width()),
             Some(20),
             "a section without a map keeps the departing landscape"
         );
         assert!(engine.pxs_system.peek_slot(0, 6).is_some());
-        assert_eq!(engine.mass_movers.slot(4).map(|mover| (mover.x, mover.y)), Some((2, 3)));
+        assert_eq!(
+            engine.mass_movers.slot(4).map(|mover| (mover.x, mover.y)),
+            Some((2, 3))
+        );
     }
 }
 
@@ -73330,9 +73087,7 @@ mod pathfinder_host_state_regression {
         assert_eq!(points.last(), Some(&(to.x, to.y, None)));
         assert!(points.len() > 2);
         assert!(
-            points
-                .iter()
-                .any(|(_, y, _)| *y < 100 || *y > 1_900),
+            points.iter().any(|(_, y, _)| *y < 100 || *y > 1_900),
             "the level-5 route must reach a wall exit"
         );
     }
@@ -73357,8 +73112,8 @@ mod pathfinder_host_state_regression {
         engine
             .register_definition(enabled)
             .expect("enabled definition registers");
-        let mut disabled = Definition::from_script("PFNZ", "No-zone mover", "")
-            .expect("definition compiles");
+        let mut disabled =
+            Definition::from_script("PFNZ", "No-zone mover", "").expect("definition compiles");
         disabled.set_pathfinder(1);
         disabled.set_no_transfer_zones(1);
         engine
@@ -73812,9 +73567,7 @@ mod pathfinder_host_state_regression {
         let caller = engine
             .spawn_object(SpawnConfig::new("ACBE"))
             .expect("caller spawns");
-        let entrance_index = engine
-            .find_object_index(entrance)
-            .expect("entrance exists");
+        let entrance_index = engine.find_object_index(entrance).expect("entrance exists");
         engine.objects[entrance_index].state.ocf |= ocf::ENTRANCE;
 
         assert_eq!(Value::RawBool(raw).c4_bool_raw(), Some(0));
@@ -73860,9 +73613,7 @@ mod pathfinder_host_state_regression {
         let caller = engine
             .spawn_object(SpawnConfig::new("ZENA"))
             .expect("caller spawns");
-        let entrance_index = engine
-            .find_object_index(entrance)
-            .expect("entrance exists");
+        let entrance_index = engine.find_object_index(entrance).expect("entrance exists");
         engine.objects[entrance_index].state.ocf |= ocf::ENTRANCE;
         let caller_index = engine.find_object_index(caller).expect("caller exists");
         engine.objects[caller_index]
@@ -74238,7 +73989,10 @@ mod pathfinder_host_state_regression {
             .find_object_index(gate)
             .expect("the deleted object remains as a physical tombstone");
         assert!(engine.objects[gate_index].destroyed);
-        assert_eq!(engine.objects[gate_index].state.status, ObjectStatus::Deleted);
+        assert_eq!(
+            engine.objects[gate_index].state.status,
+            ObjectStatus::Deleted
+        );
         assert!(
             engine.transfer_zones.get(gate).is_none(),
             "the authoritative zone table clears before frame cleanup"
@@ -74281,7 +74035,10 @@ mod pathfinder_host_state_regression {
             .find_object_index(transfer_actor)
             .expect("transfer actor remains");
         assert!(
-            engine.objects[transfer_index].commands.snapshot().is_empty(),
+            engine.objects[transfer_index]
+                .commands
+                .snapshot()
+                .is_empty(),
             "Transfer targeting the removed owner fails on its next same-frame execution"
         );
     }
@@ -74357,8 +74114,8 @@ mod pathfinder_host_state_regression {
                     width: 10,
                     height: 20,
                 },
-        )
-        .expect("transfer zone registers");
+            )
+            .expect("transfer zone registers");
         assert!(engine.find_path(from, to, 1, true).is_some());
         assert_ne!(
             script_get_path(&mut engine, from, to),
@@ -74397,8 +74154,7 @@ mod pathfinder_host_state_regression {
 
         assert_eq!(engine.frame(), 0, "no frame cleanup has run");
         assert_eq!(
-            engine.objects[actor_index].state.rotation,
-            23,
+            engine.objects[actor_index].state.rotation, 23,
             "the next effect callback sees the clear in its threaded host world"
         );
         assert!(
@@ -74427,14 +74183,12 @@ mod pathfinder_host_state_regression {
 
         engine
             .register_definition(
-                Definition::from_script("LAYR", "Layer", "")
-                    .expect("layer definition compiles"),
+                Definition::from_script("LAYR", "Layer", "").expect("layer definition compiles"),
             )
             .expect("layer definition registers");
         engine
             .register_definition(
-                Definition::from_script("GEM_", "Gem", "")
-                    .expect("gem definition compiles"),
+                Definition::from_script("GEM_", "Gem", "").expect("gem definition compiles"),
             )
             .expect("gem definition registers");
         let mut digger = Definition::from_script(
@@ -74596,8 +74350,7 @@ mod pathfinder_host_state_regression {
 
         assert_eq!(engine.frame(), 0, "no frame cleanup has run");
         assert_eq!(
-            engine.objects[actor_index].state.rotation,
-            23,
+            engine.objects[actor_index].state.rotation, 23,
             "Initialize sees Construction's synchronous zone clear"
         );
         assert!(engine.transfer_zones.get(gate).is_none());

@@ -1,5 +1,5 @@
-// Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
-// sequence, not a child module, so test ids stay `tests::<fn>`.
+    // Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
+    // sequence, not a child module, so test ids stay `tests::<fn>`.
 
     #[test]
     fn classic_command_line_join_urls_and_update_stub_are_disjoint() {
@@ -48,10 +48,7 @@
                 None,
             )
             .expect("explicit reference endpoint"),
-            clonk_network::ReferenceEndpoint::Address(SocketAddr::from((
-                [127, 0, 0, 1],
-                11_112,
-            )))
+            clonk_network::ReferenceEndpoint::Address(SocketAddr::from(([127, 0, 0, 1], 11_112,)))
         );
         assert_eq!(
             classic_direct_reference_endpoint("games.example.test", None)
@@ -64,10 +61,7 @@
         let game_address = SocketAddr::from(([127, 0, 0, 1], 41_234));
         let reference = clonk_network::NetworkGameReference {
             build: clonk_network::CURRENT_GAME_BUILD + 2,
-            source_address: SocketAddr::from((
-                [127, 0, 0, 1],
-                clonk_network::DEFAULT_REFERENCE_PORT,
-            )),
+            source_address: SocketAddr::from(([127, 0, 0, 1], clonk_network::DEFAULT_REFERENCE_PORT)),
             addresses: vec![clonk_network::NetworkAddress::new(
                 clonk_network::NetworkProtocol::Tcp,
                 game_address,
@@ -237,13 +231,13 @@
         .expect("remote league violation is removed before starting");
 
         assert_eq!(
-            commands.take_submitted_client_removes(),
-            vec![clonk_engine::ClientRemoveControlData {
-                client_id: 7,
-                reason: LegacyCString::from_bytes(b"Players Chooser and Companion would be playing against each other in split-screen. This is disallowed in league games!".to_vec()).unwrap(),
-                by_client: 0,
-            }]
-        );
+                commands.take_submitted_client_removes(),
+                vec![clonk_engine::ClientRemoveControlData {
+                    client_id: 7,
+                    reason: LegacyCString::from_bytes(b"Players Chooser and Companion would be playing against each other in split-screen. This is disallowed in league games!".to_vec()).unwrap(),
+                    by_client: 0,
+                }]
+            );
         assert_eq!(app.host_lobby_countdown, Some(HostLobbyCountdown::new()));
         assert!(app.message_dialogs.is_empty());
     }
@@ -271,10 +265,8 @@
             }]
         );
 
-        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit(
-            "/kick Remote".to_string(),
-        ))
-        .expect("submit kick command");
+        app.process_classic_lobby_chat_request(LobbyChatRequest::Submit("/kick Remote".to_string()))
+            .expect("submit kick command");
         let removals = commands.take_submitted_client_removes();
         assert_eq!(removals.len(), 1);
         assert_eq!(removals[0].client_id, 7);
@@ -325,15 +317,12 @@
     fn l104_network_start_wait_kick_click_reuses_direct_and_league_paths() {
         let setup = |league: bool| {
             let mut app = new_menu_app(640, 480);
-            let (network, _events, commands) =
-                NetworkManager::test_stub_with_commands_for_client_id(0);
+            let (network, _events, commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
             app.network = Some(network);
             app.network_mode = Some(NetworkMode::Host(host_network_settings()));
             app.network_is_league = league;
-            app.control_clients.replace_snapshot([
-                message_client(0, b"Host"),
-                message_client(7, b"Remote"),
-            ]);
+            app.control_clients
+                .replace_snapshot([message_client(0, b"Host"), message_client(7, b"Remote")]);
             if league {
                 app.control_player_infos.replace_snapshot(
                     1,
@@ -356,17 +345,16 @@
             });
             app.show_reached_network_start_wait()
                 .expect("show host start wait");
-            let layout = app.network_start_wait_layout().expect("visible wait layout");
+            let layout = app
+                .network_start_wait_layout()
+                .expect("visible wait layout");
             let kick = layout
                 .clients
                 .iter()
                 .find(|row| row.client_id == 7)
                 .and_then(|row| row.kick_button)
                 .expect("remote kick button");
-            let point = GuiPoint::new(
-                (kick.x + kick.w / 2) as f32,
-                (kick.y + kick.h / 2) as f32,
-            );
+            let point = GuiPoint::new((kick.x + kick.w / 2) as f32, (kick.y + kick.h / 2) as f32);
             physical_left_click_with_modifiers(
                 &mut app,
                 point,
@@ -385,10 +373,8 @@
             direct_commands.take_submitted_client_removes(),
             vec![clonk_engine::ClientRemoveControlData {
                 client_id: 7,
-                reason: LegacyCString::from_bytes(
-                    b"kicked from startup waiting dialog".to_vec()
-                )
-                .unwrap(),
+                reason: LegacyCString::from_bytes(b"kicked from startup waiting dialog".to_vec())
+                    .unwrap(),
                 by_client: 0,
             }]
         );
@@ -418,8 +404,7 @@
         let mut app = new_menu_app(640, 480);
         app.app_paths = Some(paths.clone());
         let (chooser, companion) = install_test_classic_host_team_lobby(&mut app);
-        let (network, _events, mut commands) =
-            NetworkManager::test_stub_with_commands_for_client_id(0);
+        let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
         app.network = Some(network);
         app.network_mode = Some(NetworkMode::Host(HostSettings {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -439,10 +424,9 @@
             position: GuiPoint::new(200.0, 150.0),
         }])
         .expect("player context opens");
-        assert!(
-            app.handle_context_menu_key(VirtualKeyCode::R, ElementState::Pressed)
-                .expect("activate Remove hotkey")
-        );
+        assert!(app
+            .handle_context_menu_key(VirtualKeyCode::R, ElementState::Pressed)
+            .expect("activate Remove hotkey"));
 
         assert_eq!(
             commands.take_lobby_player_update_commands(),
@@ -534,7 +518,12 @@
                 position: GuiPoint::new(200.0, 150.0),
             }])
             .expect("remote client context opens");
-        assert_eq!(direct.context_menu.as_ref().unwrap().layout().panels[0].rows.len(), 4);
+        assert_eq!(
+            direct.context_menu.as_ref().unwrap().layout().panels[0]
+                .rows
+                .len(),
+            4
+        );
         assert!(direct.select_classic_lobby_sheet(LobbySheet::Resources));
         assert!(direct.context_menu.is_none());
         assert_eq!(direct.context_menu_lobby_kick_client, None);
@@ -550,10 +539,8 @@
             direct_commands.take_submitted_client_removes(),
             vec![clonk_engine::ClientRemoveControlData {
                 client_id: 7,
-                reason: LegacyCString::from_bytes(
-                    b"kicked from startup waiting dialog".to_vec()
-                )
-                .unwrap(),
+                reason: LegacyCString::from_bytes(b"kicked from startup waiting dialog".to_vec())
+                    .unwrap(),
                 by_client: 0,
             }]
         );
@@ -603,8 +590,7 @@
     #[test]
     fn host_disconnect_menu_lists_clients_and_dispatches_kick() {
         let mut direct = new_running_sandbox_app();
-        let (_events, mut direct_commands) =
-            install_running_network_stub(&mut direct, 0, 40, 4);
+        let (_events, mut direct_commands) = install_running_network_stub(&mut direct, 0, 40, 4);
         let mut observer = message_client(9, b"Spectator");
         observer.activated = false;
         observer.observer = true;
@@ -684,8 +670,7 @@
         assert!(direct.ingame_menu.get(owner).is_none());
 
         let mut league = new_running_sandbox_app();
-        let (_events, mut league_commands) =
-            install_running_network_stub(&mut league, 0, 40, 4);
+        let (_events, mut league_commands) = install_running_network_stub(&mut league, 0, 40, 4);
         league.network_is_league = true;
         league
             .control_clients
@@ -800,7 +785,7 @@
             ..Default::default()
         };
         let entry = GameApp::startup_masterserver_reply_entry(
-            None,
+            &embedded_runtime_language_table().entries,
             "https://master.example:8443/refs",
             &reply,
         );
@@ -819,7 +804,7 @@
         assert_eq!(entry.row_icon, NetDlgRowIcon::QueryStatic);
 
         let zero = GameApp::startup_masterserver_reply_entry(
-            None,
+            &embedded_runtime_language_table().entries,
             "https://master.example/",
             &clonk_network::MasterserverReplyInfo::default(),
         );
@@ -856,15 +841,13 @@
         assert_eq!(master.row_icon, NetDlgRowIcon::Error);
         assert!(master.extra_lines.is_empty());
 
-        app.apply_startup_game_search_event(
-            clonk_network::StartupGameSearchEvent::MasterserverReply(
-                clonk_network::MasterserverReplyInfo {
-                    game_count: 1,
-                    player_count: 2,
-                    ..Default::default()
-                },
-            ),
-        )
+        app.apply_startup_game_search_event(clonk_network::StartupGameSearchEvent::MasterserverReply(
+            clonk_network::MasterserverReplyInfo {
+                game_count: 1,
+                player_count: 2,
+                ..Default::default()
+            },
+        ))
         .expect("a successful retry recovers the masterserver row");
         let master = app
             .startup_network_dialog
@@ -881,9 +864,7 @@
         let next_query_at = app
             .startup_masterserver_next_query_at
             .expect("terminal failure arms a response-relative retry");
-        app.tick_startup_network_query_rows_at(
-            next_query_at - Duration::from_millis(1),
-        );
+        app.tick_startup_network_query_rows_at(next_query_at - Duration::from_millis(1));
         assert_eq!(
             app.startup_network_dialog
                 .as_ref()
@@ -920,9 +901,7 @@
         assert_eq!(master.details, "Querying game infos...");
         assert_eq!(master.row_icon, NetDlgRowIcon::Query);
 
-        let unchanged_refresh = Instant::now()
-            .checked_sub(Duration::from_secs(5))
-            .unwrap();
+        let unchanged_refresh = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
         app.startup_network_last_refresh = Some(unchanged_refresh);
         app.refresh_retained_network_dialog_internet();
         assert_eq!(
@@ -1027,11 +1006,7 @@
             }]
         );
         assert_eq!(
-            app.startup_network_dialog
-                .as_ref()
-                .unwrap()
-                .games()
-                .len(),
+            app.startup_network_dialog.as_ref().unwrap().games().len(),
             1
         );
         assert_eq!(
@@ -1054,17 +1029,11 @@
         ]);
         let paths = AppPaths::discover().expect("discover L040 paths");
         paths.ensure_user_dirs().expect("create L040 user dirs");
-        persist_config_value(&paths, "General", "LanguageEx", "US")
-            .expect("configure L040 language");
+        persist_config_value(&paths, "General", "LanguageEx", "US").expect("configure L040 language");
         persist_config_value(&paths, "Network", "MasterServerSignUp", "0")
             .expect("disable live masterserver query");
-        persist_config_value(
-            &paths,
-            "Network",
-            "ServerAddress",
-            "https://old.example",
-        )
-        .expect("configure old server");
+        persist_config_value(&paths, "Network", "ServerAddress", "https://old.example")
+            .expect("configure old server");
         persist_config_value(
             &paths,
             "Network",
@@ -1182,8 +1151,7 @@
                     break;
                 }
                 request.extend_from_slice(&buffer[..count]);
-                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
-                else {
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
                     continue;
                 };
                 let header = std::str::from_utf8(&request[..header_end]).unwrap();
@@ -1267,8 +1235,7 @@
         let packet = recorded_right_control(app.local_owner);
         app.apply_ready_controls(
             0,
-            vec![network::network_control_for_packet(packet.clone())
-                .expect("supported control")],
+            vec![network::network_control_for_packet(packet.clone()).expect("supported control")],
         )
         .expect("execute and record control");
         assert_eq!(
@@ -1331,9 +1298,9 @@
         let output_path = {
             use std::os::unix::ffi::OsStringExt;
 
-            directory.path().join(OsString::from_vec(
-                b"001-Streamed-e\xcc\x81.c4s".to_vec(),
-            ))
+            directory
+                .path()
+                .join(OsString::from_vec(b"001-Streamed-e\xcc\x81.c4s".to_vec()))
         };
         #[cfg(not(unix))]
         let output_path = directory.path().join("001-Streamed.c4s");
@@ -1345,26 +1312,18 @@
                 .path()
                 .join(OsString::from_vec(b"001-Streamed-\xff.c4s".to_vec()));
             let invalid_name = league_record_name(&invalid_path).unwrap();
-            assert_eq!(
-                invalid_name.as_bytes(),
-                path_to_legacy_bytes(&invalid_path)
-            );
-            assert!(invalid_name
-                .as_bytes()
-                .ends_with(b"001-Streamed-\xff.c4s"));
+            assert_eq!(invalid_name.as_bytes(), path_to_legacy_bytes(&invalid_path));
+            assert!(invalid_name.as_bytes().ends_with(b"001-Streamed-\xff.c4s"));
         }
         let (endpoint, request) = serve_one_record_stream_upload();
         let mut app = new_state_only_running_sandbox_app();
-        app.process_group_maker =
-            LegacyCString::from_bytes(b"League stream maker".to_vec()).unwrap();
+        app.process_group_maker = LegacyCString::from_bytes(b"League stream maker".to_vec()).unwrap();
         install_test_recording_template(&mut app, output_path.clone());
         let output_name_bytes = path_to_legacy_bytes(&output_path);
         let initial_name = league_record_name(&output_path).unwrap();
-        let initial_chunk = clonk_network::encode_league_stream_file_chunk(
-            &initial_name,
-            b"packed initial record",
-        )
-        .unwrap();
+        let initial_chunk =
+            clonk_network::encode_league_stream_file_chunk(&initial_name, b"packed initial record")
+                .unwrap();
         app.recording_template
             .as_mut()
             .unwrap()
@@ -1373,8 +1332,8 @@
         app.network = Some(network);
         app.network_is_league = true;
         assert!(app.engine.definition_name("CLNK").is_some());
-        let mut ranked = Definition::from_script("RANK", "Ranked crew", "")
-            .expect("custom-rank definition");
+        let mut ranked =
+            Definition::from_script("RANK", "Ranked crew", "").expect("custom-rank definition");
         ranked.set_rank_system(
             Some(vec!["Cadet".to_string(), "Veteran".to_string()]),
             Some(1_200),
@@ -1386,16 +1345,16 @@
         let player_path = directory.path().join("Alice.c4p");
         let mut player_group = MutableGroup::new("Alice.c4p");
         let raw_player_core = b"[Player]\n\
-Name=<i>Al</i>ice\n\
-Comment=stream candidate\n\
-Score=9\n\
-VendorPlayerField=discard me\n\
-[Preferences]\n\
-Color=2\n\
-ColorDw=0\n\
-AutoStopControl=2\n\
-[VendorPlayer]\n\
-Retain=never\n";
+    Name=<i>Al</i>ice\n\
+    Comment=stream candidate\n\
+    Score=9\n\
+    VendorPlayerField=discard me\n\
+    [Preferences]\n\
+    Color=2\n\
+    ColorDw=0\n\
+    AutoStopControl=2\n\
+    [VendorPlayer]\n\
+    Retain=never\n";
         player_group
             .add_file("Player.txt", raw_player_core.to_vec())
             .unwrap();
@@ -1407,17 +1366,17 @@ Retain=never\n";
             .unwrap();
         let mut valid_crew = MutableGroup::new("Alice.c4i");
         let raw_valid_crew = b"[ObjectInfo]\n\
-id=RANK-extra\n\
-Name=Alice\n\
-DeathMessage=@fell\n\
-RankName=Stale rank\n\
-NextRankName=Stale next rank\n\
-NextRankExp=999\n\
-VendorCrewField=discard me\n\
-[Physical]\n\
-Energy=1\n\
-[VendorCrew]\n\
-Retain=never\n";
+    id=RANK-extra\n\
+    Name=Alice\n\
+    DeathMessage=@fell\n\
+    RankName=Stale rank\n\
+    NextRankName=Stale next rank\n\
+    NextRankExp=999\n\
+    VendorCrewField=discard me\n\
+    [Physical]\n\
+    Energy=1\n\
+    [VendorCrew]\n\
+    Retain=never\n";
         valid_crew
             .add_file("ObjectInfo.txt", raw_valid_crew.to_vec())
             .unwrap();
@@ -1434,13 +1393,11 @@ Retain=never\n";
         missing_crew
             .add_file("ObjectInfo.txt", raw_missing_crew.to_vec())
             .unwrap();
-        player_group
-            .add_child("Missing.c4i", missing_crew)
-            .unwrap();
+        player_group.add_child("Missing.c4i", missing_crew).unwrap();
         let raw_nested_crew = b"[ObjectInfo]\n\
-id=CLNK\n\
-Name=Nested\n\
-VendorNestedField=discard me\n";
+    id=CLNK\n\
+    Name=Nested\n\
+    VendorNestedField=discard me\n";
         let mut nested_crew = MutableGroup::new("Alice.c4i");
         nested_crew
             .add_file("ObjectInfo.txt", raw_nested_crew.to_vec())
@@ -1479,8 +1436,8 @@ VendorNestedField=discard me\n";
             live_local_player_path.is_file(),
             "PreRec copies the local player resource before the control chunk"
         );
-        let live_local_player = Group::open(&live_local_player_path)
-            .expect("live unstripped player resource opens");
+        let live_local_player =
+            Group::open(&live_local_player_path).expect("live unstripped player resource opens");
         assert!(live_local_player.exists("Private.bin"));
         assert!(live_local_player.exists("Missing.c4i"));
 
@@ -1497,9 +1454,7 @@ VendorNestedField=discard me\n";
             .position(|part| part == b"\r\n\r\n")
             .unwrap();
         let header = std::str::from_utf8(&request[..header_end]).unwrap();
-        assert!(header.starts_with(
-            "POST /record?game=7&pos=0&end=true HTTP/1."
-        ));
+        assert!(header.starts_with("POST /record?game=7&pos=0&end=true HTTP/1."));
         let mut decoded = Vec::new();
         ZlibDecoder::new(&request[header_end + 4..])
             .read_to_end(&mut decoded)
@@ -1548,7 +1503,10 @@ VendorNestedField=discard me\n";
         assert!(!streamed_player.exists("Private.bin"));
         let canonical_crlf = |bytes: &[u8]| {
             bytes.iter().enumerate().all(|(index, byte)| {
-                *byte != b'\n' || index.checked_sub(1).is_some_and(|index| bytes[index] == b'\r')
+                *byte != b'\n'
+                    || index
+                        .checked_sub(1)
+                        .is_some_and(|index| bytes[index] == b'\r')
             })
         };
         let streamed_player_core = streamed_player
@@ -1559,8 +1517,7 @@ VendorNestedField=discard me\n";
         let streamed_player_text = std::str::from_utf8(&streamed_player_core).unwrap();
         assert!(!streamed_player_text.contains("VendorPlayer"));
         assert!(!streamed_player_text.contains("<i>"));
-        let parsed_streamed_player =
-            PlayerFile::load_with_portraits(&streamed_player, false).unwrap();
+        let parsed_streamed_player = PlayerFile::load_with_portraits(&streamed_player, false).unwrap();
         assert_eq!(parsed_streamed_player.name, "Alice");
         assert_eq!(parsed_streamed_player.score, 9);
         assert_eq!(parsed_streamed_player.pref_color_dw, 0x00c800);
@@ -1692,10 +1649,7 @@ VendorNestedField=discard me\n";
             b"nested extra"
         );
         assert_eq!(
-            local_nested
-                .read_file("ObjectInfo.txt")
-                .unwrap()
-                .as_slice(),
+            local_nested.read_file("ObjectInfo.txt").unwrap().as_slice(),
             raw_nested_crew
         );
         let local = record.read_file("CtrlRec.c4b").expect("local CtrlRec");
@@ -1715,11 +1669,10 @@ VendorNestedField=discard me\n";
             .unwrap();
         let no_crew = Group::from_memory(PathBuf::from("Empty.c4p"), no_crew.pack().unwrap())
             .expect("empty player opens");
-        assert!(
-            app.pack_stripped_stream_player(&no_crew, b"1-Empty.c4p")
-                .unwrap_err()
-                .contains("no loadable direct crew")
-        );
+        assert!(app
+            .pack_stripped_stream_player(&no_crew, b"1-Empty.c4p")
+            .unwrap_err()
+            .contains("no loadable direct crew"));
 
         let mut source = MutableGroup::new("Nested.c4p");
         source
@@ -1752,13 +1705,16 @@ VendorNestedField=discard me\n";
         let stripped = app
             .pack_stripped_stream_player(&source, b"2-Nested.c4p")
             .expect("direct invalid crew still lets native strip proceed");
-        let stripped = Group::from_memory(PathBuf::from("2-Nested.c4p"), stripped)
-            .expect("stripped player opens");
+        let stripped =
+            Group::from_memory(PathBuf::from("2-Nested.c4p"), stripped).expect("stripped player opens");
         assert!(stripped.exists("Player.txt"));
         assert!(stripped.exists("Nested.c4i"));
         assert!(!stripped.exists("Missing.c4i"));
         assert!(!stripped.exists("Roster.c4f"));
-        assert!(!stripped.open_child("Nested.c4i").unwrap().exists("Portrait.png"));
+        assert!(!stripped
+            .open_child("Nested.c4i")
+            .unwrap()
+            .exists("Portrait.png"));
     }
 
     #[test]
@@ -1888,12 +1844,10 @@ VendorNestedField=discard me\n";
             .as_ref()
             .expect("open chart")
             .layout(preferred, resources);
-        let exposed = (chart_layout.chart.y
-            ..chart_layout.chart.y.saturating_add(chart_layout.chart.h))
+        let exposed = (chart_layout.chart.y..chart_layout.chart.y.saturating_add(chart_layout.chart.h))
             .step_by(4)
             .find_map(|y| {
-                (chart_layout.chart.x
-                    ..chart_layout.chart.x.saturating_add(chart_layout.chart.w))
+                (chart_layout.chart.x..chart_layout.chart.x.saturating_add(chart_layout.chart.w))
                     .step_by(4)
                     .map(|x| GuiPoint::new(x as f32, y as f32))
                     .find(|point| app.top_message_dialog_hit_index(*point).is_none())
@@ -2000,10 +1954,8 @@ VendorNestedField=discard me\n";
             retargeted_cursor,
             retargeted_hidden_script_menu,
         );
-        retargeted.save_browser =
-            Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
-        let mut with_retargeted_menus =
-            vec![0_u8; retargeted.graphics.surface().pixels().len()];
+        retargeted.save_browser = Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
+        let mut with_retargeted_menus = vec![0_u8; retargeted.graphics.surface().pixels().len()];
         retargeted
             .render(&mut with_retargeted_menus)
             .expect("retargeted eliminated viewport suppresses local-owner menus");
@@ -2030,10 +1982,8 @@ VendorNestedField=discard me\n";
                 .script_menu_pointer_target_for_owner(
                     local_owner,
                     GuiPoint::new(
-                        retargeted_viewport.x as f32
-                            + retargeted_viewport.width as f32 / 2.0,
-                        retargeted_viewport.y as f32
-                            + retargeted_viewport.height as f32 / 2.0,
+                        retargeted_viewport.x as f32 + retargeted_viewport.width as f32 / 2.0,
+                        retargeted_viewport.y as f32 + retargeted_viewport.height as f32 / 2.0,
                     ),
                 )
                 .expect("retargeted hidden script-menu routing is inert"),
@@ -2050,8 +2000,7 @@ VendorNestedField=discard me\n";
             .expect("render eliminated player through physical observer viewport");
         app.ingame_menu
             .replace(OWNER_NONE, Some(IngameMenuState::surrender_menu()));
-        let mut with_hidden_fullscreen_menu =
-            vec![0_u8; app.graphics.surface().pixels().len()];
+        let mut with_hidden_fullscreen_menu = vec![0_u8; app.graphics.surface().pixels().len()];
         app.render(&mut with_hidden_fullscreen_menu)
             .expect("eliminated observer target suppresses the fullscreen menu");
         assert_eq!(
@@ -2162,8 +2111,7 @@ VendorNestedField=discard me\n";
         // src/C4MainMenu.cpp:643-686; src/C4GameParameters.h:126-173;
         // src/C4GameControl.cpp:93-127; src/C4Network2.cpp:1595-1602).
         let mut app = new_state_only_running_sandbox_app();
-        let (manager, event_tx, _commands) =
-            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let (manager, event_tx, _commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
             SocketAddr::from(([127, 0, 0, 1], 11_112)),
@@ -2231,12 +2179,10 @@ VendorNestedField=discard me\n";
         let conditions = app.main_menu_conditions();
         assert!(conditions.is_league);
         let menu = IngameMenuState::main_menu(&conditions).expect("main menu has entries");
-        assert!(
-            !menu
-                .items()
-                .iter()
-                .any(|item| item.action == MenuAction::ActivateNewPlayer)
-        );
+        assert!(!menu
+            .items()
+            .iter()
+            .any(|item| item.action == MenuAction::ActivateNewPlayer));
 
         app.change_network_control_to_local(7);
         assert!(app.main_menu_conditions().is_league);
@@ -2358,12 +2304,16 @@ VendorNestedField=discard me\n";
         event_tx
             .send(NetworkEvent::PeerConnectionFailed { client_id: 8 })
             .expect("queue host route loss");
-        host.process_network_events().expect("report host route loss");
+        host.process_network_events()
+            .expect("report host route loss");
         let (reason, players) = host_report
             .join()
             .expect("join host report worker")
             .expect("host sent report");
-        assert_eq!(reason, clonk_network::LeagueDisconnectReason::ConnectionFailed);
+        assert_eq!(
+            reason,
+            clonk_network::LeagueDisconnectReason::ConnectionFailed
+        );
         assert_eq!(players.client_id, 8);
         assert_eq!(players.players[0].id, 41);
 
@@ -2381,8 +2331,7 @@ VendorNestedField=discard me\n";
                 ..Default::default()
             }],
         );
-        let client_report =
-            std::thread::spawn(move || commands.complete_league_disconnect_report());
+        let client_report = std::thread::spawn(move || commands.complete_league_disconnect_report());
         event_tx
             .send(NetworkEvent::PeerDisconnected {
                 client_id: 0,
@@ -2396,7 +2345,10 @@ VendorNestedField=discard me\n";
             .join()
             .expect("join client report worker")
             .expect("client sent report");
-        assert_eq!(reason, clonk_network::LeagueDisconnectReason::ConnectionFailed);
+        assert_eq!(
+            reason,
+            clonk_network::LeagueDisconnectReason::ConnectionFailed
+        );
         assert_eq!(players.client_id, 7);
         assert_eq!(players.players[0].id, 55);
     }
@@ -2517,11 +2469,8 @@ VendorNestedField=discard me\n";
             ..Default::default()
         };
         app.network_mode = Some(NetworkMode::Client(
-            ClientSettings::new(
-                SocketAddr::from(([127, 0, 0, 1], 11_112)),
-                "Client",
-            )
-            .with_league_auth(auth.clone()),
+            ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client")
+                .with_league_auth(auth.clone()),
         ));
         app.network_is_league = true;
         let configured_paths = [accepted_path, rejected_path];
@@ -2540,14 +2489,11 @@ VendorNestedField=discard me\n";
             })
             .collect::<Vec<_>>();
         let all_rejected_cores = cores.clone();
-        let responses = vec![
-            clonk_network::decode_league_auth_response(
-                b"[Response]\r\nStatus=Success\r\nAUID=accepted-token\r\n",
-            ),
-        ];
-        let observer = thread::spawn(move || {
-            commands.complete_initial_league_client_join(cores, responses)
-        });
+        let responses = vec![clonk_network::decode_league_auth_response(
+            b"[Response]\r\nStatus=Success\r\nAUID=accepted-token\r\n",
+        )];
+        let observer =
+            thread::spawn(move || commands.complete_initial_league_client_join(cores, responses));
 
         assert_eq!(
             app.submit_initial_client_player_info(7, "league.example".to_string()),
@@ -2555,7 +2501,9 @@ VendorNestedField=discard me\n";
         );
         poll_league_auth_until(&mut app, "Auth error", |app| {
             matches!(
-                app.message_dialogs.last().map(|dialog| &dialog.continuation),
+                app.message_dialogs
+                    .last()
+                    .map(|dialog| &dialog.continuation),
                 Some(MessageDialogContinuation::LeaguePlayerAuthError)
             )
         });
@@ -2610,10 +2558,7 @@ VendorNestedField=discard me\n";
             settings.league_auth = auth;
         }
         let observer = thread::spawn(move || {
-            commands.complete_initial_league_client_join(
-                all_rejected_cores,
-                Vec::new(),
-            )
+            commands.complete_initial_league_client_join(all_rejected_cores, Vec::new())
         });
         assert_eq!(
             app.submit_initial_client_player_info(7, "league.example".to_string()),
@@ -2621,7 +2566,9 @@ VendorNestedField=discard me\n";
         );
         poll_league_auth_until(&mut app, "Auth error", |app| {
             matches!(
-                app.message_dialogs.last().map(|dialog| &dialog.continuation),
+                app.message_dialogs
+                    .last()
+                    .map(|dialog| &dialog.continuation),
                 Some(MessageDialogContinuation::LeaguePlayerAuthError)
             )
         });
@@ -2654,11 +2601,8 @@ VendorNestedField=discard me\n";
             ..Default::default()
         };
         app.network_mode = Some(NetworkMode::Client(
-            ClientSettings::new(
-                SocketAddr::from(([127, 0, 0, 1], 11_112)),
-                "Client",
-            )
-            .with_league_auth(auth.clone()),
+            ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client")
+                .with_league_auth(auth.clone()),
         ));
         let player = clonk_engine::ControlPlayerInfoEntry {
             name: LegacyCString::from_bytes(b"Exact Player".to_vec()).unwrap(),
@@ -2703,9 +2647,7 @@ VendorNestedField=discard me\n";
         assert_eq!(
             app.pending_league_player_auth
                 .as_ref()
-                .map(|pending| GameApp::league_auth_continuation_player_name(
-                    &pending.continuation
-                )),
+                .map(|pending| GameApp::league_auth_continuation_player_name(&pending.continuation)),
             Some("Exact Player".to_string())
         );
         let wait = app.message_dialogs.last().expect("Auth wait dialog");
@@ -2723,15 +2665,16 @@ VendorNestedField=discard me\n";
             clonk_frontend::message_dialog::MessageDialogButtons::CANCEL
         );
         assert_eq!(
-            wait.state.button_label(
-                clonk_frontend::message_dialog::MessageDialogButton::Cancel
-            ),
+            wait.state
+                .button_label(clonk_frontend::message_dialog::MessageDialogButton::Cancel),
             "Abort"
         );
         let command = commands.receive_league_player_auth();
-        assert!(command.complete(Ok(clonk_network::decode_league_auth_response(
-            b"[Response]\r\nStatus=Success\r\nAUID=one-use-token\r\nMessage=Server welcome\r\n",
-        ))));
+        assert!(
+            command.complete(Ok(clonk_network::decode_league_auth_response(
+                b"[Response]\r\nStatus=Success\r\nAUID=one-use-token\r\nMessage=Server welcome\r\n",
+            )))
+        );
         app.poll_league_player_auth()
             .expect("resolve successful Auth");
 
@@ -2747,9 +2690,9 @@ VendorNestedField=discard me\n";
             clonk_frontend::message_dialog::MessageDialogButtons::OK_CANCEL
         );
         assert_eq!(
-            welcome.state.button_label(
-                clonk_frontend::message_dialog::MessageDialogButton::Cancel
-            ),
+            welcome
+                .state
+                .button_label(clonk_frontend::message_dialog::MessageDialogButton::Cancel),
             "Abort"
         );
         assert!(commands.take_player_info_updates().is_empty());
@@ -2777,9 +2720,7 @@ VendorNestedField=discard me\n";
         let abandoned = commands.receive_league_player_auth();
         app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
             .expect("Abort wait drops current player without hanging");
-        assert!(!abandoned.complete(Ok(
-            clonk_network::LeagueAuthResponse::default()
-        )));
+        assert!(!abandoned.complete(Ok(clonk_network::LeagueAuthResponse::default())));
         let updates = commands.take_player_info_updates();
         let [submitted] = updates.as_slice() else {
             panic!("aborted Auth submits the empty observer packet");
@@ -2806,11 +2747,8 @@ VendorNestedField=discard me\n";
             ..Default::default()
         };
         app.network_mode = Some(NetworkMode::Client(
-            ClientSettings::new(
-                SocketAddr::from(([127, 0, 0, 1], 11_112)),
-                "Client",
-            )
-            .with_league_auth(auth.clone()),
+            ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client")
+                .with_league_auth(auth.clone()),
         ));
         let player = clonk_engine::ControlPlayerInfoEntry {
             name: LegacyCString::from_bytes(b"Exact Player".to_vec()).unwrap(),
@@ -2835,9 +2773,11 @@ VendorNestedField=discard me\n";
         );
         let rejected = commands.receive_league_player_auth();
         assert_eq!(rejected.auth.password.as_bytes(), b"password");
-        assert!(rejected.complete(Ok(clonk_network::decode_league_auth_response(
-            b"[Response]\r\nStatus=Failure\r\nMessage=Wrong password\r\n",
-        ))));
+        assert!(
+            rejected.complete(Ok(clonk_network::decode_league_auth_response(
+                b"[Response]\r\nStatus=Failure\r\nMessage=Wrong password\r\n",
+            )))
+        );
         app.poll_league_player_auth()
             .expect("resolve rejected Auth");
         let error = app.message_dialogs.last().expect("Auth error dialog");
@@ -2865,11 +2805,12 @@ VendorNestedField=discard me\n";
         let retry = commands.receive_league_player_auth();
         assert_eq!(retry.player, player);
         assert_eq!(retry.auth.password.as_bytes(), b"replacement");
-        assert!(retry.complete(Ok(clonk_network::decode_league_auth_response(
-            b"[Response]\r\nStatus=Success\r\nAUID=retry-token\r\nAccount=Master\r\n",
-        ))));
-        app.poll_league_player_auth()
-            .expect("resolve retried Auth");
+        assert!(
+            retry.complete(Ok(clonk_network::decode_league_auth_response(
+                b"[Response]\r\nStatus=Success\r\nAUID=retry-token\r\nAccount=Master\r\n",
+            )))
+        );
+        app.poll_league_player_auth().expect("resolve retried Auth");
         let welcome = app.message_dialogs.last().expect("derived welcome dialog");
         assert_eq!(
             welcome.state.message(),
@@ -2912,14 +2853,16 @@ VendorNestedField=discard me\n";
         );
         let registration = commands.receive_league_player_auth();
         assert!(registration.complete(Ok(clonk_network::decode_league_auth_response(
-            b"[Response]\r\nStatus=Success\r\nAUID=registration-token\r\nAccount=canonical-master\r\n",
-        ))));
+                b"[Response]\r\nStatus=Success\r\nAUID=registration-token\r\nAccount=canonical-master\r\n",
+            ))));
         app.poll_league_player_auth()
             .expect("resolve registration Auth");
         app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Cancel)
             .expect("decline registration welcome");
         assert!(matches!(
-            app.message_dialogs.last().map(|dialog| &dialog.continuation),
+            app.message_dialogs
+                .last()
+                .map(|dialog| &dialog.continuation),
             Some(MessageDialogContinuation::LeaguePlayerAuthCancelled)
         ));
         app.finish_message_dialog(clonk_frontend::message_dialog::MessageDialogResult::Ok)
@@ -2932,7 +2875,10 @@ VendorNestedField=discard me\n";
             registration_retry.controller.mode(),
             clonk_frontend::league_signup::LeagueSignupMode::Registration
         );
-        assert_eq!(registration_retry.auth.account.as_bytes(), b"canonical-master");
+        assert_eq!(
+            registration_retry.auth.account.as_bytes(),
+            b"canonical-master"
+        );
         assert_eq!(registration_retry.auth.password.as_bytes(), b"old-password");
         assert!(registration_retry.auth.new_account.is_empty());
         assert!(registration_retry.auth.new_password.is_empty());
@@ -2955,11 +2901,8 @@ VendorNestedField=discard me\n";
             ..Default::default()
         };
         app.network_mode = Some(NetworkMode::Client(
-            ClientSettings::new(
-                SocketAddr::from(([127, 0, 0, 1], 11_112)),
-                "Client",
-            )
-            .with_league_auth(auth.clone()),
+            ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client")
+                .with_league_auth(auth.clone()),
         ));
         let player = clonk_engine::ControlPlayerInfoEntry {
             name: LegacyCString::from_bytes(b"Runtime Player".to_vec()).unwrap(),
@@ -2988,8 +2931,8 @@ VendorNestedField=discard me\n";
         let command = commands.receive_league_player_auth();
         assert_eq!(command.player, player);
         assert!(command.complete(Ok(clonk_network::decode_league_auth_response(
-            b"[Response]\r\nStatus=Success\r\nAUID=runtime-token\r\nMessage=Welcome runtime player\r\n",
-        ))));
+                b"[Response]\r\nStatus=Success\r\nAUID=runtime-token\r\nMessage=Welcome runtime player\r\n",
+            ))));
         app.poll_league_player_auth()
             .expect("resolve runtime league Auth");
         assert!(commands.take_player_info_updates().is_empty());
@@ -3000,7 +2943,10 @@ VendorNestedField=discard me\n";
         let [submitted] = updates.as_slice() else {
             panic!("runtime approval submits exactly one add request");
         };
-        assert_eq!(submitted.flags, clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS);
+        assert_eq!(
+            submitted.flags,
+            clonk_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
+        );
         assert_eq!(submitted.players[0].auth_id.as_bytes(), b"runtime-token");
     }
 
@@ -3056,7 +3002,10 @@ VendorNestedField=discard me\n";
                     "LeaguePassword",
                     clonk_app_netplay::NativeConfigValue::CppEscapedString(b"secret"),
                 ),
-                ("LeagueAutoLogin", clonk_app_netplay::NativeConfigValue::RawAscii("1")),
+                (
+                    "LeagueAutoLogin",
+                    clonk_app_netplay::NativeConfigValue::RawAscii("1"),
+                ),
             ],
         )
         .expect("seed ignored disk password");
@@ -3073,7 +3022,10 @@ VendorNestedField=discard me\n";
         persist_native_config_values(
             &paths,
             "Network",
-            &[("LeagueAutoLogin", clonk_app_netplay::NativeConfigValue::RawAscii("0"))],
+            &[(
+                "LeagueAutoLogin",
+                clonk_app_netplay::NativeConfigValue::RawAscii("0"),
+            )],
         )
         .expect("disable league auto-login");
         assert!(app.league_login_prompt_required());
@@ -3083,13 +3035,17 @@ VendorNestedField=discard me\n";
     fn league_signup_edit_interactions_match_classic_edit_behavior() {
         use clonk_frontend::league_signup::{
             LeagueSignupAction, LeagueSignupConfig, LeagueSignupControl,
-            LeagueSignupEditClipboardShortcut, LeagueSignupEditContextCommand,
-            LeagueSignupEditKey, LeagueSignupField, LeagueSignupKeyModifiers, LeagueSignupMode,
-            LeagueSignupStrings,
+            LeagueSignupEditClipboardShortcut, LeagueSignupEditContextCommand, LeagueSignupEditKey,
+            LeagueSignupField, LeagueSignupKeyModifiers, LeagueSignupMode, LeagueSignupStrings,
         };
 
         let app = new_classic_running_sandbox_app();
-        let font = &app.assets.clonk_fonts.as_deref().expect("classic fonts").text;
+        let font = &app
+            .assets
+            .clonk_fonts
+            .as_deref()
+            .expect("classic fonts")
+            .text;
         let mut login = clonk_frontend::league_signup::LeagueSignupController::new(
             LeagueSignupConfig::new("Player", "league.example", LeagueSignupMode::Login)
                 .with_preferences("account", "secret"),
@@ -3109,15 +3065,9 @@ VendorNestedField=discard me\n";
 
         login.set_account("alpha beta");
         login.set_focus(LeagueSignupControl::Password);
-        let beta_x = layout.account.edit.x
-            + 4
-            + font.measure("alpha be", false).0;
+        let beta_x = layout.account.edit.x + 4 + font.measure("alpha be", false).0;
         let edit_y = layout.account.edit.y + layout.account.edit.h / 2;
-        login.handle_pointer_double_click(
-            GuiPoint::new(beta_x as f32, edit_y as f32),
-            &layout,
-            font,
-        );
+        login.handle_pointer_double_click(GuiPoint::new(beta_x as f32, edit_y as f32), &layout, font);
         let (start, end) = login
             .field_selection(LeagueSignupField::Account)
             .expect("double-click word selection");
@@ -3158,12 +3108,7 @@ VendorNestedField=discard me\n";
         ));
         assert!(matches!(
             login
-                .handle_clipboard_shortcut(
-                    LeagueSignupEditClipboardShortcut::Cut,
-                    None,
-                    &layout,
-                    font,
-                )
+                .handle_clipboard_shortcut(LeagueSignupEditClipboardShortcut::Cut, None, &layout, font,)
                 .as_slice(),
             [LeagueSignupAction::ClipboardTransfer { cut: true, .. }]
         ));
@@ -3245,11 +3190,7 @@ VendorNestedField=discard me\n";
         assert_eq!(movable.dialog_offset(), (0, 0));
 
         let mut registration = clonk_frontend::league_signup::LeagueSignupController::new(
-            LeagueSignupConfig::new(
-                "Player",
-                "league.example",
-                LeagueSignupMode::Registration,
-            ),
+            LeagueSignupConfig::new("Player", "league.example", LeagueSignupMode::Registration),
             LeagueSignupStrings::default(),
         );
         registration.set_password_enabled(true);
@@ -3301,16 +3242,11 @@ VendorNestedField=discard me\n";
             league_signup_dialog_key_code(VirtualKeyCode::Tab, ModifiersState::SHIFT),
             Some(KeyCode::Tab)
         );
-        assert!(
-            league_signup_dialog_key_code(VirtualKeyCode::Tab, ModifiersState::CTRL).is_none()
-        );
+        assert!(league_signup_dialog_key_code(VirtualKeyCode::Tab, ModifiersState::CTRL).is_none());
 
         let first_press = Instant::now();
         let mut last_press = None;
-        assert!(!classic_press_is_double_click(
-            &mut last_press,
-            first_press
-        ));
+        assert!(!classic_press_is_double_click(&mut last_press, first_press));
         assert!(classic_press_is_double_click(
             &mut last_press,
             first_press + Duration::from_millis(399)
@@ -3324,9 +3260,7 @@ VendorNestedField=discard me\n";
 
     #[test]
     fn league_signup_headless_login_registration_and_abort_match_cpp_auth_flow() {
-        use clonk_frontend::league_signup::{
-            LeagueSignupControl, LeagueSignupField, LeagueSignupMode,
-        };
+        use clonk_frontend::league_signup::{LeagueSignupControl, LeagueSignupField, LeagueSignupMode};
 
         let mut app = new_classic_running_sandbox_app();
         // Keep the already-loaded exact GUI bundle while making credentials,
@@ -3468,14 +3402,19 @@ VendorNestedField=discard me\n";
         );
         poll_league_auth_until(&mut app, "failed-auth message", |app| {
             matches!(
-                app.message_dialogs.last().map(|dialog| &dialog.continuation),
+                app.message_dialogs
+                    .last()
+                    .map(|dialog| &dialog.continuation),
                 Some(MessageDialogContinuation::LeaguePlayerAuthError)
             )
         });
         assert!(app.league_signup_dialog.is_none());
         let failure = app.message_dialogs.last().expect("failed-auth message");
         assert_eq!(failure.state.caption(), "League Login Failed");
-        assert_eq!(failure.state.message(), "League server reply: Invalid password");
+        assert_eq!(
+            failure.state.message(),
+            "League server reply: Invalid password"
+        );
         assert_eq!(
             app.league_auth_session
                 .as_ref()
@@ -3548,9 +3487,8 @@ VendorNestedField=discard me\n";
             app.message_dialogs.last().map(|dialog| dialog.state.icon()),
             Some(clonk_frontend::message_dialog::MessageDialogIcon::NOTIFY)
         );
-        let observer = thread::spawn(move || {
-            commands.complete_initial_league_client_join(Vec::new(), Vec::new())
-        });
+        let observer =
+            thread::spawn(move || commands.complete_initial_league_client_join(Vec::new(), Vec::new()));
         app.finish_message_dialog_at(
             app.message_dialogs.len() - 1,
             clonk_frontend::message_dialog::MessageDialogResult::Ok,
@@ -3595,9 +3533,9 @@ VendorNestedField=discard me\n";
             LeaguePlayerAuthStatus::Pending
         );
         poll_league_auth_until(&mut app, "registration form", |app| {
-            app.league_signup_dialog.as_ref().is_some_and(|dialog| {
-                dialog.controller.mode() == LeagueSignupMode::Registration
-            })
+            app.league_signup_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.controller.mode() == LeagueSignupMode::Registration)
         });
         let registration = &app
             .league_signup_dialog
@@ -3625,7 +3563,9 @@ VendorNestedField=discard me\n";
             .expect("submit registration form");
         poll_league_auth_until(&mut app, "registration failure", |app| {
             matches!(
-                app.message_dialogs.last().map(|dialog| &dialog.continuation),
+                app.message_dialogs
+                    .last()
+                    .map(|dialog| &dialog.continuation),
                 Some(MessageDialogContinuation::LeaguePlayerAuthError)
             )
         });
@@ -3871,16 +3811,14 @@ VendorNestedField=discard me\n";
             NetworkManager::test_stub_with_league_commands_for_client_id(0);
         app.network = Some(manager);
         let responses = vec![
-            clonk_network::decode_league_join_response(
-                b"[Response]\r\nStatus=Failure\r\nMessage=Rejected\r\n",
-            ),
-            clonk_network::decode_league_join_response(
-                b"[Response]\r\nStatus=Success\r\nAccount=Alice\r\nLeague=Cup\r\nScore=42\r\nRank=7\r\nRankSymbol=9\r\nProgressData=level3\r\nClanTag=TAG\r\n",
-            ),
-        ];
-        let observer = thread::spawn(move || {
-            commands.complete_host_league_player_checks(responses, 2)
-        });
+                clonk_network::decode_league_join_response(
+                    b"[Response]\r\nStatus=Failure\r\nMessage=Rejected\r\n",
+                ),
+                clonk_network::decode_league_join_response(
+                    b"[Response]\r\nStatus=Success\r\nAccount=Alice\r\nLeague=Cup\r\nScore=42\r\nRank=7\r\nRankSymbol=9\r\nProgressData=level3\r\nClanTag=TAG\r\n",
+                ),
+            ];
+        let observer = thread::spawn(move || commands.complete_host_league_player_checks(responses, 2));
         event_tx
             .send(NetworkEvent::PlayerInfoUpdateRequest {
                 origin: 3,
@@ -3941,7 +3879,10 @@ VendorNestedField=discard me\n";
                 .iter()
                 .map(|player| (player.id, player.auth_id.as_bytes()))
                 .collect::<Vec<_>>(),
-            vec![(2, b"reject-token".as_slice()), (3, b"accept-token".as_slice())]
+            vec![
+                (2, b"reject-token".as_slice()),
+                (3, b"accept-token".as_slice())
+            ]
         );
         let [gain_reset, admitted, ..] = broadcasts.as_slice() else {
             panic!("expected gain reset before admitted PlayerInfo");
@@ -4058,12 +3999,12 @@ VendorNestedField=discard me\n";
             .install_scenario_script_with_convention(
                 "League progress fixture",
                 r#"#strict 3
-                global func WriteProgress() { return SetLeagueProgressData("data", 41); }
-                global func EmptyProgress() { return SetLeagueProgressData("", 41); }
-                global func ClearProgress() { return SetLeagueProgressData(nil, 41); }
-                global func ReadLeagueScore() { return SetMaxPlayer(GetLeagueScore(41)); }
-                global func SetLimit() { return SetMaxPlayer(5); }
-                "#,
+                    global func WriteProgress() { return SetLeagueProgressData("data", 41); }
+                    global func EmptyProgress() { return SetLeagueProgressData("", 41); }
+                    global func ClearProgress() { return SetLeagueProgressData(nil, 41); }
+                    global func ReadLeagueScore() { return SetMaxPlayer(GetLeagueScore(41)); }
+                    global func SetLimit() { return SetMaxPlayer(5); }
+                    "#,
                 true,
             )
             .expect("fixture script installs");
@@ -4207,8 +4148,7 @@ VendorNestedField=discard me\n";
             .expect("queue mismatching host sync check");
         let report = std::thread::spawn(move || commands.complete_league_disconnect_report());
 
-        app.process_network_events()
-            .expect("process league desync");
+        app.process_network_events().expect("process league desync");
 
         let (reason, players) = report
             .join()
@@ -4429,9 +4369,9 @@ VendorNestedField=discard me\n";
             clonk_frontend::message_dialog::MessageDialogButtons::RETRY_CANCEL
         );
         assert_eq!(
-            retry.state.button_label(
-                clonk_frontend::message_dialog::MessageDialogButton::Cancel
-            ),
+            retry
+                .state
+                .button_label(clonk_frontend::message_dialog::MessageDialogButton::Cancel),
             "Abort"
         );
         assert!(app.game_over_dialog.is_none());
@@ -4476,8 +4416,7 @@ VendorNestedField=discard me\n";
                 error: "offline".to_string(),
             })
             .collect();
-        let observer =
-            thread::spawn(move || commands.complete_league_end_flow(outcomes));
+        let observer = thread::spawn(move || commands.complete_league_end_flow(outcomes));
 
         app.run_pending_league_end_attempt()
             .expect("first End attempt opens retry dialog");
@@ -4546,9 +4485,9 @@ VendorNestedField=discard me\n";
             clonk_frontend::message_dialog::MessageDialogButtons::CANCEL
         );
         assert_eq!(
-            rejected.state.button_label(
-                clonk_frontend::message_dialog::MessageDialogButton::Cancel
-            ),
+            rejected
+                .state
+                .button_label(clonk_frontend::message_dialog::MessageDialogButton::Cancel),
             "Abort"
         );
 
@@ -4680,6 +4619,10 @@ VendorNestedField=discard me\n";
                 fair_crew_forced: false,
                 allow_debug: true,
                 auto_frame_skip: true,
+                synchronized_rule_goal_lists: clonk_engine::GameParameterRuleGoalLists::new(
+                    Vec::new(),
+                    Vec::new(),
+                ),
                 team_configuration: TeamConfiguration::default(),
                 team_registry: Vec::new(),
                 definition_modules: None,
@@ -4755,7 +4698,10 @@ VendorNestedField=discard me\n";
         let (host_events, mut host_commands) = install_running_network_stub(&mut host, 0, 0, 2);
         queue_empty_ready_tick(&host, &host_events);
         host.update().expect("execute host control tick zero");
-        assert_eq!((host.engine.frame(), host.next_network_control_tick()), (1, 1));
+        assert_eq!(
+            (host.engine.frame(), host.next_network_control_tick()),
+            (1, 1)
+        );
         let pause_target = host.next_network_control_tick();
         host.handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
             .expect("nonleague host Pause requests synchronized halt");
@@ -4867,7 +4813,10 @@ VendorNestedField=discard me\n";
             NetworkManager::test_stub_with_commands_for_client_id(3);
         ambiguous.network = Some(ambiguous_manager);
         ambiguous.network_mode = Some(NetworkMode::Host(host_network_settings()));
-        assert_eq!(ambiguous.runtime_network_role(), RuntimeNetworkRole::Ambiguous);
+        assert_eq!(
+            ambiguous.runtime_network_role(),
+            RuntimeNetworkRole::Ambiguous
+        );
         ambiguous
             .handle_key(VirtualKeyCode::Pause, ElementState::Pressed)
             .expect("an inconsistent runtime role is safely consumed");
@@ -4901,8 +4850,7 @@ VendorNestedField=discard me\n";
     #[test]
     fn league_abort_confirmation_routes_cancel_and_self_kick_votes() {
         let mut host = new_running_sandbox_app();
-        let (_host_events, mut host_commands) =
-            install_running_network_stub(&mut host, 0, 0, 1);
+        let (_host_events, mut host_commands) = install_running_network_stub(&mut host, 0, 0, 1);
         host.network_is_league = true;
         assert!(host.show_abort_dialog(host.local_owner));
         finish_abort_dialog(
@@ -4935,10 +4883,7 @@ VendorNestedField=discard me\n";
             data: 0,
             by_client: 0,
         };
-        assert_eq!(
-            restart_commands.take_submitted_votes(),
-            vec![restart_vote]
-        );
+        assert_eq!(restart_commands.take_submitted_votes(), vec![restart_vote]);
         assert!(restart_host.abort_restart_pending);
         restart_host.league_votes.add(restart_vote);
         restart_host.execute_league_vote_end(clonk_engine::VoteControlData {
@@ -4965,8 +4910,7 @@ VendorNestedField=discard me\n";
         );
 
         let mut client = new_running_sandbox_app();
-        let (_client_events, mut client_commands) =
-            install_running_network_stub(&mut client, 7, 0, 1);
+        let (_client_events, mut client_commands) = install_running_network_stub(&mut client, 7, 0, 1);
         client.engine.set_control_host(false);
         client.network_is_league = true;
         assert!(client.show_abort_dialog(client.local_owner));
@@ -5030,8 +4974,7 @@ VendorNestedField=discard me\n";
             .player_mut(player)
             .expect("local player")
             .set_at_client(clonk_engine::PlayerAtClient::new(3));
-        let (manager, _events, mut commands) =
-            NetworkManager::test_stub_with_commands_for_client_id(3);
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(3);
         app.network = Some(manager);
         let tick = app.local_control_submission_tick();
 
@@ -5126,11 +5069,7 @@ VendorNestedField=discard me\n";
         app.apply_ingame_menu_action(MenuAction::ActivateOptions)
             .expect("open options menu");
         assert!(
-            app.engine
-                .snapshot()
-                .round_results
-                .network_result
-                .is_none(),
+            app.engine.snapshot().round_results.network_result.is_none(),
             "fresh Part fixture has no earlier, more-specific result"
         );
 
@@ -5198,17 +5137,20 @@ VendorNestedField=discard me\n";
             .get(remote_info)
             .expect("remote player history remains");
         assert_ne!(removed.flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED, 0);
-        assert_ne!(removed.flags & clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED, 0);
+        assert_ne!(
+            removed.flags & clonk_engine::PLAYER_INFO_FLAG_DISCONNECTED,
+            0
+        );
         app.engine
             .install_scenario_script_with_convention(
                 "NetworkParameterProbe.c",
                 r#"
-                    #strict
-                    func Initialize() {
-                        if (IsNetwork()) SetGravity(77);
-                        else SetGravity(23);
-                    }
-                "#,
+                        #strict
+                        func Initialize() {
+                            if (IsNetwork()) SetGravity(77);
+                            else SetGravity(23);
+                        }
+                    "#,
                 true,
             )
             .expect("probe synchronized IsNetwork parameter");
@@ -5281,11 +5223,7 @@ VendorNestedField=discard me\n";
             }]
         );
         assert!(
-            app.engine
-                .snapshot()
-                .round_results
-                .network_result
-                .is_none(),
+            app.engine.snapshot().round_results.network_result.is_none(),
             "league self-kick does not execute the ordinary Part verdict"
         );
     }
@@ -5324,9 +5262,7 @@ VendorNestedField=discard me\n";
             assert!(commands.take_submitted_votes().is_empty());
             assert_eq!(
                 latest_message_board_logical_entry(&app).as_deref(),
-                Some(
-                    "Voting-Timeout: you have to wait two minutes until you can request a new vote."
-                )
+                Some("Voting-Timeout: you have to wait two minutes until you can request a new vote.")
             );
             assert_eq!(app.message_dialogs.len(), 1);
             let prompt = &app.message_dialogs[0];
@@ -5336,9 +5272,9 @@ VendorNestedField=discard me\n";
             ));
             assert_eq!(prompt.state.caption(), "Voting");
             assert_eq!(
-                prompt.state.message(),
-                "It was decided that you cannot leave the game. However, you can forfeit the game instead.||Do you want to surrender?"
-            );
+                    prompt.state.message(),
+                    "It was decided that you cannot leave the game. However, you can forfeit the game instead.||Do you want to surrender?"
+                );
             assert_eq!(
                 prompt.state.buttons(),
                 clonk_frontend::message_dialog::MessageDialogButtons::YES_NO
@@ -5668,12 +5604,10 @@ VendorNestedField=discard me\n";
         );
 
         let mut game_over = new_state_only_running_sandbox_app();
-        assert!(
-            game_over
-                .engine
-                .request_game_over_from_control()
-                .expect("mark the round game over")
-        );
+        assert!(game_over
+            .engine
+            .request_game_over_from_control()
+            .expect("mark the round game over"));
         let (manager, _events, _commands) = NetworkManager::test_stub_with_commands();
         game_over.network = Some(manager);
         game_over.network_mode = Some(NetworkMode::Host(host_network_settings()));
@@ -5690,16 +5624,17 @@ VendorNestedField=discard me\n";
                 ..Default::default()
             }],
         );
-        game_over.apply_ready_controls(
-            24,
-            vec![NetworkControl::VoteEnd(clonk_engine::VoteControlData {
-                vote_type: clonk_engine::VOTE_TYPE_KICK,
-                approve: true,
-                data: 7,
-                by_client: 0,
-            })],
-        )
-        .expect("execute a post-game-over approved kick");
+        game_over
+            .apply_ready_controls(
+                24,
+                vec![NetworkControl::VoteEnd(clonk_engine::VoteControlData {
+                    vote_type: clonk_engine::VOTE_TYPE_KICK,
+                    approve: true,
+                    data: 7,
+                    by_client: 0,
+                })],
+            )
+            .expect("execute a post-game-over approved kick");
         assert_eq!(
             game_over
                 .control_player_infos
@@ -5784,8 +5719,7 @@ VendorNestedField=discard me\n";
             },
             clonk_engine::ClientCoreControlData {
                 client_id: local_client,
-                name: clonk_engine::LegacyCString::from_bytes(b"Client".to_vec())
-                    .expect("client name"),
+                name: clonk_engine::LegacyCString::from_bytes(b"Client".to_vec()).expect("client name"),
                 ..Default::default()
             },
         ]);
@@ -5810,9 +5744,9 @@ VendorNestedField=discard me\n";
         let prompt = &app.message_dialogs[0].state;
         assert_eq!(prompt.caption(), "Voting");
         assert_eq!(
-            prompt.message(),
-            "Host wants to kick client Client. Allow?|Notice: if a player leaves without being defeated, the opposing players will gain less league score in case of a win."
-        );
+                prompt.message(),
+                "Host wants to kick client Client. Allow?|Notice: if a player leaves without being defeated, the opposing players will gain less league score in case of a win."
+            );
         assert_eq!(
             prompt.buttons(),
             clonk_frontend::message_dialog::MessageDialogButtons::YES_NO
@@ -5883,9 +5817,9 @@ VendorNestedField=discard me\n";
         let prompt = &app.message_dialogs[0].state;
         assert_eq!(prompt.caption(), "Voting");
         assert_eq!(
-            prompt.message(),
-            "It was decided that you cannot leave the game. However, you can forfeit the game instead.||Do you want to surrender?"
-        );
+                prompt.message(),
+                "It was decided that you cannot leave the game. However, you can forfeit the game instead.||Do you want to surrender?"
+            );
         assert_eq!(
             prompt.focused_button(),
             Some(clonk_frontend::message_dialog::MessageDialogButton::No)

@@ -8,7 +8,7 @@
 //! an in-process adapter; it is never emitted on the UDP wire.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     future::Future,
     io,
@@ -19,6 +19,7 @@ use std::{
         Arc, Mutex,
     },
     task::{Context, Poll},
+    time::Duration,
 };
 
 use tokio::{
@@ -27,6 +28,7 @@ use tokio::{
     task::JoinHandle,
 };
 
+use crate::udp_runtime::ReliableUdpPollReady;
 use crate::{
     canonical_reliable_udp_peer_address, NetpuncherAddressFamily, NetpuncherIoEvent,
     NetpuncherPacket, NetpuncherRole, ReliableUdpDisconnectReason, ReliableUdpDriverError,
@@ -39,6 +41,7 @@ const HUB_COMMAND_CAPACITY: usize = 64;
 const INCOMING_PEER_CAPACITY: usize = 32;
 const PUNCHER_EVENT_CAPACITY: usize = 16;
 const PEER_INBOUND_PACKET_CAPACITY: usize = 64;
+const ABANDONED_PEER_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(100);
 
 type HubCommandPermitFuture = Pin<
     Box<
@@ -81,6 +84,10 @@ enum HubCommand {
         peer: SocketAddr,
         generation: u64,
     },
+    InboundCapacity {
+        peer: SocketAddr,
+        generation: u64,
+    },
     Shutdown {
         completion: Option<oneshot::Sender<()>>,
     },
@@ -88,8 +95,6 @@ enum HubCommand {
 
 enum PeerInbound {
     Packet(Vec<u8>),
-    Disconnected(ReliableUdpDisconnectReason),
-    Failed(String),
 }
 
 #[derive(Clone)]
@@ -161,7 +166,14 @@ fn terminal_read_result(terminal: Option<PeerTerminal>) -> io::Result<()> {
 struct ConnectedPeer {
     generation: u64,
     inbound: mpsc::Sender<PeerInbound>,
+    staged: VecDeque<PeerInbound>,
     terminal: Arc<PeerTerminalState>,
+}
+
+struct PeerInboundServiceSinks<'a> {
+    commands: &'a mpsc::Sender<HubCommand>,
+    incoming: &'a mpsc::Sender<io::Result<ReliableUdpPeerStream>>,
+    puncher_events: &'a mpsc::Sender<NetpuncherIoEvent>,
 }
 
 /// One reliable-UDP peer exposed through the stream contract expected by
@@ -177,6 +189,8 @@ pub struct ReliableUdpPeerStream {
     write_buffer: Vec<u8>,
     pending_send: Option<Vec<u8>>,
     send_reservation: Option<HubCommandPermitFuture>,
+    inbound_capacity_pending: bool,
+    inbound_capacity_reservation: Option<HubCommandPermitFuture>,
     read_closed: bool,
     write_closed: bool,
     close_requested: bool,
@@ -201,6 +215,8 @@ impl ReliableUdpPeerStream {
             write_buffer: Vec::new(),
             pending_send: None,
             send_reservation: None,
+            inbound_capacity_pending: false,
+            inbound_capacity_reservation: None,
             read_closed: false,
             write_closed: false,
             close_requested: false,
@@ -278,7 +294,7 @@ impl ReliableUdpPeerStream {
 
     fn poll_pending_send(&mut self, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.terminal.is_closed() {
-            self.mark_transport_closed();
+            self.mark_write_closed();
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "reliable-UDP peer stream is closed",
@@ -321,11 +337,73 @@ impl ReliableUdpPeerStream {
     fn mark_transport_closed(&mut self) {
         self.terminal.close(PeerTerminal::Closed);
         self.read_closed = true;
+        self.inbound_capacity_pending = false;
+        self.inbound_capacity_reservation = None;
+        self.mark_write_closed();
+        self.inbound.close();
+    }
+
+    fn request_inbound_capacity(&mut self) {
+        if self.inbound_capacity_pending {
+            return;
+        }
+        let command = HubCommand::InboundCapacity {
+            peer: self.peer,
+            generation: self.generation,
+        };
+        match self.commands.try_send(command) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) | Err(mpsc::error::TrySendError::Closed(_)) => {
+                // The old all-peer sweep happened to mask a dropped wakeup.
+                // Retain it explicitly so a core-held ordered packet cannot
+                // remain stalled after the application frees mailbox credit.
+                self.inbound_capacity_pending = true;
+            }
+        }
+    }
+
+    fn poll_inbound_capacity_notification(
+        &mut self,
+        context: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        if !self.inbound_capacity_pending {
+            return Poll::Ready(Ok(()));
+        }
+        if self.inbound_capacity_reservation.is_none() {
+            self.inbound_capacity_reservation =
+                Some(Box::pin(self.commands.clone().reserve_owned()));
+        }
+        let reservation = self
+            .inbound_capacity_reservation
+            .as_mut()
+            .expect("pending inbound-capacity wakeup has a command reservation");
+        match reservation.as_mut().poll(context) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(permit)) => {
+                self.inbound_capacity_reservation = None;
+                self.inbound_capacity_pending = false;
+                permit.send(HubCommand::InboundCapacity {
+                    peer: self.peer,
+                    generation: self.generation,
+                });
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(_)) => {
+                self.inbound_capacity_reservation = None;
+                self.inbound_capacity_pending = false;
+                Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "reliable-UDP session hub stopped while restoring inbound capacity",
+                )))
+            }
+        }
+    }
+
+    fn mark_write_closed(&mut self) {
         self.write_closed = true;
         self.write_buffer.clear();
         self.pending_send = None;
         self.send_reservation = None;
-        self.inbound.close();
         self.request_close();
     }
 
@@ -393,6 +471,18 @@ impl AsyncRead for ReliableUdpPeerStream {
             if this.read_closed {
                 return Poll::Ready(Ok(()));
             }
+            match this.poll_inbound_capacity_notification(context) {
+                // Register the command-capacity wake, but keep draining data
+                // already admitted to this peer's mailbox. Once that mailbox
+                // empties, both sources share this task's waker and the
+                // retained reservation can restore core delivery credit.
+                Poll::Pending => {}
+                Poll::Ready(Err(error)) => {
+                    this.mark_transport_closed();
+                    return Poll::Ready(Err(error));
+                }
+                Poll::Ready(Ok(())) => {}
+            }
             match Pin::new(&mut this.inbound).poll_recv(context) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(PeerInbound::Packet(payload))) => {
@@ -400,16 +490,7 @@ impl AsyncRead for ReliableUdpPeerStream {
                         this.mark_transport_closed();
                         return Poll::Ready(Err(error));
                     }
-                }
-                Poll::Ready(Some(PeerInbound::Disconnected(reason))) => {
-                    this.mark_transport_closed();
-                    return Poll::Ready(terminal_read_result(Some(PeerTerminal::Disconnected(
-                        reason,
-                    ))));
-                }
-                Poll::Ready(Some(PeerInbound::Failed(error))) => {
-                    this.mark_transport_closed();
-                    return Poll::Ready(terminal_read_result(Some(PeerTerminal::Failed(error))));
+                    this.request_inbound_capacity();
                 }
                 Poll::Ready(None) => {
                     let terminal = this.terminal.reason();
@@ -429,7 +510,7 @@ impl AsyncWrite for ReliableUdpPeerStream {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         if this.write_closed || this.terminal.is_closed() {
-            this.mark_transport_closed();
+            this.mark_write_closed();
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "reliable-UDP peer stream is closed",
@@ -589,11 +670,7 @@ pub struct ReliableUdpSessionHandle {
 }
 
 impl ReliableUdpSessionHandle {
-    pub async fn init_puncher(
-        &self,
-        address: SocketAddr,
-        role: NetpuncherRole,
-    ) -> io::Result<()> {
+    pub async fn init_puncher(&self, address: SocketAddr, role: NetpuncherRole) -> io::Result<()> {
         let (response, completed) = oneshot::channel();
         self.commands
             .send(HubCommand::InitPuncher {
@@ -749,11 +826,7 @@ impl ReliableUdpSessionHub {
         }
     }
 
-    pub async fn init_puncher(
-        &self,
-        address: SocketAddr,
-        role: NetpuncherRole,
-    ) -> io::Result<()> {
+    pub async fn init_puncher(&self, address: SocketAddr, role: NetpuncherRole) -> io::Result<()> {
         self.handle().init_puncher(address, role).await
     }
 
@@ -771,9 +844,7 @@ impl ReliableUdpSessionHub {
 
     /// Detaches the low-volume callback stream so a session loop can select
     /// it independently from ordinary incoming game peers.
-    pub fn take_puncher_event_receiver(
-        &mut self,
-    ) -> mpsc::Receiver<NetpuncherIoEvent> {
+    pub fn take_puncher_event_receiver(&mut self) -> mpsc::Receiver<NetpuncherIoEvent> {
         self.puncher_events
             .take()
             .expect("puncher event receiver already taken")
@@ -867,9 +938,13 @@ async fn run_hub(
     let mut pending_connects =
         BTreeMap::<SocketAddr, oneshot::Sender<io::Result<ReliableUdpPeerStream>>>::new();
     let mut next_peer_generation = 0_u64;
+    let mut abandoned_peer_maintenance = tokio::time::interval_at(
+        tokio::time::Instant::now() + ABANDONED_PEER_MAINTENANCE_INTERVAL,
+        ABANDONED_PEER_MAINTENANCE_INTERVAL,
+    );
+    abandoned_peer_maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        close_abandoned_peers(&mut driver, &mut peers).await;
         tokio::select! {
             command = command_rx.recv() => {
                 let Some(command) = command else {
@@ -1039,6 +1114,22 @@ async fn run_hub(
                             }
                         }
                     }
+                    HubCommand::InboundCapacity { peer, generation } => {
+                        service_peer_inbound(
+                            &mut driver,
+                            peer,
+                            generation,
+                            PeerInboundServiceSinks {
+                                commands: &commands,
+                                incoming: &incoming,
+                                puncher_events: &puncher_events,
+                            },
+                            &mut peers,
+                            &mut pending_connects,
+                            &mut next_peer_generation,
+                        )
+                        .await;
+                    }
                     HubCommand::Shutdown { completion } => {
                         close_all(&mut driver, &mut peers, &mut pending_connects).await;
                         if let Some(completion) = completion {
@@ -1049,6 +1140,14 @@ async fn run_hub(
                 }
             }
             ready = driver.wait_ready() => {
+                if let ReliableUdpPollReady::Datagram(_, source) = &ready {
+                    let source = canonical_reliable_udp_peer_address(*source);
+                    let capacity = peers
+                        .get(&source)
+                        .map(connected_peer_delivery_capacity)
+                        .unwrap_or(PEER_INBOUND_PACKET_CAPACITY);
+                    driver.set_peer_delivery_credit(source, capacity);
+                }
                 // Once readiness advances the reliable-UDP core, finish its
                 // ACK/event flush outside the cancellable select future.
                 let result = driver.process_ready(ready).await;
@@ -1074,8 +1173,110 @@ async fn run_hub(
                     }
                 }
             }
+            _ = abandoned_peer_maintenance.tick() => {
+                // A stream Drop normally enqueues Close. The bounded command
+                // queue may be full, so retain a low-frequency recovery edge
+                // without scanning every peer before every hub transition.
+                close_abandoned_peers(&mut driver, &mut peers).await;
+            }
         }
     }
+}
+
+fn drain_staged_peer_inbound(connected: &mut ConnectedPeer) {
+    while let Some(item) = connected.staged.pop_front() {
+        match connected.inbound.try_send(item) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(item)) => {
+                connected.staged.push_front(item);
+                break;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                connected.staged.clear();
+                break;
+            }
+        }
+    }
+}
+
+fn connected_peer_delivery_capacity(connected: &ConnectedPeer) -> usize {
+    if connected.staged.is_empty() {
+        connected.inbound.capacity()
+    } else {
+        0
+    }
+}
+
+fn queue_peer_inbound(connected: &mut ConnectedPeer, item: PeerInbound) {
+    if !connected.staged.is_empty() {
+        connected.staged.push_back(item);
+        return;
+    }
+    match connected.inbound.try_send(item) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(item)) => {
+            // Delivery credit normally prevents this branch. Retain the
+            // already-admitted logical packet if capacity changed between
+            // core dispatch and mailbox publication.
+            connected.staged.push_back(item);
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {}
+    }
+}
+
+fn finish_peer_inbound(mut connected: ConnectedPeer) {
+    if connected.staged.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        while let Some(item) = connected.staged.pop_front() {
+            if connected.inbound.send(item).await.is_err() {
+                break;
+            }
+        }
+    });
+}
+
+async fn service_peer_inbound(
+    driver: &mut ReliableUdpSocketDriver,
+    peer: SocketAddr,
+    generation: u64,
+    sinks: PeerInboundServiceSinks<'_>,
+    peers: &mut BTreeMap<SocketAddr, ConnectedPeer>,
+    pending_connects: &mut BTreeMap<SocketAddr, oneshot::Sender<io::Result<ReliableUdpPeerStream>>>,
+    next_peer_generation: &mut u64,
+) {
+    let peer = canonical_reliable_udp_peer_address(peer);
+    if !peer_generation_matches(peers, peer, generation) {
+        return;
+    }
+    let capacity = {
+        let Some(connected) = peers.get_mut(&peer) else {
+            return;
+        };
+        drain_staged_peer_inbound(connected);
+        connected_peer_delivery_capacity(connected)
+    };
+    if capacity == 0 {
+        return;
+    }
+    let Ok(events) = driver.drain_peer_packets(peer, capacity).await else {
+        return;
+    };
+    if events.is_empty() {
+        return;
+    }
+    dispatch_events(
+        driver,
+        events,
+        sinks.commands,
+        sinks.incoming,
+        sinks.puncher_events,
+        peers,
+        pending_connects,
+        next_peer_generation,
+    )
+    .await;
 }
 
 async fn dispatch_events(
@@ -1097,6 +1298,13 @@ async fn dispatch_events(
                 }
                 let generation = *next_peer_generation;
                 *next_peer_generation = next_peer_generation.wrapping_add(1);
+                // Native UDP stores completed ordered packets in PacketList's
+                // effectively-unbounded default and drains them synchronously
+                // through the connection callback. The async adapter must
+                // likewise retain every delivered packet without awaiting one
+                // peer and stalling the shared socket driver
+                // (oracle-src-pinned src/C4NetIO.h:543-566;
+                // src/C4NetIO.cpp:2648-2652,3175-3199).
                 let (inbound, inbound_rx) = mpsc::channel(PEER_INBOUND_PACKET_CAPACITY);
                 let terminal = Arc::new(PeerTerminalState::open());
                 let stream = ReliableUdpPeerStream::new(
@@ -1117,6 +1325,7 @@ async fn dispatch_events(
                         ConnectedPeer {
                             generation,
                             inbound,
+                            staged: VecDeque::new(),
                             terminal,
                         },
                     );
@@ -1126,31 +1335,8 @@ async fn dispatch_events(
             }
             ReliableUdpEvent::Packet { peer, payload } => {
                 let peer = canonical_reliable_udp_peer_address(peer);
-                if let Some(connected) = peers.get(&peer) {
-                    // One socket task drives every peer, so waiting here would
-                    // let one stalled consumer block CHECKs and commands for
-                    // all peers. The bounded queue absorbs normal bursts; a
-                    // full queue deterministically fails this route instead of
-                    // dropping a packet and continuing with a corrupt stream.
-                    let delivery = connected.inbound.try_send(PeerInbound::Packet(payload));
-                    if let Err(error) = delivery {
-                        match error {
-                            mpsc::error::TrySendError::Full(_) => {
-                                let message = "reliable-UDP peer inbound queue is saturated";
-                                connected
-                                    .terminal
-                                    .close(PeerTerminal::Failed(message.to_string()));
-                                let _ = connected
-                                    .inbound
-                                    .try_send(PeerInbound::Failed(message.to_string()));
-                            }
-                            mpsc::error::TrySendError::Closed(_) => {
-                                connected.terminal.close(PeerTerminal::Closed);
-                            }
-                        }
-                        peers.remove(&peer);
-                        let _ = driver.close_peer(peer).await;
-                    }
+                if let Some(connected) = peers.get_mut(&peer) {
+                    queue_peer_inbound(connected, PeerInbound::Packet(payload));
                 }
             }
             ReliableUdpEvent::Disconnected { peer, reason } => {
@@ -1160,9 +1346,7 @@ async fn dispatch_events(
                 }
                 if let Some(connected) = peers.remove(&peer) {
                     connected.terminal.close(PeerTerminal::Disconnected(reason));
-                    let _ = connected
-                        .inbound
-                        .try_send(PeerInbound::Disconnected(reason));
+                    finish_peer_inbound(connected);
                 }
             }
             ReliableUdpEvent::Puncher(event) => {
@@ -1252,7 +1436,7 @@ fn fail_peer(
         connected
             .terminal
             .close(PeerTerminal::Failed(error.clone()));
-        let _ = connected.inbound.try_send(PeerInbound::Failed(error));
+        finish_peer_inbound(connected);
     }
 }
 
@@ -1265,9 +1449,7 @@ fn fail_all(
         connected
             .terminal
             .close(PeerTerminal::Failed(error.to_string()));
-        let _ = connected
-            .inbound
-            .try_send(PeerInbound::Failed(error.to_string()));
+        finish_peer_inbound(connected);
     }
     for (peer, response) in std::mem::take(pending_connects) {
         let _ = response.send(Err(io::Error::new(
@@ -1297,9 +1479,7 @@ async fn close_all(
                     }
                     if let Some(connected) = peers.remove(&peer) {
                         connected.terminal.close(PeerTerminal::Disconnected(reason));
-                        let _ = connected
-                            .inbound
-                            .try_send(PeerInbound::Disconnected(reason));
+                        finish_peer_inbound(connected);
                     }
                 }
             }
@@ -1323,9 +1503,9 @@ mod tests {
     use super::*;
     use crate::{
         decode_reliable_udp_data_fragment, encode_reliable_udp_connect,
-        encode_reliable_udp_connect_ok, reliable_udp_packet_kind, ControlDelivery, ControlMessage,
-        ControlTransport, PingPacket, ReliableUdpConnect, ReliableUdpConnectOk,
-        ReliableUdpMulticastMode, ReliableUdpPacketKind,
+        encode_reliable_udp_connect_ok, encode_reliable_udp_data_fragments,
+        reliable_udp_packet_kind, ControlDelivery, ControlMessage, ControlTransport, PingPacket,
+        ReliableUdpConnect, ReliableUdpConnectOk, ReliableUdpMulticastMode, ReliableUdpPacketKind,
     };
 
     #[test]
@@ -1444,10 +1624,7 @@ mod tests {
             .is_err());
 
         subject_handle
-            .send_puncher_packet(
-                NetpuncherAddressFamily::Ipv4,
-                NetpuncherPacket::IdRequest,
-            )
+            .send_puncher_packet(NetpuncherAddressFamily::Ipv4, NetpuncherPacket::IdRequest)
             .await
             .unwrap();
         assert_eq!(
@@ -1475,9 +1652,11 @@ mod tests {
         assert_eq!(length, 9);
         assert_eq!(wire[0], 0x01);
         assert_eq!(&wire[5..9], &0_u32.to_ne_bytes());
-        assert!(timeout(Duration::from_millis(50), target.recv_from(&mut wire))
-            .await
-            .is_err());
+        assert!(
+            timeout(Duration::from_millis(50), target.recv_from(&mut wire))
+                .await
+                .is_err()
+        );
         assert!(puncher_event_rx.try_recv().is_err());
         assert!(timeout(Duration::from_millis(50), subject.accept())
             .await
@@ -1500,10 +1679,7 @@ mod tests {
             })
         );
 
-        subject_handle
-            .close_puncher(puncher_address)
-            .await
-            .unwrap();
+        subject_handle.close_puncher(puncher_address).await.unwrap();
         let mut closed = [0_u8; 1];
         assert_eq!(
             timeout(Duration::from_secs(2), puncher_stream.read(&mut closed))
@@ -1835,7 +2011,10 @@ mod tests {
         let mut shutdown = Box::pin(hub.shutdown());
         let waker = std::task::Waker::noop();
         let mut context = Context::from_waker(waker);
-        assert!(matches!(shutdown.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(
+            shutdown.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
         drop(shutdown);
 
         let rebound = timeout(Duration::from_secs(2), async {
@@ -1855,7 +2034,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saturated_peer_inbound_queue_closes_with_a_retained_reason() {
+    async fn reliable_udp_inbound_delivery_is_lossless_beyond_the_retransmit_window() {
+        const PACKET_COUNT: u32 = 10_001;
+
+        // C++ inbound PacketList defaults to ~0u and synchronously drains each
+        // complete ordered packet. Its separate outgoing retransmit window is
+        // 10,000 packets, so inbound app delivery must remain lossless past it
+        // (oracle-src-pinned src/C4NetIO.h:543-566;
+        // src/C4NetIO.cpp:1916,2648-2652,3175-3199).
         let mut driver = ReliableUdpSocketDriver::bind(loopback()).unwrap();
         let sink = UdpSocket::bind(loopback()).await.unwrap();
         let peer = sink.local_addr().unwrap();
@@ -1863,7 +2049,7 @@ mod tests {
         let (commands, _command_rx) = mpsc::channel(1);
         let (incoming, _incoming_rx) = mpsc::channel(1);
         let (puncher_events, _puncher_event_rx) = mpsc::channel(PUNCHER_EVENT_CAPACITY);
-        let (inbound, inbound_rx) = mpsc::channel(PEER_INBOUND_PACKET_CAPACITY);
+        let (inbound, inbound_rx) = mpsc::channel(PACKET_COUNT as usize);
         let terminal = Arc::new(PeerTerminalState::open());
         let mut stream =
             ReliableUdpPeerStream::new(peer, 7, commands.clone(), inbound_rx, terminal.clone());
@@ -1872,14 +2058,16 @@ mod tests {
             ConnectedPeer {
                 generation: 7,
                 inbound,
+                staged: VecDeque::new(),
                 terminal: terminal.clone(),
             },
         )]);
-        for index in 0..PEER_INBOUND_PACKET_CAPACITY {
-            assert!(peers[&peer]
+        for index in 0..PACKET_COUNT - 1 {
+            peers[&peer]
                 .inbound
-                .try_send(PeerInbound::Packet(vec![index as u8]))
-                .is_ok());
+                .send(PeerInbound::Packet(index.to_ne_bytes().to_vec()))
+                .await
+                .unwrap();
         }
         let mut pending_connects = BTreeMap::new();
         let mut next_peer_generation = 8;
@@ -1887,7 +2075,7 @@ mod tests {
             &mut driver,
             vec![ReliableUdpEvent::Packet {
                 peer,
-                payload: vec![0xff],
+                payload: (PACKET_COUNT - 1).to_ne_bytes().to_vec(),
             }],
             &commands,
             &incoming,
@@ -1898,28 +2086,274 @@ mod tests {
         )
         .await;
 
-        assert!(!peers.contains_key(&peer));
-        assert!(driver.core().peer_status(peer).is_none());
-        assert!(terminal.is_closed());
-        assert!(matches!(terminal.reason(), Some(PeerTerminal::Failed(_))));
-        for index in 0..PEER_INBOUND_PACKET_CAPACITY {
-            let mut frame = [0_u8; TCP_FRAME_HEADER_SIZE + 1];
+        assert!(peers.contains_key(&peer));
+        assert!(driver.core().peer_status(peer).is_some());
+        assert!(!terminal.is_closed());
+        for index in 0..PACKET_COUNT {
+            let mut frame = [0_u8; TCP_FRAME_HEADER_SIZE + std::mem::size_of::<u32>()];
             stream.read_exact(&mut frame).await.unwrap();
             assert_eq!(frame[0], TCP_FRAME_PREFIX);
-            assert_eq!(frame[TCP_FRAME_HEADER_SIZE], index as u8);
+            assert_eq!(
+                &frame[TCP_FRAME_HEADER_SIZE..],
+                index.to_ne_bytes().as_slice()
+            );
         }
-        let mut byte = [0_u8; 1];
-        let error = stream.read(&mut byte).await.unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
-        assert!(error.to_string().contains("inbound queue is saturated"));
-        assert_eq!(
-            stream
-                .write_all(&[TCP_FRAME_PREFIX])
-                .await
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::BrokenPipe
+    }
+
+    #[tokio::test]
+    async fn inbound_capacity_services_only_the_notified_peer() {
+        let mut driver = ReliableUdpSocketDriver::bind(loopback()).unwrap();
+        let target_sink = UdpSocket::bind(loopback()).await.unwrap();
+        let target = target_sink.local_addr().unwrap();
+        let unaffected_sink = UdpSocket::bind(loopback()).await.unwrap();
+        let unaffected = unaffected_sink.local_addr().unwrap();
+        driver.connect(target).await.unwrap();
+        driver.connect(unaffected).await.unwrap();
+
+        let (commands, _command_rx) = mpsc::channel(1);
+        let (incoming, _incoming_rx) = mpsc::channel(1);
+        let (puncher_events, _puncher_event_rx) = mpsc::channel(PUNCHER_EVENT_CAPACITY);
+        let (target_inbound, mut target_rx) = mpsc::channel(1);
+        let (unaffected_inbound, mut unaffected_rx) = mpsc::channel(1);
+        target_inbound
+            .send(PeerInbound::Packet(vec![1]))
+            .await
+            .unwrap();
+        unaffected_inbound
+            .send(PeerInbound::Packet(vec![2]))
+            .await
+            .unwrap();
+        assert!(matches!(
+            target_rx.recv().await,
+            Some(PeerInbound::Packet(payload)) if payload == vec![1]
+        ));
+        assert!(matches!(
+            unaffected_rx.recv().await,
+            Some(PeerInbound::Packet(payload)) if payload == vec![2]
+        ));
+
+        let target_terminal = Arc::new(PeerTerminalState::open());
+        let unaffected_terminal = Arc::new(PeerTerminalState::open());
+        let mut peers = BTreeMap::from([
+            (
+                target,
+                ConnectedPeer {
+                    generation: 1,
+                    inbound: target_inbound,
+                    staged: VecDeque::from([PeerInbound::Packet(vec![3])]),
+                    terminal: target_terminal,
+                },
+            ),
+            (
+                unaffected,
+                ConnectedPeer {
+                    generation: 2,
+                    inbound: unaffected_inbound,
+                    staged: VecDeque::from([PeerInbound::Packet(vec![4])]),
+                    terminal: unaffected_terminal,
+                },
+            ),
+        ]);
+        let mut pending_connects = BTreeMap::new();
+        let mut next_peer_generation = 3;
+
+        service_peer_inbound(
+            &mut driver,
+            target,
+            0,
+            PeerInboundServiceSinks {
+                commands: &commands,
+                incoming: &incoming,
+                puncher_events: &puncher_events,
+            },
+            &mut peers,
+            &mut pending_connects,
+            &mut next_peer_generation,
+        )
+        .await;
+        assert_eq!(peers[&target].staged.len(), 1);
+        assert_eq!(peers[&unaffected].staged.len(), 1);
+
+        service_peer_inbound(
+            &mut driver,
+            target,
+            1,
+            PeerInboundServiceSinks {
+                commands: &commands,
+                incoming: &incoming,
+                puncher_events: &puncher_events,
+            },
+            &mut peers,
+            &mut pending_connects,
+            &mut next_peer_generation,
+        )
+        .await;
+
+        assert!(peers[&target].staged.is_empty());
+        assert_eq!(peers[&unaffected].staged.len(), 1);
+        assert!(matches!(
+            target_rx.recv().await,
+            Some(PeerInbound::Packet(payload)) if payload == vec![3]
+        ));
+        assert!(unaffected_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn saturated_command_queue_retains_capacity_wakeup_and_drains_staged_before_core() {
+        let mut driver = ReliableUdpSocketDriver::bind(loopback()).unwrap();
+        let raw_peer = UdpSocket::bind(loopback()).await.unwrap();
+        let peer = raw_peer.local_addr().unwrap();
+        let driver_address = SocketAddr::new(
+            Ipv4Addr::LOCALHOST.into(),
+            driver.local_addr().unwrap().port(),
         );
+        let mut wire = [0_u8; 512];
+
+        driver.connect(peer).await.unwrap();
+        timeout(Duration::from_secs(2), raw_peer.recv_from(&mut wire))
+            .await
+            .unwrap()
+            .unwrap();
+        raw_peer
+            .send_to(
+                &encode_reliable_udp_connect_ok(&ReliableUdpConnectOk {
+                    packet_number: 0,
+                    multicast_mode: ReliableUdpMulticastMode::NoMulticast,
+                    observed_address: driver_address,
+                }),
+                driver_address,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), driver.poll())
+                .await
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            [ReliableUdpEvent::Connected { peer: connected, .. }] if *connected == peer
+        ));
+
+        let (commands, mut command_rx) = mpsc::channel(HUB_COMMAND_CAPACITY);
+        for generation in 0..HUB_COMMAND_CAPACITY as u64 {
+            commands
+                .try_send(HubCommand::Close {
+                    peer: SocketAddr::from(([127, 0, 0, 1], 30_000)),
+                    generation,
+                })
+                .unwrap();
+        }
+        let (incoming, _incoming_rx) = mpsc::channel(1);
+        let (puncher_events, _puncher_event_rx) = mpsc::channel(PUNCHER_EVENT_CAPACITY);
+        let (inbound, inbound_rx) = mpsc::channel(2);
+        inbound.send(PeerInbound::Packet(vec![1])).await.unwrap();
+        let terminal = Arc::new(PeerTerminalState::open());
+        let mut stream =
+            ReliableUdpPeerStream::new(peer, 7, commands.clone(), inbound_rx, terminal.clone());
+        let mut peers = BTreeMap::from([(
+            peer,
+            ConnectedPeer {
+                generation: 7,
+                inbound,
+                staged: VecDeque::from([PeerInbound::Packet(vec![2])]),
+                terminal,
+            },
+        )]);
+        let mut pending_connects = BTreeMap::new();
+        let mut next_peer_generation = 8;
+
+        driver.set_peer_delivery_credit(peer, 0);
+        let held_wire = encode_reliable_udp_data_fragments(0, &[3])
+            .unwrap()
+            .remove(0);
+        raw_peer.send_to(&held_wire, driver_address).await.unwrap();
+        assert!(timeout(Duration::from_secs(2), driver.poll())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_empty());
+
+        let mut first = [0_u8; TCP_FRAME_HEADER_SIZE + 1];
+        stream.read_exact(&mut first).await.unwrap();
+        assert_eq!(first[TCP_FRAME_HEADER_SIZE], 1);
+        assert!(stream.inbound_capacity_pending);
+
+        for _ in 0..HUB_COMMAND_CAPACITY {
+            assert!(matches!(
+                command_rx.try_recv(),
+                Ok(HubCommand::Close { .. })
+            ));
+        }
+        let read = tokio::spawn(async move {
+            let mut staged = [0_u8; TCP_FRAME_HEADER_SIZE + 1];
+            let mut core = [0_u8; TCP_FRAME_HEADER_SIZE + 1];
+            stream.read_exact(&mut staged).await.unwrap();
+            stream.read_exact(&mut core).await.unwrap();
+            (stream, staged, core)
+        });
+        let (notified_peer, notified_generation) =
+            match timeout(Duration::from_secs(2), command_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                HubCommand::InboundCapacity { peer, generation } => (peer, generation),
+                _ => panic!("expected retained inbound-capacity wakeup"),
+            };
+        service_peer_inbound(
+            &mut driver,
+            notified_peer,
+            notified_generation,
+            PeerInboundServiceSinks {
+                commands: &commands,
+                incoming: &incoming,
+                puncher_events: &puncher_events,
+            },
+            &mut peers,
+            &mut pending_connects,
+            &mut next_peer_generation,
+        )
+        .await;
+
+        let (stream, staged, core) = timeout(Duration::from_secs(2), read)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(staged[TCP_FRAME_HEADER_SIZE], 2);
+        assert_eq!(core[TCP_FRAME_HEADER_SIZE], 3);
+        drop(stream);
+    }
+
+    #[tokio::test]
+    async fn maintenance_closes_an_abandoned_peer_when_its_close_command_was_saturated() {
+        let mut driver = ReliableUdpSocketDriver::bind(loopback()).unwrap();
+        let sink = UdpSocket::bind(loopback()).await.unwrap();
+        let peer = sink.local_addr().unwrap();
+        driver.connect(peer).await.unwrap();
+
+        let (commands, _command_rx) = mpsc::channel(1);
+        commands
+            .try_send(HubCommand::Shutdown { completion: None })
+            .unwrap();
+        let (inbound, inbound_rx) = mpsc::channel(1);
+        let terminal = Arc::new(PeerTerminalState::open());
+        let stream = ReliableUdpPeerStream::new(peer, 11, commands, inbound_rx, terminal.clone());
+        let mut peers = BTreeMap::from([(
+            peer,
+            ConnectedPeer {
+                generation: 11,
+                inbound,
+                staged: VecDeque::new(),
+                terminal,
+            },
+        )]);
+
+        drop(stream);
+        assert!(peers[&peer].inbound.is_closed());
+        assert!(driver.core().peer_status(peer).is_some());
+        close_abandoned_peers(&mut driver, &mut peers).await;
+        assert!(!peers.contains_key(&peer));
+        assert!(driver.core().peer_status(peer).is_none());
     }
 
     #[tokio::test]

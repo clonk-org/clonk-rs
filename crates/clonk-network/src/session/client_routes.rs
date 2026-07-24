@@ -5,116 +5,211 @@
 
 use super::*;
 
+const HOST_ROUTE_CLOSE_WRITE_GRACE: Duration = Duration::from_millis(25);
+
+enum HostRouteWriterExit {
+    Cancelled,
+    OutboundClosed,
+    ClosedByHost,
+    Failed(String),
+}
+
+async fn wait_for_host_route_close(
+    close_rx: &mut watch::Receiver<Option<crate::ConnectionReply>>,
+) -> crate::ConnectionReply {
+    loop {
+        if let Some(reply) = close_rx.borrow_and_update().clone() {
+            return reply;
+        }
+        if close_rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+async fn run_host_route_writer<W>(
+    mut transport: crate::ControlTransport<W>,
+    mut outbound_rx: mpsc::UnboundedReceiver<HostOutboundMessage>,
+    mut close_rx: watch::Receiver<Option<crate::ConnectionReply>>,
+    mut cancel_rx: watch::Receiver<bool>,
+) -> HostRouteWriterExit
+where
+    W: AsyncWrite + Unpin,
+{
+    let exit = loop {
+        enum Next {
+            Close(crate::ConnectionReply),
+            Outbound(HostOutboundMessage),
+        }
+
+        let next = tokio::select! {
+            biased;
+            _ = wait_for_route_retirement(&mut cancel_rx) => {
+                break HostRouteWriterExit::Cancelled;
+            }
+            reply = wait_for_host_route_close(&mut close_rx) => Next::Close(reply),
+            outbound = outbound_rx.recv() => {
+                let Some(message) = outbound else {
+                    break HostRouteWriterExit::OutboundClosed;
+                };
+                Next::Outbound(message)
+            }
+        };
+
+        if let Next::Close(reply) = next {
+            // Native CloseConns makes one best-effort ConnRe send and then
+            // closes immediately; it never drains stale OBuf first
+            // (oracle-src-pinned src/C4Network2Client.cpp:104-118;
+            // src/C4NetIO.cpp:1458-1468).
+            if let Ok(frame) =
+                transport.prepare_message_frame(ControlMessage::ConnectionReply(reply))
+            {
+                let _ = tokio::time::timeout(
+                    HOST_ROUTE_CLOSE_WRITE_GRACE,
+                    transport.send_prepared_frame(&frame),
+                )
+                .await;
+            }
+            break HostRouteWriterExit::ClosedByHost;
+        }
+
+        let frame = match next {
+            Next::Outbound(HostOutboundMessage::Message(message)) => {
+                transport.prepare_message_frame(message)
+            }
+            Next::Outbound(HostOutboundMessage::Raw(packet)) => {
+                transport.prepare_complete_packet_frame(&packet)
+            }
+            Next::Close(_) => unreachable!("close handled before frame preparation"),
+        };
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(error) => break HostRouteWriterExit::Failed(format!("send failed: {error}")),
+        };
+        let result = tokio::select! {
+            biased;
+            _reply = wait_for_host_route_close(&mut close_rx) => {
+                break HostRouteWriterExit::ClosedByHost;
+            }
+            _ = wait_for_route_retirement(&mut cancel_rx) => {
+                break HostRouteWriterExit::Cancelled;
+            }
+            result = transport.send_prepared_frame(&frame) => result,
+        };
+        if let Err(error) = result {
+            break HostRouteWriterExit::Failed(format!("send failed: {error}"));
+        }
+    };
+
+    outbound_rx.close();
+    if !matches!(exit, HostRouteWriterExit::ClosedByHost) {
+        while let Ok(message) = outbound_rx.try_recv() {
+            let _ = match message {
+                HostOutboundMessage::Message(message) => transport.retain_unsent_message(message),
+                HostOutboundMessage::Raw(packet) => transport.retain_unsent_complete_packet(packet),
+            };
+        }
+    }
+    exit
+}
+
+fn enqueue_host_session_liveness_probe(
+    liveness: &mut ConnectionLivenessState,
+    outbound_tx: &mpsc::UnboundedSender<HostOutboundMessage>,
+) -> Result<bool, String> {
+    let ping = liveness
+        .timer_tick()
+        .map_err(|timeout| format!("connection {timeout:?} timeout"))?;
+    let Some(ping) = ping else {
+        return Ok(false);
+    };
+    let result = outbound_tx.send(HostOutboundMessage::Message(ControlMessage::Ping(ping)));
+    // C4Network2IO calls OnPing after the send attempt even on failure
+    // (oracle-src-pinned src/C4Network2IO.cpp:1141-1151).
+    liveness.record_ping_dispatched();
+    result.map_err(|_| "ping send failed: route writer closed".to_string())?;
+    Ok(true)
+}
+
 pub(crate) struct ClientTask<S> {
     pub(crate) local_connection_id: u32,
     pub(crate) remote_connection_id: u32,
     pub(crate) client_id: ClientId,
     pub(crate) transport: crate::ControlTransport<S>,
-    pub(crate) outbound_rx: mpsc::Receiver<HostOutboundMessage>,
+    pub(crate) outbound_rx: HostOutboundReceiver,
     pub(crate) retire_rx: watch::Receiver<bool>,
-    pub(crate) host_tx: mpsc::Sender<HostLoopMessage>,
+    pub(crate) host_tx: mpsc::UnboundedSender<HostLoopMessage>,
     pub(crate) liveness: ConnectionLivenessState,
 }
 
 impl<S> ClientTask<S>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    fn retain_queued_post_mortem_packets(&mut self) {
-        self.outbound_rx.close();
-        while let Ok(message) = self.outbound_rx.try_recv() {
-            let _ = match message {
-                HostOutboundMessage::Message(message) => {
-                    self.transport.retain_unsent_message(message)
-                }
-                HostOutboundMessage::Raw(packet) => {
-                    self.transport.retain_unsent_complete_packet(packet)
-                }
-                HostOutboundMessage::Close(_) => Ok(()),
-            };
-        }
-    }
-
-    async fn notify_disconnected(&mut self, reason: Option<String>) {
-        // A successful channel send is a successful logical send to callers.
-        // Preserve commands that this dead route had accepted but had not yet
-        // written so the surviving route's PostMortem replay cannot lose them.
-        self.retain_queued_post_mortem_packets();
-        let post_mortem = self.transport.create_post_mortem(self.remote_connection_id);
-        let _ = self
-            .host_tx
-            .send(HostLoopMessage::ClientDisconnected {
-                connection_id: self.local_connection_id,
-                client_id: self.client_id,
-                next_inbound_packet: self.liveness.connection().inbound_packet_counter(),
-                post_mortem,
-                reason,
-            })
-            .await;
-    }
-
-    pub(crate) async fn run(mut self) {
+    pub(crate) async fn run(self) {
+        let ClientTask {
+            local_connection_id,
+            remote_connection_id,
+            client_id,
+            transport,
+            outbound_rx,
+            mut retire_rx,
+            host_tx,
+            mut liveness,
+        } = self;
+        let (mut transport, writer) = transport.into_split();
+        let (outbound_tx, outbound_rx, close_rx) = outbound_rx.into_parts();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let mut writer_task = tokio::spawn(run_host_route_writer(
+            writer,
+            outbound_rx,
+            close_rx,
+            cancel_rx,
+        ));
+        let mut writer_finished = false;
+        let mut disconnect_reason = None;
+        let mut notify_disconnect = true;
         loop {
-            let liveness_deadline = self.liveness.next_timer_at();
+            let liveness_deadline = liveness.next_timer_at();
             tokio::select! {
-                biased;
-                _ = wait_for_route_retirement(&mut self.retire_rx) => {
-                    self.notify_disconnected(None).await;
+                _ = wait_for_route_retirement(&mut retire_rx) => {
                     break;
                 }
-                Some(message) = self.outbound_rx.recv() => {
-                    let message = match message {
-                        HostOutboundMessage::Close(reply) => {
-                            let _ = self
-                                .transport
-                                .send_message(ControlMessage::ConnectionReply(reply))
-                                .await;
-                            break;
+                writer_result = &mut writer_task => {
+                    writer_finished = true;
+                    match writer_result {
+                        Ok(HostRouteWriterExit::Cancelled) => {}
+                        Ok(HostRouteWriterExit::OutboundClosed)
+                        | Ok(HostRouteWriterExit::ClosedByHost) => {
+                            notify_disconnect = false;
                         }
-                        message => message,
-                    };
-                    let result = tokio::select! {
-                        biased;
-                        result = async {
-                            match message {
-                                HostOutboundMessage::Message(message) => {
-                                    self.transport.send_message(message).await
-                                }
-                                HostOutboundMessage::Raw(packet) => {
-                                    self.transport.send_complete_packet_bytes(&packet).await
-                                }
-                                HostOutboundMessage::Close(_) => {
-                                    unreachable!("close handled before send selection")
-                                }
-                            }
-                        } => Some(result),
-                        _ = wait_for_route_retirement(&mut self.retire_rx) => None,
-                    };
-                    let Some(result) = result else {
-                        self.notify_disconnected(None).await;
-                        break;
-                    };
-                    if let Err(error) = result {
-                        self.notify_disconnected(Some(format!("send failed: {error}")))
-                            .await;
-                        break;
+                        Ok(HostRouteWriterExit::Failed(reason)) => {
+                            disconnect_reason = Some(reason);
+                        }
+                        Err(error) => {
+                            disconnect_reason = Some(format!("route writer task failed: {error}"));
+                        }
                     }
+                    break;
                 }
-                packet = self.transport.read_packet() => {
+                packet = transport.read_packet() => {
                     let result = match packet {
                         Ok(crate::transport::InboundPacket::Message(message)) => {
-                            self.liveness.record_inbound_message(&message);
+                            liveness.record_inbound_message(&message);
                             Ok(message)
                         }
                         Ok(crate::transport::InboundPacket::Ignored(packet_type)) => {
-                            self.liveness.record_inbound_packet(packet_type);
-                            let _ = self
-                                .host_tx
+                            liveness.record_inbound_packet(packet_type);
+                            if host_tx
                                 .send(HostLoopMessage::UnhandledPacket {
-                                    client_id: Some(self.client_id),
+                                    client_id: Some(client_id),
                                     packet_type,
                                 })
-                                .await;
+                                .is_err()
+                            {
+                                notify_disconnect = false;
+                                break;
+                            }
                             continue;
                         }
                         Ok(crate::transport::InboundPacket::Empty) => continue,
@@ -122,131 +217,114 @@ where
                             packet_type,
                             error,
                         }) => {
-                            self.liveness.record_inbound_packet(packet_type);
+                            liveness.record_inbound_packet(packet_type);
                             Err(error)
                         }
                         Err(error) => Err(error),
                     };
                     match result {
                         Ok(ControlMessage::Ping(packet)) => {
-                            let result = tokio::select! {
-                                biased;
-                                result = self.transport.send_message(ControlMessage::Pong(packet)) => {
-                                    Some(result)
-                                },
-                                _ = wait_for_route_retirement(&mut self.retire_rx) => None,
-                            };
-                            let Some(result) = result else {
-                                self.notify_disconnected(None).await;
-                                break;
-                            };
-                            if let Err(error) = result {
-                                self.notify_disconnected(Some(format!("pong send failed: {error}")))
-                                    .await;
+                            if outbound_tx
+                                .send(HostOutboundMessage::Message(ControlMessage::Pong(packet)))
+                                .is_err()
+                            {
+                                disconnect_reason =
+                                    Some("pong send failed: route writer closed".to_string());
                                 break;
                             }
                         }
                         Ok(ControlMessage::Pong(packet)) => {
-                            let round_trip_ms = self.liveness.record_pong(packet);
-                            let _ = self
-                                .host_tx
+                            let round_trip_ms = liveness.record_pong(packet);
+                            if host_tx
                                 .send(HostLoopMessage::ConnectionPing {
-                                    connection_id: self.local_connection_id,
-                                    client_id: self.client_id,
+                                    connection_id: local_connection_id,
+                                    client_id,
                                     update: RoutePingUpdate::Measured(round_trip_ms),
                                 })
-                                .await;
+                                .is_err()
+                            {
+                                notify_disconnect = false;
+                                break;
+                            }
                         }
                         Ok(ControlMessage::ConnectionReply(reply)) if !reply.ok => {
-                            self.notify_disconnected(Some(
+                            disconnect_reason = Some(
                                 clonk_resources::decode_legacy_script_text(reply.message.as_bytes()),
-                            ))
-                            .await;
+                            );
                             break;
                         }
                         Ok(message) => {
-                            let ping_ms = self
-                                .liveness
+                            let ping_ms = liveness
                                 .connection()
                                 .measured_ping_ms()
                                 .unwrap_or(-1);
-                            let _ = self
-                                .host_tx
+                            if host_tx
                                 .send(HostLoopMessage::ClientMessage {
-                                    connection_id: self.local_connection_id,
-                                    client_id: self.client_id,
+                                    connection_id: local_connection_id,
+                                    client_id,
                                     message,
                                     ping_ms,
                                 })
-                                .await;
+                                .is_err()
+                            {
+                                notify_disconnect = false;
+                                break;
+                            }
                         }
                         Err(TransportError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                            self.notify_disconnected(None).await;
                             break;
                         }
                         Err(error) => {
-                            self.notify_disconnected(Some(format!("read failed: {error}"))).await;
+                            disconnect_reason = Some(format!("read failed: {error}"));
                             break;
                         }
                     }
                 }
                 _ = tokio::time::sleep_until(liveness_deadline) => {
-                    let result = tokio::select! {
-                        biased;
-                        result = drive_session_liveness_timer(
-                            &mut self.transport,
-                            &mut self.liveness,
-                        ) => Some(result),
-                        _ = wait_for_route_retirement(&mut self.retire_rx) => None,
-                    };
-                    let Some(result) = result else {
-                        self.notify_disconnected(None).await;
-                        break;
-                    };
-                    match result {
+                    match enqueue_host_session_liveness_probe(&mut liveness, &outbound_tx) {
                         Ok(true) => {
-                            let _ = self
-                                .host_tx
+                            if host_tx
                                 .send(HostLoopMessage::ConnectionPing {
-                                    connection_id: self.local_connection_id,
-                                    client_id: self.client_id,
+                                    connection_id: local_connection_id,
+                                    client_id,
                                     update: RoutePingUpdate::Dispatched,
                                 })
-                                .await;
+                                .is_err()
+                            {
+                                notify_disconnect = false;
+                                break;
+                            }
                         }
                         Ok(false) => {}
                         Err(reason) => {
-                            self.notify_disconnected(Some(reason)).await;
+                            disconnect_reason = Some(reason);
                             break;
                         }
                     }
                 }
             }
         }
+        cancel_tx.send_replace(true);
+        drop(outbound_tx);
+        if !writer_finished {
+            let _ = writer_task.await;
+        }
+        if notify_disconnect {
+            // A successful channel enqueue is a successful logical send.
+            // The writer retained every accepted-but-unwritten packet before
+            // completing cancellation, so the shared log is complete here.
+            let next_outbound_packet = transport.outbound_packet_counter();
+            let post_mortem = transport.create_post_mortem(remote_connection_id);
+            let _ = host_tx.send(HostLoopMessage::ClientDisconnected {
+                connection_id: local_connection_id,
+                client_id,
+                next_inbound_packet: liveness.connection().inbound_packet_counter(),
+                next_outbound_packet,
+                post_mortem,
+                reason: disconnect_reason,
+            });
+        }
     }
-}
-
-/// Returns whether this edge dispatched a ping probe, so the caller can
-/// mirror the outstanding-ping timestamp onto its route registry.
-pub(crate) async fn drive_session_liveness_timer<S>(
-    transport: &mut crate::ControlTransport<S>,
-    liveness: &mut ConnectionLivenessState,
-) -> Result<bool, String>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let ping = liveness
-        .timer_tick()
-        .map_err(|timeout| format!("connection {timeout:?} timeout"))?;
-    let Some(ping) = ping else {
-        return Ok(false);
-    };
-    let result = transport.send_message(ControlMessage::Ping(ping)).await;
-    // C4Network2IO calls OnPing after the send attempt even on failure
-    // (src/C4Network2IO.cpp:1141-1151).
-    liveness.record_ping_dispatched();
-    result.map_err(|error| format!("ping send failed: {error}"))?;
-    Ok(true)
 }
 
 pub(crate) enum ClientRouteCommand {
@@ -256,17 +334,48 @@ pub(crate) enum ClientRouteCommand {
 
 #[derive(Clone)]
 pub(crate) struct ClientRouteSender {
-    pub(crate) sender: mpsc::Sender<ClientRouteCommand>,
+    pub(crate) sender: mpsc::UnboundedSender<ClientRouteCommand>,
     pub(crate) retire: watch::Sender<bool>,
+    pub(crate) post_failure: PostFailureBuffer<ClientRouteCommand>,
 }
 
 impl ClientRouteSender {
     pub(crate) fn is_closed(&self) -> bool {
-        self.sender.is_closed() || *self.retire.borrow()
+        self.is_retiring() || !self.post_failure.is_accepting()
     }
 
-    fn retire(&self) {
+    pub(crate) fn is_retiring(&self) -> bool {
+        *self.retire.borrow()
+    }
+
+    fn accepts_post_failure_fifo(&self) -> bool {
+        self.post_failure.is_accepting()
+    }
+
+    fn send(
+        &self,
+        command: ClientRouteCommand,
+    ) -> Result<(), mpsc::error::SendError<ClientRouteCommand>> {
+        match self.sender.send(command) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::SendError(command)) => self
+                .post_failure
+                .retain(command)
+                .map_err(mpsc::error::SendError),
+        }
+    }
+
+    pub(crate) fn retire(&self) {
+        // Cancellation stops the route task, but only Disconnected may expose
+        // a fallback: it first removes this route, then closes and drains the
+        // retained suffix into the route's PostMortem packet.
         self.retire.send_replace(true);
+    }
+
+    fn retire_and_take_post_failure(&self) -> VecDeque<ClientRouteCommand> {
+        let commands = self.post_failure.close_and_drain();
+        self.retire.send_replace(true);
+        commands
     }
 }
 
@@ -299,6 +408,7 @@ pub(crate) enum ClientRouteEvent {
     Disconnected {
         route_id: u32,
         next_inbound_packet: u32,
+        next_outbound_packet: u32,
         post_mortem: Option<crate::PostMortemPacket>,
         reason: Option<String>,
     },
@@ -325,20 +435,30 @@ pub(crate) enum ClientRouteRead {
 
 pub(crate) struct ClientRouteManager {
     pub(crate) routes: BTreeMap<u32, ClientRouteEntry>,
-    pub(crate) event_tx: mpsc::Sender<ClientRouteEvent>,
-    event_rx: mpsc::Receiver<ClientRouteEvent>,
+    pub(crate) event_tx: mpsc::UnboundedSender<ClientRouteEvent>,
+    event_rx: mpsc::UnboundedReceiver<ClientRouteEvent>,
     tasks: BTreeMap<u32, tokio::task::JoinHandle<()>>,
     pub(crate) closed_routes: crate::post_mortem::ClosedConnectionRouter,
     closed_route_peers: BTreeMap<u32, Option<SocketAddr>>,
     pub(crate) pending_post_mortems: BTreeMap<u32, crate::PostMortemPacket>,
     peer_ping_ms: BTreeMap<ClientId, i32>,
-    pub(crate) replay_packets:
-        VecDeque<(ClientId, crate::transport::InboundPacket, Option<SocketAddr>)>,
+    control_send_time_dirty: bool,
+    pub(crate) replay_packets: VecDeque<(
+        ClientId,
+        crate::transport::InboundPacket,
+        Option<SocketAddr>,
+    )>,
 }
 
 impl ClientRouteManager {
     pub(crate) fn new() -> Self {
-        let (event_tx, event_rx) = mpsc::channel(64);
+        // C4InteractiveThread::PushEvent appends accepted network events to
+        // an uncapped FIFO linked list. The network thread must never stop
+        // parsing later Ping/Pong frames because bootstrap or the main thread
+        // has not consumed an earlier event
+        // (oracle-src-pinned src/C4InteractiveThread.cpp:70-100;
+        // src/C4Packet2.cpp:51-73).
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
         Self {
             routes: BTreeMap::new(),
             event_tx,
@@ -348,6 +468,7 @@ impl ClientRouteManager {
             closed_route_peers: BTreeMap::new(),
             pending_post_mortems: BTreeMap::new(),
             peer_ping_ms: BTreeMap::new(),
+            control_send_time_dirty: true,
             replay_packets: VecDeque::new(),
         }
     }
@@ -417,8 +538,15 @@ impl ClientRouteManager {
                 }
             }
         }
-        let (sender, outbound_rx) = mpsc::channel(64);
+        // C4Network2Client::SendMsg delegates to each connection's buffered
+        // nonblocking Send; the UDP transport, not this app-level route queue,
+        // owns the 10,000-packet retransmit window (oracle-src-pinned
+        // src/C4Network2Client.cpp:121-124;
+        // src/C4NetIO.cpp:1345-1357,1916,2788-2808).
+        let (sender, outbound_rx) = mpsc::unbounded_channel();
+        let route_tx = sender.clone();
         let (retire, retire_rx) = watch::channel(false);
+        let post_failure = PostFailureBuffer::default();
         let replaced = self.routes.insert(
             local_connection_id,
             ClientRouteEntry {
@@ -428,9 +556,14 @@ impl ClientRouteManager {
                 protocol,
                 peer_addr,
                 ping: RoutePingLag::default(),
-                outbound: ClientRouteSender { sender, retire },
+                outbound: ClientRouteSender {
+                    sender,
+                    retire,
+                    post_failure,
+                },
             },
         );
+        self.control_send_time_dirty = true;
         debug_assert!(replaced.is_none());
         let events = self.event_tx.clone();
         let task = tokio::spawn(run_client_route(
@@ -438,6 +571,7 @@ impl ClientRouteManager {
             remote_connection_id,
             peer_addr,
             transport,
+            route_tx,
             outbound_rx,
             retire_rx,
             events,
@@ -462,9 +596,33 @@ impl ClientRouteManager {
         peer_id: ClientId,
         traffic: ConnectionTrafficClass,
     ) -> Option<u32> {
+        self.select_preferred_route_id(peer_id, traffic, false)
+    }
+
+    fn preferred_send_route_id(
+        &self,
+        peer_id: ClientId,
+        traffic: ConnectionTrafficClass,
+    ) -> Option<u32> {
+        self.select_preferred_route_id(peer_id, traffic, true)
+    }
+
+    fn select_preferred_route_id(
+        &self,
+        peer_id: ClientId,
+        traffic: ConnectionTrafficClass,
+        include_retiring: bool,
+    ) -> Option<u32> {
         self.routes
             .iter()
-            .filter(|(_, route)| route.peer_id == peer_id && !route.outbound.is_closed())
+            .filter(|(_, route)| {
+                route.peer_id == peer_id
+                    && if include_retiring {
+                        route.outbound.accepts_post_failure_fifo()
+                    } else {
+                        !route.outbound.is_closed()
+                    }
+            })
             .min_by_key(|(route_id, route)| {
                 let protocol_rank = match (traffic, route.protocol) {
                     (ConnectionTrafficClass::Message, crate::NetworkProtocol::Udp)
@@ -490,7 +648,10 @@ impl ClientRouteManager {
             .retain(|route_id, _| closed_routes.contains(*route_id));
     }
 
-    pub(crate) async fn send_message(&mut self, message: ControlMessage) -> Result<(), TransportError> {
+    pub(crate) async fn send_message(
+        &mut self,
+        message: ControlMessage,
+    ) -> Result<(), TransportError> {
         self.try_send_to(HOST_CLIENT_ID, message)
     }
 
@@ -505,7 +666,7 @@ impl ClientRouteManager {
             _ => ConnectionTrafficClass::Message,
         };
         loop {
-            let Some(route_id) = self.preferred_route_id(peer_id, traffic) else {
+            let Some(route_id) = self.preferred_send_route_id(peer_id, traffic) else {
                 return Err(TransportError::Io(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "client has no accepted transport route to peer",
@@ -517,11 +678,7 @@ impl ClientRouteManager {
                 .expect("selected client route exists")
                 .outbound
                 .clone();
-            match outbound
-                .sender
-                .send(ClientRouteCommand::Message(message))
-                .await
-            {
+            match outbound.send(ClientRouteCommand::Message(message)) {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     message = match error.0 {
@@ -545,7 +702,7 @@ impl ClientRouteManager {
             _ => ConnectionTrafficClass::Message,
         };
         loop {
-            let Some(route_id) = self.preferred_route_id(peer_id, traffic) else {
+            let Some(route_id) = self.preferred_send_route_id(peer_id, traffic) else {
                 return Err(TransportError::Io(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "client has no accepted transport route to peer",
@@ -557,27 +714,15 @@ impl ClientRouteManager {
                 .expect("selected client route exists")
                 .outbound
                 .clone();
-            match outbound
-                .sender
-                .try_send(ClientRouteCommand::Message(message))
-            {
+            match outbound.send(ClientRouteCommand::Message(message)) {
                 Ok(()) => return Ok(()),
-                Err(mpsc::error::TrySendError::Closed(command)) => {
+                Err(mpsc::error::SendError(command)) => {
                     message = match command {
                         ClientRouteCommand::Message(message) => message,
                         ClientRouteCommand::Flush(_) => {
                             unreachable!("try_send_to only queues message commands")
                         }
                     };
-                }
-                Err(mpsc::error::TrySendError::Full(command)) => {
-                    message = match command {
-                        ClientRouteCommand::Message(message) => message,
-                        ClientRouteCommand::Flush(_) => {
-                            unreachable!("try_send_to only queues message commands")
-                        }
-                    };
-                    outbound.retire();
                 }
             }
         }
@@ -586,7 +731,7 @@ impl ClientRouteManager {
     pub(crate) async fn flush_to(&mut self, peer_id: ClientId) -> Result<(), TransportError> {
         loop {
             let Some(route_id) =
-                self.preferred_route_id(peer_id, ConnectionTrafficClass::Message)
+                self.preferred_send_route_id(peer_id, ConnectionTrafficClass::Message)
             else {
                 return Err(TransportError::Io(io::Error::new(
                     io::ErrorKind::BrokenPipe,
@@ -600,19 +745,9 @@ impl ClientRouteManager {
                 .outbound
                 .clone();
             let (completion, completed) = oneshot::channel();
-            match outbound
-                .sender
-                .try_send(ClientRouteCommand::Flush(completion))
-            {
+            match outbound.send(ClientRouteCommand::Flush(completion)) {
                 Ok(()) => {}
-                Err(mpsc::error::TrySendError::Closed(_)) => continue,
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    outbound.retire();
-                    return Err(TransportError::Io(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "client route queue is full before graceful flush",
-                    )));
-                }
+                Err(mpsc::error::SendError(_)) => continue,
             }
             return match tokio::time::timeout(CLIENT_ROUTE_RETRY_INTERVAL, completed).await {
                 Ok(Ok(())) => Ok(()),
@@ -662,8 +797,92 @@ impl ClientRouteManager {
     pub(crate) fn connected_peer_ids(&self) -> BTreeSet<ClientId> {
         self.routes
             .values()
-            .filter(|route| !route.outbound.is_closed())
+            .filter(|route| route.outbound.accepts_post_failure_fifo())
             .map(|route| route.peer_id)
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn control_send_time_ms(
+        &self,
+        control_mode: i32,
+        remote_client_ids: impl IntoIterator<Item = ClientId>,
+    ) -> i32 {
+        let remote_clients = remote_client_ids.into_iter().collect::<BTreeSet<_>>();
+        let preferred_message_ping_ms = self.preferred_control_message_ping_ms(&remote_clients);
+
+        control_send_time_ms(
+            control_mode,
+            remote_clients.into_iter().map(|client_id| {
+                (
+                    client_id,
+                    preferred_message_ping_ms.get(&client_id).copied(),
+                )
+            }),
+        )
+    }
+
+    pub(crate) fn publish_control_send_time(
+        &mut self,
+        snapshot: &ControlSendTimeSnapshot,
+        control_mode: i32,
+        local_client_id: ClientId,
+        known_clients: BTreeSet<ClientId>,
+    ) {
+        if !self.control_send_time_dirty {
+            return;
+        }
+        let preferred_message_ping_ms = self.preferred_control_message_ping_ms(&known_clients);
+        snapshot.publish(
+            control_mode,
+            local_client_id,
+            known_clients,
+            preferred_message_ping_ms,
+        );
+        self.control_send_time_dirty = false;
+    }
+
+    pub(crate) fn control_send_time_needs_publish(&self) -> bool {
+        self.control_send_time_dirty
+    }
+
+    pub(crate) fn invalidate_control_send_time(&mut self) {
+        self.control_send_time_dirty = true;
+    }
+
+    fn preferred_control_message_ping_ms(
+        &self,
+        clients: &BTreeSet<ClientId>,
+    ) -> BTreeMap<ClientId, i32> {
+        let mut preferred_message_routes =
+            BTreeMap::<ClientId, ((u8, ClientId, u32, u32), i32)>::new();
+
+        for (route_id, route) in &self.routes {
+            if route.outbound.is_closed() || !clients.contains(&route.peer_id) {
+                continue;
+            }
+            let protocol_rank = match route.protocol {
+                crate::NetworkProtocol::Udp => 0,
+                crate::NetworkProtocol::Tcp => 1,
+                _ => 2,
+            };
+            let preference = (
+                protocol_rank,
+                route.initiator_id,
+                (*route_id).min(route.remote_connection_id),
+                (*route_id).max(route.remote_connection_id),
+            );
+            if preferred_message_routes
+                .get(&route.peer_id)
+                .is_none_or(|(best, _)| preference < *best)
+            {
+                preferred_message_routes.insert(route.peer_id, (preference, route.ping.ping_ms()));
+            }
+        }
+
+        preferred_message_routes
+            .into_iter()
+            .map(|(client_id, (_, ping_ms))| (client_id, ping_ms))
             .collect()
     }
 
@@ -723,15 +942,16 @@ impl ClientRouteManager {
             .collect()
     }
 
-    pub(crate) fn disconnect_runtime_connection(&self, connection_id: u32) -> bool {
+    pub(crate) fn disconnect_runtime_connection(&mut self, connection_id: u32) -> bool {
         let Some(route) = self
             .routes
             .get(&connection_id)
-            .filter(|route| !route.outbound.is_closed())
+            .filter(|route| !route.outbound.is_retiring())
         else {
             return false;
         };
         route.outbound.retire();
+        self.control_send_time_dirty = true;
         true
     }
 
@@ -752,6 +972,7 @@ impl ClientRouteManager {
             }
         }
         self.peer_ping_ms.remove(&peer_id);
+        self.control_send_time_dirty = true;
         self.closed_routes.remove_client(peer_id);
         self.closed_route_peers
             .retain(|route_id, _| self.closed_routes.contains(*route_id));
@@ -766,20 +987,58 @@ impl ClientRouteManager {
             }
         }
         self.peer_ping_ms.remove(&peer_id);
+        self.control_send_time_dirty = true;
     }
 
     pub(crate) fn send_to_connected_peers(&mut self, message: ControlMessage) -> Vec<ClientId> {
-        let peer_ids = self
-            .connected_peer_ids()
-            .into_iter()
-            .filter(|peer_id| *peer_id != HOST_CLIENT_ID)
-            .collect::<Vec<_>>();
+        // C++ selects each logical client's cached message connection, then
+        // submits one broadcast through those selected connections
+        // (src/C4Network2Client.cpp:497-541). Select one route per peer in a
+        // single pass. Calling `try_send_to` for every peer would scan this
+        // entire route registry once per peer.
+        let mut preferred_routes = BTreeMap::<ClientId, ((u8, ClientId, u32, u32), u32)>::new();
+        for (route_id, route) in &self.routes {
+            if route.peer_id == HOST_CLIENT_ID || !route.outbound.accepts_post_failure_fifo() {
+                continue;
+            }
+            let protocol_rank = match route.protocol {
+                crate::NetworkProtocol::Udp => 0,
+                crate::NetworkProtocol::Tcp => 1,
+                _ => 2,
+            };
+            let preference = (
+                protocol_rank,
+                route.initiator_id,
+                (*route_id).min(route.remote_connection_id),
+                (*route_id).max(route.remote_connection_id),
+            );
+            if preferred_routes
+                .get(&route.peer_id)
+                .is_none_or(|(best, _)| preference < *best)
+            {
+                preferred_routes.insert(route.peer_id, (preference, *route_id));
+            }
+        }
         let mut sent = Vec::new();
-        for peer_id in peer_ids {
-            if self.try_send_to(peer_id, message.clone()).is_ok() {
-                sent.push(peer_id);
-            } else {
-                self.retire_peer_gracefully(peer_id);
+        for (peer_id, (_, route_id)) in preferred_routes {
+            let outbound = self
+                .routes
+                .get(&route_id)
+                .expect("selected client broadcast route exists")
+                .outbound
+                .clone();
+            match outbound.send(ClientRouteCommand::Message(message.clone())) {
+                Ok(()) => sent.push(peer_id),
+                Err(mpsc::error::SendError(ClientRouteCommand::Message(message))) => {
+                    if self.try_send_to(peer_id, message).is_ok() {
+                        sent.push(peer_id);
+                    } else {
+                        self.retire_peer_gracefully(peer_id);
+                    }
+                }
+                Err(mpsc::error::SendError(ClientRouteCommand::Flush(_))) => {
+                    unreachable!("broadcast only queues message commands")
+                }
             }
         }
         sent
@@ -836,9 +1095,7 @@ impl ClientRouteManager {
         if let Some(outbound) = self
             .routes
             .get(&connection_id)
-            .filter(|route| {
-                source_peer_id == HOST_CLIENT_ID || route.peer_id == source_peer_id
-            })
+            .filter(|route| source_peer_id == HOST_CLIENT_ID || route.peer_id == source_peer_id)
             .map(|route| route.outbound.clone())
         {
             self.pending_post_mortems.insert(connection_id, post_mortem);
@@ -927,6 +1184,7 @@ impl ClientRouteManager {
                         continue;
                     }
                     self.peer_ping_ms.insert(peer_id, round_trip_ms);
+                    self.control_send_time_dirty = true;
                     return Ok(ClientRouteRead::PingMeasured {
                         peer_id,
                         round_trip_ms,
@@ -941,13 +1199,34 @@ impl ClientRouteManager {
                 ClientRouteEvent::Disconnected {
                     route_id,
                     next_inbound_packet,
-                    post_mortem,
+                    mut next_outbound_packet,
+                    mut post_mortem,
                     reason,
                 } => {
                     self.tasks.remove(&route_id);
                     let Some(route) = self.routes.remove(&route_id) else {
                         continue;
                     };
+                    self.control_send_time_dirty = true;
+                    for command in route.outbound.retire_and_take_post_failure() {
+                        match command {
+                            ClientRouteCommand::Message(message) => {
+                                if let Ok(packet) =
+                                    crate::transport::encode_complete_message(message)
+                                {
+                                    crate::post_mortem::retain_post_failure_packet(
+                                        &mut post_mortem,
+                                        route.remote_connection_id,
+                                        &mut next_outbound_packet,
+                                        packet,
+                                    );
+                                }
+                            }
+                            ClientRouteCommand::Flush(completion) => {
+                                let _ = completion.send(());
+                            }
+                        }
+                    }
                     self.closed_routes
                         .retain(route_id, route.peer_id, next_inbound_packet);
                     self.closed_route_peers.insert(route_id, route.peer_addr);
@@ -956,10 +1235,9 @@ impl ClientRouteManager {
                     }
                     let mut fallback_post_mortem = None;
                     if let Some(post_mortem) = post_mortem {
-                        if self.preferred_route_id(
-                            route.peer_id,
-                            ConnectionTrafficClass::Message,
-                        ).is_some()
+                        if self
+                            .preferred_route_id(route.peer_id, ConnectionTrafficClass::Message)
+                            .is_some()
                         {
                             if self
                                 .try_send_to(
@@ -977,13 +1255,9 @@ impl ClientRouteManager {
                     return Ok(ClientRouteRead::Disconnected {
                         peer_id: route.peer_id,
                         protocol: route.protocol,
-                        routes_remaining: self
-                            .routes
-                            .values()
-                            .any(|remaining| {
-                                remaining.peer_id == route.peer_id
-                                    && !remaining.outbound.is_closed()
-                            }),
+                        routes_remaining: self.routes.values().any(|remaining| {
+                            remaining.peer_id == route.peer_id && !remaining.outbound.is_closed()
+                        }),
                         post_mortem: fallback_post_mortem,
                         reason,
                     });
@@ -1028,6 +1302,7 @@ impl ClientRouteManager {
             .map(|route| route.outbound.clone())
             .collect::<Vec<_>>();
         self.routes.clear();
+        self.control_send_time_dirty = true;
         for outbound in senders {
             outbound.retire();
         }
@@ -1036,4 +1311,3 @@ impl ClientRouteManager {
         }
     }
 }
-

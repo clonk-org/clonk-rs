@@ -5,6 +5,272 @@
 
 use super::*;
 
+#[cfg(test)]
+type PostJoinBootstrapPause = (oneshot::Sender<()>, oneshot::Receiver<()>);
+
+#[cfg(test)]
+fn post_join_bootstrap_pauses() -> &'static Mutex<BTreeMap<Vec<u8>, PostJoinBootstrapPause>> {
+    static PAUSES: std::sync::OnceLock<Mutex<BTreeMap<Vec<u8>, PostJoinBootstrapPause>>> =
+        std::sync::OnceLock::new();
+    PAUSES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn pause_client_post_join_bootstrap(
+    client_name: &[u8],
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let replaced = post_join_bootstrap_pauses()
+        .lock()
+        .expect("post-JoinData bootstrap pause lock poisoned")
+        .insert(client_name.to_vec(), (reached_tx, resume_rx));
+    assert!(
+        replaced.is_none(),
+        "post-JoinData bootstrap pause already installed for this client"
+    );
+    (reached_rx, resume_tx)
+}
+
+#[cfg(test)]
+async fn wait_at_client_post_join_bootstrap_pause(client_name: &[u8]) {
+    let pause = post_join_bootstrap_pauses()
+        .lock()
+        .expect("post-JoinData bootstrap pause lock poisoned")
+        .remove(client_name);
+    let Some((reached, resume)) = pause else {
+        return;
+    };
+    let _ = reached.send(());
+    let _ = resume.await;
+}
+
+#[cfg(test)]
+type ResourceBootstrapProbePause = (oneshot::Sender<()>, std::sync::mpsc::Receiver<()>);
+
+#[cfg(test)]
+fn resource_bootstrap_probe_pauses(
+) -> &'static Mutex<BTreeMap<Vec<u8>, ResourceBootstrapProbePause>> {
+    static PAUSES: std::sync::OnceLock<Mutex<BTreeMap<Vec<u8>, ResourceBootstrapProbePause>>> =
+        std::sync::OnceLock::new();
+    PAUSES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn pause_client_resource_bootstrap_probe(
+    client_name: &[u8],
+) -> (oneshot::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let replaced = resource_bootstrap_probe_pauses()
+        .lock()
+        .expect("resource-bootstrap probe pause lock poisoned")
+        .insert(client_name.to_vec(), (reached_tx, resume_rx));
+    assert!(
+        replaced.is_none(),
+        "resource-bootstrap probe pause already installed for this client"
+    );
+    (reached_rx, resume_tx)
+}
+
+#[cfg(test)]
+fn wait_at_client_resource_bootstrap_probe_pause(client_name: &[u8]) {
+    let pause = resource_bootstrap_probe_pauses()
+        .lock()
+        .expect("resource-bootstrap probe pause lock poisoned")
+        .remove(client_name);
+    let Some((reached, resume)) = pause else {
+        return;
+    };
+    let _ = reached.send(());
+    let _ = resume.recv();
+}
+
+struct ClientPostJoinResourceBootstrap {
+    resource_state: ClientResourceState,
+    resolver: crate::client_bootstrap::ClientBootstrapResolver,
+    join_data: JoinDataEnvelope,
+    initialized_game_resources: usize,
+}
+
+struct ClientPostJoinResourceConfig {
+    local_candidates: crate::ClientBootstrapLocalCandidates,
+    local_resource_roots: Vec<PathBuf>,
+    local_system_path: Option<PathBuf>,
+    trusted_local_system_path: Option<PathBuf>,
+    resource_directory: Option<PathBuf>,
+    group_maker: clonk_engine::LegacyCString,
+    #[cfg(test)]
+    client_name: Vec<u8>,
+}
+
+impl ClientPostJoinResourceBootstrap {
+    fn resolve_before_addresses(
+        mut resource_state: ClientResourceState,
+        mut join_data: JoinDataEnvelope,
+        mut config: ClientPostJoinResourceConfig,
+    ) -> Result<Self, ClientError> {
+        #[cfg(test)]
+        wait_at_client_resource_bootstrap_probe_pause(&config.client_name);
+
+        resource_state.next_control_request_at =
+            tokio::time::Instant::now() + CONTROL_REQUEST_INTERVAL;
+        config
+            .local_candidates
+            .extend_from_roots(&join_data, &config.local_resource_roots);
+        if let Some(system_path) = config.local_system_path {
+            for system in join_data
+                .parameters
+                .game_resources
+                .iter()
+                .filter(|core| core.resource_type == crate::HostResourceType::System as u8)
+            {
+                config
+                    .local_candidates
+                    .prioritize(system.id, system_path.clone());
+            }
+        }
+        let standalone_directory = config
+            .resource_directory
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new("Network"));
+        let mut resolver = crate::client_bootstrap::ClientBootstrapResolver::new_with_group_maker(
+            &config.local_candidates,
+            standalone_directory.to_path_buf(),
+            config.group_maker,
+        );
+        if let Some(path) = config.trusted_local_system_path {
+            resolver = resolver.with_trusted_local_system_path(path);
+        }
+
+        let mut initialized_game_resources = 0;
+        for core in &join_data.parameters.game_resources {
+            if resource_state
+                .resolve_and_add_bootstrap_resource(
+                    &resolver,
+                    crate::ClientBootstrapResourceRole::GameResource,
+                    core,
+                )
+                .is_err()
+            {
+                break;
+            }
+            initialized_game_resources += 1;
+        }
+        resource_state
+            .resolve_and_add_bootstrap_resource(
+                &resolver,
+                crate::ClientBootstrapResourceRole::Dynamic,
+                &join_data.dynamic,
+            )
+            .map_err(ClientError::Handshake)?;
+        for player in join_data
+            .parameters
+            .player_infos
+            .clients
+            .iter_mut()
+            .flat_map(|client| &mut client.players)
+        {
+            let flags = player.flags;
+            if flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0
+                || flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+            {
+                continue;
+            }
+            if flags & clonk_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
+                crate::client_bootstrap::clear_player_resource(player);
+                continue;
+            }
+            let Some(core) = player.resource.clone() else {
+                crate::client_bootstrap::clear_player_resource(player);
+                continue;
+            };
+            match resource_state.resolve_and_add_bootstrap_resource(
+                &resolver,
+                crate::ClientBootstrapResourceRole::Player,
+                &core,
+            ) {
+                Ok(
+                    ClientBootstrapRegistration::AlreadyPresent
+                    | ClientBootstrapRegistration::Registered,
+                ) => {}
+                Ok(ClientBootstrapRegistration::UnavailableNonLoadable) | Err(_) => {
+                    crate::client_bootstrap::clear_player_resource(player);
+                }
+            }
+        }
+
+        Ok(Self {
+            resource_state,
+            resolver,
+            join_data,
+            initialized_game_resources,
+        })
+    }
+
+    fn resolve_after_addresses(
+        mut self,
+    ) -> Result<(ClientResourceState, JoinDataEnvelope), ClientError> {
+        self.resource_state
+            .resolve_and_add_bootstrap_resource(
+                &self.resolver,
+                crate::ClientBootstrapResourceRole::Scenario,
+                &self.join_data.parameters.scenario,
+            )
+            .map_err(ClientError::Handshake)?;
+        for core in self
+            .join_data
+            .parameters
+            .game_resources
+            .iter()
+            .skip(self.initialized_game_resources)
+        {
+            self.resource_state
+                .resolve_and_add_bootstrap_resource(
+                    &self.resolver,
+                    crate::ClientBootstrapResourceRole::GameResource,
+                    core,
+                )
+                .map_err(ClientError::Handshake)?;
+        }
+        self.resource_state.retain_resource_resolver(self.resolver);
+        Ok((self.resource_state, self.join_data))
+    }
+}
+
+async fn run_client_resource_bootstrap<T, F>(operation: F) -> Result<T, ClientError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ClientError> + Send + 'static,
+{
+    // Local group probing recursively walks, opens, and hashes files. Keep it
+    // off the async executor so the accepted route task remains equivalent to
+    // C++'s dedicated C4InteractiveThread even on a current-thread runtime
+    // (oracle-src-pinned src/C4Network2.cpp:1628-1638;
+    // src/C4Network2IO.cpp:117-197).
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| {
+            ClientError::Handshake(format!("resource bootstrap worker failed: {error}"))
+        })?
+}
+
+async fn complete_client_post_join_step<T>(
+    routes: &mut ClientRouteManager,
+    result: Result<T, ClientError>,
+) -> Result<T, ClientAttemptError> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            // HandleJoinData failures call Clear before returning, which
+            // immediately removes the admitted C4Network2IO connection
+            // (oracle-src-pinned src/C4Network2.cpp:1590-1639).
+            routes.shutdown().await;
+            Err(error.into())
+        }
+    }
+}
+
 pub(crate) fn selected_puncher_addresses(addresses: &[SocketAddr]) -> Vec<SocketAddr> {
     let mut have_ipv4 = false;
     let mut have_ipv6 = false;
@@ -68,7 +334,9 @@ impl ClientDialRace {
                                 return None;
                             }
                             Box::pin(async move {
-                                TcpStream::connect(endpoint).await.map(ClientDialStream::Tcp)
+                                TcpStream::connect(endpoint)
+                                    .await
+                                    .map(ClientDialStream::Tcp)
                             })
                         }
                         crate::NetworkProtocol::Udp => {
@@ -171,8 +439,7 @@ pub(crate) async fn prepare_client_mesh(
     config: &ClientConfig,
     require_udp: bool,
 ) -> Result<PreparedClientMesh, ClientError> {
-    let io_statistics =
-        crate::NetworkIoStatistics::new(network_statistics_now_ms());
+    let io_statistics = crate::NetworkIoStatistics::new(network_statistics_now_ms());
     let mut first_bind_error = None;
     let tcp_listener = match config.mesh_tcp_bind_address {
         Some(bind_address) => match bind_client_mesh_tcp_listener(bind_address).await {
@@ -211,19 +478,19 @@ pub(crate) async fn prepare_client_mesh(
     };
     let requested_transport = config.mesh_tcp_bind_address.is_some() || udp_bind_address.is_some();
     if requested_transport && tcp_listener.is_none() && udp_hub.is_none() {
-        return Err(ClientError::Connect(first_bind_error.unwrap_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::AddrNotAvailable,
-                "no configured client network transport could be bound",
-            )
-        })));
+        return Err(ClientError::Connect(first_bind_error.unwrap_or_else(
+            || {
+                io::Error::new(
+                    io::ErrorKind::AddrNotAvailable,
+                    "no configured client network transport could be bound",
+                )
+            },
+        )));
     }
     let source_puncher_events = udp_hub
         .as_mut()
         .map(crate::ReliableUdpSessionHub::take_puncher_event_receiver);
-    let udp_handle = udp_hub
-        .as_ref()
-        .map(crate::ReliableUdpSessionHub::handle);
+    let udp_handle = udp_hub.as_ref().map(crate::ReliableUdpSessionHub::handle);
     if let Some(handle) = udp_handle.as_ref() {
         for puncher in &config.mesh_punchers {
             let _ = handle
@@ -267,7 +534,8 @@ pub(crate) async fn prepare_client_mesh(
                                     .expect("client puncher initialization lock poisoned");
                                 if init.initializing {
                                     if let crate::NetpuncherIoEvent::Connected {
-                                        observed_address, ..
+                                        observed_address,
+                                        ..
                                     } = &event
                                     {
                                         init.observations.push(*observed_address);
@@ -341,8 +609,7 @@ pub struct HostUdpBinding {
 
 impl HostUdpBinding {
     pub fn bind(config: &HostConfig) -> Self {
-        let io_statistics =
-            crate::NetworkIoStatistics::new(network_statistics_now_ms());
+        let io_statistics = crate::NetworkIoStatistics::new(network_statistics_now_ms());
         let udp_bind_address = (config.configured_udp_port != Some(0))
             .then(|| {
                 config.udp_bind_address.or_else(|| {
@@ -440,6 +707,8 @@ pub(crate) async fn start_host_with_udp_binding_and_backend(
     let active_port_mappings =
         (!mapping_requests.is_empty()).then(|| port_mapping_backend.start(&mapping_requests));
     let (command_tx, command_rx) = mpsc::channel::<HostCommand>(64);
+    let control_send_time = ControlSendTimeSnapshot::default();
+    let worker_control_send_time = control_send_time.clone();
     let (event_tx, event_rx) = mpsc::channel::<HostEvent>(64);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let task_io_statistics = io_statistics.clone();
@@ -452,6 +721,7 @@ pub(crate) async fn start_host_with_udp_binding_and_backend(
             resource_backend,
             task_io_statistics,
             command_rx,
+            worker_control_send_time,
             event_tx.clone(),
             shutdown_rx,
         )
@@ -462,6 +732,7 @@ pub(crate) async fn start_host_with_udp_binding_and_backend(
     });
     Ok(HostHandle {
         command_tx,
+        control_send_time,
         event_rx: Some(event_rx),
         shutdown_tx: Some(shutdown_tx),
         join_handle,
@@ -605,8 +876,8 @@ pub async fn connect_client_addresses(
         })
         .map(|address| address.endpoint);
     let mut client_mesh = prepare_client_mesh(&config, secondary_udp_addr.is_some()).await?;
-    let tcp_available = config.mesh_tcp_bind_address.is_none()
-        || client_mesh.tcp_listener.is_some();
+    let tcp_available =
+        config.mesh_tcp_bind_address.is_none() || client_mesh.tcp_listener.is_some();
     if !tcp_available {
         secondary_tcp_addr = None;
     }
@@ -663,9 +934,7 @@ pub async fn connect_client_addresses(
                         )
                         .await
                     }
-                    Err(error) => {
-                        Err(ClientAttemptError::Retryable(ClientError::Connect(error)))
-                    }
+                    Err(error) => Err(ClientAttemptError::Retryable(ClientError::Connect(error))),
                 }
             }
         };
@@ -774,7 +1043,7 @@ where
         compatibility_build,
         password,
         resource_directory,
-        mut bootstrap_local_candidates,
+        bootstrap_local_candidates,
         local_system_path,
         trusted_local_system_path,
         local_resource_roots,
@@ -782,9 +1051,10 @@ where
         mesh_udp_bind_address: _,
         mesh_punchers: _,
     } = config;
-    let wire_name = clonk_engine::LegacyCString::from_bytes(name.into_bytes()).ok_or_else(|| {
-        ClientError::Handshake("client name contains an interior NUL".to_string())
-    })?;
+    let wire_name =
+        clonk_engine::LegacyCString::from_bytes(name.into_bytes()).ok_or_else(|| {
+            ClientError::Handshake("client name contains an interior NUL".to_string())
+        })?;
     let local_core = clonk_engine::ClientCoreControlData {
         client_id: -1,
         activated: matches!(kind, ParticipantKind::Player),
@@ -912,87 +1182,47 @@ where
                 "failed to initialize control after JoinData: {error}"
             ))
         })?;
-    resource_state.next_control_request_at =
-        tokio::time::Instant::now() + CONTROL_REQUEST_INTERVAL;
-    bootstrap_local_candidates.extend_from_roots(&join_data, &local_resource_roots);
-    if let Some(system_path) = local_system_path {
-        for system in join_data
-            .parameters
-            .game_resources
-            .iter()
-            .filter(|core| core.resource_type == crate::HostResourceType::System as u8)
-        {
-            bootstrap_local_candidates.prioritize(system.id, system_path.clone());
-        }
-    }
-    let standalone_directory = resource_directory
-        .as_deref()
-        .unwrap_or_else(|| std::path::Path::new("Network"));
-    let mut bootstrap_resolver =
-        crate::client_bootstrap::ClientBootstrapResolver::new_with_group_maker(
-            &bootstrap_local_candidates,
-            standalone_directory.to_path_buf(),
-            group_maker,
-        );
-    if let Some(path) = trusted_local_system_path {
-        bootstrap_resolver = bootstrap_resolver.with_trusted_local_system_path(path);
-    }
-    let mut initialized_game_resources = 0;
-    for core in &join_data.parameters.game_resources {
-        if resource_state
-            .resolve_and_add_bootstrap_resource(
-                &bootstrap_resolver,
-                crate::ClientBootstrapResourceRole::GameResource,
-                core,
-            )
-            .is_err()
-        {
-            break;
-        }
-        initialized_game_resources += 1;
-    }
-    resource_state
-        .resolve_and_add_bootstrap_resource(
-            &bootstrap_resolver,
-            crate::ClientBootstrapResourceRole::Dynamic,
-            &join_data.dynamic,
+    // JoinData is delivered to C++'s main thread, but the already accepted
+    // transport remains registered with C4InteractiveThread throughout local
+    // resource probing. Hand the route to its independent reader/writer and
+    // liveness task before any synchronous bootstrap work
+    // (oracle-src-pinned src/C4Network2.cpp:1590-1639;
+    // src/C4Network2IO.cpp:117-197; src/C4Packet2.cpp:51-73).
+    let mut routes = ClientRouteManager::new();
+    routes.add_route(
+        primary_local_connection_id,
+        primary_remote_connection_id,
+        host_protocol,
+        host_peer_addr,
+        transport,
+        primary_liveness,
+    );
+    #[cfg(test)]
+    wait_at_client_post_join_bootstrap_pause(assigned_local_core.name.as_bytes()).await;
+    let resource_config = ClientPostJoinResourceConfig {
+        local_candidates: bootstrap_local_candidates,
+        local_resource_roots,
+        local_system_path,
+        trusted_local_system_path,
+        resource_directory,
+        group_maker,
+        #[cfg(test)]
+        client_name: assigned_local_core.name.as_bytes().to_vec(),
+    };
+    let resource_bootstrap = run_client_resource_bootstrap(move || {
+        ClientPostJoinResourceBootstrap::resolve_before_addresses(
+            resource_state,
+            join_data,
+            resource_config,
         )
-        .map_err(ClientError::Handshake)?;
-    for player in join_data
-        .parameters
-        .player_infos
-        .clients
-        .iter_mut()
-        .flat_map(|client| &mut client.players)
-    {
-        let flags = player.flags;
-        if flags & clonk_engine::PLAYER_INFO_FLAG_REMOVED != 0
-            || flags & clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
-        {
-            continue;
-        }
-        if flags & clonk_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
-            crate::client_bootstrap::clear_player_resource(player);
-            continue;
-        }
-        let Some(core) = player.resource.clone() else {
-            crate::client_bootstrap::clear_player_resource(player);
-            continue;
-        };
-        match resource_state.resolve_and_add_bootstrap_resource(
-            &bootstrap_resolver,
-            crate::ClientBootstrapResourceRole::Player,
-            &core,
-        ) {
-            Ok(
-                ClientBootstrapRegistration::AlreadyPresent
-                | ClientBootstrapRegistration::Registered,
-            ) => {}
-            Ok(ClientBootstrapRegistration::UnavailableNonLoadable) | Err(_) => {
-                crate::client_bootstrap::clear_player_resource(player);
-            }
-        }
-    }
+    })
+    .await;
+    let ClientPostJoinResourceBootstrap {
+        resource_state,
+        resolver: bootstrap_resolver,
+        join_data,
+        initialized_game_resources,
+    } = complete_client_post_join_step(&mut routes, resource_bootstrap).await?;
     let client_id = join_data.client_id as ClientId;
     let mesh_tcp_listener = client_mesh.tcp_listener.take();
     let mesh_udp_hub = client_mesh.udp_hub.take();
@@ -1114,47 +1344,27 @@ where
             })
         })
         .collect();
-    send_client_address_announcements(&mut transport, address_announcements)
+    let announcement = send_client_route_address_announcements(&mut routes, address_announcements)
         .await
         .map_err(|error| {
             ClientError::Handshake(format!(
                 "failed to announce addresses after JoinData: {error}"
             ))
-        })?;
-    resource_state
-        .resolve_and_add_bootstrap_resource(
-            &bootstrap_resolver,
-            crate::ClientBootstrapResourceRole::Scenario,
-            &join_data.parameters.scenario,
-        )
-        .map_err(ClientError::Handshake)?;
-    for core in join_data
-        .parameters
-        .game_resources
-        .iter()
-        .skip(initialized_game_resources)
-    {
-        resource_state
-            .resolve_and_add_bootstrap_resource(
-                &bootstrap_resolver,
-                crate::ClientBootstrapResourceRole::GameResource,
-                core,
-            )
-            .map_err(ClientError::Handshake)?;
-    }
-    resource_state.retain_resource_resolver(bootstrap_resolver);
+        });
+    complete_client_post_join_step(&mut routes, announcement).await?;
+    let resource_bootstrap = run_client_resource_bootstrap(move || {
+        ClientPostJoinResourceBootstrap {
+            resource_state,
+            resolver: bootstrap_resolver,
+            join_data,
+            initialized_game_resources,
+        }
+        .resolve_after_addresses()
+    })
+    .await;
+    let (resource_state, join_data) =
+        complete_client_post_join_step(&mut routes, resource_bootstrap).await?;
 
-    // Keep the admitted primary route's Ping/Pong and timeout state live while
-    // an explicitly requested second transport completes its own handshake.
-    let mut routes = ClientRouteManager::new();
-    routes.add_route(
-        primary_local_connection_id,
-        primary_remote_connection_id,
-        host_protocol,
-        host_peer_addr,
-        transport,
-        primary_liveness,
-    );
     let udp_reconnect_addr = secondary_udp_addr.or_else(|| {
         matches!(host_protocol, crate::NetworkProtocol::Udp)
             .then_some(host_peer_addr)
@@ -1165,9 +1375,7 @@ where
             .then_some(host_peer_addr)
             .flatten()
     });
-    let connection_ids = Arc::new(AtomicU32::new(
-        primary_local_connection_id.wrapping_add(1),
-    ));
+    let connection_ids = Arc::new(AtomicU32::new(primary_local_connection_id.wrapping_add(1)));
     let mesh_udp_handle = mesh_udp_hub
         .as_ref()
         .map(crate::ReliableUdpSessionHub::handle);
@@ -1204,12 +1412,15 @@ where
     };
 
     let (command_tx, command_rx) = mpsc::channel::<ClientCommand>(64);
+    let control_send_time = ControlSendTimeSnapshot::default();
+    let worker_control_send_time = control_send_time.clone();
     let (event_tx, event_rx) = mpsc::channel::<ClientEvent>(64);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join_handle = tokio::spawn(run_client_loop_with_routes(
         routes,
         io_statistics.clone(),
         command_rx,
+        worker_control_send_time,
         event_tx,
         shutdown_rx,
         host_peer_addr,
@@ -1236,6 +1447,7 @@ where
     ));
     Ok(ClientHandle {
         command_tx,
+        control_send_time,
         event_rx: Some(event_rx),
         shutdown_tx: Some(shutdown_tx),
         join_handle,
@@ -1620,8 +1832,7 @@ pub(crate) fn spawn_mesh_dial(
             pending.spawn(async move {
                 let mut last_error = None;
                 for endpoint in endpoints {
-                    let connection_id =
-                        connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
+                    let connection_id = connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
                     match connect_mesh_tcp_route(
                         peer_id_wire,
                         endpoint,
@@ -1667,8 +1878,7 @@ pub(crate) fn spawn_mesh_dial(
             pending.spawn(async move {
                 let mut last_error = None;
                 for endpoint in endpoints {
-                    let connection_id =
-                        connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
+                    let connection_id = connection_ids.fetch_add(1, AtomicOrdering::Relaxed);
                     match connect_mesh_udp_route(
                         handle.clone(),
                         peer_id_wire,
@@ -1787,14 +1997,10 @@ pub(crate) fn connected_mesh_route_matches_registry(
 ) -> bool {
     let (peer_id, peer_core) = match route {
         ConnectedMeshRoute::Tcp {
-            peer_id,
-            peer_core,
-            ..
+            peer_id, peer_core, ..
         }
         | ConnectedMeshRoute::Udp {
-            peer_id,
-            peer_core,
-            ..
+            peer_id, peer_core, ..
         } => (*peer_id, peer_core),
     };
     let Ok(peer_id) = i32::try_from(peer_id) else {
@@ -1983,6 +2189,7 @@ where
         .await
 }
 
+#[cfg(test)]
 async fn send_client_address_announcements<S>(
     transport: &mut crate::ControlTransport<S>,
     address_announcements: Vec<crate::AddressPacket>,
@@ -1996,6 +2203,21 @@ where
         transport
             .send_message(ControlMessage::Address(packet))
             .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn send_client_route_address_announcements(
+    routes: &mut ClientRouteManager,
+    address_announcements: Vec<crate::AddressPacket>,
+) -> Result<(), TransportError> {
+    // SendAddresses appends each PID_Addr to C4NetIOTCP::Peer::OBuf and
+    // returns without waiting for socket drainage. The route's lossless FIFO
+    // is the equivalent acceptance boundary here
+    // (oracle-src-pinned src/C4Network2Client.cpp:319-337,616-621;
+    // src/C4NetIO.cpp:1345-1396).
+    for packet in address_announcements {
+        routes.send_message(ControlMessage::Address(packet)).await?;
     }
     Ok(())
 }

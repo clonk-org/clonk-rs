@@ -72,9 +72,7 @@ pub(crate) async fn handle_client_message(
                 match backend.on_packet(client_id as i32, &packet, now_seconds, &mut random) {
                     Ok(events) => {
                         if matches!(&packet, ResourcePacket::Derive(_)) {
-                            let _ = state
-                                .resource_catalog
-                                .on_packet(client_id as i32, &packet);
+                            let _ = state.resource_catalog.on_packet(client_id as i32, &packet);
                         }
                         update_derived_resource_sources(
                             &mut state.published_player_sources,
@@ -248,7 +246,9 @@ pub(crate) fn forward_selects(packet: &crate::ForwardPacket, client_id: i32) -> 
     }
 }
 
-pub(crate) fn decentral_control_message(packet: &ControlPacket) -> Result<ControlMessage, TransportError> {
+pub(crate) fn decentral_control_message(
+    packet: &ControlPacket,
+) -> Result<ControlMessage, TransportError> {
     decentral_control_message_to_unconnected(packet, std::iter::empty())
 }
 
@@ -390,6 +390,13 @@ async fn dispatch_forwarded_packet_for_host(
         }
         Err(error) => {
             report_forward_error(source, format!("invalid forwarded packet: {error}"), state).await;
+            if let Some(route) = state
+                .accepted_routes
+                .get(&connection_id)
+                .filter(|route| route.client_id == source)
+            {
+                route.outbound.retire();
+            }
             return;
         }
     };
@@ -429,15 +436,8 @@ pub(crate) async fn dispatch_host_resource_actions(
             }
             crate::ResourceCatalogAction::Broadcast { packet } => {
                 let traffic = resource_traffic_class(&packet);
-                for client_id in host_target_client_ids(state, None) {
-                    let _ = send_host_message(
-                        state,
-                        client_id,
-                        traffic,
-                        ControlMessage::Resource(packet.clone()),
-                    )
-                    .await;
-                }
+                let _ =
+                    broadcast_host_message(state, traffic, ControlMessage::Resource(packet), None);
             }
             external => {
                 let _ = state
@@ -496,7 +496,10 @@ pub(crate) async fn dispatch_host_resource_events(
     }
 }
 
-pub(crate) async fn report_host_resource_error(error: crate::ResourceTransferError, state: &HostState) {
+pub(crate) async fn report_host_resource_error(
+    error: crate::ResourceTransferError,
+    state: &HostState,
+) {
     let _ = state
         .event_tx
         .send(HostEvent::TransportError {
@@ -534,22 +537,20 @@ async fn handle_received_host_address(
     // connected client, including the source connection. The source then
     // suppresses the duplicate on receipt (src/C4Network2Client.cpp:259-278,
     // 581-597).
-    for client_id in host_target_client_ids(state, None) {
-        let _ = send_host_message(
-            state,
-            client_id,
-            ConnectionTrafficClass::Message,
-            ControlMessage::Address(packet),
-        )
-        .await;
-    }
+    let _ = broadcast_host_message(
+        state,
+        ConnectionTrafficClass::Message,
+        ControlMessage::Address(packet),
+        None,
+    );
 }
 
 pub(crate) async fn handle_client_disconnected(
     connection_id: u32,
     client_id: ClientId,
     next_inbound_packet: u32,
-    post_mortem: Option<crate::PostMortemPacket>,
+    mut next_outbound_packet: u32,
+    mut post_mortem: Option<crate::PostMortemPacket>,
     reason: Option<String>,
     state: &mut HostState,
 ) {
@@ -557,10 +558,27 @@ pub(crate) async fn handle_client_disconnected(
     if disconnected_route.is_none() {
         return;
     }
+    state.invalidate_control_send_time();
     if let Some(route) = &disconnected_route {
         state
             .closed_routes
             .retain(connection_id, route.client_id, next_inbound_packet);
+        for message in route.outbound.retire_and_take_post_failure() {
+            let packet = match message {
+                HostOutboundMessage::Message(message) => {
+                    crate::transport::encode_complete_message(message).ok()
+                }
+                HostOutboundMessage::Raw(packet) => Some(packet),
+            };
+            if let Some(packet) = packet {
+                crate::post_mortem::retain_post_failure_packet(
+                    &mut post_mortem,
+                    route.remote_connection_id,
+                    &mut next_outbound_packet,
+                    packet,
+                );
+            }
+        }
     }
     if let Some((source_client_id, packet, ping_ms)) =
         state.pending_post_mortems.remove(&connection_id)
@@ -606,7 +624,7 @@ pub(crate) async fn handle_client_disconnected(
         if let Some(reason) = reason {
             let _ = state
                 .event_tx
-                .send(HostEvent::TransportError {
+                .send(HostEvent::RecoverableRouteDiagnostic {
                     client_id: Some(client_id),
                     error: reason,
                 })
@@ -630,7 +648,7 @@ pub(crate) async fn handle_client_disconnected(
         if let Some(reason) = reason {
             let _ = state
                 .event_tx
-                .send(HostEvent::TransportError {
+                .send(HostEvent::RecoverableRouteDiagnostic {
                     client_id: Some(client_id),
                     error: reason,
                 })
@@ -686,7 +704,7 @@ pub(crate) async fn handle_client_disconnected(
     if let Some(reason) = reason {
         let _ = state
             .event_tx
-            .send(HostEvent::TransportError {
+            .send(HostEvent::RecoverableRouteDiagnostic {
                 client_id: Some(client_id),
                 error: reason,
             })
@@ -694,16 +712,49 @@ pub(crate) async fn handle_client_disconnected(
     }
 }
 
-pub(crate) async fn handle_admission_failed(connection_id: u32, error: String, state: &mut HostState) {
+pub(crate) async fn handle_admission_failed(
+    connection_id: u32,
+    error: String,
+    state: &mut HostState,
+) {
     state.pending_route_peers.remove(&connection_id);
-    state.pending_route_clients.remove(&connection_id);
+    let route_client_id = state.pending_route_clients.remove(&connection_id);
     let provisional_client_id = state.pending_admissions.remove(&connection_id);
+    let provisional_client_id = provisional_client_id.and_then(|client_id| {
+        ClientId::try_from(client_id)
+            .ok()
+            .map(|network_client_id| (client_id, network_client_id))
+    });
+    if provisional_client_id.is_some_and(|(_, client_id)| {
+        state.clients.contains_key(&client_id)
+            || state
+                .accepted_routes
+                .values()
+                .any(|route| route.client_id == client_id)
+    }) {
+        let _ = state
+            .event_tx
+            .send(HostEvent::RecoverableRouteDiagnostic {
+                client_id: provisional_client_id.map(|(_, client_id)| client_id),
+                error,
+            })
+            .await;
+        return;
+    }
     if let Some(core) =
-        provisional_client_id.and_then(|client_id| state.client_cores.get(&client_id).cloned())
+        provisional_client_id.and_then(|(client_id, _)| state.client_cores.get(&client_id).cloned())
     {
-        if let Ok(client_id) = ClientId::try_from(core.client_id) {
-            mark_client_removing(client_id, state);
-        }
+        let client_id =
+            ClientId::try_from(core.client_id).expect("provisional client id was validated above");
+        mark_client_removing(client_id, state);
+        // C4Network2::OnConnectFail performs the same logical-client
+        // disconnect notification before CtrlRemove as an accepted route
+        // failure. The failed socket remains peer-local; it does not abort
+        // the host network loop (src/C4Network2.cpp:1761-1771,1802-1824).
+        let _ = state
+            .event_tx
+            .send(HostEvent::ClientConnectionFailed { client_id })
+            .await;
         queue_disconnected_client_remove(&core, state).await;
         let retry_effects = retry_unreached_status_after_disconnect(
             &mut state.status_barrier,
@@ -711,13 +762,13 @@ pub(crate) async fn handle_admission_failed(connection_id: u32, error: String, s
         );
         apply_barrier_effects(retry_effects, state).await;
     }
-    let _ = state
-        .event_tx
-        .send(HostEvent::TransportError {
-            client_id: provisional_client_id.and_then(|id| ClientId::try_from(id).ok()),
-            error,
-        })
-        .await;
+    let event = HostEvent::RecoverableRouteDiagnostic {
+        client_id: provisional_client_id
+            .map(|(_, client_id)| client_id)
+            .or(route_client_id),
+        error,
+    };
+    let _ = state.event_tx.send(event).await;
 }
 
 pub(crate) fn retry_unreached_status_after_disconnect(
@@ -748,8 +799,8 @@ async fn queue_disconnected_client_remove(
     core: &clonk_engine::ClientCoreControlData,
     state: &mut HostState,
 ) {
-    let reason = clonk_engine::LegacyCString::from_bytes(b"disconnected".to_vec())
-        .unwrap_or_default();
+    let reason =
+        clonk_engine::LegacyCString::from_bytes(b"disconnected".to_vec()).unwrap_or_default();
     queue_host_client_remove(core, reason, state).await;
 }
 
@@ -759,7 +810,12 @@ pub(crate) async fn fail_host_pending_join_data(
 ) -> usize {
     let pending = pending_join_data_client_ids(&state.clients, &state.removing_clients)
         .into_iter()
-        .filter_map(|client_id| state.clients.get(&client_id).map(|client| client.core.clone()))
+        .filter_map(|client_id| {
+            state
+                .clients
+                .get(&client_id)
+                .map(|client| client.core.clone())
+        })
         .collect::<Vec<_>>();
     let removed = pending.len();
     for core in pending {
@@ -791,7 +847,11 @@ pub(crate) enum ControlIngress {
     Network,
 }
 
-pub(crate) async fn ingest_control(packet: ControlPacket, ingress: ControlIngress, state: &mut HostState) {
+pub(crate) async fn ingest_control(
+    packet: ControlPacket,
+    ingress: ControlIngress,
+    state: &mut HostState,
+) {
     let client_id = packet.client_id();
     // Validate everything PackCompleteCtrl needs before the coordinator
     // consumes contributions and advances its tick. A malformed frame must
@@ -852,9 +912,10 @@ pub(crate) async fn ingest_control(packet: ControlPacket, ingress: ControlIngres
         Err(error) => {
             let _ = state
                 .event_tx
-                .send(HostEvent::TransportError {
-                    client_id: Some(client_id),
-                    error: error.to_string(),
+                .send(HostEvent::FatalError {
+                    error: format!(
+                        "authoritative host control for client {client_id} was rejected: {error}"
+                    ),
                 })
                 .await;
         }
@@ -885,12 +946,8 @@ pub(crate) fn validate_queued_control_authors(packet: &ControlPacket) -> Result<
             clonk_engine::ControlPacket::ClientRemove(control) => {
                 ("CID_ClientRemove", control.by_client)
             }
-            clonk_engine::ControlPacket::PlayerInfo(control) => {
-                ("CID_PlrInfo", control.by_client)
-            }
-            clonk_engine::ControlPacket::JoinPlayer(control) => {
-                ("CID_JoinPlr", control.by_client)
-            }
+            clonk_engine::ControlPacket::PlayerInfo(control) => ("CID_PlrInfo", control.by_client),
+            clonk_engine::ControlPacket::JoinPlayer(control) => ("CID_JoinPlr", control.by_client),
             clonk_engine::ControlPacket::PlayerSelect(control) => {
                 ("CID_PlrSelect", control.by_client)
             }
@@ -908,8 +965,12 @@ pub(crate) fn validate_queued_control_authors(packet: &ControlPacket) -> Result<
             clonk_engine::ControlPacket::CustomCommand(command) => {
                 ("CID_CustomCommand", command.by_client)
             }
-            clonk_engine::ControlPacket::EmMoveObject(control) => ("CID_EMMoveObj", control.by_client),
-            clonk_engine::ControlPacket::EmDrawTool(control) => ("CID_EMDrawTool", control.by_client),
+            clonk_engine::ControlPacket::EmMoveObject(control) => {
+                ("CID_EMMoveObj", control.by_client)
+            }
+            clonk_engine::ControlPacket::EmDrawTool(control) => {
+                ("CID_EMDrawTool", control.by_client)
+            }
             clonk_engine::ControlPacket::EmDropDef(control) => ("CID_EMDropDef", control.by_client),
             clonk_engine::ControlPacket::ActivateGameGoalMenu(control) => {
                 ("CID_ActivateGameGoalMenu", control.by_client)
@@ -926,7 +987,9 @@ pub(crate) fn validate_queued_control_authors(packet: &ControlPacket) -> Result<
             clonk_engine::ControlPacket::EliminatePlayer(control) => {
                 ("CID_EliminatePlayer", control.by_client)
             }
-            clonk_engine::ControlPacket::RemovePlayer(remove) => ("CID_RemovePlr", remove.by_client),
+            clonk_engine::ControlPacket::RemovePlayer(remove) => {
+                ("CID_RemovePlr", remove.by_client)
+            }
             clonk_engine::ControlPacket::Set(set) => ("CID_Set", set.by_client),
             clonk_engine::ControlPacket::Vote(vote) => ("CID_Vote", vote.by_client),
             clonk_engine::ControlPacket::VoteEnd(vote) => ("CID_VoteEnd", vote.by_client),
@@ -939,9 +1002,7 @@ pub(crate) fn validate_queued_control_authors(packet: &ControlPacket) -> Result<
             clonk_engine::ControlPacket::Synchronize(control) => {
                 ("CID_Synchronize", control.by_client)
             }
-            clonk_engine::ControlPacket::SyncCheck(control) => {
-                ("CID_SyncCheck", control.by_client)
-            }
+            clonk_engine::ControlPacket::SyncCheck(control) => ("CID_SyncCheck", control.by_client),
             // DebugRec has no inherited C4ControlPacket body, so the outer
             // authenticated contribution is its only author identity.
             clonk_engine::ControlPacket::DebugRecord(_) => continue,
@@ -1007,8 +1068,7 @@ pub(crate) async fn publish_ready_batch(batch: ReadyBatch, state: &mut HostState
         Err(error) => {
             let _ = state
                 .event_tx
-                .send(HostEvent::TransportError {
-                    client_id: None,
+                .send(HostEvent::FatalError {
                     error: format!("failed to aggregate ready tick {}: {error}", batch.tick()),
                 })
                 .await;
@@ -1031,15 +1091,12 @@ pub(crate) async fn publish_ready_batch(batch: ReadyBatch, state: &mut HostState
 }
 
 async fn broadcast_control(packet: &ControlPacket, state: &mut HostState) {
-    for client_id in host_target_client_ids(state, None) {
-        let _ = send_host_message(
-            state,
-            client_id,
-            ConnectionTrafficClass::Message,
-            ControlMessage::Control(packet.clone()),
-        )
-        .await;
-    }
+    let _ = broadcast_host_message(
+        state,
+        ConnectionTrafficClass::Message,
+        ControlMessage::Control(packet.clone()),
+        None,
+    );
 }
 
 pub(crate) async fn broadcast_packet(
@@ -1094,18 +1151,15 @@ async fn dispatch_packet(
             // and waits for the host echo, so include every client here
             // (src/C4GameControlNetwork.cpp:181-220,568-572).
             if relay_to_clients {
-                for client_id in host_target_client_ids(state, None) {
-                    let _ = send_host_message(
-                        state,
-                        client_id,
-                        ConnectionTrafficClass::Message,
-                        ControlMessage::Packet {
-                            delivery,
-                            data: data.clone(),
-                        },
-                    )
-                    .await;
-                }
+                let _ = broadcast_host_message(
+                    state,
+                    ConnectionTrafficClass::Message,
+                    ControlMessage::Packet {
+                        delivery,
+                        data: data.clone(),
+                    },
+                    None,
+                );
             }
             state.pending_sync.push(control);
             if state.status_barrier.is_frozen() {
@@ -1166,18 +1220,15 @@ async fn dispatch_packet(
                 }
             }
             if relay_to_clients {
-                for client_id in host_target_client_ids(state, origin) {
-                    let _ = send_host_message(
-                        state,
-                        client_id,
-                        ConnectionTrafficClass::Message,
-                        ControlMessage::Packet {
-                            delivery,
-                            data: data.clone(),
-                        },
-                    )
-                    .await;
-                }
+                let _ = broadcast_host_message(
+                    state,
+                    ConnectionTrafficClass::Message,
+                    ControlMessage::Packet {
+                        delivery,
+                        data: data.clone(),
+                    },
+                    origin,
+                );
             }
             let _ = state
                 .event_tx
@@ -1231,7 +1282,7 @@ pub(crate) fn authenticated_single_control(
         // control envelope is therefore its sole author identity.
         clonk_engine::ControlPacket::DebugRecord(_) => expected_author,
         clonk_engine::ControlPacket::Unknown { .. } => {
-            return Err("unsupported single control packet".to_string())
+            return Err("unsupported single control packet".to_string());
         }
     };
     if author != expected_author {
@@ -1256,14 +1307,18 @@ pub(crate) fn control_requires_host_ingress(control: &clonk_engine::ControlPacke
     )
 }
 
-pub(crate) fn validate_peer_control_packet(packet: &ControlPacket, peer_id: ClientId) -> Result<(), String> {
+pub(crate) fn validate_peer_control_packet(
+    packet: &ControlPacket,
+    peer_id: ClientId,
+) -> Result<(), String> {
     if packet.client_id() != peer_id {
         return Err(format!(
             "peer {peer_id} sent a control contribution for client {}",
             packet.client_id()
         ));
     }
-    validate_control_envelope(packet).map_err(|error| format!("invalid control packet: {error}"))?;
+    validate_control_envelope(packet)
+        .map_err(|error| format!("invalid control packet: {error}"))?;
     validate_queued_control_authors(packet)?;
     let frame = crate::decode_control_packet(packet)
         .map_err(|error| format!("invalid control packet: {error}"))?;
@@ -1287,24 +1342,20 @@ pub(crate) fn validate_peer_control_or_recovery(
 }
 
 pub(crate) fn extend_peer_recovery_window(recovery_from_tick: &mut Option<Tick>, from_tick: Tick) {
-    *recovery_from_tick = Some(
-        recovery_from_tick.map_or(from_tick, |outstanding| outstanding.min(from_tick)),
-    );
+    *recovery_from_tick =
+        Some(recovery_from_tick.map_or(from_tick, |outstanding| outstanding.min(from_tick)));
 }
 
 pub(crate) async fn broadcast_exec_sync(control_tick: Tick, state: &mut HostState) {
     if state.pending_sync.is_empty() {
         return;
     }
-    for client_id in host_target_client_ids(state, None) {
-        let _ = send_host_message(
-            state,
-            client_id,
-            ConnectionTrafficClass::Message,
-            ControlMessage::ExecSync { control_tick },
-        )
-        .await;
-    }
+    let _ = broadcast_host_message(
+        state,
+        ConnectionTrafficClass::Message,
+        ControlMessage::ExecSync { control_tick },
+        None,
+    );
     let controls = std::mem::take(&mut state.pending_sync);
     apply_host_membership_controls(&controls, state).await;
     let _ = state
@@ -1329,15 +1380,12 @@ async fn execute_frozen_sync(control_tick: Tick, state: &mut HostState) {
             controls,
         })
         .await;
-    for client_id in host_target_client_ids(state, None) {
-        let _ = send_host_message(
-            state,
-            client_id,
-            ConnectionTrafficClass::Message,
-            ControlMessage::ExecSync { control_tick },
-        )
-        .await;
-    }
+    let _ = broadcast_host_message(
+        state,
+        ConnectionTrafficClass::Message,
+        ControlMessage::ExecSync { control_tick },
+        None,
+    );
 }
 
 async fn apply_host_membership_controls(
@@ -1396,6 +1444,7 @@ async fn apply_host_membership_controls(
                 }
                 if let Some(core) = state.client_cores.remove(&remove.client_id) {
                     state.admission.remove_client_name(&core.name);
+                    state.invalidate_control_send_time();
                 }
                 state.client_addresses.remove(&remove.client_id);
                 state.resource_catalog.remove_at_client(remove.client_id);
@@ -1418,6 +1467,9 @@ async fn close_removed_client_connections(client_id: ClientId, state: &mut HostS
         .collect::<Vec<_>>();
     for (connection_id, _) in &routes {
         state.accepted_routes.remove(connection_id);
+    }
+    if !routes.is_empty() {
+        state.invalidate_control_send_time();
     }
     invalidate_pending_client_routes(client_id, state);
     state
@@ -1458,15 +1510,17 @@ async fn coordination_unregister(client_id: ClientId, state: &mut HostState) {
     }
 }
 
-pub(crate) async fn broadcast_status(status: NetworkStatus, acknowledgement: bool, state: &mut HostState) {
-    for client_id in host_target_client_ids(state, None) {
-        let message = if acknowledgement {
-            ControlMessage::StatusAck(status)
-        } else {
-            ControlMessage::Status(status)
-        };
-        let _ = send_host_message(state, client_id, ConnectionTrafficClass::Message, message).await;
-    }
+pub(crate) async fn broadcast_status(
+    status: NetworkStatus,
+    acknowledgement: bool,
+    state: &mut HostState,
+) {
+    let message = if acknowledgement {
+        ControlMessage::StatusAck(status)
+    } else {
+        ControlMessage::Status(status)
+    };
+    let _ = broadcast_host_message(state, ConnectionTrafficClass::Message, message, None);
 }
 
 pub(crate) async fn broadcast_ready_check(
@@ -1474,42 +1528,33 @@ pub(crate) async fn broadcast_ready_check(
     except_client_id: Option<ClientId>,
     state: &mut HostState,
 ) {
-    for client_id in host_target_client_ids(state, except_client_id) {
-        let _ = send_host_message(
-            state,
-            client_id,
-            ConnectionTrafficClass::Message,
-            ControlMessage::ReadyCheck(packet),
-        )
-        .await;
-    }
+    let _ = broadcast_host_message(
+        state,
+        ConnectionTrafficClass::Message,
+        ControlMessage::ReadyCheck(packet),
+        except_client_id,
+    );
 }
 
 pub(crate) async fn broadcast_lobby_countdown(packet: LobbyCountdownPacket, state: &mut HostState) {
-    for client_id in host_target_client_ids(state, None) {
-        let _ = send_host_message(
-            state,
-            client_id,
-            ConnectionTrafficClass::Message,
-            ControlMessage::LobbyCountdown(packet),
-        )
-        .await;
-    }
+    let _ = broadcast_host_message(
+        state,
+        ConnectionTrafficClass::Message,
+        ControlMessage::LobbyCountdown(packet),
+        None,
+    );
 }
 
 pub(crate) async fn broadcast_league_round_results(
     packet: crate::LeagueRoundResultsPacket,
     state: &mut HostState,
 ) {
-    for client_id in host_target_client_ids(state, None) {
-        let _ = send_host_message(
-            state,
-            client_id,
-            ConnectionTrafficClass::Message,
-            ControlMessage::LeagueRoundResults(packet.clone()),
-        )
-        .await;
-    }
+    let _ = broadcast_host_message(
+        state,
+        ConnectionTrafficClass::Message,
+        ControlMessage::LeagueRoundResults(packet),
+        None,
+    );
 }
 
 pub(crate) fn apply_ready_check_to_host_state(packet: ReadyCheckPacket, state: &mut HostState) {
@@ -1577,6 +1622,7 @@ async fn apply_host_control_mode(mode: i32, from_tick: i32, state: &mut HostStat
         return;
     }
     state.control_mode = mode;
+    state.invalidate_control_send_time();
     let Ok(from_tick) = Tick::try_from(from_tick) else {
         return;
     };
@@ -1648,4 +1694,3 @@ pub(crate) async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &m
             .await;
     }
 }
-

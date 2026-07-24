@@ -78,6 +78,68 @@ awk '
   END { if (!found) exit 1 }
 ' "$src/C4Game.cpp" > "$gen/shake_objects.inc"
 
+# Network game startup must place the synchronized C4GameParameters lists,
+# not a client's local Scenario.txt lists. Lift the complete production
+# conversion and placement methods so the HarpoonRace fixture below executes
+# the pinned source text rather than an independently rewritten algorithm.
+awk '
+  /^void C4SGame::ConvertGoals\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Scenario.cpp" > "$gen/scenario_convert_goals.inc"
+
+awk '
+  /^void C4SGame::ClearOldGoals\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Scenario.cpp" > "$gen/scenario_clear_old_goals.inc"
+
+awk '
+  /^void C4Game::InitRules\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Game.cpp" > "$gen/game_init_rules.inc"
+
+awk '
+  /^void C4Game::InitGoals\(/ { p = 1 }
+  p { print }
+  p && /^}$/ { found = 1; exit }
+  END { if (!found) exit 1 }
+' "$src/C4Game.cpp" > "$gen/game_init_goals.inc"
+
+# The extracted methods traverse and mutate C4IDList. Lift the small list
+# operations they call as well, including both production findId overloads.
+awk '
+  /^static auto findId\(/ { p = 1 }
+  p { print }
+  p && /^}$/ {
+    closures++
+    if (closures == 2) { found = 1; exit }
+  }
+  END { if (!found) exit 1 }
+' "$src/C4IDList.cpp" > "$gen/id_list_find.inc"
+
+for method_spec in \
+  "Clear id_list_clear" \
+  "GetID id_list_get_id" \
+  "GetIDCount id_list_get_id_count" \
+  "SetIDCount id_list_set_id_count" \
+  "GetNumberOfIDs id_list_get_number_of_ids"
+do
+  set -- $method_spec
+  method="$1"
+  output="$2"
+  awk -v method="$method" '
+    $0 ~ "^[A-Za-z0-9_:<> ]+C4IDList::" method "\\(" { p = 1 }
+    p { print }
+    p && /^}$/ { found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$src/C4IDList.cpp" > "$gen/${output}.inc"
+done
+
 awk '
   /^void C4Object::Fling\(/ { p = 1 }
   p { print }

@@ -1,5 +1,5 @@
-// Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
-// sequence, not a child module, so test ids stay `tests::<fn>`.
+    // Spliced into `mod tests` (src/main_tests.rs) via include!: a bare item
+    // sequence, not a child module, so test ids stay `tests::<fn>`.
 
     #[test]
     fn m10_l046_completion_matches_win32_and_gtk_function_layout() {
@@ -15,8 +15,8 @@
             .install_scenario_script(
                 "Scenario",
                 "func ScenarioAlpha() { return true; }\n\
-                 protected func ScenarioHidden() { return true; }\n\
-                 global func ScenarioGlobal() { return true; }",
+                     protected func ScenarioHidden() { return true; }\n\
+                     global func ScenarioGlobal() { return true; }",
             )
             .expect("install completion scenario");
 
@@ -34,7 +34,13 @@
             .engine_functions
             .iter()
             .any(|name| name == "SetContactDensity"));
-        for hidden in ["ScoreboardCol", "CastInt", "CastBool", "CastC4ID", "CastAny"] {
+        for hidden in [
+            "ScoreboardCol",
+            "CastInt",
+            "CastBool",
+            "CastC4ID",
+            "CastAny",
+        ] {
             assert!(!catalog.engine_functions.iter().any(|name| name == hidden));
         }
         assert_eq!(
@@ -42,10 +48,8 @@
             ["ScenarioHidden".to_string(), "ScenarioAlpha".to_string()]
         );
 
-        let win32 = developer_console_completion_entries(
-            &catalog,
-            DeveloperConsoleCompletionStyle::Win32,
-        );
+        let win32 =
+            developer_console_completion_entries(&catalog, DeveloperConsoleCompletionStyle::Win32);
         let separator = win32
             .iter()
             .position(|entry| *entry == DeveloperConsoleCompletionEntry::Separator)
@@ -59,14 +63,10 @@
             ]
         );
         assert!(win32[separator + 1..].iter().any(|entry| {
-            entry
-                == &DeveloperConsoleCompletionEntry::Function("EngineProbe()".to_string())
+            entry == &DeveloperConsoleCompletionEntry::Function("EngineProbe()".to_string())
         }));
 
-        let gtk = developer_console_completion_entries(
-            &catalog,
-            DeveloperConsoleCompletionStyle::Gtk,
-        );
+        let gtk = developer_console_completion_entries(&catalog, DeveloperConsoleCompletionStyle::Gtk);
         assert!(!gtk
             .iter()
             .any(|entry| *entry == DeveloperConsoleCompletionEntry::Separator));
@@ -136,10 +136,7 @@
         );
         let changed_at = started + BLOCKING_RESOURCE_STALL_TIMEOUT - Duration::from_millis(1);
         assert!(!advancing.observe_at(26, changed_at));
-        assert!(!advancing.observe_at(
-            26,
-            changed_at + BLOCKING_RESOURCE_STALL_TIMEOUT
-        ));
+        assert!(!advancing.observe_at(26, changed_at + BLOCKING_RESOURCE_STALL_TIMEOUT));
         assert!(advancing.observe_at(
             26,
             changed_at + BLOCKING_RESOURCE_STALL_TIMEOUT + Duration::from_millis(1)
@@ -190,8 +187,7 @@
     #[test]
     fn l126_headless_client_join_tracks_slow_resource_then_cancel_aborts() {
         let mut app = new_menu_app(800, 600);
-        let (manager, event_tx, _commands) =
-            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let (manager, event_tx, _commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Client(client_network_settings()));
 
@@ -209,8 +205,11 @@
         let mut snapshot = host_config
             .initial_join_snapshot
             .expect("default host publishes JoinData");
-        snapshot.parameters.scenario =
-            resource(clonk_network::HostResourceType::Scenario, 70, b"Scenario.c4s");
+        snapshot.parameters.scenario = resource(
+            clonk_network::HostResourceType::Scenario,
+            70,
+            b"Scenario.c4s",
+        );
         snapshot.dynamic = resource(clonk_network::HostResourceType::Dynamic, 71, b"Dynamic.c4s");
         snapshot.parameters.game_resources.clear();
         let mut reference_status = host_config.initial_status;
@@ -260,9 +259,9 @@
         );
         assert_eq!(progress.state.focused_button(), None);
         assert_eq!(
-            progress.state.button_label(
-                clonk_frontend::message_dialog::MessageDialogButton::Cancel
-            ),
+            progress
+                .state
+                .button_label(clonk_frontend::message_dialog::MessageDialogButton::Cancel),
             "Cancel"
         );
 
@@ -340,9 +339,7 @@
             app.admission_resources.status(core.id),
             Some(&AdmissionResourceState::Loading { removed: false })
         );
-        assert!(app
-            .aborted_player_resource_joins
-            .contains(&(core.id, 99)));
+        assert!(app.aborted_player_resource_joins.contains(&(core.id, 99)));
         let join = |info_id| {
             vec![NetworkControl::JoinPlayer(
                 clonk_engine::JoinPlayerControlData {
@@ -379,8 +376,7 @@
             env!("CARGO_MANIFEST_DIR"),
             "/../clonk-engine/tests/fixtures/embedded_player.c4p"
         ));
-        app.admission_resources
-            .mark_complete(core.id, player_path);
+        app.admission_resources.mark_complete(core.id, player_path);
         app.apply_ready_controls(
             0,
             vec![
@@ -409,9 +405,7 @@
             .players
             .iter()
             .any(|player| player.player_info_id == 99));
-        assert!(!app
-            .aborted_player_resource_joins
-            .contains(&(core.id, 99)));
+        assert!(!app.aborted_player_resource_joins.contains(&(core.id, 99)));
     }
 
     #[test]
@@ -458,8 +452,7 @@
         let install = tempdir().expect("install root");
         let user_data = tempdir().expect("user data");
         fs::create_dir_all(install.path().join("planet")).expect("planet directory");
-        fs::write(install.path().join("planet/System.c4g"), b"stub")
-            .expect("system group stub");
+        fs::write(install.path().join("planet/System.c4g"), b"stub").expect("system group stub");
         let config_file = user_data.path().join("custom/fresh.config");
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(install.path())),
@@ -476,10 +469,7 @@
         display.persist_if_dirty(&paths);
 
         let persisted = Config::load(&config_file).expect("load first-quit config");
-        assert_eq!(
-            persisted.get_in(Some("Graphics"), "DisplayMode"),
-            Some("0")
-        );
+        assert_eq!(persisted.get_in(Some("Graphics"), "DisplayMode"), Some("0"));
 
         fs::write(&config_file, "[General]\nSentinel=keep\n")
             .expect("write config without DisplayMode");
@@ -488,10 +478,7 @@
         missing_key.persist_if_dirty(&paths);
         let persisted = Config::load(&config_file).expect("reload missing-key config");
         assert_eq!(persisted.get_in(Some("General"), "Sentinel"), Some("keep"));
-        assert_eq!(
-            persisted.get_in(Some("Graphics"), "DisplayMode"),
-            Some("0")
-        );
+        assert_eq!(persisted.get_in(Some("Graphics"), "DisplayMode"), Some("0"));
     }
 
     #[test]
@@ -517,8 +504,7 @@
         let root = dir.path().join("Objects.c4d");
         let pure_sounds = root.join("Potions.c4d");
         fs::create_dir_all(&pure_sounds).expect("create pure install sound group");
-        fs::write(pure_sounds.join("Drink.wav"), silent_pcm_wav(20))
-            .expect("write pure install sound");
+        fs::write(pure_sounds.join("Drink.wav"), silent_pcm_wav(20)).expect("write pure install sound");
 
         let group = Group::open(&root).expect("open install definition root");
         let mut engine = Engine::new();
@@ -535,12 +521,10 @@
         .expect("walk install definition tree");
 
         assert_eq!(audio.available_sound_samples(), ["drink.wav"]);
-        assert!(
-            audio
-                .ensure_sound_with_key("Drink")
-                .expect("decode install pure-container sample")
-                .is_some()
-        );
+        assert!(audio
+            .ensure_sound_with_key("Drink")
+            .expect("decode install pure-container sample")
+            .is_some());
     }
 
     #[test]
@@ -549,8 +533,7 @@
         reset_cached_app_paths();
         let user_data = tempdir().expect("isolated localized-dialog user data");
         let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
-        persist_config_value(&paths, "General", "LanguageEx", "DE")
-            .expect("select German resources");
+        persist_config_value(&paths, "General", "LanguageEx", "DE").expect("select German resources");
         let mut app = new_menu_app_with_paths(640, 480, &paths);
 
         app.push_message_dialog(
@@ -650,13 +633,13 @@
         app.sync_classic_lobby_roster();
         let expected_color = lobby_rgba(0x00ff_0000);
         assert!(app
-            .classic_host_lobby
-            .as_ref()
-            .unwrap()
-            .controller
-            .rows()
-            .iter()
-            .any(|row| matches!(row, LobbyRosterRow::Player(player) if player.id == 4 && player.color == expected_color)));
+                .classic_host_lobby
+                .as_ref()
+                .unwrap()
+                .controller
+                .rows()
+                .iter()
+                .any(|row| matches!(row, LobbyRosterRow::Player(player) if player.id == 4 && player.color == expected_color)));
 
         let mut client = new_menu_app(640, 480);
         client.startup_view = StartupView::NetworkLobby;
@@ -665,15 +648,17 @@
             message_client(0, b"Exact Host"),
             message_client(7, b"Client"),
         ]);
-        client.control_player_infos.replace_snapshot(4, [authoritative]);
+        client
+            .control_player_infos
+            .replace_snapshot(4, [authoritative]);
         client.sync_classic_lobby_roster();
         assert!(client
-            .network_lobby
-            .as_ref()
-            .unwrap()
-            .roster_rows
-            .iter()
-            .any(|row| matches!(row, LobbyRosterRow::Player(player) if player.id == 4 && player.color == expected_color)));
+                .network_lobby
+                .as_ref()
+                .unwrap()
+                .roster_rows
+                .iter()
+                .any(|row| matches!(row, LobbyRosterRow::Player(player) if player.id == 4 && player.color == expected_color)));
     }
 
     #[test]
@@ -686,10 +671,7 @@
 
         let mut app = new_menu_app(640, 480);
         app.startup_view = StartupView::NetworkLobby;
-        let mut settings = ClientSettings::new(
-            SocketAddr::from(([127, 0, 0, 1], 11_112)),
-            "Client",
-        );
+        let mut settings = ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Client");
         settings.resource_directory = work.clone();
         app.network_mode = Some(NetworkMode::Client(settings));
         let (network, _events) = NetworkManager::test_stub_for_client_id(7);
@@ -746,8 +728,7 @@
     fn l098_takeover_selection_submits_full_local_packet_with_savegame_association() {
         let mut app = new_menu_app(640, 480);
         install_test_free_savegame_player_row(&mut app, 50);
-        let (network, _events, mut commands) =
-            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(network);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
             SocketAddr::from(([127, 0, 0, 1], 11_112)),
@@ -786,11 +767,8 @@
         }])
         .expect("free savegame player context opens");
         let root = app.context_menu.as_ref().unwrap().layout().panels[0].rows[0].rect;
-        app.handle_context_menu_pointer_move(GuiPoint::new(
-            (root.x + 1) as f32,
-            (root.y + 1) as f32,
-        ))
-        .expect("open takeover submenu");
+        app.handle_context_menu_pointer_move(GuiPoint::new((root.x + 1) as f32, (root.y + 1) as f32))
+            .expect("open takeover submenu");
 
         let mut live_sibling = sibling.clone();
         live_sibling.color = 0x0000_00bb;
@@ -804,18 +782,11 @@
             }],
         );
         let child = app.context_menu.as_ref().unwrap().layout().panels[1].rows[0].rect;
-        app.handle_context_menu_pointer_move(GuiPoint::new(
-            (child.x + 1) as f32,
-            (child.y + 1) as f32,
-        ))
-        .expect("select takeover child");
-        assert!(
-            app.handle_context_menu_pointer_button(
-                ElementState::Pressed,
-                ContextMenuPointerButton::Left,
-            )
-            .expect("activate takeover child")
-        );
+        app.handle_context_menu_pointer_move(GuiPoint::new((child.x + 1) as f32, (child.y + 1) as f32))
+            .expect("select takeover child");
+        assert!(app
+            .handle_context_menu_pointer_button(ElementState::Pressed, ContextMenuPointerButton::Left,)
+            .expect("activate takeover child"));
         assert!(app.context_menu.is_none());
 
         let mut expected_chosen = chosen.clone();
@@ -837,13 +808,9 @@
             0,
             "takeover waits for the authoritative PlayerInfo echo"
         );
-        assert!(
-            app.handle_context_menu_pointer_button(
-                ElementState::Released,
-                ContextMenuPointerButton::Left,
-            )
-            .expect("consume takeover activation release")
-        );
+        assert!(app
+            .handle_context_menu_pointer_button(ElementState::Released, ContextMenuPointerButton::Left,)
+            .expect("consume takeover activation release"));
     }
 
     #[test]
@@ -860,8 +827,7 @@
                 by_client: 0,
             }],
         );
-        let (network, _events, mut commands) =
-            NetworkManager::test_stub_with_commands_for_client_id(0);
+        let (network, _events, mut commands) = NetworkManager::test_stub_with_commands_for_client_id(0);
         app.network = Some(network);
         app.network_mode = Some(NetworkMode::Host(HostSettings {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -874,10 +840,9 @@
             position: GuiPoint::new(200.0, 150.0),
         }])
         .expect("player context opens");
-        assert!(
-            app.handle_context_menu_key(VirtualKeyCode::C, ElementState::Pressed)
-                .expect("activate New Color hotkey")
-        );
+        assert!(app
+            .handle_context_menu_key(VirtualKeyCode::C, ElementState::Pressed)
+            .expect("activate New Color hotkey"));
 
         let mut reset = chooser.clone();
         reset.color = reset.original_color;
@@ -977,14 +942,8 @@
             random_team_count: 0,
             teams: Vec::new(),
         };
-        let rows = classic_lobby_roster_projection(
-            &clients,
-            &infos,
-            Some(&metadata),
-            0,
-            LobbySheet::Teams,
-        )
-        .0;
+        let rows =
+            classic_lobby_roster_projection(&clients, &infos, Some(&metadata), 0, LobbySheet::Teams).0;
         assert_eq!(
             rows.iter().map(LobbyRosterRow::id).collect::<Vec<_>>(),
             vec![
@@ -1030,15 +989,9 @@
             ],
         );
         assert!(
-            classic_lobby_roster_projection(
-                &clients,
-                &infos,
-                Some(&metadata),
-                0,
-                LobbySheet::Teams,
-            )
-            .0
-            .is_empty(),
+            classic_lobby_roster_projection(&clients, &infos, Some(&metadata), 0, LobbySheet::Teams,)
+                .0
+                .is_empty(),
             "the Random team header is created lazily only for a visible active-client player"
         );
     }
@@ -1066,8 +1019,7 @@
             "alpha beta",
             "failed Cut must retain the selection"
         );
-        transfer_edit_selection(&mut edit, true, |_| Ok::<(), ()>(()))
-            .expect("successful Cut");
+        transfer_edit_selection(&mut edit, true, |_| Ok::<(), ()>(())).expect("successful Cut");
         assert_eq!(edit.text(), " beta");
 
         edit.set_text("replace me");
@@ -1176,18 +1128,13 @@
         let target = app
             .startup_element_tooltip_target_at(point)
             .expect("Start owns a native tooltip");
-        assert_eq!(
-            target,
-            StartupTooltip::resource("IDS_DLGTIP_STARTGAME")
-        );
+        assert_eq!(target, StartupTooltip::resource("IDS_DLGTIP_STARTGAME"));
         assert_eq!(
             app.resolve_startup_tooltip_text(target),
             "Start a local game without network support."
         );
         assert_eq!(
-            app.resolve_startup_tooltip_text(StartupTooltip::resource(
-                "IDS_L022_MISSING_RESOURCE"
-            )),
+            app.resolve_startup_tooltip_text(StartupTooltip::resource("IDS_L022_MISSING_RESOURCE")),
             "[Undefined: IDS_L022_MISSING_RESOURCE]"
         );
 
@@ -1202,10 +1149,7 @@
         // the inclusive 500ms boundary eligible. Pending hover bypasses the
         // cached base and the final overlay changes pixels.
         let started = Instant::now()
-            .checked_sub(
-                clonk_frontend::context_menu::CLASSIC_TOOLTIP_DELAY
-                    + Duration::from_millis(1),
-            )
+            .checked_sub(clonk_frontend::context_menu::CLASSIC_TOOLTIP_DELAY + Duration::from_millis(1))
             .expect("monotonic clock supports a 501ms lookback");
         app.startup_tooltip = ClassicTooltipTracker::new_at(started);
         app.startup_tooltip.note_pointer_move_at(point, started);
@@ -1256,11 +1200,7 @@
         };
         use clonk_frontend::startup_options_dlg::OptionsSheet;
 
-        fn assert_delayed_target(
-            app: &mut GameApp,
-            point: GuiPoint,
-            expected: StartupTooltip,
-        ) {
+        fn assert_delayed_target(app: &mut GameApp, point: GuiPoint, expected: StartupTooltip) {
             let started = Instant::now();
             app.startup_tooltip = ClassicTooltipTracker::new_at(started);
             app.startup_tooltip.note_pointer_move_at(point, started);
@@ -1274,9 +1214,7 @@
                 .is_none());
             assert_eq!(
                 app.startup_tooltip
-                    .eligible_pointer_at(
-                        started + clonk_frontend::context_menu::CLASSIC_TOOLTIP_DELAY,
-                    )
+                    .eligible_pointer_at(started + clonk_frontend::context_menu::CLASSIC_TOOLTIP_DELAY,)
                     .and_then(|point| app.classic_dialog_title_tooltip_target_at(point)),
                 Some(expected)
             );
@@ -1323,8 +1261,7 @@
         );
 
         use clonk_frontend::runtime_client_list::{
-            RuntimeClientListDialog, RuntimeClientListStatus, RuntimeClientRow,
-            RuntimeClientStatusIcon,
+            RuntimeClientListDialog, RuntimeClientListStatus, RuntimeClientRow, RuntimeClientStatusIcon,
         };
         let row = RuntimeClientRow {
             client_id: 7,
@@ -1516,11 +1453,8 @@
 
         app.runtime_client_list = None;
         app.startup_options_advanced_dialog = None;
-        let mut definition = clonk_frontend::definition_sel::DefinitionSelController::new(
-            "",
-            Vec::new(),
-            Vec::new(),
-        );
+        let mut definition =
+            clonk_frontend::definition_sel::DefinitionSelController::new("", Vec::new(), Vec::new());
         let (definition_width, definition_height) = {
             let surface = app.graphics.surface();
             (surface.width() as i32, surface.height() as i32)
@@ -1528,7 +1462,11 @@
         let definition_layout = definition.layout(
             definition_width,
             definition_height,
-            &app.assets.clonk_fonts.as_deref().expect("classic fonts").text,
+            &app.assets
+                .clonk_fonts
+                .as_deref()
+                .expect("classic fonts")
+                .text,
         );
         let definition_title = GuiPoint::new(
             (definition_layout.caption.x + 8) as f32,
@@ -1931,8 +1869,7 @@
     fn l016_screenshot_folder_override_falls_back_to_install_root() {
         let install = tempdir().expect("screenshot install root");
         let user_data = tempdir().expect("screenshot user data");
-        fs::create_dir_all(install.path().join("planet/System.c4g"))
-            .expect("fixture System group");
+        fs::create_dir_all(install.path().join("planet/System.c4g")).expect("fixture System group");
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(install.path())),
             ("LC_USER_DATA_DIR", Some(user_data.path())),
@@ -1977,7 +1914,10 @@
         let user = root.path().join("user");
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(root.path())),
-            ("LC_CONTENT_DIR", Some(root.path().join("content").as_path())),
+            (
+                "LC_CONTENT_DIR",
+                Some(root.path().join("content").as_path()),
+            ),
             ("LC_USER_DATA_DIR", Some(user.as_path())),
         ]);
         let paths = AppPaths::discover().expect("scenario font paths");
@@ -2035,9 +1975,7 @@
             &scenario,
             &ScenarioDefinitionLoad::Fixed {
                 modules: vec!["Objects.c4d".to_string()],
-                definition_root: Some(path_with_trailing_native_separator(
-                    definition_root.path(),
-                )),
+                definition_root: Some(path_with_trailing_native_separator(definition_root.path())),
             },
             &paths,
             &assets,
@@ -2090,7 +2028,10 @@
         let state = app.loader_screen.as_ref().expect("loader").state();
         assert_eq!(state.title(), "Loading...");
         assert_eq!(state.progress(), 0);
-        assert_eq!(state.log(), &clonk_frontend::loader_screen::LoaderLog::Hidden);
+        assert_eq!(
+            state.log(),
+            &clonk_frontend::loader_screen::LoaderLog::Hidden
+        );
     }
 
     #[test]
@@ -2289,8 +2230,7 @@
                 b"[Player]\nName=Alice\n[Preferences]\nColorDw=255\n".to_vec(),
             )
             .expect("add player core");
-        fs::write(&player_path, player_group.pack().expect("pack player"))
-            .expect("write player group");
+        fs::write(&player_path, player_group.pack().expect("pack player")).expect("write player group");
         let output_path = directory.path().join("001-Resource.c4s");
         let mut app = new_state_only_running_sandbox_app();
         install_test_recording_template(&mut app, output_path.clone());
@@ -2323,10 +2263,8 @@
         scenario.path = Some(output_path);
         app.active_scenario = Some(scenario);
         app.control_playback = Some(
-            ControlRecordPlayback::from_bytes(
-                &record.read_file("CtrlRec.c4b").expect("record stream"),
-            )
-            .expect("open record stream"),
+            ControlRecordPlayback::from_bytes(&record.read_file("CtrlRec.c4b").expect("record stream"))
+                .expect("open record stream"),
         );
         assert_eq!(
             app.replay_record_player_file(&core)
@@ -2346,8 +2284,11 @@
         let install = tempdir().expect("throwaway install root");
         let planet = install.path().join("planet");
         fs::create_dir_all(planet.join("System.c4g")).expect("create system group");
-        fs::write(install.path().join("Sentinel.txt"), b"install root survives")
-            .expect("write install sentinel");
+        fs::write(
+            install.path().join("Sentinel.txt"),
+            b"install root survives",
+        )
+        .expect("write install sentinel");
         let user_data = tempdir().expect("player sync user data");
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(install.path())),
@@ -2402,12 +2343,7 @@
         let residue = fs::read_dir(install.path().parent().expect("install parent"))
             .expect("scan install siblings")
             .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .contains("lc-rewrite")
-            })
+            .filter(|entry| entry.file_name().to_string_lossy().contains("lc-rewrite"))
             .count();
         assert_eq!(residue, 0, "no staged/backup rewrite residue may appear");
     }
@@ -2454,7 +2390,7 @@
         let mut app = new_running_sandbox_app();
         let mut clock = NetworkControlClock::new(0, 1);
         clock.set_target_fps(76);
-        clock.observe_round_trip_ms(300);
+        clock.observe_control_send_time_ms(300);
         for _ in 0..6 {
             assert!(clock.calculate_performance().is_none());
             clock.complete_control_frame();
@@ -2489,7 +2425,10 @@
         use clonk_engine::ScriptStrictness::{NonStrict, Strict1, Strict2, Strict3};
 
         for (config, expected) in [
-            ("[Developer]\nConsoleScriptStrictness=NonStrict\n", NonStrict),
+            (
+                "[Developer]\nConsoleScriptStrictness=NonStrict\n",
+                NonStrict,
+            ),
             ("[Developer]\nConsoleScriptStrictness=Strict1\n", Strict1),
             ("[Developer]\nConsoleScriptStrictness=Strict2\n", Strict2),
             ("[Developer]\nConsoleScriptStrictness=Strict3\n", Strict3),
@@ -2509,7 +2448,10 @@
             ("[Developer]\nConsoleScriptStrictness=0x2\n", Strict2),
             ("[Developer]\nConsoleScriptStrictness=2suffix\n", Strict2),
             ("[Developer]\nConsoleScriptStrictness=-0\n", NonStrict),
-            ("[Developer]\nConsoleScriptStrictness=\"Strict2\"\n", Strict3),
+            (
+                "[Developer]\nConsoleScriptStrictness=\"Strict2\"\n",
+                Strict3,
+            ),
             ("[Developer]\nConsoleScriptStrictness =Strict2\n", Strict3),
             ("[Developer]\nConsoleScriptStrictness= Strict2\n", Strict2),
             (
@@ -2527,7 +2469,11 @@
         for (value, expected) in [
             (
                 "4294967296",
-                if wide_unsigned_long { NonStrict } else { Strict3 },
+                if wide_unsigned_long {
+                    NonStrict
+                } else {
+                    Strict3
+                },
             ),
             (
                 "4294967298",
@@ -2613,7 +2559,8 @@
             scenario.identifier = identifier.to_string();
             scenario.title = title.to_string();
             scenario.path = Some(PathBuf::from(identifier));
-            app.scenario_catalog.insert(identifier.to_string(), scenario);
+            app.scenario_catalog
+                .insert(identifier.to_string(), scenario);
         }
         let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
         lobby.select_scenario("Old.c4s", "Old");
@@ -2668,7 +2615,8 @@
                 player_info(1, 48),
             )))
             .expect("queue direct PlayerInfo");
-        app.process_network_events().expect("apply direct PlayerInfo");
+        app.process_network_events()
+            .expect("apply direct PlayerInfo");
         assert_eq!(
             app.admission_resources.status(48),
             Some(&AdmissionResourceState::Loading { removed: false })
@@ -2689,14 +2637,12 @@
             clonk_engine::JoinPlayerControlData {
                 at_client: 9,
                 info_id: 1,
-                source: clonk_engine::JoinPlayerSource::Resource(
-                    clonk_engine::NetworkResourceCore {
-                        resource_type: clonk_network::HostResourceType::Player as u8,
-                        id: resource_id,
-                        loadable: true,
-                        ..Default::default()
-                    },
-                ),
+                source: clonk_engine::JoinPlayerSource::Resource(clonk_engine::NetworkResourceCore {
+                    resource_type: clonk_network::HostResourceType::Player as u8,
+                    id: resource_id,
+                    loadable: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         )];
@@ -2734,9 +2680,7 @@
         metadata.team_distribution = clonk_engine::InitialNetworkTeamDistribution::Random;
         app.engine
             .set_teams(runtime_teams_from_initial_metadata(&metadata));
-        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
-            metadata,
-        ));
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
         app.control_player_infos.replace_snapshot(
             30,
             [clonk_engine::PlayerInfoControlData {
@@ -2885,9 +2829,7 @@
         metadata.team_distribution = clonk_engine::InitialNetworkTeamDistribution::Random;
         app.engine
             .set_teams(runtime_teams_from_initial_metadata(&metadata));
-        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
-            metadata,
-        ));
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(metadata));
         let player = |id, team, color, original_color, projected_gain, name: &[u8], forced: &[u8]| {
             let mut player = set_control_test_player(id, team, 0);
             player.color = color;
@@ -2906,15 +2848,7 @@
                 clonk_engine::PlayerInfoControlData {
                     client_id: 3,
                     players: vec![
-                        player(
-                            10,
-                            1,
-                            0x0000_f400,
-                            0x00f4_0000,
-                            6,
-                            b"Alice",
-                            b"Alice (2)",
-                        ),
+                        player(10, 1, 0x0000_f400, 0x00f4_0000, 6, b"Alice", b"Alice (2)"),
                         player(20, 1, 0x0000_00f4, 0x0000_00f4, -1, b"Bob", b""),
                         player(30, 1, 0x00f4_f400, 0x00f4_f400, 0, b"Cara", b""),
                     ],
@@ -2922,15 +2856,7 @@
                 },
                 clonk_engine::PlayerInfoControlData {
                     client_id: 4,
-                    players: vec![player(
-                        40,
-                        2,
-                        0x00f4_0000,
-                        0x00f4_0000,
-                        9,
-                        b"Alice",
-                        b"",
-                    )],
+                    players: vec![player(40, 2, 0x00f4_0000, 0x00f4_0000, 9, b"Alice", b"")],
                     ..Default::default()
                 },
                 clonk_engine::PlayerInfoControlData {
@@ -3013,7 +2939,10 @@
             ],
         );
         assert_eq!((gain_only.client_id, gain_only.by_client), (5, 0));
-        assert_eq!(gain_only.flags & clonk_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED, 0);
+        assert_eq!(
+            gain_only.flags & clonk_engine::CLIENT_PLAYER_INFO_FLAG_UPDATED,
+            0
+        );
         assert_eq!(gain_only.players.len(), 1);
         assert_eq!(gain_only.players[0].id, 50);
         assert_eq!(gain_only.players[0].league_projected_gain, -1);
@@ -3086,10 +3015,8 @@
                         client_id: 1,
                         players: vec![clonk_engine::ControlPlayerInfoEntry {
                             id: info_id,
-                            name: clonk_engine::LegacyCString::from_bytes(
-                                b"Delayed resource".to_vec(),
-                            )
-                            .unwrap(),
+                            name: clonk_engine::LegacyCString::from_bytes(b"Delayed resource".to_vec())
+                                .unwrap(),
                             flags: clonk_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
                             resource: Some(core.clone()),
                             ..Default::default()
@@ -3108,7 +3035,8 @@
             })
             .expect("queue resource-backed join before completion");
 
-        app.update().expect("pending resource stalls the control tick");
+        app.update()
+            .expect("pending resource stalls the control tick");
 
         assert_eq!(app.engine.frame(), initial_frame);
         assert!(app.network_ticks.ready.contains_key(&tick));
@@ -3138,7 +3066,10 @@
             })
             .expect("player resource progress dialog");
         assert_eq!(progress.state.progress(), Some(0));
-        assert_eq!(progress.state.message(), "Waiting for player file for Delayed resource...");
+        assert_eq!(
+            progress.state.message(),
+            "Waiting for player file for Delayed resource..."
+        );
 
         event_tx
             .send(NetworkEvent::ResourceProgress {
@@ -3146,7 +3077,8 @@
                 present_percent: 47,
             })
             .expect("advance delayed player resource");
-        app.update().expect("updated progress still stalls the control tick");
+        app.update()
+            .expect("updated progress still stalls the control tick");
         assert_eq!(app.engine.frame(), initial_frame);
         assert_eq!(
             app.blocking_resource_wait
@@ -3174,7 +3106,8 @@
                 local: false,
             })
             .expect("complete delayed player resource");
-        app.update().expect("completed resource releases control tick");
+        app.update()
+            .expect("completed resource releases control tick");
 
         assert_eq!(app.engine.frame(), initial_frame + 1);
         assert!(!app.network_ticks.ready.contains_key(&tick));
@@ -3223,7 +3156,8 @@
             })
             .expect("queue resource-backed join before failure");
 
-        app.update().expect("pending resource stalls the control tick");
+        app.update()
+            .expect("pending resource stalls the control tick");
         assert_eq!(app.engine.frame(), initial_frame);
         assert_eq!(
             app.admission_resources.status(resource_id),
@@ -3674,10 +3608,7 @@
                 hud.upper_board.take().expect("restored upper board"),
             )
         };
-        assert_refusal(
-            &mut app,
-            vec!["Background.png", "UpperBoard.png"],
-        );
+        assert_refusal(&mut app, vec!["Background.png", "UpperBoard.png"]);
         let hud = Arc::make_mut(
             &mut Arc::get_mut(&mut app.assets)
                 .expect("frontend assets are app-owned")
@@ -3802,7 +3733,11 @@
         fs::write(base_path.join("C4.pal"), vec![0_u8; GamePalette::BYTE_LEN])
             .expect("base game palette");
         let cached_cursors = Arc::new(CursorAtlas::new(vec![
-            Some(ImageData::new(1, 1, vec![1, 2, 3, 255]));
+            Some(ImageData::new(
+                1,
+                1,
+                vec![1, 2, 3, 255]
+            ));
             8
         ]));
 
@@ -3868,10 +3803,7 @@
             }
         );
 
-        write_preview_png(
-            &override_path.join("Liquid.png"),
-            [170, 180, 190, 255],
-        );
+        write_preview_png(&override_path.join("Liquid.png"), [170, 180, 190, 255]);
         let valid_registration = [LoaderGroupRegistration {
             priority: 200,
             registration_order: 0,
@@ -4243,23 +4175,23 @@
         fs::write(
             scenario_dir.join("Scenario.json"),
             r#"
-            {
-                "name": "Alpha Mission",
-                "ground_height": 72,
-                "landscape": { "kind": "flat", "width": 160, "height": 80 },
-                "definitions": [
-                    { "id": "Mover", "name": "Mover", "script": "scripts/mover.aul" }
-                ],
-                "initial_objects": [
-                    {
-                        "definition": "Mover",
-                        "position": [40, 48],
-                        "owner": 1,
-                        "crew_member": true
-                    }
-                ]
-            }
-            "#,
+                {
+                    "name": "Alpha Mission",
+                    "ground_height": 72,
+                    "landscape": { "kind": "flat", "width": 160, "height": 80 },
+                    "definitions": [
+                        { "id": "Mover", "name": "Mover", "script": "scripts/mover.aul" }
+                    ],
+                    "initial_objects": [
+                        {
+                            "definition": "Mover",
+                            "position": [40, 48],
+                            "owner": 1,
+                            "crew_member": true
+                        }
+                    ]
+                }
+                "#,
         )
         .unwrap();
         fs::write(scripts_dir.join("mover.aul"), walker_script()).unwrap();
@@ -4371,10 +4303,10 @@
         write_definition(&local, "Shared.c4d", "SAME", 2);
         fs::create_dir_all(&scenario).expect("scenario directory");
         fs::write(
-            scenario.join("Scenario.txt"),
-            "[Head]\nTitle=Collision\n\n[Definitions]\nDefinition1=Objects.c4d\n\n[Landscape]\nSky=DefinitionSky\n",
-        )
-        .expect("scenario core");
+                scenario.join("Scenario.txt"),
+                "[Head]\nTitle=Collision\n\n[Definitions]\nDefinition1=Objects.c4d\n\n[Landscape]\nSky=DefinitionSky\n",
+            )
+            .expect("scenario core");
 
         let scenario_group = Group::open(&scenario).expect("scenario group");
         let resolver = InstallDefinitionResolver::new(None);
@@ -4387,10 +4319,10 @@
             .collect::<Vec<_>>();
 
         assert_eq!(
-            roots,
-            [global.clone()],
-            "the resolver returns the one explicit global resource; InitDefs adds folder-local resources separately"
-        );
+                roots,
+                [global.clone()],
+                "the resolver returns the one explicit global resource; InitDefs adds folder-local resources separately"
+            );
 
         let loaded = Scenario::load_from_path_with(&scenario, &resolver)
             .expect("collision scenario loads through app resolver");
@@ -4492,11 +4424,7 @@
         let outer_materials = packed_test_group(&[
             ("Source.txt", false, b"outer materials"),
             ("TexMap.txt", false, b"1=Earth-Rough\n"),
-            (
-                "Earth.c4m",
-                false,
-                b"[Material]\nName=Earth\nDensity=50\n",
-            ),
+            ("Earth.c4m", false, b"[Material]\nName=Earth\nDensity=50\n"),
             ("Rough.png", false, outer_png.as_slice()),
         ]);
         let inner_graphics = packed_test_group(&[
@@ -4510,11 +4438,7 @@
                 false,
                 b"OverloadMaterials\nOverloadTextures\n1=Earth-Rough\n",
             ),
-            (
-                "Earth.c4m",
-                false,
-                b"[Material]\nName=Earth\nDensity=100\n",
-            ),
+            ("Earth.c4m", false, b"[Material]\nName=Earth\nDensity=100\n"),
             ("Rough.png", false, inner_png.as_slice()),
         ]);
         let definition = packed_test_group(&[
@@ -4527,13 +4451,13 @@
             ("Graphics.png", false, inner_png.as_slice()),
         ]);
         let scenario = packed_test_group(&[
-            (
-                "Scenario.txt",
-                false,
-                b"[Head]\nTitle=Packed parents\n\n[Definitions]\nLocalOnly=1\n\n[Landscape]\nSky=Priority\n",
-            ),
-            ("Good.c4d", true, definition.as_slice()),
-        ]);
+                (
+                    "Scenario.txt",
+                    false,
+                    b"[Head]\nTitle=Packed parents\n\n[Definitions]\nLocalOnly=1\n\n[Landscape]\nSky=Priority\n",
+                ),
+                ("Good.c4d", true, definition.as_slice()),
+            ]);
         let inner = packed_test_group(&[
             ("Graphics.c4g", true, inner_graphics.as_slice()),
             ("Material.c4g", true, inner_materials.as_slice()),
@@ -4546,16 +4470,10 @@
         ]);
         let outer_path = dir.path().join("Outer.c4f");
         fs::write(&outer_path, outer).expect("write packed outer folder");
-        let scenario_group = open_group_path_for_folder_map(
-            &outer_path.join("Inner.c4f/Scen.c4s"),
-        )
-        .expect("open packed scenario through its parent chain");
+        let scenario_group = open_group_path_for_folder_map(&outer_path.join("Inner.c4f/Scen.c4s"))
+            .expect("open packed scenario through its parent chain");
 
-        assert_parent_resource_order(
-            &scenario_group,
-            &outer_path.join("Inner.c4f"),
-            &outer_path,
-        );
+        assert_parent_resource_order(&scenario_group, &outer_path.join("Inner.c4f"), &outer_path);
         let scenario_path = outer_path.join("Inner.c4f/Scen.c4s");
         preflight_offline_startup(&scenario_path)
             .expect("packed nested scenario passes offline startup preflight");
@@ -4604,15 +4522,21 @@
         let inner = outer.join("Inner.c4f");
         let scenario = inner.join("Scen.c4s");
         for (parent, graphic, material) in [
-            (&outer, b"outer graphics".as_slice(), b"outer materials".as_slice()),
-            (&inner, b"inner graphics".as_slice(), b"inner materials".as_slice()),
+            (
+                &outer,
+                b"outer graphics".as_slice(),
+                b"outer materials".as_slice(),
+            ),
+            (
+                &inner,
+                b"inner graphics".as_slice(),
+                b"inner materials".as_slice(),
+            ),
         ] {
             fs::create_dir_all(parent.join("Graphics.c4g")).expect("graphics group");
             fs::create_dir_all(parent.join("Material.c4g")).expect("material group");
-            fs::write(parent.join("Graphics.c4g/Source.txt"), graphic)
-                .expect("write graphic marker");
-            fs::write(parent.join("Material.c4g/Source.txt"), material)
-                .expect("write material marker");
+            fs::write(parent.join("Graphics.c4g/Source.txt"), graphic).expect("write graphic marker");
+            fs::write(parent.join("Material.c4g/Source.txt"), material).expect("write material marker");
         }
         fs::create_dir_all(&scenario).expect("scenario group");
         let scenario_group = Group::open(&scenario).expect("open unpacked scenario");
@@ -4629,8 +4553,7 @@
         let folder_graphics = family.join("Graphics.c4g");
         fs::create_dir_all(&scenario_graphics).expect("scenario graphics");
         fs::create_dir_all(&folder_graphics).expect("folder graphics");
-        fs::write(scenario_graphics.join("Shared.png"), b"scenario")
-            .expect("scenario graphic");
+        fs::write(scenario_graphics.join("Shared.png"), b"scenario").expect("scenario graphic");
         fs::write(folder_graphics.join("Shared.png"), b"folder").expect("folder graphic");
 
         let scenario_group = Group::open(&scenario).expect("scenario group");
@@ -4654,8 +4577,11 @@
         let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
         let scenario = content.join("Scenario.c4s");
         fs::create_dir_all(&scenario).expect("scenario group");
-        fs::write(scenario.join("Scenario.txt"), "[Head]\nTitle=GUI Override\n")
-            .expect("scenario core");
+        fs::write(
+            scenario.join("Scenario.txt"),
+            "[Head]\nTitle=GUI Override\n",
+        )
+        .expect("scenario core");
 
         let definition = content.join("Objects.c4d");
         let definition_graphics = definition.join("Graphics.c4g");
@@ -4865,30 +4791,30 @@
         fs::write(
             particle.join("Particle.txt"),
             "[Particle]\n\
-             Name=InstallParticle\n\
-             InitFn=StdInit\n\
-             ExecFn=StdExec\n\
-             DrawFn=Std\n\
-             Face=0,0,1,1,0,0\n",
+                 Name=InstallParticle\n\
+                 InitFn=StdInit\n\
+                 ExecFn=StdExec\n\
+                 DrawFn=Std\n\
+                 Face=0,0,1,1,0,0\n",
         )
         .unwrap();
         let particle_override = particle.join("Override.c4d");
         fs::create_dir_all(&particle_override).unwrap();
         fs::write(
-            particle_override.join("Particle.txt"),
-            "[Particle]\nName=InstallParticle\nInitFn=StdInit\nExecFn=StdExec\nDrawFn=Std\nFace=0,0,1,1,0,0\n",
-        )
-        .unwrap();
+                particle_override.join("Particle.txt"),
+                "[Particle]\nName=InstallParticle\nInitFn=StdInit\nExecFn=StdExec\nDrawFn=Std\nFace=0,0,1,1,0,0\n",
+            )
+            .unwrap();
         image::RgbaImage::from_pixel(1, 1, image::Rgba([9, 8, 7, 255]))
             .save(particle_override.join("Graphics.png"))
             .unwrap();
         let invalid_override = particle_override.join("Invalid.c4d");
         fs::create_dir_all(&invalid_override).unwrap();
         fs::write(
-            invalid_override.join("Particle.txt"),
-            "[Particle]\nName=InstallParticle\nInitFn=StdInit\nExecFn=StdExec\nDrawFn=MissingDrawProc\nFace=0,0,1,1,0,0\n",
-        )
-        .unwrap();
+                invalid_override.join("Particle.txt"),
+                "[Particle]\nName=InstallParticle\nInitFn=StdInit\nExecFn=StdExec\nDrawFn=MissingDrawProc\nFace=0,0,1,1,0,0\n",
+            )
+            .unwrap();
         image::RgbaImage::from_pixel(1, 1, image::Rgba([99, 98, 97, 255]))
             .save(invalid_override.join("Graphics.png"))
             .unwrap();
@@ -4919,9 +4845,7 @@
             load_install_definitions(&mut engine, &paths, None).expect("load install definitions");
         assert_eq!(spawn.as_deref(), Some("CLNK"));
         assert!(
-            engine
-                .definition_ids()
-                .any(|id| id == "CLNK"),
+            engine.definition_ids().any(|id| id == "CLNK"),
             "expected Clonk definition to be registered"
         );
         assert!(engine.definition_ids().any(|id| id == "WIPF"));
@@ -4947,22 +4871,16 @@
         );
 
         let objects_group = Group::open(planet_dir.join("objects.c4d")).unwrap();
-        assert!(
-            find_definition_in_group(&objects_group, "Clon")
-                .expect("lowercase ID lookup skips")
-                .is_none()
-        );
-        assert!(
-            find_definition_in_group(&objects_group, "0000")
-                .expect("invalid lookup skips")
-                .is_none()
-        );
+        assert!(find_definition_in_group(&objects_group, "Clon")
+            .expect("lowercase ID lookup skips")
+            .is_none());
+        assert!(find_definition_in_group(&objects_group, "0000")
+            .expect("invalid lookup skips")
+            .is_none());
         for rejected in ["MISS", "OLDG", "OVLY", "PART"] {
-            assert!(
-                find_definition_in_group(&objects_group, rejected)
-                    .expect("load-ladder rejection remains nonfatal")
-                    .is_none()
-            );
+            assert!(find_definition_in_group(&objects_group, rejected)
+                .expect("load-ladder rejection remains nonfatal")
+                .is_none());
         }
         assert_eq!(
             find_definition_in_group(&objects_group, "WIPF")

@@ -2665,12 +2665,13 @@ impl GameApp {
                 .map_err(anyhow::Error::new)?;
         }
         let mut players = if viewport_overlays_visible {
-            collect_player_overlays(
+            collect_player_overlays_for_viewports(
                 &mut self.engine,
                 &self.snapshot,
                 self.focus_id,
                 &self.bindings,
                 &self.gamepad_bindings,
+                &viewports,
             )
         } else {
             Vec::new()

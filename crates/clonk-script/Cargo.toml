@@ -11,6 +11,7 @@ bench = ["dep:criterion"]
 thiserror = "1"
 serde = { version = "1.0", features = ["derive"] }
 indexmap = { version = "2", features = ["serde"] }
+smallvec = { version = "1", features = ["const_generics"] }
 # Grows the native stack on demand so deep (but C++-legal, <=512) script
 # recursion doesn't overflow the thread stack in this tree-walking interpreter.
 stacker = "0.1"

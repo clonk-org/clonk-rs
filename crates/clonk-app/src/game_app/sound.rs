@@ -486,6 +486,9 @@ impl GameApp {
     }
 
     pub(crate) fn update_before_sound_instance_step(&mut self) -> Result<(), EngineError> {
+        // Each C4Game::Execute attempt recomputes whether Control.Prepare is
+        // blocked. The scheduler reads the reason after this method returns.
+        self.waiting_network_control = None;
         self.guard_classic_global_gui_bootstrap()?;
         self.poll_lobby_preload()?;
         if let Some(network) = self.network.as_ref() {
@@ -659,6 +662,10 @@ impl GameApp {
                                 )
                             });
                         if let Some(pending) = pending_player_resource {
+                            self.waiting_network_control =
+                                Some(NetworkControlWait::PlayerResource {
+                                    resource_id: pending.core.id,
+                                });
                             let player_name = pending
                                 .player_name
                                 .or_else(|| {
@@ -694,6 +701,8 @@ impl GameApp {
                                 )
                             })
                         else {
+                            self.waiting_network_control =
+                                Some(NetworkControlWait::ReadyTick(tick));
                             return Ok(());
                         };
                         // C++ CalcPerformance runs in GetControl, before the
@@ -708,16 +717,18 @@ impl GameApp {
                         let Some(network) = self.network.as_ref() else {
                             return Ok(());
                         };
-                        network.control_tick_consumed(tick, active_client_ids);
+                        let control_send_time_ms =
+                            network.control_tick_consumed(tick, active_client_ids);
                         // C++ GetControl::CalcPerformance precedes decoded
                         // Control.Execute. Its flash therefore precedes (and
                         // may be replaced by) a SetPreSend flash in this batch.
-                        if let Some(change) = self
-                            .network_control_clock
-                            .as_mut()
-                            .and_then(NetworkControlClock::calculate_performance)
-                        {
-                            self.apply_control_presend_change(change)?;
+                        if let Some(clock) = self.network_control_clock.as_mut() {
+                            if let Some(control_send_time_ms) = control_send_time_ms {
+                                clock.observe_control_send_time_ms(control_send_time_ms);
+                            }
+                            if let Some(change) = clock.calculate_performance() {
+                                self.apply_control_presend_change(change)?;
+                            }
                         }
                         let control_result = self.apply_ready_controls(tick, controls);
                         if control_result.is_ok() {

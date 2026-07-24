@@ -9,6 +9,7 @@ use tracing_subscriber::fmt::writer::{MakeWriter, MakeWriterExt};
 use tracing_subscriber::{fmt, EnvFilter};
 
 static INITIALIZED: OnceLock<()> = OnceLock::new();
+const DEFAULT_DEPENDENCY_FILTER: &str = "wgpu_core::device=warn";
 
 /// Process-local copy of formatted log output consumed by the developer
 /// console. The capture is intentionally independent from the bounded GUI
@@ -22,7 +23,10 @@ pub struct ConsoleLogCapture {
 impl ConsoleLogCapture {
     /// Remove and return every byte written since the previous drain.
     pub fn take(&self) -> String {
-        let mut bytes = self.bytes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut bytes = self
+            .bytes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let drained = std::mem::take(&mut *bytes);
         format_console_log(&String::from_utf8_lossy(&drained))
     }
@@ -133,11 +137,11 @@ pub fn init_verbose_with_file_and_capture(
         Ok(file) => {
             let init_result = if let Some(capture) = capture {
                 fmt()
-                .with_env_filter(env_filter(default_level))
+                    .with_env_filter(env_filter(default_level))
                     .with_writer(io::stderr.and(Mutex::new(file)).and(capture))
-                .with_ansi(false)
-                .with_target(false)
-                .with_level(true)
+                    .with_ansi(false)
+                    .with_target(false)
+                    .with_level(true)
                     .try_init()
             } else {
                 fmt()
@@ -167,12 +171,12 @@ pub fn init_verbose_with_file_and_capture(
                         .with_level(true)
                         .try_init();
                 } else {
-                let _ = fmt()
-                    .with_env_filter(env_filter(default_level))
-                    .with_writer(io::stderr)
-                    .with_target(false)
-                    .with_level(true)
-                    .try_init();
+                    let _ = fmt()
+                        .with_env_filter(env_filter(default_level))
+                        .with_writer(io::stderr)
+                        .with_target(false)
+                        .with_level(true)
+                        .try_init();
                 }
             });
             Err(err)
@@ -207,8 +211,9 @@ fn open_session_log(log_path: &Path) -> io::Result<File> {
 fn env_filter(default_level: &'static str) -> EnvFilter {
     let lc_log = std::env::var("LC_LOG").ok();
     let rust_log = std::env::var("RUST_LOG").ok();
-    let directive = select_filter_directive(lc_log.as_deref(), rust_log.as_deref(), default_level);
-    EnvFilter::new(directive)
+    explicit_filter_directive(lc_log.as_deref(), rust_log.as_deref())
+        .map(EnvFilter::new)
+        .unwrap_or_else(|| EnvFilter::new(format!("{default_level},{DEFAULT_DEPENDENCY_FILTER}")))
 }
 
 fn init_with_default_level(default_level: &'static str) {
@@ -227,8 +232,14 @@ pub fn select_filter_directive<'a>(
     rust_log: Option<&'a str>,
     default_level: &'a str,
 ) -> &'a str {
+    explicit_filter_directive(lc_log, rust_log).unwrap_or(default_level)
+}
+
+fn explicit_filter_directive<'a>(
+    lc_log: Option<&'a str>,
+    rust_log: Option<&'a str>,
+) -> Option<&'a str> {
     lc_log
         .or(rust_log)
         .filter(|directive| EnvFilter::try_new(directive).is_ok())
-        .unwrap_or(default_level)
 }

@@ -27,6 +27,7 @@ bitflags = { version = "2", features = ["std"] }
 # their optimized engine artifact is reusable by the full workspace gate.
 clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
 log = { version = "0.4", features = ["std"] }
+serde_json = "1"
 tokio = { version = "1", features = ["test-util"] }
 tracing-core = "0.1"
 

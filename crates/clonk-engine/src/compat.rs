@@ -5,21 +5,21 @@ use std::rc::Rc;
 
 use crate::action::{ScriptCallbackTarget, SharedActionLibrary};
 use crate::command::{
-    AcquireScriptResult, CallResultAction, CommandData, CommandDefinitionSnapshot, CommandEvent,
-    CommandEventInstanceKind, CommandFailureFeedback, CommandFailureReason, CommandId, CommandMode,
-    CommandObjectSnapshot, CommandOperation, CommandPlayerSnapshot, CommandRequest,
-    CommandRuntimeContext, CommandStack, CommandStackSnapshot, CommandView, MAX_COMMAND_STACK,
-    definition_id_to_c4id,
+    definition_id_to_c4id, AcquireScriptResult, CallResultAction, CommandData,
+    CommandDefinitionSnapshot, CommandEvent, CommandEventInstanceKind, CommandFailureFeedback,
+    CommandFailureReason, CommandId, CommandMode, CommandObjectSnapshot, CommandOperation,
+    CommandPlayerSnapshot, CommandRequest, CommandRuntimeContext, CommandStack,
+    CommandStackSnapshot, CommandView, MAX_COMMAND_STACK,
 };
 use crate::effect::{EffectCommand, EffectState, EffectVarValue};
 use crate::material::MaterialSet;
 use crate::math::{
-    C4Fixed, FixedVec2, fixed10, fixed100, fixtoi, fixtoi_prec, integer_distance, itofix,
-    itofix_prec,
+    fixed10, fixed100, fixtoi, fixtoi_prec, integer_distance, itofix, itofix_prec, C4Fixed,
+    FixedVec2,
 };
 use crate::message::{
-    ALIGNMENT_FLAGS, FLAG_DROP_SPEECH, FLAG_MULTIPLE, HORIZONTAL_POSITION_FLAGS, MessageCommand,
-    MessageKind, MessageSpec, VERTICAL_POSITION_FLAGS,
+    MessageCommand, MessageKind, MessageSpec, ALIGNMENT_FLAGS, FLAG_DROP_SPEECH, FLAG_MULTIPLE,
+    HORIZONTAL_POSITION_FLAGS, VERTICAL_POSITION_FLAGS,
 };
 use crate::ocf;
 use crate::rng::LcgRng;
@@ -27,24 +27,23 @@ use crate::scenario::{ScenarioValue, ScenarioValueStore};
 use crate::scoreboard::ScoreboardPresentationSink;
 use crate::sector::{SectorMap, SectorObject};
 use crate::sky::SkyAdjustment;
-use crate::text_spec::{TextSpec, parse_text_spec};
+use crate::text_spec::{parse_text_spec, TextSpec};
 use crate::transfer::TransferZoneTable;
 use crate::{
-    ActionLibrary, ActionProcedure, ActionState, ActionUpdate, AudioCommand, C4D_BORDER_BOTTOM,
-    C4D_BORDER_LAYER, C4D_BORDER_SIDES, C4D_BORDER_TOP, CATEGORY_SORT_LIMIT, CNAT_BOTTOM,
-    CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, ChangeDefContentsSort,
-    CommandDirection, CrewInfoCoreFields, CrewInfoLink, CrewObjectInfo, CrewPermanentPortrait,
-    CrewPortrait, CrewPortraitState, CrewSelectionState, DEFAULT_CATEGORY, DEFAULT_MUSIC_LEVEL,
-    DefinitionId, DefinitionRect, Direction, DrawTransform, EnvironmentSettings, FULL_CON,
-    FloatVector2, GraphicsOverlayMode,
-    Landscape, MenuRequest, MenuRequestKind, OWNER_NONE, ObjectBaseGraphics,
+    encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionState, ActionUpdate,
+    AudioCommand, ChangeDefContentsSort, CommandDirection, CrewInfoCoreFields, CrewInfoLink,
+    CrewObjectInfo, CrewPermanentPortrait, CrewPortrait, CrewPortraitState, CrewSelectionState,
+    DefinitionId, DefinitionRect, Direction, DrawTransform, EnvironmentSettings, FloatVector2,
+    GraphicsOverlayMode, Landscape, MenuRequest, MenuRequestKind, ObjectBaseGraphics,
     ObjectGraphicsOverlay, ObjectId, ObjectState, ObjectStatus, ObjectUpdate, ObjectVertex,
     ParticleCommand, ParticleConfig, ParticleLayer, ParticleScope, PathFinder,
-    PathfinderDebugSnapshot, PauseGameRequest,
-    PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState, QueuedCommand,
-    RgbColor, ScoreboardState, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig, SpeechFallback,
-    TeamConfiguration, TeamInfo, TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2,
-    encode_bridge_action_data,
+    PathfinderDebugSnapshot, PauseGameRequest, PhysicalsUpdate, PhysicsSettings,
+    PlayerControlState, PlayerState, QueuedCommand, RgbColor, ScoreboardState, ShapeAttachRecord,
+    ShapeVertexBuffer, SpawnConfig, SpeechFallback, TeamConfiguration, TeamInfo,
+    TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2, C4D_BORDER_BOTTOM,
+    C4D_BORDER_LAYER, C4D_BORDER_SIDES, C4D_BORDER_TOP, CATEGORY_SORT_LIMIT, CNAT_BOTTOM,
+    CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY,
+    DEFAULT_MUSIC_LEVEL, FULL_CON, OWNER_NONE,
 };
 #[cfg(test)]
 use crate::{LiquidSegment, PlayerViewport};
@@ -113,33 +112,30 @@ thread_local! {
     static CLOSE_QUERYING: RefCell<std::collections::HashSet<ObjectId>> =
         RefCell::new(std::collections::HashSet::new());
 }
-const LEGACY_GAME_PALETTE: &[u8; 256 * 3] =
-    include_bytes!("../../../planet/Graphics.c4g/C4.PAL");
+const LEGACY_GAME_PALETTE: &[u8; 256 * 3] = include_bytes!("../../../planet/Graphics.c4g/C4.PAL");
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ActionSpec;
-    use crate::AudioCommand;
     use crate::command::{CommandId, CommandOperation};
     use crate::message::{FLAG_BOTTOM, FLAG_LEFT, FLAG_WIDTH_REL, FLAG_X_REL};
     use crate::ocf;
+    use crate::ActionSpec;
+    use crate::AudioCommand;
     use clonk_resources::C4_MAX_PHYSICAL;
     use proptest::prelude::*;
     use std::collections::HashMap;
     use std::fmt;
     use std::sync::{Arc, Mutex};
     use tracing::field::{Field, Visit};
-    use tracing::{Level, subscriber};
+    use tracing::{subscriber, Level};
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use tracing_subscriber::registry::Registry;
 
     #[test]
     fn cpp_add_func_argument_extraction_canonicalizes_scalar_and_pointer_slots() {
         let raw_bool = Value::from_c4_bool_raw(2);
-        let high_word_bool = Value::from_c4_bool_data_raw(
-            1usize.checked_shl(32).unwrap_or(2),
-        );
+        let high_word_bool = Value::from_c4_bool_data_raw(1usize.checked_shl(32).unwrap_or(2));
 
         assert_eq!(
             extract_cpp_native_argument("Probe", 0, C4VType::Int, &Value::Nil)
@@ -190,13 +186,8 @@ mod tests {
             Value::Bool(false)
         );
         assert_eq!(
-            extract_cpp_native_argument(
-                "Probe",
-                0,
-                C4VType::C4Id,
-                &Value::C4Id("NONE".into()),
-            )
-            .expect("zero C4ID extracts as null"),
+            extract_cpp_native_argument("Probe", 0, C4VType::C4Id, &Value::C4Id("NONE".into()),)
+                .expect("zero C4ID extracts as null"),
             Value::Nil
         );
         assert_eq!(
@@ -263,10 +254,7 @@ mod tests {
             if wrapped {
                 wrap_cpp_add_func_host_function(&mut engine, "Probe", PROBE_TYPES);
             }
-            assert!(engine.set_host_function_parameter_types(
-                "Probe",
-                PROBE_TYPES.iter().copied(),
-            ));
+            assert!(engine.set_host_function_parameter_types("Probe", PROBE_TYPES.iter().copied(),));
             engine
                 .load_script(
                     "#strict 3\n\
@@ -290,9 +278,7 @@ mod tests {
             (result, debugger_args)
         }
 
-        let high_word_bool = Value::from_c4_bool_data_raw(
-            1usize.checked_shl(32).unwrap_or(2),
-        );
+        let high_word_bool = Value::from_c4_bool_data_raw(1usize.checked_shl(32).unwrap_or(2));
         let vm_prepared = vec![
             Value::Nil,
             Value::from_c4_bool_raw(2),
@@ -351,9 +337,7 @@ mod tests {
             Value::Int(1)
         );
 
-        let high_word_bool = Value::from_c4_bool_data_raw(
-            1usize.checked_shl(32).unwrap_or(2),
-        );
+        let high_word_bool = Value::from_c4_bool_data_raw(1usize.checked_shl(32).unwrap_or(2));
         assert_eq!(
             engine
                 .call("Not", &[high_word_bool])
@@ -364,31 +348,24 @@ mod tests {
 
     #[test]
     fn cpp_native_registration_kinds_are_exhaustively_partitioned() {
-        let cpp_backed =
-            crate::native_function_parameters::native_function_parameter_entries()
-                .filter(|(name, _)| {
-                    !crate::native_function_parameters::RUST_STANDIN_NATIVE_FUNCTIONS
-                        .contains(name)
-                })
-                .count();
+        let cpp_backed = crate::native_function_parameters::native_function_parameter_entries()
+            .filter(|(name, _)| {
+                !crate::native_function_parameters::RUST_STANDIN_NATIVE_FUNCTIONS.contains(name)
+            })
+            .count();
         assert_eq!(
             cpp_backed,
             crate::native_function_parameters::CPP_BACKED_NATIVE_FUNCTION_COUNT
         );
 
-        let add_func =
-            crate::native_function_parameters::native_function_parameter_entries()
-                .filter(|(name, _)| {
-                    !crate::native_function_parameters::RUST_STANDIN_NATIVE_FUNCTIONS
-                        .contains(name)
-                        && !RAW_CPP_NATIVE_FUNCTIONS.contains(name)
-                })
-                .count();
+        let add_func = crate::native_function_parameters::native_function_parameter_entries()
+            .filter(|(name, _)| {
+                !crate::native_function_parameters::RUST_STANDIN_NATIVE_FUNCTIONS.contains(name)
+                    && !RAW_CPP_NATIVE_FUNCTIONS.contains(name)
+            })
+            .count();
         assert_eq!(add_func, 442);
-        assert_eq!(
-            add_func - REFERENCE_AWARE_CPP_NATIVE_FUNCTIONS.len(),
-            434
-        );
+        assert_eq!(add_func - REFERENCE_AWARE_CPP_NATIVE_FUNCTIONS.len(), 434);
     }
 
     #[test]
@@ -409,9 +386,9 @@ mod tests {
                 &[Value::Proplist(ValueMap::from([("id", Value::Int(1))]))],
             )
             .expect_err("a map never converts to C4Object");
-        assert!(map_error.to_string().contains(
-            "call to \"GetX\" parameter 1: got \"map\", but expected \"object\"!"
-        ));
+        assert!(map_error
+            .to_string()
+            .contains("call to \"GetX\" parameter 1: got \"map\", but expected \"object\"!"));
         assert_eq!(
             legacy
                 .call("ZeroArgument", &[])
@@ -450,10 +427,7 @@ mod tests {
 
     #[test]
     fn lazy_get_inserts_objects_in_canonical_index_order() {
-        unsafe fn object(
-            source: *const (),
-            id: ObjectId,
-        ) -> Option<(usize, HostWorldObject)> {
+        unsafe fn object(source: *const (), id: ObjectId) -> Option<(usize, HostWorldObject)> {
             // SAFETY: the test keeps the source vector at a stable address
             // until after its only provider-bearing context is dropped.
             let objects = unsafe { &*source.cast::<Vec<HostWorldObject>>() };
@@ -511,10 +485,7 @@ mod tests {
         ] {
             let id = ObjectId::new(id);
             assert_eq!(world.get(id).map(|object| object.id), Some(id));
-            let expected = expected
-                .into_iter()
-                .map(ObjectId::new)
-                .collect::<Vec<_>>();
+            let expected = expected.into_iter().map(ObjectId::new).collect::<Vec<_>>();
             assert_eq!(
                 world.object_store.borrow().order.as_slice(),
                 expected.as_slice()
@@ -1119,10 +1090,7 @@ mod tests {
             "expected local hour {before} or {after}, got {local:?}"
         );
         assert_eq!(
-            query(
-                HostWorldContext::default().with_control_sync_mode(true),
-                4,
-            ),
+            query(HostWorldContext::default().with_control_sync_mode(true), 4,),
             Value::Nil
         );
         assert_eq!(query(HostWorldContext::default(), -1), Value::Nil);
@@ -1246,13 +1214,11 @@ mod tests {
 
         assert_eq!(result.expect("known section is accepted"), Value::Int(1));
         match outcome.player_commands.as_slice() {
-            [
-                PlayerCommand::LoadScenarioSection {
-                    name,
-                    flags,
-                    preserve_ids,
-                },
-            ] => {
+            [PlayerCommand::LoadScenarioSection {
+                name,
+                flags,
+                preserve_ids,
+            }] => {
                 assert_eq!(name, "mOuNtAiNs");
                 assert_eq!(*flags, 3);
                 assert_eq!(preserve_ids, &[ObjectId::new(1), ObjectId::new(2)]);
@@ -1270,13 +1236,11 @@ mod tests {
 
         assert_eq!(result.expect("known section is accepted"), Value::Int(1));
         match outcome.player_commands.as_slice() {
-            [
-                PlayerCommand::LoadScenarioSection {
-                    flags,
-                    preserve_ids,
-                    ..
-                },
-            ] => {
+            [PlayerCommand::LoadScenarioSection {
+                flags,
+                preserve_ids,
+                ..
+            }] => {
                 assert_eq!(*flags, 0);
                 assert!(preserve_ids.is_empty());
             }
@@ -1684,9 +1648,9 @@ mod tests {
         assert_eq!(requests.len(), 2, "missing-player calls emit no request");
         assert_eq!(requests[0].show_count, 2);
         assert_eq!(requests[1].show_count, 1);
-        assert!(requests.iter().all(|request| {
-            request.layout_revision == 1 && request.title_widget_present
-        }));
+        assert!(requests
+            .iter()
+            .all(|request| { request.layout_revision == 1 && request.title_widget_present }));
     }
 
     #[test]
@@ -1966,26 +1930,22 @@ public func Apply(int active, int zero_score, int retired, int runtime_number)
         );
         let from_snapshot = crate::EngineState::from_snapshot(&snapshot);
         assert_eq!(from_snapshot.round_results.league_performance, -3);
-        assert!(
-            from_snapshot
-                .round_results
-                .players
-                .iter()
-                .all(|player| player.league_performance == 0)
-        );
+        assert!(from_snapshot
+            .round_results
+            .players
+            .iter()
+            .all(|player| player.league_performance == 0));
         assert_eq!(
             from_snapshot.round_results.players[0].league_progress_data, None,
             "C4RoundResults save collapses empty progress to its null default"
         );
         let captured = engine.capture_state();
         assert_eq!(captured.round_results.league_performance, -3);
-        assert!(
-            captured
-                .round_results
-                .players
-                .iter()
-                .all(|player| player.league_performance == 0)
-        );
+        assert!(captured
+            .round_results
+            .players
+            .iter()
+            .all(|player| player.league_performance == 0));
         let restored = crate::EngineState::from_json_str(
             &captured
                 .to_json_string()
@@ -1993,13 +1953,11 @@ public func Apply(int active, int zero_score, int retired, int runtime_number)
         )
         .expect("league performance state deserializes");
         assert_eq!(restored.round_results.league_performance, -3);
-        assert!(
-            restored
-                .round_results
-                .players
-                .iter()
-                .all(|player| player.league_performance == 0)
-        );
+        assert!(restored
+            .round_results
+            .players
+            .iter()
+            .all(|player| player.league_performance == 0));
     }
 
     #[test]
@@ -2114,7 +2072,10 @@ public func Apply(int active, int zero_score, int retired, int runtime_number)
                 Value::Int(17),
             ])
         );
-        assert!(outcome.player_commands.is_empty(), "getter emits no controls");
+        assert!(
+            outcome.player_commands.is_empty(),
+            "getter emits no controls"
+        );
     }
 
     #[test]
@@ -2128,11 +2089,7 @@ public func Apply(int active, int zero_score, int retired, int runtime_number)
                 )
                 .expect("player registers");
         }
-        engine.replace_player_info_league_progress_data([
-            (41, None),
-            (43, None),
-            (57, None),
-        ]);
+        engine.replace_player_info_league_progress_data([(41, None), (43, None), (57, None)]);
         engine.replace_player_info_league_scores([(41, 238), (43, 0), (57, -19)]);
 
         let snapshot = engine.snapshot();
@@ -2775,24 +2732,19 @@ global func PreInitializePlayer(int player)
             Value::Bool(true)
         );
 
-        let [
-            ObjectOrderCommand::OrderFuncAll {
-                order: first,
-                category: default_category,
-            },
-            ObjectOrderCommand::OrderFuncObject {
-                order: second,
-                object: default_object,
-            },
-            ObjectOrderCommand::OrderFuncAll {
-                order: third,
-                category: explicit_category,
-            },
-            ObjectOrderCommand::OrderFuncObject {
-                order: fourth,
-                object: explicit_object,
-            },
-        ] = outcome.object_order_commands.as_slice()
+        let [ObjectOrderCommand::OrderFuncAll {
+            order: first,
+            category: default_category,
+        }, ObjectOrderCommand::OrderFuncObject {
+            order: second,
+            object: default_object,
+        }, ObjectOrderCommand::OrderFuncAll {
+            order: third,
+            category: explicit_category,
+        }, ObjectOrderCommand::OrderFuncObject {
+            order: fourth,
+            object: explicit_object,
+        }] = outcome.object_order_commands.as_slice()
         else {
             panic!(
                 "unexpected order-function queue: {:?}",
@@ -3173,8 +3125,11 @@ global func PreInitializePlayer(int player)
             clonk_script::c4_string_from_bytes(&[0xbf])
         );
         assert_eq!(
-            legacy_s_equal(&[Value::String("\u{ff}".into()), Value::String(split_utf8.into())])
-                .expect("byte-equivalent strings compare"),
+            legacy_s_equal(&[
+                Value::String("\u{ff}".into()),
+                Value::String(split_utf8.into())
+            ])
+            .expect("byte-equivalent strings compare"),
             Value::Int(1)
         );
     }
@@ -3220,11 +3175,8 @@ global func PreInitializePlayer(int player)
 
         // FnSetVar returns nil before touching NumVars when there is no caller.
         assert_eq!(
-            set_var(&[
-                Value::Int(LEGACY_MAX_ARRAY_SIZE),
-                Value::Int(9),
-            ])
-            .expect("SetVar without a caller succeeds"),
+            set_var(&[Value::Int(LEGACY_MAX_ARRAY_SIZE), Value::Int(9),])
+                .expect("SetVar without a caller succeeds"),
             Value::Nil
         );
     }
@@ -4128,7 +4080,9 @@ global func PreInitializePlayer(int player)
                 .into_value()
         };
         let typed = |value: &str| {
-            Value::C4Id(clonk_script::c4_id_from_raw(clonk_script::c4_id_parse(value)))
+            Value::C4Id(clonk_script::c4_id_from_raw(clonk_script::c4_id_parse(
+                value,
+            )))
         };
 
         assert_eq!(reflected(Some("NONE")), Value::Nil);
@@ -5448,15 +5402,10 @@ func Trigger(object pOther)
 
     #[test]
     fn optional_native_int_keeps_non_nil_raw_bool_zero_present() {
-        let high_word_bool =
-            Value::from_c4_bool_data_raw(1usize.checked_shl(32).unwrap_or(2));
+        let high_word_bool = Value::from_c4_bool_data_raw(1usize.checked_shl(32).unwrap_or(2));
         assert_eq!(
-            parse_native_optional_i32(
-                Some(&high_word_bool),
-                "Probe",
-                "optional integer",
-            )
-            .expect("raw Bool payload extracts"),
+            parse_native_optional_i32(Some(&high_word_bool), "Probe", "optional integer",)
+                .expect("raw Bool payload extracts"),
             Some(if usize::BITS > 32 { 0 } else { 2 })
         );
 
@@ -5650,7 +5599,10 @@ func Announce()
             death_announce_world(Some("Must stay hidden"), 2),
             || death_announce(&[]),
         );
-        assert_eq!(result.expect("Film DeathAnnounce succeeds"), Value::Bool(true));
+        assert_eq!(
+            result.expect("Film DeathAnnounce succeeds"),
+            Value::Bool(true)
+        );
         assert!(outcome.messages.is_empty());
 
         let (objectless, outcome) = with_effect_context(
@@ -5686,10 +5638,10 @@ func Announce()
             let choice = expected_rng.random(7) as usize;
             SCRIPT_SAFE_RNG.with(|rng| *rng.borrow_mut() = initial_rng);
 
-            let (result, outcome) = with_object_host_context_with_world(
-                death_announce_world(None, 0),
-                || death_announce(&[]),
-            );
+            let (result, outcome) =
+                with_object_host_context_with_world(death_announce_world(None, 0), || {
+                    death_announce(&[])
+                });
             assert_eq!(result.expect("fallback succeeds"), Value::Bool(true));
             assert!(matches!(
                 outcome.messages.as_slice(),
@@ -6307,10 +6259,7 @@ func Announce()
                     Value::Int(7),
                     Value::String("Hello 2$NoPlayerSpeech$".into()),
                 ])?,
-                plr_message(&[
-                    Value::String("Hello 3$NoPlrSpeech$".into()),
-                    Value::Int(7),
-                ])?,
+                plr_message(&[Value::String("Hello 3$NoPlrSpeech$".into()), Value::Int(7)])?,
             ))
         });
         let _ = audio_guard.finish();
@@ -6368,8 +6317,7 @@ func Announce()
 
     #[test]
     fn message_speech_catalog_matches_cpp_prepared_filenames() {
-        let invalid_star_matches =
-            HashSet::from(["foo.wav".to_string(), "foo12.wav".to_string()]);
+        let invalid_star_matches = HashSet::from(["foo.wav".to_string(), "foo12.wav".to_string()]);
         assert!(!sound_sample_available(&invalid_star_matches, "Foo*"));
         let mut valid_star_matches = invalid_star_matches;
         valid_star_matches.insert("foo1.wav".to_string());
@@ -6571,11 +6519,7 @@ func Announce()
                 Value::Int(100),
             ])?;
             assert_eq!(
-                sound_level(&[
-                    Value::String("Shot".into()),
-                    Value::Int(0),
-                    target_value,
-                ])?,
+                sound_level(&[Value::String("Shot".into()), Value::Int(0), target_value,])?,
                 Value::Nil
             );
             Ok::<_, RuntimeError>(Value::Nil)
@@ -7123,7 +7067,11 @@ public func CheckGoals()
 
         assert_eq!(
             engine
-                .call_object_function(goal_index, "HasAccess", vec![Value::String(String::new().into())],)
+                .call_object_function(
+                    goal_index,
+                    "HasAccess",
+                    vec![Value::String(String::new().into())],
+                )
                 .expect("explicit empty query executes"),
             Value::Bool(true),
             "SGetModule exposes the initially empty module"
@@ -7143,7 +7091,11 @@ public func CheckGoals()
         );
         assert_eq!(
             engine
-                .call_object_function(goal_index, "HasAccess", vec![Value::String(String::new().into())],)
+                .call_object_function(
+                    goal_index,
+                    "HasAccess",
+                    vec![Value::String(String::new().into())],
+                )
                 .expect("post-grant empty query executes"),
             Value::Bool(false)
         );
@@ -7205,9 +7157,9 @@ public func CheckGoals()
     fn mission_access_uses_native_bytes_for_equality_and_length() {
         assert!(c4_bytes_equal_no_case(&[0xe4], &[0xc4]));
         assert_eq!(
-            clonk_script::c4_string_bytes(&normalize_sound_name(&clonk_script::c4_string_from_bytes(&[
-                0xe4
-            ]),)),
+            clonk_script::c4_string_bytes(&normalize_sound_name(
+                &clonk_script::c4_string_from_bytes(&[0xe4]),
+            )),
             [0xc4]
         );
         assert_eq!(
@@ -7256,11 +7208,7 @@ public func CheckGoals()
         let access = Rc::new(RefCell::new("Alpha; Beta ;Gamma".to_string()));
         for password in ["alpha", "BETA", "Gamma"] {
             assert_eq!(
-                query(
-                    Rc::clone(&access),
-                    false,
-                    &[Value::String(password.into())]
-                ),
+                query(Rc::clone(&access), false, &[Value::String(password.into())]),
                 Value::Bool(true)
             );
         }
@@ -7281,11 +7229,7 @@ public func CheckGoals()
         let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
         subscriber::with_default(subscriber, || {
             assert_eq!(
-                query(
-                    Rc::clone(&access),
-                    true,
-                    &[Value::String("Alpha".into())]
-                ),
+                query(Rc::clone(&access), true, &[Value::String("Alpha".into())]),
                 Value::Bool(true)
             );
             assert_eq!(
@@ -7495,7 +7439,8 @@ public func CheckGoals()
     #[test]
     fn format_width_precision_and_c4id_use_native_byte_counts() {
         let utf8 = Value::String("\u{ff}".into());
-        let projected = Value::String(clonk_script::c4_string_from_bytes("\u{ff}".as_bytes()).into());
+        let projected =
+            Value::String(clonk_script::c4_string_from_bytes("\u{ff}".as_bytes()).into());
         let format = Value::String("%.1s|%3s|%c".into());
         let render = |value: Value| {
             let result = format_string(&[format.clone(), value.clone(), value, Value::Int(0xff)])
@@ -7528,8 +7473,10 @@ public func CheckGoals()
         assert_eq!(clonk_script::c4_string_bytes(&nul_truncated), b"A");
 
         let raw = [0xff, b'A', b'B', b'C'];
-        let id = c4_id(&[Value::String(clonk_script::c4_string_from_bytes(&raw).into())])
-            .expect("raw C4ID converts");
+        let id = c4_id(&[Value::String(
+            clonk_script::c4_string_from_bytes(&raw).into(),
+        )])
+        .expect("raw C4ID converts");
         assert_eq!(
             cast_int(&[id.clone()]).expect("raw C4ID payload casts"),
             Value::Int(-1),
@@ -7583,7 +7530,10 @@ public func CheckGoals()
         .expect("typed command Tx parses");
         assert_eq!(request.tx, Some(12345));
         assert_eq!(
-            request.tx_definition.as_deref().map(clonk_script::c4_id_raw),
+            request
+                .tx_definition
+                .as_deref()
+                .map(clonk_script::c4_id_raw),
             Some(12345)
         );
     }
@@ -7863,19 +7813,15 @@ public func RejectConstruction(x, y, builder)
     #[test]
     fn create_array_rejects_out_of_range_sizes() {
         let error = create_array(&[Value::Int(-1)]).expect_err("CreateArray rejects negative");
-        assert!(
-            error
-                .message()
-                .starts_with("CreateArray: invalid array size")
-        );
+        assert!(error
+            .message()
+            .starts_with("CreateArray: invalid array size"));
 
         let error = create_array(&[Value::Int(LEGACY_MAX_ARRAY_SIZE + 1)])
             .expect_err("CreateArray rejects oversized");
-        assert!(
-            error
-                .message()
-                .starts_with("CreateArray: invalid array size")
-        );
+        assert!(error
+            .message()
+            .starts_with("CreateArray: invalid array size"));
     }
 
     #[test]
@@ -8310,9 +8256,7 @@ public func RejectConstruction(x, y, builder)
 
         let mut strict2_source = ScriptEngine::new();
         strict2_source
-            .load_script(
-                "#strict 2\nfunc Probe() { var unset; return GetIndexOf(0, [unset]); }",
-            )
+            .load_script("#strict 2\nfunc Probe() { var unset; return GetIndexOf(0, [unset]); }")
             .expect("strict2 source loads");
 
         let mut strict3_destination = ScriptEngine::new();
@@ -8352,13 +8296,11 @@ public func RejectConstruction(x, y, builder)
                 Value::Int(-1)
             );
         }
-        assert!(
-            strict2
-                .call("Wrong", &[])
-                .expect_err("truthy non-array is rejected")
-                .to_string()
-                .contains("expected \"array\"")
-        );
+        assert!(strict2
+            .call("Wrong", &[])
+            .expect_err("truthy non-array is rejected")
+            .to_string()
+            .contains("expected \"array\""));
         assert_eq!(
             strict2
                 .call("Passed", &[Value::C4Id("NONE".into())])
@@ -8382,13 +8324,11 @@ public func RejectConstruction(x, y, builder)
                  func Passed(value) { return GetIndexOf(1, value); }",
             )
             .expect("strict3 parameter probe loads");
-        assert!(
-            strict3
-                .call("Zero", &[])
-                .expect_err("strict3 retains typed zero")
-                .to_string()
-                .contains("expected \"array\"")
-        );
+        assert!(strict3
+            .call("Zero", &[])
+            .expect_err("strict3 retains typed zero")
+            .to_string()
+            .contains("expected \"array\""));
         assert_eq!(
             strict3
                 .call("Passed", &[Value::C4Id("0000".into())])
@@ -8501,11 +8441,9 @@ public func RejectConstruction(x, y, builder)
 
         let records = records.lock().unwrap();
         assert!(records.iter().all(|record| record.level == Level::INFO));
-        assert!(
-            records
-                .iter()
-                .all(|record| record.target == "clonk-script-trace")
-        );
+        assert!(records
+            .iter()
+            .all(|record| record.target == "clonk-script-trace"));
         assert_eq!(
             records
                 .iter()
@@ -8663,7 +8601,10 @@ public func RejectConstruction(x, y, builder)
                 trace
             };
 
-            assert_eq!(script.call("Arm", &[]).expect("eval succeeds"), Value::Int(7));
+            assert_eq!(
+                script.call("Arm", &[]).expect("eval succeeds"),
+                Value::Int(7)
+            );
             assert_eq!(
                 take_trace(),
                 [
@@ -8700,10 +8641,7 @@ public func RejectConstruction(x, y, builder)
                 Some("eval in Scenario")
             );
             assert_eq!(error.call_frames()[2].function(), "NestedFail");
-            assert_eq!(
-                take_trace(),
-                ["T>eval in Scenario", "T>>eval in Scenario"]
-            );
+            assert_eq!(take_trace(), ["T>eval in Scenario", "T>>eval in Scenario"]);
 
             assert_eq!(
                 script
@@ -8742,7 +8680,7 @@ public func RejectConstruction(x, y, builder)
                 clonk_script::active_direct_exec_diagnostic_frames()
                     .into_iter()
                     .map(Value::from)
-                .collect(),
+                    .collect(),
             ))
         });
         script.register_host_function("MissingObject", |_| Ok(Value::Object(999)));
@@ -8865,9 +8803,7 @@ public func RejectConstruction(x, y, builder)
             script
                 .call("GlobalFrame", &[])
                 .expect("callerless global frame eval succeeds"),
-            Value::Array(vec![Value::String(
-                "eval in Scenario.c4s/Script.c".into()
-            )]),
+            Value::Array(vec![Value::String("eval in Scenario.c4s/Script.c".into())]),
             "a callerless global function is owned by Game.ScriptEngine"
         );
         assert_eq!(
@@ -8891,9 +8827,7 @@ public func RejectConstruction(x, y, builder)
             script
                 .call("ProbeGlobal", &[])
                 .expect("global frame eval succeeds"),
-            Value::Array(vec![Value::String(
-                "eval in Scenario.c4s/Script.c".into()
-            )]),
+            Value::Array(vec![Value::String("eval in Scenario.c4s/Script.c".into())]),
             "a null Obj/Def global frame selects Game.Script"
         );
 
@@ -8987,7 +8921,9 @@ public func RejectConstruction(x, y, builder)
             .expect("script-profiler probes compile");
         let script = Arc::new(script);
         assert_eq!(
-            script.call("StartAll", &[]).expect("global profiler starts"),
+            script
+                .call("StartAll", &[])
+                .expect("global profiler starts"),
             Value::Bool(true)
         );
         assert_eq!(
@@ -9006,7 +8942,9 @@ public func RejectConstruction(x, y, builder)
 
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             assert_eq!(
-                script.call("StartAll", &[]).expect("global profiler starts"),
+                script
+                    .call("StartAll", &[])
+                    .expect("global profiler starts"),
                 Value::Bool(true)
             );
             assert_eq!(
@@ -9043,7 +8981,9 @@ public func RejectConstruction(x, y, builder)
             .expect("ReloadDef probes compile");
 
         assert_eq!(
-            script.call("Explicit", &[]).expect("explicit reload executes"),
+            script
+                .call("Explicit", &[])
+                .expect("explicit reload executes"),
             Value::Int(0)
         );
         assert_eq!(
@@ -9123,7 +9063,9 @@ public func RejectConstruction(x, y, builder)
         let replay_world = engine.host_world_context();
         let (result, _) = with_effect_context(None, &[], replay_world, 1, || {
             assert_eq!(
-                script.call("Halt", &[]).expect("replay halt probe executes"),
+                script
+                    .call("Halt", &[])
+                    .expect("replay halt probe executes"),
                 Value::Int(7)
             );
             assert_eq!(
@@ -9167,13 +9109,10 @@ public func RejectConstruction(x, y, builder)
             .register_player(crate::PlayerConfig::new(0, "Player"))
             .expect("film-view player registers");
         let call = |engine: &crate::Engine| {
-            let (result, _) = with_effect_context(
-                None,
-                &[],
-                engine.host_world_context(),
-                1,
-                || script.call("Probe", &[]),
-            );
+            let (result, _) =
+                with_effect_context(None, &[], engine.host_world_context(), 1, || {
+                    script.call("Probe", &[])
+                });
             result.expect("SetFilmView probe executes")
         };
 
@@ -9213,9 +9152,7 @@ public func RejectConstruction(x, y, builder)
             engine.take_viewport_presentation_requests(),
             vec![
                 crate::ViewportPresentationRequest::SetFilmView { player: 0 },
-                crate::ViewportPresentationRequest::SetFilmView {
-                    player: OWNER_NONE,
-                },
+                crate::ViewportPresentationRequest::SetFilmView { player: OWNER_NONE },
             ],
             "invalid players never reach the app-owned viewport channel"
         );
@@ -9249,9 +9186,7 @@ public func RejectConstruction(x, y, builder)
         );
         assert_eq!(
             without_viewport.take_viewport_presentation_requests(),
-            vec![crate::ViewportPresentationRequest::SetFilmView {
-                player: OWNER_NONE,
-            }],
+            vec![crate::ViewportPresentationRequest::SetFilmView { player: OWNER_NONE }],
             "an explicit observer viewport exists independently of local players"
         );
     }
@@ -9272,13 +9207,9 @@ public func RejectConstruction(x, y, builder)
             .expect("viewport player registers");
         engine.set_replay_control(true);
         engine.set_film_viewport_available(true);
-        let (result, _) = with_effect_context(
-            None,
-            &[],
-            engine.host_world_context(),
-            1,
-            || script.call("Probe", &[]),
-        );
+        let (result, _) = with_effect_context(None, &[], engine.host_world_context(), 1, || {
+            script.call("Probe", &[])
+        });
         result.expect("viewport request probe executes");
         assert_eq!(
             engine.take_viewport_presentation_requests(),
@@ -9314,8 +9245,7 @@ public func RejectConstruction(x, y, builder)
             )
             .expect("script-profiler report probes compile");
         let script = Arc::new(script);
-        let world =
-            HostWorldContext::default().with_scenario_script(Some(Arc::clone(&script)));
+        let world = HostWorldContext::default().with_scenario_script(Some(Arc::clone(&script)));
         let records = Arc::new(Mutex::new(Vec::new()));
         let subscriber = Registry::default().with(RecordingLayer::new(Arc::clone(&records)));
 
@@ -9369,7 +9299,10 @@ public func RejectConstruction(x, y, builder)
             .iter()
             .position(|record| record.message.ends_with("game BInner"))
             .expect("inner function is profiled");
-        assert!(outer < inner, "inclusive outer time sorts before inner time");
+        assert!(
+            outer < inner,
+            "inclusive outer time sorts before inner time"
+        );
         let elapsed = rows
             .iter()
             .map(|record| {
@@ -9512,10 +9445,7 @@ public func RejectConstruction(x, y, builder)
                 };
                 assert_eq!(call("MissingName", &[])?, Value::Bool(false));
                 // An allocated empty C4String is not a missing C4String*.
-                assert_eq!(
-                    call("EmptyName", &[Value::Object(1)])?,
-                    Value::Bool(true)
-                );
+                assert_eq!(call("EmptyName", &[Value::Object(1)])?, Value::Bool(true));
                 assert_eq!(
                     call("MissingFunction", &[Value::Object(1)])?,
                     Value::Bool(true)
@@ -9546,7 +9476,13 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(records.len(), 6);
         let diagnostics = records
             .iter()
-            .map(|record| (record.level, record.target.as_str(), record.message.as_str()))
+            .map(|record| {
+                (
+                    record.level,
+                    record.target.as_str(),
+                    record.message.as_str(),
+                )
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             diagnostics,
@@ -10273,11 +10209,13 @@ public func RejectConstruction(x, y, builder)
         texmap.texture_names[3] = Some("Smooth".to_string());
         texmap.match_texture_names[3] = Some("Smooth".to_string());
         texmap.shapes[3] = Some(crate::chunky::ChunkShape::Flat);
-        texmap.materials.push(crate::landscape::RuntimeTexMapMaterial {
-            name: "Vehicle".to_string(),
-            density: 100,
-            shape: crate::chunky::ChunkShape::Flat,
-        });
+        texmap
+            .materials
+            .push(crate::landscape::RuntimeTexMapMaterial {
+                name: "Vehicle".to_string(),
+                density: 100,
+                shape: crate::chunky::ChunkShape::Flat,
+            });
         texmap.texture_inventory.push("Smooth".to_string());
         texmap.set_default_material_entry("Vehicle", 3);
         assert!(landscape.replace_runtime_texmap_state(texmap));
@@ -10454,11 +10392,7 @@ public func RejectConstruction(x, y, builder)
             render_texture_names,
         ));
         assert_eq!(
-            landscape
-                .pixel_grid()
-                .expect("pixel grid")
-                .texture_names()[25]
-                .as_deref(),
+            landscape.pixel_grid().expect("pixel grid").texture_names()[25].as_deref(),
             Some("Liquid"),
             "the frontend still sees the remapped Liquid render surface"
         );
@@ -10501,18 +10435,10 @@ public func RejectConstruction(x, y, builder)
         // GetEntry returns a non-null pointer even for an empty entry
         // (C4Script.cpp:5071-5075; C4Landscape.cpp:2733-2755;
         // C4Texture.h:83).
-        let (result, outcome) = with_effect_context(
-            None,
-            &[],
-            draw_map_world(8, 7, 3, false),
-            1,
-            || {
+        let (result, outcome) =
+            with_effect_context(None, &[], draw_map_world(8, 7, 3, false), 1, || {
                 Ok::<_, RuntimeError>(Value::Array(vec![
-                    set_texture_index(&[
-                        Value::Nil,
-                        Value::Int(2),
-                        Value::Bool(false),
-                    ])?,
+                    set_texture_index(&[Value::Nil, Value::Int(2), Value::Bool(false)])?,
                     set_texture_index(&[
                         Value::String("Earth-Rough".to_string().into()),
                         Value::Int(0),
@@ -10552,15 +10478,10 @@ public func RejectConstruction(x, y, builder)
                     // empty mat/tex is a successful no-op. Nonempty 126/127
                     // paths reach native one-past-array writes and are
                     // deliberately contained.
-                    set_texture_index(&[
-                        Value::Nil,
-                        Value::Int(127),
-                        Value::Bool(true),
-                    ])?,
+                    set_texture_index(&[Value::Nil, Value::Int(127), Value::Bool(true)])?,
                     get_texture(&[Value::Int(2), Value::Int(2)])?,
                 ]))
-            },
-        );
+            });
 
         assert_eq!(
             result.expect("SetTextureIndex rejection paths succeed"),
@@ -10656,24 +10577,23 @@ public func RejectConstruction(x, y, builder)
         let initial_revision = initial_grid.revision();
         let initial_material_names = initial_grid.material_names().to_vec();
         let initial_texture_names = initial_grid.texture_names().to_vec();
-        let (result, outcome) =
-            with_effect_context(None, &[], replay_world.clone(), 1, || {
-                Ok::<_, RuntimeError>(Value::Array(vec![
-                    get_texture(&[Value::Int(2), Value::Int(2)])?,
-                    set_texture_index(&[
-                        Value::String("Earth-Rough".to_string().into()),
-                        Value::Int(2),
-                        Value::Bool(false),
-                    ])?,
-                    get_texture(&[Value::Int(2), Value::Int(2)])?,
-                    get_texture(&[Value::Int(1), Value::Int(2)])?,
-                    set_texture_index(&[
-                        Value::String("Earth-Rough".to_string().into()),
-                        Value::Int(2),
-                        Value::Bool(false),
-                    ])?,
-                ]))
-            });
+        let (result, outcome) = with_effect_context(None, &[], replay_world.clone(), 1, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                get_texture(&[Value::Int(2), Value::Int(2)])?,
+                set_texture_index(&[
+                    Value::String("Earth-Rough".to_string().into()),
+                    Value::Int(2),
+                    Value::Bool(false),
+                ])?,
+                get_texture(&[Value::Int(2), Value::Int(2)])?,
+                get_texture(&[Value::Int(1), Value::Int(2)])?,
+                set_texture_index(&[
+                    Value::String("Earth-Rough".to_string().into()),
+                    Value::Int(2),
+                    Value::Bool(false),
+                ])?,
+            ]))
+        });
 
         assert_eq!(
             result.expect("SetTextureIndex and GetTexture succeed"),
@@ -10698,10 +10618,7 @@ public func RejectConstruction(x, y, builder)
         for slot in [1, 2] {
             assert_eq!(texmap.material_names[slot].as_deref(), Some("Earth"));
             assert_eq!(texmap.texture_names[slot].as_deref(), Some("Rough"));
-            assert_eq!(
-                texmap.match_texture_names[slot].as_deref(),
-                Some("Rough")
-            );
+            assert_eq!(texmap.match_texture_names[slot].as_deref(), Some("Rough"));
             assert_eq!(texmap.densities[slot], 100);
             assert_eq!(texmap.shapes[slot], Some(crate::chunky::ChunkShape::Flat));
         }
@@ -10711,7 +10628,9 @@ public func RejectConstruction(x, y, builder)
         // callback's captured entry state and map-color delta must make slot
         // 2 visible to the next one before the authoritative Engine fold.
         replay_world.preview_runtime_landscape_operation(&outcome.landscape[0]);
-        let preview_landscape = replay_world.landscape_ref().expect("preview landscape exists");
+        let preview_landscape = replay_world
+            .landscape_ref()
+            .expect("preview landscape exists");
         assert_eq!(
             preview_landscape
                 .raster_state()
@@ -10725,17 +10644,16 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(preview_grid.revision(), initial_revision);
         assert_eq!(preview_grid.material_names(), initial_material_names);
         assert_eq!(preview_grid.texture_names(), initial_texture_names);
-        let (replayed, replayed_outcome) =
-            with_effect_context(None, &[], replay_world, 1, || {
-                Ok::<_, RuntimeError>((
-                    get_texture(&[Value::Int(2), Value::Int(2)])?,
-                    set_texture_index(&[
-                        Value::String("Earth-Rough".to_string().into()),
-                        Value::Int(2),
-                        Value::Bool(false),
-                    ])?,
-                ))
-            });
+        let (replayed, replayed_outcome) = with_effect_context(None, &[], replay_world, 1, || {
+            Ok::<_, RuntimeError>((
+                get_texture(&[Value::Int(2), Value::Int(2)])?,
+                set_texture_index(&[
+                    Value::String("Earth-Rough".to_string().into()),
+                    Value::Int(2),
+                    Value::Bool(false),
+                ])?,
+            ))
+        });
         assert_eq!(
             replayed.expect("replayed callback sees texmap"),
             (Value::String("Rough".to_string().into()), Value::Int(0))
@@ -10793,20 +10711,19 @@ public func RejectConstruction(x, y, builder)
             .expect("pixel grid")
             .revision();
 
-        let (result, outcome) =
-            with_effect_context(None, &[], replay_world.clone(), 1, || {
-                Ok::<_, RuntimeError>((
-                    remove_unused_texmap_entries(&[])?,
-                    // Slot 4 was Earth-Ridge but had neither a pixel nor a
-                    // material reference. Its removal is immediately live.
-                    set_texture_index(&[
-                        Value::String("Earth-Ridge".to_string().into()),
-                        Value::Int(7),
-                        Value::Bool(false),
-                    ])?,
-                    get_texture(&[Value::Int(1), Value::Int(0)])?,
-                ))
-            });
+        let (result, outcome) = with_effect_context(None, &[], replay_world.clone(), 1, || {
+            Ok::<_, RuntimeError>((
+                remove_unused_texmap_entries(&[])?,
+                // Slot 4 was Earth-Ridge but had neither a pixel nor a
+                // material reference. Its removal is immediately live.
+                set_texture_index(&[
+                    Value::String("Earth-Ridge".to_string().into()),
+                    Value::Int(7),
+                    Value::Bool(false),
+                ])?,
+                get_texture(&[Value::Int(1), Value::Int(0)])?,
+            ))
+        });
         assert_eq!(
             result.expect("RemoveUnusedTexMapEntries succeeds"),
             (
@@ -10816,8 +10733,7 @@ public func RejectConstruction(x, y, builder)
             )
         );
         assert_eq!(outcome.landscape.len(), 1);
-        let LandscapeOperation::RemoveUnusedTexMapEntries { cleared_slots } =
-            &outcome.landscape[0]
+        let LandscapeOperation::RemoveUnusedTexMapEntries { cleared_slots } = &outcome.landscape[0]
         else {
             panic!("unexpected landscape operation: {:?}", outcome.landscape[0]);
         };
@@ -10836,26 +10752,34 @@ public func RejectConstruction(x, y, builder)
             .expect("raster state")
             .texmap();
         for slot in [1, 2, 3, 5] {
-            assert!(replayed_texmap.material_names[slot].is_some(), "slot {slot}");
+            assert!(
+                replayed_texmap.material_names[slot].is_some(),
+                "slot {slot}"
+            );
         }
         for slot in [4, 6] {
-            assert!(replayed_texmap.material_names[slot].is_none(), "slot {slot}");
+            assert!(
+                replayed_texmap.material_names[slot].is_none(),
+                "slot {slot}"
+            );
             assert!(replayed_texmap.texture_names[slot].is_none(), "slot {slot}");
-            assert!(replayed_texmap.match_texture_names[slot].is_none(), "slot {slot}");
+            assert!(
+                replayed_texmap.match_texture_names[slot].is_none(),
+                "slot {slot}"
+            );
             assert!(replayed_texmap.shapes[slot].is_none(), "slot {slot}");
             assert_eq!(replayed_texmap.densities[slot], 0, "slot {slot}");
         }
         assert_eq!(replayed_texmap.default_material_entry("Rock"), Some(2));
         assert_eq!(replayed_texmap.material_crossmap_entries, vec![3]);
 
-        let (replayed, replayed_outcome) =
-            with_effect_context(None, &[], replay_world, 1, || {
-                set_texture_index(&[
-                    Value::String("Earth-Ridge".to_string().into()),
-                    Value::Int(7),
-                    Value::Bool(false),
-                ])
-            });
+        let (replayed, replayed_outcome) = with_effect_context(None, &[], replay_world, 1, || {
+            set_texture_index(&[
+                Value::String("Earth-Ridge".to_string().into()),
+                Value::Int(7),
+                Value::Bool(false),
+            ])
+        });
         assert_eq!(replayed.expect("replayed removal is live"), Value::Int(0));
         assert!(replayed_outcome.landscape.is_empty());
 
@@ -10978,9 +10902,7 @@ public func RejectConstruction(x, y, builder)
         assert_eq!(drew.expect("DrawMatChunks succeeds"), Value::Int(1));
         assert_eq!(chunks_outcome.landscape.len(), 1);
 
-        removed_outcome
-            .landscape
-            .extend(chunks_outcome.landscape);
+        removed_outcome.landscape.extend(chunks_outcome.landscape);
         let mut engine = crate::Engine::new();
         engine.set_landscape(initial_landscape);
         engine.apply_landscape_operations(removed_outcome.landscape);
@@ -11127,8 +11049,7 @@ public func RejectConstruction(x, y, builder)
             )
             .expect("runtime ScriptAlgo probe compiles");
         let script = Arc::new(script);
-        let world = draw_map_world(8, 7, 3, true)
-            .with_scenario_script(Some(Arc::clone(&script)));
+        let world = draw_map_world(8, 7, 3, true).with_scenario_script(Some(Arc::clone(&script)));
 
         let seed = 53;
         let mut expected_rng = LcgRng::new(seed);
@@ -11138,9 +11059,8 @@ public func RejectConstruction(x, y, builder)
         let expected_after = expected_rng.random(1_000);
 
         let guard = enter_random_context(LcgRng::new(seed));
-        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
-            script.call("Probe", &[])
-        });
+        let (result, outcome) =
+            with_effect_context(None, &[], world, 1, || script.call("Probe", &[]));
         let final_rng = guard.finish();
 
         assert_eq!(
@@ -11174,10 +11094,7 @@ public func RejectConstruction(x, y, builder)
             Value::String("Requested".to_string().into()),
         ];
 
-        for (name, seed, draw_def) in [
-            ("DrawMap", 17, false),
-            ("DrawDefMap", 37, true),
-        ] {
+        for (name, seed, draw_def) in [("DrawMap", 17, false), ("DrawDefMap", 37, true)] {
             let world = draw_map_masked_world();
             let guard = enter_random_context(LcgRng::new(seed));
             let (result, outcome) = with_effect_context(None, &[], world.clone(), 1, || {
@@ -11230,7 +11147,11 @@ public func RejectConstruction(x, y, builder)
             Value::Int(0),
             Value::Int(3),
             Value::Int(3),
-            Value::String("overlay Added { mat = Earth; tex = Ridge; seed = 7; };".to_string().into()),
+            Value::String(
+                "overlay Added { mat = Earth; tex = Ridge; seed = 7; };"
+                    .to_string()
+                    .into(),
+            ),
         ];
         let guard = enter_random_context(LcgRng::new(31));
         let (result, outcome) =
@@ -11662,11 +11583,9 @@ public func RejectConstruction(x, y, builder)
             Value::Bool(false),
         ];
         let mut world = draw_mat_chunks_world();
-        assert!(
-            world
-                .landscape_mut()
-                .is_some_and(|landscape| { landscape.set_surface32_pixel(15, 5, 0x0011_2233) })
-        );
+        assert!(world
+            .landscape_mut()
+            .is_some_and(|landscape| { landscape.set_surface32_pixel(15, 5, 0x0011_2233) }));
         let initial_landscape = world.landscape_ref().expect("landscape exists").clone();
         let guard = enter_random_context(LcgRng::new(59));
         let (result, outcome) = with_effect_context(None, &[], world, 1, || {
@@ -11826,11 +11745,9 @@ public func RejectConstruction(x, y, builder)
             Value::Int(5),
         ];
         let mut world = draw_volcano_branch_world();
-        assert!(
-            world
-                .landscape_mut()
-                .is_some_and(|landscape| { landscape.set_surface32_pixel(6, 2, 0x0011_2233) })
-        );
+        assert!(world
+            .landscape_mut()
+            .is_some_and(|landscape| { landscape.set_surface32_pixel(6, 2, 0x0011_2233) }));
         let initial_landscape = world.landscape_ref().expect("landscape exists").clone();
         let object_context = HostObjectContext::new(
             ObjectId::new(91),
@@ -11906,7 +11823,10 @@ public func RejectConstruction(x, y, builder)
         });
         assert_eq!(
             replayed.expect("replayed callback reads landscape"),
-            (Value::String("Smooth".to_string().into()), Value::Bool(false))
+            (
+                Value::String("Smooth".to_string().into()),
+                Value::Bool(false)
+            )
         );
 
         let mut engine = crate::Engine::new();
@@ -12247,9 +12167,8 @@ func ProbeDrawDefMap() {
         ]);
         for probe in ["ProbeBlast", "ProbeShake", "ProbeDig", "ProbeDigRect"] {
             let random = enter_random_context(LcgRng::new(101));
-            let (result, outcome) = with_effect_context(None, &[], terrain_world(), 1, || {
-                script.call(probe, &[])
-            });
+            let (result, outcome) =
+                with_effect_context(None, &[], terrain_world(), 1, || script.call(probe, &[]));
             let _ = random.finish();
             assert_eq!(
                 result.unwrap_or_else(|error| panic!("{probe} failed: {error}")),
@@ -12260,8 +12179,10 @@ func ProbeDrawDefMap() {
             assert!(
                 matches!(
                     (probe, &outcome.landscape[0]),
-                    ("ProbeBlast", LandscapeOperation::BlastCirclePreviewed { .. })
-                        | ("ProbeShake", LandscapeOperation::ShakeCircle { .. })
+                    (
+                        "ProbeBlast",
+                        LandscapeOperation::BlastCirclePreviewed { .. }
+                    ) | ("ProbeShake", LandscapeOperation::ShakeCircle { .. })
                         | ("ProbeDig", LandscapeOperation::DigCirclePreviewed { .. })
                         | ("ProbeDigRect", LandscapeOperation::DigRectPreviewed { .. })
                 ),
@@ -12277,11 +12198,7 @@ func ProbeDrawDefMap() {
             let _ = random.finish();
             assert_eq!(
                 result.unwrap_or_else(|error| panic!("{probe} failed: {error}")),
-                Value::Array(vec![
-                    sky_state.clone(),
-                    Value::Int(1),
-                    earth_state.clone(),
-                ]),
+                Value::Array(vec![sky_state.clone(), Value::Int(1), earth_state.clone(),]),
                 "{probe} must expose its painted pixel before returning from the callback"
             );
             assert_eq!(outcome.landscape.len(), 1, "{probe} queues one fold");
@@ -12866,11 +12783,7 @@ func ProbeDrawDefMap() {
         let mut densities = vec![0; 3];
         densities[1] = 25;
         densities[2] = 100;
-        let names = vec![
-            None,
-            Some("Water".to_string()),
-            Some("Earth".to_string()),
-        ];
+        let names = vec![None, Some("Water".to_string()), Some("Earth".to_string())];
         let mut landscape = Landscape::new(3, vec![3; 3]).expect("landscape builds");
         landscape.set_world_height(3);
         landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
@@ -12996,7 +12909,10 @@ func ProbeDrawDefMap() {
         corridor[2 * 5 + 2] = 1;
         corridor[2 * 5 + 3] = 1;
         let (result, outcome) = probe(world(5, 5, corridor.clone(), false));
-        assert_eq!(result.expect("default preflight succeeds"), Value::Bool(false));
+        assert_eq!(
+            result.expect("default preflight succeeds"),
+            Value::Bool(false)
+        );
         assert!(outcome.landscape.is_empty());
 
         let (result, outcome) = probe(world(5, 5, corridor, true));
@@ -13258,6 +13174,74 @@ func ProbeDrawDefMap() {
         assert_eq!(
             result.expect("GetPlayerByIndex follows overridden player order"),
             Value::Array(vec![Value::Int(1), Value::Int(0), Value::Int(2)])
+        );
+    }
+
+    #[test]
+    fn get_player_by_index_type_filter_keeps_order_teams_and_eliminated_players() {
+        // C4PlayerList::GetByIndex(index, type) filters only C4PlayerInfo
+        // type while walking native player-list order. Team and elimination
+        // state do not remove a runtime player from this lookup.
+        let script_eliminated = PlayerState {
+            id: 40,
+            script_player: true,
+            status: crate::PlayerStatus::Eliminated,
+            team: Some(3),
+            ..PlayerState::default()
+        };
+        let user_eliminated = PlayerState {
+            id: 10,
+            status: crate::PlayerStatus::Eliminated,
+            team: Some(2),
+            ..PlayerState::default()
+        };
+        let user_active = PlayerState {
+            id: 30,
+            status: crate::PlayerStatus::Active,
+            team: Some(1),
+            ..PlayerState::default()
+        };
+        let script_active = PlayerState {
+            id: 20,
+            script_player: true,
+            status: crate::PlayerStatus::Active,
+            team: None,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            [
+                script_eliminated,
+                user_eliminated,
+                user_active,
+                script_active,
+            ],
+        )
+        .with_player_order([40, 10, 30, 20]);
+
+        let user = i32::from(crate::PLAYER_INFO_TYPE_USER);
+        let script = i32::from(crate::PLAYER_INFO_TYPE_SCRIPT);
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            Ok::<Value, RuntimeError>(Value::Array(vec![
+                get_player_by_index(&[Value::Int(0), Value::Int(user)])?,
+                get_player_by_index(&[Value::Int(1), Value::Int(user)])?,
+                get_player_by_index(&[Value::Int(2), Value::Int(user)])?,
+                get_player_by_index(&[Value::Int(0), Value::Int(script)])?,
+                get_player_by_index(&[Value::Int(1), Value::Int(script)])?,
+                get_player_by_index(&[Value::Int(2), Value::Int(script)])?,
+            ]))
+        });
+
+        assert_eq!(
+            result.expect("GetPlayerByIndex preserves filtered native order"),
+            Value::Array(vec![
+                Value::Int(10),
+                Value::Int(30),
+                Value::Int(OWNER_NONE),
+                Value::Int(40),
+                Value::Int(20),
+                Value::Int(OWNER_NONE),
+            ])
         );
     }
 
@@ -15165,10 +15149,7 @@ func ProbeBadIndex(definition) {
             ..PlayerState::default()
         };
         let definitions = HashMap::from([
-            (
-                DefinitionId::from("ZERO"),
-                DefinitionMetadata::default(),
-            ),
+            (DefinitionId::from("ZERO"), DefinitionMetadata::default()),
             (
                 DefinitionId::from("BRIK"),
                 DefinitionMetadata {
@@ -15190,24 +15171,9 @@ func ProbeBadIndex(definition) {
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             Ok::<Value, RuntimeError>(Value::Array(vec![
                 get_plr_knowledge(&[Value::Int(26), Value::Nil, Value::Int(0)])?,
-                get_plr_knowledge(&[
-                    Value::Int(26),
-                    Value::Nil,
-                    Value::Int(0),
-                    Value::Int(0),
-                ])?,
-                get_plr_knowledge(&[
-                    Value::Int(26),
-                    Value::Nil,
-                    Value::Int(0),
-                    Value::Int(-1),
-                ])?,
-                get_plr_knowledge(&[
-                    Value::Int(26),
-                    Value::Nil,
-                    Value::Int(1),
-                    Value::Int(-1),
-                ])?,
+                get_plr_knowledge(&[Value::Int(26), Value::Nil, Value::Int(0), Value::Int(0)])?,
+                get_plr_knowledge(&[Value::Int(26), Value::Nil, Value::Int(0), Value::Int(-1)])?,
+                get_plr_knowledge(&[Value::Int(26), Value::Nil, Value::Int(1), Value::Int(-1)])?,
             ]))
         });
 
@@ -15462,20 +15428,16 @@ func ProbeBadIndex(definition) {
                 Value::Int(0)
             );
         }
-        assert!(
-            strict3
-                .call("FalseID", &[])
-                .expect_err("strict 3 retains bool false")
-                .to_string()
-                .contains("expected \"id\"")
-        );
-        assert!(
-            strict3
-                .call("PassedID", &[Value::Object(0)])
-                .expect_err("strict 3 retains a null object")
-                .to_string()
-                .contains("expected \"id\"")
-        );
+        assert!(strict3
+            .call("FalseID", &[])
+            .expect_err("strict 3 retains bool false")
+            .to_string()
+            .contains("expected \"id\""));
+        assert!(strict3
+            .call("PassedID", &[Value::Object(0)])
+            .expect_err("strict 3 retains a null object")
+            .to_string()
+            .contains("expected \"id\""));
     }
 
     #[test]
@@ -16187,7 +16149,9 @@ func Missing() { return ComponentAll(0, WOOD); }
         let query = |world| {
             let (result, _) = with_effect_context(None, &[], world, 1, || {
                 Ok::<_, RuntimeError>(
-                    script.call("Probe", &[]).expect("EditCursor probe executes"),
+                    script
+                        .call("Probe", &[])
+                        .expect("EditCursor probe executes"),
                 )
             });
             result.expect("EditCursor host context succeeds")
@@ -16423,8 +16387,7 @@ func Missing() { return ComponentAll(0, WOOD); }
         );
         let query = |world: HostWorldContext, player_id| {
             let args = [Value::Int(player_id)];
-            let (result, _) =
-                with_effect_context(None, &[], world, 1, || get_plr_view_mode(&args));
+            let (result, _) = with_effect_context(None, &[], world, 1, || get_plr_view_mode(&args));
             result.expect("GetPlrViewMode succeeds")
         };
 
@@ -16480,17 +16443,12 @@ func Missing() { return ComponentAll(0, WOOD); }
         );
 
         let query = |engine: &crate::Engine| {
-            let (result, _) = with_effect_context(
-                None,
-                &[],
-                engine.host_world_context(),
-                1,
-                || {
+            let (result, _) =
+                with_effect_context(None, &[], engine.host_world_context(), 1, || {
                     Ok::<_, RuntimeError>(
                         script.call("Probe", &[]).expect("GetTime probe executes"),
                     )
-                },
-            );
+                });
             result.expect("GetTime host context succeeds")
         };
 
@@ -16705,8 +16663,7 @@ func Missing() { return ComponentAll(0, WOOD); }
             });
             result.map(|result| (result, state, retained_fow_link))
         });
-        let (result, state, retained_fow_link) =
-            result.expect("pointer-clear probe succeeds");
+        let (result, state, retained_fow_link) = result.expect("pointer-clear probe succeeds");
 
         assert_eq!(
             result,
@@ -16781,11 +16738,9 @@ public func Trigger()
         let index = engine
             .find_object_index(target)
             .expect("removed-FoW object exists");
-        assert!(
-            engine
-                .player(0)
-                .is_some_and(|player| player.has_fow_view_object(target))
-        );
+        assert!(engine
+            .player(0)
+            .is_some_and(|player| player.has_fow_view_object(target)));
 
         assert_eq!(
             engine
@@ -16879,7 +16834,10 @@ public func Trigger()
         let (absent_result, _) = with_effect_context(None, &[], absent_world, 1, || {
             set_view_offset(&[Value::Int(15), Value::Int(5), Value::Int(6)])
         });
-        assert_eq!(absent_result.expect("headless call succeeds"), Value::Bool(true));
+        assert_eq!(
+            absent_result.expect("headless call succeeds"),
+            Value::Bool(true)
+        );
         assert!(
             absent_requests.borrow().is_empty(),
             "GetViewport returned null at call time"
@@ -17473,12 +17431,7 @@ public func Trigger()
     #[test]
     fn negative_transfer_zone_command_stays_set() {
         let (result, outcome) = with_object_host_context(|| {
-            set_transfer_zone(&[
-                Value::Int(0),
-                Value::Int(0),
-                Value::Int(-1),
-                Value::Int(10),
-            ])
+            set_transfer_zone(&[Value::Int(0), Value::Int(0), Value::Int(-1), Value::Int(10)])
         });
 
         assert_eq!(result.expect("SetTransferZone succeeds"), Value::Bool(true));
@@ -17909,8 +17862,8 @@ public func Trigger()
     }
 
     #[test]
-    fn async_random_per_frame_keeps_headless_sync_counts_seed_independent()
-    -> Result<(), crate::EngineError> {
+    fn async_random_per_frame_keeps_headless_sync_counts_seed_independent(
+    ) -> Result<(), crate::EngineError> {
         const SCRIPT: &str = r#"
             global func Step(state, frame, random)
             {
@@ -18079,12 +18032,7 @@ public func Trigger()
                 assert!(effect.vars().is_empty());
                 assert_eq!(
                     constructor_values.as_ref(),
-                    Some(&[
-                        Value::Int(7),
-                        Value::Bool(true),
-                        Value::Nil,
-                        Value::Nil,
-                    ])
+                    Some(&[Value::Int(7), Value::Bool(true), Value::Nil, Value::Nil,])
                 );
             }
             other => panic!("unexpected command: {other:?}"),
@@ -20703,11 +20651,7 @@ func Probe(state) {
                     get_contact(std::slice::from_ref(&object))?,
                     get_contact(&[object.clone(), Value::Nil])?,
                     get_contact(&[object.clone(), Value::Int(-1)])?,
-                    get_contact(&[
-                        object,
-                        Value::Int(-1),
-                        Value::Int(CNAT_CENTER as i32),
-                    ])?,
+                    get_contact(&[object, Value::Int(-1), Value::Int(CNAT_CENTER as i32)])?,
                 ]))
             },
         );
@@ -21047,12 +20991,10 @@ func Probe(state) {
         // Directions range (C4Script.cpp:799-804; C4Object.cpp:4235-4241).
         let (result, outcome) = with_walking_host_context(|| set_dir(&[Value::Int(13)]));
         assert_eq!(result.expect("SetDir runs"), Value::Bool(true));
-        assert!(
-            outcome
-                .object_update
-                .map(|update| update.direction.is_none())
-                .unwrap_or(true)
-        );
+        assert!(outcome
+            .object_update
+            .map(|update| update.direction.is_none())
+            .unwrap_or(true));
     }
 
     fn set_phase_target_world(action_name: &str) -> (ObjectId, HostWorldContext) {
@@ -21306,12 +21248,10 @@ func Probe(state) {
         // (C4Script.cpp:799-804).
         let (result, outcome) = with_object_host_context(|| set_dir(&[Value::Int(1)]));
         assert_eq!(result.expect("SetDir runs"), Value::Bool(true));
-        assert!(
-            outcome
-                .object_update
-                .map(|update| update.direction.is_none())
-                .unwrap_or(true)
-        );
+        assert!(outcome
+            .object_update
+            .map(|update| update.direction.is_none())
+            .unwrap_or(true));
     }
 
     #[test]
@@ -24113,12 +24053,7 @@ public func Probe(object carrier)
             let object = effect_var(&[Value::Int(1), state.clone(), Value::Int(1)])?;
             assert_eq!(object, Value::Nil);
 
-            effect_var(&[
-                Value::Int(0),
-                state.clone(),
-                Value::Int(1),
-                Value::Int(3),
-            ])?;
+            effect_var(&[Value::Int(0), state.clone(), Value::Int(1), Value::Int(3)])?;
             effect_var(&[
                 Value::Int(1),
                 state.clone(),
@@ -24239,11 +24174,7 @@ public func Probe(object carrier)
         let target1 = Value::Object(2);
         let target2 = Value::Object(3);
         for name in ["Idle", "ActIdle"] {
-            let args = vec![
-                Value::String(name.into()),
-                target1.clone(),
-                target2.clone(),
-            ];
+            let args = vec![Value::String(name.into()), target1.clone(), target2.clone()];
             let (result, outcome) =
                 with_object_host_context_actions(&["Idle", "ActIdle"], || set_action(&args));
             assert_eq!(result.expect("SetAction returns bool"), Value::Bool(true));
@@ -24930,8 +24861,8 @@ func ChangeAndProbe()
         std::fs::write(caller_dir.path().join("Script.c"), script).expect("caller script writes");
         let caller_group =
             clonk_resources::Group::open(caller_dir.path()).expect("caller group opens");
-        let caller_resource =
-            clonk_resources::ResourceDefinition::load(&caller_group).expect("caller resource loads");
+        let caller_resource = clonk_resources::ResourceDefinition::load(&caller_group)
+            .expect("caller resource loads");
         let caller_definition =
             crate::Definition::from_resource(&caller_resource).expect("caller resource compiles");
         assert_eq!(caller_definition.crew_member_value(), -2);
@@ -25500,27 +25431,25 @@ func ChangeAndProbe()
 
     #[test]
     fn get_alive_reads_world_when_target_provided() {
-        let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                ObjectId::new(7),
-                "Dummy",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            )
-            .with_alive(false),
-        ]);
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            ObjectId::new(7),
+            "Dummy",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_alive(false)]);
         let args = [object_reference_value(ObjectId::new(7))];
         let (result, _) = with_effect_context(None, &[], world, 1, || get_alive(&args));
 
@@ -25643,10 +25572,7 @@ func ChangeAndProbe()
             .find(|outcome| outcome.object_id == ObjectId::new(7))
             .expect("the target carries its death outcome");
         assert_eq!(
-            death
-                .update
-                .as_ref()
-                .and_then(|update| update.alive),
+            death.update.as_ref().and_then(|update| update.alive),
             Some(false),
             "foreign AssignDeath completes before copy-out"
         );
@@ -25691,13 +25617,13 @@ protected func Death()
         });
         let death_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_death_calls = Arc::clone(&death_calls);
-        definition.set_debugger_hooks(
-            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| {
+        definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
+            move |name, _| {
                 if name == "Death" {
                     observed_death_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
-            }),
-        );
+            },
+        ));
         let mut engine = crate::Engine::with_seed(0);
         engine
             .register_definition(definition)
@@ -25769,13 +25695,13 @@ protected func CatchBlow(strength, attacker)
                 ("GetPunched".to_string(), crate::ActionSpec::default()),
             ]),
         );
-        target_definition.set_debugger_hooks(
-            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| {
+        target_definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
+            move |name, _| {
                 if name == "CatchBlow" {
                     observed_catch_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
-            }),
-        );
+            },
+        ));
 
         let mut engine = crate::Engine::with_seed(0);
         engine
@@ -25792,9 +25718,7 @@ protected func CatchBlow(strength, attacker)
             .expect("punch target spawns");
         let target_index = engine.find_object_index(target).expect("target exists");
         engine.objects[target_index].state.energy = 1;
-        let attacker_index = engine
-            .find_object_index(attacker)
-            .expect("attacker exists");
+        let attacker_index = engine.find_object_index(attacker).expect("attacker exists");
 
         assert_eq!(
             engine
@@ -25844,8 +25768,8 @@ protected func FxSecondDamage(target, number, change, cause, caused_by)
 "#,
         )
         .expect("damage-removal target compiles");
-        target_definition.set_debugger_hooks(
-            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| match name {
+        target_definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
+            move |name, _| match name {
                 "FxFirstDamage" => {
                     observed_first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
@@ -25853,8 +25777,8 @@ protected func FxSecondDamage(target, number, change, cause, caused_by)
                     observed_second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 _ => {}
-            }),
-        );
+            },
+        ));
         let caller_definition = crate::Definition::from_script(
             "CALL",
             "Caller",
@@ -25896,10 +25820,7 @@ public func Trigger(target)
                 .expect("foreign DoEnergy returns"),
             Value::Bool(true)
         );
-        assert_eq!(
-            first_calls.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
+        assert_eq!(first_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             second_calls.load(std::sync::atomic::Ordering::SeqCst),
             0,
@@ -25942,8 +25863,8 @@ protected func FxSecondDamage(target, number, change, cause, caused_by)
 "#,
         )
         .expect("damage-effect-removal target compiles");
-        target_definition.set_debugger_hooks(
-            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| match name {
+        target_definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
+            move |name, _| match name {
                 "FxFirstDamage" => {
                     observed_first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
@@ -25951,8 +25872,8 @@ protected func FxSecondDamage(target, number, change, cause, caused_by)
                     observed_second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 _ => {}
-            }),
-        );
+            },
+        ));
 
         let mut engine = crate::Engine::with_seed(0);
         engine
@@ -25972,10 +25893,7 @@ protected func FxSecondDamage(target, number, change, cause, caused_by)
                 .expect("DoEnergy returns"),
             Value::Bool(true)
         );
-        assert_eq!(
-            first_calls.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
+        assert_eq!(first_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             second_calls.load(std::sync::atomic::Ordering::SeqCst),
             0,
@@ -26110,8 +26028,8 @@ public func StopProbe()
             let death_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let observed_stops = Arc::clone(&stop_calls);
             let observed_deaths = Arc::clone(&death_calls);
-            definition.set_debugger_hooks(
-                clonk_script::DebuggerHooks::new().with_on_call(move |name, _| match name {
+            definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
+                move |name, _| match name {
                     "FxGuardStop" => {
                         observed_stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
@@ -26119,8 +26037,8 @@ public func StopProbe()
                         observed_deaths.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
                     _ => {}
-                }),
-            );
+                },
+            ));
 
             let mut engine = crate::Engine::with_seed(0);
             engine
@@ -26153,7 +26071,10 @@ public func StopProbe()
 
         let revived = run(false);
         assert_eq!(revived.0, Value::Int(13));
-        assert!(revived.1, "RemoveDeath SetAlive revival aborts ordinary Kill");
+        assert!(
+            revived.1,
+            "RemoveDeath SetAlive revival aborts ordinary Kill"
+        );
         assert_eq!(revived.2, "Idle");
         assert_eq!(revived.3, 1, "Stop=-1 restores the effect node");
         assert_eq!(revived.4, 1, "RemoveDeath Stop runs exactly once");
@@ -26170,7 +26091,10 @@ public func StopProbe()
             Value::Int(123),
             "forced Kill runs Death before the invoking script resumes"
         );
-        assert!(!forced.1, "forced Kill overrides the Stop callback's revival");
+        assert!(
+            !forced.1,
+            "forced Kill overrides the Stop callback's revival"
+        );
         assert_eq!(forced.2, "Dead");
         assert_eq!(forced.3, 1, "forced death still honors Stop=-1");
         assert_eq!(forced.4, 1, "forced RemoveDeath Stop runs exactly once");
@@ -26221,8 +26145,8 @@ protected func FxChangedStop(target, number, reason)
 "#,
         )
         .expect("ClearAll live-node target compiles");
-        definition.set_debugger_hooks(
-            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| match name {
+        definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
+            move |name, _| match name {
                 "FxHighStop" => {
                     observed_high.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
@@ -26233,8 +26157,8 @@ protected func FxChangedStop(target, number, reason)
                     observed_changed_low.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 _ => {}
-            }),
-        );
+            },
+        ));
 
         let mut engine = crate::Engine::with_seed(0);
         engine
@@ -26251,10 +26175,7 @@ protected func FxChangedStop(target, number, reason)
                 .expect("forced Kill returns"),
             Value::Bool(true)
         );
-        assert_eq!(
-            high_calls.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
+        assert_eq!(high_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             old_low_calls.load(std::sync::atomic::Ordering::SeqCst),
             0,
@@ -26499,13 +26420,13 @@ public func DeathCount()
                 ("Dead".to_string(), crate::ActionSpec::default()),
             ]),
         );
-        target_definition.set_debugger_hooks(
-            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| {
+        target_definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
+            move |name, _| {
                 if name == "Death" {
                     observed_deaths.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
-            }),
-        );
+            },
+        ));
         let caller_definition = crate::Definition::from_script(
             "CALL",
             "Caller",
@@ -26655,10 +26576,7 @@ public func Trigger(target)
         let mut engine = crate::Engine::with_seed(0);
         for player in [0, 1] {
             engine
-                .register_player(crate::PlayerConfig::new(
-                    player,
-                    format!("Player {player}"),
-                ))
+                .register_player(crate::PlayerConfig::new(player, format!("Player {player}")))
                 .expect("FoW player registers");
         }
         engine
@@ -26678,16 +26596,12 @@ public func Trigger(target)
         let caller = engine
             .spawn_object(SpawnConfig::new("FOWC"))
             .expect("FoW caller spawns");
-        assert!(
-            engine
-                .player(0)
-                .is_some_and(|player| player.has_fow_view_object(target))
-        );
-        assert!(
-            !engine
-                .player(1)
-                .is_some_and(|player| player.has_fow_view_object(target))
-        );
+        assert!(engine
+            .player(0)
+            .is_some_and(|player| player.has_fow_view_object(target)));
+        assert!(!engine
+            .player(1)
+            .is_some_and(|player| player.has_fow_view_object(target)));
 
         let caller_index = engine.find_object_index(caller).expect("FoW caller exists");
         assert_eq!(
@@ -26732,9 +26646,7 @@ public func Trigger(target)
             let mut crew_definition =
                 crate::Definition::from_script("VCRE", "View crew", "#strict")
                     .expect("view-crew script compiles");
-            crew_definition.set_category(
-                crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING,
-            );
+            crew_definition.set_category(crate::CATEGORY_OBJECT | crate::CATEGORY_LIVING);
             crew_definition.set_crew_member(true);
             crew_definition.configure_actions(
                 Some("Idle".to_string()),
@@ -26795,8 +26707,7 @@ public func Trigger(target)
                 player.set_view_target(Some(replacement));
                 player.set_view_center(Vector2::new(1, 2));
                 player.replace_viewports(vec![
-                    PlayerViewport::new(Vector2::new(1, 2))
-                        .with_focus(Some(replacement)),
+                    PlayerViewport::new(Vector2::new(1, 2)).with_focus(Some(replacement))
                 ]);
             }
 
@@ -26804,8 +26715,9 @@ public func Trigger(target)
                 let caller = engine
                     .spawn_object(SpawnConfig::new("VCRL"))
                     .expect("view caller spawns");
-                let caller_index =
-                    engine.find_object_index(caller).expect("view caller exists");
+                let caller_index = engine
+                    .find_object_index(caller)
+                    .expect("view caller exists");
                 assert_eq!(
                     engine
                         .call_object_function(
@@ -26817,8 +26729,7 @@ public func Trigger(target)
                     Value::Bool(true)
                 );
             } else {
-                let dying_index =
-                    engine.find_object_index(dying).expect("dying crew exists");
+                let dying_index = engine.find_object_index(dying).expect("dying crew exists");
                 engine
                     .assign_death(dying_index, true)
                     .expect("direct view death succeeds");
@@ -26846,10 +26757,7 @@ public func Trigger(target)
                 Vector2::new(40, 50),
                 "UpdateView still follows the old ViewCursor at its native call point"
             );
-            assert_eq!(
-                player.viewports()[0].center,
-                Vector2::new(40, 50)
-            );
+            assert_eq!(player.viewports()[0].center, Vector2::new(40, 50));
             assert_eq!(
                 player.viewports()[0].focus,
                 Some(replacement),
@@ -26892,8 +26800,8 @@ protected func Death()
 "#,
         )
         .expect("removal target script compiles");
-        target_definition.set_debugger_hooks(
-            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| match name {
+        target_definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
+            move |name, _| match name {
                 "FxVanishStop" => {
                     observed_stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
@@ -26901,8 +26809,8 @@ protected func Death()
                     observed_deaths.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 _ => {}
-            }),
-        );
+            },
+        ));
         let caller_definition = crate::Definition::from_script(
             "CALL",
             "Caller",
@@ -26956,10 +26864,7 @@ public func Trigger(target)
             ObjectStatus::Deleted,
             "AssignRemoval clears raw Status before the Kill call resumes"
         );
-        assert_eq!(
-            stop_calls.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
+        assert_eq!(stop_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             death_calls.load(std::sync::atomic::Ordering::SeqCst),
             0,
@@ -27000,9 +26905,8 @@ protected func Death()
                 ("Dead".to_string(), crate::ActionSpec::default()),
             ]),
         );
-        let item_definition =
-            crate::Definition::from_script("ITEM", "Item", "#strict")
-                .expect("contents item compiles");
+        let item_definition = crate::Definition::from_script("ITEM", "Item", "#strict")
+            .expect("contents item compiles");
 
         let mut engine = crate::Engine::with_seed(0);
         engine
@@ -27191,13 +27095,19 @@ protected func Ejection(object item)
                 ("Dead".to_string(), crate::ActionSpec::default()),
             ]),
         );
-        let mut high_definition =
-            crate::Definition::from_script("HIGH", "High", "#strict\npublic func Tag() { return 2; }")
-                .expect("high contents script compiles");
+        let mut high_definition = crate::Definition::from_script(
+            "HIGH",
+            "High",
+            "#strict\npublic func Tag() { return 2; }",
+        )
+        .expect("high contents script compiles");
         high_definition.set_category(crate::CATEGORY_OBJECT);
-        let mut low_definition =
-            crate::Definition::from_script("LOW", "Low", "#strict\npublic func Tag() { return 1; }")
-                .expect("low contents script compiles");
+        let mut low_definition = crate::Definition::from_script(
+            "LOW",
+            "Low",
+            "#strict\npublic func Tag() { return 1; }",
+        )
+        .expect("low contents script compiles");
         low_definition.set_category(crate::CATEGORY_VEHICLE);
 
         let mut engine = crate::Engine::with_seed(0);
@@ -27275,13 +27185,13 @@ protected func Death()
                 ("Dead".to_string(), crate::ActionSpec::default()),
             ]),
         );
-        definition.set_debugger_hooks(
-            clonk_script::DebuggerHooks::new().with_on_call(move |name, _| {
+        definition.set_debugger_hooks(clonk_script::DebuggerHooks::new().with_on_call(
+            move |name, _| {
                 if name == "Death" {
                     observed_deaths.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
-            }),
-        );
+            },
+        ));
 
         let mut engine = crate::Engine::with_seed(0);
         engine
@@ -27500,12 +27410,10 @@ protected func Death()
             .get_mut(&0)
             .expect("owner exists")
             .remove_fow_view_object(target);
-        assert!(
-            !engine
-                .player(0)
-                .expect("owner remains")
-                .has_fow_view_object(target)
-        );
+        assert!(!engine
+            .player(0)
+            .expect("owner remains")
+            .has_fow_view_object(target));
 
         let target_index = engine
             .find_object_index(target)
@@ -27531,7 +27439,11 @@ protected func Death()
             "nonzero-range MakeCrewMember re-adds the live FoW link"
         );
         assert!(
-            engine.player(0).expect("owner remains").crew().contains(&target),
+            engine
+                .player(0)
+                .expect("owner remains")
+                .crew()
+                .contains(&target),
             "the cursor-replacement callback re-recruits the dying target"
         );
     }
@@ -27951,13 +27863,11 @@ protected func Death()
         );
         let value = result.expect("DoEnergy returns bool");
         assert_eq!(value, Value::Bool(true));
-        assert!(
-            outcome
-                .object_update
-                .as_ref()
-                .and_then(|update| update.energy)
-                .is_some()
-        );
+        assert!(outcome
+            .object_update
+            .as_ref()
+            .and_then(|update| update.energy)
+            .is_some());
     }
 
     #[test]
@@ -28899,13 +28809,11 @@ public func Purchase(int player, object base) { order = order * 10 + player; }
             Some(&Value::Int(12)),
             "native Recruitment runs before Purchase and bypasses the same-name script override"
         );
-        assert!(
-            engine
-                .player(1)
-                .expect("recipient remains")
-                .crew()
-                .contains(&bought)
-        );
+        assert!(engine
+            .player(1)
+            .expect("recipient remains")
+            .crew()
+            .contains(&bought));
         assert_eq!(engine.player(2).expect("payer remains").wealth(), 90);
         assert_eq!(
             engine
@@ -29560,13 +29468,11 @@ public func SeedRemoved() { return(PlaceAnimal(DIEA)); }
             .call_object_function(caller_index, "SeedRemoved", Vec::new())
             .expect("SeedRemoved runs");
         assert_eq!(value, Value::Nil);
-        assert!(
-            engine
-                .snapshot()
-                .objects
-                .iter()
-                .all(|object| object.definition_id != "DIEA")
-        );
+        assert!(engine
+            .snapshot()
+            .objects
+            .iter()
+            .all(|object| object.definition_id != "DIEA"));
         assert_eq!(engine.capture_state().next_object_id, before_next_id + 1);
     }
 
@@ -29576,9 +29482,10 @@ public func SeedRemoved() { return(PlaceAnimal(DIEA)); }
         // then the surface arm draws x/y, applies AboveSemiSolid, checks Soil,
         // and passes the raw growth value to CreateObjectConstruction with
         // NO_OWNER (C4Game.cpp:2980-3022).
-        let library =
-            clonk_resources::MaterialLibrary::parse("[Material]\nName=Earth\nDensity=100\nSoil=1\n")
-                .expect("earth material parses");
+        let library = clonk_resources::MaterialLibrary::parse(
+            "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
+        )
+        .expect("earth material parses");
         let materials = MaterialSet::from_resource_library(&library);
         let earth = materials.id_of("Earth").expect("earth material exists");
         let mut landscape = Landscape::flat_with_material(400, 160, Some(earth));
@@ -29709,9 +29616,10 @@ public func SeedFull()
     return(PlaceVegetation(TREE, -100, -100, 200, 200, 100000));
 }
 "#;
-        let library =
-            clonk_resources::MaterialLibrary::parse("[Material]\nName=Earth\nDensity=100\nSoil=1\n")
-                .expect("earth material parses");
+        let library = clonk_resources::MaterialLibrary::parse(
+            "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
+        )
+        .expect("earth material parses");
         let mut engine = crate::Engine::with_seed(17);
         engine.configure_materials_from_library(&library);
         let earth = engine
@@ -29871,9 +29779,10 @@ public func SeedFull()
         // iGrowth<=0 first becomes FullCon; a definition with Growth then
         // has a 1-in-3 gate followed by Random(FullCon)+1
         // (C4Game.cpp:2988-2992), before the placement-point draws.
-        let library =
-            clonk_resources::MaterialLibrary::parse("[Material]\nName=Earth\nDensity=100\nSoil=1\n")
-                .expect("earth material parses");
+        let library = clonk_resources::MaterialLibrary::parse(
+            "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
+        )
+        .expect("earth material parses");
         let materials = MaterialSet::from_resource_library(&library);
         let earth = materials.id_of("Earth").expect("earth exists");
         let mut landscape = Landscape::flat_with_material(400, 160, Some(earth));
@@ -30622,7 +30531,9 @@ protected func Construction()
             let mut script = clonk_script::Engine::new();
             register_host_functions(&mut script);
             script
-                .load_script("#strict\nglobal func Probe(pObj) { return [GetBase(pObj), GetBase()]; }")
+                .load_script(
+                    "#strict\nglobal func Probe(pObj) { return [GetBase(pObj), GetBase()]; }",
+                )
                 .map_err(|error| RuntimeError::new(error.to_string()))?;
             script
                 .call("Probe", &[object_reference_value(hut)])
@@ -30754,10 +30665,7 @@ protected func Construction()
             let Value::Array(values) = value else {
                 panic!("FindObjects should return an array");
             };
-            values
-                .iter()
-                .map(object_id_from_value)
-                .collect::<Vec<_>>()
+            values.iter().map(object_id_from_value).collect::<Vec<_>>()
         };
 
         for function in ["FalsyNil", "FalsyInt", "FalsyBool"] {
@@ -31010,12 +30918,10 @@ protected func Construction()
         "#;
 
         let mut engine = crate::Engine::with_seed(0);
-        engine.set_landscape(
-            Landscape::new(200, vec![120; 200]).expect("sectored landscape builds"),
-        );
-        let mut target_definition =
-            crate::Definition::from_script("TARG", "Target", target_script)
-                .expect("target definition compiles");
+        engine
+            .set_landscape(Landscape::new(200, vec![120; 200]).expect("sectored landscape builds"));
+        let mut target_definition = crate::Definition::from_script("TARG", "Target", target_script)
+            .expect("target definition compiles");
         target_definition.set_shape_rect(Some(DefinitionRect::new(-2, -2, 4, 4)));
         engine
             .register_definition(target_definition)
@@ -31058,11 +30964,7 @@ protected func Construction()
         ]);
         assert_eq!(
             engine
-                .call_object_function(
-                    caller_index,
-                    "Probe",
-                    vec![object_reference_value(target)],
-                )
+                .call_object_function(caller_index, "Probe", vec![object_reference_value(target)],)
                 .expect("same-call shape probe runs"),
             Value::Array(vec![before, Value::Bool(true), after.clone()])
         );
@@ -32606,9 +32508,10 @@ protected func Construction()
             Value::C4Id("GEM1".into()),
             object_reference_value(container_id),
         ];
-        let (result, _) = with_effect_context(Some(context.clone()), &[], world.clone(), 500, || {
-            find_other_contents(&args)
-        });
+        let (result, _) =
+            with_effect_context(Some(context.clone()), &[], world.clone(), 500, || {
+                find_other_contents(&args)
+            });
         let value = result.expect("FindOtherContents succeeds");
         assert_eq!(value, object_reference_value(hammer_id));
 
@@ -32779,7 +32682,10 @@ public func GetCalcCalls() { return calc_calls; }
                 .call_object_function(
                     actor_index,
                     "RemoveNested",
-                    vec![object_reference_value(victim), object_reference_value(child)],
+                    vec![
+                        object_reference_value(victim),
+                        object_reference_value(child)
+                    ],
                 )
                 .expect("nested removal returns"),
             Value::Bool(true)
@@ -33108,6 +33014,66 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
     }
 
     #[test]
+    fn find_object_closest_ties_keep_forward_master_order() {
+        // C4Game::FindObject evaluates closest candidates while walking
+        // Game.Objects.First -> Next and replaces the best only for a
+        // strictly smaller distance (C4Game.cpp:1367-1424). Storage order
+        // must not decide an equal-distance tie.
+        let first_in_storage = HostWorldObject::new(
+            ObjectId::new(30),
+            "DUMY",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::new(-2, 0),
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        );
+        let first_in_master = HostWorldObject::new(
+            ObjectId::new(31),
+            "DUMY",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::new(2, 0),
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        );
+        let world = HostWorldContext::from_objects([first_in_storage, first_in_master])
+            .with_master_order([ObjectId::new(31), ObjectId::new(30)]);
+        let args = [
+            Value::C4Id("DUMY".into()),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(-1),
+            Value::Int(-1),
+        ];
+
+        let (result, _) = with_effect_context(None, &[], world, 1, || find_object(&args));
+
+        assert_eq!(
+            result.expect("FindObject closest succeeds"),
+            object_reference_value(ObjectId::new(31))
+        );
+    }
+
+    #[test]
     fn find_object_respects_ocf_filter() {
         let matching_id = ObjectId::new(51);
         let world = HostWorldContext::from_objects(vec![
@@ -33301,27 +33267,25 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
         // carries OCF_Normal (C4Object.cpp:547-548).
         let ocf_mask = ocf::NORMAL | ocf::NOT_CONTAINED | ocf::AVAILABLE | ocf::ALIVE;
         let object_id = ObjectId::new(1);
-        let world = HostWorldContext::from_objects(vec![
-            HostWorldObject::new(
-                object_id,
-                "Dummy",
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                OWNER_NONE,
-                100,
-                crate::FULL_CON,
-                Vector2::ZERO,
-                Vector2::ZERO,
-                Vec::new(),
-                0,
-                0,
-                None,
-            )
-            .with_ocf(ocf_mask),
-        ]);
+        let world = HostWorldContext::from_objects(vec![HostWorldObject::new(
+            object_id,
+            "Dummy",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_ocf(ocf_mask)]);
 
         let object_context = HostObjectContext::with_category(
             object_id,
@@ -34264,12 +34228,13 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
             None,
             None,
         );
-        let with_overlay = object_context
-            .clone()
-            .with_graphics_overlays(vec![ObjectGraphicsOverlay::new(
-                1,
-                GraphicsOverlayMode::Base,
-            )]);
+        let with_overlay =
+            object_context
+                .clone()
+                .with_graphics_overlays(vec![ObjectGraphicsOverlay::new(
+                    1,
+                    GraphicsOverlayMode::Base,
+                )]);
         let args = [
             Value::Int(1000),
             Value::Int(0),
@@ -34729,23 +34694,14 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                     "EffectVar extracts both raw-Bool integer address slots"
                 );
                 assert_eq!(
-                    effect_call(&[
-                        Value::Nil,
-                        raw_bool(2),
-                        Value::String("Missing".into()),
-                    ])?,
+                    effect_call(&[Value::Nil, raw_bool(2), Value::String("Missing".into()),])?,
                     Value::Nil,
                     "EffectCall accepts a raw-Bool effect number"
                 );
 
                 for name in [Value::String("Changed".into()), Value::Nil] {
                     assert_eq!(
-                        remove_effect(&[
-                            name,
-                            Value::Nil,
-                            Value::Int(-1),
-                            Value::Bool(true),
-                        ])?,
+                        remove_effect(&[name, Value::Nil, Value::Int(-1), Value::Bool(true),])?,
                         Value::Bool(false),
                         "a negative named index or effect number is a miss, not an error"
                     );
@@ -34774,8 +34730,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
 
     #[test]
     fn fire_constructor_extracts_raw_bool_start_parameters_from_data_int() {
-        let high_word_bool =
-            Value::from_c4_bool_data_raw(1usize.checked_shl(32).unwrap_or(2));
+        let high_word_bool = Value::from_c4_bool_data_raw(1usize.checked_shl(32).unwrap_or(2));
         let (result, outcome) = with_object_host_context(|| {
             let random = enter_random_context(LcgRng::new(9));
             let result = add_effect(&[
@@ -34845,10 +34800,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                 Value::String("Global".into())
             );
             assert_eq!(
-                get_effect(&[
-                    Value::String("Global".into()),
-                    Value::Object(1),
-                ])?,
+                get_effect(&[Value::String("Global".into()), Value::Object(1),])?,
                 Value::Nil,
                 "the active object's list remains untouched"
             );
@@ -34883,11 +34835,7 @@ public func RemoveSelfWithoutEject() { return RemoveObject(); }
                 Value::Int(55)
             );
             assert_eq!(
-                effect_call(&[
-                    null_object.clone(),
-                    number,
-                    Value::String("Missing".into()),
-                ])?,
+                effect_call(&[null_object.clone(), number, Value::String("Missing".into()),])?,
                 Value::Nil
             );
             assert_eq!(

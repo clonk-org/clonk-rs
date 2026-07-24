@@ -672,26 +672,39 @@ fn cpp_set_by_core_packs_a_directory_with_the_stock_group_sort_order() {
             .add_file_with_metadata(filename, fs::read(path).unwrap(), modified, false)
             .unwrap();
     }
-    let packed = expected.pack().unwrap();
-    let core = core(
-        b"Objects.c4d",
-        packed.len() as u32,
-        c4group_file_crc(&packed),
-        expected.contents_crc(),
-        true,
-    );
+    let mut matched = None;
+    for attempt in 0..8 {
+        let before = unix_time_now();
+        let packed = expected.pack().unwrap();
+        let core = core(
+            b"Objects.c4d",
+            packed.len() as u32,
+            c4group_file_crc(&packed),
+            expected.contents_crc(),
+            true,
+        );
+        let resolution =
+            resolve_local_resource(&core, [&candidate], standalones.join(attempt.to_string()))
+                .unwrap();
+        let after = unix_time_now();
+        if before != after {
+            continue;
+        }
 
-    let resolution = resolve_local_resource(&core, [&candidate], &standalones).unwrap();
-
-    let LocalResourceResolution::Local(local) = resolution else {
-        panic!("matching directory should produce an exact sorted standalone");
-    };
-    assert_ne!(local.path(), candidate);
-    assert_eq!(
-        local.standalone_ownership(),
-        Some(ResourceFileOwnership::Temporary)
-    );
-    assert_eq!(fs::read(local.path()).unwrap(), packed);
+        let LocalResourceResolution::Local(local) = resolution else {
+            panic!("matching directory should produce an exact sorted standalone");
+        };
+        assert_ne!(local.path(), candidate);
+        assert_eq!(
+            local.standalone_ownership(),
+            Some(ResourceFileOwnership::Temporary)
+        );
+        matched = Some((local.path().to_path_buf(), packed));
+        break;
+    }
+    let (standalone, packed) =
+        matched.expect("could not pack the expected and local groups in one timestamp second");
+    assert_eq!(fs::read(standalone).unwrap(), packed);
 }
 
 #[test]
