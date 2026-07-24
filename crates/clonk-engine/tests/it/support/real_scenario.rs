@@ -43,6 +43,10 @@ pub struct PreparedInstalledScenario {
 }
 
 impl PreparedInstalledScenario {
+    pub fn generated_landscape_requires_seed_retry(&self) -> bool {
+        self.scenario.generated_landscape_requires_seed_retry()
+    }
+
     /// Apply the immutable parsed inputs to a fresh simulation instance.
     pub fn instantiate(&self) -> Engine {
         let mut engine = Engine::with_seed(self.seed);

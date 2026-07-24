@@ -1266,6 +1266,7 @@ pub struct PendingMasterserverSignup {
     completion: Receiver<std::result::Result<Option<clonk_network::LeagueStartResponse>, String>>,
     cancellation: Option<tokio::sync::oneshot::Sender<()>>,
     transition: Arc<std::sync::atomic::AtomicU8>,
+    cancel_on_drop: bool,
 }
 
 #[derive(Debug)]
@@ -1301,6 +1302,21 @@ impl PendingMasterserverSignup {
         self.previous_enabled
     }
 
+    /// Keep an already-committed registration cleanup alive while the owning
+    /// lobby and network manager are torn down.
+    ///
+    /// C++ sends `End` before `DeinitLeague`. A pending disable which follows
+    /// a successful `Start` has the same obligation: dropping the UI-side
+    /// handle must let the worker finish `End`, after which the manager's
+    /// queued shutdown can deinitialise the league runtime.
+    pub fn finish_committed_cleanup_on_worker_shutdown(&mut self) -> bool {
+        if self.enabled || !self.previous_enabled {
+            return false;
+        }
+        self.cancel_on_drop = false;
+        true
+    }
+
     /// Returns false when the worker already committed a terminal result. In
     /// that race the caller must consume completion instead of painting an
     /// off state over a live registration.
@@ -1326,7 +1342,9 @@ impl PendingMasterserverSignup {
 
 impl Drop for PendingMasterserverSignup {
     fn drop(&mut self) {
-        let _ = self.cancel();
+        if self.cancel_on_drop {
+            let _ = self.cancel();
+        }
     }
 }
 
@@ -1415,6 +1433,18 @@ impl TestMasterserverSignupCommand {
         assert_eq!(
             self.transition.load(Ordering::Acquire),
             MASTERSERVER_SIGNUP_CANCELLED
+        );
+    }
+
+    pub fn wait_for_cleanup_preservation(self) {
+        assert!(
+            self.cancellation.blocking_recv().is_err(),
+            "committed cleanup must release its UI handle without signalling cancellation"
+        );
+        assert_eq!(
+            self.transition.load(Ordering::Acquire),
+            MASTERSERVER_SIGNUP_PENDING,
+            "the worker retains ownership of the committed cleanup transition"
         );
     }
 }
@@ -4240,6 +4270,7 @@ impl NetworkManager {
             completion: completed,
             cancellation: Some(cancellation),
             transition,
+            cancel_on_drop: true,
         })
     }
 
@@ -4632,6 +4663,35 @@ fn apply_league_start_response_to_reference(
     reference
         .replacing_parameters(parameters)
         .map_err(|error| format!("league Start settings are invalid: {error}"))
+}
+
+/// Build the identity which a compensating `End` must send after the server
+/// has committed `Start`, even when the local admission layer rejects one of
+/// the returned values.
+///
+/// In particular, admission converts `MaxPlayers` to `usize` and generated
+/// landscapes may reject an assigned seed. Neither local failure rewinds the
+/// server session. C++ updates the synchronized parameters before ending that
+/// session, so cleanup must carry every raw Start field that fits the wire
+/// reference, including the server-assigned `RandomSeed`.
+fn league_cleanup_reference_after_start(
+    reference: &clonk_network::HostGameReference,
+    response: &clonk_network::LeagueStartResponse,
+) -> std::result::Result<clonk_network::HostGameReference, String> {
+    let mut parameters = reference.parameters().clone();
+    parameters.league = response.league.clone();
+    if let Some(seed) = response.seed {
+        parameters.random_seed = seed;
+    }
+    if response.max_players != 0 {
+        parameters.max_players = response.max_players;
+    }
+    if response.league.is_empty() {
+        parameters.league_address = clonk_engine::LegacyCString::default();
+    }
+    reference
+        .replacing_parameters(parameters)
+        .map_err(|error| format!("cannot build league cleanup reference: {error}"))
 }
 
 async fn register_league_host(
@@ -5407,14 +5467,42 @@ async fn run_host_worker(
                         return Err(anyhow!(message));
                     }
                 };
+            let cleanup_reference =
+                match league_cleanup_reference_after_start(&reference, &response) {
+                    Ok(reference) => reference,
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            "falling back to the pre-Start league cleanup reference"
+                        );
+                        reference.clone()
+                    }
+                };
             if let Err(error) = prepared_host.apply_league_start_response(&response) {
-                if let Err(cleanup_error) = finish_league_runtime(&runtime, reference, None).await {
+                if let Err(cleanup_error) =
+                    finish_league_runtime(&runtime, cleanup_reference, None).await
+                {
                     tracing::error!(%cleanup_error, "failed to end rejected league registration");
                 }
                 let message = format!("league Start settings are invalid: {error}");
                 let _ = local_id_tx.send(Err(message.clone().into()));
                 return Err(anyhow!(message));
             }
+            let reference = match prepared_host
+                .initial_host_game_reference(false, &registration_addresses)
+            {
+                Ok(reference) => reference,
+                Err(error) => {
+                    if let Err(cleanup_error) =
+                        finish_league_runtime(&runtime, cleanup_reference, None).await
+                    {
+                        tracing::error!(%cleanup_error, "failed to end unusable league registration");
+                    }
+                    let message = format!("cannot rebuild league Start reference: {error}");
+                    let _ = local_id_tx.send(Err(message.clone().into()));
+                    return Err(anyhow!(message));
+                }
+            };
             if !prepared_host.stream_address().is_empty() {
                 let stream_address = clonk_resources::decode_legacy_script_text(
                     prepared_host.stream_address().as_bytes(),
@@ -5426,7 +5514,7 @@ async fn run_host_worker(
                     Ok(runtime) => Some(runtime),
                     Err(error) => {
                         if let Err(cleanup_error) =
-                            finish_league_runtime(&runtime, reference, None).await
+                            finish_league_runtime(&runtime, reference.clone(), None).await
                         {
                             tracing::error!(%cleanup_error, "failed to end league registration after stream setup failure");
                         }
@@ -5437,21 +5525,6 @@ async fn run_host_worker(
                     }
                 };
             }
-            let reference = match prepared_host
-                .initial_host_game_reference(false, &registration_addresses)
-            {
-                Ok(reference) => reference,
-                Err(error) => {
-                    if let Err(cleanup_error) =
-                        finish_league_runtime(&runtime, reference, None).await
-                    {
-                        tracing::error!(%cleanup_error, "failed to end unusable league registration");
-                    }
-                    let message = format!("cannot rebuild league Start reference: {error}");
-                    let _ = local_id_tx.send(Err(message.clone().into()));
-                    return Err(anyhow!(message));
-                }
-            };
             host_config = prepared_host.host_config().clone();
             host_config.configured_tcp_port = Some(bound_addr.map_or(0, |address| address.port()));
             host_config.udp_bind_address = udp_bind_address;
@@ -5976,9 +6049,45 @@ async fn run_host_worker(
                                     )
                                     .await?;
                                 if cancelled {
-                                    // Native abort tears down the local league client without
-                                    // waiting for a compensating End request.
-                                    drop(registered);
+                                    if let Some(Ok((response, runtime))) = registered {
+                                        // Cancellation may race a committed Start while the
+                                        // concurrent puncher setup is still pending. Once the
+                                        // server has created a session, C++ tears it down with
+                                        // End before deinitialising the league client.
+                                        let cleanup_reference =
+                                            league_cleanup_reference_after_start(
+                                                &reference,
+                                                &response,
+                                            )
+                                            .unwrap_or_else(|error| {
+                                                tracing::error!(
+                                                    %error,
+                                                    "falling back to the pre-Start cancelled cleanup reference"
+                                                );
+                                                reference.clone()
+                                            });
+                                        if let Err(cleanup_error) =
+                                            await_host_operation_while_forwarding_events(
+                                                finish_league_runtime(
+                                                    &runtime,
+                                                    cleanup_reference,
+                                                    None,
+                                                ),
+                                                &mut host_events,
+                                                local_owner,
+                                                &event_tx,
+                                                &telemetry_tx,
+                                                &mut player_info_echo_provenance,
+                                                &netpuncher_state,
+                                            )
+                                            .await?
+                                        {
+                                            tracing::error!(
+                                                %cleanup_error,
+                                                "failed to end cancelled live league registration"
+                                            );
+                                        }
+                                    }
                                     latest_league_reference.take();
                                     let _ = completion.send(Err(
                                         "masterserver signup was cancelled".to_string(),
@@ -6013,20 +6122,27 @@ async fn run_host_worker(
                                                 &response,
                                             );
                                         if let Err(error) = updated_reference.as_ref() {
-                                            let cleanup = async {
-                                                tokio::select! {
-                                                    biased;
-                                                    _ = &mut cancellation => None,
-                                                    result = finish_league_runtime(
-                                                        &runtime,
-                                                        reference.clone(),
-                                                        None,
-                                                    ) => Some(result),
-                                                }
-                                            };
-                                            if let Some(Err(cleanup_error)) =
+                                            let cleanup_reference =
+                                                match league_cleanup_reference_after_start(
+                                                    &reference,
+                                                    &response,
+                                                ) {
+                                                    Ok(reference) => reference,
+                                                    Err(cleanup_reference_error) => {
+                                                        tracing::error!(
+                                                            error = %cleanup_reference_error,
+                                                            "falling back to the pre-Start live cleanup reference"
+                                                        );
+                                                        reference.clone()
+                                                    }
+                                                };
+                                            if let Err(cleanup_error) =
                                                 await_host_operation_while_forwarding_events(
-                                                    cleanup,
+                                                    finish_league_runtime(
+                                                        &runtime,
+                                                        cleanup_reference,
+                                                        None,
+                                                    ),
                                                     &mut host_events,
                                                     local_owner,
                                                     &event_tx,
@@ -6061,10 +6177,32 @@ async fn run_host_worker(
                                                 MASTERSERVER_SIGNUP_FINISHED,
                                                 Ordering::AcqRel,
                                                 Ordering::Acquire,
-                                        )
-                                        .is_err()
+                                            )
+                                            .is_err()
                                         {
-                                            drop(runtime);
+                                            let cleanup_reference =
+                                                updated_reference.expect("checked Ok above");
+                                            if let Err(cleanup_error) =
+                                                await_host_operation_while_forwarding_events(
+                                                    finish_league_runtime(
+                                                        &runtime,
+                                                        cleanup_reference,
+                                                        None,
+                                                    ),
+                                                    &mut host_events,
+                                                    local_owner,
+                                                    &event_tx,
+                                                    &telemetry_tx,
+                                                    &mut player_info_echo_provenance,
+                                                    &netpuncher_state,
+                                                )
+                                                .await?
+                                            {
+                                                tracing::error!(
+                                                    %cleanup_error,
+                                                    "failed to end cancelled live league registration"
+                                                );
+                                            }
                                             latest_league_reference.take();
                                             let _ = completion.send(Err(
                                                 "masterserver signup was cancelled".to_string(),
@@ -6085,16 +6223,35 @@ async fn run_host_worker(
                                 }
                             }
                         } else {
+                            // A successful Start may have replaced synchronized
+                            // fields such as RandomSeed. End must identify that
+                            // committed server reference, even when the app is
+                            // compensating for a rejected local application.
+                            let end_reference =
+                                latest_league_reference.take().unwrap_or(reference);
                             let result = if let Some(runtime) = league_runtime.take() {
                                 let ending = async {
+                                    let finish = finish_league_runtime(
+                                        &runtime,
+                                        end_reference,
+                                        None,
+                                    );
+                                    tokio::pin!(finish);
                                     tokio::select! {
                                         biased;
-                                        _ = &mut cancellation => None,
-                                        result = finish_league_runtime(
-                                            &runtime,
-                                            reference,
-                                            None,
-                                        ) => Some(result),
+                                        cancellation = &mut cancellation => {
+                                            if cancellation.is_ok() {
+                                                None
+                                            } else {
+                                                // The lobby-side handle was dropped during
+                                                // teardown without explicitly cancelling this
+                                                // committed cleanup. Match C++'s End-before-
+                                                // Deinit ordering and finish the request before
+                                                // the queued worker shutdown is observed.
+                                                Some(finish.await)
+                                            }
+                                        },
+                                        result = &mut finish => Some(result),
                                     }
                                 };
                                 await_host_operation_while_forwarding_events(
@@ -6120,13 +6277,11 @@ async fn run_host_worker(
                                     )
                                     .is_err()
                             {
-                                latest_league_reference.take();
                                 let _ = completion.send(Err(
                                     "masterserver signup change was cancelled".to_string(),
                                 ));
                                 continue;
                             }
-                            latest_league_reference.take();
                             match result.expect("uncancelled signup disable has an End result") {
                                 Ok(Some(packet)) => {
                                     if let Err(error) = await_host_operation_while_forwarding_events(
@@ -9676,6 +9831,78 @@ Message=Server says Andr\xe9\r\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l082_initial_start_rejection_ends_with_the_server_assigned_seed() {
+        let (endpoint, league_server) = league_http_fixture(vec![
+            b"[Response]\r\nStatus=Success\r\nCSID=session\r\nLeague=Cup\r\nSeed=305419896\r\nMaxPlayers=-1\r\n",
+            b"[Response]\r\nStatus=Success\r\n",
+        ]);
+        let settings = HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: Some(PreparedHostBootstrap::transport_test_fixture(
+                1,
+                0,
+                Some(PreparedLeagueHostConfig {
+                    endpoint,
+                    transport: clonk_network::LeagueHttpTransportConfig::default(),
+                    update_period_secs: 120,
+                    league_server_signup: false,
+                }),
+            )),
+        };
+        let (_command_tx, mut command_rx) = tokio_mpsc::channel(8);
+        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
+        let (_control_performance_tx, mut control_performance_rx) =
+            tokio_mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let worker = tokio::spawn(async move {
+            run_host_worker(
+                settings,
+                0,
+                &mut command_rx,
+                &mut control_tick_rx,
+                &mut control_performance_rx,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+                test_netpuncher_state(),
+            )
+            .await
+        });
+
+        let error = local_id_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("host worker readiness timeout")
+            .expect_err("negative Start MaxPlayers must reject local admission");
+        assert!(matches!(
+            error,
+            NetworkStartError::Other(message)
+                if message.contains("league Start settings are invalid")
+        ));
+        assert!(worker
+            .await
+            .expect("join rejected league host worker")
+            .is_err());
+
+        let bodies = league_server.join().expect("join league HTTP fixture");
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0]
+            .windows(b"Action=Start".len())
+            .any(|window| window == b"Action=Start"));
+        assert!(bodies[1]
+            .windows(b"Action=End".len())
+            .any(|window| window == b"Action=End"));
+        assert!(
+            bodies[1]
+                .windows(b"RandomSeed=305419896".len())
+                .any(|window| window == b"RandomSeed=305419896"),
+            "cleanup must identify the Start-updated registration"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn l082_host_worker_returns_live_start_response_and_initializes_puncher() {
         let (second_start_seen_tx, second_start_seen_rx) = mpsc::channel();
         let (release_second_start_tx, release_second_start_rx) = mpsc::channel();
@@ -9856,7 +10083,136 @@ Message=Server says Andr\xe9\r\n\
         assert!(bodies[2]
             .windows(b"Action=End".len())
             .any(|window| window == b"Action=End"));
+        assert!(
+            bodies[2]
+                .windows(b"RandomSeed=305419896".len())
+                .any(|window| window == b"RandomSeed=305419896"),
+            "End must identify the Start-updated reference, not the pre-Start command copy"
+        );
         puncher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn l082_worker_finishes_live_end_when_lobby_drops_cleanup_handle() {
+        let (end_seen_tx, end_seen_rx) = mpsc::channel();
+        let (release_end_tx, release_end_rx) = mpsc::channel();
+        let (endpoint, league_server) = league_http_fixture_with_before_reply(
+            vec![
+                b"[Response]\r\nStatus=Success\r\nCSID=session\r\nLeague=Cup\r\nSeed=305419896\r\n",
+                b"[Response]\r\nStatus=Success\r\n",
+            ],
+            move |reply_index| {
+                if reply_index == 1 {
+                    end_seen_tx.send(()).expect("report in-flight End");
+                    release_end_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("release in-flight End response");
+                }
+            },
+        );
+        let settings = HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        };
+        let (command_tx, mut command_rx) = tokio_mpsc::channel(8);
+        let (_control_tick_tx, mut control_tick_rx) = tokio_mpsc::unbounded_channel();
+        let (_control_performance_tx, mut control_performance_rx) =
+            tokio_mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = NetworkEventSender::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+        let worker = tokio::spawn(async move {
+            run_host_worker(
+                settings,
+                0,
+                &mut command_rx,
+                &mut control_tick_rx,
+                &mut control_performance_rx,
+                event_tx,
+                telemetry_tx,
+                local_id_tx,
+                test_netpuncher_state(),
+            )
+            .await
+        });
+        local_id_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("host worker readiness timeout")
+            .expect("host worker readiness");
+
+        let reference = minimal_league_reference();
+        let config = PreparedLeagueHostConfig {
+            endpoint,
+            transport: clonk_network::LeagueHttpTransportConfig::default(),
+            update_period_secs: 120,
+            league_server_signup: false,
+        };
+        let (enabled_tx, enabled_rx) = mpsc::channel();
+        let (_enabled_cancel, enabled_cancellation) = tokio::sync::oneshot::channel();
+        command_tx
+            .send(NetworkCommand::SetMasterserverSignup {
+                enabled: true,
+                config: config.clone(),
+                reference: reference.clone(),
+                completion: enabled_tx,
+                cancellation: enabled_cancellation,
+                transition: Arc::new(std::sync::atomic::AtomicU8::new(
+                    MASTERSERVER_SIGNUP_PENDING,
+                )),
+            })
+            .await
+            .expect("enable masterserver signup");
+        enabled_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("masterserver signup enable completion")
+            .expect("masterserver signup enables");
+
+        let (disabled_tx, disabled_rx) = mpsc::channel();
+        let (disabled_cancel, disabled_cancellation) = tokio::sync::oneshot::channel();
+        let disabled_transition = Arc::new(std::sync::atomic::AtomicU8::new(
+            MASTERSERVER_SIGNUP_PENDING,
+        ));
+        command_tx
+            .send(NetworkCommand::SetMasterserverSignup {
+                enabled: false,
+                config,
+                reference,
+                completion: disabled_tx,
+                cancellation: disabled_cancellation,
+                transition: Arc::clone(&disabled_transition),
+            })
+            .await
+            .expect("queue compensating End");
+        end_seen_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("End reaches the league server");
+        drop(disabled_cancel);
+        release_end_tx.send(()).expect("release End response");
+        drop(disabled_rx);
+        command_tx
+            .send(NetworkCommand::Shutdown)
+            .await
+            .expect("queue worker shutdown behind End");
+        worker
+            .await
+            .expect("join host worker")
+            .expect("host worker exits cleanly");
+
+        assert_eq!(
+            disabled_transition.load(Ordering::Acquire),
+            MASTERSERVER_SIGNUP_FINISHED
+        );
+        let bodies = league_server.join().expect("join league HTTP fixture");
+        assert_eq!(bodies.len(), 2, "End must complete before worker shutdown");
+        assert!(bodies[1]
+            .windows(b"Action=End".len())
+            .any(|window| window == b"Action=End"));
+        assert!(
+            bodies[1]
+                .windows(b"RandomSeed=305419896".len())
+                .any(|window| window == b"RandomSeed=305419896")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

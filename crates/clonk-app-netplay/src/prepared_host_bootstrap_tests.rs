@@ -14,6 +14,262 @@ use crate::prepared_host_bootstrap::{
     PreparedLeagueHostConfig,
 };
 
+fn prepare_harpoonrace_host(
+    random_seed_unix_seconds: i64,
+    league: Option<&PreparedLeagueHostConfig>,
+) -> (prepared_host_bootstrap::PreparedHostBootstrap, tempfile::TempDir) {
+    let repository = repository_root();
+    let content = repository.join("content");
+    let planet = repository.join("planet");
+    let scenario_path = content.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
+    let install_roots = vec![content.clone(), planet];
+    prepare_harpoonrace_host_from_paths(
+        random_seed_unix_seconds,
+        league,
+        &scenario_path,
+        &content,
+        &install_roots,
+    )
+}
+
+fn prepare_harpoonrace_host_from_paths(
+    random_seed_unix_seconds: i64,
+    league: Option<&PreparedLeagueHostConfig>,
+    scenario_path: &Path,
+    content: &Path,
+    install_roots: &[PathBuf],
+) -> (prepared_host_bootstrap::PreparedHostBootstrap, tempfile::TempDir) {
+    let definition_resource_paths =
+        vec![content.join("Objects.c4d"), content.join("EkeReloaded.c4d")];
+    let effective_definition_modules = vec!["Objects.c4d".to_owned(), "EkeReloaded.c4d".to_owned()];
+    let definition_resources = freeze_host_definition_resource_sources(
+        &definition_resource_paths,
+        scenario_path,
+        &effective_definition_modules,
+        false,
+        content,
+        "",
+    )
+    .expect("freeze HarpoonRace definitions");
+    let definition_executable_path = format!("{}{}", content.display(), std::path::MAIN_SEPARATOR);
+    let languages = vec!["US".to_owned(), "DE".to_owned()];
+    let language_packs = LanguagePacks::default();
+    let network = tempfile::tempdir().expect("isolated host resources");
+
+    let prepared = prepare_host_bootstrap(PreparedHostBootstrapSpec {
+        scenario_path,
+        install_roots,
+        definition_resources: &definition_resources,
+        effective_definition_modules: &effective_definition_modules,
+        initial_definition_modules: &[],
+        fixed_definition_modules: None,
+        selector_definition_root: None,
+        definition_executable_path: &definition_executable_path,
+        definition_path: "",
+        languages: &languages,
+        language_packs: &language_packs,
+        network_directory: network.path(),
+        network_work_path: "Network",
+        start_unix_seconds: 1_784_903_469,
+        random_seed_unix_seconds,
+        group_maker: "Worldgen test",
+        host_name: "Host",
+        host_nick: "Host",
+        network_password: "",
+        network_comment: "",
+        netpuncher_address: "puncher.invalid:11115",
+        player_sources: &[],
+        config: PreparedHostBootstrapConfig {
+            control_mode: 0,
+            control_rate: 2,
+            async_max_wait: 2,
+            fair_crew: true,
+            fair_crew_strength: 1_000,
+            auto_frame_skip: true,
+            max_load_file_size: 100 * 1024 * 1024,
+            no_runtime_join: true,
+            enable_upnp: false,
+            network_tcp_port: 0,
+            network_udp_port: 0,
+        },
+        league,
+    })
+    .expect("prepare HarpoonRace host");
+
+    (prepared, network)
+}
+
+#[test]
+fn harpoonrace_host_retries_before_publishing_the_random_seed() {
+    let (prepared, _network) = prepare_harpoonrace_host(1_784_903_470, None);
+    let join = prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData");
+    assert_eq!(
+        join.parameters.random_seed, 1_784_903_471,
+        "the known-invalid seed is advanced before JoinData publication"
+    );
+    let dynamic_path = prepared
+        .host_config()
+        .resource_files
+        .iter()
+        .find(|resource| resource.core.id == join.dynamic.id)
+        .map(|resource| resource.path.as_path())
+        .expect("published Dynamic resource");
+    let dynamic = Group::open(dynamic_path).expect("open Dynamic resource");
+    let parameters = dynamic
+        .read_file("Parameters.txt")
+        .expect("read Dynamic Parameters");
+    assert!(
+        parameters
+            .windows(b"RandomSeed=1784903471".len())
+            .any(|window| window == b"RandomSeed=1784903471"),
+        "Dynamic and JoinData must publish the same accepted seed"
+    );
+    let scenario = prepared
+        .claim_scenario()
+        .expect("claim accepted host scenario");
+    assert!(
+        !scenario.generated_landscape_requires_seed_retry(),
+        "the retained host scenario must match the accepted seed"
+    );
+}
+
+#[test]
+fn harpoonrace_live_signup_rejects_an_invalid_seed_after_signup_off_prepare() {
+    // Native applies the league Start seed before Landscape.Init
+    // (oracle src/C4Network2.cpp:2378-2431; src/C4Game.cpp:2660-2672).
+    // Rust cannot advance that externally authoritative seed, but it must not
+    // publish or launch a known-invalid generated landscape.
+    let league = PreparedLeagueHostConfig {
+        endpoint: "https://league.invalid/".to_owned(),
+        transport: clonk_network::LeagueHttpTransportConfig::default(),
+        update_period_secs: 120,
+        league_server_signup: false,
+    };
+    let (mut prepared, _network) = prepare_harpoonrace_host(1_784_903_471, Some(&league));
+
+    let error = prepared
+        .apply_league_start_response(&clonk_network::LeagueStartResponse {
+            seed: Some(1_784_903_470),
+            ..clonk_network::LeagueStartResponse::default()
+        })
+        .expect_err("the league-assigned seed exposes the SkyParcour water fill");
+
+    assert!(matches!(
+        error,
+        PrepareHostBootstrapError::LeagueGeneratedLandscapeInvalid {
+            random_seed: 1_784_903_470
+        }
+    ));
+    assert_eq!(
+        prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters
+            .random_seed,
+        1_784_903_471,
+        "a rejected Start reply must not partially mutate JoinData"
+    );
+}
+
+#[test]
+fn harpoonrace_league_reloads_the_retained_map_for_a_valid_assigned_seed() {
+    // The Start seed is installed before native creates the landscape
+    // (oracle src/C4Network2.cpp:2430-2432; src/C4Game.cpp:2660-2672).
+    let league = PreparedLeagueHostConfig {
+        endpoint: "https://league.invalid/".to_owned(),
+        transport: clonk_network::LeagueHttpTransportConfig::default(),
+        update_period_secs: 120,
+        league_server_signup: true,
+    };
+    let (mut prepared, _network) = prepare_harpoonrace_host(1_784_903_470, Some(&league));
+
+    prepared
+        .apply_league_start_response(&clonk_network::LeagueStartResponse {
+            seed: Some(1_784_903_471),
+            ..clonk_network::LeagueStartResponse::default()
+        })
+        .expect("the assigned seed produces a valid SkyParcour landscape");
+
+    assert_eq!(
+        prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters
+            .random_seed,
+        1_784_903_471
+    );
+    let scenario = prepared
+        .claim_scenario()
+        .expect("claim league-seeded host scenario");
+    assert!(
+        !scenario.generated_landscape_requires_seed_retry(),
+        "the host must launch the map generated from the published Start seed"
+    );
+}
+
+#[test]
+fn harpoonrace_league_seed_reload_uses_the_published_scenario_bytes() {
+    let repository = repository_root();
+    let content = repository.join("content");
+    let planet = repository.join("planet");
+    let source_scenario =
+        content.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
+    let isolated = tempfile::tempdir().expect("isolated scenario source");
+    let isolated_content = isolated.path().join("content");
+    let isolated_scenario = isolated_content.join("HarpoonRace.c4s");
+    fs::create_dir_all(&isolated_scenario).expect("create isolated scenario");
+    for entry in fs::read_dir(&source_scenario).expect("read HarpoonRace source") {
+        let entry = entry.expect("read HarpoonRace source entry");
+        assert!(
+            entry.file_type().expect("read source entry kind").is_file(),
+            "the HarpoonRace fixture copy expects only direct files"
+        );
+        fs::copy(entry.path(), isolated_scenario.join(entry.file_name()))
+            .expect("copy isolated HarpoonRace entry");
+    }
+    let install_roots = vec![isolated_content, content.clone(), planet];
+    let league = PreparedLeagueHostConfig {
+        endpoint: "https://league.invalid/".to_owned(),
+        transport: clonk_network::LeagueHttpTransportConfig::default(),
+        update_period_secs: 120,
+        league_server_signup: false,
+    };
+    let (mut prepared, _network) = prepare_harpoonrace_host_from_paths(
+        1_784_903_471,
+        Some(&league),
+        &isolated_scenario,
+        &content,
+        &install_roots,
+    );
+
+    let landscape_path = isolated_scenario.join("Landscape.txt");
+    let source = fs::read_to_string(&landscape_path).expect("read isolated Landscape");
+    let changed = source.replacen("mat=Water", "mat=Earth", 1);
+    assert_ne!(changed, source, "the fixture must contain its water overlay");
+    fs::write(&landscape_path, changed).expect("mutate only the isolated source");
+
+    let error = prepared
+        .apply_league_start_response(&clonk_network::LeagueStartResponse {
+            seed: Some(1_784_903_470),
+            ..clonk_network::LeagueStartResponse::default()
+        })
+        .expect_err("the published Landscape bytes still expose water for the known-invalid seed");
+    assert!(matches!(
+        error,
+        PrepareHostBootstrapError::LeagueGeneratedLandscapeInvalid {
+            random_seed: 1_784_903_470
+        }
+    ));
+}
+
 #[test]
 fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     // The builder follows OpenScenario -> Parameters::Load -> InitHost ->

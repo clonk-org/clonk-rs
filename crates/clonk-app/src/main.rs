@@ -988,6 +988,9 @@ enum ScenarioLoadingEvent {
         log: Option<Vec<String>>,
     },
     RefreshResources,
+    /// A fresh authoritative load rejected one or more malformed generated
+    /// landscapes and selected this replacement Parameters.RandomSeed.
+    AcceptedRandomSeed(u64),
     Finished(Result<Scenario, String>),
 }
 
@@ -25130,6 +25133,59 @@ where
     }
 }
 
+const AUTHORITATIVE_WORLDGEN_SEED_ATTEMPTS: u32 = 256;
+
+fn load_fresh_scenario_with_valid_generated_landscape<F>(
+    path: &Path,
+    resolver: &InstallDefinitionResolver,
+    languages: &[String],
+    definition_load: &ScenarioDefinitionLoad,
+    initial_random_seed: u64,
+    startup_player_count: i32,
+    mut progress: F,
+) -> std::result::Result<(Scenario, u64), String>
+where
+    F: FnMut(i32, &'static str),
+{
+    let mut random_seed = u64::from(initial_random_seed as u32);
+    for rejected in 0..AUTHORITATIVE_WORLDGEN_SEED_ATTEMPTS {
+        let scenario =
+            load_scenario_with_definition_load_and_seed_and_startup_player_count_and_progress(
+                path,
+                resolver,
+                languages,
+                definition_load,
+                random_seed,
+                startup_player_count,
+                &mut progress,
+            )
+            .map_err(|error| error.to_string())?;
+        if !scenario.generated_landscape_requires_seed_retry() {
+            if rejected != 0 {
+                tracing::info!(
+                    initial_random_seed = initial_random_seed as u32,
+                    accepted_random_seed = random_seed as u32,
+                    rejected_seeds = rejected,
+                    "selected a contained SkyParcour landscape"
+                );
+            }
+            return Ok((scenario, random_seed));
+        }
+
+        tracing::debug!(
+            rejected_random_seed = random_seed as u32,
+            "SkyParcour generation exposed movable Water"
+        );
+        progress(92, "Retrying malformed generated landscape");
+        random_seed = u64::from((random_seed as u32).wrapping_add(1));
+    }
+
+    Err(format!(
+        "no contained SkyParcour landscape was generated in {} attempts starting at seed {}",
+        AUTHORITATIVE_WORLDGEN_SEED_ATTEMPTS, initial_random_seed as u32
+    ))
+}
+
 fn load_options_program_state(
     paths: Option<&AppPaths>,
     resources: Option<&HashMap<String, String>>,
@@ -33287,6 +33343,13 @@ impl GameApp {
                         state.refresh_requested = true;
                     }
                     self.apply_pending_loading_resource_refresh()?;
+                }
+                Ok(ScenarioLoadingEvent::AcceptedRandomSeed(random_seed)) => {
+                    let state = self
+                        .loading_state
+                        .as_mut()
+                        .expect("loading state exists while draining its receiver");
+                    state.offline_random_seed = Some(random_seed);
                 }
                 Ok(ScenarioLoadingEvent::Finished(result)) => {
                     let state = self

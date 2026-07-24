@@ -464,6 +464,61 @@
         );
     }
 
+    #[test]
+    fn l001_fresh_offline_skyparcour_retries_and_activates_the_accepted_seed() {
+        let _pin_guard = EnvGuard::set(&[
+            ("LC_PIN_SEED", Some(Path::new("1784903470"))),
+            ("LC_RUST_ENGINE_RANDOM_SEED", None),
+            ("LC_RUST_ENGINE_MAP_SEED", None),
+        ]);
+        let user_data = tempdir().expect("isolated SkyParcour seed user data");
+        let (_paths_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        configure_test_startup_participant(&paths, user_data.path());
+        let audio_options = AudioOptions {
+            sound_enabled: false,
+            music_enabled: false,
+            menu_music_enabled: false,
+            menu_sound_enabled: false,
+            ..AudioOptions::default()
+        };
+        let mut app = GameApp::new(
+            320,
+            200,
+            audio_options,
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "SkyParcour seed retry".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize SkyParcour seed retry app");
+        wait_for_menu(&mut app);
+        let scenario = resolve_next_mission_scenario(
+            &app.scenario_catalog,
+            "EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s",
+        )
+        .expect("HarpoonRace is present in the real scenario catalog");
+
+        app.start_scenario(scenario)
+            .expect("start pinned offline HarpoonRace");
+        assert_eq!(
+            app.loading_state
+                .as_ref()
+                .and_then(|loading| loading.offline_random_seed),
+            Some(1_784_903_470),
+            "the candidate seed is frozen before asynchronous validation",
+        );
+        wait_for_running_with_attempts(&mut app, 4_800);
+
+        assert_eq!(
+            app.engine.random_seed(),
+            1_784_903_471,
+            "activation, saves, and recordings must use the accepted seed"
+        );
+    }
+
     fn app_default_rank_promotion_name(app: &GameApp) -> String {
         let script = r#"#strict 2
     func Award()

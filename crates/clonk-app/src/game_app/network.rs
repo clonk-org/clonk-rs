@@ -4939,6 +4939,13 @@ impl GameApp {
             self.status_text = "Only the host can start the game".to_string();
             return Ok(());
         }
+        if self.pending_lobby_internet_signup.is_some() {
+            if self.status_text.is_empty() {
+                self.status_text =
+                    "Unable to start network game while Internet signup is changing".to_string();
+            }
+            return Ok(());
+        }
         if let Some(task) = self.lobby_preload_task.as_mut() {
             // C++ blocks InitGame on PreloadMutex. Keep the lobby responsive
             // while the worker runs, then resume this exact start request.
@@ -5272,6 +5279,13 @@ impl GameApp {
     pub(crate) fn network_game_start_guard_passes(&mut self) -> bool {
         if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
             self.status_text = "Only the host can start the game".to_string();
+            return false;
+        }
+        if self.pending_lobby_internet_signup.is_some() {
+            if self.status_text.is_empty() {
+                self.status_text =
+                    "Unable to start network game while Internet signup is changing".to_string();
+            }
             return false;
         }
         if self.network_mode.as_ref().is_some_and(|mode| match mode {
@@ -6900,6 +6914,19 @@ impl GameApp {
         // Validate every local representation before mutating any of them.
         // The server-side registration is already live at this point, so a
         // partially applied response must never be painted as signup-off.
+        let updated_reference = self
+            .advertised_game_reference
+            .as_ref()
+            .map(|reference| {
+                reference
+                    .replacing_parameters(parameters.clone())
+                    .map_err(|error| anyhow!("cannot rebuild live league reference: {error}"))
+            })
+            .transpose()?;
+        // PreparedHostBootstrap clones share the single retained Scenario.
+        // Validate the independently cloned reference first so the only
+        // remaining fallible operation may update that shared scenario as the
+        // final step of this transaction.
         let updated_prepared = self
             .network_mode
             .as_ref()
@@ -6913,15 +6940,6 @@ impl GameApp {
                     .apply_league_start_response(response)
                     .map_err(|error| anyhow!("cannot apply live league Start settings: {error}"))?;
                 Ok::<_, anyhow::Error>(updated)
-            })
-            .transpose()?;
-        let updated_reference = self
-            .advertised_game_reference
-            .as_ref()
-            .map(|reference| {
-                reference
-                    .replacing_parameters(parameters.clone())
-                    .map_err(|error| anyhow!("cannot rebuild live league reference: {error}"))
             })
             .transpose()?;
 
@@ -7068,6 +7086,24 @@ impl GameApp {
         Ok(())
     }
 
+    fn begin_live_masterserver_signup_rollback(
+        &self,
+    ) -> Result<network::PendingMasterserverSignup> {
+        let network = self
+            .network
+            .as_ref()
+            .ok_or_else(|| anyhow!("live host network manager is unavailable"))?;
+        let reference = self
+            .advertised_game_reference
+            .clone()
+            .ok_or_else(|| anyhow!("live host game reference is unavailable"))?;
+        network.begin_masterserver_signup(
+            false,
+            load_prepared_league_host_config(self.app_paths.as_ref(), false),
+            reference,
+        )
+    }
+
     pub(crate) fn poll_live_masterserver_signup(&mut self) -> Result<(), EngineError> {
         let result = match (
             self.network.as_ref(),
@@ -7098,11 +7134,29 @@ impl GameApp {
                         .transpose()
                     {
                         Ok(_) => (true, None),
-                        // Start has committed on the worker. Keep the button
-                        // honest if a local invariant prevents propagation;
-                        // reporting signup-off here would create a hidden live
-                        // registration.
-                        Err(error) => (true, Some(error)),
+                        Err(error) => match self.begin_live_masterserver_signup_rollback() {
+                            Ok(rollback) => {
+                                // Start has committed on the worker. Keep its
+                                // live state visible and block launch until
+                                // the compensating End is confirmed.
+                                self.pending_lobby_internet_signup = Some(rollback);
+                                (true, Some(error))
+                            }
+                            Err(rollback_error) => {
+                                // Dropping the manager makes the worker send
+                                // End with its retained Start-updated
+                                // reference. Tear the staged host down so a
+                                // locally rejected seed can never launch.
+                                let message = format!(
+                                    "{error}; could not begin compensating Internet signup cleanup: {rollback_error}"
+                                );
+                                tracing::error!(error = %message, "tearing down rejected live signup");
+                                return self.finish_startup_network_failure(
+                                    StartupNetworkPurpose::StagedHost,
+                                    format!("Unable to change Internet game signup: {message}"),
+                                );
+                            }
+                        },
                     }
                 } else {
                     match self.clear_live_league_registration() {
@@ -7110,6 +7164,14 @@ impl GameApp {
                         Err(error) => (false, Some(error)),
                     }
                 }
+            }
+            Err(error) if !enabled && previous_enabled => {
+                return self.finish_startup_network_failure(
+                    StartupNetworkPurpose::StagedHost,
+                    format!(
+                        "Unable to confirm cleanup of the live Internet registration: {error}"
+                    ),
+                );
             }
             Err(error) => (if enabled { previous_enabled } else { false }, Some(error)),
         };
@@ -7148,7 +7210,9 @@ impl GameApp {
 
     pub(crate) fn abandon_live_masterserver_signup(&mut self) {
         if let Some(mut pending) = self.pending_lobby_internet_signup.take() {
-            let _ = pending.cancel();
+            if !pending.finish_committed_cleanup_on_worker_shutdown() {
+                let _ = pending.cancel();
+            }
         }
     }
 

@@ -824,18 +824,27 @@ impl GameApp {
             && offline_startup_error.is_none()
             && replay_startup.is_none())
         .then(|| current_offline_round_random_seed(offline_parameter_seed));
+        let fresh_authority_may_retry =
+            offline_random_seed.is_some() && offline_savegame.is_none();
         let preloaded_scenario = self
             .lobby_preload_artifact
             .as_mut()
             .and_then(|artifact| artifact.catalog_host.as_mut())
             .and_then(|catalog_host| catalog_host.take_matching_scenario(&catalog_preload_key));
+        let retry_generated_landscape = fresh_authority_may_retry
+            && preloaded_scenario
+                .as_ref()
+                .is_none_or(Scenario::generated_landscape_seed_retry_applies);
+        let preloaded_scenario = (!retry_generated_landscape)
+            .then_some(preloaded_scenario)
+            .flatten();
 
         thread::spawn(move || {
             let mut reporter = ScenarioLoadingReporter::new(sender);
             let resolver = InstallDefinitionResolver::new(resolver_paths);
             let scenario_data = if let Some(preloaded_scenario) = preloaded_scenario {
                 reporter.report(93, "Scenario preload ready");
-                Ok(preloaded_scenario)
+                Ok((preloaded_scenario, None))
             } else {
                 match offline_startup_error.or(replay_startup_error) {
                     Some(error) => Err(error),
@@ -850,7 +859,21 @@ impl GameApp {
                                 replay.startup_player_count,
                                 |progress, line| reporter.report(progress, line),
                             )
+                            .map(|scenario| (scenario, None))
                             .map_err(|error| error.to_string())
+                        }
+                        (None, Some(startup_player_count)) if retry_generated_landscape => {
+                            load_fresh_scenario_with_valid_generated_landscape(
+                                &path_for_thread,
+                                &resolver,
+                                &languages,
+                                &definition_load,
+                                offline_random_seed
+                                    .expect("fresh offline loading freezes a random seed"),
+                                startup_player_count,
+                                |progress, line| reporter.report(progress, line),
+                            )
+                            .map(|(scenario, random_seed)| (scenario, Some(random_seed)))
                         }
                         (None, Some(startup_player_count)) => {
                             load_scenario_with_definition_load_and_seed_and_startup_player_count_and_progress(
@@ -862,6 +885,7 @@ impl GameApp {
                                 startup_player_count,
                                 |progress, line| reporter.report(progress, line),
                             )
+                            .map(|scenario| (scenario, None))
                             .map_err(|error| error.to_string())
                         }
                         (None, None) => load_scenario_with_definition_load_and_progress(
@@ -871,13 +895,17 @@ impl GameApp {
                             &definition_load,
                             |progress, line| reporter.report(progress, line),
                         )
+                        .map(|scenario| (scenario, None))
                         .map_err(|error| error.to_string()),
                     },
                 }
             };
 
             match scenario_data {
-                Ok(data) => {
+                Ok((data, accepted_random_seed)) => {
+                    if let Some(random_seed) = accepted_random_seed {
+                        reporter.send(ScenarioLoadingEvent::AcceptedRandomSeed(random_seed));
+                    }
                     reporter.send(ScenarioLoadingEvent::RefreshResources);
                     reporter.send(ScenarioLoadingEvent::Finished(Ok(data)));
                 }

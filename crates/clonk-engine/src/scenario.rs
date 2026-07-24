@@ -35,9 +35,9 @@ use crate::{
     DefinitionActionGraphics, DefinitionComponent, DefinitionId, DefinitionPicture,
     DefinitionPictureImage, DefinitionRect, DefinitionSpriteImage, Direction, EffectState,
     EffectVarValue, Engine, EngineError, EnvironmentSettings, Landscape, LegacyCString,
-    MovementProfile, ObjectId, ObjectStatus, PhysicsSettings, RgbColor, RoundResultsState,
-    ScoreboardState, ScriptGlobalState, SkyFrame, SkyParallaxMode, SkySettings, SpawnConfig,
-    TeamInfo, Vector2, FULL_CON, LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT,
+    MaterialSet, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings, RgbColor,
+    RoundResultsState, ScoreboardState, ScriptGlobalState, SkyFrame, SkyParallaxMode, SkySettings,
+    SpawnConfig, TeamInfo, Vector2, FULL_CON, LANDSCAPE_MODE_DYNAMIC, LANDSCAPE_MODE_EXACT,
     LANDSCAPE_MODE_STATIC,
 };
 
@@ -1828,6 +1828,90 @@ impl LegacyDefinitionResolver for AuthoritativeNetworkResourceResolver<'_> {
 }
 
 impl Scenario {
+    /// Whether this scenario uses the shipped `SkyParcour` generator whose
+    /// final sky overlays can expose its earlier Water fill.
+    pub fn generated_landscape_seed_retry_applies(&self) -> bool {
+        self.landscape.as_ref().is_some_and(|landscape| {
+            landscape
+                .raster_state()
+                .and_then(LandscapeRasterState::map_creator)
+                .is_some_and(|creator| creator.has_skyparcour_water_exposure_guard())
+        })
+    }
+
+    /// Whether a fresh authoritative round should try the next random seed
+    /// before publishing its generated landscape.
+    ///
+    /// The shipped HarpoonRace and Sky Race `SkyParcour` map draws Water
+    /// inside an Earth overlay and then subtracts sky from the completed
+    /// operator chain. Some seeds therefore expose an otherwise rectangular
+    /// Water fill with an immediate C4MassMover path. The C++ creator produces
+    /// the same invalid Surface8; restricting this workaround to that exact
+    /// operator program leaves intentional waterfalls and third-party maps
+    /// named `SkyParcour` untouched.
+    ///
+    /// Exact replay/save/network-client loads must retain their synchronized
+    /// seed and should not use this fresh-round predicate.
+    pub fn generated_landscape_requires_seed_retry(&self) -> bool {
+        if !self.generated_landscape_seed_retry_applies() {
+            return false;
+        }
+        let Some(landscape) = self.landscape.as_ref() else {
+            return false;
+        };
+        let Some(grid) = landscape.pixel_grid() else {
+            return false;
+        };
+        let (Ok(width), Ok(height)) = (i32::try_from(grid.width()), i32::try_from(grid.height()))
+        else {
+            return false;
+        };
+        if width <= 0 || height <= 1 {
+            return false;
+        }
+        let Some(material_library) = self.material_library.as_ref() else {
+            return false;
+        };
+        let materials = MaterialSet::from_resource_library(material_library);
+        let Some(water) = materials.get("Water").filter(|water| water.instable()) else {
+            return false;
+        };
+        let water_slots = grid
+            .material_names()
+            .iter()
+            .map(|name| {
+                name.as_deref()
+                    .is_some_and(|name| clonk_resources::material::c4_names_equal(name, "Water"))
+            })
+            .collect::<Vec<_>>();
+        let width = width as usize;
+        let scanned_pixels = grid.bytes().len().saturating_sub(width);
+
+        grid.bytes()
+            .iter()
+            .take(scanned_pixels)
+            .enumerate()
+            .any(|(index, &byte)| {
+                if !water_slots
+                    .get(usize::from(byte & 0x7f))
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    return false;
+                }
+                let mut x = (index % width) as i32;
+                let mut y = (index / width) as i32;
+                landscape.find_mat_path(
+                    &mut x,
+                    &mut y,
+                    1,
+                    water.density(),
+                    water.max_slide(),
+                    &materials,
+                )
+            })
+    }
+
     /// Reads the ordinary offline player-admission parameters without loading
     /// definitions, materials or landscape data.
     pub fn preflight_offline_startup_from_path(

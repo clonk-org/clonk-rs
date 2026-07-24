@@ -442,14 +442,21 @@ pub(crate) struct MapCreatorS2State {
     /// then replays only RenderTo after script linking from this exact point.
     #[serde(skip, default)]
     pre_render_rng: Option<LcgRng>,
+    /// Rust-authority validation is restricted to the exact shipped
+    /// HarpoonRace/Sky Race operator program. A map name alone is not an
+    /// identity: third-party content may legitimately reuse `SkyParcour`.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    skyparcour_water_exposure_guard: bool,
 }
 
 // Callback bitmaps are transient PostInitMap work, deliberately omitted from
-// saves. Creator identity/equality follows the persisted S2 tree and its
-// construction-time default map.
+// saves. Creator identity/equality follows the persisted S2 tree, its
+// construction-time default map, and the behavior-bearing validation guard.
 impl PartialEq for MapCreatorS2State {
     fn eq(&self, other: &Self) -> bool {
-        self.tree == other.tree && self.default_map == other.default_map
+        self.tree == other.tree
+            && self.default_map == other.default_map
+            && self.skyparcour_water_exposure_guard == other.skyparcour_water_exposure_guard
     }
 }
 
@@ -459,6 +466,10 @@ impl MapCreatorS2State {
     #[cfg(test)]
     fn node_count(&self) -> usize {
         self.tree.nodes.len()
+    }
+
+    pub(crate) fn has_skyparcour_water_exposure_guard(&self) -> bool {
+        self.skyparcour_water_exposure_guard
     }
 
     pub(crate) fn set_callback_map_zoom(&mut self, map_zoom: i32) {
@@ -500,6 +511,7 @@ impl MapCreatorS2State {
             self.tree.nodes.push(node);
         }
         self.callbacks.append_from(&other.callbacks);
+        self.skyparcour_water_exposure_guard |= other.skyparcour_water_exposure_guard;
     }
 
     pub(crate) fn callback_state(&self) -> PostInitMapCallbacks {
@@ -524,6 +536,62 @@ pub(crate) struct S2MapCreation {
     pub(crate) bitmap: Option<clonk_resources::bitmap::IndexedBitmap>,
     pub(crate) creator: MapCreatorS2State,
     pub(crate) callbacks: PostInitMapCallbacks,
+}
+
+const SKYPARCOUR_WATER_EXPOSURE_CANONICAL_LEN: usize = 1_125;
+const SKYPARCOUR_WATER_EXPOSURE_CANONICAL_FNV1A64: u64 = 0x6abc_3e93_6ed2_fcda;
+
+fn bool_is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn source_has_skyparcour_water_exposure_bug(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut canonical_len = 0_usize;
+    let mut index = 0_usize;
+    let mut pending_separator = false;
+    while index < bytes.len() {
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            index += 2;
+            while bytes
+                .get(index)
+                .is_some_and(|byte| !matches!(*byte, b'\r' | b'\n'))
+            {
+                index += 1;
+            }
+            pending_separator = true;
+            continue;
+        }
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            index += 2;
+            while index < bytes.len()
+                && !(bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/'))
+            {
+                index += 1;
+            }
+            index = index.saturating_add(2).min(bytes.len());
+            pending_separator = true;
+            continue;
+        }
+        let byte = bytes[index];
+        index += 1;
+        if byte.is_ascii_whitespace() {
+            pending_separator = true;
+            continue;
+        }
+        if pending_separator && canonical_len != 0 {
+            hash ^= u64::from(b' ');
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            canonical_len += 1;
+        }
+        pending_separator = false;
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        canonical_len += 1;
+    }
+    canonical_len == SKYPARCOUR_WATER_EXPOSURE_CANONICAL_LEN
+        && hash == SKYPARCOUR_WATER_EXPOSURE_CANONICAL_FNV1A64
 }
 
 #[derive(Default)]
@@ -1876,7 +1944,7 @@ pub(crate) fn create_s2_map_with_state_and_functions_with_script_algo(
     // C4MCMap::Default (src/C4MapCreatorS2.cpp:633-644) runs at creator
     // construction: MapWdt/MapHgt evaluate through the synced rng.
     let (wdt, hgt) = evaluate_map_size(map_width, map_height, map_player_extend, player_count, rng);
-    parse_and_render_s2_map_with_callbacks_and_script_algo(
+    let mut creation = parse_and_render_s2_map_with_callbacks_and_script_algo(
         Tree::new(),
         source,
         classifier,
@@ -1886,7 +1954,10 @@ pub(crate) fn create_s2_map_with_state_and_functions_with_script_algo(
         script_functions,
         None,
         script_algo,
-    )
+    );
+    creation.creator.skyparcour_water_exposure_guard =
+        source_has_skyparcour_water_exposure_bug(source);
+    creation
 }
 
 /// Unified `CreateMapS2` entry point for scenario-section activation. With a
@@ -1951,8 +2022,9 @@ pub(crate) fn create_s2_map_for_section_with_state_and_functions_with_script_alg
         default_map,
         callbacks,
         pre_render_rng: _,
+        skyparcour_water_exposure_guard,
     } = retained;
-    parse_and_render_s2_map_with_callbacks_and_script_algo(
+    let mut creation = parse_and_render_s2_map_with_callbacks_and_script_algo(
         tree,
         source,
         classifier,
@@ -1962,7 +2034,10 @@ pub(crate) fn create_s2_map_for_section_with_state_and_functions_with_script_alg
         script_functions,
         Some(callbacks),
         script_algo,
-    )
+    );
+    creation.creator.skyparcour_water_exposure_guard = skyparcour_water_exposure_guard
+        || source_has_skyparcour_water_exposure_bug(source);
+    creation
 }
 
 /// Compatibility name for the retained-creator branch of
@@ -2192,6 +2267,7 @@ fn parse_and_render_s2_map_with_callbacks_and_script_algo(
             default_map,
             callbacks: callbacks.clone(),
             pre_render_rng,
+            skyparcour_water_exposure_guard: false,
         },
         callbacks,
     }
@@ -2417,6 +2493,49 @@ pub(crate) fn rerender_last_s2_map_with_script_algo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn water_exposure_guard_matches_only_the_shipped_skyparcour_program() {
+        let shipped_skyparcour =
+            include_str!("../../../content/Races.c4f/Skyrace.c4s/Landscape.txt");
+
+        assert!(source_has_skyparcour_water_exposure_bug(shipped_skyparcour));
+        assert!(source_has_skyparcour_water_exposure_bug(
+            &shipped_skyparcour.replacen("/* Skylands parcour */", "/* copied scenario */", 1)
+        ));
+        assert!(
+            !source_has_skyparcour_water_exposure_bug(
+                &shipped_skyparcour.replacen("SkyParcour", "Sky Parcour", 1)
+            ),
+            "whitespace that changes token boundaries must change the program identity"
+        );
+        assert!(
+            !source_has_skyparcour_water_exposure_bug(
+                "map SkyParcour { overlay { mat=Water; }; };"
+            ),
+            "a third-party map name must not opt into the shipped-content repair"
+        );
+
+        let mut classifier = test_classifier();
+        let mut rng = LcgRng::seed_from_u64(1);
+        let (width, height) = params();
+        let creator = create_s2_map_with_state(
+            shipped_skyparcour,
+            &mut classifier,
+            width,
+            height,
+            false,
+            1,
+            &mut rng,
+        )
+        .creator;
+        assert!(creator.has_skyparcour_water_exposure_guard());
+        let encoded = serde_json::to_string(&creator).expect("guarded creator serializes");
+        let restored: MapCreatorS2State =
+            serde_json::from_str(&encoded).expect("guarded creator restores");
+        assert_eq!(restored, creator);
+        assert!(restored.has_skyparcour_water_exposure_guard());
+    }
 
     fn test_classifier() -> MapPixelClassifier {
         let mut densities = [0i32; 128];

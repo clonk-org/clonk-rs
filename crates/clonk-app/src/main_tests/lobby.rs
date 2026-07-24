@@ -1205,6 +1205,10 @@
         .expect("queue live signup without waiting for its HTTP response");
         assert!(!app.scenario_game_options.values().master_server_signup);
         assert!(app.pending_lobby_internet_signup.is_some());
+        assert!(
+            !app.network_game_start_guard_passes(),
+            "a host cannot launch while a Start or compensating End is unresolved"
+        );
         let wait = app.message_dialogs.last().expect("cancellable wait dialog");
         assert!(matches!(
             wait.continuation,
@@ -1319,7 +1323,7 @@
     }
 
     #[test]
-    fn l082_committed_start_never_paints_a_hidden_live_registration_off() {
+    fn l082_committed_start_apply_failure_tears_down_when_cleanup_cannot_start() {
         let mut app = new_menu_app(640, 480);
         let (_events, mut commands) = install_classic_host_network_stub(&mut app);
         let (_snapshot, reference) = default_exact_host_reference();
@@ -1333,12 +1337,185 @@
         app.advertised_game_reference = None;
         signup.complete(Ok(Some(clonk_network::LeagueStartResponse::default())));
         app.poll_live_masterserver_signup()
-            .expect("retain committed worker state after local invariant failure");
+            .expect("tear down the rejected live registration");
 
-        assert!(app.scenario_game_options.values().master_server_signup);
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
         assert!(app
-            .status_text
-            .contains("live host game parameters are unavailable"));
+            .message_dialogs
+            .last()
+            .is_some_and(|dialog| dialog
+                .state
+                .message()
+                .contains("could not begin compensating Internet signup cleanup")));
+    }
+
+    #[test]
+    fn l082_leaving_lobby_during_compensating_end_preserves_worker_cleanup() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        let (snapshot, reference) = default_exact_host_reference();
+        app.host_join_snapshot = Some(snapshot);
+        app.advertised_game_reference = Some(reference);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('I'),
+        )])
+        .expect("queue live signup");
+        commands
+            .receive_masterserver_signup()
+            .complete(Ok(Some(clonk_network::LeagueStartResponse {
+                league: LegacyCString::from_bytes(b"Cup".to_vec()).expect("league name"),
+                seed: Some(0x1234_5678),
+                max_players: -1,
+                ..clonk_network::LeagueStartResponse::default()
+            })));
+        app.poll_live_masterserver_signup()
+            .expect("reject Start and queue compensating End");
+        assert!(
+            app.pending_lobby_internet_signup.is_some(),
+            "the committed Start must remain visible until End"
+        );
+        let cleanup = commands.receive_masterserver_signup();
+        assert!(!cleanup.enabled);
+
+        app.show_main_menu();
+
+        assert!(app.pending_lobby_internet_signup.is_none());
+        assert!(app.network.is_none());
+        cleanup.wait_for_cleanup_preservation();
+    }
+
+    #[test]
+    fn l082_failed_live_end_tears_the_host_down() {
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        let (snapshot, reference) = default_exact_host_reference();
+        app.host_join_snapshot = Some(snapshot);
+        app.advertised_game_reference = Some(reference);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('I'),
+        )])
+        .expect("queue live signup");
+        commands
+            .receive_masterserver_signup()
+            .complete(Ok(Some(clonk_network::LeagueStartResponse::default())));
+        app.poll_live_masterserver_signup()
+            .expect("commit live signup");
+        commands.take_published_join_snapshots();
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('I'),
+        )])
+        .expect("queue live End");
+        commands
+            .receive_masterserver_signup()
+            .complete(Err("End transport failed".to_owned()));
+        app.poll_live_masterserver_signup()
+            .expect("tear down after an unconfirmed End");
+
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app
+            .message_dialogs
+            .last()
+            .is_some_and(|dialog| dialog
+                .state
+                .message()
+                .contains("Unable to confirm cleanup of the live Internet registration")));
+    }
+
+    #[test]
+    fn harpoonrace_invalid_live_seed_is_ended_before_the_host_can_launch() {
+        let (prepared, _network_files) =
+            prepare_harpoonrace_host_with_seed(1_784_903_471);
+        let initial_snapshot = prepared
+            .host_config()
+            .initial_join_snapshot
+            .clone()
+            .expect("prepared HarpoonRace JoinData");
+        let reference = prepared
+            .initial_host_game_reference(true, &[])
+            .expect("prepared HarpoonRace reference");
+        let mut app = new_menu_app(640, 480);
+        let (_events, mut commands) = install_classic_host_network_stub(&mut app);
+        app.host_join_snapshot = Some(initial_snapshot);
+        app.advertised_game_reference = Some(reference);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Host".to_owned(),
+            prepared: Some(prepared),
+        }));
+        assert!(!app.scenario_game_options.values().master_server_signup);
+
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::GameOptions(
+            LobbyGameOptionInput::Hotkey('I'),
+        )])
+        .expect("queue live HarpoonRace signup");
+        let signup = commands.receive_masterserver_signup();
+        assert!(signup.enabled);
+        signup.complete(Ok(Some(clonk_network::LeagueStartResponse {
+            league: LegacyCString::from_bytes(b"Cup".to_vec()).expect("league name"),
+            seed: Some(1_784_903_470),
+            ..clonk_network::LeagueStartResponse::default()
+        })));
+        app.poll_live_masterserver_signup()
+            .expect("reject and begin cleanup for invalid Start seed");
+
+        assert!(
+            app.pending_lobby_internet_signup.is_some(),
+            "the committed Start must retain a compensating End transaction"
+        );
+        assert!(app.scenario_game_options.values().master_server_signup);
+        assert!(
+            !app.network_game_start_guard_passes(),
+            "the host remains blocked while the compensating End is unresolved"
+        );
+        app.start_network_game_now()
+            .expect("direct start remains blocked during compensating End");
+        assert!(matches!(app.mode, AppMode::Menu));
+        assert!(app.status_text.contains("1784903470"));
+        assert_eq!(
+            app.host_join_snapshot
+                .as_ref()
+                .expect("unchanged local JoinData")
+                .parameters
+                .random_seed,
+            1_784_903_471,
+            "the rejected response must not partially replace the local seed"
+        );
+
+        let rollback = commands.receive_masterserver_signup();
+        assert!(!rollback.enabled);
+        rollback.complete(Ok(None));
+        app.poll_live_masterserver_signup()
+            .expect("confirm compensating End");
+
+        assert!(app.pending_lobby_internet_signup.is_none());
+        assert!(!app.scenario_game_options.values().master_server_signup);
+        assert_eq!(
+            app.host_join_snapshot
+                .as_ref()
+                .expect("retained local JoinData")
+                .parameters
+                .random_seed,
+            1_784_903_471
+        );
+        assert!(
+            app.status_text.contains("1784903470"),
+            "successful cleanup preserves the actionable rejection"
+        );
+        let scenario = match app.network_mode.as_ref() {
+            Some(NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            })) => prepared
+                .claim_scenario()
+                .expect("claim retained valid HarpoonRace scenario"),
+            _ => panic!("cleanup retains the prepared host"),
+        };
+        assert!(!scenario.generated_landscape_requires_seed_retry());
     }
 
     #[test]

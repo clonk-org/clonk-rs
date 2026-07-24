@@ -1485,6 +1485,87 @@
         .expect("prepare staged network host")
     }
 
+    fn prepare_harpoonrace_host_with_seed(
+        random_seed_unix_seconds: i64,
+    ) -> (PreparedHostBootstrap, tempfile::TempDir) {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repository root");
+        let content = repository.join("content");
+        let planet = repository.join("planet");
+        let scenario_path =
+            content.join("EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s");
+        let definition_resource_paths =
+            vec![content.join("Objects.c4d"), content.join("EkeReloaded.c4d")];
+        let effective_definition_modules =
+            vec!["Objects.c4d".to_owned(), "EkeReloaded.c4d".to_owned()];
+        let definition_resources =
+            host_game_resource_sources::freeze_host_definition_resource_sources(
+                &definition_resource_paths,
+                &scenario_path,
+                &effective_definition_modules,
+                false,
+                &content,
+                "",
+            )
+            .expect("freeze HarpoonRace definitions");
+        let definition_executable_path =
+            format!("{}{}", content.display(), std::path::MAIN_SEPARATOR);
+        let install_roots = vec![content, planet];
+        let languages = vec!["US".to_owned(), "DE".to_owned()];
+        let language_packs = clonk_resources::LanguagePacks::default();
+        let network = tempdir().expect("isolated HarpoonRace host resources");
+        let league = prepared_host_bootstrap::PreparedLeagueHostConfig {
+            endpoint: "https://league.invalid/".to_owned(),
+            transport: clonk_network::LeagueHttpTransportConfig::default(),
+            update_period_secs: 120,
+            league_server_signup: false,
+        };
+        let prepared = prepared_host_bootstrap::prepare_host_bootstrap(
+            prepared_host_bootstrap::PreparedHostBootstrapSpec {
+                scenario_path: &scenario_path,
+                install_roots: &install_roots,
+                definition_resources: &definition_resources,
+                effective_definition_modules: &effective_definition_modules,
+                initial_definition_modules: &[],
+                fixed_definition_modules: None,
+                selector_definition_root: None,
+                definition_executable_path: &definition_executable_path,
+                definition_path: "",
+                languages: &languages,
+                language_packs: &language_packs,
+                network_directory: network.path(),
+                network_work_path: "Network",
+                start_unix_seconds: random_seed_unix_seconds - 1,
+                random_seed_unix_seconds,
+                group_maker: "Worldgen live-signup test",
+                host_name: "Host",
+                host_nick: "Host",
+                network_password: "",
+                network_comment: "",
+                netpuncher_address: "puncher.invalid:11115",
+                player_sources: &[],
+                config: prepared_host_bootstrap::PreparedHostBootstrapConfig {
+                    control_mode: 0,
+                    control_rate: 2,
+                    async_max_wait: 2,
+                    fair_crew: true,
+                    fair_crew_strength: 1_000,
+                    auto_frame_skip: true,
+                    max_load_file_size: 100 * 1024 * 1024,
+                    no_runtime_join: true,
+                    enable_upnp: false,
+                    network_tcp_port: 0,
+                    network_udp_port: 0,
+                },
+                league: Some(&league),
+            },
+        )
+        .expect("prepare HarpoonRace live-signup host");
+        (prepared, network)
+    }
+
     fn published_definition_wire_names(prepared: &PreparedHostBootstrap) -> Vec<Vec<u8>> {
         prepared
             .host_config()

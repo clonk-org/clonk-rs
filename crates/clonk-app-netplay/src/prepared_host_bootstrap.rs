@@ -50,6 +50,8 @@ use crate::host_game_resource_sources::{
     validate_host_group_resource_source, HostGameResourceSourceError, HostGameResourceSourceKind,
 };
 
+const GENERATED_LANDSCAPE_SEED_ATTEMPTS: usize = 256;
+
 /// Configuration values C++ reads while loading parameters and initializing
 /// its network status. Values unrelated to this supported initial-host subset
 /// remain fixed at their stock defaults.
@@ -306,6 +308,7 @@ pub struct PreparedHostBootstrap {
     /// stable resource identities for every later attribute-resolution pass.
     local_player_alternate_colors_by_resource: HashMap<i32, u32>,
     pending_initial_league_players: Option<PendingInitialLeaguePlayers>,
+    league_generated_landscape_loader: Option<PreparedLeagueGeneratedLandscapeLoader>,
     lifetime: Arc<PreparedHostLifetime>,
 }
 
@@ -316,6 +319,35 @@ struct PendingInitialLeaguePlayers {
     restore_players: Vec<ControlPlayerInfoEntry>,
     restore_last_player_id: i32,
     team_metadata: InitialNetworkTeamMetadata,
+}
+
+/// Exact post-publication inputs retained until the league Start response has
+/// supplied the seed that C++ uses for `Landscape.Init`.
+#[derive(Debug, Clone)]
+struct PreparedLeagueGeneratedLandscapeLoader {
+    /// In-memory image of the exact Scenario resource advertised in JoinData.
+    /// The source path may be edited while a lobby remains open, but league
+    /// Start must regenerate the same bytes already available to clients.
+    scenario_group: Group,
+    definition_groups: Vec<Group>,
+    material_groups: Vec<Group>,
+    graphics_groups: Vec<Group>,
+    languages: Vec<String>,
+    language_packs: LanguagePacks,
+}
+
+impl PreparedLeagueGeneratedLandscapeLoader {
+    fn load(&self, random_seed: u32) -> Result<Scenario, ScenarioError> {
+        Scenario::load_network_from_group_with_languages_and_seed_and_packs(
+            &self.scenario_group,
+            &self.definition_groups,
+            &self.material_groups,
+            &self.graphics_groups,
+            &self.languages,
+            u64::from(random_seed),
+            &self.language_packs,
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -438,6 +470,36 @@ impl PreparedHostBootstrap {
             .then(|| usize::try_from(response.max_players))
             .transpose()
             .map_err(|_| PrepareHostBootstrapError::MaxPlayersOutOfRange(response.max_players))?;
+        let current_seed = self
+            .host_config
+            .initial_join_snapshot
+            .as_ref()
+            .ok_or(PrepareHostBootstrapError::MissingJoinSnapshot)?
+            .parameters
+            .random_seed;
+        let random_seed = response.seed.unwrap_or(current_seed) as u32;
+        let league_scenario = self
+            .league_generated_landscape_loader
+            .as_ref()
+            .map(|loader| loader.load(random_seed))
+            .transpose()?;
+        if league_scenario
+            .as_ref()
+            .is_some_and(Scenario::generated_landscape_requires_seed_retry)
+        {
+            return Err(
+                PrepareHostBootstrapError::LeagueGeneratedLandscapeInvalid { random_seed },
+            );
+        }
+        let mut retained_scenario = league_scenario
+            .is_some()
+            .then(|| self.lifetime.scenario.lock());
+        if retained_scenario
+            .as_ref()
+            .is_some_and(|scenario| scenario.is_none())
+        {
+            return Err(PrepareHostBootstrapError::LeagueScenarioAlreadyClaimed);
+        }
         let parameters = &mut self
             .host_config
             .initial_join_snapshot
@@ -461,6 +523,11 @@ impl PreparedHostBootstrap {
             parameters.max_players = response.max_players;
             self.host_config.max_players = max_players;
             self.admission.max_players = response.max_players;
+        }
+        if let (Some(retained), Some(scenario)) =
+            (retained_scenario.as_mut(), league_scenario)
+        {
+            **retained = Some(scenario);
         }
         Ok(())
     }
@@ -764,6 +831,7 @@ impl PreparedHostBootstrap {
             local_player_resources: Vec::new(),
             local_player_alternate_colors_by_resource: HashMap::new(),
             pending_initial_league_players: None,
+            league_generated_landscape_loader: None,
             lifetime: Arc::new(PreparedHostLifetime {
                 temporary_files: Vec::new(),
                 scenario: Mutex::new(None),
@@ -857,6 +925,20 @@ pub enum PrepareHostBootstrapError {
     InvalidGameRuntime(#[from] InitialNetworkGameApplyError),
     #[error("the prepared host has no initial JoinData snapshot")]
     MissingJoinSnapshot,
+    #[error(
+        "no valid generated landscape was found in {attempts} seeds starting at {initial_seed}"
+    )]
+    GeneratedLandscapeSeedRetryExhausted { initial_seed: u32, attempts: usize },
+    #[error(
+        "published generated landscape for accepted random seed {random_seed} still requires a retry"
+    )]
+    PublishedGeneratedLandscapeInvalid { random_seed: u32 },
+    #[error(
+        "league-assigned random seed {random_seed} produces an invalid generated landscape"
+    )]
+    LeagueGeneratedLandscapeInvalid { random_seed: u32 },
+    #[error("the prepared host scenario was already claimed before the league seed was applied")]
+    LeagueScenarioAlreadyClaimed,
     #[error("scenario metadata could not be prepared: {0}")]
     Scenario(#[from] ScenarioError),
     #[error("scenario metadata could not be adapted: {0}")]
@@ -1420,6 +1502,47 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         let restore_count = i32::try_from(restore_players.len()).unwrap_or(i32::MAX);
         parameters.max_players = parameters.max_players.max(restore_count);
     }
+    // A fresh Rust authority may reject an invalid generated SkyParcour map,
+    // but it must select the replacement before CreateDynamic and JoinData
+    // freeze Parameters.RandomSeed. C++ clients independently regenerate the
+    // initial landscape from that published seed. Savegames and league games
+    // have an external exact seed and therefore never enter this retry path.
+    let retry_generated_landscape_seed =
+        should_retry_generated_landscape_seed(is_save_game, spec.league)
+            && scenario.generated_landscape_seed_retry_applies();
+    if retry_generated_landscape_seed {
+        let definition_groups = prepublication_resource_groups(
+            &resource_sources.definitions,
+            HostGameResourceSourceKind::Definition,
+        )?;
+        let material_groups = prepublication_resource_groups(
+            &resource_sources.materials,
+            HostGameResourceSourceKind::Material,
+        )?;
+        let graphics_groups = definition_resolver
+            .resolve_graphics_groups_with_definition_roots(&scenario_group, &definition_groups)?;
+        let initial_seed = parameters.random_seed as u32;
+        let (accepted_scenario, accepted_seed, rejected_seeds) =
+            load_fresh_network_scenario_with_seed_retry(
+                &scenario_group,
+                &definition_groups,
+                &material_groups,
+                &graphics_groups,
+                spec.languages,
+                spec.language_packs,
+                initial_seed,
+            )?;
+        scenario = accepted_scenario;
+        parameters.random_seed = accepted_seed as i32;
+        if rejected_seeds != 0 {
+            tracing::info!(
+                initial_seed,
+                accepted_seed,
+                rejected_seeds,
+                "advanced fresh host random seed past invalid generated landscapes"
+            );
+        }
+    }
 
     // Every stored nonempty Game.txt is compiled, including an ordinary
     // scenario whose component contains only the legacy [Player...] tail.
@@ -1513,11 +1636,15 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         published_game_resource_groups(&publication, HostResourceType::Definitions)?;
     let material_resource_groups =
         published_game_resource_groups(&publication, HostResourceType::Material)?;
+    let published_scenario_group = frozen_published_scenario_group(&publication)?;
     let graphics_groups = definition_resolver
-        .resolve_graphics_groups_with_definition_roots(&scenario_group, &definition_groups)?;
+        .resolve_graphics_groups_with_definition_roots(
+            &published_scenario_group,
+            &definition_groups,
+        )?;
     let random_seed = u64::from(publication.join_snapshot.parameters.random_seed as u32);
     scenario = Scenario::load_network_from_group_with_languages_and_seed_and_packs(
-        &scenario_group,
+        &published_scenario_group,
         &definition_groups,
         &material_resource_groups,
         &graphics_groups,
@@ -1525,6 +1652,28 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         random_seed,
         spec.language_packs,
     )?;
+    if retry_generated_landscape_seed && scenario.generated_landscape_requires_seed_retry() {
+        return Err(
+            PrepareHostBootstrapError::PublishedGeneratedLandscapeInvalid {
+                random_seed: random_seed as u32,
+            },
+        );
+    }
+    // Internet signup may be enabled from the live lobby even when this host
+    // was initially prepared without league-server signup. Retain the exact
+    // post-publication loader for every fresh affected scenario so any later
+    // Start seed is validated and installed before launch.
+    let retain_league_generated_landscape_loader =
+        !is_save_game && scenario.generated_landscape_seed_retry_applies();
+    let league_generated_landscape_loader =
+        retain_league_generated_landscape_loader.then(|| PreparedLeagueGeneratedLandscapeLoader {
+            scenario_group: published_scenario_group,
+            definition_groups: definition_groups.clone(),
+            material_groups: material_resource_groups.clone(),
+            graphics_groups: graphics_groups.clone(),
+            languages: spec.languages.to_vec(),
+            language_packs: spec.language_packs.clone(),
+        });
     let mut published_index = 0;
     let published_local_players = local_players
         .iter()
@@ -1684,6 +1833,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         local_player_resources,
         local_player_alternate_colors_by_resource: alternate_colors_by_resource,
         pending_initial_league_players,
+        league_generated_landscape_loader,
         lifetime: Arc::new(PreparedHostLifetime {
             temporary_files,
             scenario: Mutex::new(Some(scenario)),
@@ -1695,6 +1845,69 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
 
 fn path_from_legacy_text(value: &str) -> PathBuf {
     clonk_resources::path_from_legacy_bytes(&clonk_script::c4_string_bytes(value))
+}
+
+fn should_retry_generated_landscape_seed(
+    is_save_game: bool,
+    league: Option<&PreparedLeagueHostConfig>,
+) -> bool {
+    !is_save_game && !league.is_some_and(|league| league.league_server_signup)
+}
+
+fn prepublication_resource_groups(
+    sources: &[HostInitialResourceSource],
+    kind: HostGameResourceSourceKind,
+) -> Result<Vec<Group>, PrepareHostBootstrapError> {
+    sources
+        .iter()
+        .map(|resource| {
+            let group = resource.virtual_group_bytes.as_ref().map_or_else(
+                || open_group_path(&resource.path),
+                |bytes| Group::from_memory(resource.path.clone(), bytes.clone()),
+            );
+            group.map_err(|source| {
+                PrepareHostBootstrapError::Resources(HostGameResourceSourceError::ResourceGroup {
+                    kind,
+                    path: resource.path.clone(),
+                    source,
+                })
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_fresh_network_scenario_with_seed_retry(
+    scenario_group: &Group,
+    definition_groups: &[Group],
+    material_groups: &[Group],
+    graphics_groups: &[Group],
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    initial_seed: u32,
+) -> Result<(Scenario, u32, usize), PrepareHostBootstrapError> {
+    let mut random_seed = initial_seed;
+    for rejected_seeds in 0..GENERATED_LANDSCAPE_SEED_ATTEMPTS {
+        let scenario = Scenario::load_network_from_group_with_languages_and_seed_and_packs(
+            scenario_group,
+            definition_groups,
+            material_groups,
+            graphics_groups,
+            languages,
+            u64::from(random_seed),
+            language_packs,
+        )?;
+        if !scenario.generated_landscape_requires_seed_retry() {
+            return Ok((scenario, random_seed, rejected_seeds));
+        }
+        random_seed = random_seed.wrapping_add(1);
+    }
+    Err(
+        PrepareHostBootstrapError::GeneratedLandscapeSeedRetryExhausted {
+            initial_seed,
+            attempts: GENERATED_LANDSCAPE_SEED_ATTEMPTS,
+        },
+    )
 }
 
 fn published_game_resource_groups(
@@ -1724,6 +1937,27 @@ fn published_game_resource_groups(
             })
         })
         .collect()
+}
+
+fn frozen_published_scenario_group(
+    publication: &HostInitialResourcePublication,
+) -> Result<Group, PrepareHostBootstrapError> {
+    let core = &publication.join_snapshot.parameters.scenario;
+    let resource = publication
+        .resource_files
+        .iter()
+        .find(|resource| resource.core.id == core.id)
+        .ok_or(PrepareHostBootstrapError::PublishedResourceFileMissing {
+            resource_id: core.id,
+        })?;
+    fs::read(&resource.path)
+        .map_err(GroupError::Io)
+        .and_then(|bytes| Group::from_memory(resource.path.clone(), bytes))
+        .map_err(|source| PrepareHostBootstrapError::PublishedResourceGroup {
+            resource_id: core.id,
+            path: resource.path.clone(),
+            source,
+        })
 }
 
 struct InstallRootDefinitionResolver<'a> {
@@ -2384,6 +2618,28 @@ mod definition_root_graphics_tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[test]
+    fn generated_landscape_retry_only_changes_fresh_non_league_authorities() {
+        let league = PreparedLeagueHostConfig {
+            endpoint: "https://league.example/".to_string(),
+            transport: LeagueHttpTransportConfig::default(),
+            update_period_secs: 120,
+            league_server_signup: true,
+        };
+        let master_server_only = PreparedLeagueHostConfig {
+            league_server_signup: false,
+            ..league.clone()
+        };
+
+        assert!(should_retry_generated_landscape_seed(false, None));
+        assert!(should_retry_generated_landscape_seed(
+            false,
+            Some(&master_server_only)
+        ));
+        assert!(!should_retry_generated_landscape_seed(true, None));
+        assert!(!should_retry_generated_landscape_seed(false, Some(&league)));
+    }
+
     fn league_prepared_host(control_mode: i32) -> PreparedHostBootstrap {
         let mut host_config = HostConfig::default();
         host_config.initial_status.control_mode = control_mode;
@@ -2441,6 +2697,7 @@ mod definition_root_graphics_tests {
             local_player_resources: Vec::new(),
             local_player_alternate_colors_by_resource: HashMap::new(),
             pending_initial_league_players: None,
+            league_generated_landscape_loader: None,
             lifetime: Arc::new(PreparedHostLifetime {
                 temporary_files: Vec::new(),
                 scenario: Mutex::new(None),
