@@ -1,0 +1,1 @@
+Der Spieler, der zuerst X Stippel eliminiert hat, gewinnt. X ergibt sich aus der Anzahl dieses Spielziels im Szenario mal hundert.

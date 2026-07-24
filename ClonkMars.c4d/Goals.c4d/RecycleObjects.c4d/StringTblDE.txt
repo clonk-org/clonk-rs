@@ -1,0 +1,2 @@
+MsgGoalFulfilled=Alle zu recycleten Gebäude sind zerlegt!
+MsgGoalTodo=Es müssen noch %dx %s recyclet werden.

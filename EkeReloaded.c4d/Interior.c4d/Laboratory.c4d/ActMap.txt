@@ -1,0 +1,5 @@
+[Action]
+Name=Exist
+Facet=0,0,60,40
+Length=10
+NextAction=Exist

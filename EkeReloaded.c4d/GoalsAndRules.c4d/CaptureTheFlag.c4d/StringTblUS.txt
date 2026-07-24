@@ -1,0 +1,1 @@
+RestInfo=Your team must conquer %d more bunkers.

@@ -1,0 +1,6 @@
+CtxLinePickupDesc=Leitung aufnehmen
+TxtNoDoubleKit=%s wird bereits|am anderen Ende verlegt.
+TxtDisconnect=%s von|%s getrennt.
+TxtLinePickupCaption=Leitung aufnehmen
+TxtPickupLineTo=%s nach %s aufnehmen
+TxtPickupLineFrom=%s von %s aufnehmen

@@ -1,0 +1,5 @@
+TxtConnectLine=Connect line
+TxtFarRemoval=Disconnect line on the other end
+TxtNoNewLine=Cannot create a new %s here.
+TxtLineRemoval=%s disconnected.
+TxtConnect=%s connected|to %s

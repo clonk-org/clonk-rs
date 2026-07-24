@@ -1,0 +1,15 @@
+/* Phobos */
+
+map Phobos{
+   //Tunnelsky
+   overlay{mat=Tunnel;algo=sin; oy=45;turbulence=50;zoomX=30;zoomY=10;};
+   overlay{mat=Rock;algo=sin; oy=50;turbulence=50;zoomX=20;zoomY=10;};
+   
+  overlay {mat=Earth; tex=Smooth; algo=sin;zoomX=80; zoomY=-69;oy=50;loosebounds=1;
+    overlay{mat=Rock; tex=Smooth;algo=boxes; x=50; a=20;b=50; turbulence=100; lambda=2; };
+    overlay{mat=Rock; tex=Ridge;algo=rndchecker; x=1;turbulence=100; lambda=2; };
+    
+    overlay{mat=Tunnel;x=0;y=30; algo=bozo; a=25; b=10; turbulence=500;};
+    };
+    };
+};

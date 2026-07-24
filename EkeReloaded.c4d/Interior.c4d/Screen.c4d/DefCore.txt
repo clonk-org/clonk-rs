@@ -1,0 +1,6 @@
+[DefCore]
+id=SC5B
+Name=Screen
+Category=C4D_StaticBack
+Width=50
+Height=30

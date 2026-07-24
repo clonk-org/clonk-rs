@@ -1,0 +1,1 @@
+This object should be included by all buildings using the power system.

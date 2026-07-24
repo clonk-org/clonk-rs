@@ -1,0 +1,2 @@
+DE:Teslaspule
+US:Tesla Coil

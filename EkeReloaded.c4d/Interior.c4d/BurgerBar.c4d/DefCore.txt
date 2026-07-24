@@ -1,0 +1,9 @@
+[DefCore]
+id=BR5B
+Name=BurgerBar
+Category=C4D_Structure
+Width=74
+Height=50
+Offset=-37,-25
+Vertices=1
+VertexY=24

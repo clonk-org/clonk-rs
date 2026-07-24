@@ -1,0 +1,1 @@
+Dieses Objekt stellt die Grundfunktionalität für das Aufnehmen von Leitungen zur Verfügung.

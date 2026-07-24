@@ -1,0 +1,2 @@
+DE:Temperatur
+US:Temperature

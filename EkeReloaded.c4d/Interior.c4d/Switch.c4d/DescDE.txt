@@ -1,0 +1,1 @@
+Öffnet das nächstgelegene Gate mit [Graben]. Spezialfunktionen können per appendto realisiert werden.

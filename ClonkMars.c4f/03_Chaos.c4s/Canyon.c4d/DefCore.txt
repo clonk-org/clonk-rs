@@ -1,0 +1,16 @@
+[DefCore]
+id=BG_2
+Name=Vallis Marineris
+Version=4,9,5
+Category=3145729
+MaxUserSelect=10
+Width=1970
+Height=1360
+Offset=-0,-0
+Value=-1
+Mass=1
+Components=MARS=1;
+Picture=0,0,1970,1360
+Vertices=1
+VertexY=1
+VertexFriction=20

@@ -1,0 +1,10 @@
+map EkeTunnels
+{
+  overlay { algo=solid; mat=Earth;   tex=Rough;  x=0; y=10; wdt=100; hgt=100; a=0;  b=0;  rotate=0;  turbulence=100;   loosebounds=0; };
+  overlay { algo=bozo;  mat=Earth;   tex=Smooth; x=0; y=10; wdt=100; hgt=100; a=10; b=0;  rotate=0;  turbulence=5000;  loosebounds=0; };
+  overlay { algo=bozo;  mat=Coal;    tex=Swirl;  x=0; y=10; wdt=100; hgt=100; a=25; b=0;  rotate=0;  turbulence=5000;  loosebounds=0; };  
+  overlay { algo=bozo;  mat=Granite; tex=Ridge;  x=0; y=10; wdt=100; hgt=100; a=20; b=0;  rotate=0;  turbulence=10000; loosebounds=0; };  
+  overlay { algo=lines; mat=Ore;     tex=Rough;  x=0; y=10; wdt=100; hgt=100; a=3;  b=25; rotate=45; turbulence=5000;  loosebounds=0; };
+  overlay { algo=bozo;  mat=Tunnel;  tex=Smooth; x=0; y=10; wdt=100; hgt=100; a=10; b=0;  rotate=90; turbulence=100;   loosebounds=0; };
+  overlay { algo=lines; mat=Tunnel;  tex=Smooth; x=0; y=15; wdt=100; hgt=100; a=3;  b=10; rotate=90; turbulence=0;     loosebounds=0; };
+};

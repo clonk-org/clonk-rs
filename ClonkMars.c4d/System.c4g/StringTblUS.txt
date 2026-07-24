@@ -1,0 +1,4 @@
+BuyMenu=Buy-menu
+BuyItem=Buy %s
+NotenoughMoney=Not enough clunkers!
+Pipe=Rohr

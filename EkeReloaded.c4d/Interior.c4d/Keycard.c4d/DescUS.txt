@@ -1,0 +1,1 @@
+With this card, the SFT can pass security doors. The code is set with the SetCode(newCode) function. Different cards are combined into one to save space in the inventory. You can then query the codes you have collected with [Double Dig].

@@ -1,0 +1,40 @@
+// CREDITZ!
+
+
+ala: Betatesting, komplette Map: Tithonium Chasma + Überarbeitung sämtlicher Maps
+
+boni: Betatesting, JnR Steuerung für RADO, div. Bugfixes
+
+Hazard Team: Dunkelheit- und Lasersystem, div. Effekte
+
+Henry: Jetbelt, Explosion.c4d
+
+Maikel: Power.c4d
+
+Randrian: Raumfahrerclonk+Portrait Grafiken
+
+Icewing: Pipesystem, Baugrafiksystem, Menüsystem, Betatesting
+
+JCaesar: Kapsellandesystem, div. Bugfixes
+
+Nachtschatten: Betatesting
+
+Hubble: Betatesting
+
+Mirosh (EKE Pack): Schweiss-Sound
+
+mcGreen, s_m_w, Joshi: gelegentliches Betatesting
+
+Killerwipf: Kristallabbau-Regel
+
+OpenClonk: Rock, Earth Textur (leichte Veränderungen)
+
+Community: Bugs finden, tolles Feedback
+
+Team StarEmpires: Lavablasen-Effekt
+
+cgtextures.com: einige Bildertexturen
+
+freesound.org: einige Sounds
+
+celestiamotherlode: marsige Texturen

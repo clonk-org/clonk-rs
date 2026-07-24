@@ -1,0 +1,4 @@
+Emits microwaves, which can destroy meteorites. Unwary Clonks may also be on target.
+
+Control: Grab+Left/Right=Rotate
+Grab+Dig=Shoot a testwarp

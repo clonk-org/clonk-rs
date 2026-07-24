@@ -1,0 +1,3 @@
+Save landingplatform for supply capsules.
+
+The capsules land after completion only here and are save against slipping down or similar dangers.

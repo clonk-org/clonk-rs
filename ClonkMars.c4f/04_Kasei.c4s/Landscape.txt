@@ -1,0 +1,30 @@
+map Lavapits{
+
+  overlay{mat=Tunnel;tex=Smooth;algo=sin;
+  zoomX=25;oy=55;turbulence=30;
+  };
+  
+  overlay{mat=Durolava; tex=Smooth;
+  zoomX=200; oy=68;loosebounds=1;
+  
+  };
+  
+    overlay{mat=Earth; tex=Structure3;algo=sin; turbulence=30;
+    zoomX=60; oy=60;loosebounds=1;
+    
+    overlay{mat=Earth; tex=Earth;algo=rndchecker;turbulence=500;};
+        
+        overlay{mat=Sulphur; tex=Volcanic;algo=bozo; turbulence=50;
+        a=15;};
+        
+        overlay{mat=Rock; tex=Rock2; algo=bozo; turbulence=500;
+        a=25;};
+        
+        overlay{mat=Oil; tex=Smooth; algo=lines; turbulence=300;
+        y=85; zoomY=10; a=5;b=10;rotate=90; };
+        
+        overlay{mat=Crystal; tex=crystal2; algo=bozo;turbulence=1000;
+        a=25;};
+        };
+    };   
+};

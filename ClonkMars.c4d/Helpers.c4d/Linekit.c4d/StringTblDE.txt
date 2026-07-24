@@ -1,0 +1,5 @@
+TxtConnectLine=Leitung anschließen
+TxtFarRemoval=Leitung am anderen Ende abnehmen
+TxtNoNewLine=%s hier|nicht möglich.
+TxtLineRemoval=%s abgenommen.
+TxtConnect=%s verbunden|mit %s

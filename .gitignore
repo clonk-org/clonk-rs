@@ -81,6 +81,10 @@ Clonk.log
 # Rust build artifacts
 target/
 
+# Python test artifacts
+__pycache__/
+*.py[cod]
+
 # Game data files and directories
 *.c4p
 *.c4d
@@ -88,6 +92,16 @@ target/
 *.c4s
 *.c4m
 *.c4g
+
+# Authorized classic add-on packs live in the install-root namespace.
+!/EkeReloaded.c4d/
+!/EkeReloaded.c4d/**
+!/EkeReloaded.c4f/
+!/EkeReloaded.c4f/**
+!/ClonkMars.c4d/
+!/ClonkMars.c4d/**
+!/ClonkMars.c4f/
+!/ClonkMars.c4f/**
 
 # But track specific source files and assets in planet/
 !planet/Graphics.c4g/

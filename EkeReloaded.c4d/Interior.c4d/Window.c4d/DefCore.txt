@@ -1,0 +1,8 @@
+[DefCore]
+id=WI5B
+Name=Window
+Category=C4D_StaticBack
+Width=11
+Height=29
+Offset=-5,-14
+SolidMask=11,0,11,29

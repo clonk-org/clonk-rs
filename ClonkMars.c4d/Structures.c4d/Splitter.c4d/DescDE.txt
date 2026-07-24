@@ -1,0 +1,3 @@
+Leitet Licht in jede gewünschte Richtung weiter, in einem beinah unendlichen Radius. 
+
+Es darf aber keine Landschaft zwischen zwei Splittern sein. Zum Test anfassen und Springen drücken. Erscheint ein Lichstrahl zum nächsten Splitter ist alles korrekt.

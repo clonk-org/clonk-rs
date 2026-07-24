@@ -1,0 +1,11 @@
+[Action]
+Name=Reel
+NextAction=Reel
+Delay=1
+FacetBase=1
+StartCall=Reeling
+
+[Action]
+Name=Stop
+NextAction=Stop
+FacetBase=1

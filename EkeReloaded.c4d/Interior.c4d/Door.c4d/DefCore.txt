@@ -1,0 +1,9 @@
+[DefCore]
+id=DO5B
+Name=Door
+Category=C4D_StaticBack
+Width=11
+Height=29
+Offset=-5,-14
+ColorByOwner=1
+SolidMask=0,0,11,29

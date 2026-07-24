@@ -1,0 +1,16 @@
+[DefCore]
+id=MARS
+Name=Mars
+Version=4,9,5
+Category=3145729
+MaxUserSelect=10
+Width=1890
+Height=650
+Offset=-0,-0
+Value=42
+Mass=42
+Components=MARS=1;
+Picture=0,0,1890,650
+Vertices=1
+VertexY=1
+VertexFriction=20

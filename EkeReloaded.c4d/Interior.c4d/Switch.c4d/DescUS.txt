@@ -1,0 +1,1 @@
+Opens the nearest gate with [Dig]. Special functions can be realized by appendto.

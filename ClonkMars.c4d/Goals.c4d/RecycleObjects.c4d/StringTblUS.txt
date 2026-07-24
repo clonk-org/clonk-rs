@@ -1,0 +1,2 @@
+MsgGoalFulfilled=All structures to be recycled are gone!
+MsgGoalTodo=Still to recycle: %dx %s

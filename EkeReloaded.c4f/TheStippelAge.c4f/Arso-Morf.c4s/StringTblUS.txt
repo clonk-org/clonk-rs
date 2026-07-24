@@ -1,0 +1,3 @@
+Scientist1=UUAAAAAA!!!
+Scientist2=The end of all days is near!
+Scientist3=You will all die..

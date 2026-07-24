@@ -1,0 +1,1 @@
+Can start to flicker with DoDamage().

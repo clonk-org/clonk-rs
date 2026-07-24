@@ -1,0 +1,10 @@
+[DefCore]
+id=O2GN
+Version=4,9,8
+Name=Include
+Category=C4D_StaticBack
+MaxUserSelect=1
+Width=1
+Height=1
+Value=1
+Picture=0,0,64,64

@@ -1,0 +1,2 @@
+String0=Alles Kristall ist abgebaut.
+String1=Es sind noch|%d Einheiten festes Kristall und|%d Kristalle abzubauen.|%d Kristalle verkauft (%d insgesamt).

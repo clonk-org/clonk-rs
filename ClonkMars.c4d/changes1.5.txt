@@ -1,0 +1,29 @@
++ hinzugefügt | - entfernt | * verändert |! Bugfix
+
++ Lava kann zu Energie konvertiert werden (erforschbares Upgrade)
++ Solar Panels produzieren mehr Strom (erforschbares Upgrade)
++ günstigeres Transmitten (erforschbares Upgrade)
++ paralleles Beamen (erforschbares Upgrade)
++ Laserflint (veredelt Kristalle im Radius)
+* Kristallwachstumsverhalten verbessert
+* Clonks respawnen anstatt dass der Spieler eliminiert wird
+* Tithonium Chasma hat Spielziel
+* Gemeinschaftskonto und -Baupläne grundsätzlich für jedes Szenario
+* Transmitter: weniger Bau- und Betriebskosten
+* Anpassungen für Liga
+* Tanks können mehr Lava aufnehmen, gesonderte Anzeige
+* Terraformer Verhalten überabeitet
+* Beschreibungen überarbeitet
+* Phobos: Überabeitung der Map, Balancing
+* Abyss: Energie wird benötigt
+* Gras produziert kein CO2 mehr
+* für das Spielziel Ölförderung werden nur noch 80% benötigt
+! Desync Fix (danke Uncobob)
+! RADO wird erst aktiv wenn fertig gebaut
+! Bäume wachsen nicht mehr in Lava
+! HUD Grafikfehler Fix
+! Foldermap Grafikfehler Fix
+! Materiallabor vergisst keine Aufträge mehr
+! Vegetation schwebt nicht mehr
+! Kapseln sollten nicht mehr festhängen
+! Splitter haben rotierende SolidMasks

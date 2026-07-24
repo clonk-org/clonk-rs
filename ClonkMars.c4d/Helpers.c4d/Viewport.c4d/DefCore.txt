@@ -1,0 +1,8 @@
+[DefCore]
+id=VWPT
+Version=4,9,8
+Name=Viewport
+Category=C4D_StaticBack|C4D_Parallax|C4D_Foreground|C4D_IgnoreFoW|C4D_MouseIgnore
+Width=1024
+Height=768
+Picture=0,0,32,32

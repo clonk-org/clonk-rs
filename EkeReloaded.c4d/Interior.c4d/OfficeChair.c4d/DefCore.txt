@@ -1,0 +1,10 @@
+[DefCore]
+id=OC5B
+Name=OfficeChair
+Category=C4D_Vehicle
+Width=12
+Height=15
+Offset=-6,-7
+Vertices=1
+VertexY=7
+Picture=0,15,35,35

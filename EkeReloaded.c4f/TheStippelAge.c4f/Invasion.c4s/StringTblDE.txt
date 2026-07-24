@@ -1,0 +1,29 @@
+Tent=Bauen Sie hier eine Zeltbasis auf und warten Sie auf weitere Befehle.
+Scientist=Wir schicken nun einen Wissenschaftler, der die Lage einschätzen soll.
+Meeting=Treffen Sie ihn am Rand des Kraters.
+Hello=Guten Tag, folgen Sie mir bitte. Aber fassen sie nichts an!
+Wonder=Mh.. sehr merkwürdig. Ah ja, mal sehn..
+Pain=Hilfe! AAAAAH!!!
+Heart=Oh, mein Herz...
+
+Alarm1=Bringen Sie sich in Sicherheit!
+Alarm2=Offensichtlich sind wir hier auf eine aggressive außerirdische Lebensform gestoßen.
+
+Money1=Diese Aliens scheinen sich schnell auszubreiten.
+Money2=Das muss unter allen Umständen unterbunden werden.
+Money3=Holen Sie sich Verstärkung, sie bekommen jetzt die nötigen Mittel dazu.
+
+ArsoMorf1=Es gibt da dieses neue Forschungszentrum auf dem Planeten Arso-Morf.
+ArsoMorf2=Die Brillenträger dort wollen unbedingt Alien-Kokons für ihre Arbeit haben.
+ArsoMorf3=Also bringen Sie möglichst viele Kokons in ihre Basis.
+
+Seal1=Versiegeln Sie gesäuberte Stollen.
+Seal2=So können sich die Aliens nicht mehr ausbreiten.
+
+Dinner1=Weiter so, Soldat! Sie werden rechtzeitig zum Abendessen zu Haus sein.
+Dinner2=Killen sie die übrigen Biester!
+
+Biomap1=Es sind nur noch ein paar Aliens übrig!
+Biomap2=Sie können die Biomap vom GPED benutzen, um versteckte Lebewesen zu finden.
+
+End=Sie haben es geschafft! Diese Mistviecher sind wir wohl los.

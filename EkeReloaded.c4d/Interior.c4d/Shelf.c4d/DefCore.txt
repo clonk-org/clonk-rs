@@ -1,0 +1,10 @@
+[DefCore]
+id=SL5B
+Name=Shelf
+Category=C4D_Structure
+Width=69
+Height=35
+Offset=-34,-17
+Vertices=1
+VertexY=17
+SolidMask=0,35,69,35

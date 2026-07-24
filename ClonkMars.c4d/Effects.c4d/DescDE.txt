@@ -1,0 +1,1 @@
+Systemobjekte wie Rauch, Flammen, Explosionen und Licht, die in jedem Spiel benötigt werden.

@@ -1,0 +1,5 @@
+MenuTitle=Eingestellte Auflösung wählen
+MenuResolution=Auflösung
+MenuCustom=Benutzerdefiniert
+MenuX=X-Auflösung
+MenuY=Y-Auflösung

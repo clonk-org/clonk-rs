@@ -1,0 +1,1 @@
+Dieses Objekt sollte von allen Gebäuden, die das Energiesystem benutzen, eingebunden werden.

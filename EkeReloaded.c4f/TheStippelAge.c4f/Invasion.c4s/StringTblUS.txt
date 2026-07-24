@@ -1,0 +1,29 @@
+Tent=Set up a tent base here and wait for further orders.
+Scientist=We send a scientist who will assess the situation.
+Meeting=Meet him at the edge of the crater.
+Hello=Hi, follow me, please. But do not touch anything!
+Wonder=Mh.. very strange. Well, let's see...
+Pain=Help! AAAAAH!!!
+Heart=Oh, my heart...
+
+Alarm1=Seek shelter, son!
+Alarm2=Obviously, we found an aggressive extraterrestrial life.
+
+Money1=These aliens seem to spread quickly.
+Money2=This must be prevented under all circumstances.
+Money3=Get reinforcements, we will send you the necessary funds.
+
+ArsoMorf1=There's this new research center on the planet Arso-Morf.
+ArsoMorf2=The nerds there want to use some of these alien cocoons for their work.
+ArsoMorf3=So bring as many of them as possible to your base.
+
+Seal1=Seal cleaned tunnels.
+Seal2=Then the aliens can no longer spread.
+
+Dinner1=Keep it up, soldier! You will be in time for dinner at home. 
+Dinner2=Kill the beasts!
+
+Biomap1=There are only a few aliens left! 
+Biomap2=Use the Biomap of the GPED to find hidden creatures.
+
+End=You did it! These bastards are gone forever.

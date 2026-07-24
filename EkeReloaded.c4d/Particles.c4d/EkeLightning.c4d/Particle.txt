@@ -1,0 +1,11 @@
+[Particle]
+Name=EkeLightning
+MaxCount=5000
+InitFn=StdInit
+ExecFn=StdExec
+DrawFn=Std
+Face=0,0,17,17,-8,-8
+RByV=2
+GravityAcc=0
+Additive=1
+AlphaFade=20

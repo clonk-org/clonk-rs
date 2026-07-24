@@ -1,0 +1,12 @@
+[Material]
+Name=Granite
+Color=150,86,56,146,66,106,176,126,62
+Shape=3
+Density=50
+Friction=100
+MaxAirSpeed=100
+MaxSlide=250
+Placement=60
+TextureOverlay=Rock2
+Blast2Object=ROCK
+Blast2ObjectRatio=75

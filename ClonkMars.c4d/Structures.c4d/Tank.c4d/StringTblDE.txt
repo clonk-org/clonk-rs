@@ -1,0 +1,6 @@
+TxtOnlyOil=Nur Öl möglich!
+TxtOnlyEmptyTank=Nur bei leerem Tank möglich!
+TxtEnemy=Zugriff verweigert
+TxtSwitchToOil=Zu Öl wechseln
+TxtSwitchToLava=Zu Lava wechseln
+TxtFlushTank=Tank leeren

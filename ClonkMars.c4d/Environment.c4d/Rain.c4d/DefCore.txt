@@ -1,0 +1,10 @@
+[DefCore]
+id=_RAI
+Name=Rain
+Version=4,9,5
+Category=65
+MaxUserSelect=1
+Picture=0,0,64,64
+Value=1
+TimerCall=Rain
+Timer=3

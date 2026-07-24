@@ -1,0 +1,1 @@
+Damit kommt der SFT durch Sicherheitstüren. Der Code wird mit SetCode(newCode) festgelegt. Verschiedene Karten werden im Inventar des SFTs zu einer zusammengefügt, um Platz zu sparen. Welche Codes bisher gesammelt wurden, kann man dann mit [Doppelt Graben] abfragen.

@@ -1,0 +1,62 @@
+overlay earthtex { mat=earth; tex=smooth;
+  overlay { mat=earth; tex=earth; algo=rndchecker; a=1; zoomX=-40; zoomY=-40; turbulence=1000; };
+  overlay { mat=earth; tex=Rock; algo=rndchecker; a=2; zoomX=-60; zoomY=-60; turbulence=1000; };
+
+  //Asche
+  overlay { mat=earth; tex=Earth; algo=rndchecker; a=3; zoomX=-80; zoomY=-80; turbulence=1000;
+    overlay { mat=rock; tex=Rock2; algo=random; a=4; zoomX=-100; zoomY=-100; turbulence=10; };    
+    };
+  overlay { mat=earth; tex=smooth2; algo=rndchecker; a=4; zoomX=-100; zoomY=-100; turbulence=100;
+    overlay { mat=rock; tex=rock; algo=random; a=4; zoomX=-100; zoomY=-100; turbulence=10; };   
+    };
+
+  overlay { mat=Ashes; tex=ashes2; algo=rndchecker; a=4; zoomX=-100; zoomY=-100; turbulence=10; };
+  overlay { mat=Ashes; tex=ashes2; algo=rndchecker; a=4; zoomX=-100; zoomY=-100; turbulence=10; };  
+    
+  overlay { mat=earth; tex=Earth; algo=rndchecker; a=6; zoomX=-100; zoomY=-100; turbulence=100; };
+  overlay { mat=earth; tex=Earth; algo=rndchecker; a=6; zoomX=-100; zoomY=-100; turbulence=100; };  
+  overlay { mat=earth; tex=Earth; algo=rndchecker; a=6; zoomX=-100; zoomY=-100; turbulence=100; };             
+  
+  //Materialien
+
+    //Kristall
+    overlay { mat=crystal; tex=crystal2; algo=rndchecker; a=5; hgt=60; loosebounds=1; zoomX=-100; zoomY=-100; turbulence=100; };
+  
+    //Schwefel
+    overlay { mat=sulphur; tex=Volcanic; algo=rndchecker; a=4; y=50; loosebounds=1; zoomX=-100; zoomY=-70; turbulence=100; };    
+    
+    //Stein+Textur
+    overlay { mat=rock; tex=structure; algo=rndchecker; a=5; zoomX=-80; zoomY=20; turbulence=1000;
+      overlay { mat=rock; tex=Rock2; algo=rndchecker; a=8; zoomX=-100; zoomY=-100; turbulence=100; };
+      overlay { mat=rock; tex=structure2; algo=rndchecker; a=9; zoomX=-100; zoomY=-100; turbulence=100; };      
+      };
+  };
+
+map TithoniumChasma {
+
+ //Steilhang auf einem Fließbett
+ overlay { mat=durolava; tex=Smooth; y=74;
+   overlay { mat=ashes; tex=Structure3; algo=sin; oy=62; ox=40; zoomX=90; zoomY=45; turbulence=100; };
+   };
+ 
+ 
+ earthtex { algo=sin; oy=15; ox=40; wdt=70; zoomX=80; zoomY=85; turbulence=1000; 
+   //Höhlen im Hang
+   overlay { algo=lines; a=8; b=27; turbulence=100; rotate=110; mat=tunnel; tex=smooth; seed=30; } &
+   overlay { y=30; hgt=44; turbulence=10; mat=Tunnel; //Keine Höhlen an den Grenzen
+     //Texturing 
+     overlay { mat=Tunnel; tex=rough; algo=rndchecker; a=3; turbulence=1000; zoomX=-100; };
+     overlay { mat=Tunnel; tex=smooth2; algo=rndchecker; a=4; turbulence=100; zoomX=-100;}; 
+     overlay { mat=Tunnel; tex=Earth; algo=rndchecker; a=5; turbulence=100; zoomX=-100;};           
+     overlay { mat=Tunnel; tex=rock; x=30; algo=random; a=0; loosebounds=1; turbulence=1000; zoomX=-100; };          
+   };
+ };
+ earthtex { algo=sin; oy=65; ox=40; zoomX=90; zoomY=45; turbulence=10;
+
+  //Materialien (Tiefe)
+  overlay { mat=oil; tex=liquid; algo=sin; oy=85; zoomX=100; zoomY=40; turbulence=10000;
+    earthtex { algo=lines; a=4; b=45; turbulence=1000; };
+    };
+  overlay { mat=Ashes; tex=Structure; algo=lines; a=6; b=210; turbulence=1000; seed=5; ox=85; };   
+  };
+};

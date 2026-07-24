@@ -1,0 +1,16 @@
+[Particle]
+Name=BoostDust
+MaxCount=1000
+InitFn=StdInit
+ExecFn=StdExec
+DrawFn=Std
+CollisionFn=Die
+VertexCount=1
+Face=0,0,80,160,-40,-80
+Delay=0
+Repeats=0
+Reverse=0
+AlphaFade=1
+GravityAcc=0
+Additive=0
+WindDrift=50

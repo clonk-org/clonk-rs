@@ -1,0 +1,9 @@
+[DefCore]
+id=IB5B
+Name=InfoBoard
+Category=C4D_Structure
+Width=80
+Height=50
+Offset=-40,-25
+Vertices=1
+VertexY=24

@@ -1,0 +1,2 @@
+DE:Capture The Flag
+US:Capture The Flag

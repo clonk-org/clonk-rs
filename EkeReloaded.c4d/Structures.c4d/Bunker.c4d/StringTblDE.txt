@@ -1,0 +1,4 @@
+Install=%s installieren
+Deinstall=%s deinstallieren
+Money=Nicht genug Geld!
+Context=Geschütze

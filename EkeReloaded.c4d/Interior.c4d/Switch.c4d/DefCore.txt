@@ -1,0 +1,10 @@
+[DefCore]
+id=SI5B
+Name=Switch
+Category=C4D_Structure
+Width=15
+Height=18
+Offset=-7,-9
+Vertices=1
+VertexY=8
+Grab=2

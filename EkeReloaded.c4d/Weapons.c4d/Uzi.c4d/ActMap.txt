@@ -1,0 +1,11 @@
+[Action]
+Name=Shoot
+Delay=3
+NextAction=Shoot
+StartCall=Shooting
+Sound=UZ_Shoot
+
+[Action]
+Name=Stop
+Delay=10
+FacetBase=1

@@ -1,0 +1,14 @@
+[DefCore]
+id=PC5B
+Name=PulseCannon
+Version=4,9,5
+Category=C4D_Structure
+MaxUserSelect=10
+Picture=0,60,35,35
+Width=50
+Height=30
+Offset=-25,-15
+Value=250
+Mass=500
+TimerCall=TargetScan
+Timer=1

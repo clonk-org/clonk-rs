@@ -1,0 +1,2 @@
+DE:Keycard
+US:Keycard

@@ -1,0 +1,2 @@
+DE:Zerstörte Gebäude
+US:Ruined Structures

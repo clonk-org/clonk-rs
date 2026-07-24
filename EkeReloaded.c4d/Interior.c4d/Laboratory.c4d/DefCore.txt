@@ -1,0 +1,9 @@
+[DefCore]
+id=LB5B
+Name=Laboratory
+Category=C4D_Structure
+Width=60
+Height=40
+Offset=-30,-20
+Vertices=1
+VertexY=19

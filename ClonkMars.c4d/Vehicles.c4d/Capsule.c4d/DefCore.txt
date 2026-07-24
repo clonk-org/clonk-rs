@@ -1,0 +1,25 @@
+[DefCore]
+id=CPSL
+Version=4,1,0
+Name=Versorgungkapsel
+Category=3332
+MaxUserSelect=2
+Height=45
+Width=60
+Offset=-30,-22
+Value=0
+Mass=600
+Components=METL=2;
+Picture=0,0,60,45
+Vertices=7
+VertexX=       -24, 0,24,20,  9, -7,-20
+VertexY=        14,14,14, 0,-19,-19,  0
+VertexFriction= 100,100,100,100, 100, 100, 100
+VertexCNAT=      9, 8,10, 2,  6,  5,  1
+ContactCalls=1
+BorderBound=1
+Rotate=1
+Grab=1
+GrabPutGet=3
+ColorByOwner=1
+NoPushEnter=1

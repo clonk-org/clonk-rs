@@ -1,0 +1,7 @@
+[DefCore]
+id=AL5B
+Name=ApproachLight
+Category=C4D_StaticBack
+Width=4
+Height=4
+Offset=-2,-2

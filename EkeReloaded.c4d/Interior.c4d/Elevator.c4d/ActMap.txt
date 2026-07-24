@@ -1,0 +1,16 @@
+[Action]
+Name=Wait
+Procedure=FLOAT
+Delay=35
+FacetBase=1
+NextAction=Wait
+StartCall=Waiting
+
+[Action]
+Name=Move
+Procedure=FLOAT
+Delay=1
+FacetBase=1
+NextAction=Move
+StartCall=Moving
+Sound=EL_Move

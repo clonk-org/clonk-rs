@@ -1,0 +1,7 @@
+Dient als als Forschungseinrichtung für Updates und Upgrades.
+
+Leuchtet die grüne Ampel, ist alles in Ordnung, es kann geforscht werden.
+
+Gelbe Ampel signalisiert Forschungsbetrieb.
+
+Bei Roter Ampel ist keine Forschung möglich (zB Energiemangel)

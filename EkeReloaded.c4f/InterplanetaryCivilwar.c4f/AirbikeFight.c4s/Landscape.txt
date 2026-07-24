@@ -1,0 +1,15 @@
+/* AirbikeFight */
+
+map AirbikeFight
+{
+  overlay
+  {
+    mat=Earth;
+    tex=Rough;
+    algo=boxes;
+    a=10;
+    b=50;
+    turbulence=1000;
+    rotate=45;
+  };
+};

@@ -1,0 +1,2 @@
+TxtFull=%s is full|with %d Clonks!
+TxtNoPushEnter=%s can't be pushed|into %s.

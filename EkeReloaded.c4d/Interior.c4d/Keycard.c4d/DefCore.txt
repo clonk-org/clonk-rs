@@ -1,0 +1,14 @@
+[DefCore]
+id=KC5B
+Name=Keycard
+Category=C4D_Object
+Mass=1
+Width=6
+Height=4
+Offset=-3,-2
+Vertices=1
+VertexY=1
+VertexFriction=100
+Picture=6,0,35,35
+Collectible=1
+ColorByOwner=1

@@ -1,0 +1,10 @@
+[Action]
+Name=Walk
+FacetBase=1
+NextAction=Walk
+StartCall=Departure
+
+[Action]
+Name=AirbikeFly
+FacetBase=1
+NextAction=AirbikeFly

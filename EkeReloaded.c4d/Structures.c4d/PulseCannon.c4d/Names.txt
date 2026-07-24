@@ -1,0 +1,2 @@
+DE:Pulskanone
+US:Pulse Cannon

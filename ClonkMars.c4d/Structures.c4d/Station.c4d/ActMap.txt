@@ -1,0 +1,16 @@
+[Action]
+Name=Wait
+Procedure=NONE
+Length=1
+FacetBase=1
+Facet=0,0,70,45
+NextAction=Wait
+
+[Action]
+Name=Energize
+Procedure=NONE
+Length=30
+Delay=3
+FacetBase=1
+Facet=0,0,70,45
+NextAction=Wait

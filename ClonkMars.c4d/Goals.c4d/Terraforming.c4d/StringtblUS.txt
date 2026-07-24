@@ -1,0 +1,1 @@
+TxtGoal=Current state: %d % - to reach: %d %.

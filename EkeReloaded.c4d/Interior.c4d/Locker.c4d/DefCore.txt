@@ -1,0 +1,13 @@
+[DefCore]
+id=LO5B
+Name=Locker
+Category=C4D_Structure
+Width=18
+Height=35
+Offset=-9,-17
+Vertices=1
+VertexY=17
+Picture=18,0,35,35
+Grab=2
+GrabPutGet=3
+CollectionLimit=10

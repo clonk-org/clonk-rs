@@ -1,0 +1,53 @@
+overlay earthtex { mat=earth; tex=rock;
+  overlay { mat=earth; tex=earth; algo=rndchecker; a=1; zoomX=-40; zoomY=-40; turbulence=1000; };
+  overlay { mat=earth; tex=Volcanic; algo=rndchecker; a=2; zoomX=-60; zoomY=-60; turbulence=1000; };
+  overlay { mat=earth; tex=ridge; algo=rndchecker; a=6; zoomX=-100; zoomY=-100; turbulence=1000; };
+  overlay { mat=earth; tex=smooth2; algo=rndchecker; a=4; zoomX=-100; zoomY=-100; turbulence=100; };
+  overlay { mat=earth; tex=Flare3; algo=rndchecker; a=6; zoomX=-100; zoomY=-100; turbulence=100; };  
+  };
+//ToTest: Flare, Rock
+overlay ashestex { mat=flyashes; tex=ashes2;
+  overlay { mat=ashes; tex=Structure3; a=1; algo=rndchecker; turbulence=100; };
+  overlay { mat=ashes; tex=Volcanic; a=2; algo=rndchecker; turbulence=1000; };  
+  };
+
+
+/* Eos */
+
+map Valley {
+    //Krater
+    ashestex { algo=sin; a=10; zoomX=70; zoomY=10; oy=49; ox=25;
+      overlay { mat=earth; tex=rock; algo=bozo; a=7; turbulence=100; zoomX=-40; zoomY=-100;
+        //Texturen        
+        overlay { mat=earth; tex=smooth; algo=rndchecker; turbulence=100; };
+        overlay { mat=earth; tex=earth; algo=rndchecker; a=2; turbulence=1000; };                
+        //Steinablagerungen
+        overlay { mat=rock; tex=Structure; algo=rndchecker; a=1; turbulence=100; };
+        };
+      overlay { mat=sulphur; tex=Volcanic; algo=rndchecker; a=6; zoomX=-100; zoomY=-70; turbulence=1000; };
+                        
+    //aushub (Meteor!)
+    overlay{ algo=mandel;ox=12;zoomX=60;zoomY=30;turbulence=100; loosebounds=1; 
+      overlay{ mat=tunnel; tex=smooth; algo=sin; zoomX=80; zoomY=20; oy=53; ox=30; };
+      overlay{mat=Oil;y=68;
+      };
+    };
+
+    earthtex { algo=sin; a=10; zoomX=70; zoomY=10; oy=77; ox=30; turbulence=100;
+      overlay { mat=crystal; tex=flare; algo=boxes; a=10; b=40; zoomX=-20; zoomY=-100; turbulence=1000; };  
+      overlay { mat=rock; tex=rough; algo=rndchecker; a=1; zoomY=-100; zoomX=-70; rotate=0; turbulence=10;
+        overlay { mat=rock; tex=rock; algo=rndchecker; turbulence=100; zoomX=-100; zoomY=-100; a=2; };
+        earthtex { algo=rndchecker; turbulence=100;  };  
+        };
+      overlay { mat=tunnel; tex=Spots; algo=rndchecker; a=7; zoomX=-100; zoomY=-10; turbulence=10000; lambda=15; hgt=91; 
+        overlay { mat=Tunnel; tex=Earth; algo=rndchecker; turbulence=100; zoomX=-100; zoomY=-100; };        
+        };   
+      //Durolava
+      overlay { mat=durolava; tex=smooth; algo=lines; a=7; b=30; y=93; turbulence=100;
+        overlay { mat=ashes; tex=Volcanic; algo=border; a=0; b=1; turbulence=0; };
+        }; 
+      };   
+     
+  };
+};
+  

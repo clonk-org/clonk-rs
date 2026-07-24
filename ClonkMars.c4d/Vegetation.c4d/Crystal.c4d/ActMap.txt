@@ -1,0 +1,13 @@
+[Action]
+Name=Hang
+Procedure=FLOAT
+Length=5
+Facet=0,0,19,19
+NextAction=Hang
+
+[Action]
+Name=Object
+Procedure=NONE
+Length=5
+Facet=0,0,19,19
+NextAction=Object

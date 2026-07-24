@@ -1,0 +1,7 @@
+Eine sichere Basis mit Handelseinheit.
+
+Auf Springen öffnet sich das Menü mit dem man Nachschubkapseln besorgen kann. Diese landen in der Nähe irgendwo, es sei denn man baut einen Kapselport. Geht eine Kapsel kaputt, muss man fünf Minuten auf einer neue Warten.
+
+In kleinen Portionen heilt sich der Clonk innerhalb der Basis.
+
+Ebenfalls können Clonks reproduziert werden. Dazu muss während des Züchtungsvorgangs immer(!) mindestens ein Clonk, genügend Platz, eine grüne Basis, sowie Strom vorhanden sein. Wird eines dieser Kriterien kurzzeitig nicht eingehalten, schlägt der Prozess fehl und wird von neuem angefangen. Der Prozess kann per Kontextmenü aktiviert und gestoppt werden.

@@ -1,0 +1,5 @@
+[DefCore]
+id=STRM
+Name=Storm Control
+Category=C4D_StaticBack|C4D_Environment
+MaxUserSelect=1

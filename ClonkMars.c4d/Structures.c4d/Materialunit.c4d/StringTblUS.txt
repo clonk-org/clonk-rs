@@ -1,0 +1,6 @@
+TxtCancel=Cancel
+TxtCancelFull=Cancle the actual production, if the action is finished.
+TxtCancelNow=Cancel Now
+TxtCancelNowFull=Cancle the actual production now. Caution: All materials will be lost.
+TxtNothingProducible=Nothing producible
+TxtNotEnoughOil=Not enough Oil in the tanks available!

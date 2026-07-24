@@ -1,0 +1,1 @@
+Steuerung wie bei einem Fahrstuhl gewohnt. Fährt wenn losgelassen automatisch bis zur nächsten Tür.

@@ -1,0 +1,1 @@
+The first player who kills X Stippels wins. X is given by the number of this goal in the scenario times hundred.

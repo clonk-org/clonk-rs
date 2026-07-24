@@ -1,0 +1,1 @@
+Kann mit DoDamage() zum Flackern gebracht werden.
