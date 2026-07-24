@@ -6,7 +6,7 @@ dependency graphs of clonk-app and clonk-game. Development dependencies are
 excluded. Duplicate entries between the two binary graphs are intentional.
 
 Cargo.lock FNV-1a 64: 321b617e684eb761
-Release dependency inputs FNV-1a 64: 9efd1d8b39bba439
+Release dependency inputs FNV-1a 64: 44b2aeb6e018ad42
 Project source: ISC (see ../COPYING).
 Game content: separate CC BY-NC terms (see clonk_content_license.txt).
 Third-party Rust crates: their respective licenses below.

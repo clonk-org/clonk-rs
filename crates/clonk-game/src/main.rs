@@ -375,22 +375,20 @@ fn ensure_runtime_asset(
 }
 
 fn same_file(a: &Path, b: &Path) -> io::Result<bool> {
-    let a_meta = fs::metadata(a)?;
-    let b_meta = fs::metadata(b)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let a_meta = fs::metadata(a)?;
+        let b_meta = fs::metadata(b)?;
         Ok(a_meta.ino() == b_meta.ino() && a_meta.dev() == b_meta.dev())
     }
-    #[cfg(windows)]
+    #[cfg(not(unix))]
     {
-        use std::os::windows::fs::MetadataExt;
-        return Ok(a_meta.file_index() == b_meta.file_index()
-            && a_meta.volume_serial_number() == b_meta.volume_serial_number());
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        return Ok(a_meta.len() == b_meta.len());
+        // Windows file identity (`MetadataExt::file_index` and
+        // `volume_serial_number`) is still unstable, so identity comes from the
+        // fully resolved path. `canonicalize` resolves symlinks and junctions
+        // and errors on a missing path, matching the Unix arm's guarantees.
+        Ok(fs::canonicalize(a)? == fs::canonicalize(b)?)
     }
 }
 
