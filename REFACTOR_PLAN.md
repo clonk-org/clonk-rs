@@ -340,3 +340,24 @@ state extraction remains queued behind wave 2.
   items whose largest block is the 6,441-line root `impl GameApp`. Splitting it
   is the queued step 6b (per-area state extraction), which is a design change,
   not a byte-verbatim move.
+- command.rs production split landed: the 12,186-line production half became
+  `snapshot.rs` 419 / `model.rs` 894 / `geometry.rs` 240 / `machine.rs` 6,845
+  and `machine/stack.rs` 3,825, with command.rs down to 69 lines (imports,
+  consts, the module decls and the id-frozen `mod tests` splice).
+
+  Two boundary lessons, both forced by the compiler:
+  * `impl CommandStack` reaches into every per-command state struct's private
+    fields (713 accesses). Rather than publish those fields, `stack` became a
+    **child** of `machine` — a child can see its parent's privates, so the
+    state machine keeps its encapsulation and only the module nesting changed.
+    `CommandSnapshot` and `ActiveCommand` are likewise mutually private, so the
+    old `runtime` group was merged into `machine` instead of being its own file.
+  * The inline `mod tests` stays at `command::tests` (ids are frozen), which
+    makes it a *sibling* of the new children and unable to see their internals.
+    The fix is `pub(in crate::command)`, not `pub(crate)`: it restores exactly
+    the visibility those items had before the split — the whole `command`
+    subtree — with no widening. 235 declarations use it; only 73 needed real
+    `pub(crate)` because something outside `command` already called them.
+
+  Byte-partition proof: all 12,186 production lines reconstruct from the five
+  files line for line, with 239 lines differing solely by a visibility prefix.
