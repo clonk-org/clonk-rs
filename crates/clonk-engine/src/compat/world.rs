@@ -4464,11 +4464,7 @@ pub(crate) fn get_system_time(args: &[Value]) -> Result<Value, RuntimeError> {
 /// `timeGetTime()` clock only in local, non-recording control mode. A missing
 /// host context corresponds to C4GameControl::CM_None and is synchronized.
 pub(crate) fn get_time(_args: &[Value]) -> Result<Value, RuntimeError> {
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         if context.world.control_sync_mode {
             return Ok(Value::Nil);
         }
@@ -4487,11 +4483,7 @@ pub(crate) fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(entry) = entry else {
         return Ok(Value::Nil);
     };
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let definition_id = match requested {
             Some(id) => Some(id),
             // `if (!idDef && cthr->Def) idDef = cthr->Def->id` — the
@@ -4577,11 +4569,7 @@ pub(crate) fn get_scenario_val(args: &[Value]) -> Result<Value, RuntimeError> {
         "GetScenarioVal",
         "entry_nr",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         if let Some(value) =
             context
                 .world
@@ -4636,11 +4624,7 @@ pub(crate) fn load_scenario_section(args: &[Value]) -> Result<Value, RuntimeErro
         "flags",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context_mut(Ok(Value::Int(0)), |context| {
         if !context.world.scenario_section_known(&name) {
             return Ok(Value::Int(0));
         }
@@ -4692,11 +4676,7 @@ pub(crate) fn script_go(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(Value::Int(value)) => *value != 0,
         _ => false,
     };
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         context.script_go_request = Some(go);
         Ok(Value::Nil)
     })
@@ -4707,11 +4687,7 @@ pub(crate) fn script_go(args: &[Value]) -> Result<Value, RuntimeError> {
 /// it before entering ScriptN (C4ScriptHost.cpp:222-232), and a preceding
 /// goto() in this same VM call is immediately visible.
 pub(crate) fn script_counter(_args: &[Value]) -> Result<Value, RuntimeError> {
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context(Ok(Value::Int(0)), |context| {
         Ok(Value::Int(
             context
                 .script_counter_request
@@ -4772,11 +4748,7 @@ pub(crate) fn host_overlap_object(
 pub(crate) fn set_game_speed(args: &[Value]) -> Result<Value, RuntimeError> {
     let requested = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetGameSpeed", "speed")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context(Ok(Value::Bool(false)), |context| {
         if context.world.league_game() && clonk_script::caller_is_temporary_script() != Some(false)
         {
             return Ok(Value::Bool(false));

@@ -2648,11 +2648,7 @@ fn call_world_object_reference_with(
             ),
         }
     });
-    let (previous_script_object, previous_script_definition) = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return (None, None);
-        };
+    let (previous_script_object, previous_script_definition) = with_host_context_mut((None, None), |context| {
         let definition = context.object_effective_definition_id(target);
         (
             context.script_object_context.replace(target),
@@ -2904,11 +2900,7 @@ fn call_world_object_function_with_options(
     });
     // The HOST_CONTEXT borrow is released here: the nested VM's host
     // functions re-borrow it against the swapped-in scope.
-    let (previous_script_object, previous_script_definition) = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return (None, None);
-        };
+    let (previous_script_object, previous_script_definition) = with_host_context_mut((None, None), |context| {
         let definition = context.object_effective_definition_id(target);
         (
             context.script_object_context.replace(target),

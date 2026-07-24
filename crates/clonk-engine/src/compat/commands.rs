@@ -132,11 +132,7 @@ pub(crate) fn parse_command_request(
 /// Presence check for ordered command previews: once a same-call scope
 /// exists, its removal state supersedes the immutable frame snapshot.
 fn preview_object_is_present(target: ObjectId) -> bool {
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    with_host_context(false, |context| {
         match context.object_scope(target) {
             Some(scope) => !scope.destroy && scope.status() != ObjectStatus::Deleted,
             None => context
@@ -716,11 +712,7 @@ pub(crate) fn get_command(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .unwrap_or(0);
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let resolved = target_id.or_else(|| context.object_context().map(|object| object.id()));
         let Some(resolved) = resolved else {
             return Ok(Value::Nil);
@@ -810,11 +802,7 @@ pub(crate) fn finish_command(args: &[Value]) -> Result<Value, RuntimeError> {
             };
         }
     }
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(object) = context.object_context_mut() else {
             return Ok(Value::Bool(false));
         };
@@ -1199,11 +1187,7 @@ fn preview_command_failure_feedback(
     actor: ObjectId,
     feedback: CommandFailureFeedback,
 ) -> Result<(), RuntimeError> {
-    let crew = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    let crew = with_host_context(false, |context| {
         context
             .object_scope(actor)
             .map(|scope| scope.ocf() & ocf::CREW_MEMBER != 0)
@@ -1274,11 +1258,7 @@ fn preview_command_failure_feedback(
         }
         "Build" => {
             if let Some(target) = command.target {
-                let (component, count) = HOST_CONTEXT.with(|cell| {
-                    let borrow = cell.borrow();
-                    let Some(context) = borrow.as_ref() else {
-                        return (None, 0);
-                    };
+                let (component, count) = with_host_context((None, 0), |context| {
                     let scope = context.object_scope(target);
                     let state = context
                         .get_world_object(target)
@@ -1322,11 +1302,7 @@ fn preview_command_failure_feedback(
     if !object_has_status(actor) {
         return Ok(());
     }
-    let silent_commands = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    let silent_commands = with_host_context(false, |context| {
         context
             .object_effective_definition_id(actor)
             .and_then(|id| context.definition_metadata(&id))
@@ -1335,11 +1311,7 @@ fn preview_command_failure_feedback(
     if silent_commands {
         return Ok(());
     }
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         if context.ensure_object_scope(actor) {
             if let Some(scope) = context.object_scope_mut(actor) {
                 scope.set_command_direction(CommandDirection::Stop);
@@ -1647,11 +1619,7 @@ fn preview_object_com_drop(actor: ObjectId, object: ObjectId) -> Result<bool, Ru
 
     // The first SetOCF happened in Exit before Ejection. This explicit
     // ObjectComDrop update happens after Departure and before UnGrab.
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         if !context.ensure_object_scope(actor) {
             return;
         }
@@ -1683,11 +1651,7 @@ fn preview_object_com_put(
     target: ObjectId,
     object: ObjectId,
 ) -> Result<bool, RuntimeError> {
-    let gate = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return PreviewObjectComPutGate::Reject;
-        };
+    let gate = with_host_context(PreviewObjectComPutGate::Reject, |context| {
         let Some(actor_state) = context.get_world_object(actor) else {
             return PreviewObjectComPutGate::Reject;
         };
@@ -2034,11 +1998,7 @@ fn preview_object_com_dig(actor: ObjectId) -> Result<bool, RuntimeError> {
         return Ok(true);
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         let name = context.object_effective_name(actor).unwrap_or_default();
         let text = if context
             .get_world_object(actor)
@@ -2257,11 +2217,7 @@ fn preview_move_to_stop(actor: ObjectId) -> Result<Vec<CommandEvent>, RuntimeErr
     else {
         return Ok(Vec::new());
     };
-    let events = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Vec::new();
-        };
+    let events = with_host_context_mut(Vec::new(), |context| {
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
@@ -2312,11 +2268,7 @@ fn preview_resume_move_to_after_flight(
     else {
         return Vec::new();
     };
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Vec::new();
-        };
+    with_host_context_mut(Vec::new(), |context| {
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
@@ -2445,11 +2397,7 @@ fn preview_build_stop(
     else {
         return Ok(Vec::new());
     };
-    let events = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Vec::new();
-        };
+    let events = with_host_context_mut(Vec::new(), |context| {
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
@@ -2496,11 +2444,7 @@ fn preview_resolve_put_take_attempt(
     command_instance_id: u64,
 ) -> Result<(), RuntimeError> {
     let outcome = preview_object_com_put_take(actor_id, target_id, requested_item)?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         let Some(scope) = context.object_scope_mut(actor_id) else {
             return;
         };
@@ -2686,11 +2630,7 @@ fn preview_resume_construct(
     else {
         return Vec::new();
     };
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Vec::new();
-        };
+    with_host_context_mut(Vec::new(), |context| {
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
@@ -2750,11 +2690,7 @@ fn preview_resume_construct_spawn(
     else {
         return Vec::new();
     };
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Vec::new();
-        };
+    with_host_context_mut(Vec::new(), |context| {
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
@@ -2812,11 +2748,7 @@ fn preview_spawn_construction(
         supplied_instance_id,
     );
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         let Some(metadata) = context.definition_metadata(&definition_id).cloned() else {
             return;
         };
@@ -2899,11 +2831,7 @@ fn preview_resume_drop_after_prelude(
     else {
         return Vec::new();
     };
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Vec::new();
-        };
+    with_host_context_mut(Vec::new(), |context| {
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
@@ -2947,11 +2875,7 @@ fn preview_resume_exit_after_stop(actor: ObjectId, command_instance_id: u64) -> 
     else {
         return Vec::new();
     };
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Vec::new();
-        };
+    with_host_context_mut(Vec::new(), |context| {
         let Some(object_snapshot) = objects.get(&actor) else {
             return Vec::new();
         };
@@ -2991,11 +2915,7 @@ fn preview_resume_exit_after_stop(actor: ObjectId, command_instance_id: u64) -> 
 }
 
 fn preview_defer_command_event(actor: ObjectId, event: CommandEvent) {
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         context.pending_command_events.push(event.clone());
         if let Some(scope) = context.object_scope_mut(actor) {
             scope
@@ -3419,11 +3339,7 @@ fn preview_grab_attempt(actor: ObjectId, target: ObjectId) -> Result<(), Runtime
     };
 
     if actor_snapshot.action_procedure == ActionProcedure::Push {
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             let Some(scope) = context.object_scope_mut(actor) else {
                 return;
             };
@@ -3440,11 +3356,7 @@ fn preview_grab_attempt(actor: ObjectId, target: ObjectId) -> Result<(), Runtime
     }
 
     if stopped_for_grab {
-        let failed = HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return false;
-            };
+        let failed = with_host_context_mut(false, |context| {
             let Some(scope) = context.object_scope_mut(actor) else {
                 return false;
             };
@@ -3473,11 +3385,7 @@ fn preview_grab_attempt(actor: ObjectId, target: ObjectId) -> Result<(), Runtime
         && target_snapshot.ocf & ocf::ALL != 0
         && target_snapshot.at_point(actor_snapshot.position.x, actor_snapshot.position.y);
     if !target_at_actor {
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             let Some(scope) = context.object_scope_mut(actor) else {
                 return;
             };
@@ -3519,11 +3427,7 @@ fn preview_grab_attempt(actor: ObjectId, target: ObjectId) -> Result<(), Runtime
     if !preview_object_is_present(actor) {
         return Ok(());
     }
-    let target_retained = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return true;
-        };
+    let target_retained = with_host_context_mut(true, |context| {
         if let Some(object) = context.object_scope_mut(actor) {
             let resolution = object.live_commands.resolve_grab_attempt(target, rejected);
             if resolution.is_some() {
@@ -3555,11 +3459,7 @@ fn preview_activate_entrance(target: ObjectId, caller: ObjectId) -> bool {
     let Some((objects, _, _, _)) = prepare_command_runtime_data(None) else {
         return false;
     };
-    let should_call = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let should_call = with_host_context_mut(false, |context| {
         let (Some(target_snapshot), Some(caller_snapshot)) =
             (objects.get(&target), objects.get(&caller))
         else {
@@ -3701,11 +3601,7 @@ fn preview_evaluate_buy(
         return resolve_preview_buy(actor, base, definition_id, false);
     }
 
-    let contained = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    let contained = with_host_context(false, |context| {
         context
             .object_scope(actor)
             .map(ObjectScopeContext::container)
@@ -3717,11 +3613,7 @@ fn preview_evaluate_buy(
             == Some(Some(base))
     });
     if !contained {
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             if !context.ensure_object_scope(actor) {
                 return;
             }
@@ -3743,11 +3635,7 @@ fn preview_evaluate_buy(
         return Ok(());
     }
 
-    let purchase_count = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return count.max(1);
-        };
+    let purchase_count = with_host_context_mut(count.max(1), |context| {
         if !context.ensure_object_scope(actor) {
             return count.max(1);
         }
@@ -3800,11 +3688,7 @@ fn preview_evaluate_buy(
         if !matches!(bought, Value::Object(_)) {
             return resolve_preview_buy(actor, base, definition_id, false);
         }
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             let Some(scope) = context.object_scope_mut(actor) else {
                 return;
             };
@@ -3828,11 +3712,7 @@ fn preview_evaluate_sell(
     preferred: Option<ObjectId>,
     count: i32,
 ) -> Result<(), RuntimeError> {
-    let sale_count = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return count.max(1);
-        };
+    let sale_count = with_host_context_mut(count.max(1), |context| {
         if !context.ensure_object_scope(actor) {
             return count.max(1);
         }
@@ -3912,11 +3792,7 @@ fn preview_evaluate_sell(
             return resolve_preview_sell(actor, base, definition_id, false);
         }
         preferred = None;
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             if !context.ensure_object_scope(actor) {
                 return;
             }
@@ -3967,11 +3843,7 @@ pub(crate) fn apply_preview_native_command_success(
 }
 
 fn apply_preview_command_experience(target: ObjectId) -> Result<(), RuntimeError> {
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(());
-        };
+    with_host_context_mut(Ok(()), |context| {
         let successful_finishes = context
             .object_scope_mut(target)
             .map(|scope| scope.live_commands.take_successful_finishes())
@@ -4487,11 +4359,7 @@ fn call_control_command_fail_safe(target: ObjectId, args: &[Value]) -> bool {
 }
 
 fn clear_command_stack_live(target: ObjectId) -> bool {
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    with_host_context_mut(false, |context| {
         if !context.ensure_object_scope(target) {
             return false;
         }
@@ -4513,11 +4381,7 @@ fn set_command_live(
     f_control: bool,
     callback_tx: Value,
 ) -> bool {
-    let staged = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let staged = with_host_context_mut(false, |context| {
         // FnSetCommand only checks that pObj is non-null. A status-zero object
         // can still be the in-flight script receiver and SetCommand continues
         // operating on its removal-delay tombstone.
@@ -4606,11 +4470,7 @@ fn set_command_live(
         }
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         if let Some(object) = context.object_scope_mut(target) {
             let _ = object.push_command_front(request);
         }
@@ -4737,11 +4597,7 @@ pub(crate) fn player_object_command_host(args: &[Value]) -> Result<Value, Runtim
     let mut routed_target = target;
     let mut cursor_processed = false;
     for crew_id in crew {
-        let route = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let Some(context) = borrow.as_ref() else {
-                return None;
-            };
+        let route = with_host_context(None, |context| {
             let cursor = context
                 .player_state(player_id)
                 .and_then(|player| player.cursor);
@@ -4767,11 +4623,7 @@ pub(crate) fn player_object_command_host(args: &[Value]) -> Result<Value, Runtim
 
         let mut object_tx = tx;
         if command == CommandId::Put && target2.is_none() {
-            let contents_count = HOST_CONTEXT.with(|cell| {
-                let borrow = cell.borrow();
-                let Some(context) = borrow.as_ref() else {
-                    return 0;
-                };
+            let contents_count = with_host_context(0, |context| {
                 let Some(object) = context.get_world_object(crew_id) else {
                     return 0;
                 };

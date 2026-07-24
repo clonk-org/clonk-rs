@@ -124,11 +124,7 @@ pub(crate) fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(indexed(&components, index));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let object = match target {
             Some(id) => context.get_world_object(id),
             None => context
@@ -224,11 +220,7 @@ pub(crate) fn get_needed_mat_str(args: &[Value]) -> Result<Value, RuntimeError> 
 
     let needed_components = resolve_component_list(&recipe_definition, None, builder)?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         // Re-read live state after GetCustomComponents: synchronous callback
         // writes are already visible to the following C++ subtraction/name.
         let current_components = context
@@ -380,11 +372,7 @@ pub(crate) fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
 /// BurnTurnTo. It bypasses script function resolution but keeps every
 /// callback that the C++ object method itself performs.
 pub(crate) fn change_def_live(target: ObjectId, new_id: &str) -> Result<bool, RuntimeError> {
-    let known = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let known = with_host_context_mut(false, |context| {
         context.definition_metadata(new_id).is_some() && context.ensure_object_scope(target)
     });
     if !known {
@@ -413,11 +401,7 @@ pub(crate) fn change_def_live(target: ObjectId, new_id: &str) -> Result<bool, Ru
     });
     if let Some(previous) = previous_container {
         let _ = exit_object_at_position_with_calls(target, Vector2::ZERO, false)?;
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             context.relink_content_after_exit(previous, target);
         });
     }
@@ -438,11 +422,7 @@ pub(crate) fn change_def_live(target: ObjectId, new_id: &str) -> Result<bool, Ru
     });
     let action_applied = native_set_action_by_name(target, "Idle")?;
 
-    let staged = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let staged = with_host_context_mut(false, |context| {
         let Some(metadata) = context.definition_metadata(new_id).cloned() else {
             return false;
         };
@@ -1035,11 +1015,7 @@ pub(crate) fn exit_object_at_position_with_full_motion_and_calls(
     rotation_velocity: C4Fixed,
     f_calls: bool,
 ) -> Result<bool, RuntimeError> {
-    let previous = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return None;
-        };
+    let previous = with_host_context_mut(None, |context| {
         if !context.ensure_object_scope(target) {
             return None;
         }
@@ -1064,11 +1040,7 @@ pub(crate) fn exit_object_at_position_with_full_motion_and_calls(
 
     bounds_check_live_exit(target, &mut position);
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         let definition_metadata = context
             .object_effective_definition_id(target)
             .and_then(|id| context.definition_metadata(&id).cloned())
@@ -1148,11 +1120,7 @@ pub(crate) fn exit_object_at_position_with_full_motion_and_calls(
 /// then advances it once more. Track link generations so callback-driven
 /// re-entry cannot make a new link alias the removed iterator position.
 fn clear_contents_and_contained_live(target: ObjectId, f_calls: bool) -> Result<(), RuntimeError> {
-    let initial_links = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Vec::new();
-        };
+    let initial_links = with_host_context(Vec::new(), |context| {
         let Some(object) = context.get_world_object(target) else {
             return Vec::new();
         };
@@ -1277,11 +1245,7 @@ fn enter_object_live_internal(
         return Ok(false);
     }
 
-    let would_cycle = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return true;
-        };
+    let would_cycle = with_host_context(true, |context| {
         let mut cursor = Some(container);
         let mut seen = HashSet::new();
         while let Some(current) = cursor {
@@ -1332,11 +1296,7 @@ fn enter_object_live_internal(
         return Ok(false);
     }
 
-    let entered = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let entered = with_host_context_mut(false, |context| {
         let definition_metadata = context
             .object_effective_definition_id(target)
             .and_then(|definition_id| context.definition_metadata(&definition_id).cloned())
@@ -1553,11 +1513,7 @@ pub(crate) fn assign_removal_live(
         })
     });
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         mark_object_status_deleted(context, target);
     });
 
@@ -1588,11 +1544,7 @@ pub(crate) fn assign_removal_live(
         let _ = assign_removal_live(child, false)?;
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         let removed_from = context
             .object_scope(target)
             .and_then(ObjectScopeContext::container);
@@ -1617,11 +1569,7 @@ pub(crate) fn assign_removal_live(
 }
 
 fn can_sell_object_live(target: ObjectId, player: i32) -> bool {
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    with_host_context(false, |context| {
         let player_active = context.player_state(player).is_some_and(|state| {
             !matches!(
                 state.status,
@@ -1686,11 +1634,7 @@ pub(crate) fn sell_object_to_home_live(
     };
     // C4Player::DoWealth clamps adjustments to 0..=10000; FnSetWealth's
     // wider 100000 ceiling does not apply to a home-base sale.
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         let updated = {
             let Some(state) = context.player_state_mut(player) else {
                 return;
@@ -1728,11 +1672,7 @@ pub(crate) fn sell_object_to_home_live(
             }
         };
     if let Some(definition) = stock_definition {
-        let (valid_definition, should_stock) = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let Some(context) = borrow.as_ref() else {
-                return (false, false);
-            };
+        let (valid_definition, should_stock) = with_host_context((false, false), |context| {
             let valid_definition =
                 context.world.definition_known(definition.as_str()) != Some(false);
             let should_stock = valid_definition
@@ -1813,11 +1753,7 @@ pub(crate) fn buy(args: &[Value]) -> Result<Value, RuntimeError> {
     let creator = to_base.or(caller);
     let definition_id = DefinitionId::from(definition.as_str());
 
-    let initial = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return None;
-        };
+    let initial = with_host_context(None, |context| {
         // ValidPlr accepts eliminated players; C4Player::Buy reports that
         // state separately below.
         context.player_state(for_player)?;
@@ -1865,11 +1801,7 @@ pub(crate) fn buy(args: &[Value]) -> Result<Value, RuntimeError> {
     // CalcDefValue/CalcBuyValue callbacks above can mutate both wealth and
     // stock. C++ compares/decrements the live values after those callbacks,
     // while retaining only the initial availability decision.
-    let charged = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let charged = with_host_context_mut(false, |context| {
         let Some(current_wealth) = context.player_state(pay_player).map(|payer| payer.wealth)
         else {
             return false;
@@ -2048,11 +1980,7 @@ fn auto_sell_after_enter(
                 .unwrap_or_default()
         });
         for child in nested {
-            let auto_sell = HOST_CONTEXT.with(|cell| {
-                let borrow = cell.borrow();
-                let Some(context) = borrow.as_ref() else {
-                    return false;
-                };
+            let auto_sell = with_host_context(false, |context| {
                 context
                     .object_effective_definition_id(child)
                     .is_some_and(|id| context.world.definition_base_auto_sell(id.as_str()))
@@ -2062,11 +1990,7 @@ fn auto_sell_after_enter(
                 let _ = sell_object_to_home_live(child, player)?;
             }
         }
-        let auto_sell = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let Some(context) = borrow.as_ref() else {
-                return false;
-            };
+        let auto_sell = with_host_context(false, |context| {
             context
                 .object_effective_definition_id(object)
                 .is_some_and(|id| context.world.definition_base_auto_sell(id.as_str()))
@@ -2156,11 +2080,7 @@ pub(crate) fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     }
 
-    let (ready, old_no_collect_delay) = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return (false, 0);
-        };
+    let (ready, old_no_collect_delay) = with_host_context_mut((false, 0), |context| {
         let item_ready = context
             .get_world_object(item)
             .is_some_and(|object| object.is_present());
@@ -2204,11 +2124,7 @@ pub(crate) fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
     // collectable without cached C4RULE_FlagRemoveable. FnCollect's
     // temporary NoCollectDelay/OCF work above deliberately precedes this
     // native gate (C4Script.cpp:391-413; C4Object.cpp:5693-5700).
-    let blocked_flag = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    let blocked_flag = with_host_context(false, |context| {
         context.get_world_object(item).is_some_and(|item| {
             flag_collection_blocked(
                 item.definition_id(),
@@ -2247,11 +2163,7 @@ pub(crate) fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
     // C4Object::Collect cancels an ATTACH procedure before Collection. Use
     // ObjectSetAction so Start/Abort calls remain synchronous like C++
     // ObjectComCancelAttach -> SetAction(ActIdle) (C4ObjectCom.cpp:769-774).
-    let attached = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    let attached = with_host_context(false, |context| {
         context
             .object_scope(item)
             .map(ObjectScopeContext::effective_action_procedure)
@@ -2290,11 +2202,7 @@ pub(crate) fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
     // callbacks left it in this collector, CopyMotion snaps position and
     // fixed dirs to the collector (C4Object.cpp:5711-5713;
     // C4Movement.cpp:518-529).
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         let still_collected = context
             .get_world_object(item)
             .is_some_and(|object| object.is_present() && object.container() == Some(collector));
@@ -2327,11 +2235,7 @@ pub(crate) fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
     // the temporary recompute/Enter callbacks after the deferred outcome
     // fold performs its ordinary container refresh.
     if old_no_collect_delay != 0 {
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             if context.ensure_object_scope(collector) {
                 if let Some(scope) = context.object_scope_mut(collector) {
                     let ocf = scope.ocf();
@@ -2378,11 +2282,7 @@ pub(crate) fn grab_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         };
     }
 
-    let contents = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return None;
-        };
+    let contents = with_host_context(None, |context| {
         // A C4Value object reference can only supply live engine objects.
         context.get_world_object(to)?;
         context
@@ -2434,11 +2334,7 @@ pub(crate) fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
     let txdir = parse_optional_i32(args.get(4), "Exit", "xdir")?.unwrap_or(0);
     let tydir = parse_optional_i32(args.get(5), "Exit", "ydir")?.unwrap_or(0);
     let trdir = parse_optional_i32(args.get(6), "Exit", "rdir")?.unwrap_or(0);
-    let prepared = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(None);
-        };
+    let prepared = with_host_context_mut(Ok(None), |context| {
         let active = context.object_context().map(|object| object.id());
         let Some(target) = subject.or(active) else {
             return Ok(None); // no pObj and no scope object
@@ -2468,11 +2364,7 @@ pub(crate) fn exit_container(args: &[Value]) -> Result<Value, RuntimeError> {
     // C4Object::Exit checks Contained. SetAction(ActIdle) is a native call:
     // a script function named SetAction may not intercept it, and the old
     // ATTACH action's AbortCall observes the pre-Exit position/container.
-    let attached = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    let attached = with_host_context(false, |context| {
         context
             .object_scope(target)
             .map(ObjectScopeContext::effective_action_procedure)
@@ -2540,11 +2432,7 @@ pub(crate) fn set_component(args: &[Value]) -> Result<Value, RuntimeError> {
             };
         }
     }
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(self_id) = context.object_context().map(|object| object.id()) else {
             return Ok(Value::Bool(false));
         };
@@ -2643,11 +2531,7 @@ pub(crate) fn calculated_definition_value(
     base: Option<ObjectId>,
     player: i32,
 ) -> Result<Option<i32>, RuntimeError> {
-    let (metadata, script) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return (None, None);
-        };
+    let (metadata, script) = with_host_context((None, None), |context| {
         (
             context.definition_metadata(definition).cloned(),
             context.world.definition_script(definition).cloned(),
@@ -3125,11 +3009,7 @@ pub(crate) fn construction_delta_from_percent(percent: i32) -> i32 {
 pub(crate) fn scroll_contents(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_object = parse_native_object_argument(args.first(), "ScrollContents", "target")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         let Some(target) = target_object.or(context.script_object_context) else {
             return Ok(Value::Nil);
         };
@@ -3226,11 +3106,7 @@ pub(crate) fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             new_front_id: String,
         },
     }
-    let picked = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Picked::Done(Value::Bool(false));
-        };
+    let picked = with_host_context_mut(Picked::Done(Value::Bool(false)), |context| {
         let Some(self_id) = context.object_context().map(|object| object.id()) else {
             return Picked::Done(Value::Bool(false));
         };
@@ -3463,11 +3339,7 @@ pub(crate) enum ParsedCriterion {
 /// owns an ordinary Value clone.
 fn live_find_callback_parameters(pars: &[Value]) -> Vec<Value> {
     let mut live = pars.to_vec();
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return;
-        };
+    with_host_context((), |context| {
         for value in &mut live {
             clear_removed_object_references(value, &context.removed_object_references);
         }
@@ -4310,11 +4182,7 @@ pub(crate) fn find_object2(args: &[Value]) -> Result<Value, RuntimeError> {
             .map(object_reference_value)
             .unwrap_or(Value::Nil));
     }
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let condition = condition.pruned(context);
         if let Some(sort) = sort {
             return Ok(find_first_with_sort(context, &condition, &sort)?
@@ -4365,11 +4233,7 @@ pub(crate) fn find_objects2(args: &[Value]) -> Result<Value, RuntimeError> {
             matches.into_iter().map(object_reference_value).collect(),
         ));
     }
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Array(Vec::new()));
-        };
+    with_host_context(Ok(Value::Array(Vec::new())), |context| {
         let condition = condition.pruned(context);
         let mut matches = find_condition_matches(context, &condition)?;
         if let Some(sort) = sort {
@@ -4408,11 +4272,7 @@ pub(crate) fn object_count2(args: &[Value]) -> Result<Value, RuntimeError> {
         let matches = find_condition_matches(&view, &condition)?;
         return Ok(Value::Int(truncate_to_i32(matches.len() as u64)));
     }
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context(Ok(Value::Int(0)), |context| {
         let condition = condition.pruned(context);
         if condition.is_ensured(context) {
             let count = context
@@ -4442,11 +4302,7 @@ pub(crate) fn find_object(args: &[Value]) -> Result<Value, RuntimeError> {
 pub(crate) fn find_base(args: &[Value]) -> Result<Value, RuntimeError> {
     let player = value_to_i32(args.first().unwrap_or(&Value::Nil), "FindBase", "player")?;
     let mut index = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "FindBase", "index")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         if context.player_state(player).is_none() || index < 0 {
             return Ok(Value::Nil);
         }
@@ -4733,11 +4589,7 @@ pub(crate) fn object_by_number(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Nil);
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let status = context
             .get_world_object(id)
             .map(|object| object.status())
@@ -4862,11 +4714,7 @@ pub(crate) fn get_base(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Int(OWNER_NONE));
-        };
+    with_host_context(Ok(Value::Int(OWNER_NONE)), |context| {
         let target = target.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let base = target
             .and_then(|id| context.get_world_object(id))
@@ -5173,11 +5021,7 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
     // Initial DoCon(FullCon,true) runs only after Construction. Its straight
     // growth keeps the old bottom fixed in integer coordinates and leaves
     // fix_y at the supplied raw center (C4Object.cpp:1428-1515).
-    let crossed_full_con = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let crossed_full_con = with_host_context_mut(false, |context| {
         if !context.ensure_object_scope(target) {
             return false;
         }
@@ -5244,11 +5088,7 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
-    let removed = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return true;
-        };
+    let removed = with_host_context_mut(true, |context| {
         if context.nested_object_destroyed(target) {
             return true;
         }
@@ -5568,11 +5408,7 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
         // initial DoCon grows to FullCon, moves the straight shape's bottom,
         // and only on that transition calls Completion then Initialize
         // (C4Game.cpp:1117-1127; C4Object.cpp:1506-1511).
-        let crossed_full_con = HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return false;
-            };
+        let crossed_full_con = with_host_context_mut(false, |context| {
             let was_full = context
                 .object_scope(target)
                 .is_some_and(|scope| scope.construction() >= FULL_CON);
@@ -5921,11 +5757,7 @@ fn finish_placement_object_creation(
         return Ok(Value::Nil);
     }
 
-    let crossed_full_con = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let crossed_full_con = with_host_context_mut(false, |context| {
         let was_full = context
             .object_scope(target)
             .is_some_and(|scope| scope.construction() >= FULL_CON);
@@ -6610,11 +6442,7 @@ pub(crate) fn create_construction(args: &[Value]) -> Result<Value, RuntimeError>
     // Initial DoCon adds iCon to whatever Construction left behind, keeps
     // the old shape bottom fixed in integer coordinates, and leaves fix_y
     // at the pre-growth position (C4Object.cpp:1432-1500).
-    let (crossed_full_con, final_construction) = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return (false, 0);
-        };
+    let (crossed_full_con, final_construction) = with_host_context_mut((false, 0), |context| {
         if !context.ensure_object_scope(target) {
             return (false, 0);
         }
@@ -7720,11 +7548,7 @@ fn resolve_component_list(
     instance: Option<ObjectId>,
     builder: Option<ObjectId>,
 ) -> Result<Vec<(String, i32)>, RuntimeError> {
-    let (script, static_components) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return (None, Vec::new());
-        };
+    let (script, static_components) = with_host_context((None, Vec::new()), |context| {
         (
             context.world.definition_script(definition).cloned(),
             context
@@ -7770,11 +7594,7 @@ fn resolve_component_list(
         return Ok(static_components);
     };
 
-    Ok(HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Vec::new();
-        };
+    Ok(with_host_context(Vec::new(), |context| {
         let object = context.get_world_object(instance);
         let components = context
             .object_scope(instance)
@@ -7817,11 +7637,7 @@ fn resolve_component_list(
 }
 
 fn live_contents_matching(container: ObjectId, definition: &str) -> Vec<ObjectId> {
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Vec::new();
-        };
+    with_host_context(Vec::new(), |context| {
         context
             .get_world_object(container)
             .map(|container| {
@@ -7963,11 +7779,7 @@ pub(crate) fn split_to_components(args: &[Value]) -> Result<Value, RuntimeError>
         "Split2Components",
         "object",
     )?;
-    let (source, builder) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return (None, None);
-        };
+    let (source, builder) = with_host_context((None, None), |context| {
         (
             explicit.or(context.script_object_context),
             context.script_object_context,
@@ -8055,11 +7867,7 @@ pub(crate) fn split_to_components(args: &[Value]) -> Result<Value, RuntimeError>
             else {
                 continue;
             };
-            let (burning, fire_owner) = HOST_CONTEXT.with(|cell| {
-                let borrow = cell.borrow();
-                let Some(context) = borrow.as_ref() else {
-                    return (false, OWNER_NONE);
-                };
+            let (burning, fire_owner) = with_host_context((false, OWNER_NONE), |context| {
                 let Some(source_state) = context.get_world_object(source) else {
                     return (false, OWNER_NONE);
                 };
@@ -9003,11 +8811,7 @@ pub(crate) fn get_object_val(args: &[Value]) -> Result<Value, RuntimeError> {
         "entry_nr",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let target = target.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
             return Ok(Value::Nil);
@@ -9210,11 +9014,7 @@ pub(crate) fn get_entrance(args: &[Value]) -> Result<Value, RuntimeError> {
         "target",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(target) = target_id.or(context.script_object_context) else {
             return Ok(Value::Nil);
         };
@@ -9345,11 +9145,7 @@ pub(crate) fn set_object_order(args: &[Value]) -> Result<Value, RuntimeError> {
         .flatten();
     let after = args.get(2).map(Value::as_bool).unwrap_or(false);
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let object = explicit_object.or_else(|| context.object_context().map(|scope| scope.id()));
         let Some((relative_to, object)) = relative_to.zip(object) else {
             return Ok(Value::Bool(false));
@@ -9440,11 +9236,7 @@ pub(crate) fn resort_objects(args: &[Value]) -> Result<Value, RuntimeError> {
         category = CATEGORY_SORT_LIMIT;
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(order) = capture_object_order_function(context, function)? else {
             return Ok(Value::Bool(false));
         };
@@ -9470,11 +9262,7 @@ pub(crate) fn resort_object(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(object) = explicit.or(context.script_object_context) else {
             return Ok(Value::Bool(false));
         };
@@ -9506,11 +9294,7 @@ pub(crate) fn resort(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         let target = explicit.or(context.script_object_context);
         if let Some(target) = target {
             let resolves = context.object_scope(target).is_some()
@@ -9570,11 +9354,7 @@ pub(crate) fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
             // number stays consumed, exactly like C++ where the object
             // existed and died (the GoldRush TRPR Recruitment temp,
             // Trapper.c4d/Script.c:19-25).
-            let removed = HOST_CONTEXT.with(|cell| {
-                let mut borrow = cell.borrow_mut();
-                let Some(context) = borrow.as_mut() else {
-                    return false;
-                };
+            let removed = with_host_context_mut(false, |context| {
                 let last_position = context
                     .object_scope(target)
                     .map(|scope| scope.current_position)
@@ -9765,19 +9545,11 @@ pub(crate) fn set_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
         // particular, callbacks must still observe action/command pointers
         // and may create a transfer zone that the later sweep removes.
         clear_contents_and_contained_live(object_id, true)?;
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             context.clear_object_action_and_command_pointers(object_id);
         });
         clear_player_object_pointers_host(object_id);
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             let still_member = context.object_in_any_crew(object_id);
             if let Some(object) = context.object_scope_mut(object_id) {
                 object.set_crew_status_member(still_member);

@@ -44,11 +44,7 @@ pub(crate) fn set_play_list(args: &[Value]) -> Result<Value, RuntimeError> {
         .unwrap_or_default();
     let restart = args.get(1).is_some_and(Value::as_bool);
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         let count = context.audio_mut().set_music_playlist(playlist, restart);
         if context.world.control_sync_mode {
             Ok(Value::Nil)

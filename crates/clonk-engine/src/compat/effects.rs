@@ -13,11 +13,7 @@ pub(crate) fn reload_particle(args: &[Value]) -> Result<Value, RuntimeError> {
 /// still live; effects added by those callbacks are deleted afterwards
 /// without receiving a Stop callback (C4Effect.cpp:407-425).
 pub(crate) fn clear_effects_for_assign_removal(target: ObjectId) -> Result<bool, RuntimeError> {
-    let effects = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Vec::new();
-        };
+    let effects = with_host_context_mut(Vec::new(), |context| {
         if !context.ensure_object_scope(target) {
             return Vec::new();
         }
@@ -117,11 +113,7 @@ pub(crate) fn clear_effects_for_assign_removal(target: ObjectId) -> Result<bool,
 /// stay linked and effects added by Stop callbacks are not part of this walk
 /// (C4Effect.cpp:407-425; C4Object.cpp:1164-1174).
 pub(crate) fn clear_effects_for_assign_death(target: ObjectId) -> Result<bool, RuntimeError> {
-    let effects = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Vec::new();
-        };
+    let effects = with_host_context_mut(Vec::new(), |context| {
         if !context.ensure_object_scope(target) {
             return Vec::new();
         }
@@ -455,11 +447,7 @@ fn check_effect_with_policy(
     // A typed object pointer whose Status is zero is rejected before its
     // effect list is inspected (FnCheckEffect's safety guard).
     if let Some(target_id) = target_id {
-        let (active, status) = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let Some(context) = borrow.as_ref() else {
-                return (None, None);
-            };
+        let (active, status) = with_host_context((None, None), |context| {
             let active = context.object_context().map(|object| object.id());
             let status = if active == Some(target_id) {
                 context.object_context().map(|object| object.status())
@@ -1224,11 +1212,7 @@ pub(crate) fn effect_var(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let new_value = args.get(3).map(value_to_effect_var);
 
-    let context_value = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(None);
-        };
+    let context_value = with_host_context_mut(Ok(None), |context| {
 
         // The VM's retained-lvalue bridge supplies a private fourth write
         // value after resolving the public three-parameter native. Re-entering
@@ -1351,11 +1335,7 @@ fn effect_script_fx_callback_exists(
     command_id: Option<&str>,
     function: &str,
 ) -> bool {
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    with_host_context(false, |context| {
         if let Some(command_target) = command_target {
             let target = ObjectId::new(command_target as u64);
             if context.has_callable_object(target) {
@@ -1386,11 +1366,7 @@ fn effect_fx_callback_exists(
     command_id: Option<&str>,
     function: &str,
 ) -> bool {
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    with_host_context(false, |context| {
         if let Some(command_target) = command_target {
             let target = ObjectId::new(command_target as u64);
             if context.has_callable_object(target) {
@@ -1434,11 +1410,7 @@ fn dispatch_effect_fx_callback(
         // (C4Effect.cpp:443-445,456). GetFuncRecursive also reaches native
         // engine functions (notably FxFireInfo).
         let command_target = ObjectId::new(command_target as u64);
-        let (target_exists, resolution) = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let Some(context) = borrow.as_ref() else {
-                return (false, None);
-            };
+        let (target_exists, resolution) = with_host_context((false, None), |context| {
             let target_exists = context.has_callable_object(command_target);
             let resolution = target_exists
                 .then(|| context.object_effective_definition_id(command_target))
@@ -1863,11 +1835,7 @@ fn native_explosion_visual(
     });
 
     if let Some(definition_id) = selected_particle {
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             context.register_particle(ParticleCommand::Create(ParticleConfig {
                 definition_id: definition_id.clone(),
                 position: FloatVector2::new(position.x as f32, position.y as f32),
@@ -2008,11 +1976,7 @@ fn native_blast_objects(
                 .unwrap_or_default()
         });
         for id in ids {
-            let eligible = HOST_CONTEXT.with(|cell| {
-                let borrow = cell.borrow();
-                let Some(context) = borrow.as_ref() else {
-                    return false;
-                };
+            let eligible = with_host_context(false, |context| {
                 let Some(object) = context.get_world_object(id) else {
                     return false;
                 };
@@ -2271,11 +2235,7 @@ fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<b
         None => Some(level),
     };
     if let Some(damage_change) = damage_change {
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             if let Some(scope) = context.object_scope_mut(target) {
                 // Damage = max(Damage + iChange, 0) (C4Object.cpp:1288).
                 scope.adjust_damage(damage_change);
@@ -2303,11 +2263,7 @@ fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<b
     // Alive AFTER the ~Damage callback like the live C4Object would; the
     // living Fx*Damage hook sees the SCALED change (C4Object.cpp:1347,
     // :1355-1359) and a zero chain outcome skips the write.
-    let alive_now = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let alive_now = with_host_context_mut(false, |context| {
         let alive = context
             .object_scope(target)
             .map(|scope| scope.alive())
@@ -2337,11 +2293,7 @@ fn native_blast_object(target: ObjectId, level: i32, caused_by: i32) -> Result<b
     // Incinerate arm (C4Object.cpp:1420-1423): the LIVE Damage — staged
     // writes plus whatever the ~Damage callback changed — against
     // Def->BlastIncinerate (truthy in C++, so any nonzero value arms it).
-    let incinerate = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    let incinerate = with_host_context(false, |context| {
         let blast_incinerate = effective_definition_id(context, target)
             .and_then(|id| context.world.definition_metadata(&id))
             .map(|metadata| metadata.fire.blast_incinerate)
@@ -2392,11 +2344,7 @@ pub(crate) fn incinerate_target(
     blasted: bool,
     incinerating: Option<ObjectId>,
 ) -> Result<bool, RuntimeError> {
-    let eligible = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let eligible = with_host_context_mut(false, |context| {
         if !context.ensure_object_scope(target) {
             return false;
         }
@@ -2548,11 +2496,7 @@ fn fire_effect_start_core(
     // ChangeDef above is immediately live in C++. Re-read the effective
     // definition before each guarded block so BurnTurnTo and callbacks can
     // change whether contents are ejected and attached objects detached.
-    let eject_contents = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    let eject_contents = with_host_context(false, |context| {
         effective_definition_id(context, target)
             .and_then(|id| context.world.definition_metadata(&id))
             .map(|metadata| !metadata.fire.incomplete_activity && !metadata.fire.no_burn_decay)
@@ -2599,11 +2543,7 @@ fn fire_effect_start_core(
         }
     }
 
-    let detach_attached = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    let detach_attached = with_host_context(false, |context| {
         effective_definition_id(context, target)
             .and_then(|id| context.world.definition_metadata(&id))
             .map(|metadata| !metadata.fire.incomplete_activity && !metadata.fire.no_burn_decay)
@@ -2671,11 +2611,7 @@ fn fire_effect_start_core(
             previous = Some(candidate);
             // Earlier SetAction callbacks may remove or retarget later
             // candidates; test the live state immediately before detaching.
-            let attached = HOST_CONTEXT.with(|cell| {
-                let borrow = cell.borrow();
-                let Some(context) = borrow.as_ref() else {
-                    return false;
-                };
+            let attached = with_host_context(false, |context| {
                 if let Some(scope) = context.object_scope(candidate) {
                     return !scope.destroy
                         && scope.status().is_active()
@@ -2723,11 +2659,7 @@ fn fire_effect_start_core(
         }
         FireStage::Ignite => {}
     }
-    let category = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return 0;
-        };
+    let category = with_host_context(0, |context| {
         let Some(scope) = context.object_scope(target) else {
             return 0;
         };
@@ -2969,11 +2901,7 @@ pub(crate) fn fx_fire_timer(args: &[Value]) -> Result<Value, RuntimeError> {
     // advance and before decay/damage/energy. ValidPlr is only membership in
     // the live player list; the container need not belong to the victim.
     if frame.is_multiple_of(5) {
-        let extinguish_in_base = HOST_CONTEXT.with(|cell| {
-            let borrow = cell.borrow();
-            let Some(context) = borrow.as_ref() else {
-                return false;
-            };
+        let extinguish_in_base = with_host_context(false, |context| {
             if !context.world.base_extinguish_enabled {
                 return false;
             }
@@ -3159,11 +3087,7 @@ fn extinguish_target(target: ObjectId) -> Result<bool, RuntimeError> {
 /// exactly that effect (C4Object.cpp:1276-1299).
 fn extinguish_effect_target(target: ObjectId, fire_number: i32) -> Result<bool, RuntimeError> {
     let engine_fire_stop = !script_shadows_engine_fx("FxFireStop");
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(false);
-        };
+    with_host_context_mut(Ok(false), |context| {
         if !context.ensure_object_scope(target) {
             return Ok(false);
         }
@@ -3558,11 +3482,7 @@ pub(crate) fn flame_consume_material(args: &[Value]) -> Result<Value, RuntimeErr
         "FlameConsumeMaterial",
         "y",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let mut position = Vector2::new(x, y);
         if let Some(object) = context.object_context() {
             let base = object.effective_position();

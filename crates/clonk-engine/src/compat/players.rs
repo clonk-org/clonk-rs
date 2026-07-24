@@ -78,11 +78,7 @@ pub(crate) fn create_script_player(args: &[Value]) -> Result<Value, RuntimeError
         return Ok(Value::Bool(false));
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Bool(true));
-        };
+    with_host_context(Ok(Value::Bool(true)), |context| {
         if !context.world.control_host {
             return Ok(Value::Bool(true));
         }
@@ -132,11 +128,7 @@ pub(crate) fn get_player_count(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
     let filter = parse_player_type_filter(args.first(), "GetPlayerCount")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context(Ok(Value::Int(0)), |context| {
         let count = context
             .player_ids()
             .iter()
@@ -202,11 +194,7 @@ pub(crate) fn get_player_by_index(args: &[Value]) -> Result<Value, RuntimeError>
     if index < 0 {
         return Ok(Value::Int(OWNER_NONE));
     }
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Int(OWNER_NONE));
-        };
+    with_host_context(Ok(Value::Int(OWNER_NONE)), |context| {
         // C4PlayerList::GetByIndex walks the live player list only until the
         // requested matching entry (C4PlayerList.cpp:139-153). Preserve that
         // early-exit behavior instead of materializing every match: Race's
@@ -248,11 +236,7 @@ pub(crate) fn init_scenario_player(args: &[Value]) -> Result<Value, RuntimeError
         "team",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some((player_info_id, current_team)) = context
             .player_state(player_id)
             .map(|player| (player.player_info_id, player.team))
@@ -312,11 +296,7 @@ pub(crate) fn eliminate_player(args: &[Value]) -> Result<Value, RuntimeError> {
         "EliminatePlayer",
         "direct removal flag",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context_mut(Ok(Value::Int(0)), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Int(0));
         };
@@ -359,11 +339,7 @@ pub(crate) fn surrender_player(args: &[Value]) -> Result<Value, RuntimeError> {
         "SurrenderPlayer",
         "player",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let can_surrender = context.player_state(player_id).is_some_and(|player| {
             !matches!(
                 player.status,
@@ -398,11 +374,7 @@ pub(crate) fn get_player_name(args: &[Value]) -> Result<Value, RuntimeError> {
         "GetPlayerName",
         "player",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -425,11 +397,7 @@ pub(crate) fn get_tagged_player_name(args: &[Value]) -> Result<Value, RuntimeErr
         "GetTaggedPlayerName",
         "player",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -474,11 +442,7 @@ pub(crate) fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Nil);
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -671,11 +635,7 @@ pub(crate) fn get_player_id(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
     let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlayerID", "player")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         Ok(context
             .player_state(player_id)
             .map_or(Value::Nil, |player| Value::Int(player.player_info_id)))
@@ -694,11 +654,7 @@ pub(crate) fn get_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
         "GetPlayerTeam",
         "player",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -742,11 +698,7 @@ pub(crate) fn set_player_team(args: &[Value]) -> Result<Value, RuntimeError> {
         AlreadyThere,
         Continue,
     }
-    let preflight = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Preflight::Reject;
-        };
+    let preflight = with_host_context(Preflight::Reject, |context| {
         // League refusal precedes even the same-team fast path.
         if context.world.league_game() {
             return Preflight::Reject;
@@ -948,11 +900,7 @@ pub(crate) fn get_team_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
         "GetTeamByIndex",
         "index",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         Ok(usize::try_from(index)
             .ok()
             .and_then(|index| context.teams().get(index))
@@ -962,11 +910,7 @@ pub(crate) fn get_team_by_index(args: &[Value]) -> Result<Value, RuntimeError> {
 
 pub(crate) fn get_team_color(args: &[Value]) -> Result<Value, RuntimeError> {
     let id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetTeamColor", "team")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         Ok(context
             .teams()
             .iter()
@@ -977,11 +921,7 @@ pub(crate) fn get_team_color(args: &[Value]) -> Result<Value, RuntimeError> {
 
 pub(crate) fn get_team_name(args: &[Value]) -> Result<Value, RuntimeError> {
     let id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetTeamName", "team")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         Ok(context
             .teams()
             .iter()
@@ -1002,11 +942,7 @@ pub(crate) fn get_player_type(args: &[Value]) -> Result<Value, RuntimeError> {
         "GetPlayerType",
         "player",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         Ok(context
             .player_state(player_id)
             .map_or(Value::Nil, |player| Value::Int(player_type(player))))
@@ -1016,11 +952,7 @@ pub(crate) fn get_player_type(args: &[Value]) -> Result<Value, RuntimeError> {
 pub(crate) fn get_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
     // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
     let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetWealth", "player")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -1048,11 +980,7 @@ pub(crate) fn set_wealth(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(player) = context.player_state_mut(player_id) else {
             return Ok(Value::Bool(false));
         };
@@ -1087,11 +1015,7 @@ pub(crate) fn hostile(args: &[Value]) -> Result<Value, RuntimeError> {
         "one-way flag",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context(Ok(Value::Bool(false)), |context| {
         let (Some(player_state), Some(opponent_state)) =
             (context.player_state(player), context.player_state(opponent))
         else {
@@ -1161,11 +1085,7 @@ pub(crate) fn set_hostility(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     }
 
-    let old_hostility = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return None;
-        };
+    let old_hostility = with_host_context_mut(None, |context| {
         if player == opponent || context.player_state(opponent).is_none() {
             return None;
         }
@@ -1205,11 +1125,7 @@ pub(crate) fn set_fow(args: &[Value]) -> Result<Value, RuntimeError> {
     let enabled = value_to_bool(args.first().unwrap_or(&Value::Nil), "SetFoW", "enabled")?;
     let player_id = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "SetFoW", "player")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context_mut(Ok(Value::Int(0)), |context| {
         let Some(player) = context.player_state_mut(player_id) else {
             return Ok(Value::Int(0));
         };
@@ -1236,11 +1152,7 @@ pub(crate) fn set_plr_show_control_pos(args: &[Value]) -> Result<Value, RuntimeE
         "SetPlrShowControlPos",
         "position",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(player) = context.player_state_mut(player_id) else {
             return Ok(Value::Bool(false));
         };
@@ -1279,11 +1191,7 @@ pub(crate) fn set_plr_show_control(args: &[Value]) -> Result<Value, RuntimeError
     };
     let mask = string_bit_eval(controls);
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(player) = context.player_state_mut(player_id) else {
             return Ok(Value::Bool(false));
         };
@@ -1312,11 +1220,7 @@ pub(crate) fn set_plr_show_command(args: &[Value]) -> Result<Value, RuntimeError
         "SetPlrShowCommand",
         "command",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         if context.player_state(player_id).is_none() {
             return Ok(Value::Bool(false));
         }
@@ -1344,11 +1248,7 @@ pub(crate) fn get_plr_extra_data(args: &[Value]) -> Result<Value, RuntimeError> 
         // A nil C4String* dereferences to no name — no slot matches.
         return Ok(Value::Nil);
     };
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -1374,11 +1274,7 @@ pub(crate) fn get_crew_extra_data(args: &[Value]) -> Result<Value, RuntimeError>
         return Ok(Value::Nil);
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(target) = target.or(context.script_object_context) else {
             return Ok(Value::Nil);
         };
@@ -1421,11 +1317,7 @@ pub(crate) fn set_crew_extra_data(args: &[Value]) -> Result<Value, RuntimeError>
     }
     let data = args.get(2).cloned().unwrap_or(Value::Nil);
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         let Some(target) = target.or(context.script_object_context) else {
             return Ok(Value::Nil);
         };
@@ -1537,11 +1429,7 @@ pub(crate) fn set_plr_extra_data(args: &[Value]) -> Result<Value, RuntimeError> 
     ) {
         return Ok(Value::Nil);
     }
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state_mut(player_id) else {
             return Ok(Value::Nil);
         };
@@ -1572,11 +1460,7 @@ pub(crate) fn get_score(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
     let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetScore", "player")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -1591,11 +1475,7 @@ pub(crate) fn do_score(args: &[Value]) -> Result<Value, RuntimeError> {
     let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "DoScore", "player")?;
     let change = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "DoScore", "change")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context_mut(Ok(Value::Int(0)), |context| {
         let Some(player) = context.player_state_mut(player_id) else {
             return Ok(Value::Int(0));
         };
@@ -1730,11 +1610,7 @@ pub(crate) fn do_crew_exp(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_id =
         parse_object_reference_argument(args.get(1).unwrap_or(&Value::Nil), "DoCrewExp", "target")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
         else {
             return Ok(Value::Bool(false));
@@ -1753,11 +1629,7 @@ pub(crate) fn get_plr_value(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     // An unfilled iPlr slot is nil -> 0 (C4AulExec parameter filling).
     let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetPlrValue", "player")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -1777,11 +1649,7 @@ pub(crate) fn get_plr_value_gain(args: &[Value]) -> Result<Value, RuntimeError> 
         "GetPlrValueGain",
         "player",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -1809,11 +1677,7 @@ pub(crate) fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(name) = name.filter(|name| !name.is_empty()) else {
         return Ok(Value::Bool(false));
     };
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(true));
-        };
+    with_host_context_mut(Ok(Value::Bool(true)), |context| {
         let active = context.object_context().map(|object| object.id());
         let Some(target) = target.or(active) else {
             return Ok(Value::Bool(false));
@@ -1976,11 +1840,7 @@ pub(crate) fn get_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "GetPortrait", "obj")?;
     let get_id = args.get(1).map(value_raw_truthy).unwrap_or(false);
     let permanent = args.get(2).map(value_raw_truthy).unwrap_or(false);
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         let active = context.object_context().map(|object| object.id());
         let Some(target) = target.or(active) else {
             return Ok(Value::Nil);
@@ -2038,11 +1898,7 @@ pub(crate) fn set_plr_view(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|value| parse_object_reference_argument(value, "SetPlrView", "target"))
         .transpose()?
         .flatten();
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(player) = context.player_state_mut(player_id) else {
             return Ok(Value::Bool(false));
         };
@@ -2145,11 +2001,7 @@ pub(crate) fn set_plr_view_range(args: &[Value]) -> Result<Value, RuntimeError> 
     if !exact && range > 0 && range < 128 {
         range = 128;
     }
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context_mut(Ok(Value::Int(0)), |context| {
         let target = target.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
             return Ok(Value::Int(0));
@@ -2171,11 +2023,7 @@ pub(crate) fn get_plr_down_double(args: &[Value]) -> Result<Value, RuntimeError>
         "GetPlrDownDouble",
         "player",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -2191,11 +2039,7 @@ pub(crate) fn clear_last_plr_com(args: &[Value]) -> Result<Value, RuntimeError> 
         "ClearLastPlrCom",
         "player",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(player) = context.player_state_mut(player_id) else {
             return Ok(Value::Bool(false));
         };
@@ -2207,11 +2051,7 @@ pub(crate) fn clear_last_plr_com(args: &[Value]) -> Result<Value, RuntimeError> 
 }
 
 pub(crate) fn sync_homebase_material_to_team_live(player: i32) {
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         if !context.team_home_base_rule() {
             return;
         }
@@ -2251,11 +2091,7 @@ pub(crate) fn get_league(args: &[Value]) -> Result<Value, RuntimeError> {
     let Ok(index) = usize::try_from(index) else {
         return Ok(Value::Nil);
     };
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(section) = context
             .world
             .league_name
@@ -2285,11 +2121,7 @@ pub(crate) fn get_league_score(args: &[Value]) -> Result<Value, RuntimeError> {
         "player info ID",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         Ok(context
             .world
             .player_info_league_score(player_info_id)
@@ -2308,11 +2140,7 @@ pub(crate) fn get_league_progress_data(args: &[Value]) -> Result<Value, RuntimeE
         "player info ID",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         if !context.world.league_name_configured() {
             return Ok(Value::Nil);
         }
@@ -2341,11 +2169,7 @@ pub(crate) fn set_league_progress_data(args: &[Value]) -> Result<Value, RuntimeE
         "player info ID",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         if !context.world.league_name_configured()
             || !context.world.player_info_id_known(player_info_id)
         {
@@ -2371,11 +2195,7 @@ pub(crate) fn get_hi_rank(args: &[Value]) -> Result<Value, RuntimeError> {
     // the crew in order, rank from the linked Info (no info = -1); only a
     // strictly higher rank replaces, so the first of equal ranks wins.
     let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetHiRank", "player")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -2409,11 +2229,7 @@ pub(crate) fn get_rank(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|value| parse_object_reference_argument(value, "GetRank", "obj"))
         .transpose()?
         .flatten();
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(target) = target.or_else(|| context.object_context().map(|object| object.id()))
         else {
             return Ok(Value::Nil);
@@ -2439,11 +2255,7 @@ pub(crate) fn get_crew(args: &[Value]) -> Result<Value, RuntimeError> {
     if index < 0 {
         return Ok(Value::Nil);
     }
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -2467,11 +2279,7 @@ pub(crate) fn get_crew_count(args: &[Value]) -> Result<Value, RuntimeError> {
         "GetCrewCount",
         "player",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -2490,11 +2298,7 @@ pub(crate) fn get_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
     if index < 0 {
         return Ok(Value::Nil);
     }
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -2536,11 +2340,7 @@ pub(crate) fn get_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
 /// clears its raw pointer when an object is removed; mirror that guarantee
 /// when a copied host context observes same-call removal.
 pub(crate) fn edit_cursor(_args: &[Value]) -> Result<Value, RuntimeError> {
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         if context.world.control_sync_mode {
             return Ok(Value::Nil);
         }
@@ -2565,11 +2365,7 @@ pub(crate) fn get_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
         "GetViewCursor",
         "player",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -2590,11 +2386,7 @@ pub(crate) fn get_captain(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
     let player_id = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetCaptain", "player")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -2619,11 +2411,7 @@ pub(crate) fn set_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|value| parse_object_reference_argument(value, "SetViewCursor", "object"))
         .transpose()?
         .flatten();
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(player) = context.player_state_mut(player_id) else {
             return Ok(Value::Bool(false));
         };
@@ -2645,11 +2433,7 @@ pub(crate) fn get_select_count(args: &[Value]) -> Result<Value, RuntimeError> {
         "GetSelectCount",
         "player",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -2676,11 +2460,7 @@ pub(crate) fn get_homebase_material(args: &[Value]) -> Result<Value, RuntimeErro
         Some(value) => value_to_i32(value, "GetHomebaseMaterial", "category")?,
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -2712,11 +2492,7 @@ pub(crate) fn get_homebase_production(args: &[Value]) -> Result<Value, RuntimeEr
         Some(value) => value_to_i32(value, "GetHomebaseProduction", "category")?,
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -2748,11 +2524,7 @@ pub(crate) fn get_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(value) => value_to_i32(value, "GetPlrKnowledge", "category")?,
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -2806,11 +2578,7 @@ pub(crate) fn set_plr_knowledge(args: &[Value]) -> Result<Value, RuntimeError> {
         "remove flag",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
 
         if remove {
             let Some(player) = context.player_state_mut(player_id) else {
@@ -2848,11 +2616,7 @@ pub(crate) fn get_plr_magic(args: &[Value]) -> Result<Value, RuntimeError> {
     let definition = parse_native_c4id_argument(args.get(1), "GetPlrMagic")?;
     let index = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "GetPlrMagic", "index")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -2890,11 +2654,7 @@ pub(crate) fn set_plr_magic(args: &[Value]) -> Result<Value, RuntimeError> {
         "remove flag",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context_mut(Ok(Value::Int(0)), |context| {
 
         if remove {
             let Some(player) = context.player_state_mut(player_id) else {
@@ -2940,11 +2700,7 @@ pub(crate) fn do_homebase_material(args: &[Value]) -> Result<Value, RuntimeError
         Some(value) => value_to_i32(value, "DoHomebaseMaterial", "change")?,
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
 
         if context.definition_metadata(&definition).is_none()
             && context.definition_category(&definition).is_none()
@@ -3006,11 +2762,7 @@ pub(crate) fn do_homebase_production(args: &[Value]) -> Result<Value, RuntimeErr
         Some(value) => value_to_i32(value, "DoHomebaseProduction", "change")?,
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
 
         if context.definition_metadata(&definition).is_none()
             && context.definition_category(&definition).is_none()
@@ -3134,11 +2886,7 @@ pub(crate) fn do_scoreboard_show(args: &[Value]) -> Result<Value, RuntimeError> 
         "player",
     )?;
 
-    Ok(HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Value::Bool(false);
-        };
+    Ok(with_host_context(Value::Bool(false), |context| {
         if for_player != 0 {
             let player = for_player.wrapping_sub(1);
             if !context.world.players.contains_key(&player) {
@@ -3201,11 +2949,7 @@ pub(crate) fn add_evaluation_data(args: &[Value]) -> Result<Value, RuntimeError>
         return Ok(Value::Bool(false));
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         if player_info_id != 0 && !context.world.player_info_id_known(player_info_id) {
             return Ok(Value::Bool(false));
         }
@@ -3250,11 +2994,7 @@ pub(crate) fn set_league_performance(args: &[Value]) -> Result<Value, RuntimeErr
     // C4Aul's typed two-parameter dispatch evaluates and discards surplus
     // arguments before entering the native function.
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         if !context.world.league_game() {
             return Ok(Value::Bool(false));
         }
@@ -3373,11 +3113,7 @@ pub(crate) fn mission_access_contains(list: &str, password: &str) -> bool {
 pub(crate) fn gain_mission_access(args: &[Value]) -> Result<Value, RuntimeError> {
     let password =
         parse_optional_string(args.first(), "GainMissionAccess", "password")?.unwrap_or_default();
-    let granted = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    let granted = with_host_context(false, |context| {
         let mut access = context.world.mission_access.borrow_mut();
         if clonk_script::c4_string_byte_len(&access)
             .saturating_add(clonk_script::c4_string_byte_len(&password))
@@ -3697,11 +3433,7 @@ pub(crate) fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
     };
     if let Some(owner) = callback_owner {
         call_recruitment_callback(to, owner);
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             let donor_member = context.object_in_any_crew(from);
             let receiver_member = context.object_in_any_crew(to);
             if let Some(scope) = context.object_scope_mut(from) {
@@ -4075,11 +3807,7 @@ fn recruit_or_create_crew_info(
 /// Direct C4Player::MakeCrewMember mutation. Native callers such as Buy must
 /// not dispatch a definition function named MakeCrewMember on the target.
 pub(crate) fn make_crew_member_live(target: ObjectId, player: i32) -> Result<bool, RuntimeError> {
-    let joined = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(false);
-        };
+    let joined = with_host_context_mut(Ok(false), |context| {
         if context.player_state(player).is_none() {
             return Ok(false); // ValidPlr (C4Script.cpp:2166)
         }
@@ -4227,11 +3955,7 @@ pub(crate) fn get_plr_color_dw(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
     let player_id = value_to_i32(&args[0], "GetPlrColorDw", "player")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
@@ -4299,11 +4023,7 @@ pub(crate) fn get_crew_enabled(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let target =
         consume_optional_object_reference_argument(args, &mut index, "GetCrewEnabled", "obj")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let active = context.object_context().map(|object| object.id());
         let target = target.or(active);
         let Some(target) = target else {
@@ -4375,11 +4095,7 @@ fn do_select_host_object(target: ObjectId, cursor: bool) -> bool {
 /// C4Object::UnSelect (C4Object.cpp:5827-5832): unlike DoSelect it always
 /// invokes the callback, including on CrewDisabled objects.
 fn unselect_host_object(target: ObjectId, cursor: bool) -> bool {
-    let known = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let known = with_host_context_mut(false, |context| {
         if context.get_world_object(target).is_none() {
             return false;
         }
@@ -4441,19 +4157,11 @@ fn record_cursor_state(context: &mut EffectHostContext, player_id: i32) {
 /// its selection callbacks run before the next player's pointers are cleared,
 /// exactly as the C++ loop does.
 pub(crate) fn clear_player_object_pointers_host(target: ObjectId) {
-    let players = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Vec::new();
-        };
+    let players = with_host_context(Vec::new(), |context| {
         context.player_ids().to_vec()
     });
     for player_id in players {
-        let removed_cursor = HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return false;
-            };
+        let removed_cursor = with_host_context_mut(false, |context| {
             let Some(player) = context.player_state_mut(player_id) else {
                 return false;
             };
@@ -4467,11 +4175,7 @@ pub(crate) fn clear_player_object_pointers_host(target: ObjectId) {
         if removed_cursor {
             adjust_cursor_host(player_id);
         }
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             if let Some(player) = context.player_state_mut(player_id) {
                 player.clear_object_pointers_after_cursor_adjust(target);
             }
@@ -4494,11 +4198,7 @@ pub(crate) fn clear_player_object_pointers_host(target: ObjectId) {
 /// FoWViewObjs entry is retained for normal dead-view decay
 /// (C4Object.cpp:1194-1200; C4Player.cpp:57-82).
 pub(crate) fn clear_owner_death_pointers_host(target: ObjectId, owner: i32) {
-    let removed_cursor = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let removed_cursor = with_host_context_mut(false, |context| {
         let Some(player) = context.player_state_mut(owner) else {
             return false;
         };
@@ -4512,11 +4212,7 @@ pub(crate) fn clear_owner_death_pointers_host(target: ObjectId, owner: i32) {
     if removed_cursor {
         adjust_cursor_host(owner);
     }
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         if let Some(player) = context.player_state_mut(owner) {
             player.clear_object_pointers_after_cursor_adjust(target);
         }
@@ -4581,11 +4277,7 @@ fn adjust_cursor_host(player_id: i32) -> bool {
     if let Some(cursor) = cursor {
         do_select_host_object(cursor, false);
     }
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         if let Some(player) = context.player_state_mut(player_id) {
             player.control.cursor_flash = 30;
         }
@@ -4632,11 +4324,7 @@ fn select_crew_host_impl(
     } else {
         unselect_host_object(target, false);
     }
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         if let Some(player) = context.player_state_mut(player_id) {
             player.control.select_flash = 30;
             player.control.cursor_selection = 0;
@@ -4696,11 +4384,7 @@ pub(crate) fn set_crew_status(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     if in_crew {
-        let added = HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return None;
-            };
+        let added = with_host_context_mut(None, |context| {
             let Some(player) = context.player_state(player_id) else {
                 return None;
             };
@@ -4756,11 +4440,7 @@ pub(crate) fn set_crew_status(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(1));
     }
 
-    let removal = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return None;
-        };
+    let removal = with_host_context_mut(None, |context| {
         let player = context.player_state(player_id)?;
         if !player.crew.contains(&target) {
             // Already absent is a successful side-effect-free no-op.
@@ -4796,11 +4476,7 @@ pub(crate) fn set_crew_status(args: &[Value]) -> Result<Value, RuntimeError> {
         unselect_host_object(target, false);
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         if !context.ensure_object_scope(target) {
             return;
         }
@@ -4927,11 +4603,7 @@ pub(crate) fn set_cursor_host(args: &[Value]) -> Result<Value, RuntimeError> {
         if let Some(current) = current {
             do_select_host_object(current, true);
         }
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             if let Some(player) = context.player_state_mut(player_id) {
                 if !no_select_arrow {
                     player.control.cursor_flash = 30;
@@ -4980,11 +4652,7 @@ pub(crate) fn set_crew_enabled(args: &[Value]) -> Result<Value, RuntimeError> {
             };
         }
     }
-    let adjust_owner = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return None;
-        };
+    let adjust_owner = with_host_context_mut(None, |context| {
         let Some((id, owner)) = context.object_context_mut().map(|object| {
             object.pending_update.crew_disabled = Some(!enabled);
             if !enabled {
@@ -5054,11 +4722,7 @@ pub(crate) fn update_player_selection_toggle_status_host(player_id: i32) {
         adjust_cursor_host(player_id);
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         if let Some(player) = context.player_state_mut(player_id) {
             player.control.cursor_selection = 0;
             player.control.cursor_toggled = 0;
@@ -5079,11 +4743,7 @@ pub(crate) fn crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
     // C4Aul's typed one-parameter dispatch evaluates and discards surplus
     // arguments before entering the native function.
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(target) = target_id.or(context.script_object_context) else {
             return Ok(Value::Nil);
         };
@@ -5110,11 +4770,7 @@ pub(crate) fn set_view_offset(args: &[Value]) -> Result<Value, RuntimeError> {
     let x = parse_optional_i32(args.get(1), "SetViewOffset", "x")?.unwrap_or(0);
     let y = parse_optional_i32(args.get(2), "SetViewOffset", "y")?.unwrap_or(0);
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         if context.player_state(player).is_none() {
             return Ok(Value::Bool(false));
         }

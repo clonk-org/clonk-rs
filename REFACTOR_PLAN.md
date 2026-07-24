@@ -289,3 +289,13 @@ state extraction remains queued behind wave 2.
   original 40,001-line body line for line, with every difference being one of
   the 260 enumerated `pub(crate)` insertions. nextest id list byte-identical
   (8,861); gate 8,828/8,828, 11 skipped.
+- compat host-context prologue collapse (wave C, DRY): 270 of the ~790
+  `HOST_CONTEXT.with(|cell| { .. })` host-function bodies opened with the same
+  four-line borrow-and-bail preamble. Two private helpers in compat.rs —
+  `with_host_context` / `with_host_context_mut`, taking the inert fallback and
+  a closure over the context — replace it, so each wrapper now starts at its
+  own logic. Every fallback is a constant expression, so moving it from the
+  bail arm to an argument does not change what is evaluated. 6 sites whose
+  bodies still name `borrow`/`cell` were skipped by the transform, as were the
+  `match`-form and `and_then`-chain variants (next pass). Net -1,067 lines with
+  the wrappers' C++ `file:line` citations untouched.

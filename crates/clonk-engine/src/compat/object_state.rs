@@ -45,11 +45,7 @@ pub(crate) fn kill(args: &[Value]) -> Result<Value, RuntimeError> {
     // C4Aul's typed two-parameter dispatch discards surplus values after
     // evaluating them (C4AulExec.cpp:1364-1396).
 
-    let target = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(None);
-        };
+    let target = with_host_context_mut(Ok(None), |context| {
         // `cthr->Obj`, not the mutable effect carrier: definition-owned
         // callbacks may carry pForObj state while executing with Obj=null.
         let caller = context.script_object_context;
@@ -93,11 +89,7 @@ pub(crate) fn kill(args: &[Value]) -> Result<Value, RuntimeError> {
 /// and same-call read observes the native ordering before the invoking script
 /// resumes (oracle-src-pinned src/C4Object.cpp:1164-1205).
 pub(crate) fn assign_death_live(target: ObjectId, forced: bool) -> Result<bool, RuntimeError> {
-    let death_causing_player = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return None;
-        };
+    let death_causing_player = with_host_context_mut(None, |context| {
         if !context.ensure_object_scope(target)
             || !context
                 .object_scope(target)
@@ -139,11 +131,7 @@ pub(crate) fn assign_death_live(target: ObjectId, forced: bool) -> Result<bool, 
     // SetActionByName("Dead") is an ordinary native action transition:
     // NoOtherAction may reject it and Start/Abort callbacks run inline.
     let _ = native_set_action_by_name(target, "Dead")?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         if let Some(scope) = context.object_scope_mut(target) {
             scope.set_selected(false);
             // Forced death clears a RemoveDeath callback's revival again.
@@ -179,11 +167,7 @@ pub(crate) fn assign_death_live(target: ObjectId, forced: bool) -> Result<bool, 
     if let Some(owner) = owner_player {
         clear_owner_death_pointers_host(target, owner);
     }
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         let retain_living_owner_view = owner_player.is_some_and(|owner| {
             context
                 .object_scope(target)
@@ -330,11 +314,7 @@ pub(crate) fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     // Native reads the attacker's facing only after DoEnergy returned, then
     // stops the target's command direction (C4ObjectCom.cpp:744-746).
-    let tdir_set = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return None;
-        };
+    let tdir_set = with_host_context_mut(None, |context| {
         let tdir = match context.object_scope(attacker)?.direction() {
             Direction::Left => -1,
             _ => 1,
@@ -363,11 +343,7 @@ pub(crate) fn punch(args: &[Value]) -> Result<Value, RuntimeError> {
         if !action_set {
             return false;
         }
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return false;
-            };
+        with_host_context_mut(false, |context| {
             context
                 .object_scope_mut(target)
                 .map(|scope| scope.set_fixed_velocity(velocity))
@@ -428,11 +404,7 @@ pub(crate) fn set_solid_mask(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     let target =
         parse_object_reference_argument(args.get(6).unwrap_or(&Value::Nil), "SetSolidMask", "obj")?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let active = context.object_context().map(|object| object.id());
         let Some(target) = target.or(active) else {
             return Ok(Value::Bool(false));
@@ -472,11 +444,7 @@ pub(crate) fn set_visibility(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|value| parse_object_reference_argument(value, "SetVisibility", "object"))
         .transpose()?
         .flatten();
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(target) = target.or_else(|| context.object_context().map(|object| object.id()))
         else {
             return Ok(Value::Bool(false));
@@ -512,11 +480,7 @@ pub(crate) fn set_clr_modulation(args: &[Value]) -> Result<Value, RuntimeError> 
         "overlay id",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(target) = target.or_else(|| context.object_context().map(|object| object.id()))
         else {
             return Ok(Value::Bool(false));
@@ -549,11 +513,7 @@ pub(crate) fn get_clr_modulation(args: &[Value]) -> Result<Value, RuntimeError> 
         "overlay id",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(target) = target.or_else(|| context.object_context().map(|object| object.id()))
         else {
             return Ok(Value::Nil);
@@ -606,11 +566,7 @@ pub(crate) fn live_object_bounds_shape(
 }
 
 pub(crate) fn run_live_exit_bound_contact(target: ObjectId, cnat: u32) {
-    let calls_enabled = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let calls_enabled = with_host_context_mut(false, |context| {
         let definition_id = context.object_effective_definition_id(target);
         let calls_enabled = definition_id
             .as_deref()
@@ -961,11 +917,7 @@ pub(crate) fn get_mass(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     let target =
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "GetMass", "obj")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let id = target.or_else(|| context.object_context().map(|object| object.id()));
         let Some(id) = id else {
             return Ok(Value::Nil);
@@ -1002,11 +954,7 @@ pub(crate) fn set_mass(args: &[Value]) -> Result<Value, RuntimeError> {
             };
         }
     }
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(id) = context.object_context().map(|object| object.id()) else {
             return Ok(Value::Bool(false));
         };
@@ -1167,11 +1115,7 @@ pub(crate) fn get_name(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
     let def_id = parse_native_c4id_argument(args.get(1), "GetName")?.filter(|id| !id.is_empty());
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         if let Some(definition) = def_id {
             return Ok(context
                 .definition_metadata(&definition)
@@ -1197,11 +1141,7 @@ pub(crate) fn get_desc(args: &[Value]) -> Result<Value, RuntimeError> {
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "GetDesc", "object")?;
     let definition =
         parse_native_c4id_argument(args.get(1), "GetDesc")?.filter(|id| !id.is_empty());
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let definition = match (target, definition) {
             (Some(target), _) => context.object_effective_definition_id(target),
             (None, Some(definition)) => Some(definition),
@@ -1826,11 +1766,7 @@ pub(crate) fn do_energy_with_cause_override(
     else {
         return Ok(Value::Bool(false));
     };
-    let should_assign_death = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let should_assign_death = with_host_context_mut(false, |context| {
         if let Some(scope) = context.object_scope_mut(target) {
             let energy = scope.adjust_energy(scaled, true, max_energy);
             // This write has evaluated C++'s death predicate against the
@@ -2224,11 +2160,7 @@ pub(crate) fn do_con_live(target: ObjectId, delta: i32) -> Result<bool, RuntimeE
     }
 
     if refresh {
-        HOST_CONTEXT.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            let Some(context) = borrow.as_mut() else {
-                return;
-            };
+        with_host_context_mut((), |context| {
             let Some(definition_id) = context.object_effective_definition_id(target) else {
                 return;
             };
@@ -2467,11 +2399,7 @@ pub(crate) fn do_damage_with_cause_override(
         Some(modified) => modified,
         None => change,
     };
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return;
-        };
+    with_host_context_mut((), |context| {
         if let Some(scope) = context.object_scope_mut(target) {
             // Damage = max(Damage + iChange, 0) (C4Object.cpp:1288).
             scope.adjust_damage(change);
@@ -3401,11 +3329,7 @@ pub(crate) fn get_visibility(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|arg| parse_object_reference_argument(arg, "GetVisibility", "obj"))
         .transpose()?
         .flatten();
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(target) = target.or_else(|| context.object_context().map(|object| object.id()))
         else {
             return Ok(Value::Nil);
@@ -3433,11 +3357,7 @@ pub(crate) fn get_color(args: &[Value]) -> Result<Value, RuntimeError> {
 pub(crate) fn get_color_dw(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let target = consume_optional_object_reference_argument(args, &mut index, "GetColorDw", "obj")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let active = context.object_context().map(|object| object.id());
         let Some(target) = target.or(active) else {
             return Ok(Value::Nil);
@@ -3600,11 +3520,7 @@ pub(crate) fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
     // C4ObjectCom.cpp:280-312): the snake's Activity jump takes effect
     // THIS frame, before its movement — a queued command would lag one
     // frame. Gates: only while the WALK procedure runs.
-    let jump_target = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return None;
-        };
+    let jump_target = with_host_context(None, |context| {
         let object = context.object_context()?;
         let action_name = object.effective_action_name().to_string();
         if !matches!(
@@ -3703,11 +3619,7 @@ pub(crate) fn jump(args: &[Value]) -> Result<Value, RuntimeError> {
     if !matches!(set, Value::Bool(true)) {
         return Ok(Value::Bool(false));
     }
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(true));
-        };
+    with_host_context_mut(Ok(Value::Bool(true)), |context| {
         if let Some(object) = context.object_context_mut() {
             object.set_fixed_velocity(FixedVec2::new(txdir, tydir));
             object.set_mobile(true);
@@ -3776,11 +3688,7 @@ pub(crate) fn check_energy_need_chain(args: &[Value]) -> Result<Value, RuntimeEr
         })
         .transpose()?
         .flatten();
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let target = target.or_else(|| context.object_context().map(ObjectScopeContext::id));
         let Some(target) = target else {
             return Ok(Value::Nil);
@@ -3806,11 +3714,7 @@ pub(crate) fn energy_check(args: &[Value]) -> Result<Value, RuntimeError> {
         })
         .transpose()?
         .flatten();
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         let target = target.or_else(|| context.object_context().map(|object| object.id()));
         let Some(target) = target else {
             return Ok(Value::Nil);
@@ -3862,11 +3766,7 @@ pub(crate) fn stuck(args: &[Value]) -> Result<Value, RuntimeError> {
         .map(|arg| parse_object_reference_argument(arg, "Stuck", "obj"))
         .transpose()?
         .flatten();
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some((position, vertices)) = resolve_vertices(context, target_id) else {
             return Ok(Value::Nil);
         };
@@ -4062,11 +3962,7 @@ pub(crate) fn fight_with(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Bool(false));
     };
 
-    let both_ready = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return false;
-        };
+    let both_ready = with_host_context(false, |context| {
         [target, clonk].into_iter().all(|object| {
             context
                 .get_world_object(object)
@@ -5425,11 +5321,7 @@ pub(crate) fn get_def_bottom(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let target = explicit_target.or_else(|| context.object_context().map(|object| object.id()));
         let Some(target) = target else {
             return Ok(Value::Nil);
@@ -5644,11 +5536,7 @@ pub(crate) fn get_unused_overlay_id(args: &[Value]) -> Result<Value, RuntimeErro
         return Ok(Value::Nil);
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let target = target.or(context.script_object_context);
         let Some(target) = target else {
             return Ok(Value::Nil);
@@ -6326,11 +6214,7 @@ fn legacy_player_color(index: i32) -> Option<u32> {
 }
 
 fn stage_object_color(target_id: Option<ObjectId>, value: u32) -> bool {
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    with_host_context_mut(false, |context| {
         let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
         let Some(target) = target else {
             return false;
@@ -6385,11 +6269,7 @@ pub(crate) fn set_picture(args: &[Value]) -> Result<Value, RuntimeError> {
     let explicit_target =
         consume_optional_object_reference_argument(args, &mut index, "SetPicture", "target")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let target = explicit_target.or_else(|| context.object_context().map(|object| object.id()));
         let Some(target) = target else {
             return Ok(Value::Bool(false));
@@ -6461,11 +6341,7 @@ pub(crate) fn set_contact_density(args: &[Value]) -> Result<Value, RuntimeError>
         "target",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let target = explicit_target.or_else(|| context.object_context().map(|object| object.id()));
         let Some(target) = target else {
             return Ok(Value::Bool(false));
@@ -6493,11 +6369,7 @@ pub(crate) fn add_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let target = explicit_target.or_else(|| context.object_context().map(|object| object.id()));
         let Some(target) = target else {
             return Ok(Value::Bool(false));
@@ -6529,11 +6401,7 @@ pub(crate) fn remove_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let target = explicit_target.or_else(|| context.object_context().map(|object| object.id()));
         let Some(target) = target else {
             return Ok(Value::Bool(false));
@@ -7044,11 +6912,7 @@ pub(crate) fn get_killer(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Int(OWNER_NONE));
-        };
+    with_host_context(Ok(Value::Int(OWNER_NONE)), |context| {
         let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
         else {
             return Ok(Value::Int(OWNER_NONE));
@@ -7085,11 +6949,7 @@ pub(crate) fn set_killer(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         if new_killer != OWNER_NONE && context.player_state(new_killer).is_none() {
             return Ok(Value::Bool(false));
         }
@@ -7154,11 +7014,7 @@ pub(crate) fn set_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
         else {
             return Ok(Value::Bool(false));
@@ -7204,11 +7060,7 @@ pub(crate) fn get_object_blit_mode(args: &[Value]) -> Result<Value, RuntimeError
         "overlay id",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
         else {
             return Ok(Value::Nil);
@@ -7249,11 +7101,7 @@ pub(crate) fn set_object_blit_mode(args: &[Value]) -> Result<Value, RuntimeError
         "overlay id",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
         else {
             return Ok(Value::Nil);

@@ -114,6 +114,19 @@ thread_local! {
 }
 const LEGACY_GAME_PALETTE: &[u8; 256 * 3] = include_bytes!("../../../planet/Graphics.c4g/C4.PAL");
 
+/// Run `f` against the installed host context, yielding `fallback` when the
+/// engine has none installed. C++ host functions always execute inside a
+/// context; the `Option` models the window between frames, where every
+/// wrapper returns its own inert value rather than touching engine state.
+fn with_host_context<R>(fallback: R, f: impl FnOnce(&EffectHostContext) -> R) -> R {
+    HOST_CONTEXT.with(|cell| cell.borrow().as_ref().map_or(fallback, f))
+}
+
+/// `with_host_context` for the wrappers that mutate engine state.
+fn with_host_context_mut<R>(fallback: R, f: impl FnOnce(&mut EffectHostContext) -> R) -> R {
+    HOST_CONTEXT.with(|cell| cell.borrow_mut().as_mut().map_or(fallback, f))
+}
+
 #[cfg(test)]
 #[allow(clippy::arc_with_non_send_sync)]
 // Runtime host contexts intentionally share single-threaded script engines by Arc identity.

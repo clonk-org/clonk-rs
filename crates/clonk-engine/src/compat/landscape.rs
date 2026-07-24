@@ -13,11 +13,7 @@ pub(crate) fn default_sky_fade() -> [RgbColor; 2] {
 pub(crate) fn in_liquid(args: &[Value]) -> Result<Value, RuntimeError> {
     let target =
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "InLiquid", "obj")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         if let Some(id) = target {
             if context.object_context().map(|object| object.id()) != Some(id) {
                 return Ok(context
@@ -195,11 +191,7 @@ pub(crate) fn get_material_count(args: &[Value]) -> Result<Value, RuntimeError> 
         "GetMaterialCount",
         "real",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Int(-1));
-        };
+    with_host_context(Ok(Value::Int(-1)), |context| {
         let Some(material_id) = usize::try_from(material_index)
             .ok()
             .and_then(crate::material::MaterialId::new)
@@ -281,11 +273,7 @@ pub(crate) fn bubble(args: &[Value]) -> Result<Value, RuntimeError> {
     }
     let mut x = parse_optional_i32(args.first(), "Bubble", "x")?.unwrap_or(0);
     let mut y = parse_optional_i32(args.get(1), "Bubble", "y")?.unwrap_or(0);
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         // Local calls offset by the object position (C4Script.cpp:2190).
         if let Some(object) = context.object_context() {
             let position = object.effective_position();
@@ -385,11 +373,7 @@ pub(crate) fn smoke(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "Smoke", "y")?;
     let level = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "Smoke", "level")?;
     let color = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "Smoke", "clr")?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         if let Some(object) = context.object_context() {
             let position = object.effective_position();
             x = x.saturating_add(position.x);
@@ -933,11 +917,7 @@ pub(crate) fn get_wind(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(Value::Int(value)) => *value,
         _ => 0,
     };
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Int(wind));
-        };
+    with_host_context(Ok(Value::Int(wind)), |context| {
         let mut global_x = local_x;
         let mut global_y = local_y;
         if let Some(object) = context.object_context() {
@@ -1326,11 +1306,7 @@ pub(crate) fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
 pub(crate) fn get_texture(args: &[Value]) -> Result<Value, RuntimeError> {
     let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "GetTexture", "x")?;
     let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "GetTexture", "y")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let texture_index = context
             .landscape_ref()
             .and_then(|landscape| landscape.grid_byte_at(x, y))
@@ -1381,11 +1357,7 @@ pub(crate) fn set_texture_index(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Int(0));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context_mut(Ok(Value::Int(0)), |context| {
         let Some(texmap) = context.runtime_texmap_mut() else {
             return Ok(Value::Int(0));
         };
@@ -1417,11 +1389,7 @@ pub(crate) fn set_texture_index(args: &[Value]) -> Result<Value, RuntimeError> {
 /// references. Entry removal is live, but the native deliberately leaves the
 /// byte plane and its Pix2* lookup caches untouched.
 pub(crate) fn remove_unused_texmap_entries(_args: &[Value]) -> Result<Value, RuntimeError> {
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         let Some(texture_usage) = context
             .world
             .landscape_ref()
@@ -1905,11 +1873,7 @@ pub(crate) fn draw_mat_chunks(args: &[Value]) -> Result<Value, RuntimeError> {
         parse_optional_string(args.get(7), "DrawMatChunks", "texture")?.unwrap_or_default();
     let ift = value_to_bool(args.get(8).unwrap_or(&Value::Nil), "DrawMatChunks", "ift")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context_mut(Ok(Value::Int(0)), |context| {
         let Some(map_seed) = context
             .world
             .landscape_ref()
@@ -1999,11 +1963,7 @@ pub(crate) fn draw_volcano_branch(args: &[Value]) -> Result<Value, RuntimeError>
         "size",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         let Some(material_byte) = context
             .runtime_texmap()
             .and_then(|texmap| texmap.default_material_entry_by_index(material))
@@ -2054,11 +2014,7 @@ pub(crate) fn draw_material_quad(args: &[Value]) -> Result<Value, RuntimeError> 
         Vector2::new(coordinates[6], coordinates[7]),
     ];
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         if !context.resolve_runtime_material_texture(&material_texture) {
             return Ok(Value::Bool(false));
         }
@@ -2218,11 +2174,7 @@ pub(crate) fn draw_map(args: &[Value]) -> Result<Value, RuntimeError> {
     *random_context.rng.borrow_mut() = rng;
 
     let texmap = classifier.into_runtime_state();
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context_mut(Ok(Value::Int(0)), |context| {
         // Parser-side texture allocations are live to later calls in this
         // VM session even if Render found no map.
         context.set_runtime_texmap(texmap.clone());
@@ -2352,11 +2304,7 @@ pub(crate) fn draw_def_map(args: &[Value]) -> Result<Value, RuntimeError> {
     *random_context.rng.borrow_mut() = rng;
 
     let texmap = classifier.into_runtime_state();
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context_mut(Ok(Value::Int(0)), |context| {
         context.set_runtime_texmap(texmap.clone());
         let Some(bitmap) = rendered else {
             return Ok(Value::Int(0));
@@ -2391,11 +2339,7 @@ pub(crate) fn free_rect(args: &[Value]) -> Result<Value, RuntimeError> {
         "FreeRect",
         "free_density",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Nil);
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
         context.preview_clear_rect(
             Vector2::new(x, y),
             width,

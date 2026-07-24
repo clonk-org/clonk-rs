@@ -52,11 +52,7 @@ pub(crate) fn call_message_board(args: &[Value]) -> Result<Value, RuntimeError> 
         "player",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let target = explicit_target.or(context.script_object_context);
         if target.is_some_and(|target| !context.object_status_present(target)) {
             return Ok(Value::Bool(false));
@@ -88,11 +84,7 @@ pub(crate) fn abort_message_board(args: &[Value]) -> Result<Value, RuntimeError>
         "player",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Bool(false));
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let target = explicit_target.or(context.script_object_context);
         if context.player_state(player_id).is_none() {
             return Ok(Value::Bool(false));
@@ -126,11 +118,7 @@ pub(crate) fn on_message_board_answer(args: &[Value]) -> Result<Value, RuntimeEr
     )?;
     let answer = parse_optional_string_value(args.get(2), "OnMessageBoardAnswer", "answer")?;
 
-    let removed = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let removed = with_host_context_mut(false, |context| {
         let removed = context
             .player_state_mut(player_id)
             .is_some_and(|player| player.remove_message_board_query(target));
@@ -226,11 +214,7 @@ pub(crate) fn activate_game_goal_menu(args: &[Value]) -> Result<Value, RuntimeEr
         "ActivateGameGoalMenu",
         "player",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return Ok(Value::Int(0));
-        };
+    with_host_context_mut(Ok(Value::Int(0)), |context| {
         if context.player_state(player_id).is_none() {
             return Ok(Value::Int(0));
         }
@@ -439,11 +423,7 @@ pub(crate) fn show_info(args: &[Value]) -> Result<Value, RuntimeError> {
     let explicit =
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "ShowInfo", "object")?;
     let target = explicit.unwrap_or(command_object);
-    let queued = HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    let queued = with_host_context_mut(false, |context| {
         if context.get_world_object(target).is_none() {
             return false;
         }
@@ -664,11 +644,7 @@ pub(crate) fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         def_description,
         static_components,
         component_script,
-    ) = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return (None, None, String::new(), String::new(), Vec::new(), None);
-        };
+    ) = with_host_context((None, None, String::new(), String::new(), Vec::new(), None), |context| {
         // pDef = C4Id2Def(idItem), falling back to the menu object's own
         // def (C4Script.cpp:1488-1489).
         let item_definition_id = (item_id_raw != 0).then(|| stored_item_id.clone());
@@ -1115,11 +1091,7 @@ pub(crate) fn set_menu_decoration(args: &[Value]) -> Result<Value, RuntimeError>
     let Some(target) = target else {
         return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1739)
     };
-    let menu = HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let Some(context) = borrow.as_ref() else {
-            return None;
-        };
+    let menu = with_host_context(None, |context| {
         context.object_menu(target)
     });
     let Some(mut menu) = menu else {
@@ -1796,11 +1768,7 @@ pub(crate) fn preview_prepare_put_take_menu(request: MenuRequest) -> bool {
     let Ok(Some(menu)) = menu else {
         return false;
     };
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let Some(context) = borrow.as_mut() else {
-            return false;
-        };
+    with_host_context_mut(false, |context| {
         context.set_object_menu(request.crew_id, Some(menu))
     })
 }
