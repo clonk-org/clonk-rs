@@ -135,6 +135,17 @@ C4.PAL colors/locals, and half-open start-marked segments; Lightning
 `DrawBolt` uses C++'s per-axis cull, four unsynced jitter draws, CWhite, and raw
 triangle strip.
 
+C4Script `&` parameters now bind through `->` object and definition calls:
+`Parse_Params` keeps an argument's reference whenever any engine function of
+that name declares `C4V_pC4Value` at the slot, so the world bridge carries the
+callee's settled parameter slots back to the caller. `SetVertex`'s own-vertex
+modes write the `C4Shape` backup half seeded from the definition shape, and
+`VTX_SetPermanentUpd` restores the live vertices through `UpdateShape`. Hazard
+aiming rides on both: its HCRH crosshair orbits the aiming Clonk at
+`CH_Distance` off the `WeaponAt` muzzle vertex, and a left click while aiming
+runs `ControlCommand`/`DoMouseAiming`/`FireAimWeapon` through to the launched
+projectile.
+
 Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
 source and shipped content; top-level visual similarity is not treated as full

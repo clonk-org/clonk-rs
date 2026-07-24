@@ -39,6 +39,7 @@ mod goldrush_scenario_batches;
 mod hangle_movement;
 mod harpoonrace_reload;
 mod harpoonrace_worldgen;
+mod hazard_crosshair;
 mod hazard_squat_aim;
 mod is_newgfx;
 mod legacy_scenario_loading;
