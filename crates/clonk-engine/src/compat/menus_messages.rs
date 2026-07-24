@@ -338,12 +338,7 @@ pub(crate) fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
     // Object menu: validate the command object (C4Script.cpp:1433-1436);
     // no command object is the scenario-script-callback form.
     if let Some(command_object) = command_object {
-        let command_present = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .map(|context| context.object_status_present(command_object))
-                .unwrap_or(false)
-        });
+        let command_present = with_host_context(false, |context| context.object_status_present(command_object));
         if !command_present {
             return Ok(Value::Bool(false));
         }

@@ -118,12 +118,7 @@ pub(crate) fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
         None
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = match borrow.as_mut() {
-            Some(context) => context,
-            None => return Ok(Value::Bool(true)),
-        };
+    with_host_context_mut(Ok(Value::Bool(true)), |context| {
 
         if at_player != 0 {
             let player_id = at_player.wrapping_sub(1);
@@ -196,12 +191,7 @@ pub(crate) fn sound_level(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let object_arg = args.get(2);
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = match borrow.as_mut() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context_mut(Ok(Value::Nil), |context| {
 
         let target_id = if let Some(value) = object_arg {
             parse_object_reference_argument(value, "SoundLevel", "object")?

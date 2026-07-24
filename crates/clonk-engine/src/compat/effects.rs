@@ -3436,12 +3436,7 @@ pub(crate) fn clear_particles(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = match borrow.as_mut() {
-            Some(context) => context,
-            None => return Ok(Value::Bool(false)),
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
 
         // a named def that is not loaded → false (C4Script.cpp:4932)
         if let Some(name) = &definition {
@@ -3527,12 +3522,7 @@ pub(crate) fn on_fire(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let target_id =
         consume_optional_object_reference_argument(args, &mut index, "OnFire", "target")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
         let Some(target) = target else {
             return Ok(Value::Nil);

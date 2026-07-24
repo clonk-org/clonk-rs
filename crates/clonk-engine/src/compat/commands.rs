@@ -828,12 +828,7 @@ pub(crate) fn get_path(args: &[Value]) -> Result<Value, RuntimeError> {
     let to_x = value_to_i32(&args[2], "GetPath", "to_x")?;
     let to_y = value_to_i32(&args[3], "GetPath", "to_y")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let landscape = match context.landscape_ref() {
             Some(landscape) => landscape,
             None => return Ok(Value::Nil),

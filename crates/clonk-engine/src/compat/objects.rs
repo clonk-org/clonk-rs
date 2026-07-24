@@ -4331,12 +4331,7 @@ fn find_object_cpp(
     function: &str,
     owner_override: Option<i32>,
 ) -> Result<Value, RuntimeError> {
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let mut params = FindObjectParams::parse_cpp_call(args, function, context.caller_scope())?;
         if let Some(owner) = owner_override {
             params.owner = owner;
@@ -4508,12 +4503,7 @@ pub(crate) fn find_id(args: &[Value]) -> Result<Value, RuntimeError> {
 
 pub(crate) fn find_objects(args: &[Value]) -> Result<Value, RuntimeError> {
     let params = FindObjectParams::parse(args)?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Array(Vec::new())),
-        };
+    with_host_context(Ok(Value::Array(Vec::new())), |context| {
         let ids = if params.is_closest_query() {
             collect_closest_matches(context, &params)
         } else {
@@ -4531,12 +4521,7 @@ pub(crate) fn object_count(args: &[Value]) -> Result<Value, RuntimeError> {
     // FnObjectCount (C4Script.cpp:2085-2111): the FindObject layout with
     // iOwner instead of pFindNext as the 10th parameter; an owner of 0
     // becomes ANY_OWNER ("incomplete useless implementation").
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Int(0)),
-        };
+    with_host_context(Ok(Value::Int(0)), |context| {
         let mut params = FindObjectParams::parse_cpp_call(
             &args[..args.len().min(9)],
             "ObjectCount",
@@ -4671,12 +4656,7 @@ pub(crate) fn get_id(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         if let Some(target) = target_id {
             if context.get_world_object(target).is_some() {
@@ -4996,12 +4976,7 @@ pub(crate) fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             "creation callback failed; continuing like C++ fail-safe Call"
         );
     }
-    let removed = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|context| context.nested_object_destroyed(target))
-            .unwrap_or(false)
-    });
+    let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
     if removed {
         return Ok(Value::Nil);
     }
@@ -5394,12 +5369,7 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                 "creation callback failed; continuing like C++ fail-safe Call"
             );
         }
-        let removed = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .map(|context| context.nested_object_destroyed(target))
-                .unwrap_or(false)
-        });
+        let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
         if removed {
             continue;
         }
@@ -5462,12 +5432,7 @@ pub(crate) fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     "creation callback failed; continuing like C++ fail-safe Call"
                 );
             }
-            let removed = HOST_CONTEXT.with(|cell| {
-                cell.borrow()
-                    .as_ref()
-                    .map(|context| context.nested_object_destroyed(target))
-                    .unwrap_or(false)
-            });
+            let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
             if !removed {
                 if let Some(Err(error)) = call_world_object_own_function(target, "Initialize", &[])
                 {
@@ -5747,12 +5712,7 @@ fn finish_placement_object_creation(
             "creation callback failed; continuing like C++ fail-safe Call"
         );
     }
-    let removed = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|context| context.nested_object_destroyed(target))
-            .unwrap_or(false)
-    });
+    let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
     if removed {
         return Ok(Value::Nil);
     }
@@ -5807,12 +5767,7 @@ fn finish_placement_object_creation(
                 "creation callback failed; continuing like C++ fail-safe Call"
             );
         }
-        let removed = HOST_CONTEXT.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .map(|context| context.nested_object_destroyed(target))
-                .unwrap_or(false)
-        });
+        let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
         if !removed {
             if let Some(Err(error)) = call_world_object_own_function(target, "Initialize", &[]) {
                 tracing::warn!(
@@ -5825,12 +5780,7 @@ fn finish_placement_object_creation(
         }
     }
 
-    let removed = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|context| context.nested_object_destroyed(target))
-            .unwrap_or(false)
-    });
+    let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
     Ok(if removed {
         Value::Nil
     } else {
@@ -6429,12 +6379,7 @@ pub(crate) fn create_construction(args: &[Value]) -> Result<Value, RuntimeError>
             "creation callback failed; continuing like C++ fail-safe Call"
         );
     }
-    let removed = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|context| context.nested_object_destroyed(target))
-            .unwrap_or(false)
-    });
+    let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
     if removed {
         return Ok(Value::Nil);
     }
@@ -6528,12 +6473,7 @@ pub(crate) fn create_construction(args: &[Value]) -> Result<Value, RuntimeError>
         }
     }
 
-    let removed = HOST_CONTEXT.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|context| context.nested_object_destroyed(target))
-            .unwrap_or(false)
-    });
+    let removed = with_host_context(false, |context| context.nested_object_destroyed(target));
     Ok(if removed {
         Value::Nil
     } else {
@@ -6735,12 +6675,7 @@ pub(crate) fn contained(args: &[Value]) -> Result<Value, RuntimeError> {
         target_id = parse_object_reference_argument(arg, "Contained", "target")?;
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let to_value = |container: Option<ObjectId>| {
             container.map(object_reference_value).unwrap_or(Value::Nil)
@@ -6790,12 +6725,7 @@ pub(crate) fn contents(args: &[Value]) -> Result<Value, RuntimeError> {
         false
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let container_id = if let Some(id) = target_id {
             id
@@ -6853,12 +6783,7 @@ pub(crate) fn contents_count(args: &[Value]) -> Result<Value, RuntimeError> {
         "object",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Int(0)),
-        };
+    with_host_context(Ok(Value::Int(0)), |context| {
 
         let container_id = if let Some(id) = target_id {
             id
@@ -6909,12 +6834,7 @@ pub(crate) fn find_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         "object",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let container_id = if let Some(id) = target_id {
             id
@@ -6959,12 +6879,7 @@ pub(crate) fn find_other_contents(args: &[Value]) -> Result<Value, RuntimeError>
         "object",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let container_id = if let Some(id) = target_id {
             id
@@ -7011,12 +6926,7 @@ pub(crate) fn get_ocf(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_value = args.first().unwrap_or(&Value::Nil);
     let target_id = parse_object_reference_argument(target_value, "GetOCF", "target")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let ocf_value = |mask: u32| Value::Int(mask as i32);
 
@@ -7052,12 +6962,7 @@ pub(crate) fn get_category(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_id = parse_object_reference_argument(target_value, "GetCategory", "target")?;
     let definition = parse_native_c4id_argument(args.get(1), "GetCategory")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         if let Some(definition_id) = definition {
             if let Some(category) = context.definition_category(&definition_id) {
@@ -9579,12 +9484,7 @@ pub(crate) fn get_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
         "target",
     )?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         if let Some(target) = target_id {
             if let Some(object) = context.object_scope(target) {

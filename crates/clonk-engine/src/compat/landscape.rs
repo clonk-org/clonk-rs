@@ -1067,12 +1067,7 @@ pub(crate) fn path_free(args: &[Value]) -> Result<Value, RuntimeError> {
     let x2 = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "PathFree", "x2")?;
     let y2 = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "PathFree", "y2")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Bool(true)),
-        };
+    with_host_context(Ok(Value::Bool(true)), |context| {
 
         let Some(landscape) = context.landscape_ref() else {
             return Ok(Value::Bool(true));
@@ -1208,12 +1203,7 @@ fn g_back_common(
     let local_x = value_to_i32(args.first().unwrap_or(&Value::Nil), function, "x")?;
     let local_y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), function, "y")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Bool(fallback_without_context(query))),
-        };
+    with_host_context(Ok(Value::Bool(fallback_without_context(query))), |context| {
 
         let mut global_x = local_x;
         let mut global_y = local_y;
@@ -1270,12 +1260,7 @@ pub(crate) fn get_material(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(value) => value_to_i32(value, "GetMaterial", "y")?,
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Int(MATERIAL_NONE)),
-        };
+    with_host_context(Ok(Value::Int(MATERIAL_NONE)), |context| {
 
         let mut global_x = local_x;
         let mut global_y = local_y;
@@ -2464,12 +2449,7 @@ pub(crate) fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
     // C4Landscape::InsertMaterial (FIXED10 there).
     let vx = value_to_i32(args.get(3).unwrap_or(&Value::Nil), "InsertMaterial", "vx")?;
     let vy = value_to_i32(args.get(4).unwrap_or(&Value::Nil), "InsertMaterial", "vy")?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = match borrow.as_mut() {
-            Some(context) => context,
-            None => return Ok(Value::Bool(false)),
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let Some(material_id) = usize::try_from(material)
             .ok()
             .and_then(crate::material::MaterialId::new)
@@ -2528,12 +2508,7 @@ pub(crate) fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
 pub(crate) fn extract_liquid(args: &[Value]) -> Result<Value, RuntimeError> {
     let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "ExtractLiquid", "x")?;
     let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "ExtractLiquid", "y")?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = match borrow.as_mut() {
-            Some(context) => context,
-            None => return Ok(Value::Int(MATERIAL_NONE)),
-        };
+    with_host_context_mut(Ok(Value::Int(MATERIAL_NONE)), |context| {
         let position = context
             .caller_scope()
             .map_or(Vector2::new(x, y), |(_, base)| {
@@ -2572,12 +2547,7 @@ pub(crate) fn extract_material_amount(args: &[Value]) -> Result<Value, RuntimeEr
         "ExtractMaterialAmount",
         "amount",
     )?;
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = match borrow.as_mut() {
-            Some(context) => context,
-            None => return Ok(Value::Int(0)),
-        };
+    with_host_context_mut(Ok(Value::Int(0)), |context| {
         let mut position = Vector2::new(x, y);
         if let Some(object) = context.object_context() {
             let base = object.current_position;

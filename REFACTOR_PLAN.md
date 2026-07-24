@@ -299,3 +299,10 @@ state extraction remains queued behind wave 2.
   bodies still name `borrow`/`cell` were skipped by the transform, as were the
   `match`-form and `and_then`-chain variants (next pass). Net -1,067 lines with
   the wrappers' C++ `file:line` citations untouched.
+- compat host-context collapse, second pass: the `match borrow.as_ref() { .. }`
+  form (51 sites) and the `cell.borrow().as_ref().map(..).unwrap_or(..)` form
+  (9 sites) now go through the same two helpers. Net -300 lines. Left for a
+  later pass: the `.ok_or_else(|| RuntimeError::new(".."))?` chain form (~66
+  sites), which needs a lazy-error helper so the message is not allocated on
+  every call, and the multi-step `and_then` chains, which are real expression
+  rewrites rather than a preamble swap.

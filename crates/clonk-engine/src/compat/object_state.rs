@@ -999,12 +999,7 @@ pub(crate) fn get_energy(args: &[Value]) -> Result<Value, RuntimeError> {
         target_id = parse_object_reference_argument(arg, "GetEnergy", "target")?;
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
@@ -1079,12 +1074,7 @@ pub(crate) fn get_breath(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let target_id =
         consume_optional_object_reference_argument(args, &mut index, "GetBreath", "target")?;
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
         let Some(target) = target else {
             return Ok(Value::Nil);
@@ -1316,12 +1306,7 @@ pub(crate) fn get_con(args: &[Value]) -> Result<Value, RuntimeError> {
         target_id = parse_object_reference_argument(arg, "GetCon", "target")?;
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         if let Some(target) = target_id {
             if let Some(object) = context.object_scope(target) {
@@ -2242,12 +2227,7 @@ pub(crate) fn get_damage(args: &[Value]) -> Result<Value, RuntimeError> {
         target_id = parse_object_reference_argument(arg, "GetDamage", "target")?;
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
@@ -2869,12 +2849,7 @@ pub(crate) fn get_action(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
@@ -2927,12 +2902,7 @@ pub(crate) fn get_act_time(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let action_time = |ticks: i32| Value::Int(ticks);
 
@@ -2970,12 +2940,7 @@ pub(crate) fn get_phase(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let object = if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
@@ -3083,12 +3048,7 @@ pub(crate) fn get_action_data(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
@@ -3124,12 +3084,7 @@ pub(crate) fn get_procedure(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let procedure_value = |name: Option<&str>| match name {
             Some(procedure) => Value::String(procedure.to_string().into()),
@@ -3199,12 +3154,7 @@ pub(crate) fn get_action_target(args: &[Value]) -> Result<Value, RuntimeError> {
         return Ok(Value::Nil);
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         if let Some(target) = object_id {
             if let Some(object) = context.object_context() {
@@ -3239,12 +3189,7 @@ pub(crate) fn get_vertex_num(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         match resolve_vertices(context, target_id) {
             Some((_position, vertices)) => Ok(Value::Int(truncate_to_i32(vertices.len() as u64))),
@@ -3278,12 +3223,7 @@ pub(crate) fn get_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let (_position, vertices) = match resolve_vertices(context, target_id) {
             Some(value) => value,
@@ -3838,12 +3778,7 @@ pub(crate) fn get_vertex_contact(args: &[Value]) -> Result<Value, RuntimeError> 
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let (position, vertices) = match resolve_vertices(context, target_id) {
             Some(value) => value,
@@ -3893,12 +3828,7 @@ pub(crate) fn get_contact(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let (position, vertices) = match resolve_vertices(context, target_id) {
             Some(value) => value,
@@ -4556,12 +4486,7 @@ pub(crate) fn get_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
                 if target == object.id() {
@@ -4650,12 +4575,7 @@ pub(crate) fn get_r(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_id =
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "GetR", "target")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         if let Some(target) = target_id {
             if let Some(object) = context.object_scope(target) {
@@ -4734,12 +4654,7 @@ pub(crate) fn get_com_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
         if let Some(target) = target_id {
             if let Some(object) = context.object_scope(target) {
                 return Ok(Value::Int(object.command_direction().to_script_value()));
@@ -4802,12 +4717,7 @@ fn get_position_component(
         target_id = parse_object_reference_argument(arg, component.function_name(), "target")?;
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
@@ -4851,12 +4761,7 @@ pub(crate) fn object_distance(args: &[Value]) -> Result<Value, RuntimeError> {
         None => return Ok(Value::Nil),
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let locate_position = |id: ObjectId| -> Option<Vector2> {
             if let Some(object) = context.object_context() {
@@ -4967,12 +4872,7 @@ fn get_velocity_component(
         )));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let effective_precision = normalise_precision(precision);
         let fetch_velocity = |fixed_velocity: FixedVec2| {
@@ -5269,12 +5169,7 @@ pub(crate) fn get_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let effective_precision = normalise_precision(precision);
         if let Some(target) = target_id {
@@ -6019,12 +5914,7 @@ pub(crate) fn get_act_map_val(args: &[Value]) -> Result<Value, RuntimeError> {
     };
     let action = action.unwrap_or_default();
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         // `idDef` defaults to the executing definition (cthr->Def).
         let (library, graphics) = match definition {
@@ -6544,12 +6434,7 @@ pub(crate) fn act_idle(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_id =
         consume_optional_object_reference_argument(args, &mut index, "ActIdle", "target")?;
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let idle = if let Some(target) = target_id {
             match context.object_context() {
@@ -6826,12 +6711,7 @@ pub(crate) fn get_owner(args: &[Value]) -> Result<Value, RuntimeError> {
         target_id = parse_object_reference_argument(arg, "GetOwner", "target")?;
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Int(OWNER_NONE)),
-        };
+    with_host_context(Ok(Value::Int(OWNER_NONE)), |context| {
 
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
@@ -6869,12 +6749,7 @@ pub(crate) fn get_controller(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Int(OWNER_NONE)),
-        };
+    with_host_context(Ok(Value::Int(OWNER_NONE)), |context| {
 
         if let Some(target) = target_id {
             if let Some(object) = context.object_context() {
@@ -6982,12 +6857,7 @@ pub(crate) fn get_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
         .transpose()?
         .flatten();
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         let target = target_id.or_else(|| context.object_context().map(|object| object.id()));
         let layer = target.and_then(|target| context.object_layer(target));
@@ -7177,12 +7047,7 @@ pub(crate) fn set_controller(args: &[Value]) -> Result<Value, RuntimeError> {
         }
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        let context = match borrow.as_mut() {
-            Some(context) => context,
-            None => return Ok(Value::Bool(false)),
-        };
+    with_host_context_mut(Ok(Value::Bool(false)), |context| {
         let object = match context.object_context_mut() {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
@@ -7204,12 +7069,7 @@ pub(crate) fn get_alive(args: &[Value]) -> Result<Value, RuntimeError> {
         target_id = parse_object_reference_argument(arg, "GetAlive", "target")?;
     }
 
-    HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let context = match borrow.as_ref() {
-            Some(context) => context,
-            None => return Ok(Value::Nil),
-        };
+    with_host_context(Ok(Value::Nil), |context| {
 
         if let Some(target) = target_id {
             // C++ reads the live object. A foreign target may already have
