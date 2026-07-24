@@ -1135,7 +1135,46 @@ fn assemble_macos_app_bundle(paths: &WorkspacePaths, package_dir: &Path) -> Resu
     fs::write(contents.join("PkgInfo"), b"APPL????")
         .with_context(|| format!("failed to write {}", contents.join("PkgInfo").display()))?;
 
+    sign_macos_bundle(&app_dir, &macos_dir)?;
+
     Ok(app_dir)
+}
+
+/// Ad-hoc sign the finished bundle and prove the signature validates.
+///
+/// The linker already ad-hoc signs each executable, but a `.app` whose
+/// `Contents/_CodeSignature` is absent fails validation as a bundle, and macOS
+/// reports a quarantined copy of it as "damaged and can't be opened" rather
+/// than as merely unsigned. Signing seals `Info.plist` and `Resources`.
+///
+/// This is not a substitute for Developer ID signing and notarization: the
+/// download still needs the quarantine flag cleared before it will launch.
+fn sign_macos_bundle(app_dir: &Path, macos_dir: &Path) -> Result<()> {
+    // The launcher is nested code and must be signed before the bundle that
+    // seals it; `clonk-app` is the bundle executable and is covered below.
+    codesign(&["--force", "--sign", "-"], &macos_dir.join("clonk-game"))?;
+    codesign(&["--force", "--sign", "-"], app_dir)?;
+    // Packaging must fail loudly rather than ship an unopenable bundle.
+    codesign(&["--verify", "--deep", "--strict"], app_dir)
+        .context("the packaged application bundle does not carry a valid signature")?;
+    Ok(())
+}
+
+fn codesign(arguments: &[&str], target: &Path) -> Result<()> {
+    let status = Command::new("codesign")
+        .args(arguments)
+        .arg(target)
+        .status()
+        .with_context(|| format!("failed to invoke codesign for {}", target.display()))?;
+    if !status.success() {
+        bail!(
+            "codesign {} failed for {} with status {:?}",
+            arguments.join(" "),
+            target.display(),
+            status.code()
+        );
+    }
+    Ok(())
 }
 
 fn macos_info_plist() -> String {
@@ -1274,7 +1313,11 @@ fn create_dmg(paths: &WorkspacePaths, app_dir: &Path) -> Result<PathBuf> {
     let status = Command::new("hdiutil")
         .args(["create", "-volname", "Clonk Rust", "-srcfolder"])
         .arg(&staging)
-        .args(["-fs", "HFS+", "-format", "UDZO", "-quiet"])
+        // APFS preserves filenames byte-for-byte. HFS+ normalizes Unicode, so
+        // content paths such as `Überladungen.c4d` would arrive under a
+        // different encoding than the code signature sealed, and every such
+        // resource would read back as missing.
+        .args(["-fs", "APFS", "-format", "UDZO", "-quiet"])
         .arg(&image_path)
         .status()
         .context("failed to invoke hdiutil")?;
