@@ -1,2 +1,0 @@
-RestInfo=You have to eliminate %d Stippels, Mutations or Cocoons to win.
-GameOver=%s is the best hunter in the universe!

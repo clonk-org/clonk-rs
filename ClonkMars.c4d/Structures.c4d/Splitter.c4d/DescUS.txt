@@ -1,3 +1,0 @@
-Directs light into the wanted direction, with infinite radius.
-
-There shall be no landscape between two shivers. For test, touch and press Jump. If a light ray appears to the next shiver, everything is correct.

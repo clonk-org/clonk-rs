@@ -1,1 +1,0 @@
-System objects such as smoke, flames, explosions and lights, which are needed in every scenario.

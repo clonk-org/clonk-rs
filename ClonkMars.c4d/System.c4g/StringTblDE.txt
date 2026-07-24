@@ -1,4 +1,0 @@
-BuyMenu=Kaufmenü
-BuyItem=%s kaufen
-NotenoughMoney=Nicht genug Clunker!
-Pipe=Rohr

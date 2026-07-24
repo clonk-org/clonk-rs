@@ -1,9 +1,0 @@
-The Terraforming unit produces heat and lets rain fall. 
-
-As an effect of that, plants will grow, which produce within a certain radius oxygen on the surface of the planet. 
-
-Using LEDs, plants will even grow under the earth ("dig" shows where plants might grow).
-
-"Throw" (de)activates terraforming
-"Up" shows the radius in which plants will grow
-"Dig" shows where the terraformer will remove earth or ash rain. These can be reset using the context menu.

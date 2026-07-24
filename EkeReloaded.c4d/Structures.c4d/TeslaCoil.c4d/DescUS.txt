@@ -1,1 +1,0 @@
-Hits enemy creatures around the base with lightning bolts.

@@ -1,5 +1,0 @@
-MenuTitle=Set current resolution
-MenuResolution=Resolution
-MenuCustom=Custom
-MenuX=X resolution
-MenuY=Y resolution

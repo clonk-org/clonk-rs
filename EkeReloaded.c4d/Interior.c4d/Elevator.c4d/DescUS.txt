@@ -1,1 +1,0 @@
-Control this elevator as usual. Running automatically to the next door if not grabbed.

@@ -1,1 +1,0 @@
-TxtGoal=Aktueller Stand: %d % - zu erreichen: %d %.

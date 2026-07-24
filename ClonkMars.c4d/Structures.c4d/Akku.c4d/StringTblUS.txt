@@ -1,6 +1,0 @@
-TxtStored=Currently stored:|%d kWh
-TxtCharged=EnergyCell charged.
-TxtAssign=Energy assigned.
-TxtNotEnoughPower=Not enough power available.
-TxtNoCell=No empty cell in your inventory.
-TxtNoChargedCell=No charged cell in your inventory.

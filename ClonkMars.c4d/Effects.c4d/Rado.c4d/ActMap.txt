@@ -1,7 +1,0 @@
-[Action]
-Name=Effect
-Procedure=ATTACH
-Length=18
-Facet=0,0,170,250
-Delay=1
-EndCall=Remove

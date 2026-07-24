@@ -1,2 +1,0 @@
-DE:Kapselport
-US:Capsule port

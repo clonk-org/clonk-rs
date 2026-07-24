@@ -1,6 +1,0 @@
-[DefCore]
-id=PT5B
-Name=Pistol
-Version=4,9,5
-Category=C4D_StaticBack
-Picture=0,0,35,35

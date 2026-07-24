@@ -1,1 +1,0 @@
-Wenn aktiviert kann der Host über das globale Regelmenü alle Regeln für das Spiel eingestellen.

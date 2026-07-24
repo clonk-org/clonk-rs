@@ -1,9 +1,0 @@
-[DefCore]
-id=LV5B
-Name=Lavatory
-Category=C4D_Structure
-Width=25
-Height=30
-Offset=-12,-15
-Vertices=1
-VertexY=14

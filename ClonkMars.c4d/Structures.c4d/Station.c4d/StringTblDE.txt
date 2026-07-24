@@ -1,3 +1,0 @@
-TxtNoTarget=Keine möglichen Teleportziele vorhanden
-TxtBeamstation=Zur ausgewählten Station beamen
-TxtNeededEnergy=Benötigte Energie:

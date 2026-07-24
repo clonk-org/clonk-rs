@@ -1,6 +1,0 @@
-TxtOnlyOil=Only Oil possible.
-TxtOnlyEmptyTank=Only possible if|tank is empty!
-TxtEnemy=Access denied
-TxtSwitchToOil=Switch to Oil
-TxtSwitchToLava=Switch to Lava
-TxtFlushTank=Flush Tank

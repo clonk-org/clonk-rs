@@ -1,1 +1,0 @@
-If activated the host can set the rules for the game on the global menu.

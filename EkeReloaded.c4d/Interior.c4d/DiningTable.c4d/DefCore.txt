@@ -1,9 +1,0 @@
-[DefCore]
-id=DT5B
-Name=DiningTable
-Category=C4D_Structure
-Width=41
-Height=16
-Offset=-20,-8
-Vertices=1
-VertexY=7

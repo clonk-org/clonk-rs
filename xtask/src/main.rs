@@ -15,7 +15,10 @@ use xtask::dev_check;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-const ROOT_GAME_PACKS: [&str; 4] = [
+// The authorized classic packs ship inside the content submodule, which is the
+// engine's data root (`General.ExePath`). Packing them beside it instead would
+// leave them outside every definition and scenario search path.
+const CONTENT_GAME_PACKS: [&str; 4] = [
     "EkeReloaded.c4d",
     "EkeReloaded.c4f",
     "ClonkMars.c4d",
@@ -1026,26 +1029,20 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
         &package_dir.join("THIRD_PARTY_GAME_CONTENT.md"),
     )?;
 
-    for pack in ROOT_GAME_PACKS {
-        let source = paths.repo_root.join(pack);
-        if !source.is_dir() {
-            bail!(
-                "required authorized game pack was not found at {}",
-                source.display()
-            );
-        }
-        let destination = package_dir.join(pack);
-        copy_tracked_directory(&paths.repo_root, Path::new(pack), &destination)?;
-        if !directory_contains_file(&destination)? {
-            bail!("required authorized game pack {pack} did not contain any tracked files");
-        }
-    }
-
     let planet_dst = package_dir.join("planet");
     copy_tracked_directory(&paths.repo_root, Path::new("planet"), &planet_dst)?;
 
     let content_dst = package_dir.join("content");
     copy_tracked_directory(&content_src, Path::new(""), &content_dst)?;
+
+    for pack in CONTENT_GAME_PACKS {
+        let destination = content_dst.join(pack);
+        if !directory_contains_file(&destination)? {
+            bail!(
+                "required authorized game pack {pack} did not reach the package; it must be tracked in the content submodule"
+            );
+        }
+    }
 
     let licenses_dst = package_dir.join("licenses");
     copy_tracked_directory(&paths.repo_root, Path::new("licenses"), &licenses_dst)?;
@@ -1643,16 +1640,19 @@ mod tests {
             b"scenario",
         );
         write_fixture(
-            &root.join("EkeReloaded.c4d/DefCore.txt"),
+            &root.join("content/EkeReloaded.c4d/DefCore.txt"),
             b"eke definitions",
         );
         write_fixture(
-            &root.join("EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
+            &root.join("content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
             b"harpoon race",
         );
-        write_fixture(&root.join("ClonkMars.c4d/DefCore.txt"), b"mars definitions");
         write_fixture(
-            &root.join("ClonkMars.c4f/Test.c4s/Scenario.txt"),
+            &root.join("content/ClonkMars.c4d/DefCore.txt"),
+            b"mars definitions",
+        );
+        write_fixture(
+            &root.join("content/ClonkMars.c4f/Test.c4s/Scenario.txt"),
             b"mars scenario",
         );
         write_fixture(
@@ -1723,10 +1723,10 @@ mod tests {
             PathBuf::from("planet/Graphics.c4g/Logo.png"),
             PathBuf::from("content/Objects.c4d/DefCore.txt"),
             PathBuf::from("content/Worlds.c4f/Test.c4s/Scenario.txt"),
-            PathBuf::from("EkeReloaded.c4d/DefCore.txt"),
-            PathBuf::from("EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
-            PathBuf::from("ClonkMars.c4d/DefCore.txt"),
-            PathBuf::from("ClonkMars.c4f/Test.c4s/Scenario.txt"),
+            PathBuf::from("content/EkeReloaded.c4d/DefCore.txt"),
+            PathBuf::from("content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
+            PathBuf::from("content/ClonkMars.c4d/DefCore.txt"),
+            PathBuf::from("content/ClonkMars.c4f/Test.c4s/Scenario.txt"),
         ] {
             assert!(
                 package_dir.join(&relative).is_file(),
@@ -1771,7 +1771,7 @@ mod tests {
         for relative in [
             PathBuf::from("clonk-rust/bin").join(executable_name("clonk-game", FIXTURE_TARGET)),
             PathBuf::from("clonk-rust/bin").join(executable_name("clonk-app", FIXTURE_TARGET)),
-            PathBuf::from("clonk-rust/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
+            PathBuf::from("clonk-rust/content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
             PathBuf::from("clonk-rust/licenses/RUST_THIRD_PARTY_LICENSES.txt"),
         ] {
             assert!(
@@ -1906,7 +1906,15 @@ mod tests {
             .expect("run git init");
         assert!(init.success(), "git init failed");
         let add = Command::new("git")
-            .args(["add", "Objects.c4d", "Worlds.c4f"])
+            .args([
+                "add",
+                "Objects.c4d",
+                "Worlds.c4f",
+                "EkeReloaded.c4d",
+                "EkeReloaded.c4f",
+                "ClonkMars.c4d",
+                "ClonkMars.c4f",
+            ])
             .current_dir(&content)
             .status()
             .expect("run git add");
@@ -1919,8 +1927,16 @@ mod tests {
         let package_dir = assemble_package_layout(&paths).expect("assemble package");
 
         assert!(
-            !package_dir.join("content/EkeReloaded.c4f").exists(),
-            "untracked duplicate Eke Reloaded content leaked into the package"
+            package_dir
+                .join("content/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt")
+                .is_file(),
+            "tracked Eke Reloaded content must reach the package"
+        );
+        assert!(
+            !package_dir
+                .join("content/EkeReloaded.c4f/Secret.txt")
+                .exists(),
+            "untracked Eke Reloaded content leaked into the package"
         );
     }
 
@@ -1934,15 +1950,7 @@ mod tests {
             .expect("run git init");
         assert!(init.success(), "git init failed");
         let add = Command::new("git")
-            .args([
-                "add",
-                "planet",
-                "licenses",
-                "EkeReloaded.c4d",
-                "EkeReloaded.c4f",
-                "ClonkMars.c4d",
-                "ClonkMars.c4f",
-            ])
+            .args(["add", "planet", "licenses", "content"])
             .current_dir(&paths.repo_root)
             .status()
             .expect("run git add");
@@ -1975,10 +1983,7 @@ mod tests {
                 "planet",
                 "licenses/dependency.txt",
                 "licenses/third_party",
-                "EkeReloaded.c4d",
-                "EkeReloaded.c4f",
-                "ClonkMars.c4d",
-                "ClonkMars.c4f",
+                "content",
             ])
             .current_dir(&paths.repo_root)
             .status()
@@ -2008,15 +2013,7 @@ mod tests {
             .expect("run git init");
         assert!(init.success(), "git init failed");
         let add = Command::new("git")
-            .args([
-                "add",
-                "planet",
-                "licenses",
-                "EkeReloaded.c4d",
-                "EkeReloaded.c4f",
-                "ClonkMars.c4d",
-                "ClonkMars.c4f",
-            ])
+            .args(["add", "planet", "licenses", "content"])
             .current_dir(&paths.repo_root)
             .status()
             .expect("run git add");

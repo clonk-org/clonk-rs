@@ -1,6 +1,0 @@
-TxtStored=Aktuell gespeichert:|%d kWh
-TxtCharged=Energiezelle geladen.
-TxtAssign=Energie übertragen
-TxtNotEnoughPower=Nicht genügend Strom vorhanden.
-TxtNoCell=Keine leere Zelle im Clonk.
-TxtNoChargedCell=Keine geladene Zelle im Clonk.

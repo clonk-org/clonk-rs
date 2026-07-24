@@ -1,1 +1,0 @@
-This unit enables the SFT to float through the air. Start the engine with the [Throw]-command. You have to jump before that. Reload the Jetpack with [Double Dig]. Gasoline is needed to fuel the engine.

@@ -1,2 +1,0 @@
-DE:Akkumulator
-US:Accumulator

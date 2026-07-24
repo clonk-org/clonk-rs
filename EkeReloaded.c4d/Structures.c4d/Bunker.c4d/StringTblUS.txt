@@ -1,4 +1,0 @@
-Install=Install %s
-Deinstall=Deinstall %s
-Money=Not enough money!
-Context=Cannonry

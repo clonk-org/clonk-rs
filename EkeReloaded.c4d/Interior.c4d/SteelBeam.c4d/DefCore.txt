@@ -1,9 +1,0 @@
-[DefCore]
-id=SB5B
-Name=SteelBeam
-Category=C4D_StaticBack
-Width=100
-Height=100
-
-
- 

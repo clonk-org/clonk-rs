@@ -1,1 +1,0 @@
-Robuste Heimatbasis für SFTs, mit verschiedenen Geschützen erweiterbar.

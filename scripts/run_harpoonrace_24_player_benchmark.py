@@ -50,7 +50,7 @@ GO_LOG_PATTERN = re.compile(
     re.MULTILINE,
 )
 DEFAULT_SCENARIO = (
-    "EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s"
+    "content/EkeReloaded.c4f/InterplanetaryCivilwar.c4f/HarpoonRace.c4s"
 )
 DEFAULT_PROFILE_BIG_ICON = (
     "content/Fantasy.c4f/Drachenfels.c4s/"

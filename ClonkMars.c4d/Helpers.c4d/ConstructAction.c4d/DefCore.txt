@@ -1,8 +1,0 @@
-[DefCore]
-id=L_CA
-Version=4,9,8
-Name=ConstructAction
-Category=C4D_StaticBack
-Width=1
-Height=1
-ColorByOwner=1
