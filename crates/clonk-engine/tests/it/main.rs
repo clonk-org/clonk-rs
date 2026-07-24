@@ -66,6 +66,7 @@ mod real_tutorial08_virtual_play;
 mod real_tutorial09_virtual_play;
 mod real_tutorial10_virtual_play;
 mod real_tutorial_campaign;
+mod reference_parameters;
 mod script_counter;
 mod script_goto;
 mod set_builtin;

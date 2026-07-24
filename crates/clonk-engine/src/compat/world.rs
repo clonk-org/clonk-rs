@@ -1536,6 +1536,7 @@ pub(crate) struct HostDefinitionTables {
     linked_script_hosts: Rc<Vec<(String, Arc<ScriptEngine>)>>,
     standard_crew_names: Option<String>,
     definition_crew_names: Rc<HashMap<String, String>>,
+    reference_parameter_slots: Rc<HashMap<String, u32>>,
 }
 
 impl HostDefinitionTables {
@@ -1561,12 +1562,47 @@ impl HostDefinitionTables {
             descriptions: Rc::new(descriptions),
             rank_names: Rc::new(rank_names),
             rank_bases: Rc::new(rank_bases),
+            reference_parameter_slots: Rc::new(reference_parameter_slots(
+                &scripts,
+                &linked_script_hosts,
+            )),
             scripts: Rc::new(scripts),
             linked_script_hosts: Rc::new(linked_script_hosts),
             standard_crew_names,
             definition_crew_names: Rc::new(definition_crew_names),
         }
     }
+}
+
+/// C4AulParse resolves `&` parameters through the engine-wide same-name chain
+/// (`GetFirstFunc`/`GetNextSNFunc`, C4AulParse.cpp:2318-2331,3225). Fold that
+/// chain into one `name -> slot bitmask` table when the definition tables are
+/// built, so an arrow call can answer it without walking every script host.
+fn reference_parameter_slots(
+    scripts: &HashMap<DefinitionId, Arc<ScriptEngine>>,
+    linked_script_hosts: &[(String, Arc<ScriptEngine>)],
+) -> HashMap<String, u32> {
+    let mut slots: HashMap<String, u32> = HashMap::new();
+    let mut collect = |script: &ScriptEngine| {
+        for (name, function) in script.functions() {
+            let mask = function
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(index, parameter)| parameter.is_reference && *index < u32::BITS as usize)
+                .fold(0u32, |mask, (index, _)| mask | (1 << index));
+            if mask != 0 {
+                *slots.entry(name.clone()).or_default() |= mask;
+            }
+        }
+    };
+    for script in scripts.values() {
+        collect(script);
+    }
+    for (_, script) in linked_script_hosts {
+        collect(script);
+    }
+    slots
 }
 
 // Not `derive(Debug)`: `ScriptEngine` (in `definition_scripts`) has no Debug.
@@ -1846,6 +1882,9 @@ pub struct HostWorldContext {
     /// functions can run script functions on other objects mid-VM-call
     /// (Find_Func/Sort_Func, GameCall). Empty in legacy fixture contexts.
     definition_scripts: Rc<HashMap<DefinitionId, Arc<ScriptEngine>>>,
+    /// Engine-wide `&`-parameter slots per function name (C4AulParse's
+    /// `anyfunctakesref` chain, folded once when the tables are installed).
+    reference_parameter_slots: Rc<HashMap<String, u32>>,
     /// Retained System.c4g hosts. Their global functions live in the shared
     /// engine table, but `Func->LinkedTo` still resolves local functions on
     /// the declaring System script (for example an OrderFunc comparator).
@@ -1975,6 +2014,7 @@ impl Default for HostWorldContext {
             object_no_dig_resource_string: Rc::new("%s cannot dig.".to_string()),
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
+            reference_parameter_slots: Rc::new(HashMap::new()),
             linked_script_hosts: Rc::new(Vec::new()),
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
@@ -2084,6 +2124,7 @@ impl HostWorldContext {
         self.definition_rank_names = Rc::clone(&tables.rank_names);
         self.definition_rank_bases = Rc::clone(&tables.rank_bases);
         self.definition_scripts = Rc::clone(&tables.scripts);
+        self.reference_parameter_slots = Rc::clone(&tables.reference_parameter_slots);
         self.linked_script_hosts = Rc::clone(&tables.linked_script_hosts);
         self.standard_crew_names = tables.standard_crew_names.clone();
         self.definition_crew_names = Rc::clone(&tables.definition_crew_names);
@@ -2343,6 +2384,7 @@ impl HostWorldContext {
             crew_info_state: Rc::new(RefCell::new(HostCrewInfoState::default())),
             particle_defs: None,
             definition_scripts: Rc::new(HashMap::new()),
+            reference_parameter_slots: Rc::new(HashMap::new()),
             linked_script_hosts: Rc::new(Vec::new()),
             scenario_script: None,
             crew_ranks: Rc::new(HashMap::new()),
@@ -2840,6 +2882,16 @@ impl HostWorldContext {
 
     pub(crate) fn definition_scripts(&self) -> impl Iterator<Item = &Arc<ScriptEngine>> {
         self.definition_scripts.values()
+    }
+
+    /// True when any engine script function of this name declares `&` at the
+    /// zero-based slot (C4AulParse.cpp:2318-2331 `anyfunctakesref`).
+    pub(crate) fn function_takes_reference_at(&self, name: &str, slot: usize) -> bool {
+        slot < u32::BITS as usize
+            && self
+                .reference_parameter_slots
+                .get(name)
+                .is_some_and(|mask| mask & (1 << slot) != 0)
     }
 
     /// Resolve the local-lookup script host of the suspended VM frame. This

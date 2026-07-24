@@ -508,6 +508,99 @@ pub(crate) fn arrow_method_dispatch(args: &[Value]) -> Result<Value, RuntimeErro
     }
 }
 
+/// `anyfunctakesref` for the calling VM (C4AulParse.cpp:2318-2331): the
+/// parser consults the engine-wide same-name function chain, which in this
+/// port lives in the world's definition/global script tables.
+pub(crate) fn arrow_reference_parameter_probe(name: &str, slot: usize) -> bool {
+    HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|context| context.world.function_takes_reference_at(name, slot))
+    })
+}
+
+/// AB_CALL twin for an arrow call carrying reference arguments. C4AulParse
+/// pushes an lvalue argument as `C4V_pC4Value` whenever any same-named engine
+/// function declares `&` at that slot (C4AulParse.cpp:2318-2331), and
+/// `CheckConvertFunctionParameters` then lets the callee alias it
+/// (C4AulExec.cpp:1381-1397). The `&[Value]` bridge cannot carry a pointer, so
+/// this variant reports each parameter slot's final value and the calling VM
+/// settles its own cells. Hazard's `this->~WeaponAt(x, y, r)` — which drives
+/// both the crosshair vertex and the firing chain — depends on it.
+pub(crate) fn arrow_method_ref_args_dispatch(
+    args: &[Value],
+) -> Result<(Value, Vec<Value>), RuntimeError> {
+    let target_value = args.first().cloned().unwrap_or(Value::Nil);
+    let Some(Value::String(name)) = args.get(1) else {
+        return Err(RuntimeError::new(
+            "Object call: missing function name".to_string(),
+        ));
+    };
+    let failsafe = args.get(2).map(Value::as_bool).unwrap_or(false);
+    let pars: Vec<Value> = args.iter().skip(3).cloned().collect();
+    // A miss leaves every slot exactly as it was passed in.
+    let unchanged = || pars.clone();
+
+    if let Value::C4Id(stored_id) = &target_value {
+        let def_id = definition_id_for_c4id(stored_id).unwrap_or_default();
+        let script = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.world.definition_script(&def_id).cloned())
+        });
+        let Some(script) = script else {
+            return Err(RuntimeError::new(format!(
+                "Definition call: Definition for id {} not found!",
+                clonk_script::c4_id_text(stored_id)
+            )));
+        };
+        return match call_scoped_script_ref_args_or_global(script, def_id, name, &pars) {
+            Some(result) => result,
+            None if failsafe => Ok((Value::Nil, unchanged())),
+            None => Err(RuntimeError::new(format!(
+                "Definition call: No function \"{name}\" in definition \"{}\"!",
+                clonk_script::c4_id_text(stored_id)
+            ))),
+        };
+    }
+
+    let Some(target) = object_id_from_value(&target_value) else {
+        return Err(RuntimeError::new(format!(
+            "Object call: Invalid target type {}, expected object or id!",
+            target_value.type_name()
+        )));
+    };
+    // `obj->ID::Func(...)`: AB_CALLNS only validates, AB_CALL re-resolves.
+    let name = match name.split_once("::") {
+        Some((namespace, function)) => {
+            let script = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.world.definition_script(namespace).cloned())
+            });
+            let Some(script) = script else {
+                return Err(RuntimeError::new(format!(
+                    "direct object call: def not found: {namespace}"
+                )));
+            };
+            if !script.has_function(function) {
+                return Err(RuntimeError::new(format!(
+                    "direct object call: function {namespace}::{function} not found"
+                )));
+            }
+            function
+        }
+        None => name.as_ref(),
+    };
+    match call_world_object_ref_args_from_arrow(target, name, &pars) {
+        Some(result) => result,
+        None if failsafe => Ok((Value::Nil, unchanged())),
+        None => Err(RuntimeError::new(format!(
+            "Object call: No function \"{name}\" in object {target}!"
+        ))),
+    }
+}
+
 /// Reference-preserving AB_CALL twin for an arrow call in lvalue position.
 /// C++ passes the call-target stack cell as `pReturn`; a `func &` therefore
 /// leaves a C4V_pC4Value in the suspended caller instead of a copied value
@@ -603,7 +696,8 @@ pub(crate) fn call_scoped_script_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_scoped_script_function_impl(script, function, args, false, false, false, None, None)
+    call_scoped_script_function_impl(script, function, args, false, false, false, None, None, false)
+        .map(|outcome| outcome.map(|(value, _)| value))
 }
 
 /// Game.Script::Call resolves a named function owned by the scenario host.
@@ -624,7 +718,9 @@ pub(crate) fn call_scoped_scenario_function(
         false,
         None,
         Some(resolution),
+        false,
     )
+    .map(|outcome| outcome.map(|(value, _)| value))
 }
 
 pub(crate) fn call_scoped_definition_function(
@@ -666,6 +762,29 @@ fn call_scoped_script_function_or_global(
         true,
         Some(Some(definition)),
         None,
+        false,
+    )
+    .map(|outcome| outcome.map(|(value, _)| value))
+}
+
+/// [`call_scoped_script_function_or_global`] for a definition-scope arrow call
+/// whose callee declares `&` parameters.
+fn call_scoped_script_ref_args_or_global(
+    script: Arc<ScriptEngine>,
+    definition: DefinitionId,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<(Value, Vec<Value>), RuntimeError>> {
+    call_scoped_script_function_impl(
+        script,
+        function,
+        args,
+        true,
+        false,
+        true,
+        Some(Some(definition)),
+        None,
+        true,
     )
 }
 
@@ -686,7 +805,9 @@ pub(crate) fn call_scoped_effect_function_or_global(
         false,
         Some(definition),
         None,
+        false,
     )
+    .map(|outcome| outcome.map(|(value, _)| value))
 }
 
 /// Game.ScriptEngine effect fallback: resolve only the shared engine-global
@@ -798,7 +919,8 @@ fn call_scoped_script_function_impl(
     preserve_caller: bool,
     definition_override: Option<Option<DefinitionId>>,
     resolution_override: Option<clonk_script::ScriptFunctionResolution>,
-) -> Option<Result<Value, RuntimeError>> {
+    ref_args: bool,
+) -> Option<Result<(Value, Vec<Value>), RuntimeError>> {
     let pinned_resolution = resolution_override;
     let resolution = pinned_resolution.clone().or_else(|| {
         if include_globals {
@@ -844,7 +966,16 @@ fn call_scoped_script_function_impl(
             }
         });
     let locals = HashMap::new();
-    let call = if let Some(resolution) = pinned_resolution {
+    let call = if ref_args {
+        debug_assert!(preserve_caller && pinned_resolution.is_none());
+        let cells = clonk_script::LocalCells::from_local_vars(&locals);
+        script.call_ref_args_with_cells_and_this_preserving_caller(
+            function,
+            args,
+            &cells,
+            Value::Nil,
+        )
+    } else if let Some(resolution) = pinned_resolution {
         let cells = clonk_script::LocalCells::from_local_vars(&locals);
         script
             .call_pinned_with_cells_and_this(
@@ -854,14 +985,16 @@ fn call_scoped_script_function_impl(
                 &cells,
                 Value::Nil,
             )
-            .map(|value| (value, cells.snapshot()))
+            .map(|value| (value, args.to_vec()))
     } else if preserve_caller {
         let cells = clonk_script::LocalCells::from_local_vars(&locals);
         script
             .call_with_cells_and_this_preserving_caller(function, args, &cells, Value::Nil)
-            .map(|value| (value, cells.snapshot()))
+            .map(|value| (value, args.to_vec()))
     } else {
-        script.call_with_locals_and_this(function, args, &locals, Value::Nil)
+        script
+            .call_with_locals_and_this(function, args, &locals, Value::Nil)
+            .map(|(value, _locals)| (value, args.to_vec()))
     };
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
@@ -872,7 +1005,7 @@ fn call_scoped_script_function_impl(
         }
     });
     Some(match call {
-        Ok((value, _locals)) => Ok(value),
+        Ok(outcome) => Ok(outcome),
         Err(clonk_script::ScriptError::Runtime(err)) => Err(err),
         Err(other) => Err(RuntimeError::new(other.to_string())),
     })
@@ -2616,7 +2749,9 @@ pub(crate) fn call_world_object_script_callback(
             false,
             false,
             Some(resolution.clone()),
-        ),
+            false,
+        )
+        .map(|outcome| outcome.map(|(value, _)| value)),
         None => call_world_object_own_function(target, callback.function_name(), args),
     }
 }
@@ -2631,8 +2766,9 @@ fn call_world_object_own_function_inflight(
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
     call_world_object_function_with_options(
-        target, function, args, false, false, None, false, true, None,
+        target, function, args, false, false, None, false, true, None, false,
     )
+    .map(|outcome| outcome.map(|(value, _)| value))
 }
 
 /// C4Effect callbacks may target the object whose Construction callback is
@@ -2645,8 +2781,9 @@ pub(crate) fn call_world_object_function_inflight(
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
     call_world_object_function_with_options(
-        target, function, args, true, true, None, false, true, None,
+        target, function, args, true, true, None, false, true, None, false,
     )
+    .map(|outcome| outcome.map(|(value, _)| value))
 }
 
 /// Execute an engine-global function already selected through a command
@@ -2670,7 +2807,9 @@ pub(crate) fn call_world_object_resolved_global_function(
         false,
         true,
         Some(resolution),
+        false,
     )
+    .map(|outcome| outcome.map(|(value, _)| value))
 }
 
 fn call_world_object_function_with(
@@ -2692,6 +2831,21 @@ fn call_world_object_function_with(
         preserve_caller,
         false,
         None,
+        false,
+    )
+    .map(|outcome| outcome.map(|(value, _)| value))
+}
+
+/// [`call_world_object_function_from_arrow`] for a callee that declares `&`
+/// parameters: also returns each parameter slot's final value so the calling
+/// VM can settle its reference cells.
+fn call_world_object_ref_args_from_arrow(
+    target: ObjectId,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<(Value, Vec<Value>), RuntimeError>> {
+    call_world_object_function_with_options(
+        target, function, args, true, true, None, true, false, None, true,
     )
 }
 
@@ -2705,7 +2859,8 @@ fn call_world_object_function_with_options(
     preserve_caller: bool,
     allow_scope_without_world_object: bool,
     pinned_resolution: Option<clonk_script::ScriptFunctionResolution>,
-) -> Option<Result<Value, RuntimeError>> {
+    ref_args: bool,
+) -> Option<Result<(Value, Vec<Value>), RuntimeError>> {
     let prep = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut().as_mut().and_then(|context| {
             context.prepare_nested_call(
@@ -2761,19 +2916,29 @@ fn call_world_object_function_with_options(
         )
     });
     let this = object_reference_value(target);
-    let call = if let Some(resolution) = pinned_resolution {
+    let unchanged_finals = || args.to_vec();
+    let call = if ref_args {
+        debug_assert!(preserve_caller && pinned_resolution.is_none());
+        script.call_ref_args_with_cells_and_this_preserving_caller(function, args, &cells, this)
+    } else if let Some(resolution) = pinned_resolution {
         debug_assert!(!preserve_caller);
-        script.call_pinned_with_cells_and_this(
-            resolution.function.as_ref(),
-            resolution.scope == clonk_script::ScriptFunctionScope::Global,
-            args,
-            &cells,
-            this,
-        )
+        script
+            .call_pinned_with_cells_and_this(
+                resolution.function.as_ref(),
+                resolution.scope == clonk_script::ScriptFunctionScope::Global,
+                args,
+                &cells,
+                this,
+            )
+            .map(|value| (value, unchanged_finals()))
     } else if preserve_caller {
-        script.call_with_cells_and_this_preserving_caller(function, args, &cells, this)
+        script
+            .call_with_cells_and_this_preserving_caller(function, args, &cells, this)
+            .map(|value| (value, unchanged_finals()))
     } else {
-        script.call_with_cells_and_this(function, args, &cells, this)
+        script
+            .call_with_cells_and_this(function, args, &cells, this)
+            .map(|value| (value, unchanged_finals()))
     };
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {

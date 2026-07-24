@@ -141,6 +141,26 @@ fn empty_host_registration_snapshot() -> &'static HostRegistrationSnapshot {
 pub type MethodReferenceDispatch =
     std::rc::Rc<dyn Fn(&[Value]) -> Result<ValueReference, RuntimeError>>;
 
+/// Cross-object dispatch for an arrow call whose callee declares `&`
+/// parameters. C++ hands the callee `C4V_pC4Value` slots pointing straight at
+/// the caller's stack (C4AulExec.cpp:1364-1397), which a `&[Value]` bridge
+/// cannot carry; this variant therefore also reports each parameter slot's
+/// final value so the caller can settle its reference cells. Slots the callee
+/// did not declare `&` keep the value that was passed in, because
+/// `CheckConvertFunctionParameters` gives those parameters a dereferenced
+/// copy (C4Value.cpp:586-597).
+pub type MethodRefArgsDispatch =
+    std::rc::Rc<dyn Fn(&[Value]) -> Result<(Value, Vec<Value>), RuntimeError>>;
+
+/// `C4AulParse::Parse_Params`' `anyfunctakesref` test (C4AulParse.cpp:
+/// 2318-2331): an argument expression keeps its reference bytecode unless
+/// EVERY engine function with the callee's name takes a non-reference at that
+/// slot. The parser walks `GetFirstFunc`/`GetNextSNFunc`, which spans all
+/// script hosts — knowledge only the embedding engine has, so it supplies this
+/// probe: `(function name, zero-based slot) -> any same-name function declares
+/// `&` there`.
+pub type ReferenceParameterProbe = std::rc::Rc<dyn Fn(&str, usize) -> bool>;
+
 /// Enters/leaves the native no-object scope required by strict-3
 /// `global->Fn(...)`. The script VM owns unwinding; the embedding engine owns
 /// its object/definition context and therefore supplies this small hook.
@@ -1022,6 +1042,12 @@ pub struct Engine {
     /// position. Arguments use the same [target, name, failsafe, args...]
     /// layout as `method_dispatch`.
     method_reference_dispatch: Option<MethodReferenceDispatch>,
+    /// Method resolver for an arrow call whose callee takes `&` parameters.
+    /// Same [target, name, failsafe, args...] layout as `method_dispatch`.
+    method_ref_args_dispatch: Option<MethodRefArgsDispatch>,
+    /// Engine-wide `&`-parameter lookup used when an arrow call's callee is
+    /// not resolvable in this host (see [`ReferenceParameterProbe`]).
+    reference_parameter_probe: Option<ReferenceParameterProbe>,
     /// Embedding-engine context switch for AB_CALLGLOBAL's null Obj/Def.
     global_call_context_hook: Option<GlobalCallContextHook>,
     /// The shared `static` table; `None` keeps the legacy per-host
@@ -1091,6 +1117,8 @@ impl Engine {
             global_functions: None,
             method_dispatch: None,
             method_reference_dispatch: None,
+            method_ref_args_dispatch: None,
+            reference_parameter_probe: None,
             global_call_context_hook: None,
             globals_named: None,
             globals_numbered: Some(new_global_slots()),
@@ -1862,6 +1890,14 @@ impl Engine {
         self.method_reference_dispatch = Some(dispatch);
     }
 
+    pub fn register_method_ref_args_dispatch(&mut self, dispatch: MethodRefArgsDispatch) {
+        self.method_ref_args_dispatch = Some(dispatch);
+    }
+
+    pub fn register_reference_parameter_probe(&mut self, probe: ReferenceParameterProbe) {
+        self.reference_parameter_probe = Some(probe);
+    }
+
     pub fn register_global_call_context_hook(&mut self, hook: GlobalCallContextHook) {
         self.global_call_context_hook = Some(hook);
     }
@@ -1885,6 +1921,8 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -1923,6 +1961,8 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -1968,6 +2008,8 @@ impl Engine {
         .with_exact_global_link_lookup()
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2016,6 +2058,8 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2072,6 +2116,8 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2114,6 +2160,8 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2155,6 +2203,8 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2197,6 +2247,8 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2206,6 +2258,58 @@ impl Engine {
         .with_this(this);
         vm.call_with_cells_preserving_caller(name, args, cells)
             .map_err(ScriptError::from)
+    }
+
+    /// `call_with_cells_and_this_preserving_caller` for a callee that declares
+    /// `&` parameters: the arguments enter as reference cells so those
+    /// parameters alias them, and each slot's final value comes back with the
+    /// result. Plain parameters receive a dereferenced copy
+    /// (C4Value.cpp:586-597), so their slots read back unchanged.
+    pub fn call_ref_args_with_cells_and_this_preserving_caller(
+        &self,
+        name: &str,
+        args: &[Value],
+        cells: &crate::vm::LocalCells,
+        this: Value,
+    ) -> Result<(Value, Vec<Value>), ScriptError> {
+        let vm = Vm::new(
+            &self.functions,
+            &self.host_functions,
+            &self.var_decls,
+            self.debugger_hooks.clone(),
+        )
+        .with_host_identity(self.host_identity)
+        .with_owner_definition_name(self.definition_name.as_deref())
+        .with_script_name(self.script_name.as_deref().unwrap_or(""))
+        .with_game_script_name(self.game_script_name.as_deref())
+        .with_definition_context(self.definition_context)
+        .with_host_reference_functions(&self.host_reference_functions)
+        .with_host_function_parameter_types(&self.host_function_parameter_types)
+        .with_owner_strict_level(self.owner_strict_level.unwrap_or(None))
+        .with_constants(&self.constants)
+        .with_optional_globals(self.global_functions.as_deref())
+        .with_method_dispatch(self.method_dispatch.as_ref())
+        .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
+        .with_global_call_context_hook(self.global_call_context_hook.as_ref())
+        .with_global_variables(self.globals_named.as_deref())
+        .with_global_slots(self.globals_numbered.as_deref())
+        .with_global_constants(self.globals_consts.as_deref())
+        .with_local_cell_hook(self.local_cell_hook.as_ref())
+        .with_string_registrations(self.string_registrations.as_deref())
+        .with_this(this);
+        let arg_cells: Vec<crate::vm::ValueCell> =
+            args.iter().cloned().map(crate::vm::value_cell).collect();
+        let call_args = arg_cells
+            .iter()
+            .map(|cell| crate::vm::CallArg::Reference(crate::vm::LValueRef::cell(cell.clone())))
+            .collect();
+        let result = vm
+            .call_args_with_cells_preserving_caller(name, call_args, cells)
+            .map_err(ScriptError::from)?;
+        let finals = arg_cells.iter().map(|cell| cell.borrow().clone()).collect();
+        Ok((result, finals))
     }
 
     /// Calls a `func &` against shared object-local cells without
@@ -2236,6 +2340,8 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2275,6 +2381,8 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2311,6 +2419,8 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2417,6 +2527,8 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())
@@ -2549,6 +2661,8 @@ impl Engine {
         .with_optional_globals(self.global_functions.as_deref())
         .with_method_dispatch(self.method_dispatch.as_ref())
         .with_method_reference_dispatch(self.method_reference_dispatch.as_ref())
+        .with_method_ref_args_dispatch(self.method_ref_args_dispatch.as_ref())
+        .with_reference_parameter_probe(self.reference_parameter_probe.as_ref())
         .with_global_call_context_hook(self.global_call_context_hook.as_ref())
         .with_global_variables(self.globals_named.as_deref())
         .with_global_slots(self.globals_numbered.as_deref())

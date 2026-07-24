@@ -2977,6 +2977,13 @@ pub struct Vm<'a> {
     /// Reference-preserving twin of `method_dispatch`, used when an arrow
     /// call occupies an lvalue position.
     method_reference_dispatch: Option<&'a crate::engine::MethodReferenceDispatch>,
+    /// Twin of `method_dispatch` for an arrow call carrying `&` arguments: it
+    /// also reports the callee's final parameter slots so the caller can
+    /// settle the reference cells the `&[Value]` bridge cannot carry.
+    method_ref_args_dispatch: Option<&'a crate::engine::MethodRefArgsDispatch>,
+    /// Engine-wide `&`-parameter lookup for callees this host cannot resolve
+    /// (crate::engine::ReferenceParameterProbe).
+    reference_parameter_probe: Option<&'a crate::engine::ReferenceParameterProbe>,
     /// Embedding-engine context switch for AB_CALLGLOBAL's null Obj/Def.
     global_call_context_hook: Option<&'a GlobalCallContextHook>,
     /// References returned from a global callee may outlive its temporary
@@ -3029,6 +3036,8 @@ impl<'a> Vm<'a> {
             this_value: Value::Nil,
             method_dispatch: None,
             method_reference_dispatch: None,
+            method_ref_args_dispatch: None,
+            reference_parameter_probe: None,
             global_call_context_hook: None,
             retain_global_call_context_for_host_paths: false,
             globals_named: None,
@@ -3128,6 +3137,22 @@ impl<'a> Vm<'a> {
         dispatch: Option<&'a crate::engine::MethodReferenceDispatch>,
     ) -> Self {
         self.method_reference_dispatch = dispatch;
+        self
+    }
+
+    pub fn with_method_ref_args_dispatch(
+        mut self,
+        dispatch: Option<&'a crate::engine::MethodRefArgsDispatch>,
+    ) -> Self {
+        self.method_ref_args_dispatch = dispatch;
+        self
+    }
+
+    pub fn with_reference_parameter_probe(
+        mut self,
+        probe: Option<&'a crate::engine::ReferenceParameterProbe>,
+    ) -> Self {
+        self.reference_parameter_probe = probe;
         self
     }
 
@@ -3525,6 +3550,28 @@ impl<'a> Vm<'a> {
         self.invoke_value_with_reserved_result(name, args, 0, cells.state.clone(), caller)
     }
 
+    /// [`Vm::call_with_cells_preserving_caller`] with caller-prepared
+    /// arguments, so a callee's `&` parameters alias the supplied cells.
+    pub(crate) fn call_args_with_cells_preserving_caller(
+        &self,
+        name: &str,
+        args: Vec<CallArg>,
+        cells: &LocalCells,
+    ) -> Result<Value, RuntimeError> {
+        let mut caller = current_caller_context();
+        if let Some(caller) = &mut caller {
+            caller.definition_context |= self.definition_context;
+        }
+        let _parameter_override = CallParameterOverrideGuard::enter_if_absent(MAX_CALL_PARAMETERS);
+        self.invoke_value_with_reserved_result(
+            name,
+            args.into_iter().collect(),
+            0,
+            cells.state.clone(),
+            caller,
+        )
+    }
+
     /// Reference-returning counterpart to [`Vm::call_with_cells`].
     pub(crate) fn call_reference_with_cells(
         &self,
@@ -3897,6 +3944,8 @@ impl<'a> Vm<'a> {
             this_value: Value::Nil,
             method_dispatch: self.method_dispatch,
             method_reference_dispatch: self.method_reference_dispatch,
+            method_ref_args_dispatch: self.method_ref_args_dispatch,
+            reference_parameter_probe: self.reference_parameter_probe,
             global_call_context_hook: self.global_call_context_hook,
             retain_global_call_context_for_host_paths: true,
             globals_named: self.globals_named,
@@ -7372,6 +7421,20 @@ impl<'a> Vm<'a> {
                 for arg in &evaluated_args {
                     dispatch_args.push(arg.read()?);
                 }
+                // C++ pushes lvalue arguments as `C4V_pC4Value` and the callee
+                // writes straight through them (C4AulParse.cpp:2318-2331,
+                // C4AulExec.cpp:1381-1397). A `&[Value]` bridge flattens that,
+                // so route reference arguments through the dispatch twin that
+                // reports the callee's final parameter slots and settle the
+                // caller's cells from them. Hazard's
+                // `this->~WeaponAt(x, y, r)` needs exactly this
+                // (Hazard.c4d/Libraries.c4d/Functionalities.c4d/CanAim.c4d/
+                // Script.c:220-226, HazardClonk.c4d/Script.c:930).
+                let references_out = evaluated_args
+                    .iter()
+                    .any(|arg| matches!(arg, CallArg::Reference(_)))
+                    .then_some(self.method_ref_args_dispatch)
+                    .flatten();
                 let dispatch = self
                     .method_dispatch
                     .ok_or_else(|| RuntimeError::new("method dispatch vanished".to_string()))?;
@@ -7382,7 +7445,20 @@ impl<'a> Vm<'a> {
                 // `CallCtx.Caller = pCurCtx`.
                 let _guard = CallerContextGuard::enter(Some(env.caller_context()));
                 let _parameter_override = CallParameterOverrideGuard::enter(0);
-                dispatch(&dispatch_args)
+                let Some(references_out) = references_out else {
+                    return dispatch(&dispatch_args);
+                };
+                let (result, finals) = references_out(&dispatch_args)?;
+                for (arg, settled) in evaluated_args.iter().zip(finals) {
+                    // A plain parameter received a dereferenced copy, so its
+                    // slot still holds what was passed in and this is a no-op.
+                    if let CallArg::Reference(reference) = arg {
+                        if reference.read()? != settled {
+                            reference.write(settled)?;
+                        }
+                    }
+                }
+                Ok(result)
             }
             Value::Object(_) | Value::C4Id(_) => {
                 // Self-target (or a bare engine without a world): resolve in
@@ -7458,9 +7534,19 @@ impl<'a> Vm<'a> {
         let mut evaluated_args = CallArgs::with_capacity(args.len());
         let mut value_stack = ValueStackReservation::empty();
         for (index, arg) in args.iter().enumerate() {
+            // `anyfunctakesref` (C4AulParse.cpp:2318-2331) unions the resolved
+            // callee with every other engine function of that name, so a slot
+            // stays a reference even when THIS host's same-named function
+            // takes a value — or has no such function at all. That is what
+            // lets Hazard's weapon reach the Clonk's `WeaponAt(&x, &y, &r)`
+            // across definitions (Items.c4d/Weapons.c4d/Weapon.c4d/
+            // Script.c:810).
             let script_wants_reference = function
                 .and_then(|function| function.params.get(index))
-                .is_some_and(|param| param.is_reference);
+                .is_some_and(|param| param.is_reference)
+                || name.zip(self.reference_parameter_probe).is_some_and(
+                    |(name, probe)| probe(name, index),
+                );
             let host_wants_reference = function.is_none()
                 && name
                     .and_then(|name| self.host_reference_function(name))
