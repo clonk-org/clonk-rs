@@ -253,3 +253,13 @@ state extraction remains queued behind wave 2.
   (snapshots, the command model, `impl CommandStack`, the per-command state
   machines) and is the next split. Byte-partition proof + `nextest list`
   byte-identical (8,861); gate 8,828/8,828, 11 skipped.
+- scenario.rs test splice landed: the 18,832-line `scenario::tests` body moved
+  to 8 byte-verbatim parts under `crates/clonk-engine/src/scenario/tests/`
+  (753-2,797 lines), spliced with `include!`. Two items pinned by file-relative
+  `include_str!`/`include_bytes!` paths into `content/` stay in the parent (162
+  lines) — the same carve-out main_tests.rs needed. The splitter now validates
+  every candidate boundary against a Rust code mask, because scenario.rs
+  embeds C4Script raw strings whose column-0 `}` lines otherwise read as item
+  ends. `mod game_start_sync` (854 lines) stays inline. scenario.rs
+  36,967 → 18,320 lines; the ~17.3k-line production half (Scenario, the legacy
+  C4S parsers, LegacyObjectRecord, the map-pixel classifier) is the next split.

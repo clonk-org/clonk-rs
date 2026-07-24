@@ -1,0 +1,756 @@
+// Contiguous slice 1 of 8 of the `scenario/tests` battery, spliced
+// by `include!` from the parent module so every test id is unchanged.
+
+    #[test]
+    fn legacy_string_table_reuses_identity_and_overwrites_repeated_line_id() {
+        let directory = tempdir().expect("string-table directory");
+        std::fs::write(directory.path().join("Strings.txt"), b"same\r\nsame\r\n")
+            .expect("write Strings.txt");
+        let group = Group::open(directory.path()).expect("open string-table group");
+        let registrations = load_legacy_string_table(&group).expect("load Strings.txt");
+
+        assert!(clonk_script::resolve_c4_string(&registrations, 0).is_none());
+        let repeated = clonk_script::resolve_c4_string(&registrations, 1)
+            .expect("later repeated line owns the shared ID");
+        let repeated_again = clonk_script::resolve_c4_string(&registrations, 1)
+            .expect("live shared identity remains resolvable");
+        assert!(repeated.ptr_eq(&repeated_again));
+        assert_eq!(repeated.as_ref(), "same");
+        assert_eq!(
+            clonk_script::resolve_c4_string(&registrations, 2)
+                .expect("trailing LF creates an empty final line")
+                .as_ref(),
+            ""
+        );
+
+        let mut engine = Engine::new();
+        engine.adopt_legacy_string_table(registrations);
+        let literal =
+            clonk_script::register_c4_literal_string(&engine.script_string_registrations, "same");
+        assert!(repeated.ptr_eq(&literal));
+    }
+
+    #[test]
+    fn legacy_string_table_stops_the_whole_scan_at_first_nul() {
+        let directory = tempdir().expect("string-table directory");
+        std::fs::write(
+            directory.path().join("Strings.txt"),
+            b"first\nsecond\0third\nignored",
+        )
+        .expect("write Strings.txt");
+        let group = Group::open(directory.path()).expect("open string-table group");
+        let registrations = load_legacy_string_table(&group).expect("load Strings.txt");
+
+        assert_eq!(
+            clonk_script::resolve_c4_string(&registrations, 0)
+                .expect("first line")
+                .as_ref(),
+            "first"
+        );
+        assert_eq!(
+            clonk_script::resolve_c4_string(&registrations, 1)
+                .expect("prefix before NUL")
+                .as_ref(),
+            "second"
+        );
+        assert!(clonk_script::resolve_c4_string(&registrations, 2).is_none());
+    }
+
+    #[test]
+    fn legacy_string_table_preserves_non_utf8_bytes_verbatim() {
+        let directory = tempdir().expect("string-table directory");
+        std::fs::write(directory.path().join("Strings.txt"), [0xe4])
+            .expect("write raw Strings.txt");
+        let group = Group::open(directory.path()).expect("open string-table group");
+        let registrations = load_legacy_string_table(&group).expect("load Strings.txt");
+
+        let value = clonk_script::resolve_c4_string(&registrations, 0)
+            .expect("raw string-table entry resolves");
+        assert_eq!(clonk_script::c4_string_bytes(&value), [0xe4]);
+        assert_eq!(clonk_script::c4_string_byte_len(&value), 1);
+    }
+
+    const TEST_SCRIPT: &str = r#"
+global func Initialize(state, random)
+{
+    return 0;
+}
+
+global func Step(state, frame, random)
+{
+    return 0;
+}
+"#;
+
+    #[test]
+    fn loaded_actidle_name_uses_the_builtin_sentinel() {
+        let state = build_action_state(
+            Some("ActIdle".to_string()),
+            Some(4),
+            Some(5),
+            Some(6),
+            None,
+            None,
+            None,
+        )
+        .expect("saved action builds");
+        assert_eq!(state.name, "Idle");
+        assert_eq!(state.act_map_index, None);
+    }
+
+    #[test]
+    fn loaded_action_name_buffer_stops_at_nul_before_lookup() {
+        let state = build_action_state(
+            Some("Walk\0ignored".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("saved action builds");
+
+        assert_eq!(state.name, "Walk");
+        assert_eq!(
+            clonk_script::c4_string_bytes(state.compiled_name()),
+            b"Walk"
+        );
+    }
+
+    #[test]
+    fn legacy_scenario_action_conversion_keeps_exact_first_reflection() {
+        let mut first = ResourceActionDefinition::default();
+        first.length = Some(7);
+        first.sound = Some("Zap".to_string());
+        first.disabled = true;
+        first.reflected_ints.insert("ObjectDisabled".to_string(), 7);
+        first.reflected_ints.insert("Length".to_string(), -3);
+        let mut duplicate = ResourceActionDefinition::default();
+        duplicate.length = Some(99);
+        let converted = convert_action_map(&ResourceActionMap {
+            default_action: None,
+            actions: vec![
+                ("Probe".to_string(), first),
+                ("Probe".to_string(), duplicate),
+            ],
+        });
+        let spec = converted
+            .specs
+            .get("Probe")
+            .expect("runtime action retained");
+        assert_eq!(
+            spec.length,
+            Some(7),
+            "runtime action selection keeps the first physical slot"
+        );
+        let reflection = converted
+            .reflections
+            .get("Probe")
+            .expect("exact compiler view retained");
+        assert_eq!(
+            reflection.get("Length", 0),
+            Some(clonk_script::Value::Int(-3))
+        );
+        assert_eq!(
+            reflection.get("Sound", 0),
+            Some(clonk_script::Value::String("Zap".into()))
+        );
+        assert_eq!(
+            reflection.get("ObjectDisabled", 0),
+            Some(clonk_script::Value::Int(7))
+        );
+    }
+
+    #[test]
+    fn legacy_scenario_action_conversion_retains_signed_runtime_fields() {
+        let mut action = ResourceActionDefinition::default();
+        action.length = Some(-4);
+        action.delay = Some(-6);
+        action.step = Some(-11);
+        action.directions = Some(-2);
+        action.flip_dir = Some(-3);
+        let converted = convert_action_map(&ResourceActionMap {
+            default_action: None,
+            actions: vec![("Odd".to_string(), action)],
+        });
+
+        let spec = converted.specs.get("Odd").expect("runtime action retained");
+        assert_eq!(spec.length, Some(-4));
+        assert_eq!(spec.delay, Some(-6));
+        assert_eq!(spec.step, Some(-11));
+        assert_eq!(spec.directions, Some(-2));
+        let graphics = converted
+            .graphics
+            .get("Odd")
+            .expect("runtime action graphics retained");
+        assert_eq!(graphics.length, Some(-4));
+        assert_eq!(graphics.directions, -2);
+        assert_eq!(graphics.flip_dir, Some(-3));
+    }
+
+    #[test]
+    fn legacy_objects_size_preserves_oversize_construction() {
+        // C4Object::CompileFunc reads Size directly into Con. Loaded object
+        // state may therefore remain above FullCon even independently of a
+        // later DoCon clamp decision (C4Object.cpp:2763).
+        let records =
+            parse_legacy_objects("[Object]\nid=OVSZ\nSize=150000\n").expect("Objects.txt parses");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].construction, Some(150_000));
+    }
+
+    #[test]
+    fn scenario_value_store_follows_c4value_compiler_indexing_and_types() {
+        let directory = tempdir().expect("scenario directory");
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            "[Head]\n\
+             Version=4,9\n\
+             SaveGame=2\n\
+             Replay=-3\n\
+             \n\
+             [Definitions]\n\
+             Definition1=Objects.c4d\n\
+             Definition2= \"Foo\\Bar.c4d\"  \n\
+             \n\
+             [Player1]\n\
+             StandardCrew=NONE\n\
+             EnforcePosition=7\n\
+             HomeBaseMaterial=WOOD=5;ROCK;\n\
+             \n\
+             [Player2]\n\
+             StandardCrew=0000\n\
+             EnforcePosition=8\n\
+             \n\
+             [Player3]\n\
+             StandardCrew=clnkextra\n\
+             \n\
+             [Player4]\n\
+             StandardCrew=CL-Nextra\n\
+             \n\
+             [Landscape]\n\
+             MapWidth=64,2,32,250\n\
+             MapZoom=8,2,5,15\n\
+             Sky=Clouds1,Clouds2\n\
+             \n\
+             [Disasters]\n\
+             Volcano=12,3,0,100\n",
+        )
+        .expect("scenario core");
+        let group = Group::open(directory.path()).expect("scenario group");
+        let manifest = parse_legacy_scenario_manifest(&group).expect("parsed scenario core");
+        let values = ScenarioValueStore::from_runtime_core(&manifest.core, false);
+
+        assert_eq!(
+            values.get("MapZoom", Some("Landscape"), 0),
+            Some(&ScenarioValue::Int(8))
+        );
+        assert_eq!(
+            values.get("MapZoom", Some("Landscape"), 1),
+            Some(&ScenarioValue::Int(2))
+        );
+        assert_eq!(
+            values.get("MapZoom", Some("Landscape"), 2),
+            Some(&ScenarioValue::Int(5))
+        );
+        assert_eq!(
+            values.get("MapZoom", Some("Landscape"), 3),
+            Some(&ScenarioValue::Int(15))
+        );
+        assert_eq!(values.get("MapZoom", Some("Landscape"), 4), None);
+        assert_eq!(values.get("MapZoom", Some("Landscape"), -1), None);
+
+        assert_eq!(
+            values.get("HomeBaseMaterial", Some("Player1"), 0),
+            Some(&ScenarioValue::C4Id("WOOD".to_string()))
+        );
+        assert_eq!(
+            values.get("HomeBaseMaterial", Some("Player1"), 1),
+            Some(&ScenarioValue::Int(5))
+        );
+        assert_eq!(
+            values.get("HomeBaseMaterial", Some("Player1"), 2),
+            Some(&ScenarioValue::C4Id("ROCK".to_string()))
+        );
+        assert_eq!(
+            values.get("HomeBaseMaterial", Some("Player1"), 3),
+            Some(&ScenarioValue::Int(0))
+        );
+        assert_eq!(values.get("HomeBaseMaterial", Some("Player1"), 4), None);
+
+        assert_eq!(
+            values.get("SaveGame", Some("Head"), 0),
+            Some(&ScenarioValue::Int(2))
+        );
+        assert_eq!(
+            values.get("Replay", Some("Head"), 0),
+            Some(&ScenarioValue::Int(-3))
+        );
+        assert_eq!(
+            values.get("EnforcePosition", Some("Player1"), 0),
+            Some(&ScenarioValue::Int(7))
+        );
+        assert_eq!(
+            values.get("EnforcePosition", None, 1),
+            Some(&ScenarioValue::Int(8)),
+            "a no-section lookup carries entry_nr across repeated names"
+        );
+        assert_eq!(
+            values.get("Version", Some("Head"), 1),
+            Some(&ScenarioValue::Int(9))
+        );
+        assert_eq!(values.get("Version", Some("Head"), 2), None);
+        assert_eq!(
+            values.get("Definitions", Some("Definitions"), 0),
+            Some(&ScenarioValue::String("Objects.c4d".to_string()))
+        );
+        assert_eq!(
+            values.get("Definitions", Some("Definitions"), 1),
+            Some(&ScenarioValue::String("\"Foo\\Bar.c4d\"  ".to_string()))
+        );
+        assert_eq!(
+            values.get("Definitions", None, 0),
+            None,
+            "the root [Definitions] match shadows its same-name child"
+        );
+        assert_eq!(
+            values.get("StandardCrew", Some("Player1"), 0),
+            Some(&ScenarioValue::C4Id(String::new()))
+        );
+        assert_eq!(
+            values.get("StandardCrew", Some("Player2"), 0),
+            Some(&ScenarioValue::C4Id(String::new()))
+        );
+        assert_eq!(
+            values.get("StandardCrew", Some("Player3"), 0),
+            Some(&ScenarioValue::C4Id("clnk".to_string()))
+        );
+        assert_eq!(
+            values.get("StandardCrew", Some("Player4"), 0),
+            Some(&ScenarioValue::C4Id("CL-N".to_string()))
+        );
+
+        // C4Landscape::Init mutates these three Game.C4S fields before any
+        // scenario callback can observe them.
+        assert_eq!(
+            values.get("MapWidth", Some("Landscape"), 3),
+            Some(&ScenarioValue::Int(10_000))
+        );
+        assert_eq!(
+            values.get("MapHeight", Some("Landscape"), 3),
+            Some(&ScenarioValue::Int(10_000))
+        );
+        assert_eq!(
+            values.get("NewStyleLandscape", Some("Landscape"), 0),
+            Some(&ScenarioValue::Int(2))
+        );
+        assert_eq!(
+            values.get("Sky", Some("Landscape"), 0),
+            Some(&ScenarioValue::String("Clouds1;Clouds2".to_string()))
+        );
+        let values_with_sky_surface = ScenarioValueStore::from_runtime_core(&manifest.core, true);
+        assert_eq!(
+            values_with_sky_surface.get("Sky", Some("Landscape"), 0),
+            Some(&ScenarioValue::String("Clouds1,Clouds2".to_string()))
+        );
+        assert_eq!(
+            values.get("Volcano", Some("Disasters"), 0),
+            Some(&ScenarioValue::Int(12))
+        );
+        assert_eq!(values.get("Volcano", Some("Weather"), 0), None);
+        assert_eq!(values.get("StartupPlayerCount", Some("Head"), 0), None);
+        assert_eq!(values.get("mapzoom", Some("Landscape"), 0), None);
+
+        let mut engine = Engine::new();
+        engine.set_scenario_values(values.clone());
+        let encoded = engine
+            .capture_state()
+            .to_json_string()
+            .expect("scenario values serialize with engine state");
+        let state = crate::EngineState::from_json_str(&encoded)
+            .expect("scenario values deserialize with engine state");
+        let mut restored = Engine::new();
+        restored
+            .restore_state(&state)
+            .expect("scenario values restore into a fresh engine");
+        assert_eq!(restored.scenario_values.as_ref(), &values);
+
+        let defaults = ScenarioValueStore::default();
+        assert_eq!(
+            defaults.get("MapZoom", Some("Landscape"), 0),
+            Some(&ScenarioValue::Int(10))
+        );
+    }
+
+    #[test]
+    fn section_scenario_core_resets_compiled_fields_and_ignores_main_only_entries() {
+        let main = parse_legacy_scenario_text(
+            "[Head]\n\
+             Title=Main title\n\
+             Version=4,6,4\n\
+             MaxPlayer=7\n\
+             MaxPlayerLeague=5\n\
+             SaveGame=1\n\
+             NoInitialize=9\n\
+             RandomSeed=123\n\
+             ForcedAutoContextMenu=1\n\
+             ForcedAutoStopControl=0\n\
+             \n\
+             [Definitions]\n\
+             Definition1=Main.c4d\n\
+             \n\
+             [Game]\n\
+             Goals=MELE=1\n\
+             StructNeedEnergy=0\n\
+             ValueOverloads=FISH=20\n\
+             \n\
+             [Player1]\n\
+             Wealth=42,0,0,250\n\
+             \n\
+             [Landscape]\n\
+             MapWidth=2,0,2,2\n\
+             MapHeight=3,0,3,3\n\
+             MapZoom=5,0,5,5\n\
+             ShadeMaterials=1\n\
+             \n\
+             [Weather]\n\
+             Wind=100,0,-100,100\n",
+        )
+        .expect("main core parses");
+        let section = parse_legacy_scenario_text(
+            "[Head]\n\
+             Title=Ignored title\n\
+             Version=9,9,9\n\
+             MaxPlayer=99\n\
+             MaxPlayerLeague=98\n\
+             SaveGame=0\n\
+             NoInitialize=2\n\
+             RandomSeed=7\n\
+             \n\
+             [Definitions]\n\
+             Definition1=Ignored.c4d\n\
+             \n\
+             [Game]\n\
+             ValueOverloads=ROCK=99\n\
+             \n\
+             [Landscape]\n\
+             Sky=Clouds\n",
+        )
+        .expect("section core parses");
+        let compiled = overlay_legacy_scenario_manifest(&main, section)
+            .expect("section compiles over main core");
+
+        assert_eq!(compiled.title.as_deref(), Some("Main title"));
+        assert_eq!(compiled.core.head.title, "Main title");
+        assert_eq!(compiled.core.head.version, [4, 6, 4, 0, 0]);
+        assert_eq!(compiled.core.head.max_player, 7);
+        assert_eq!(compiled.core.head.max_player_league, 5);
+        assert_eq!(compiled.core.head.save_game, 1);
+        assert_eq!(compiled.core.head.no_initialize, 2);
+        assert_eq!(compiled.core.head.random_seed, 7);
+        assert_eq!(compiled.core.head.forced_auto_context_menu, 1);
+        assert_eq!(compiled.core.head.forced_control_style, 0);
+        assert_eq!(compiled.definition_specs, vec!["Main.c4d"]);
+        assert_eq!(
+            compiled.core.game.realism.value_overloads,
+            vec![LegacyIdEntry {
+                id: "FISH".to_string(),
+                count: Some(20),
+            }]
+        );
+
+        assert!(compiled.core.game.goals.is_empty());
+        assert!(compiled.core.game.rules.is_empty());
+        assert!(compiled.core.game.realism.structures_need_energy);
+        assert_eq!(compiled.core.players.len(), MAX_PLAYER_STARTS);
+        assert_eq!(
+            compiled.core.players[0].wealth,
+            LegacyC4SVal::new(0, 0, 0, 250)
+        );
+        assert_eq!(
+            compiled.core.landscape.map_width,
+            LegacyC4SVal::new(100, 0, 64, 250)
+        );
+        assert_eq!(
+            compiled.core.landscape.map_height,
+            LegacyC4SVal::new(50, 0, 40, 250)
+        );
+        assert_eq!(
+            compiled.core.landscape.map_zoom,
+            LegacyC4SVal::new(10, 0, 5, 15)
+        );
+        assert_eq!(compiled.core.landscape.sky.as_deref(), Some("Clouds"));
+        assert!(
+            !compiled.core.landscape.shade_materials,
+            "the absent default uses retained main Version=4.6.4"
+        );
+        assert_eq!(
+            compiled.core.weather.wind,
+            LegacyC4SVal::new(0, 70, -100, 100)
+        );
+        assert_eq!(
+            compiled.sections.get("landscape"),
+            Some(&vec![("Sky".to_string(), "Clouds".to_string())]),
+            "raw main landscape entries must not leak into section consumers"
+        );
+
+        let values = ScenarioValueStore::from_runtime_core(&compiled.core, false);
+        assert_eq!(values.get("Goals", Some("Game"), 0), None);
+        assert_eq!(
+            values.get("Rules", Some("Game"), 0),
+            Some(&ScenarioValue::C4Id("ENRG".to_string()))
+        );
+        assert_eq!(
+            values.get("Rules", Some("Game"), 1),
+            Some(&ScenarioValue::Int(1))
+        );
+        assert_eq!(
+            values.get("StructNeedEnergy", Some("Game"), 0),
+            Some(&ScenarioValue::Bool(false))
+        );
+        assert_eq!(
+            values.get("ValueOverloads", Some("Game"), 0),
+            Some(&ScenarioValue::C4Id("FISH".to_string()))
+        );
+        assert_eq!(
+            values.get("MapWidth", Some("Landscape"), 0),
+            Some(&ScenarioValue::Int(100))
+        );
+        assert_eq!(
+            values.get("MapWidth", Some("Landscape"), 3),
+            Some(&ScenarioValue::Int(10_000))
+        );
+        assert_eq!(
+            values.get("Wind", Some("Weather"), 0),
+            Some(&ScenarioValue::Int(0))
+        );
+        assert_eq!(
+            values.get("Wind", Some("Weather"), 1),
+            Some(&ScenarioValue::Int(70))
+        );
+        assert_eq!(
+            values.get("ShadeMaterials", Some("Landscape"), 0),
+            Some(&ScenarioValue::Bool(false))
+        );
+
+        let directory = tempdir().expect("section directory");
+        std::fs::write(
+            directory.path().join("Landscape.txt"),
+            "map Next { seed=11; };",
+        )
+        .expect("section landscape script");
+        let group = Group::open(directory.path()).expect("section group opens");
+        let mut classifier = MapPixelClassifier::from_slots(
+            [0; 128],
+            vec![None; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+        let landscape =
+            load_legacy_landscape_body_for_test(&group, &compiled, Some(&mut classifier), 0, 1)
+                .expect("section landscape loads")
+                .expect("section landscape exists");
+        let raster = landscape.raster_state().expect("section raster state");
+        let map = raster.map().expect("section retains its generated map");
+        assert_eq!((map.width, map.height), (100, 50));
+        assert_eq!(raster.map_zoom(), 10);
+    }
+
+    // Clean differential captured from the stock pre-port C++ merge-base
+    // 9ffa0a5d. SHA-256 of the pristine 1302-byte Scenario.txt:
+    // 99351a3dede2076f8e4666d62c71362db25ddc3c953bcf60b711960100c80914.
+    const TUTORIAL01_PRISTINE_CPP_INITIAL_NETWORK_SCENARIO: &str = concat!(
+        "[Head]\r\n",
+        "Icon=2\r\n",
+        "Title=A Clonk\r\n",
+        "Version=4,9,11\r\n",
+        "Difficulty=1\r\n",
+        "MaxPlayer=1\r\n",
+        "DisableMouse=1\r\n",
+        "NetworkGame=true\r\n",
+        "ForcedGfxMode=1\r\n",
+        "Origin=Tutorial.c4f/Tutorial01.c4s\r\n",
+        "\r\n",
+        "[Definitions]\r\n",
+        "Definitions=\"Objects.c4d\",\"Tutorial.c4f\"\r\n",
+        "SkipDefs=ERTH=1\r\n",
+        "\r\n",
+        "[Game]\r\n",
+        "StructNeedEnergy=false\r\n",
+        "Rules=SURR=1\r\n",
+        "\r\n",
+        "[Player1]\r\n",
+        "Position=32,20\r\n",
+        "Crew=CLNK=1\r\n",
+        "Magic=MWND=0;MWP2=0;MGWP=0;MVLC=0;RVLT=0;RMMG=0;MMTR=0;MLGT=0;MINV=0;MGHL=0;MGUP=0;MGDW=0;MFFW=0;MFFS=0;MBRG=0;MFFA=0;FRFS=0;EXTG=0;ETFL=0;MQKE=0;CMFG=0\r\n",
+        "\r\n",
+        "[Player2]\r\n",
+        "Crew=CLNK=1\r\n",
+        "Magic=MWND=0;MWP2=0;MGWP=0;MVLC=0;RVLT=0;RMMG=0;MMTR=0;MLGT=0;MINV=0;MGHL=0;MGUP=0;MGDW=0;MFFW=0;MFFS=0;MBRG=0;MFFA=0;FRFS=0;EXTG=0;ETFL=0;MQKE=0;CMFG=0\r\n",
+        "\r\n",
+        "[Player3]\r\n",
+        "Crew=CLNK=1\r\n",
+        "Magic=MWND=0;MWP2=0;MGWP=0;MVLC=0;RVLT=0;RMMG=0;MMTR=0;MLGT=0;MINV=0;MGHL=0;MGUP=0;MGDW=0;MFFW=0;MFFS=0;MBRG=0;MFFA=0;FRFS=0;EXTG=0;ETFL=0;MQKE=0;CMFG=0\r\n",
+        "\r\n",
+        "[Player4]\r\n",
+        "Crew=CLNK=1\r\n",
+        "Magic=MWND=0;MWP2=0;MGWP=0;MVLC=0;RVLT=0;RMMG=0;MMTR=0;MLGT=0;MINV=0;MGHL=0;MGUP=0;MGDW=0;MFFW=0;MFFS=0;MBRG=0;MFFA=0;FRFS=0;EXTG=0;ETFL=0;MQKE=0;CMFG=0\r\n",
+        "\r\n",
+        "[Landscape]\r\n",
+        "VegetationLevel=0,30,0,100\r\n",
+        "Sky=Clouds2\r\n",
+        "AutoScanSideOpen=false\r\n",
+        "MapWidth=64,0,64,250\r\n",
+        "MapHeight=47,0,40,250\r\n",
+        "Liquid=Water-Smooth\r\n",
+        "Layers=Earth-Rough=100;Earth-Smooth2=100\r\n",
+        "SkyScrollMode=2\r\n",
+        "\r\n",
+        "[Weather]\r\n",
+        "Climate=30,0,0,100\r\n",
+        "YearSpeed=20,10,0,100\r\n",
+        "Wind=1,30,-100,100\r\n",
+    );
+
+    fn json_scenario_without_legacy_core() -> Scenario {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Scenario.json"),
+            r#"{"definitions":[{"id":"TEST","script":"Script.c"}]}"#,
+        )
+        .expect("write JSON fixture");
+        std::fs::write(dir.path().join("Script.c"), TEST_SCRIPT).expect("write test script");
+        Scenario::load_from_path(dir.path()).expect("JSON fixture loads")
+    }
+
+    fn scenario_with_retained_legacy_core(source: &str) -> Scenario {
+        let mut scenario = json_scenario_without_legacy_core();
+        scenario.legacy_core = Some(
+            parse_legacy_scenario_text(source)
+                .expect("legacy core parses")
+                .core,
+        );
+        scenario
+    }
+
+    #[test]
+    fn offline_startup_preflight_reads_effective_max_players_without_loading_resources() {
+        // OpenScenario loads C4S first, then Parameters.txt overrides the
+        // scenario-derived MaxPlayers default before InitLocal admits players
+        // (pristine 9ffa0a5d src/C4Game.cpp:162-166,231-248;
+        // src/C4GameParameters.cpp:408-422,553-558).
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Scenario.txt"),
+            "[Head]\nMaxPlayer=4\n\n[Definitions]\nDefinition1=Missing.c4d\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            dir.path().join("Parameters.txt"),
+            "[Parameters]\nRandomSeed=73\nMaxPlayers=2\n",
+        )
+        .expect("write parameters");
+        let group = Group::open(dir.path()).expect("open scenario group");
+
+        let expected = OfflineScenarioStartupPreflight {
+            max_players: 2,
+            random_seed: Some(73),
+            save_game: false,
+        };
+        assert_eq!(
+            Scenario::preflight_offline_startup_from_group(&group)
+                .expect("group preflight succeeds"),
+            expected,
+        );
+        assert_eq!(
+            Scenario::preflight_offline_startup_from_path(dir.path())
+                .expect("path preflight succeeds"),
+            expected,
+        );
+
+        std::fs::remove_file(dir.path().join("Parameters.txt"))
+            .expect("remove parameter component");
+        let group = Group::open(dir.path()).expect("reopen scenario without parameters");
+        let expected = OfflineScenarioStartupPreflight {
+            max_players: 4,
+            random_seed: None,
+            save_game: false,
+        };
+        assert_eq!(
+            Scenario::preflight_offline_startup_from_group(&group)
+                .expect("missing-parameters preflight succeeds"),
+            expected,
+            "only a missing Parameters.txt requests the time/LC_PIN_SEED default",
+        );
+        assert_eq!(
+            Scenario::preflight_offline_startup_from_path(dir.path())
+                .expect("path preflight succeeds"),
+            expected,
+        );
+
+        let savegame = dir.path().join("Savegame.c4s");
+        std::fs::create_dir(&savegame).expect("create savegame fixture");
+        std::fs::write(
+            savegame.join("Scenario.txt"),
+            "[Head]\nSaveGame=1\nMaxPlayer=4\n",
+        )
+        .expect("write savegame core");
+        assert_eq!(
+            Scenario::preflight_offline_startup_from_path(&savegame)
+                .expect("offline savegame preflight succeeds"),
+            OfflineScenarioStartupPreflight {
+                max_players: 4,
+                random_seed: None,
+                save_game: true,
+            }
+        );
+
+        let replay = dir.path().join("Replay.c4s");
+        std::fs::create_dir(&replay).expect("create replay fixture");
+        std::fs::write(
+            replay.join("Scenario.txt"),
+            "[Head]\nReplay=1\nMaxPlayer=4\n",
+        )
+        .expect("write replay core");
+        assert!(matches!(
+            Scenario::preflight_offline_startup_from_path(&replay),
+            Err(ScenarioError::OfflineStartupReplayUnsupported)
+        ));
+
+        let restore = dir.path().join("Restore.c4s");
+        std::fs::create_dir(&restore).expect("create restore fixture");
+        std::fs::write(restore.join("Scenario.txt"), "[Head]\nMaxPlayer=4\n")
+            .expect("write restore core");
+        std::fs::write(restore.join("SavePlayerInfos.txt"), "[PlayerInfoList]\n")
+            .expect("write restore infos");
+        assert!(matches!(
+            Scenario::preflight_offline_startup_from_path(&restore),
+            Err(ScenarioError::OfflineStartupRestoreInfosUnsupported)
+        ));
+
+        let json = dir.path().join("Json.c4s");
+        std::fs::create_dir(&json).expect("create JSON fixture");
+        std::fs::write(json.join("Scenario.json"), "{\"definitions\":[]}")
+            .expect("write JSON manifest");
+        assert!(matches!(
+            Scenario::preflight_offline_startup_from_path(&json),
+            Err(ScenarioError::OfflineStartupJsonUnsupported)
+        ));
+    }
+
+    #[test]
+    fn legacy_network_game_flag_is_preserved_for_client_safety_check() {
+        // After opening the retrieved client scenario, C4Game rejects it when
+        // C4S.Head.NetworkGame is false (C4Game.cpp:2551-2564).
+        let network = scenario_with_retained_legacy_core("[Head]\nNetworkGame=true\n");
+        let offline = scenario_with_retained_legacy_core("[Head]\nNetworkGame=false\n");
+
+        assert!(network.network_game());
+        assert!(!offline.network_game());
+    }
+
+    fn legacy_cstring(bytes: &[u8]) -> LegacyCString {
+        LegacyCString::from_bytes(bytes.to_vec()).expect("fixture has no interior NUL")
+    }
+
