@@ -25,6 +25,22 @@ const CONTENT_GAME_PACKS: [&str; 4] = [
     "ClonkMars.c4f",
 ];
 
+const MACOS_APP_NAME: &str = "Clonk Rust.app";
+const MACOS_ICON_STEM: &str = "ClonkRust";
+const MACOS_ICON_SOURCE: &str = "planet/Graphics.c4g/Logo.png";
+/// Everything the staged payload keeps outside `bin/`, relocated into
+/// `Contents/Resources` so the bundle stays self-contained.
+const MACOS_BUNDLED_RESOURCES: [&str; 8] = [
+    "planet",
+    "content",
+    "licenses",
+    "COPYING",
+    "TRADEMARK",
+    "README.md",
+    "credits.txt",
+    "THIRD_PARTY_GAME_CONTENT.md",
+];
+
 fn main() -> Result<()> {
     clonk_logging::init();
 
@@ -936,6 +952,12 @@ fn package() -> Result<()> {
             .join("licenses/RUST_THIRD_PARTY_LICENSES.txt"),
     )?;
     let package_dir = assemble_package_layout(&paths)?;
+    if paths.target_triple.contains("apple-darwin") {
+        let app_dir = assemble_macos_app_bundle(&paths, &package_dir)?;
+        let image = create_dmg(&paths, &app_dir)?;
+        tracing::info!(path = %image.display(), "packaged Rust port");
+        return Ok(());
+    }
     let archive = create_archive(&paths, &package_dir)?;
     tracing::info!(path = %archive.display(), "packaged Rust port");
     Ok(())
@@ -1061,6 +1083,207 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
     }
 
     Ok(package_dir)
+}
+
+/// Restructure the staged payload into a macOS application bundle.
+///
+/// `clonk-app` is the bundle executable rather than the `clonk-game` launcher:
+/// the launcher stages `System.c4g`/`Graphics.c4g` next to the bundle, which
+/// fails when the app runs from a read-only disk image. It still ships inside
+/// `Contents/MacOS` for terminal use.
+fn assemble_macos_app_bundle(paths: &WorkspacePaths, package_dir: &Path) -> Result<PathBuf> {
+    let app_dir = package_dir.join(MACOS_APP_NAME);
+    let contents = app_dir.join("Contents");
+    let macos_dir = contents.join("MacOS");
+    let resources = contents.join("Resources");
+    for directory in [&macos_dir, &resources] {
+        fs::create_dir_all(directory)
+            .with_context(|| format!("failed to create {}", directory.display()))?;
+    }
+
+    let bin_dir = package_dir.join("bin");
+    for binary_name in ["clonk-game", "clonk-app"] {
+        let staged = bin_dir.join(binary_name);
+        let bundled = macos_dir.join(binary_name);
+        fs::rename(&staged, &bundled).with_context(|| {
+            format!(
+                "failed to move {} into {}",
+                staged.display(),
+                bundled.display()
+            )
+        })?;
+        set_executable(&bundled)?;
+    }
+    fs::remove_dir_all(&bin_dir)
+        .with_context(|| format!("failed to remove {}", bin_dir.display()))?;
+
+    for entry in MACOS_BUNDLED_RESOURCES {
+        let staged = package_dir.join(entry);
+        let bundled = resources.join(entry);
+        fs::rename(&staged, &bundled).with_context(|| {
+            format!(
+                "failed to move {} into {}",
+                staged.display(),
+                bundled.display()
+            )
+        })?;
+    }
+
+    write_macos_icon(paths, &resources.join(format!("{MACOS_ICON_STEM}.icns")))?;
+    fs::write(contents.join("Info.plist"), macos_info_plist())
+        .with_context(|| format!("failed to write {}", contents.join("Info.plist").display()))?;
+    fs::write(contents.join("PkgInfo"), b"APPL????")
+        .with_context(|| format!("failed to write {}", contents.join("PkgInfo").display()))?;
+
+    Ok(app_dir)
+}
+
+fn macos_info_plist() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Clonk Rust</string>
+	<key>CFBundleExecutable</key>
+	<string>clonk-app</string>
+	<key>CFBundleIconFile</key>
+	<string>{MACOS_ICON_STEM}</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.syb0rg.clonk-rust</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Clonk Rust</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>{version}</string>
+	<key>CFBundleVersion</key>
+	<string>{version}</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.games</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+</dict>
+</plist>
+"#,
+        version = env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Render the project logo into an `.icns` via a temporary iconset.
+///
+/// The logo is wider than it is tall, so it is composited onto a transparent
+/// square first; padding with `sips` would force an opaque background.
+fn write_macos_icon(paths: &WorkspacePaths, destination: &Path) -> Result<()> {
+    let logo_path = paths.repo_root.join(MACOS_ICON_SOURCE);
+    let logo = image::open(&logo_path)
+        .with_context(|| format!("failed to read icon source {}", logo_path.display()))?
+        .to_rgba8();
+    let side = logo.width().max(logo.height());
+    let mut square = image::RgbaImage::from_pixel(side, side, image::Rgba([0, 0, 0, 0]));
+    image::imageops::overlay(
+        &mut square,
+        &logo,
+        i64::from((side - logo.width()) / 2),
+        i64::from((side - logo.height()) / 2),
+    );
+
+    let iconset_dir = destination.with_extension("iconset");
+    if iconset_dir.exists() {
+        fs::remove_dir_all(&iconset_dir)
+            .with_context(|| format!("failed to remove {}", iconset_dir.display()))?;
+    }
+    fs::create_dir_all(&iconset_dir)
+        .with_context(|| format!("failed to create {}", iconset_dir.display()))?;
+
+    // `iconutil` requires exactly these names, and rejects an incomplete set.
+    for (size, name) in [
+        (16, "icon_16x16.png"),
+        (32, "icon_16x16@2x.png"),
+        (32, "icon_32x32.png"),
+        (64, "icon_32x32@2x.png"),
+        (128, "icon_128x128.png"),
+        (256, "icon_128x128@2x.png"),
+        (256, "icon_256x256.png"),
+        (512, "icon_256x256@2x.png"),
+        (512, "icon_512x512.png"),
+        (1024, "icon_512x512@2x.png"),
+    ] {
+        let scaled =
+            image::imageops::resize(&square, size, size, image::imageops::FilterType::Lanczos3);
+        let path = iconset_dir.join(name);
+        scaled
+            .save(&path)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+
+    let status = Command::new("iconutil")
+        .args(["--convert", "icns", "--output"])
+        .arg(destination)
+        .arg(&iconset_dir)
+        .status()
+        .context("failed to invoke iconutil")?;
+    if !status.success() {
+        bail!("iconutil failed with status {:?}", status.code());
+    }
+    fs::remove_dir_all(&iconset_dir)
+        .with_context(|| format!("failed to remove {}", iconset_dir.display()))?;
+    Ok(())
+}
+
+/// Wrap the bundle in a compressed disk image with the conventional
+/// drag-to-Applications layout.
+fn create_dmg(paths: &WorkspacePaths, app_dir: &Path) -> Result<PathBuf> {
+    let dist_dir = paths.target_dir.join("dist");
+    let staging = dist_dir.join("dmg-staging");
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .with_context(|| format!("failed to remove {}", staging.display()))?;
+    }
+    fs::create_dir_all(&staging)
+        .with_context(|| format!("failed to create {}", staging.display()))?;
+    let staged_app = staging.join(MACOS_APP_NAME);
+    fs::rename(app_dir, &staged_app).with_context(|| {
+        format!(
+            "failed to move {} into {}",
+            app_dir.display(),
+            staged_app.display()
+        )
+    })?;
+    std::os::unix::fs::symlink("/Applications", staging.join("Applications"))
+        .context("failed to create the /Applications shortcut")?;
+
+    let image_path = dist_dir.join(format!(
+        "clonk-rust-{}-{}.dmg",
+        env!("CARGO_PKG_VERSION"),
+        paths.target_triple
+    ));
+    if image_path.exists() {
+        fs::remove_file(&image_path)
+            .with_context(|| format!("failed to remove {}", image_path.display()))?;
+    }
+    let status = Command::new("hdiutil")
+        .args(["create", "-volname", "Clonk Rust", "-srcfolder"])
+        .arg(&staging)
+        .args(["-fs", "HFS+", "-format", "UDZO", "-quiet"])
+        .arg(&image_path)
+        .status()
+        .context("failed to invoke hdiutil")?;
+    if !status.success() {
+        bail!("hdiutil failed with status {:?}", status.code());
+    }
+    fs::remove_dir_all(&staging)
+        .with_context(|| format!("failed to remove {}", staging.display()))?;
+    Ok(image_path)
 }
 
 fn executable_name(binary_name: &str, target_triple: &str) -> String {

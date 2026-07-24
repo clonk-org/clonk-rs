@@ -1,3 +1,7 @@
+// Explorer must not open a console window behind the launcher; `main`
+// reattaches stdio when it is started from a terminal instead.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod legacy_registry;
 
 use std::collections::HashSet;
@@ -70,6 +74,8 @@ struct Cli {
 }
 
 fn main() {
+    // Must precede any output: the GUI subsystem starts with stdio detached.
+    clonk_platform::attach_parent_console();
     clonk_logging::init();
 
     if let Err(error) = run() {

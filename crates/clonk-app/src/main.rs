@@ -1,3 +1,6 @@
+// Explorer must not open a console window behind the game; `main` reattaches
+// stdio when the runtime is started from a terminal instead.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 #![allow(dead_code)]
 #![allow(
     clippy::explicit_counter_loop,
@@ -8501,6 +8504,8 @@ fn reconcile_deferred_fullscreen(window: &Window, mode: DisplayMode) -> bool {
 }
 
 fn main() -> Result<()> {
+    // Must precede any output: the GUI subsystem starts with stdio detached.
+    clonk_platform::attach_parent_console();
     let cli = Cli::parse();
     let classic = parse_classic_command_line(&cli.classic_arguments);
     install_classic_language_override(&classic);
