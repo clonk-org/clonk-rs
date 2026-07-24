@@ -7980,8 +7980,11 @@ impl ObjectScopeContext {
         if metadata.line == 0 {
             let replaces_staged_vertex_edit = self.pending_update.live_vertices.is_some()
                 || self.pending_update.shape_vertices.is_some();
+            // A same-call SetVertex has already staged the backup half, so
+            // restore from the effective buffer rather than the committed one.
+            let mut buffer = self.shape_vertex_buffer();
             let base = if self.staged_own_vertices {
-                self.shape_vertices.own_original_vertices()
+                buffer.own_original_vertices()
             } else {
                 metadata.vertices.clone()
             };
@@ -7992,7 +7995,8 @@ impl ObjectScopeContext {
                 metadata.rotateable,
                 self.rotation(),
             );
-            self.shape_vertices.replace_active(&vertices);
+            buffer.replace_active(&vertices);
+            self.shape_vertices = buffer;
             if replaces_staged_vertex_edit {
                 let vertices = self.shape_vertices.clone();
                 self.pending_update.live_vertices = Some(vertices.active_vec());

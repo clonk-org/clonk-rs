@@ -24452,7 +24452,13 @@ public func GetItem()
             ),
             (
                 "Crosshair.c4d",
-                "[DefCore]\nid=WCHR\nName=Crosshair\nCategory=0\nCrewMember=0\n",
+                // Vertices=1 like the shipped crosshair
+                // (Western.c4d/Items.c4d/Weapons.c4d/Winchester.c4d/
+                // Crosshair.c4d/DefCore.txt): FnSetVertex writes a C4Shape
+                // slot but never grows VtxNum, so a vertex-less fixture would
+                // leave SetVertexXY writing a dormant slot
+                // (src/C4Script.cpp:1310-1323).
+                "[DefCore]\nid=WCHR\nName=Crosshair\nCategory=0\nCrewMember=0\nVertices=1\n",
                 "#strict\n",
             ),
             (

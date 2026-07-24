@@ -2992,6 +2992,23 @@ impl ShapeVertexBuffer {
         let count = self.active_count().min(MAX_SHAPE_VERTICES / 2);
         self.slots[MAX_SHAPE_VERTICES / 2..MAX_SHAPE_VERTICES / 2 + count].to_vec()
     }
+
+    /// `C4Shape::CreateOwnOriginalCopy` (C4Shape.cpp:484-494): seed the
+    /// backup half from the definition shape and truncate the active count to
+    /// what that half can hold. Entering own-vertex mode copies the *definition*
+    /// vertices, not the object's current (Con/rotation-transformed) ones.
+    fn create_own_original_copy(&mut self, definition: &[ObjectVertex]) {
+        let count = definition.len().min(MAX_SHAPE_VERTICES / 2);
+        self.count = count as u8;
+        self.slots[MAX_SHAPE_VERTICES / 2..MAX_SHAPE_VERTICES / 2 + count]
+            .copy_from_slice(&definition[..count]);
+    }
+
+    /// One `C4Shape` slot, addressed exactly like the C++ `VtxX[iIndex]`
+    /// arrays — including the backup half that own-vertex mode writes.
+    fn slot_mut(&mut self, index: usize) -> Option<&mut ObjectVertex> {
+        self.slots.get_mut(index)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5382,6 +5399,9 @@ struct ObjectDelta {
     shape_vertices: Option<ShapeVertexBuffer>,
     /// Permanent own-vertex base used by SetVertex's own-vertex modes.
     vertices: Option<Vec<ObjectVertex>>,
+    /// `VTX_Set` installs the base without the `UpdateShape` that
+    /// `VTX_SetPermanentUpd` performs (C4Script.cpp:1324-1325).
+    vertices_defer_shape_update: bool,
     graphics_overlays: Option<Vec<ObjectGraphicsOverlay>>,
     draw_transform: Option<Option<DrawTransform>>,
     base_graphics: Option<Option<ObjectBaseGraphics>>,
@@ -5593,6 +5613,7 @@ impl ObjectDelta {
         }
         if let Some(vertices) = update.vertices {
             self.vertices = Some(vertices);
+            self.vertices_defer_shape_update = update.vertices_defer_shape_update;
         }
         if let Some(overlays) = update.graphics_overlays {
             self.graphics_overlays = Some(overlays);
@@ -5690,6 +5711,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             live_vertices: update.live_vertices,
             shape_vertices: update.shape_vertices,
             vertices: update.vertices,
+            vertices_defer_shape_update: update.vertices_defer_shape_update,
             graphics_overlays: update.graphics_overlays,
             draw_transform: update.draw_transform,
             base_graphics: update.base_graphics,
@@ -5966,6 +5988,13 @@ pub struct ObjectUpdate {
     /// Permanent own-vertex base overwrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertices: Option<Vec<ObjectVertex>>,
+    /// `SetVertex`'s plain own-vertex mode (`VTX_Set`) writes only the shape's
+    /// backup half; the live shape keeps its vertices until some later
+    /// `UpdateShape` restores them (C4Script.cpp:1297-1325). Set this so the
+    /// accompanying `vertices` base does not run `UpdateShape` right away.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[doc(hidden)]
+    pub vertices_defer_shape_update: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphics_overlays: Option<Vec<ObjectGraphicsOverlay>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7071,8 +7100,9 @@ impl Object {
         if delta.own_mass.is_some() || delta.change_def.is_some() || construction_refreshes_shape {
             self.compiled_mass = None;
         }
-        let shape_changed =
-            construction_refreshes_shape || delta.rotation.is_some() || delta.vertices.is_some();
+        let shape_changed = construction_refreshes_shape
+            || delta.rotation.is_some()
+            || (delta.vertices.is_some() && !delta.vertices_defer_shape_update);
         // Kill-trace mark BEFORE the energy write (C4Object.cpp:1351-1361)
         // so AssignDeath credits the new cause.
         if let Some(cause) = delta.energy_loss_cause {

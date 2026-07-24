@@ -6553,12 +6553,21 @@ pub(crate) fn remove_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnSetVertex (C4Script.cpp:1237-1271): set one vertex attribute (VTX_X=0,
+/// FnSetVertex (C4Script.cpp:1292-1326): set one vertex attribute (VTX_X=0,
 /// VTX_Y=1, VTX_CNAT=2, VTX_Friction=3); unknown attributes fall back to
-/// VtxY like the old-style C++ behaviour. Own-vertex mode offsets the index
-/// by C4D_VertexCpyPos = C4D_MaxVertex/2 = 15 (C4Shape.h:27).
+/// VtxY like the old-style C++ behaviour.
+///
+/// Own-vertex mode enters `fOwnVertices` — seeding the shape's backup half
+/// from the *definition* shape (C4Shape::CreateOwnOriginalCopy,
+/// C4Shape.cpp:484-494) — and writes slot `iIndex + C4D_VertexCpyPos`
+/// (index + 15, C4Shape.h:27). `VTX_SetPermanentUpd` (2) then runs
+/// `UpdateShape(true)`, which restores the live vertices from that backup
+/// half and re-applies Con/rotation (C4Object.cpp:322-350). Plain `VTX_Set`
+/// (1) leaves the live shape alone until some later UpdateShape.
 pub(crate) fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
     const MAX_VERTEX: usize = 30;
+    const VERTEX_CPY_POS: usize = MAX_VERTEX / 2;
+    const VTX_SET_PERMANENT_UPD: i32 = 2;
     let index_arg = value_to_i32(args.first().unwrap_or(&Value::Nil), "SetVertex", "index")?;
     let kind = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "SetVertex", "attribute")?;
     let value = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "SetVertex", "value")?;
@@ -6570,14 +6579,13 @@ pub(crate) fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
         None => 0,
     };
 
-    let mut vertex_index = index_arg;
-    if own_vertex_mode != 0 {
-        vertex_index += 15;
-    }
-    let Ok(vertex_index) = usize::try_from(vertex_index) else {
+    let Ok(mut slot) = usize::try_from(index_arg) else {
         return Ok(Value::Bool(false));
     };
-    if vertex_index >= MAX_VERTEX {
+    if own_vertex_mode != 0 {
+        slot += VERTEX_CPY_POS;
+    }
+    if slot >= MAX_VERTEX {
         return Ok(Value::Bool(false));
     }
 
@@ -6587,26 +6595,11 @@ pub(crate) fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetVertex requires an active engine context"))?;
         let active = context.object_context().map(|object| object.id());
-        let write = |vertices_base: &[ObjectVertex], pending: &mut Option<Vec<ObjectVertex>>| {
-            let mut vertices = pending.clone().unwrap_or_else(|| vertices_base.to_vec());
-            if vertices.len() <= vertex_index {
-                vertices.resize(vertex_index + 1, ObjectVertex::default());
-            }
-            match kind {
-                0 => vertices[vertex_index].x = value,
-                2 => vertices[vertex_index].cnat = value as u32,
-                3 => vertices[vertex_index].friction = value,
-                // VTX_Y and the old-style fallback for any other attribute.
-                _ => vertices[vertex_index].y = value,
-            }
-            *pending = Some(vertices);
-        };
-
         // FnSetVertex works on ANY object (`if (!pObj) pObj = cthr->Obj`,
         // C4Script.cpp) — the Gatling aims its crosshair with
         // SetVertex(0, .., pCrosshair). Foreign writes stage into the
         // target's nested scope like every other cross-object fold.
-        match target_id {
+        let foreign = match target_id {
             Some(target) if Some(target) != active => {
                 if !context.nested_objects.contains_key(&target) {
                     let Some(world_object) = context.get_world_object(target) else {
@@ -6622,26 +6615,57 @@ pub(crate) fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
                 if !context.nested_order.contains(&target) {
                     context.nested_order.push(target);
                 }
-                let state = context
-                    .nested_objects
-                    .get_mut(&target)
-                    .expect("scope just ensured");
-                let base = state.scope.vertices().to_vec();
-                write(&base, &mut state.scope.pending_update.vertices);
-                state.scope.staged_own_vertices |= own_vertex_mode != 0;
-                Ok(Value::Bool(true))
+                Some(target)
             }
-            _ => {
-                let object = match context.object_context_mut() {
-                    Some(object) => object,
-                    None => return Ok(Value::Bool(false)),
-                };
-                let base = object.vertices().to_vec();
-                write(&base, &mut object.pending_update.vertices);
-                object.staged_own_vertices |= own_vertex_mode != 0;
-                Ok(Value::Bool(true))
-            }
+            _ => None,
+        };
+        // UpdateShape reads the live definition shape, so resolve it before
+        // borrowing the scope.
+        let metadata = foreign
+            .or(active)
+            .and_then(|id| context.object_effective_definition_id(id))
+            .and_then(|definition_id| context.definition_metadata(&definition_id).cloned())
+            .unwrap_or_default();
+        let scope = match foreign {
+            Some(target) => &mut context
+                .nested_objects
+                .get_mut(&target)
+                .expect("scope just ensured")
+                .scope,
+            None => match context.object_context_mut() {
+                Some(object) => object,
+                None => return Ok(Value::Bool(false)),
+            },
+        };
+
+        let mut buffer = scope.shape_vertex_buffer();
+        if own_vertex_mode != 0 && !scope.staged_own_vertices {
+            buffer.create_own_original_copy(&metadata.vertices);
+            scope.staged_own_vertices = true;
         }
+        let Some(vertex) = buffer.slot_mut(slot) else {
+            return Ok(Value::Bool(false));
+        };
+        match kind {
+            0 => vertex.x = value,
+            2 => vertex.cnat = value as u32,
+            3 => vertex.friction = value,
+            // VTX_Y and the old-style fallback for any other attribute.
+            _ => vertex.y = value,
+        }
+        let own_base = buffer.own_original_vertices();
+        scope.set_shape_vertex_buffer(buffer);
+        if own_vertex_mode != 0 {
+            // fOwnVertices makes the backup half the object's permanent shape
+            // base, so every later UpdateShape restores from it.
+            scope.pending_update.vertices = Some(own_base);
+            scope.pending_update.vertices_defer_shape_update =
+                own_vertex_mode != VTX_SET_PERMANENT_UPD;
+        }
+        if own_vertex_mode == VTX_SET_PERMANENT_UPD {
+            scope.refresh_shape_preview(&metadata);
+        }
+        Ok(Value::Bool(true))
     })
 }
 
