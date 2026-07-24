@@ -231,3 +231,18 @@ network session.rs, engine-unit-tests main.rs); wave B engine siblings
 file→dir conversions leave lib.rs decls untouched), then engine lib.rs
 last (crate root, biggest care); wave C per-crate DRY/clippy. GameApp 6b
 state extraction remains queued behind wave 2.
+
+## Wave 2 landing log
+
+- compat.rs test splice landed: the 34,767-line `compat::tests` body left the
+  parent file for 11 byte-verbatim contiguous parts under
+  `crates/clonk-engine/src/compat/tests/`, spliced back with `include!` so the
+  module — and every `compat::tests::*` id — is unchanged. compat.rs
+  34,889 → 151 lines (production was already only ~117 lines; the file was
+  99.6% test body). Prelude `use` items stay in the parent so the parts are
+  bare item sequences. Byte-partition proof: the parts concatenate to the
+  original module body exactly, line for line. `cargo nextest list --workspace`
+  byte-identical pre/post (8,861 lines); full gate 8,828 run / 8,828 passed /
+  11 skipped. Parts run 2,903-5,411 lines. Known follow-up: `xtask` dev_check
+  routes engine checks by file basename, so edits to a part file no longer
+  match the `"compat.rs"` arm — the parent still does.
