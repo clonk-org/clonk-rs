@@ -246,3 +246,10 @@ state extraction remains queued behind wave 2.
   11 skipped. Parts run 2,903-5,411 lines. Known follow-up: `xtask` dev_check
   routes engine checks by file basename, so edits to a part file no longer
   match the `"compat.rs"` arm — the parent still does.
+- command.rs test splice landed: the 16,882-line `command::tests` body moved to
+  7 byte-verbatim contiguous parts under `crates/clonk-engine/src/command/tests/`
+  (2,255-2,468 lines each), spliced with `include!` from the unchanged inline
+  module. command.rs 29,109 → 12,246 lines; the remaining body is production
+  (snapshots, the command model, `impl CommandStack`, the per-command state
+  machines) and is the next split. Byte-partition proof + `nextest list`
+  byte-identical (8,861); gate 8,828/8,828, 11 skipped.
