@@ -986,7 +986,7 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
         .with_context(|| format!("failed to create {}", bin_dir.display()))?;
 
     for binary_name in ["clonk-game", "clonk-app"] {
-        let exe_name = executable_name(binary_name);
+        let exe_name = executable_name(binary_name, &paths.target_triple);
         let built_binary = paths.release_dir.join(&exe_name);
         if !built_binary.exists() {
             bail!(
@@ -1066,8 +1066,15 @@ fn assemble_package_layout(paths: &WorkspacePaths) -> Result<PathBuf> {
     Ok(package_dir)
 }
 
-fn executable_name(binary_name: &str) -> String {
-    format!("{binary_name}{}", env::consts::EXE_SUFFIX)
+fn executable_name(binary_name: &str, target_triple: &str) -> String {
+    // The host suffix is wrong whenever `CARGO_BUILD_TARGET` cross-compiles the
+    // release binaries, so the extension follows the target triple instead.
+    let suffix = if target_triple.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    format!("{binary_name}{suffix}")
 }
 
 fn directory_contains_file(path: &Path) -> Result<bool> {
@@ -1367,7 +1374,9 @@ fn rustc_host_target(workspace_dir: &Path) -> Result<String> {
 
 fn audit_release_dependencies(paths: &WorkspacePaths) -> Result<()> {
     for binary_name in ["clonk-game", "clonk-app"] {
-        let binary = paths.release_dir.join(executable_name(binary_name));
+        let binary = paths
+            .release_dir
+            .join(executable_name(binary_name, &paths.target_triple));
         if paths.target_triple.contains("apple-darwin") {
             audit_macos_release_binary(&binary)?;
         } else if paths.target_triple.contains("linux") {
@@ -1580,6 +1589,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    const FIXTURE_TARGET: &str = "test-target";
+
     fn write_fixture(path: &Path, contents: &[u8]) {
         fs::create_dir_all(path.parent().expect("fixture path has a parent"))
             .expect("create fixture parent");
@@ -1647,13 +1658,13 @@ mod tests {
         write_fixture(
             &root
                 .join("workspace-target/release")
-                .join(executable_name("clonk-game")),
+                .join(executable_name("clonk-game", FIXTURE_TARGET)),
             b"launcher",
         );
         write_fixture(
             &root
                 .join("workspace-target/release")
-                .join(executable_name("clonk-app")),
+                .join(executable_name("clonk-app", FIXTURE_TARGET)),
             b"runtime",
         );
 
@@ -1662,10 +1673,30 @@ mod tests {
             repo_root: root.to_path_buf(),
             target_dir: root.join("workspace-target"),
             release_dir: root.join("workspace-target/release"),
-            host_triple: "test-target".to_string(),
-            target_triple: "test-target".to_string(),
+            host_triple: FIXTURE_TARGET.to_string(),
+            target_triple: FIXTURE_TARGET.to_string(),
         };
         (temp, paths)
+    }
+
+    #[test]
+    fn executable_name_follows_the_target_triple_not_the_host() {
+        assert_eq!(
+            executable_name("clonk-app", "x86_64-pc-windows-gnu"),
+            "clonk-app.exe"
+        );
+        assert_eq!(
+            executable_name("clonk-app", "x86_64-pc-windows-msvc"),
+            "clonk-app.exe"
+        );
+        assert_eq!(
+            executable_name("clonk-app", "x86_64-unknown-linux-gnu"),
+            "clonk-app"
+        );
+        assert_eq!(
+            executable_name("clonk-game", "aarch64-apple-darwin"),
+            "clonk-game"
+        );
     }
 
     #[test]
@@ -1675,8 +1706,8 @@ mod tests {
         let package_dir = assemble_package_layout(&paths).expect("assemble package");
 
         for relative in [
-            PathBuf::from("bin").join(executable_name("clonk-game")),
-            PathBuf::from("bin").join(executable_name("clonk-app")),
+            PathBuf::from("bin").join(executable_name("clonk-game", FIXTURE_TARGET)),
+            PathBuf::from("bin").join(executable_name("clonk-app", FIXTURE_TARGET)),
             PathBuf::from("COPYING"),
             PathBuf::from("TRADEMARK"),
             PathBuf::from("README.md"),
@@ -1738,8 +1769,8 @@ mod tests {
         zip.extract(extracted.path())
             .expect("extract package archive");
         for relative in [
-            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-game")),
-            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-app")),
+            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-game", FIXTURE_TARGET)),
+            PathBuf::from("clonk-rust/bin").join(executable_name("clonk-app", FIXTURE_TARGET)),
             PathBuf::from("clonk-rust/EkeReloaded.c4f/HarpoonRace.c4s/Scenario.txt"),
             PathBuf::from("clonk-rust/licenses/RUST_THIRD_PARTY_LICENSES.txt"),
         ] {
