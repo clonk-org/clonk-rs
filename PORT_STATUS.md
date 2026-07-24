@@ -178,6 +178,13 @@ live comparison.
 
 ## Open
 
+- Flaky test (observed 2026-07-24, not fixed): `clonk-network`
+  `session::tests::dual_client_reconnects_a_missing_tcp_route` failed once in a
+  full `cargo nextest run --workspace` and was not reproducible — 5/5 green in
+  isolation and the immediately following full workspace run was 8828/8828. It
+  is a real-socket reconnect test, so it is load/timing sensitive like the
+  `control_sync_and_reconnect_smoke` case that already carries `retries = 2` in
+  `.config/nextest.toml`. Root-cause it rather than adding another retry.
 - Tutorial/UI: exact menus, HUD, evaluation, audio, and startup/options; 2×/3×
   startup-main text is native, while fractional/other scaled text remains blurred.
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,

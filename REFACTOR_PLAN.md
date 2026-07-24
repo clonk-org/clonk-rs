@@ -361,3 +361,27 @@ state extraction remains queued behind wave 2.
 
   Byte-partition proof: all 12,186 production lines reconstruct from the five
   files line for line, with 239 lines differing solely by a visibility prefix.
+- scenario.rs production split landed: the 17,220-line production half became
+  `core.rs` 4,944 / `legacy_parse.rs` 4,127 / `sections.rs` 3,034 /
+  `map.rs` 1,748 / `definitions.rs` 1,163 / `values.rs` 940 / `c4value.rs` 899 /
+  `legacy_types.rs` 413, with scenario.rs down to 1,120 lines (imports, the
+  module decls, and the id-frozen `mod tests` splice plus its two
+  file-relative-macro tests and `mod game_start_sync`).
+
+  Visibility follows the command.rs rule — `pub(in crate::scenario)` restores
+  the exact pre-split scope, `pub(crate)` only where an outside caller already
+  existed; each module's `pub use` re-export is set to that module's widest item
+  visibility so no glob claims more than it re-exports. 567 declarations changed
+  visibility; the 17,220 production lines are otherwise byte-identical.
+
+  Two tooling lessons for the next split:
+  * Promoting by *name* is wrong. Making a private inherent `fn serialize`
+    visible let it win method resolution over `serde::Serialize::serialize` at
+    call sites in sibling modules — E0061/E0308, not a privacy error. Promote
+    only declarations rustc actually names, via JSON diagnostic spans, and
+    verify the span really is a declaration (an early version spliced
+    `pub(in ...)` into the middle of expressions).
+  * Conversely, span-driven promotion alone is not sufficient: when a private
+    method is shadowed by a trait method in scope, rustc reports the *arity*
+    mismatch instead of E0624, so the loop must consume every error class, not
+    just E0616/E0624/E0603/E0451.
