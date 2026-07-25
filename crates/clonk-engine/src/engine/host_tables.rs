@@ -475,6 +475,20 @@ impl Engine {
         unsafe { &*std::ptr::addr_of!((*engine).landscape) }.clone()
     }
 
+    /// Report the landscape extent without copying the shell. Sector sizing is
+    /// the only caller that used to force `lazy_host_world_landscape` for two
+    /// integers, once per script call that reaches `FindObjects`.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::lazy_host_world_landscape`].
+    unsafe fn lazy_host_world_landscape_dimensions(source: *const ()) -> Option<(i32, i32)> {
+        let engine = source.cast::<Self>();
+        unsafe { &*std::ptr::addr_of!((*engine).landscape) }
+            .as_ref()
+            .map(crate::compat::landscape_extent)
+    }
+
     /// Build the shared/static portion of a script host context without
     /// materializing every object's mutable script state or cloning the
     /// landscape shell. Movement can finish this lazily on first contact.
@@ -651,6 +665,7 @@ impl Engine {
                 Self::lazy_host_world_objects,
                 Self::lazy_host_world_landscape,
             )
+            .with_landscape_dimensions(Self::lazy_host_world_landscape_dimensions)
             .with_legacy_find_object(Self::lazy_host_world_object_matches)
         };
         self.host_world_context_base()

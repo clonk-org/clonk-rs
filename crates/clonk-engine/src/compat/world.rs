@@ -1612,6 +1612,11 @@ pub(crate) struct LazyHostWorldProvider {
     object: unsafe fn(*const (), ObjectId) -> Option<(usize, HostWorldObject)>,
     objects: unsafe fn(*const (), &HashSet<usize>) -> Vec<(usize, HostWorldObject)>,
     landscape: unsafe fn(*const ()) -> Option<Landscape>,
+    /// Landscape extent without the shell copy. `C4LSectors::Update` sizes its
+    /// grid from Width/Height alone (oracle-src-pinned src/C4Sector.cpp:107),
+    /// so a provider that can answer those two integers directly spares the
+    /// deep clone `landscape` would otherwise force.
+    landscape_dimensions: Option<unsafe fn(*const ()) -> Option<(i32, i32)>>,
     legacy_find_object: Option<unsafe fn(*const (), ObjectId, &FindObjectParams) -> Option<bool>>,
 }
 
@@ -1639,8 +1644,24 @@ impl LazyHostWorldProvider {
             object,
             objects,
             landscape,
+            landscape_dimensions: None,
             legacy_find_object: None,
         }
+    }
+
+    /// Supply the landscape extent without materializing the shell.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`LazyHostWorldProvider::new`]: the hook runs only
+    /// inside the synchronous script invocation that created the context, and
+    /// must report the same extent the `landscape` hook would.
+    pub(crate) fn with_landscape_dimensions(
+        mut self,
+        landscape_dimensions: unsafe fn(*const ()) -> Option<(i32, i32)>,
+    ) -> Self {
+        self.landscape_dimensions = Some(landscape_dimensions);
+        self
     }
 
     pub(crate) fn with_legacy_find_object(
@@ -1666,6 +1687,11 @@ impl LazyHostWorldProvider {
     fn landscape(self) -> Option<Landscape> {
         // SAFETY: see `object`.
         unsafe { (self.landscape)(self.source) }
+    }
+
+    fn landscape_dimensions(self) -> Option<(i32, i32)> {
+        // SAFETY: see `object`.
+        unsafe { (self.landscape_dimensions?)(self.source) }
     }
 }
 
@@ -3913,17 +3939,32 @@ impl HostWorldContext {
         sector_shape_rect(self.object_live_shape_rect(object))
     }
 
+    /// The landscape extent, preferring any answer that avoids materializing
+    /// the callback-local landscape shell.
+    fn landscape_dimensions(&self) -> Option<(i32, i32)> {
+        // An already-materialized landscape stays authoritative: a host API
+        // may have mutated this context's private copy, and reading it back
+        // cannot force a second clone.
+        if let Some(slot) = self.landscape.get() {
+            return slot.as_deref().map(landscape_extent);
+        }
+        self.lazy_world
+            .and_then(LazyHostWorldProvider::landscape_dimensions)
+            .or_else(|| self.landscape_ref().map(landscape_extent))
+    }
+
     /// The sector map over this context's objects, built on first use.
     fn sector_map(&self) -> Option<Rc<SectorMap>> {
         self.materialize_objects();
-        let landscape = self.landscape_ref()?;
+        let (width, height) = self.landscape_dimensions()?;
         let mut cache = self.sectors.borrow_mut();
         if cache.is_none() {
             let store = self.object_store.borrow();
             *cache = Some(Rc::new(build_host_sector_map(
                 store.order.iter().filter_map(|id| store.objects.get(id)),
                 &self.definitions,
-                landscape,
+                width,
+                height,
             )));
         }
         cache.clone()
@@ -4031,16 +4072,24 @@ impl HostWorldContext {
     }
 }
 
+/// The two integers `C4LSectors::Update` needs from the landscape
+/// (oracle-src-pinned src/C4Sector.cpp:107).
+pub(crate) fn landscape_extent(landscape: &Landscape) -> (i32, i32) {
+    (
+        i32::try_from(landscape.width()).unwrap_or(i32::MAX),
+        landscape.estimated_height(),
+    )
+}
+
 pub(crate) fn build_host_sector_map<'a, I>(
     objects: I,
     definitions: &HashMap<DefinitionId, DefinitionMetadata>,
-    landscape: &Landscape,
+    width: i32,
+    height: i32,
 ) -> SectorMap
 where
     I: IntoIterator<Item = &'a HostWorldObject>,
 {
-    let width = i32::try_from(landscape.width()).unwrap_or(i32::MAX);
-    let height = landscape.estimated_height();
     let mut sectors = SectorMap::new(width, height);
     sectors.rebuild(
         objects

@@ -786,3 +786,37 @@ fn rejected_step_latches_contact_for_next_move_to_jump() {
             "JumpControl reacts to the rejected step's latched CNAT_Left on the next command frame"
     );
 }
+
+#[test]
+fn sector_queries_do_not_materialize_the_landscape_shell() {
+    // C4LSectors only ever needs the landscape's extent to size its grid
+    // (oracle-src-pinned src/C4Sector.cpp:107 reads Game.Landscape.Width/Height
+    // and nothing else). Forcing the callback-local landscape copy for two
+    // integers costs a full deep clone on the first FindObjects of every
+    // script call, which is the hot path while many flames are alive.
+    let mut engine = Engine::with_seed(0);
+    engine
+        .register_definition(
+            Definition::from_script("SECT", "Sector", "").expect("definition compiles"),
+        )
+        .expect("definition registers");
+    engine.set_landscape(Landscape::flat(100, 100));
+    for x in 0..8 {
+        engine
+            .spawn_object(SpawnConfig::new("SECT").with_position(Vector2::new(x * 8, 10)))
+            .expect("object spawns");
+    }
+
+    HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(|count| count.set(0));
+    let context = engine.host_world_context();
+    let found = context
+        .object_sector_ids_in_rect(DefinitionRect::new(0, 0, 100, 100))
+        .expect("a landscape-backed context has a sector map");
+
+    assert_eq!(found.len(), 8, "every spawned object is inside the query rect");
+    assert_eq!(
+        HOST_WORLD_LANDSCAPE_MATERIALIZATIONS.with(Cell::get),
+        0,
+        "sector sizing must not clone the landscape shell"
+    );
+}

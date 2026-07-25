@@ -1612,12 +1612,14 @@ protected func Construction()
         let snapshot_landscape =
             Landscape::new(150, vec![120; 150]).expect("snapshot landscape builds");
         let definitions = HashMap::new();
+        let (width, height) = crate::compat::landscape_extent(&snapshot_landscape);
         let mut sectors = build_host_sector_map(
             [1_usize, 0, 2]
                 .into_iter()
                 .map(|index| &snapshot_objects[index]),
             &definitions,
-            &snapshot_landscape,
+            width,
+            height,
         );
         // SortByCategory refreshes only the rank oracle. Existing links in
         // each C4Sector::Objects list deliberately retain their old order.
