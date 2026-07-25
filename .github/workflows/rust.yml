@@ -5,7 +5,7 @@ name: Clonk Rust CI
 # repository running the workflow, so `actions/checkout` cannot clone
 # syb0rg/clonk-rs-content and every job fails at checkout with
 # "Repository not found". Runs were also billing private-repo Actions minutes
-# on every push and on each open dependabot pull request.
+# on every push and on each open dependency-update pull request.
 #
 # To re-enable, first give checkout access to the content repository — make it
 # public, or add a fine-grained PAT with Contents:read on both repositories as

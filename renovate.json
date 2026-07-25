@@ -1,0 +1,44 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommitTypeAll(chore)",
+    "helpers:pinGitHubActionDigests",
+    "schedule:monthly"
+  ],
+  "timezone": "America/Chicago",
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 0,
+  "lockFileMaintenance": {
+    "description": "Workspace builds use --locked, so a stale Cargo.lock is a build input like any other; refresh it on the same monthly cadence.",
+    "enabled": true
+  },
+  "ignorePaths": [
+    "third_party/**"
+  ],
+  "git-submodules": {
+    "description": "content/ is a deliberately pinned game-data submodule, not a dependency to track.",
+    "enabled": false
+  },
+  "packageRules": [
+    {
+      "description": "The whole workspace shares one Cargo.lock, so separate compatible-update pull requests would each invalidate the others. Collect them into one.",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "cargo minor and patch"
+    },
+    {
+      "description": "Workflow action bumps are independent of the Rust build; keep them in their own pull request.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin"],
+      "groupName": "github actions"
+    },
+    {
+      "description": "This engine is held to bit-for-bit parity with the C++ oracle and its CI is currently disabled, so a major bump must not open unreviewed. Tick it on the dependency dashboard to request the pull request.",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    }
+  ]
+}
