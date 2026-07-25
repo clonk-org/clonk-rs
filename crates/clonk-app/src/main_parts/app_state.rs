@@ -3303,9 +3303,16 @@ pub(crate) fn advance_simulation_pass(
             }
         }
         // Winit already coalesces intermediate catch-up frames into this one
-        // pass. The post-pass redraw follows only the latest C++ frame-skip
-        // decision; an earlier skipped frame must not hide recovered state.
-        outcome.skip_redraw = frame_advanced && skip_render;
+        // pass, so the pass gets a single redraw decision for all of them. An
+        // earlier skipped frame must not hide recovered state, and equally a
+        // *final* skipped frame must not discard the render that the frames
+        // before it asked for: taking only the last decision drew zero frames
+        // for the whole burst whenever the burst happened to end on a skip.
+        // C++ consumes DoSkipFrame per pass and keeps showing a fast-forward
+        // during recovery (C4Application.cpp:463-476, C4GameControl.cpp:339),
+        // so the pass draws unless every frame in it was a skip frame.
+        outcome.skip_redraw =
+            outcome.executed_frames > 0 && outcome.skipped_render_frames == outcome.executed_frames;
         catch_up = frame_advanced && pacing.overflow;
 
         let schedule_changed = synchronize_frame_schedule(
