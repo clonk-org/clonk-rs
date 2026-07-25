@@ -2391,14 +2391,12 @@
         let mut app = new_running_sandbox_app();
         let mut clock = NetworkControlClock::new(0, 1);
         clock.set_target_fps(76);
-        clock.observe_control_send_time_ms(300);
-        for _ in 0..6 {
-            assert!(clock.calculate_performance().is_none());
-            clock.complete_control_frame();
-        }
+        // At 76 fps a frame is 13.2ms, so a 20ms link is one frame plus C++'s
+        // one-frame floor and a 30ms link is two.
+        clock.observe_control_send_time_ms(20);
         let change = clock
             .calculate_performance()
-            .expect("the seventh sample changes presend to two");
+            .expect("the first sample already sizes presend");
         app.apply_control_presend_change(change)
             .expect("intermediate adaptive flash installs");
         assert_eq!(
@@ -2406,13 +2404,11 @@
             Some("PreSend: 2  - TargetFPS: 76")
         );
         clock.complete_control_frame();
-        for _ in 0..6 {
-            assert!(clock.calculate_performance().is_none());
-            clock.complete_control_frame();
-        }
+
+        clock.observe_control_send_time_ms(30);
         let change = clock
             .calculate_performance()
-            .expect("live target changes the fourteenth sample to presend three");
+            .expect("a slower link changes presend to three");
         app.apply_control_presend_change(change)
             .expect("adaptive flash installs");
         assert_eq!(

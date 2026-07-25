@@ -18851,7 +18851,9 @@
                 initial.presend,
                 initial.average_control_time
             ),
-            (41, 4, 2, 40_000)
+            // A six-second link saturates the 1..15 PreSend clamp; the ACT
+            // beside it is still C++'s exact 1/150 EWMA of the same sample.
+            (41, 4, 15, 40_000)
         );
         assert_eq!(
             app.runtime_client_list

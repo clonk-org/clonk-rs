@@ -24,9 +24,9 @@ use clonk_network::{
     connect_client_addresses, decode_control_entry_payload, decode_control_packet,
     encode_control_entry_payload, encode_control_packet, start_host_with_bindings, ClientConfig,
     ClientEvent, ClientHandle, ClientId, ClientMeshPuncherConfig, ClientPlayerResourceRequest,
-    ControlDelivery, ControlPacket, HostConfig, HostEvent, HostHandle, HostJoinSnapshot,
-    HostUdpBinding, LegacyControlFrame, LegacyControlSet, NetpuncherGameIds, NetworkAddress,
-    NetworkJoinRoutePlan, NetworkProtocol, NetworkStatus, ParticipantKind, Tick,
+    ControlDelivery, ControlLatencyEstimator, ControlPacket, HostConfig, HostEvent, HostHandle,
+    HostJoinSnapshot, HostUdpBinding, LegacyControlFrame, LegacyControlSet, NetpuncherGameIds,
+    NetworkAddress, NetworkJoinRoutePlan, NetworkProtocol, NetworkStatus, ParticipantKind, Tick,
 };
 pub use clonk_network::{
     RuntimeLobbyClientTelemetry, RuntimeNetworkClientState, RuntimeNetworkConnection,
@@ -394,6 +394,9 @@ pub struct NetworkControlClock {
     control_send_time_ms: Option<i32>,
     target_tick: Option<i32>,
     local_activated: Option<bool>,
+    /// Sizes PreSend from the delivery-time tail rather than its mean. See
+    /// `ControlLatencyEstimator` and the PORT_STATUS divergence entry.
+    latency: ControlLatencyEstimator,
 }
 
 impl NetworkControlClock {
@@ -408,6 +411,7 @@ impl NetworkControlClock {
             control_send_time_ms: None,
             target_tick: None,
             local_activated: None,
+            latency: ControlLatencyEstimator::new(),
         }
     }
 
@@ -506,9 +510,15 @@ impl NetworkControlClock {
             .wrapping_mul(149)
             .wrapping_add(control_send_time_ms.wrapping_mul(1_000))
             / 150;
+        // The C++ average above stays exactly as C++ computes it because it is
+        // the script- and dialog-visible ACT field. Only the PreSend decision
+        // moves to the tail-aware budget: C++ sizes the horizon so that the
+        // *mean* control arrives in time, which leaves every above-mean packet
+        // stalling the whole session.
+        self.latency.observe(control_send_time_ms);
         let next = self
             .target_fps
-            .wrapping_mul(self.avg_control_send_time_us)
+            .wrapping_mul(self.latency.budget_us())
             .wrapping_div(1_000_000)
             .wrapping_add(1)
             .clamp(1, MAX_CONTROL_PRESEND);
@@ -14507,7 +14517,15 @@ Message=Server says Andr\xe9\r\n\
 
         let mut clock = NetworkControlClock::new(0, 1);
         clock.observe_control_send_time_ms(sample.expect("live worker sample"));
-        assert_eq!(clock.calculate_performance(), None);
+        // 66ms of link is 2 frames at 38 fps, plus C++'s one-frame floor. The
+        // ACT average beside it stays C++'s exact 1/150 EWMA of the same sample.
+        assert_eq!(
+            clock.calculate_performance(),
+            Some(ControlPreSendChange {
+                control_presend: 3,
+                target_fps: 38,
+            })
+        );
         assert_eq!(clock.avg_control_send_time(), 440);
     }
 
@@ -14528,35 +14546,35 @@ Message=Server says Andr\xe9\r\n\
 
     #[test]
     fn control_presend_uses_cpp_rolling_average_and_one_to_fifteen_clamp() {
-        // CalcPerformance retains 149/150 of the previous microsecond average
-        // and adds 1/150 of the latest topology-aware millisecond control-send
-        // sample. These exact transition edges distinguish the rolling average
-        // from replacing it with the latest sample
-        // (src/C4GameControlNetwork.cpp:382-447).
+        // The ACT field keeps C++'s exact rolling average: CalcPerformance
+        // retains 149/150 of the previous microsecond average and adds 1/150 of
+        // the latest topology-aware millisecond control-send sample
+        // (src/C4GameControlNetwork.cpp:382-447). PreSend itself no longer
+        // reads that average -- see the PORT_STATUS divergence entry -- so this
+        // pins the average and the 1..15 clamp, and the sizing is pinned below.
         let mut clock = NetworkControlClock::new(0, 1);
         assert_eq!(clock.control_presend(), 1);
         assert_eq!(clock.avg_control_send_time(), 0);
         clock.observe_control_send_time_ms(300);
-        for _ in 0..13 {
+        for _ in 0..14 {
             clock.calculate_performance();
             clock.complete_control_frame();
         }
-        assert_eq!(clock.control_presend(), 1);
-        clock.calculate_performance();
-        clock.complete_control_frame();
-        assert_eq!(clock.control_presend(), 2);
-        assert_eq!(clock.avg_control_send_time(), 26_813);
+        assert_eq!(
+            clock.avg_control_send_time(),
+            26_813,
+            "the script- and dialog-visible average stays bit-exact with C++"
+        );
 
         let mut saturated = NetworkControlClock::new(0, 1);
         saturated.observe_control_send_time_ms(1_000);
-        for _ in 0..68 {
-            saturated.calculate_performance();
-            saturated.complete_control_frame();
-        }
-        assert_eq!(saturated.control_presend(), 14);
         saturated.calculate_performance();
         saturated.complete_control_frame();
-        assert_eq!(saturated.control_presend(), 15);
+        assert_eq!(
+            saturated.control_presend(),
+            15,
+            "a one-second link saturates the C++ 1..15 clamp"
+        );
         for _ in 0..150 {
             saturated.calculate_performance();
             saturated.complete_control_frame();
@@ -14564,39 +14582,106 @@ Message=Server says Andr\xe9\r\n\
         assert_eq!(saturated.control_presend(), 15);
     }
 
+    /// The divergence itself: C++ needs 14 identical 300ms samples before
+    /// PreSend leaves 1, and ~150 before it reflects the link at all
+    /// (src/C4GameControlNetwork.cpp:382-447). Every control tick in that
+    /// window stalls the whole session, so the port sizes the horizon from the
+    /// first sample instead.
     #[test]
-    fn control_presend_uses_live_target_fps_and_reports_only_changes() {
+    fn control_presend_covers_the_link_from_the_first_sample() {
         let mut clock = NetworkControlClock::new(0, 1);
-        clock.set_target_fps(76);
         clock.observe_control_send_time_ms(300);
-        for _ in 0..6 {
-            assert_eq!(clock.calculate_performance(), None);
+        let change = clock
+            .calculate_performance()
+            .expect("the first sample already re-sizes PreSend");
+        // 38 fps * 300ms = 11 frames of link, plus C++'s one-frame floor.
+        assert_eq!(change.control_presend, 12);
+        assert_eq!(clock.control_presend(), 12);
+
+        // A steady link is not charged a variance premium on top.
+        for _ in 0..200 {
+            clock.calculate_performance();
             clock.complete_control_frame();
         }
+        assert_eq!(clock.control_presend(), 12);
+    }
+
+    /// A link that gets slower is covered at once rather than after C++'s
+    /// ~8 second rolling-average ramp; a link that recovers gives the latency
+    /// back gradually, so one spike cannot pin the horizon high.
+    #[test]
+    fn control_presend_attacks_fast_and_decays_slowly() {
+        let mut clock = NetworkControlClock::new(0, 1);
+        clock.observe_control_send_time_ms(30);
+        clock.calculate_performance();
+        clock.complete_control_frame();
+        let settled = clock.control_presend();
+
+        clock.observe_control_send_time_ms(300);
+        clock.calculate_performance();
+        clock.complete_control_frame();
+        let spiked = clock.control_presend();
+        assert!(
+            spiked >= 12,
+            "a 300ms sample must be covered immediately, got {spiked}"
+        );
+
+        clock.observe_control_send_time_ms(30);
+        for _ in 0..10 {
+            clock.calculate_performance();
+            clock.complete_control_frame();
+        }
+        assert!(
+            clock.control_presend() >= spiked - 1,
+            "ten fast samples may shave a frame but must not collapse the \
+             horizon: {} from {spiked}",
+            clock.control_presend()
+        );
+        for _ in 0..600 {
+            clock.calculate_performance();
+            clock.complete_control_frame();
+        }
+        assert_eq!(
+            clock.control_presend(),
+            settled,
+            "but a sustained recovery returns the latency"
+        );
+    }
+
+    #[test]
+    fn control_presend_uses_live_target_fps_and_reports_only_changes() {
+        // The horizon is a frame count, so the same link converts to a
+        // different PreSend at a different target FPS. A 40ms link is 1.5
+        // frames at 38 fps and 3 frames at 76 fps, plus C++'s one-frame floor.
+        let mut clock = NetworkControlClock::new(0, 1);
+        clock.observe_control_send_time_ms(40);
         assert_eq!(
             clock.calculate_performance(),
             Some(ControlPreSendChange {
                 control_presend: 2,
-                target_fps: 76,
+                target_fps: 38,
             })
         );
         clock.complete_control_frame();
-        for _ in 0..6 {
+
+        clock.set_target_fps(76);
+        assert_eq!(
+            clock.calculate_performance(),
+            Some(ControlPreSendChange {
+                control_presend: 4,
+                target_fps: 76,
+            }),
+            "setTargetFPS alone re-converts the same link"
+        );
+        clock.complete_control_frame();
+
+        // C++ reports a change only when the value actually moves; repeated
+        // identical samples stay silent (src/C4GameControlNetwork.cpp:382-447).
+        for _ in 0..20 {
             assert_eq!(clock.calculate_performance(), None);
             clock.complete_control_frame();
         }
-        let change = clock
-            .calculate_performance()
-            .expect("the fourteenth 300ms sample changes presend");
-        assert_eq!(
-            change,
-            ControlPreSendChange {
-                control_presend: 3,
-                target_fps: 76,
-            }
-        );
-        assert_eq!(clock.avg_control_send_time(), 26_813);
-        assert_eq!(clock.calculate_performance(), None);
+        assert_eq!(clock.avg_control_send_time(), 5_463);
     }
 
     #[test]

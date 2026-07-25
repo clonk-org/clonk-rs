@@ -7,6 +7,7 @@ mod client_player_resource;
 mod connection_handshake;
 mod connection_liveness;
 mod control;
+mod control_latency;
 mod control_record;
 mod forward_packet;
 mod host_game_reference;
@@ -60,6 +61,7 @@ pub use advertise::{
     HostGameAdvertiserError, NetworkGameAdvertiser, NetworkGameAdvertiserConfig,
 };
 pub use clonk_engine::{InitScenarioPlayerControlData, PlayerInfoUpdateRequest};
+pub use control_latency::ControlLatencyEstimator;
 pub use join_client_registry::{reconcile_join_client_registry, JoinClientRegistrySnapshot};
 pub use join_player_registry::{ClientPlayerInfosSnapshot, PlayerInfoListSnapshot};
 pub use join_team_registry::{JoinTeamListSnapshot, JoinTeamSnapshot};
