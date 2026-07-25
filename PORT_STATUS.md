@@ -204,6 +204,26 @@ live comparison.
   or an `AboutDlgState` that can be driven over a test-supplied license set.
   Do **not** "restore parity" here by re-adding the notice; this is a
   deliberate licensing decision by the maintainer, not a port defect.
+
+- Test gap (2026-07-25): `advance_game_clock_from_elapsed` now coalesces a
+  one-second-timer backlog instead of replaying one `sec1_timer` pass per
+  elapsed second, matching C++ (`seconds != LastExecute.tv_sec` fires
+  `Sec1Timer()` at most once per Execute, oracle-src-pinned
+  src/StdAppUnix.cpp:288-291; Win32 never queues WM_TIMER twice,
+  StdAppWin32.cpp:132). The behavior is verified against that C++ source, but
+  the accompanying test only pins that the sub-second phase survives -- it does
+  NOT distinguish one pulse from sixty, because the drained accumulator is
+  identical either way and `sec1_timer` exposes no call counter. Pinning the
+  coalescing itself needs a counting seam on that call.
+
+- Test gap (2026-07-25): the `RELIABLE_UDP_SEND_BUDGET` fix below has no test
+  pinning "a congested peer does not delay a different peer", because forcing a
+  UDP socket to block deterministically is OS-dependent and this suite already
+  carries timing-flaky socket tests that should be root-caused rather than
+  retried. The normal path is covered by the 943 `clonk-network` tests. A real
+  test wants an injectable send seam so the congested case can be simulated
+  without a real blocked socket.
+
 - Flaky test (observed 2026-07-24, not fixed): `clonk-network`
   `session::tests::dual_client_reconnects_a_missing_tcp_route` failed once in a
   full `cargo nextest run --workspace` and was not reproducible — 5/5 green in
@@ -270,6 +290,99 @@ hashed but not exported by the C++ bridge; unequal-count duplicate IDs remain
 an ordered-map model gap.
 
 ## Deliberate divergences from the oracle
+
+- **PreSend is sized from the delivery-time envelope, not the mean**
+  (`crates/clonk-network/src/control_latency.rs`, `ControlLatencyEstimator`;
+  C++ `C4GameControlNetwork::CalcPerformance`, oracle-src-pinned
+  src/C4GameControlNetwork.cpp:382-447). Approved 2026-07-24.
+  C++ derives the PreSend horizon from a 1/150 EWMA of the *mean* control send
+  time. Two consequences, both of which stall every participant rather than the
+  one slow peer: the mean sits below the delivery times of roughly half of all
+  control packets, so a link with any jitter stalls on about half its ticks
+  forever; and the 150-sample time constant is ~8 s at ControlRate 2, so a link
+  that gets slower stalls on *every* tick for that whole span before the horizon
+  reacts. The port instead tracks a decaying peak envelope (immediate attack,
+  C++'s slow decay) plus a mean-absolute-deviation margin over upward surprises
+  only. On a steady link the deviation collapses and the envelope equals the
+  mean, so the budget converges on exactly C++'s value and healthy connections
+  are unaffected.
+  The script- and dialog-visible `avg_control_send_time` (ACT) still uses C++'s
+  exact 1/150 EWMA; only the PreSend decision reads the new budget.
+  Determinism is untouched: PreSend selects which tick a client stamps its *own*
+  input for. Every participant still executes that tick's control at that tick,
+  the wire format and the delivered control stream are unchanged, and PreSend
+  already varies per client in C++ (each adapts from its own ping, and
+  `SetPreSend` is script-settable), so a C++ peer needs no knowledge of this.
+  Measured with `cargo run -p clonk-network --example link_impairment`
+  (`LC_PRESEND=cpp` vs `adaptive`, `LC_DUP=2`), 24 seeds x 400 control ticks
+  (a 22 s session), paired with the redundancy entry below. Frozen time and the
+  worst single hitch, C++ -> port:
+  80 ms RTT / +-20 ms jitter / 1% loss, 27.19% -> 0.18% and 231 ms -> 31 ms;
+  150 ms / +-40 ms / 3%, 82.06% -> 0.81% and 502 ms -> 119 ms;
+  40 ms / +-8 ms / 0.5%, 6.47% -> 0.02% and 101 ms -> 4 ms.
+  The cost is input latency, and it is charged only where it buys something:
+  mean horizon 57 ms -> 81 ms on the typical link, 28 ms -> 52 ms on the good
+  one. The deviation weight is 1 by measurement, not by analogy: RFC 6298's 4
+  bought 0.02 percentage points of frozen time and charged 65% more latency.
+  The two tests that pinned the mean-only ramp now pin the ACT average and the
+  1..15 clamp, which remain C++'s, and two new tests pin the divergent sizing.
+
+- **One datagram may hold the reliable-UDP hub for at most 2 ms**
+  (`crates/clonk-network/src/udp_runtime.rs`, `RELIABLE_UDP_SEND_BUDGET`;
+  C++ `C4NetIOSimpleUDP::Send`, oracle-src-pinned src/C4NetIO.cpp:1772-1790).
+  Approved 2026-07-25. This restores C++'s failure mode, with one bounded
+  softening.
+  C++ issues a single non-blocking `sendto` and, on EWOULDBLOCK/EINPROGRESS,
+  resets the error and reports success: the datagram is dropped and the
+  reliable layer repairs it for that one peer. The port awaited writability
+  instead, and because a single hub task owns the UDP socket for *every* peer,
+  suspending there held up control delivery to all of them behind whichever
+  peer was congested -- one bad uplink stalled the entire session. That is a
+  port artifact, not C++ behavior, and it mattered more once control datagrams
+  started going out twice.
+  The divergence is only that C++ drops at the *first* sign of back-pressure
+  while the port allows 2 ms first, which is strictly more conservative (it
+  drops less) and still bounds the hub. A writable socket never reaches the
+  budget: `send_to` completes on its first poll and the timer is dropped
+  unfired, so the healthy path is unchanged. A timeout is reported as a
+  successful send, exactly like C++'s `return true`, so it cannot be mistaken
+  for an unreachable peer and tear the connection down.
+  `try_send_to` is not a valid expression of this and was tried and reverted:
+  tokio's `try_*` does not register interest, so it answers WouldBlock until
+  readiness has been established and silently drops every early datagram (it
+  made 6 `udp_runtime`/`udp_session` tests time out).
+
+- **Control-sized reliable-UDP datagrams are sent twice**
+  (`crates/clonk-network/src/udp.rs`, `reliable_udp_sends_redundant_copy`;
+  C++ `C4NetIOUDP::SendDirect`, oracle-src-pinned src/C4NetIO.cpp:3128).
+  Approved 2026-07-24.
+  C++ sends each data datagram once and repairs a loss with a request/resend
+  round trip. Because reliable-UDP delivery is strictly ordered
+  (`take_complete_direct_packets`, udp.rs:421), a single lost control datagram
+  withholds every *later* control tick from the game loop until that repair
+  lands, so one dropped datagram freezes the whole session for
+  (control interval + 1 RTT) -- and a loss with no following traffic waits on
+  the 1 Hz check instead, up to a second. Putting a second copy of the same
+  datagram on the wire immediately removes the round trip for any loss that does
+  not take both copies.
+  This is invisible to a C++ peer: the copy is byte-identical and therefore
+  carries the same packet number, and both engines discard a fragment they have
+  already stored -- Rust at `ReliableUdpPartialPacket::add_fragment`
+  (udp.rs:508-522), C++ at `C4NetIOUDP::Packet::AddFragment`
+  (oracle-src-pinned src/C4NetIO.cpp:2615-2620). The delivered packet stream,
+  its ordering and the wire format are unchanged.
+  Only inner packets of <= 256 bytes qualify, which covers control (10-27 bytes
+  on the wire) and excludes resource transfer, whose chunks fragment into full
+  499-byte datagrams. The cost is about 1 KB/s per peer per direction.
+  Measured as above at 80 ms RTT / +-20 ms jitter / 1% loss, holding PreSend at
+  C++'s: worst hitch 231 ms -> 56 ms and frozen time 27.19% -> 18.53%; combined
+  with the entry above, 231 ms -> 31 ms and 0.18%. Staggering the copy was
+  measured and rejected: at 0/15/30 ms of delay the results were within noise
+  under independent loss, and a correlated 60 ms loss episode swallows any
+  stagger short enough to be useful, so the copy goes out immediately and needs
+  no timer. Under that bursty model redundancy contributes little on its own
+  (both copies are usually lost together) and the envelope estimator carries the
+  result: 23.32% -> 0.31% frozen at 80 ms / 1%.
 
 - **Reliable-UDP re-ask damping, 1 s -> 250 ms** (`crates/clonk-network/src/udp.rs`,
   `RELIABLE_UDP_RECHECK_INTERVAL`; C++ `C4NetIOUDP::Peer::iReCheckInterval`,
