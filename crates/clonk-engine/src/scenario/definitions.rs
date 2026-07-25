@@ -338,6 +338,9 @@ pub(crate) fn convert_action_definition(
     if let Some(turn_action) = &action.turn_action {
         spec = spec.with_turn_action(turn_action.clone());
     }
+    if let Some(sound) = &action.sound {
+        spec = spec.with_sound(sound.clone());
+    }
     if let Some(dig_free) = action.dig_free {
         spec = spec.with_dig_free(dig_free);
     }
