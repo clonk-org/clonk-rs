@@ -1690,15 +1690,17 @@ impl GameApp {
                     self.commit_pending_native_base(frame);
                     self.begin_native_text_capture(true);
                 }
-                if let (Some(pending), Some(properties_assets), Some(fonts)) = (
+                if let (Some(pending), Some(properties_assets), Some(fonts), Some(book)) = (
                     self.startup_player_properties_dialog.as_ref(),
                     self.assets.plrprop_assets(),
                     self.assets.clonk_fonts.as_deref(),
+                    self.assets.options_book_fonts.as_deref(),
                 ) {
                     clonk_frontend::startup_plrproperties::PlayerPropertiesScreen::render(
                         self.graphics.surface_mut(),
                         &properties_assets,
                         fonts,
+                        book,
                         &pending.controller,
                         Some(menu_gamma),
                     );
