@@ -659,6 +659,10 @@ const SUPPLEMENTAL_STARTUP_DIALOG_IMAGES: &[&str] = &[
     "Menu.png",
     "Options.png",
     "Control.png",
+    // C4StartupPlrPropertiesDlg's colour preview and gamepad control image
+    // (C4GraphicsResource.cpp:209,229).
+    "Flag.png",
+    "Gamepad.png",
     // C4StartupPlrPropertiesDlg's default portrait pool.
     "Portrait1.png",
     "Portrait2.png",
@@ -5978,11 +5982,17 @@ impl FrontendAssets {
         Some(
             clonk_frontend::startup_plrproperties::PlayerPropertiesAssets {
                 background: self.dialog_image("StartupPlrPropBG.png")?,
+                big_arrows: self.dialog_image("GUIBigArrows.png")?,
+                book_scroll: self.dialog_image("StartupBookScroll.png")?,
+                icons: self.dialog_image("GUIIcons.png")?,
+                button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
+                flag: self.dialog_image("Flag.png")?,
+                control: self.dialog_image("Control.png")?,
+                gamepad: self.dialog_image("Gamepad.png"),
+                control_types: self.dialog_image("StartupPlrCtrlType.png"),
                 caption: self.dialog_image("GUICaption.png")?,
                 button: self.dialog_image("GUIButton.png")?,
                 button_down: self.dialog_image("GUIButtonDown.png")?,
-                button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
-                control_types: self.dialog_image("StartupPlrCtrlType.png"),
             },
         )
     }
@@ -7438,6 +7448,26 @@ pub(crate) fn run_menu_dump(
         .split_once(':')
         .map(|(view, path)| (view, Some(path)))
         .unwrap_or((menu_view, None));
+    // "plrprops[:<color>/<portrait>]" opens the first-start new-player form over
+    // the main menu with pinned draws, so captures are reproducible.
+    if view_name == "plrprops" {
+        let (color, portrait) = folder_path
+            .and_then(|spec| spec.split_once('/'))
+            .and_then(|(color, portrait)| {
+                Some((
+                    color.parse::<usize>().ok()?,
+                    portrait.parse::<usize>().ok()?,
+                ))
+            })
+            .unwrap_or((0, 0));
+        let controller = app.new_startup_player_properties_controller(color, portrait);
+        app.startup_player_properties_dialog = Some(PendingStartupPlayerProperties {
+            origin: StartupPlayerPropertiesOrigin::MainMenuFirstPlayer,
+            controller,
+        });
+        app.mark_menu_dirty();
+        return finish_menu_dump(&mut app, dump_path);
+    }
     let item = match view_name {
         "main" => None,
         "scenarios" => Some(MainMenuItem::LocalGame),
@@ -7445,9 +7475,9 @@ pub(crate) fn run_menu_dump(
         "about" => Some(MainMenuItem::About),
         "plrsel" => Some(MainMenuItem::PlayerSelection),
         "net" => Some(MainMenuItem::NetworkGame),
-        other => {
-            anyhow::bail!("unknown --menu-view `{other}` (main|scenarios|options|about|plrsel|net)")
-        }
+        other => anyhow::bail!(
+            "unknown --menu-view `{other}` (main|scenarios|options|about|plrsel|net|plrprops)"
+        ),
     };
     if let Some(item) = item {
         app.handle_main_menu_activation(item)
@@ -7475,7 +7505,11 @@ pub(crate) fn run_menu_dump(
         app.mark_menu_dirty();
     }
 
-    // Render one frame to the CPU surface, then encode it.
+    finish_menu_dump(&mut app, dump_path)
+}
+
+/// Renders one settled startup frame and writes it to `dump_path`.
+fn finish_menu_dump(app: &mut GameApp, dump_path: &std::path::Path) -> Result<()> {
     let (w, h) = {
         let s = app.graphics.surface();
         (s.width(), s.height())

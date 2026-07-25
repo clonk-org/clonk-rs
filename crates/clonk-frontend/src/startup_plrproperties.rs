@@ -5,8 +5,9 @@
 //! needed by the application to distinguish an unchanged image from a cleared
 //! one.
 
-use crate::classic_gui::{ClassicButtonState, ClassicGuiSkin, IntRect};
+use crate::classic_gui::{ClassicGuiSkin, IntRect};
 use crate::startup_main_menu::StartupTooltip;
+use crate::startup_options_dlg::BookFonts;
 use crate::startup_portraitsel::{
     PortraitFileEntry, PortraitLocation, PortraitSelAction, PortraitSelCommit,
     PortraitSelController, PortraitSelResources, PortraitThumbnailRequest,
@@ -14,12 +15,36 @@ use crate::startup_portraitsel::{
 use crate::{ClonkFontSet, GuiPoint, ImageData, KeyCode};
 use clonk_engine::player_file::PlayerFile;
 use clonk_graphics::clonk_font::{ClonkFont, TextAlign};
-use clonk_graphics::{Color, GammaRamp, Rect as SurfaceRect, Surface};
+use clonk_graphics::{Color, GammaRamp, Surface};
 use clonk_gui::Rect as GuiRect;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// `C4StartupEditBorderColor` (`src/C4Startup.h:31`).
 const STARTUP_EDIT_BORDER_COLOR: u32 = 0x00a4_947a;
+
+/// `C4StartupFontClr` 0xff000000 (`src/C4Startup.h:28`): opaque black.
+const STARTUP_FONT_RGBA: [u8; 4] = [0, 0, 0, 255];
+
+/// The half-transparent olive box `C4GUI::Edit::DrawElement` paints behind a
+/// selection (`src/C4GuiEdit.cpp:614`).
+const SELECTION_BOX_COLOR: u32 = 0x7f7f_7f00;
+
+/// `C4GUI_IconWdt`/`C4GUI_IconHgt` are 40 and `GUIIcons.png` is 240 wide
+/// (`src/C4Gui.h:105-106`, `src/C4Gui.cpp:1198-1199`), so the atlas has six
+/// columns — the fallback `Icon::GetIconFacet` also assumes
+/// (`src/C4GuiLabels.cpp:584`).
+const GUI_ICON_COLUMNS: i32 = 6;
+
+/// `C4P_Control_GamePad1` (`src/C4Constants.h:89`): control sets below this
+/// index draw `fctKeyboard`, the rest draw `fctGamepad`.
+const KEYBOARD_CONTROL_SETS: i32 = 4;
+
+/// `C4GUI::Edit::GetMarginLeft/Right` and `GetMarginTop/Bottom`
+/// (`src/C4GuiEdit.h:101-104`).
+const EDIT_MARGIN_X: i32 = 4;
+const EDIT_MARGIN_Y: i32 = 2;
 
 /// `C4PlayerInfoCore::PlayerColors`, in `0x00RRGGBB` form.
 pub const PLAYER_COLORS: [u32; 12] = [
@@ -104,75 +129,307 @@ impl PlayerPropertiesControl {
     ];
 }
 
-/// Responsive geometry for the centered 365x400 property paper.
+/// `C4GUI::ComponentAligner` (`C4Gui.h:1883-1926`, `C4Gui.cpp:1079-1161`).
+/// The margins are re-applied on every cut and each cut consumes
+/// `size + 2 * margin` from the remaining area along its axis. `take_*`
+/// mirrors C++'s `GetFrom*`, renamed because these consume from `self`.
+struct Aligner {
+    area: IntRect,
+    margin_x: i32,
+    margin_y: i32,
+}
+
+impl Aligner {
+    fn new(x: i32, y: i32, w: i32, h: i32, margin_x: i32, margin_y: i32) -> Self {
+        Self {
+            area: IntRect { x, y, w, h },
+            margin_x,
+            margin_y,
+        }
+    }
+
+    fn from_rect(area: IntRect, margin_x: i32, margin_y: i32) -> Self {
+        Self {
+            area,
+            margin_x,
+            margin_y,
+        }
+    }
+
+    /// `GetHeight()` returns the raw remaining height — margins are not
+    /// subtracted (`C4Gui.h:1914`).
+    fn height(&self) -> i32 {
+        self.area.h
+    }
+
+    fn take_top(&mut self, height: i32) -> IntRect {
+        let out = IntRect {
+            x: self.area.x + self.margin_x,
+            y: self.area.y + self.margin_y,
+            w: self.area.w - self.margin_x * 2,
+            h: height,
+        };
+        let consumed = height + self.margin_y * 2;
+        self.area.y += consumed;
+        self.area.h -= consumed;
+        out
+    }
+
+    fn take_bottom(&mut self, height: i32) -> IntRect {
+        let out = IntRect {
+            x: self.area.x + self.margin_x,
+            y: self.area.y + self.area.h - height - self.margin_y,
+            w: self.area.w - self.margin_x * 2,
+            h: height,
+        };
+        self.area.h -= height + self.margin_y * 2;
+        out
+    }
+
+    fn take_left(&mut self, width: i32) -> IntRect {
+        let out = IntRect {
+            x: self.area.x + self.margin_x,
+            y: self.area.y + self.margin_y,
+            w: width,
+            h: self.area.h - self.margin_y * 2,
+        };
+        let consumed = width + self.margin_x * 2;
+        self.area.x += consumed;
+        self.area.w -= consumed;
+        out
+    }
+
+    fn take_right(&mut self, width: i32) -> IntRect {
+        let out = IntRect {
+            x: self.area.x + self.area.w - width - self.margin_x,
+            y: self.area.y + self.margin_y,
+            w: width,
+            h: self.area.h - self.margin_y * 2,
+        };
+        self.area.w -= width + self.margin_x * 2;
+        out
+    }
+
+    fn all(&self) -> IntRect {
+        IntRect {
+            x: self.area.x + self.margin_x,
+            y: self.area.y + self.margin_y,
+            w: self.area.w - self.margin_x * 2,
+            h: self.area.h - self.margin_y * 2,
+        }
+    }
+
+    fn expand_top(&mut self, by: i32) {
+        self.area.y -= by;
+        self.area.h += by;
+    }
+
+    fn expand_left(&mut self, by: i32) {
+        self.area.x -= by;
+        self.area.w += by;
+    }
+}
+
+/// Width and height of `C4Startup::Graphics::fctPlrPropBG`
+/// (`StartupPlrPropBG.png`), which is also the dialog's size
+/// (`C4StartupPlrSelDlg.cpp:1094`).
+pub const PAPER_WIDTH: i32 = 365;
+pub const PAPER_HEIGHT: i32 = 400;
+
+/// `C4StartupPlrPropertiesDlg::GetMargin*` (`C4StartupPlrSelDlg.h:268-271`).
+/// Every child rect below is stated relative to the paper, i.e. with these
+/// margins already added to the `ComponentAligner` coordinates.
+const MARGIN_LEFT: i32 = 45;
+const MARGIN_TOP: i32 = 16;
+const MARGIN_RIGHT: i32 = 55;
+const MARGIN_BOTTOM: i32 = 30;
+
+/// `C4StartupGraphics::BookFont` / `BookSmallFont` line heights: `C4FT_Main`
+/// at `RXFontSize` 14 and `C4FT_MainSmall` at 13 (`C4Startup.cpp:107,117`),
+/// rasterized from Endeavour. `book_font_line_heights_match_the_layout`
+/// keeps these in step with the real faces.
+const BOOK_LINE_HEIGHT: i32 = 22;
+const BOOK_SMALL_LINE_HEIGHT: i32 = 20;
+
+/// `C4GUI::ArrowButton::GetDefaultWidth/Height` = `fctBigArrows.Wdt/Hgt`,
+/// a 76x40 sheet cut into four phases (`C4Gui.cpp:1209-1210`).
+const ARROW_WIDTH: i32 = 19;
+const ARROW_HEIGHT: i32 = 40;
+/// `C4GUI_ScrollBarHgt` (`C4Gui.h:112`).
+const SCROLLBAR_HEIGHT: i32 = 16;
+/// `C4GUI_ScrollArrowWdt` (`C4Gui.h:114`) and `C4GUI_ScrollThumbWdt`
+/// (`C4Gui.h:116`), which bound a callback scroll bar's pin travel.
+const SCROLL_ARROW_WIDTH: i32 = 16;
+const SCROLL_THUMB_WIDTH: i32 = 16;
+/// `C4GUI_ButtonAreaHgt` (`C4Gui.h:121`): reserved but never drawn into.
+const BUTTON_AREA_HEIGHT: i32 = 40;
+/// `C4GUI::Edit::GetCustomEditHeight(BookFont)` =
+/// `max(22 + 3, C4GUI_MinWoodBarHgt)` (`C4GuiEdit.cpp:114-118`, `C4Gui.h:161`).
+const EDIT_HEIGHT: i32 = 25;
+/// `BetweenElementDist` (`C4StartupPlrSelDlg.cpp:1115`).
+const BETWEEN_ELEMENTS: i32 = 2;
+/// `Game.GraphicsResource.fctKeyboard` / `fctGamepad`
+/// (`C4GraphicsResource.cpp:201,229`).
+const CONTROL_FACET_WIDTH: i32 = 80;
+const CONTROL_FACET_HEIGHT: i32 = 36;
+/// `Game.GraphicsResource.fctFlagClr`, a `C4FCT_Full` 64x64 facet over
+/// `Flag.png` (`C4GraphicsResource.cpp:209,254-255`).
+const FLAG_FACET_SIZE: i32 = 64;
+/// `C4Startup::Graphics::fctPlrCtrlType` (`C4Startup.cpp:79`): a 128x52 facet
+/// over the 256x102 `StartupPlrCtrlType.png`, i.e. a 2x2 phase grid.
+const MOVEMENT_FACET_WIDTH: i32 = 128;
+const MOVEMENT_FACET_HEIGHT: i32 = 52;
+
+/// Fixed geometry of the 365x400 property paper, derived exactly as
+/// `C4StartupPlrPropertiesDlg`'s constructor derives it through
+/// `C4GUI::ComponentAligner` (`C4StartupPlrSelDlg.cpp:1116-1235`).
+///
+/// The dialog does not scale with the window: `C4GUI::Screen::ShowDialog`
+/// centers it at `((screen - paper) / 2)` (`C4Gui.cpp:660-676`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlayerPropertiesLayout {
     pub paper: IntRect,
     pub title: IntRect,
+    pub name_label: IntRect,
     pub name: IntRect,
-    pub portrait: IntRect,
-    pub picture: IntRect,
+    pub color_label: IntRect,
     pub color_swatch: IntRect,
     pub color_previous: IntRect,
     pub color_next: IntRect,
     pub rgb_sliders: [IntRect; 3],
+    pub control_label: IntRect,
+    pub picture_label: IntRect,
     pub control_previous: IntRect,
     pub control_next: IntRect,
     pub control_preview: IntRect,
     pub mouse: IntRect,
+    pub picture: IntRect,
+    pub movement_label: IntRect,
     pub classic_movement: IntRect,
     pub jump_and_run_movement: IntRect,
     pub ok: IntRect,
     pub cancel: IntRect,
-    pub close: IntRect,
 }
 
 impl PlayerPropertiesLayout {
     pub fn for_size(width: i32, height: i32) -> Self {
-        let width = width.max(1);
-        let height = height.max(1);
-        let scale = (width as f32 / 365.0)
-            .min(height as f32 / 400.0)
-            .min(1.0)
-            .max(0.01);
-        let paper_w = (365.0 * scale).round() as i32;
-        let paper_h = (400.0 * scale).round() as i32;
         let paper = IntRect {
-            x: (width - paper_w) / 2,
-            y: (height - paper_h) / 2,
-            w: paper_w,
-            h: paper_h,
+            x: (width - PAPER_WIDTH) / 2,
+            y: (height - PAPER_HEIGHT) / 2,
+            w: PAPER_WIDTH,
+            h: PAPER_HEIGHT,
         };
-        let rect = |x: i32, y: i32, w: i32, h: i32| IntRect {
-            x: paper.x + (x as f32 * scale).round() as i32,
-            y: paper.y + (y as f32 * scale).round() as i32,
-            w: (w as f32 * scale).round().max(1.0) as i32,
-            h: (h as f32 * scale).round().max(1.0) as i32,
+        // `caMain(GetClientRect(), 0, 1, true)`: the client rect zeroed to the
+        // origin, so every cut below is offset by the dialog margins.
+        let mut main = Aligner::new(
+            0,
+            0,
+            PAPER_WIDTH - MARGIN_LEFT - MARGIN_RIGHT,
+            PAPER_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM,
+            0,
+            1,
+        );
+        let rect = |r: IntRect| IntRect {
+            x: paper.x + MARGIN_LEFT + r.x,
+            y: paper.y + MARGIN_TOP + r.y,
+            ..r
         };
+
+        // `caButtonArea` only reserves space; nothing is placed into it.
+        main.take_bottom(BUTTON_AREA_HEIGHT);
+        let title = rect(main.take_top(BOOK_LINE_HEIGHT));
+        main.expand_top(-BETWEEN_ELEMENTS);
+        let name_label = rect(main.take_top(BOOK_SMALL_LINE_HEIGHT));
+        let name = rect(main.take_top(EDIT_HEIGHT));
+        main.expand_top(-BETWEEN_ELEMENTS);
+        let color_label = rect(main.take_top(BOOK_SMALL_LINE_HEIGHT));
+
+        let color_row = main.take_top(ARROW_HEIGHT);
+        let mut color = Aligner::from_rect(color_row, 2, 0);
+        color.expand_left(2);
+        let color_previous = rect(color.take_left(ARROW_WIDTH));
+        let flag_width = color.height() * FLAG_FACET_SIZE / FLAG_FACET_SIZE;
+        let color_swatch = rect(color.take_left(flag_width));
+        let color_next = rect(color.take_left(ARROW_WIDTH));
+        let slider_y_diff = (color.height() - 3 * SCROLLBAR_HEIGHT) / 2;
+        let red = rect(color.take_top(SCROLLBAR_HEIGHT));
+        color.expand_top(-slider_y_diff);
+        let green = rect(color.take_top(SCROLLBAR_HEIGHT));
+        color.expand_top(-slider_y_diff);
+        let blue = rect(color.take_top(SCROLLBAR_HEIGHT));
+
+        main.expand_top(-BETWEEN_ELEMENTS);
+        let control_pic_size = ARROW_HEIGHT;
+        let control_row =
+            main.take_top(control_pic_size + BOOK_SMALL_LINE_HEIGHT + BETWEEN_ELEMENTS);
+        let mut control_area = Aligner::from_rect(control_row, 0, 0);
+        let mut picture_area = Aligner::from_rect(control_area.take_right(control_pic_size), 0, 0);
+        let control_label = rect(control_area.take_top(BOOK_SMALL_LINE_HEIGHT));
+        let picture_label_cell = picture_area.take_top(BOOK_SMALL_LINE_HEIGHT);
+        control_area.expand_top(-BETWEEN_ELEMENTS);
+        picture_area.expand_top(-BETWEEN_ELEMENTS);
+        let mut control = Aligner::from_rect(control_area.take_top(control_pic_size), 2, 0);
+        let control_previous = rect(control.take_left(ARROW_WIDTH));
+        let control_width = control.height() * CONTROL_FACET_WIDTH / CONTROL_FACET_HEIGHT;
+        let control_preview = rect(control.take_left(control_width));
+        let control_next = rect(control.take_left(ARROW_WIDTH));
+        control.expand_left(-10);
+        let mouse = rect(control.take_left(control.height()));
+        let picture = rect(picture_area.all());
+
+        main.expand_top(-BETWEEN_ELEMENTS);
+        let movement_label = rect(main.take_top(BOOK_SMALL_LINE_HEIGHT));
+        let mut movement = Aligner::from_rect(main.take_top(MOVEMENT_FACET_HEIGHT), 5, 0);
+        let movement_width = movement.height() * MOVEMENT_FACET_WIDTH / MOVEMENT_FACET_HEIGHT;
+        let jump_and_run_movement = rect(movement.take_left(movement_width));
+        let classic_movement = rect(movement.take_right(movement_width));
+
         Self {
             paper,
-            title: rect(45, 20, 275, 28),
-            name: rect(62, 55, 241, 28),
-            portrait: rect(37, 98, 104, 104),
-            picture: rect(38, 207, 102, 27),
-            color_swatch: rect(181, 99, 82, 38),
-            color_previous: rect(151, 103, 25, 30),
-            color_next: rect(268, 103, 25, 30),
-            rgb_sliders: [
-                rect(166, 151, 132, 19),
-                rect(166, 178, 132, 19),
-                rect(166, 205, 132, 19),
-            ],
-            control_previous: rect(38, 253, 25, 34),
-            control_next: rect(302, 253, 25, 34),
-            control_preview: rect(68, 245, 228, 52),
-            mouse: rect(126, 300, 113, 25),
-            classic_movement: rect(62, 330, 112, 25),
-            jump_and_run_movement: rect(190, 330, 125, 25),
-            ok: rect(88, 358, 88, 32),
-            cancel: rect(189, 358, 88, 32),
-            close: rect(316, 14, 28, 28),
+            title,
+            name_label,
+            name,
+            color_label,
+            color_swatch,
+            color_previous,
+            color_next,
+            rgb_sliders: [red, green, blue],
+            control_label,
+            // `ACenter` at the cell's horizontal middle; the drawn rect is
+            // narrowed to the text extent around that anchor at paint time.
+            picture_label: rect(picture_label_cell),
+            control_previous,
+            control_next,
+            control_preview,
+            mouse,
+            picture,
+            movement_label,
+            classic_movement,
+            jump_and_run_movement,
+            // Both close buttons use paper-absolute rects minus the margins
+            // (`C4StartupPlrSelDlg.cpp:1228,1231`), so they land back on the
+            // literal paper coordinates. Neither draws anything: the "OK"
+            // word and the "x" glyph are painted into `StartupPlrPropBG.png`.
+            ok: IntRect {
+                x: paper.x + 147,
+                y: paper.y + 330,
+                w: 54,
+                h: 33,
+            },
+            cancel: IntRect {
+                x: paper.x + 317,
+                y: paper.y + 16,
+                w: 21,
+                h: 21,
+            },
         }
+    }
+
+    /// Pin travel of a horizontal callback `C4GUI::ScrollBar`:
+    /// `GetMaxScroll()` (`C4Gui.h:900`) with the non-dynamic thumb size.
+    pub fn slider_pin_offset(slider: IntRect, value: u8) -> i32 {
+        let max_scroll = (slider.w - 2 * SCROLL_ARROW_WIDTH - SCROLL_THUMB_WIDTH).max(0);
+        i32::from(value) * max_scroll / 255
     }
 
     fn rect_for(self, control: PlayerPropertiesControl) -> IntRect {
@@ -215,20 +472,42 @@ fn movement_label_rect(button: IntRect, text: &str, font: &ClonkFont) -> IntRect
     }
 }
 
-/// Images used by [`PlayerPropertiesScreen`].
+/// Facet sheets used by [`PlayerPropertiesScreen`], in the same resolution
+/// order `C4StartupPlrPropertiesDlg` reaches them.
 pub struct PlayerPropertiesAssets {
-    /// `StartupPlrPropBG.png`.
+    /// `StartupPlrPropBG.png` — `C4Startup::Graphics::fctPlrPropBG`. The "OK"
+    /// word and the top-right "x" are painted into this sheet; the matching
+    /// `CloseIconButton`s carry `Ico_None` and draw nothing themselves.
     pub background: ImageData,
-    /// `GUICaption.png`.
-    pub caption: ImageData,
-    /// `GUIButton.png`.
-    pub button: ImageData,
-    /// `GUIButtonDown.png`.
-    pub button_down: ImageData,
-    /// `GUIButtonHighlight.png`.
+    /// `GUIBigArrows.png` — `fctBigArrows`, four 19x40 phases:
+    /// Left, Right, Left-down, Right-down (`C4GuiButton.cpp:262-269`).
+    pub big_arrows: ImageData,
+    /// `StartupBookScroll.png` — `fctBookScroll`, the 48x48 sheet behind
+    /// `sfctBookScrollR/G/B` (`C4Startup.cpp:58-62`).
+    pub book_scroll: ImageData,
+    /// `GUIIcons.png` — `C4GUI::Resource::fctIcons`, source of `Ico_MouseOff`
+    /// (26) and `Ico_MouseOn` (27) (`C4GuiLabels.cpp:577-586`).
+    pub icons: ImageData,
+    /// `GUIButtonHighlight.png` — the additive focus/hover overlay every
+    /// `ArrowButton`/`IconButton` draws (`C4GuiButton.cpp:209-222`).
     pub button_highlight: ImageData,
-    /// `StartupPlrCtrlType.png`; absence leaves a textual control preview.
+    /// `Flag.png` — the `ClrByOwner` source of `fctFlagClr`
+    /// (`C4GraphicsResource.cpp:209,251-256`).
+    pub flag: ImageData,
+    /// `Control.png` — `fctKeyboard` is its `(0, 0, 80, 36)` facet
+    /// (`C4GraphicsResource.cpp:201`).
+    pub control: ImageData,
+    /// `Gamepad.png` — `fctGamepad`, 80px phases (`C4GraphicsResource.cpp:229`).
+    pub gamepad: Option<ImageData>,
+    /// `StartupPlrCtrlType.png` — `fctPlrCtrlType`, a 2x2 grid of 128x52
+    /// movement-style phases (`C4Startup.cpp:78-79`).
     pub control_types: Option<ImageData>,
+    /// `GUICaption.png`, `GUIButton.png`, `GUIButtonDown.png`: the wooden GUI
+    /// skin the nested `C4PortraitSelDlg` draws with. The property paper
+    /// itself never uses them.
+    pub caption: ImageData,
+    pub button: ImageData,
+    pub button_down: ImageData,
 }
 
 pub struct PlayerPropertiesController {
@@ -576,6 +855,26 @@ impl PlayerPropertiesController {
         self.player.pref_color_dw & 0x00ff_ffff
     }
 
+    /// The dialog's own caption: `IDS_PLR_NEWPLAYER` when creating and
+    /// `IDS_DLG_PLAYER2` when editing (`C4StartupPlrSelDlg.cpp:1126-1132`).
+    pub const fn title(&self) -> &'static str {
+        match self.mode {
+            PlayerPropertiesMode::New => "New player",
+            PlayerPropertiesMode::Edit { .. } => "Player Properties",
+        }
+    }
+
+    /// `PrefColorDw` as the `ClrByOwner` modulation colour applied to
+    /// `fctFlagClr` and the picture button (`C4StartupPlrSelDlg.cpp:1262-1263`).
+    pub fn owner_color(&self) -> Color {
+        let color = self.color();
+        Color::opaque(
+            ((color >> 16) & 0xff) as u8,
+            ((color >> 8) & 0xff) as u8,
+            (color & 0xff) as u8,
+        )
+    }
+
     pub fn set_color(&mut self, color: u32) {
         let color = color & 0x00ff_ffff;
         self.player.pref_color_dw = if color == 0 { 1 } else { color };
@@ -733,10 +1032,6 @@ impl PlayerPropertiesController {
         }
         self.pointer_position = Some(position);
         self.hovered = self.hit_control(position);
-        if contains(self.layout().close, position) {
-            self.pointer_pressed = None;
-            return vec![PlayerPropertiesAction::Cancel];
-        }
         self.pointer_pressed = self.hovered;
         if let Some(control) = self.hovered {
             self.focus = control;
@@ -988,10 +1283,14 @@ fn is_slider(control: PlayerPropertiesControl) -> bool {
 pub struct PlayerPropertiesScreen;
 
 impl PlayerPropertiesScreen {
+    /// Painter order is `Window::Draw`'s: `DrawElement` blits the paper, then
+    /// every child in the order `C4StartupPlrPropertiesDlg`'s constructor
+    /// added it (`C4StartupPlrSelDlg.cpp:1116-1235`).
     pub fn render(
         surface: &mut Surface,
         assets: &PlayerPropertiesAssets,
         fonts: &ClonkFontSet,
+        book: &BookFonts,
         controller: &PlayerPropertiesController,
         gamma: Option<&GammaRamp>,
     ) {
@@ -999,292 +1298,563 @@ impl PlayerPropertiesScreen {
             PlayerPropertiesLayout::for_size(surface.width() as i32, surface.height() as i32);
         crate::draw_image_bilinear(surface, &gui_rect(layout.paper), &assets.background, gamma);
 
-        let skin = ClassicGuiSkin::new(
-            &assets.caption,
-            &assets.button,
-            &assets.button_down,
-            Some(&assets.button_highlight),
-        );
         let highlighted =
             |control| controller.focus == control || controller.hovered == Some(control);
         let pressed = |control| controller.pointer_pressed == Some(control);
 
-        fonts.caption.draw_with_gamma(
+        // Title and the four section labels: `C4GUI::Label::DrawElement`
+        // (`C4GuiLabels.cpp:38-41`) draws at `(x0, rcBounds.y)` with the
+        // label's own alignment, in `C4StartupFontClr` opaque black.
+        book.book.draw_with_gamma(
             surface,
-            layout.title.x + layout.title.w / 2,
+            layout.title.x,
             layout.title.y,
-            match controller.mode {
-                PlayerPropertiesMode::New => "New Player",
-                PlayerPropertiesMode::Edit { .. } => "Player Properties",
-            },
-            [0x40, 0x20, 0x08, 0xff],
-            TextAlign::Center,
-            true,
-            gamma,
-        );
-
-        skin.draw_caption(
-            surface,
-            layout.name,
-            &controller.player.name,
-            &fonts.text,
-            [0xff, 0xff, 0xff, 0xff],
+            controller.title(),
+            STARTUP_FONT_RGBA,
             TextAlign::Left,
+            false,
             gamma,
         );
-        draw_name_edit_frames(surface, layout.name, gamma);
-
-        if let Some(portrait) = controller.portrait_preview.as_ref() {
-            crate::draw_image_bilinear(surface, &gui_rect(layout.portrait), portrait, gamma);
-        } else if let Some(big_icon) = controller.big_icon_preview.as_ref() {
-            crate::draw_image_bilinear(surface, &gui_rect(layout.portrait), big_icon, gamma);
-        } else {
-            fill(surface, layout.portrait, Color::new(40, 30, 20, 160));
+        for (rect, text) in [
+            (layout.name_label, "Name:"),
+            (layout.color_label, "Color:"),
+            (layout.control_label, "Control:"),
+            (layout.movement_label, "Movement:"),
+        ] {
+            book.book_small.draw_with_gamma(
+                surface,
+                rect.x,
+                rect.y,
+                text,
+                STARTUP_FONT_RGBA,
+                TextAlign::Left,
+                false,
+                gamma,
+            );
         }
-        skin.draw_button(
+        book.book_small.draw_with_gamma(
             surface,
-            layout.picture,
-            "Picture",
-            fonts,
-            ClassicButtonState {
-                pressed: pressed(PlayerPropertiesControl::Picture),
-                highlighted: highlighted(PlayerPropertiesControl::Picture),
-            },
+            layout.picture_label.x + layout.picture_label.w / 2,
+            layout.picture_label.y,
+            "Picture:",
+            STARTUP_FONT_RGBA,
+            TextAlign::Center,
+            false,
             gamma,
         );
 
-        let color = controller.color();
-        fill(
+        draw_name_edit(
             surface,
-            layout.color_swatch,
-            Color::opaque(
-                ((color >> 16) & 0xff) as u8,
-                ((color >> 8) & 0xff) as u8,
-                (color & 0xff) as u8,
-            ),
+            book,
+            layout.name,
+            controller.name(),
+            // `Edit::OnGetFocus` selects the whole text and `OnLooseFocus`
+            // clears it (`C4GuiEdit.cpp:543-556`); hovering changes nothing.
+            controller.focus == PlayerPropertiesControl::Name,
+            gamma,
         );
-        draw_outline(surface, layout.color_swatch, Color::opaque(80, 40, 12));
-        draw_small_button(
+
+        // Colour row: left arrow, `fctFlagClr` tinted by the player colour,
+        // right arrow, then the three `sfctBookScrollR/G/B` sliders.
+        draw_arrow_button(
             surface,
-            &skin,
-            fonts,
+            assets,
             layout.color_previous,
-            "<",
-            PlayerPropertiesControl::ColorPrevious,
-            controller,
+            ArrowPhase::Left,
+            pressed(PlayerPropertiesControl::ColorPrevious),
+            highlighted(PlayerPropertiesControl::ColorPrevious),
             gamma,
         );
-        draw_small_button(
+        let (flag_base, flag_overlay) =
+            retained_owner_colored_flag(&assets.flag, controller.owner_color());
+        let flag_rect = aspect_fitted((FLAG_FACET_SIZE, FLAG_FACET_SIZE), layout.color_swatch);
+        crate::draw_image_bilinear(surface, &gui_rect(flag_rect), &flag_base, gamma);
+        crate::draw_image_bilinear(surface, &gui_rect(flag_rect), &flag_overlay, gamma);
+        draw_arrow_button(
             surface,
-            &skin,
-            fonts,
+            assets,
             layout.color_next,
-            ">",
-            PlayerPropertiesControl::ColorNext,
-            controller,
+            ArrowPhase::Right,
+            pressed(PlayerPropertiesControl::ColorNext),
+            highlighted(PlayerPropertiesControl::ColorNext),
             gamma,
         );
-
-        for (index, (component, label, tint)) in [
-            (PlayerColorComponent::Red, "R", Color::opaque(160, 25, 25)),
-            (PlayerColorComponent::Green, "G", Color::opaque(25, 150, 25)),
-            (PlayerColorComponent::Blue, "B", Color::opaque(25, 55, 170)),
+        for (index, (component, pin_row)) in [
+            (PlayerColorComponent::Red, 0),
+            (PlayerColorComponent::Green, 1),
+            (PlayerColorComponent::Blue, 2),
         ]
         .into_iter()
         .enumerate()
         {
-            let rect = layout.rgb_sliders[index];
-            fill(surface, rect, Color::new(30, 20, 10, 180));
-            let value = i32::from(controller.color_component(component));
-            let width = ((rect.w - 4).max(1) * value / 255).max(1);
-            fill(
+            let slider = layout.rgb_sliders[index];
+            let value = controller.color_component(component);
+            crate::startup_options_dlg::draw_horizontal_book_scrollbar(
                 surface,
-                IntRect {
-                    x: rect.x + 2,
-                    y: rect.y + 2,
-                    w: width,
-                    h: (rect.h - 4).max(1),
-                },
-                tint,
-            );
-            fonts.mini.draw_with_gamma(
-                surface,
-                rect.x - 8,
-                rect.y + (rect.h - fonts.mini.line_height) / 2,
-                label,
-                [0x40, 0x20, 0x08, 0xff],
-                TextAlign::Right,
+                &assets.book_scroll,
+                &slider,
+                PlayerPropertiesLayout::slider_pin_offset(slider, value),
                 false,
+                false,
+                // `ScrollBarFacets::Set(fctBookScroll, 1..3)`
+                // (`C4Gui.cpp:210-211`) takes the pin from column 32.
+                (32, 16 * pin_row),
                 gamma,
             );
         }
 
-        if let Some(control_types) = assets.control_types.as_ref() {
-            crate::draw_image_bilinear(
-                surface,
-                &gui_rect(layout.control_preview),
-                control_types,
-                gamma,
-            );
-        } else {
-            skin.draw_caption(
-                surface,
-                layout.control_preview,
-                &format!("Control {}", controller.player.pref_control + 1),
-                &fonts.text,
-                [0xff, 0xff, 0xff, 0xff],
-                TextAlign::Center,
-                gamma,
-            );
-        }
-        draw_small_button(
+        // Control row: left arrow, the selected control-set image, right
+        // arrow, the mouse toggle, and the picture button on the right.
+        draw_arrow_button(
             surface,
-            &skin,
-            fonts,
+            assets,
             layout.control_previous,
-            "<",
-            PlayerPropertiesControl::ControlPrevious,
-            controller,
+            ArrowPhase::Left,
+            pressed(PlayerPropertiesControl::ControlPrevious),
+            highlighted(PlayerPropertiesControl::ControlPrevious),
             gamma,
         );
-        draw_small_button(
+        draw_control_set_facet(surface, assets, layout.control_preview, controller, gamma);
+        draw_arrow_button(
             surface,
-            &skin,
-            fonts,
+            assets,
             layout.control_next,
-            ">",
-            PlayerPropertiesControl::ControlNext,
-            controller,
+            ArrowPhase::Right,
+            pressed(PlayerPropertiesControl::ControlNext),
+            highlighted(PlayerPropertiesControl::ControlNext),
             gamma,
         );
-        draw_toggle(
+        draw_icon_button(
             surface,
-            &skin,
-            fonts,
+            assets,
             layout.mouse,
-            "Mouse",
-            controller.player.pref_mouse,
-            PlayerPropertiesControl::Mouse,
-            controller,
+            // `Ico_MouseOn` 27 / `Ico_MouseOff` 26 (`C4Gui.h:716-717`).
+            Some(if controller.player.pref_mouse { 27 } else { 26 }),
+            pressed(PlayerPropertiesControl::Mouse),
+            highlighted(PlayerPropertiesControl::Mouse),
             gamma,
         );
-        draw_toggle(
+        draw_picture_button(
             surface,
-            &skin,
-            fonts,
-            layout.classic_movement,
-            "Classic",
-            !controller.player.pref_control_style,
-            PlayerPropertiesControl::ClassicMovement,
+            assets,
+            layout.picture,
             controller,
-            gamma,
-        );
-        draw_toggle(
-            surface,
-            &skin,
-            fonts,
-            layout.jump_and_run_movement,
-            "Jump'n'Run",
-            controller.player.pref_control_style,
-            PlayerPropertiesControl::JumpAndRunMovement,
-            controller,
+            pressed(PlayerPropertiesControl::Picture),
+            highlighted(PlayerPropertiesControl::Picture),
             gamma,
         );
 
-        for (control, rect, label) in [
-            (PlayerPropertiesControl::Ok, layout.ok, "OK"),
-            (PlayerPropertiesControl::Cancel, layout.cancel, "Cancel"),
+        // Movement row: each label is added before its button, so the button's
+        // facet paints over the label's descenders exactly as in C++.
+        let [classic_label, jump_label] = layout.movement_label_rects(&book.book_small);
+        for (label, text, button, control, phase) in [
+            (
+                jump_label,
+                "Jump'n'Run",
+                layout.jump_and_run_movement,
+                PlayerPropertiesControl::JumpAndRunMovement,
+                // `GetPhase(PrefControlStyle ? 1 : 0, 1)`
+                // (`C4StartupPlrSelDlg.cpp:1343`).
+                (i32::from(controller.player.pref_control_style), 1),
+            ),
+            (
+                classic_label,
+                "Classic",
+                layout.classic_movement,
+                PlayerPropertiesControl::ClassicMovement,
+                // `GetPhase(PrefControlStyle ? 0 : 1, 0)`
+                // (`C4StartupPlrSelDlg.cpp:1344`).
+                (i32::from(!controller.player.pref_control_style), 0),
+            ),
         ] {
-            skin.draw_button(
+            book.book_small.draw_with_gamma(
                 surface,
-                rect,
-                label,
-                fonts,
-                ClassicButtonState {
-                    pressed: pressed(control),
-                    highlighted: highlighted(control),
-                },
+                label.x + label.w / 2,
+                label.y,
+                text,
+                STARTUP_FONT_RGBA,
+                TextAlign::Center,
+                false,
+                gamma,
+            );
+            draw_movement_button(
+                surface,
+                assets,
+                button,
+                phase,
+                pressed(control),
+                highlighted(control),
                 gamma,
             );
         }
 
-        if let Some(error) = controller.validation_error.as_deref() {
-            fonts.mini.draw_with_gamma(
+        // OK and Cancel are `CloseIconButton`s carrying `Ico_None`: the words
+        // are part of `StartupPlrPropBG.png`, so only the additive highlight
+        // is ever drawn (`C4GuiButton.cpp:205-222`).
+        for (rect, control) in [
+            (layout.ok, PlayerPropertiesControl::Ok),
+            (layout.cancel, PlayerPropertiesControl::Cancel),
+        ] {
+            draw_icon_button(
                 surface,
-                layout.paper.x + layout.paper.w / 2,
-                layout.ok.y - fonts.mini.line_height - 2,
-                error,
-                [0xff, 0x30, 0x20, 0xff],
-                TextAlign::Center,
-                false,
+                assets,
+                rect,
+                None,
+                pressed(control),
+                highlighted(control),
                 gamma,
             );
         }
 
         if let Some(selector) = controller.portrait_selector.as_ref() {
+            let skin = ClassicGuiSkin::new(
+                &assets.caption,
+                &assets.button,
+                &assets.button_down,
+                Some(&assets.button_highlight),
+            );
             selector.render(surface, PortraitSelResources { skin, fonts }, gamma);
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_small_button(
+/// `fctBigArrows` phase indices: `ArrowFct` plus `Down` when pressed
+/// (`C4Gui.h:1137`, `C4GuiButton.cpp:266-268`).
+#[derive(Clone, Copy)]
+enum ArrowPhase {
+    Left = 0,
+    Right = 1,
+}
+
+/// `ArrowButton::DrawElement` (`C4GuiButton.cpp:255-269`).
+fn draw_arrow_button(
     surface: &mut Surface,
-    skin: &ClassicGuiSkin<'_>,
-    fonts: &ClonkFontSet,
+    assets: &PlayerPropertiesAssets,
     rect: IntRect,
-    label: &str,
-    control: PlayerPropertiesControl,
-    controller: &PlayerPropertiesController,
+    direction: ArrowPhase,
+    down: bool,
+    highlight: bool,
     gamma: Option<&GammaRamp>,
 ) {
-    skin.draw_button(
+    if highlight {
+        draw_button_highlight(surface, assets, rect, gamma);
+    }
+    let phase = direction as i32 + if down { 2 } else { 0 };
+    draw_facet_phase(
         surface,
+        &assets.big_arrows,
+        (phase * ARROW_WIDTH, 0),
+        (ARROW_WIDTH, ARROW_HEIGHT),
         rect,
-        label,
-        fonts,
-        ClassicButtonState {
-            pressed: controller.pointer_pressed == Some(control),
-            highlighted: controller.focus == control || controller.hovered == Some(control),
-        },
         gamma,
     );
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_toggle(
+/// `IconButton::DrawElement` (`C4GuiButton.cpp:205-231`) for a `GUIIcons`
+/// cell, or for `Ico_None` (highlight only).
+fn draw_icon_button(
     surface: &mut Surface,
-    skin: &ClassicGuiSkin<'_>,
-    fonts: &ClonkFontSet,
+    assets: &PlayerPropertiesAssets,
     rect: IntRect,
-    label: &str,
-    selected: bool,
-    control: PlayerPropertiesControl,
+    icon: Option<i32>,
+    down: bool,
+    highlight: bool,
+    gamma: Option<&GammaRamp>,
+) {
+    if highlight {
+        draw_button_highlight(surface, assets, rect, gamma);
+    }
+    if let Some(icon) = icon {
+        // `Icon::GetIconFacet`: square cells, `iXMax` columns per row
+        // (`C4GuiLabels.cpp:577-586`).
+        let cell = assets.icons.width() as i32 / GUI_ICON_COLUMNS;
+        let (column, row) = (icon % GUI_ICON_COLUMNS, icon / GUI_ICON_COLUMNS);
+        draw_facet_phase(
+            surface,
+            &assets.icons,
+            (column * cell, row * cell),
+            (cell, cell),
+            rect,
+            gamma,
+        );
+    }
+    if down {
+        draw_button_highlight(surface, assets, rect, gamma);
+    }
+}
+
+/// The picture button's facet: the live big icon when one exists, else
+/// `Ico_Player` (`C4StartupPlrSelDlg.cpp:1203,1520-1530`). `SetColor` tints it
+/// with the player colour (`C4StartupPlrSelDlg.cpp:1263`).
+fn draw_picture_button(
+    surface: &mut Surface,
+    assets: &PlayerPropertiesAssets,
+    rect: IntRect,
+    controller: &PlayerPropertiesController,
+    down: bool,
+    highlight: bool,
+    gamma: Option<&GammaRamp>,
+) {
+    if highlight {
+        draw_button_highlight(surface, assets, rect, gamma);
+    }
+    match controller.big_icon_preview() {
+        Some(icon) => crate::draw_image_bilinear(surface, &gui_rect(rect), icon, gamma),
+        // `Ico_Player` is icon 9 (`C4Gui.h:697`).
+        None => draw_icon_button(surface, assets, rect, Some(9), false, false, gamma),
+    }
+    if down {
+        draw_button_highlight(surface, assets, rect, gamma);
+    }
+}
+
+/// The movement `IconButton`s take a `fctPlrCtrlType` phase rather than a GUI
+/// icon (`C4StartupPlrSelDlg.cpp:1340-1345`).
+fn draw_movement_button(
+    surface: &mut Surface,
+    assets: &PlayerPropertiesAssets,
+    rect: IntRect,
+    phase: (i32, i32),
+    down: bool,
+    highlight: bool,
+    gamma: Option<&GammaRamp>,
+) {
+    if highlight {
+        draw_button_highlight(surface, assets, rect, gamma);
+    }
+    if let Some(sheet) = assets.control_types.as_ref() {
+        draw_facet_phase(
+            surface,
+            sheet,
+            (
+                phase.0 * MOVEMENT_FACET_WIDTH,
+                phase.1 * MOVEMENT_FACET_HEIGHT,
+            ),
+            (MOVEMENT_FACET_WIDTH, MOVEMENT_FACET_HEIGHT),
+            rect,
+            gamma,
+        );
+    }
+    if down {
+        draw_button_highlight(surface, assets, rect, gamma);
+    }
+}
+
+/// `pCtrlImg`: `fctKeyboard` for keyboard sets and `fctGamepad` beyond them,
+/// advanced by one facet width per set (`C4StartupPlrSelDlg.cpp:1309-1315`).
+fn draw_control_set_facet(
+    surface: &mut Surface,
+    assets: &PlayerPropertiesAssets,
+    rect: IntRect,
     controller: &PlayerPropertiesController,
     gamma: Option<&GammaRamp>,
 ) {
-    let label = if selected {
-        format!("[x] {label}")
+    let set = controller.player.pref_control;
+    let (sheet, index) = if set < KEYBOARD_CONTROL_SETS {
+        (&assets.control, set)
     } else {
-        format!("[ ] {label}")
+        match assets.gamepad.as_ref() {
+            Some(gamepad) => (gamepad, set - KEYBOARD_CONTROL_SETS),
+            None => (&assets.control, 0),
+        }
     };
-    draw_small_button(
-        surface, skin, fonts, rect, &label, control, controller, gamma,
+    draw_facet_phase(
+        surface,
+        sheet,
+        (index * CONTROL_FACET_WIDTH, 0),
+        (CONTROL_FACET_WIDTH, CONTROL_FACET_HEIGHT),
+        aspect_fitted((CONTROL_FACET_WIDTH, CONTROL_FACET_HEIGHT), rect),
+        gamma,
+    );
+}
+
+/// `GetRes()->fctButtonHighlight.DrawX` under `C4GFXBLIT_ADDITIVE`
+/// (`C4GuiButton.cpp:210-213`).
+fn draw_button_highlight(
+    surface: &mut Surface,
+    assets: &PlayerPropertiesAssets,
+    rect: IntRect,
+    gamma: Option<&GammaRamp>,
+) {
+    crate::draw_image_bilinear_additive(
+        surface,
+        &gui_rect(rect),
+        &crate::startup_options_dlg::retained_blackened_image(&assets.button_highlight),
+        gamma,
+    );
+}
+
+thread_local! {
+    /// `fctFlagClr` is built once by `C4Surface::CreateColorByOwner` and only
+    /// re-tinted by `SetDrawColor`, so the port keeps one stable `ImageData`
+    /// pair per (sheet, colour) instead of re-uploading textures every frame.
+    static OWNER_COLORED_FLAGS: RefCell<
+        HashMap<(clonk_graphics::GpuTextureId, u32), (ImageData, ImageData)>,
+    > = RefCell::new(HashMap::new());
+}
+
+/// `C4Surface::CreateColorByOwner` (`C4Surface.cpp:297-327`) splits a sheet in
+/// two, and `CStdDDraw::Blit` then draws two independently filtered quads —
+/// the base unmodulated, the overlay modulated by `ClrByOwnerClr`
+/// (`StdDDraw2.cpp:787-806`). Filtering therefore happens *before* the owner
+/// tint combines them, which is what keeps the flag's antialiased border
+/// bit-identical; tinting a single merged sheet does not reproduce it.
+///
+/// Returns `(base, tinted_overlay)`:
+/// * base — every non-owner pixel, owner positions forced to transparent black
+///   by `SetPixDw` (`C4Surface.cpp:775`);
+/// * overlay — the memset-`0xff` transparent white a fresh surface starts with
+///   (`C4Surface.cpp:1155`), with owner pixels replaced by the gray
+///   `ClrByOwner` leaves behind (`C4Surface.cpp:291-293`), every channel then
+///   modulated by the owner colour.
+fn retained_owner_colored_flag(flag: &ImageData, owner: Color) -> (ImageData, ImageData) {
+    let key = (
+        flag.gpu_texture_id(),
+        u32::from_be_bytes([owner.a, owner.r, owner.g, owner.b]),
+    );
+    OWNER_COLORED_FLAGS.with(|cache| {
+        if let Some(cached) = cache.borrow().get(&key).cloned() {
+            return cached;
+        }
+        // `ReadPNG` blackens fully transparent texels (`C4Surface.cpp:972`)
+        // before the split ever runs.
+        let source = crate::startup_options_dlg::retained_blackened_image(flag);
+        let modulate =
+            |channel: u8, value: u8| ((u16::from(channel) * u16::from(value)) / 255) as u8;
+        let mut base = Vec::with_capacity(source.pixels().len());
+        let mut overlay = Vec::with_capacity(source.pixels().len());
+        for pixel in source.pixels().chunks_exact(4) {
+            let (r, g, b, a) = (pixel[0], pixel[1], pixel[2], pixel[3]);
+            match crate::hud::clr_by_owner_gray(i32::from(r), i32::from(g), i32::from(b)) {
+                Some(gray) => {
+                    base.extend_from_slice(&[0, 0, 0, 0]);
+                    overlay.extend_from_slice(&[
+                        modulate(owner.r, gray),
+                        modulate(owner.g, gray),
+                        modulate(owner.b, gray),
+                        a,
+                    ]);
+                }
+                None => {
+                    base.extend_from_slice(&[r, g, b, a]);
+                    overlay.extend_from_slice(&[owner.r, owner.g, owner.b, 0]);
+                }
+            }
+        }
+        let split = (
+            ImageData::new(source.width(), source.height(), base),
+            ImageData::new(source.width(), source.height(), overlay),
+        );
+        cache.borrow_mut().insert(key, split.clone());
+        split
+    })
+}
+
+/// `C4GUI::Picture::DrawElement` with `fAspect` (`C4GuiLabels.cpp:353-382`):
+/// `C4Facet::Draw` fits the source's aspect ratio inside `dest` and centers
+/// the shortfall on the scaled axis (`C4Facet.cpp:113-141`).
+fn aspect_fitted(source_size: (i32, i32), dest: IntRect) -> IntRect {
+    let (source_w, source_h) = source_size;
+    if source_w <= 0 || source_h <= 0 {
+        return dest;
+    }
+    if source_w * dest.h > dest.w * source_h {
+        let h = source_h * dest.w / source_w;
+        IntRect {
+            y: dest.y + (dest.h - h) / 2,
+            h,
+            ..dest
+        }
+    } else {
+        let w = source_w * dest.h / source_h;
+        IntRect {
+            x: dest.x + (dest.w - w) / 2,
+            w,
+            ..dest
+        }
+    }
+}
+
+/// `C4Facet::DrawX` of one sheet cell into `dest`.
+fn draw_facet_phase(
+    surface: &mut Surface,
+    sheet: &ImageData,
+    source_origin: (i32, i32),
+    source_size: (i32, i32),
+    dest: IntRect,
+    gamma: Option<&GammaRamp>,
+) {
+    if dest.w <= 0 || dest.h <= 0 || source_size.0 <= 0 || source_size.1 <= 0 {
+        return;
+    }
+    crate::classic_gui::draw_facet_stretch(
+        surface,
+        sheet,
+        (
+            source_origin.0 as f32,
+            source_origin.1 as f32,
+            source_size.0 as f32,
+            source_size.1 as f32,
+        ),
+        (dest.x as f32, dest.y as f32, dest.w as f32, dest.h as f32),
+        gamma,
+    );
+}
+
+/// `C4GUI::Edit::DrawElement` (`C4GuiEdit.cpp:561-627`) with the startup
+/// colours: `C4StartupEditBGColor` is fully transparent so the paper shows
+/// through, the border is drawn as two nested `DrawFrameDw` passes, a focused
+/// edit shows its select-all highlight, and the text is vertically centered.
+fn draw_name_edit(
+    surface: &mut Surface,
+    book: &BookFonts,
+    rect: IntRect,
+    text: &str,
+    focused: bool,
+    gamma: Option<&GammaRamp>,
+) {
+    draw_name_edit_frames(surface, rect, gamma);
+    // `Edit::GetMargin*` (`C4GuiEdit.h:101-104`) insets the client rect the
+    // text and selection are laid out in.
+    let client = IntRect {
+        x: rect.x + EDIT_MARGIN_X,
+        y: rect.y + EDIT_MARGIN_Y,
+        w: rect.w - EDIT_MARGIN_X * 2,
+        h: rect.h - EDIT_MARGIN_Y * 2,
+    };
+    let line_height = book.book.line_height;
+    let (text_y, selection_height) = if client.h <= line_height {
+        // "very narrow edit field: use all of it" (`C4GuiEdit.cpp:580-585`).
+        (client.y, client.h)
+    } else {
+        (client.y + (client.h - line_height) / 2 + 1, line_height - 2)
+    };
+    if focused && !text.is_empty() {
+        let width = book.book.measure(text, false).0;
+        crate::startup_options_dlg::fill_box_dw(
+            surface,
+            client.x,
+            text_y,
+            client.x + width - 1,
+            text_y + selection_height - 1,
+            SELECTION_BOX_COLOR,
+            gamma,
+        );
+    }
+    book.book.draw_with_gamma(
+        surface,
+        client.x,
+        text_y - 1,
+        text,
+        STARTUP_FONT_RGBA,
+        TextAlign::Left,
+        false,
+        gamma,
     );
 }
 
 fn gui_rect(rect: IntRect) -> GuiRect {
     GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32)
-}
-
-fn fill(surface: &mut Surface, rect: IntRect, color: Color) {
-    if rect.w <= 0 || rect.h <= 0 {
-        return;
-    }
-    surface.fill_rect(
-        SurfaceRect::new(rect.x, rect.y, rect.w as u32, rect.h as u32),
-        color,
-    );
 }
 
 fn draw_name_edit_frames(surface: &mut Surface, rect: IntRect, gamma: Option<&GammaRamp>) {
@@ -1308,29 +1878,6 @@ fn draw_name_edit_frames(surface: &mut Surface, rect: IntRect, gamma: Option<&Ga
         rect.y + rect.h - 2,
         STARTUP_EDIT_BORDER_COLOR,
         gamma,
-    );
-}
-
-fn draw_outline(surface: &mut Surface, rect: IntRect, color: Color) {
-    fill(surface, IntRect { h: 1, ..rect }, color);
-    fill(
-        surface,
-        IntRect {
-            y: rect.y + rect.h - 1,
-            h: 1,
-            ..rect
-        },
-        color,
-    );
-    fill(surface, IntRect { w: 1, ..rect }, color);
-    fill(
-        surface,
-        IntRect {
-            x: rect.x + rect.w - 1,
-            w: 1,
-            ..rect
-        },
-        color,
     );
 }
 
@@ -1373,6 +1920,130 @@ mod tests {
 
     fn controller() -> PlayerPropertiesController {
         PlayerPropertiesController::edit(3, PlayerFile::default(), "comment", None, None)
+    }
+
+    /// The layout constants are stated as literals because `for_size` has no
+    /// font handy; this keeps them honest against the real faces
+    /// (`C4Startup.cpp:107,117`).
+    #[test]
+    fn book_font_line_heights_match_the_layout() {
+        let ttf =
+            std::fs::read(crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"))
+                .expect("read Endeavour.ttf");
+        let book = crate::startup_options_dlg::build_book_fonts(&ttf).expect("build book fonts");
+        assert_eq!(book.book.line_height, BOOK_LINE_HEIGHT);
+        assert_eq!(book.book_small.line_height, BOOK_SMALL_LINE_HEIGHT);
+    }
+
+    /// Every rect of `C4StartupPlrPropertiesDlg`'s constructor
+    /// (`C4StartupPlrSelDlg.cpp:1116-1235`), relative to the 365x400
+    /// `fctPlrPropBG` top-left. Verified against a 1280x720 C++ capture.
+    #[test]
+    fn layout_matches_the_cpp_component_aligner() {
+        let layout = PlayerPropertiesLayout::for_size(1280, 720);
+        // `C4GUI::Screen::ShowDialog` centers an exclusive dialog
+        // (`C4Gui.cpp:660-676`); the paper never scales with the window.
+        assert_eq!(
+            layout.paper,
+            IntRect {
+                x: 457,
+                y: 160,
+                w: 365,
+                h: 400
+            }
+        );
+        let paper = |x: i32, y: i32, w: i32, h: i32| IntRect {
+            x: 457 + x,
+            y: 160 + y,
+            w,
+            h,
+        };
+        for (name, got, want) in [
+            ("title", layout.title, paper(45, 17, 265, 22)),
+            ("name label", layout.name_label, paper(45, 43, 265, 20)),
+            ("name edit", layout.name, paper(45, 65, 265, 25)),
+            ("color label", layout.color_label, paper(45, 94, 265, 20)),
+            ("color prev", layout.color_previous, paper(45, 116, 19, 40)),
+            ("color swatch", layout.color_swatch, paper(68, 116, 40, 40)),
+            ("color next", layout.color_next, paper(112, 116, 19, 40)),
+            ("slider R", layout.rgb_sliders[0], paper(135, 116, 173, 16)),
+            ("slider G", layout.rgb_sliders[1], paper(135, 128, 173, 16)),
+            ("slider B", layout.rgb_sliders[2], paper(135, 140, 173, 16)),
+            (
+                "control label",
+                layout.control_label,
+                paper(45, 160, 225, 20),
+            ),
+            (
+                "picture label",
+                layout.picture_label,
+                paper(270, 160, 40, 20),
+            ),
+            (
+                "control prev",
+                layout.control_previous,
+                paper(47, 182, 19, 40),
+            ),
+            (
+                "control image",
+                layout.control_preview,
+                paper(70, 182, 88, 40),
+            ),
+            ("control next", layout.control_next, paper(162, 182, 19, 40)),
+            ("mouse", layout.mouse, paper(195, 182, 40, 40)),
+            ("picture", layout.picture, paper(270, 182, 40, 40)),
+            (
+                "movement label",
+                layout.movement_label,
+                paper(45, 226, 265, 20),
+            ),
+            (
+                "jump'n'run",
+                layout.jump_and_run_movement,
+                paper(50, 248, 128, 52),
+            ),
+            ("classic", layout.classic_movement, paper(177, 248, 128, 52)),
+            ("ok", layout.ok, paper(147, 330, 54, 33)),
+            ("cancel", layout.cancel, paper(317, 16, 21, 21)),
+        ] {
+            assert_eq!(got, want, "{name}");
+        }
+    }
+
+    /// `ScrollBar::SetScrollPos` over `GetMaxScroll()`
+    /// (`C4Gui.h:900,923`) with the default `iCBMaxRange` of 256.
+    #[test]
+    fn slider_pins_travel_over_the_native_scroll_range() {
+        let slider = PlayerPropertiesLayout::for_size(1280, 720).rgb_sliders[0];
+        assert_eq!(PlayerPropertiesLayout::slider_pin_offset(slider, 0), 0);
+        // 173 - 2*16 - 16 = 125 pixels of travel.
+        assert_eq!(PlayerPropertiesLayout::slider_pin_offset(slider, 255), 125);
+        assert_eq!(PlayerPropertiesLayout::slider_pin_offset(slider, 200), 98);
+    }
+
+    /// `C4Facet::Draw` with `fAspect` (`C4Facet.cpp:120-134`).
+    #[test]
+    fn aspect_fit_matches_the_native_facet_letterboxing() {
+        let dest = IntRect {
+            x: 70,
+            y: 182,
+            w: 88,
+            h: 40,
+        };
+        // fctKeyboard 80x36 into 88x40 scales height: 36*88/80 = 39.
+        assert_eq!(
+            aspect_fitted((80, 36), dest),
+            IntRect { h: 39, ..dest },
+            "keyboard"
+        );
+        // fctFlagClr 64x64 into 40x40 needs no letterboxing.
+        let square = IntRect {
+            x: 68,
+            y: 116,
+            w: 40,
+            h: 40,
+        };
+        assert_eq!(aspect_fitted((64, 64), square), square, "flag");
     }
 
     #[test]
@@ -1583,13 +2254,7 @@ mod tests {
                 Some(StartupTooltip::resource(key))
             );
         }
-        for rect in [
-            layout.name,
-            layout.color_swatch,
-            layout.ok,
-            layout.cancel,
-            layout.close,
-        ] {
+        for rect in [layout.name, layout.color_swatch, layout.ok, layout.cancel] {
             assert_eq!(state.tooltip_at(center(rect), &book_small), None);
         }
 
@@ -1613,19 +2278,15 @@ mod tests {
             );
         }
 
-        for (label, blocker) in [(classic_label, layout.ok), (jump_label, layout.cancel)] {
-            let overlap = IntRect {
-                x: label.x.max(blocker.x),
-                y: label.y.max(blocker.y),
-                w: (label.x + label.w).min(blocker.x + blocker.w) - label.x.max(blocker.x),
-                h: (label.y + label.h).min(blocker.y + blocker.h) - label.y.max(blocker.y),
-            };
-            assert!(overlap.w > 0 && overlap.h > 0);
-            assert_eq!(
-                state.tooltip_at(center(overlap), &book_small),
-                None,
-                "later OK/Cancel controls occlude the movement label"
-            );
+        // The native OK and Cancel rects are hard-coded well clear of the
+        // movement row (`C4StartupPlrSelDlg.cpp:1228,1231`), so neither can
+        // occlude a movement label.
+        for (label, other) in [(classic_label, layout.ok), (jump_label, layout.cancel)] {
+            let overlaps = label.x < other.x + other.w
+                && other.x < label.x + label.w
+                && label.y < other.y + other.h
+                && other.y < label.y + label.h;
+            assert!(!overlaps, "movement labels never reach OK/Cancel");
         }
     }
 }

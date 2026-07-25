@@ -562,7 +562,7 @@ fn draw_image_aspect_owner(
 /// are ColorByOwner pixels. Returns the gray value C++ keeps in the
 /// overlay surface: the blue channel (`GetRValue(dwClr)` on the engine's
 /// 0xAARRGGBB pixels, src/C4Surface.cpp:283-285).
-fn clr_by_owner_gray(r: i32, g: i32, b: i32) -> Option<u8> {
+pub(crate) fn clr_by_owner_gray(r: i32, g: i32, b: i32) -> Option<u8> {
     const HLSMAX: i32 = 255;
     const RGBMAX: i32 = 255;
     let c_max = r.max(g).max(b);

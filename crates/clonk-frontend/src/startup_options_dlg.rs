@@ -75,7 +75,7 @@ const BTN_BORDER_COLOR1: u32 = 0x00cc_c3b4;
 const BTN_BORDER_COLOR2: u32 = 0x0094_846a;
 /// `C4StartupFontClr` 0xff000000 as normal-alpha RGBA (text colors are
 /// normal-alpha; `DrawText` inverts on entry, StdFont.cpp:819).
-const STARTUP_FONT_RGBA: [u8; 4] = [0, 0, 0, 255];
+pub(crate) const STARTUP_FONT_RGBA: [u8; 4] = [0, 0, 0, 255];
 /// `C4StartupBtnFontClr` 0xff202020 (C4Startup.h:32).
 const BTN_FONT_RGBA: [u8; 4] = [0x20, 0x20, 0x20, 255];
 /// `C4GUI_ButtonFontClr` / `C4GUI_FullscreenCaptionFontClr` 0xffffff00.
@@ -3548,7 +3548,7 @@ fn engine_opacity(clr: u32) -> f32 {
 }
 
 /// `DrawBoxDw` (StdDDraw2.cpp:1401-1404): fills (x0,y0)-(x1,y1) INCLUSIVE.
-fn fill_box_dw(
+pub(crate) fn fill_box_dw(
     surface: &mut Surface,
     x0: i32,
     y0: i32,
@@ -3849,7 +3849,7 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
-fn retained_blackened_image(image: &ImageData) -> ImageData {
+pub(crate) fn retained_blackened_image(image: &ImageData) -> ImageData {
     RETAINED_BLACKENED_IMAGES.with(|images| {
         if let Some(cached) = images.borrow().get(&image.gpu_texture_id()).cloned() {
             return cached;
@@ -3984,6 +3984,61 @@ fn draw_image_bilinear_white_pad(
             }
         }
     }
+}
+
+/// `ScrollBar::DrawElement` for a horizontal bar decorated by a book scroll
+/// sheet (C4GuiContainers.cpp:446-479): the begin/middle/end cells of
+/// `barScroll` through `DrawHBarByVGfx`, then `fctScrollPin` at
+/// `x + C4GUI_ScrollArrowWdt + iScrollPos`. `pin_src` is the sheet cell chosen
+/// by `ScrollBarFacets::Set` (C4Gui.cpp:203-215): `(16, 16)` for the default
+/// pin, `(32, 16 * (index - 1))` for the R/G/B pins of `sfctBookScrollR/G/B`.
+pub(crate) fn draw_horizontal_book_scrollbar(
+    surface: &mut Surface,
+    book_scroll: &ImageData,
+    rect: &IntRect,
+    scroll_pos: i32,
+    decrement_pressed: bool,
+    increment_pressed: bool,
+    pin_src: (u32, u32),
+    gamma: Option<&GammaRamp>,
+) {
+    draw_rotated_vfacet(
+        surface,
+        book_scroll,
+        if decrement_pressed { 16 } else { 0 },
+        0,
+        16,
+        rect.x,
+        rect.y,
+        gamma,
+    );
+    let mut iy = 16;
+    while iy < rect.w - 5 {
+        let h2 = 16.min(rect.w - 5 - iy);
+        draw_rotated_vfacet(surface, book_scroll, 0, 16, h2, rect.x + iy, rect.y, gamma);
+        iy += 16;
+    }
+    draw_rotated_vfacet(
+        surface,
+        book_scroll,
+        if increment_pressed { 16 } else { 0 },
+        32,
+        16,
+        rect.x + rect.w - 16,
+        rect.y,
+        gamma,
+    );
+    draw_image_strip(
+        surface,
+        rect.x + 16 + scroll_pos,
+        rect.y,
+        book_scroll,
+        pin_src.0,
+        pin_src.1,
+        16,
+        16,
+        gamma,
+    );
 }
 
 /// One vertical-gfx facet of `DrawHBarByVGfx` (C4Gui.cpp:347-361): the 16px
@@ -5077,50 +5132,14 @@ impl OptionsDlgScreen {
         increment_pressed: bool,
         gamma: Option<&GammaRamp>,
     ) {
-        draw_rotated_vfacet(
+        draw_horizontal_book_scrollbar(
             surface,
             &assets.book_scroll,
-            if decrement_pressed { 16 } else { 0 },
-            0,
-            16,
-            rect.x,
-            rect.y,
-            gamma,
-        );
-        let mut iy = 16;
-        while iy < rect.w - 5 {
-            let h2 = 16.min(rect.w - 5 - iy);
-            draw_rotated_vfacet(
-                surface,
-                &assets.book_scroll,
-                0,
-                16,
-                h2,
-                rect.x + iy,
-                rect.y,
-                gamma,
-            );
-            iy += 16;
-        }
-        draw_rotated_vfacet(
-            surface,
-            &assets.book_scroll,
-            if increment_pressed { 16 } else { 0 },
-            32,
-            16,
-            rect.x + rect.w - 16,
-            rect.y,
-            gamma,
-        );
-        draw_image_strip(
-            surface,
-            rect.x + 16 + scroll_pos,
-            rect.y,
-            &assets.book_scroll,
-            16,
-            16,
-            16,
-            16,
+            rect,
+            scroll_pos,
+            decrement_pressed,
+            increment_pressed,
+            (16, 16),
             gamma,
         );
     }
