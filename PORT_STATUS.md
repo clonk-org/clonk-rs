@@ -276,17 +276,15 @@ live comparison.
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.
 - Graphics overlays: all seven modes now dispatch, and the walk is exhaustive so
-  a new mode cannot be lost to a catch-all. Residual divergences:
-  - MODE_Base blits the whole `Graphics.png` sheet centred on the object, where
-    C++ sets the facet to `(0, 0, Shape.Wdt, Shape.Hgt)` with
-    `TargetX/Y = Shape.x + Shape.Wdt/2, Shape.y + Shape.Hgt/2`
-    (`C4DefGraphics.cpp:642`), which telescopes to a draw at
-    `(iTx + Shape.x, iTy + Shape.y)` (`C4DefGraphics.cpp:826`). Coincides only
-    when the sheet is exactly shape-sized and single-frame, which is true of the
-    shipped MODE_Base users checked so far.
-  - MODE_Base and MODE_Action pass a source scale of 1.0 instead of the source
-    definition's `Scale`, which C++ hands to `DrawT` for every facet mode
-    (`C4DefGraphics.cpp:826`). Latent: no shipped content sets `Scale`.
+  a new mode cannot be lost to a catch-all. MODE_Base selects the source
+  definition's `(0, 0, Shape.Wdt, Shape.Hgt)` facet, applies `Shape.x/y` at the
+  destination, and uses the source definition's `Scale`
+  (`C4DefGraphics.cpp:636-637,815-821`). This keeps Hazard's floating
+  spawnpoint items on their world-face geometry instead of drawing the embedded
+  64×64 inventory picture. Residual divergences:
+  - MODE_Action passes a source scale of 1.0 instead of the source definition's
+    `Scale`, which C++ hands to `DrawT` for every facet mode
+    (`C4DefGraphics.cpp:821`). Latent: no shipped content sets `Scale`.
   - `draw_object_face` reads geometry (Shape, GrowthType, ActMap) from the same
     sprite it blits from, so a cross-definition `SetGraphics(name, obj, idSrcDef, 0)`
     takes the SOURCE definition's geometry. C++ `SetGraphics(gfx, fTemp)` swaps

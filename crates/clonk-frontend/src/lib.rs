@@ -6555,6 +6555,124 @@ mod tests {
     }
 
     #[test]
+    fn base_overlay_draws_the_source_definition_shape_instead_of_the_whole_sheet() {
+        // MODE_Base selects (0,0,Shape.Wdt,Shape.Hgt), carries Shape.x/y as
+        // the facet target, and DrawT scales only that source crop by the
+        // source definition's Scale (src/C4DefGraphics.cpp:636-637,815-821;
+        // src/C4Facet.cpp:61-68). Hazard's Spawnpoint uses this mode for its
+        // floating item, whose graphics sheet is much larger than its shape.
+        let left_half = Color::opaque(30, 210, 90);
+        let right_half = Color::opaque(220, 40, 70);
+        let mut pixels = vec![0u8; 16 * 8 * 4];
+        for y in 0..6 {
+            for x in 0..8 {
+                let base = (y * 16 + x) * 4;
+                pixels[base..base + 4].copy_from_slice(if x < 4 {
+                    &[30, 210, 90, 255]
+                } else {
+                    &[220, 40, 70, 255]
+                });
+            }
+        }
+        let source_sprite = DefinitionSprite {
+            graphics_scale: 2.0,
+            image: ImageData::new(16, 8, pixels),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(-3, 1, 4, 3)),
+            fire_top: 0,
+            rotateable: 0,
+            line: 0,
+            stretch_growth: false,
+            top_face: None,
+            picture: None,
+        };
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(12, 10);
+        object.graphics_overlays = vec![ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base)
+            .with_definition(Some("Pickup".to_string()))
+            .with_transform(Some(DrawTransform::identity()))];
+        let mut graphics = GraphicsSystem::new(
+            24,
+            24,
+            24,
+            "Base overlay shape",
+            test_font(),
+            Arc::new(HashMap::from([(
+                sprite_map_key("Pickup", None),
+                source_sprite,
+            )])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_point_filtering(true);
+        graphics.surface_mut().fill(Color::opaque(10, 10, 10));
+
+        graphics.draw_object_overlays(
+            &object,
+            &[],
+            &[],
+            OWNER_NONE,
+            None,
+            12.0,
+            10.0,
+            1.0,
+            0.0,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            colour_bbox(graphics.surface(), left_half),
+            Some((9, 11, 10, 13)),
+        );
+        assert_eq!(
+            colour_bbox(graphics.surface(), right_half),
+            Some((11, 11, 12, 13)),
+        );
+    }
+
+    #[test]
+    fn base_overlay_with_no_definition_shape_draws_nothing() {
+        // C4DefCore::Default zeroes Shape, MODE_Base copies that zero-sized
+        // facet, and C4Facet::DrawT rejects it (src/C4Def.cpp:122-131;
+        // src/C4DefGraphics.cpp:636-637; src/C4Facet.cpp:61-68).
+        let overlay_color = Color::opaque(220, 40, 70);
+        let mut object = make_snapshot().objects.remove(0);
+        object.position = Vector2::new(3, 3);
+        object.graphics_overlays = vec![ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Base)
+            .with_definition(Some("Shapeless".to_string()))
+            .with_transform(Some(DrawTransform::identity()))];
+        let mut graphics = GraphicsSystem::new(
+            7,
+            7,
+            7,
+            "Shapeless base overlay",
+            test_font(),
+            solid_sprite("Shapeless", 2, 2, overlay_color, None, false),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.surface_mut().fill(Color::opaque(10, 10, 10));
+
+        graphics.draw_object_overlays(
+            &object,
+            &[],
+            &[],
+            OWNER_NONE,
+            None,
+            3.0,
+            3.0,
+            1.0,
+            0.0,
+            None,
+            None,
+        );
+
+        assert_eq!(colour_bbox(graphics.surface(), overlay_color), None);
+    }
+
+    #[test]
     fn ingame_picture_overlay_draws_the_source_picture_rect_zoomed_to_the_host_shape() {
         // C4GraphicsOverlay::UpdateFacet sets MODE_IngamePicture's facet to the
         // SOURCE definition's PictureRect and turns on fZoomToShape

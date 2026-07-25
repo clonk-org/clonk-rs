@@ -7881,26 +7881,27 @@ impl GraphicsSystem {
         let Some(sprite) = sprite else {
             return;
         };
-        let sprite_width = (sprite.image.width() as f32 * zoom).max(1.0);
-        let sprite_height = (sprite.image.height() as f32 * zoom).max(1.0);
-        let source_rect = SourceRect::new(
-            0,
-            0,
-            sprite.image.width() as i32,
-            sprite.image.height() as i32,
-        );
-        if !Self::source_within_image(&sprite.image, &source_rect) {
+        let Some(shape) = sprite.shape else {
+            return;
+        };
+        if shape.width <= 0 || shape.height <= 0 {
             return;
         }
+        let sprite_width = shape.width as f32 * zoom;
+        let sprite_height = shape.height as f32 * zoom;
+        let source_rect = SourceRect::new(0, 0, shape.width, shape.height);
         let fog = self.fog_draw_context();
-        let source = FloatSourceRect::scaled(source_rect, 1.0);
+        let source = FloatSourceRect::scaled(source_rect, sprite.graphics_scale);
+        if !source.is_valid() {
+            return;
+        }
         let (source, sampling) =
             self.runtime_sprite_blit(source, (sprite_width, sprite_height), true);
         if transform.is_none() && rotation_degrees.abs() <= f32::EPSILON {
             let rect = GuiRect::from_origin_size(
                 GuiPoint::new(
-                    screen_x - sprite_width / 2.0,
-                    screen_y - sprite_height / 2.0,
+                    screen_x + shape.x as f32 * zoom,
+                    screen_y + shape.y as f32 * zoom,
                 ),
                 GuiSize::new(sprite_width, sprite_height),
             );
@@ -7920,10 +7921,10 @@ impl GraphicsSystem {
         } else {
             let center = (screen_x / zoom, screen_y / zoom);
             let dest = (
-                center.0 - sprite.image.width() as f32 / 2.0,
-                center.1 - sprite.image.height() as f32 / 2.0,
-                sprite.image.width() as f32,
-                sprite.image.height() as f32,
+                center.0 + shape.x as f32,
+                center.1 + shape.y as f32,
+                shape.width as f32,
+                shape.height as f32,
             );
             let mut matrix = draw_transform_at(
                 transform
