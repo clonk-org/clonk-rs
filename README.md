@@ -50,6 +50,24 @@ Tracker-music playback loads the optional libxmp 4 runtime at run time. Install
 libxmp through the platform package manager, or set `LC_LIBXMP_LIBRARY` to a
 compatible library; the game otherwise remains runnable without tracker music.
 
+## Releasing
+
+```sh
+scripts/prepare-release.sh
+```
+
+The next version comes from the Conventional Commit subjects since the last
+`v*` tag. There is one version for the whole workspace — every crate inherits
+`version.workspace` and nothing is published to a registry — so releases are a
+single tag, not one per crate.
+
+The script bumps that version, refreshes `Cargo.lock`, regenerates
+`licenses/RUST_THIRD_PARTY_LICENSES.txt` (required: the root manifest feeds the
+notice fingerprint, so a bump without it fails `cargo xtask package`), and
+prepends a [`CHANGELOG.md`](CHANGELOG.md) section. It stops there; review the
+result, run the gates, then commit, tag and build the archives with
+`cargo xtask package` on each platform.
+
 See [`AGENTS.md`](AGENTS.md) for engineering constraints,
 [`PORT_STATUS.md`](PORT_STATUS.md) for parity status, and
 [`docs/REFACTOR_PLAN.md`](docs/REFACTOR_PLAN.md) for the ongoing

@@ -1,0 +1,67 @@
+# git-cliff configuration for clonk-rs.
+#
+# Drives semantic releases: the next version and the changelog both come from
+# Conventional Commit subjects, which `AGENTS.md` already requires (no scope,
+# subject line only). Run through `scripts/prepare-release.sh`.
+#
+# release-plz was evaluated first and rejected: it runs `cargo package` for
+# change detection, which fails here because path dependencies carry no version
+# requirement (`dependency `clonk-script` does not specify a version`). Adding
+# those requirements to ~60 declarations would be pure ceremony for a workspace
+# that sets `publish = false` and never reaches a registry.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).\n
+"""
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | upper_first }}\
+{% endfor %}
+{% endfor %}\n
+"""
+trim = true
+footer = ""
+
+[git]
+conventional_commits = true
+# Non-conventional subjects (merge commits, the pre-convention history) are
+# dropped rather than dumped into the changelog unclassified.
+filter_unconventional = true
+split_commits = false
+protect_breaking_commits = true
+filter_commits = false
+topo_order = false
+sort_commits = "newest"
+
+# Only this project's own release tags. The repository inherited LegacyClonk's
+# tags (`v330`..`v363`, `continuous-*`), which must not be read as prior
+# releases of the port.
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactoring" },
+  { message = "^test", group = "Testing" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^ci", group = "Continuous integration" },
+  { message = "^build", group = "Build system" },
+  { message = "^style", group = "Styling" },
+  { message = "^chore\\(deps\\)", group = "Dependencies" },
+  # Routine chores are noise in a player-facing changelog.
+  { message = "^chore", skip = true },
+  { message = "^Merge", skip = true },
+]
