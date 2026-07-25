@@ -232,6 +232,12 @@ fn main() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
+    // Steady-state flame population, independent of the weapon's rate of fire.
+    let flame_target: usize = env::var("LC_FLAMES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let flame_id = env::var("LC_FLAME_ID").unwrap_or_else(|_| "SH5B".to_owned());
     let boom_policy = ScriptControlPolicy {
         is_replay: false,
         console_active: true,
@@ -256,6 +262,34 @@ fn main() {
                     Ok(true) => controls_handled += 1,
                     Ok(false) => {}
                     Err(_) => control_errors += 1,
+                }
+            }
+        }
+        // Hold a steady-state flame population. The weapon's own rate of fire
+        // plateaus near 40 live flames, which is far below a real firefight;
+        // topping the census back up each frame lets the flame cost be swept
+        // independently of how fast the shipped weapon can emit.
+        if flame_target > 0 {
+            let live = engine
+                .snapshot()
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == flame_id)
+                .count();
+            for index in live..flame_target {
+                let script = format!(
+                    "CreateObject({flame_id}, {}, {}, -1);",
+                    120 + (index % 48) * 58,
+                    140 + (index % 7) * 30,
+                );
+                let control = ScriptControlData {
+                    target_object: SCRIPT_SCOPE_CONSOLE,
+                    strictness: ScriptStrictness::Strict2,
+                    script: LegacyCString::from_bytes(script.into_bytes()).expect("no NUL"),
+                    by_client: 0,
+                };
+                if engine.execute_script_control(&control, boom_policy).is_err() {
+                    control_errors += 1;
                 }
             }
         }
