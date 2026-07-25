@@ -234,17 +234,27 @@ fn system_monotonic_seed_ms() -> u64 {
         .unwrap_or_default()
 }
 
+fn display_legacy_connection_message(message: &LegacyCString) -> String {
+    clonk_resources::decode_legacy_script_text(message.as_bytes())
+}
+
 /// Failures which terminate a C++ connection admission exchange.
 #[derive(Debug, Error)]
 pub enum ConnectionHandshakeError {
     #[error("connection transport failed: {0}")]
     Transport(#[from] TransportError),
-    #[error("the local admission policy rejected the peer: {message:?}")]
+    #[error(
+        "the local admission policy rejected the peer: {}",
+        display_legacy_connection_message(.message)
+    )]
     LocalRejection {
         message: LegacyCString,
         wrong_password: bool,
     },
-    #[error("the peer rejected the local connection: {message:?}")]
+    #[error(
+        "the peer rejected the local connection: {}",
+        display_legacy_connection_message(.message)
+    )]
     PeerRejection {
         message: LegacyCString,
         wrong_password: bool,
