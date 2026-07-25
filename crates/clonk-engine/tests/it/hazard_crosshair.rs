@@ -147,10 +147,7 @@ fn hazard_mouse_click_while_aiming_launches_the_bazooka_rocket() {
             SpawnConfig::new("MIAM")
                 .with_owner(owner)
                 .with_container(weapon)
-                .with_local_vars(HashMap::from([(
-                    "__local_0".to_string(),
-                    Value::Int(5),
-                )])),
+                .with_local_vars(HashMap::from([("__local_0".to_string(), Value::Int(5))])),
         )
         .expect("load the bazooka's missiles");
 
