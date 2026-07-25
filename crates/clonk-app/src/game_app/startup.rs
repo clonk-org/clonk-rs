@@ -5305,7 +5305,7 @@ impl GameApp {
                 &mut surface,
                 width * 39 / 40,
                 height / 18 + logo_height,
-                "Version 4.9.11.0 [362] ",
+                &format!("Version {}", clonk_core::version::PORT_VERSION),
                 [255, 255, 255, 255],
                 clonk_graphics::clonk_font::TextAlign::Right,
                 true,

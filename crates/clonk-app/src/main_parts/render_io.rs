@@ -1119,12 +1119,20 @@ pub(crate) fn render_startup_frame(
                     );
                     clonk_frontend::draw_image_bilinear(surface, &logo_rect, &logo, Some(gamma));
 
-                    // "Version %s" with C4VERSION = "4.9.11.0 [362] " (trailing
-                    // space from empty C4VERSIONEXTRA/C4BUILDOPT, C4Version.h:55),
+                    // Placement, font, colour and markup follow C++ exactly:
                     // right-aligned at (Wdt*39/40, Hgt/18 + 0.4*logoHgt) in the
                     // GUI TextFont, white, markup on (C4StartupMainDlg.cpp:121).
+                    //
+                    // The string itself deliberately diverges. C++ draws
+                    // C4VERSION ("4.9.11.0 [362] "); this port draws its own
+                    // release version, because that is what identifies a build
+                    // in a bug report. The engine compatibility version still
+                    // lives in `clonk_core::version::ENGINE_VERSION` and is what
+                    // content gating and protocol identification use.
                     if !defer_native_main_text {
-                        let version_text = "Version 4.9.11.0 [362] ";
+                        let version_text =
+                            format!("Version {}", clonk_core::version::PORT_VERSION);
+                        let version_text = version_text.as_str();
                         let version_x = width * 39 / 40;
                         let version_y = height / 18 + logo_h;
                         if let Some(fonts) = assets.clonk_fonts.as_ref() {
