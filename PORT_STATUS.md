@@ -233,6 +233,28 @@ same-seed landscape coverage remains incomplete. Component order is replay-
 hashed but not exported by the C++ bridge; unequal-count duplicate IDs remain
 an ordered-map model gap.
 
+## Deliberate divergences from the oracle
+
+- **Reliable-UDP re-ask damping, 1 s -> 250 ms** (`crates/clonk-network/src/udp.rs`,
+  `RELIABLE_UDP_RECHECK_INTERVAL`; C++ `C4NetIOUDP::Peer::iReCheckInterval`,
+  oracle-src-pinned src/C4NetIO.cpp:1914). Approved 2026-07-24.
+  The first repair request is immediate in both engines, so this interval only
+  governs the case where a repair request is itself lost. C++ then waits a full
+  second, which in a lockstep session freezes every participant rather than only
+  the peer that dropped a datagram.
+  Measured with `cargo run -p clonk-network --example link_impairment` at 60 ms
+  RTT, +0..20 ms jitter, 400 control packets: at 2% loss the two intervals are
+  identical (44.50 ms mean, 171 ms p99); at 5% loss p99 falls 1.009 s -> 352 ms
+  and the worst case 1.229 s -> 462 ms, for about 7% more datagrams.
+  Simulation state cannot observe this: only the timing of a repeated repair
+  request changes, while the delivered packet stream, its ordering and the wire
+  format are untouched, and a C++ peer answers the extra asks unchanged.
+  The three tests that pinned the one-second constant now pin the new interval
+  and name the C++ line they depart from; the damping *shape* they cover
+  (quiet inside the window, strictly higher holes continue immediately, the
+  first ask's deadline survives continuations) remains C++'s and is still
+  asserted.
+
 ## Preserve
 
 Preserve fixed-point sync boundaries, shared RNG state/count, reverse

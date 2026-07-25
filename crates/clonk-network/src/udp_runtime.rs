@@ -1923,11 +1923,11 @@ mod tests {
             vec![0, 1, 2]
         );
         assert!(endpoint
-            .receive_at(known_peer, &header(3), Duration::from_millis(500))
+            .receive_at(known_peer, &header(3), Duration::from_millis(125))
             .datagrams
             .is_empty());
 
-        let continuation = endpoint.receive_at(known_peer, &header(5), Duration::from_millis(750));
+        let continuation = endpoint.receive_at(known_peer, &header(5), Duration::from_millis(188));
         assert_eq!(continuation.datagrams.len(), 1);
         assert_eq!(
             decode_reliable_udp_check(&continuation.datagrams[0].payload)
@@ -1936,7 +1936,8 @@ mod tests {
             vec![3, 4]
         );
 
-        let expired = endpoint.receive_at(known_peer, &header(5), Duration::from_secs(1));
+        let expired =
+            endpoint.receive_at(known_peer, &header(5), crate::RELIABLE_UDP_RECHECK_INTERVAL);
         assert_eq!(expired.datagrams.len(), 1);
         assert_eq!(
             decode_reliable_udp_check(&expired.datagrams[0].payload)

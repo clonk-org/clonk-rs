@@ -35,8 +35,38 @@ pub const RELIABLE_UDP_PROTOCOL_VERSION: u32 = 2;
 /// Maximum inner-packet bytes carried by one C++ reliable-UDP data fragment.
 pub const RELIABLE_UDP_DATA_PAYLOAD_LIMIT: usize = MAX_DATAGRAM_SIZE - DATA_PACKET_HEADER_SIZE;
 
-/// C4NetIOUDP::Peer::iReCheckInterval.
-pub const RELIABLE_UDP_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// Re-ask damping for a repair request that went unanswered.
+///
+/// **Deliberate divergence from the oracle.** C++ uses one second
+/// (`C4NetIOUDP::Peer::iReCheckInterval`, oracle-src-pinned
+/// src/C4NetIO.cpp:1914). The first repair request is immediate on both sides,
+/// so this interval only governs the case where a repair request is *itself*
+/// lost — and there one second is a lockstep freeze for every participant, not
+/// just the peer that dropped a datagram.
+///
+/// Measured with `cargo run -p clonk-network --example link_impairment` at
+/// 60 ms RTT and +0..20 ms jitter, 400 control packets:
+///
+/// | loss | interval | mean     | p95   | p99     | max     |
+/// |------|----------|----------|-------|---------|---------|
+/// | 2%   | 1 s      | 44.50ms  | 55ms  | 171ms   | 188ms   |
+/// | 2%   | 250 ms   | 44.50ms  | 55ms  | 171ms   | 188ms   |
+/// | 5%   | 1 s      | 90.96ms  | 423ms | 1.009s  | 1.229s  |
+/// | 5%   | 250 ms   | 55.61ms  | 169ms | 352ms   | 462ms   |
+///
+/// Below the loss rate at which a repair request is itself lost the two are
+/// identical, so this costs nothing on a healthy link; on a lossy one it cuts
+/// the p99 stall by 65% for about 7% more datagrams.
+///
+/// This changes only *when* a repair is re-requested. The delivered packet
+/// stream, its ordering and the wire format are untouched, so simulation state
+/// cannot observe it, and a C++ peer answers the extra asks unchanged.
+/// Recorded in PORT_STATUS.md.
+///
+/// Do not lower this below roughly 2x a transatlantic round trip: the point is
+/// to re-ask after a lost repair, not to duplicate repairs on exactly the
+/// congested links where loss happens.
+pub const RELIABLE_UDP_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Fields emitted by a unicast `C4NetIOUDP::ConnPacket`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -310,7 +340,9 @@ impl ReliableUdpReceiveWindow {
         )
     }
 
-    /// Applies C++'s one-second re-ask damping and direct-first continuation.
+    /// Applies re-ask damping and C++'s direct-first continuation. The damping
+    /// shape is C++'s; only its interval diverges, see
+    /// [`RELIABLE_UDP_RECHECK_INTERVAL`].
     /// `force` affects emission only; it never bypasses the active cursors.
     pub fn plan_check_at(
         &mut self,
@@ -1318,7 +1350,13 @@ mod tests {
     }
 
     #[test]
-    fn cpp_recheck_damps_continues_new_holes_and_expires_strictly() {
+    fn recheck_damps_continues_new_holes_and_expires_strictly() {
+        // The damping shape is C++'s (oracle-src-pinned src/C4NetIO.cpp:3090-3119):
+        // unchanged holes stay quiet inside the window, strictly higher holes
+        // continue immediately, and the deadline set by the first ask survives
+        // those continuations rather than being pushed back. Only the interval
+        // itself diverges, from C++'s one second; see
+        // RELIABLE_UDP_RECHECK_INTERVAL for the measurement and the reason.
         let mut window = ReliableUdpReceiveWindow::new(8, 0);
         window.observe_packet_header(ReliableUdpChannel::Direct, 10);
 
@@ -1327,29 +1365,33 @@ mod tests {
             .expect("fresh holes must emit a Check");
         assert_eq!(first.missing_packet_numbers, vec![8, 9]);
         assert_eq!(
-            window.plan_check_at(23, Duration::from_millis(500), false),
+            window.plan_check_at(23, Duration::from_millis(125), false),
             None,
-            "unchanged holes are damped inside the one-second window"
+            "unchanged holes are damped inside the recheck window"
         );
 
         window.observe_packet_header(ReliableUdpChannel::Direct, 13);
         let continuation = window
-            .plan_check_at(23, Duration::from_millis(750), false)
+            .plan_check_at(23, Duration::from_millis(188), false)
             .expect("new higher holes must be asked immediately");
         assert_eq!(continuation.missing_packet_numbers, vec![10, 11, 12]);
         assert_eq!(
-            window.plan_check_at(23, Duration::from_millis(999), false),
-            None
+            window.plan_check_at(23, Duration::from_millis(249), false),
+            None,
+            "a continuation does not push the original deadline back"
         );
 
         let expired = window
-            .plan_check_at(23, Duration::from_secs(1), false)
+            .plan_check_at(23, RELIABLE_UDP_RECHECK_INTERVAL, false)
             .expect("the original deadline expires at exact equality");
         assert_eq!(expired.missing_packet_numbers, vec![8, 9, 10, 11, 12]);
     }
 
     #[test]
-    fn cpp_recheck_shares_direct_first_budget_and_force_only_changes_emission() {
+    fn recheck_shares_direct_first_budget_and_force_only_changes_emission() {
+        // Ask-list budget and direct-first ordering are C++'s
+        // (oracle-src-pinned src/C4NetIO.cpp:3090-3119); only the window length
+        // diverges, see RELIABLE_UDP_RECHECK_INTERVAL.
         let mut window = ReliableUdpReceiveWindow::new(4, 20);
         window.observe_packet_header(ReliableUdpChannel::Direct, 8);
         window.observe_packet_header(ReliableUdpChannel::Multicast, 28);
@@ -1363,17 +1405,17 @@ mod tests {
             vec![20, 21, 22, 23, 24, 25]
         );
         let second = window
-            .plan_check_at(90, Duration::from_millis(500), false)
+            .plan_check_at(90, Duration::from_millis(125), false)
             .expect("the unasked multicast tail continues inside the window");
         assert!(second.missing_packet_numbers.is_empty());
         assert_eq!(second.missing_multicast_packet_numbers, vec![26, 27]);
         assert_eq!(
-            window.plan_check_at(90, Duration::from_millis(500), false),
+            window.plan_check_at(90, Duration::from_millis(125), false),
             None
         );
 
         let forced = window
-            .plan_check_at(90, Duration::from_millis(500), true)
+            .plan_check_at(90, Duration::from_millis(125), true)
             .expect("forced cadence emits an empty Check");
         assert!(forced.missing_packet_numbers.is_empty());
         assert!(forced.missing_multicast_packet_numbers.is_empty());
