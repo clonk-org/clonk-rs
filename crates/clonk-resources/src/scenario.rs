@@ -252,6 +252,37 @@ pub fn discover_with_languages_and_packs(
     })
 }
 
+/// Discovers one named `.c4s`/`.c4f` entry without flattening a directory
+/// container. This mirrors loading that entry from its parent folder in
+/// `C4ScenarioListLoader::Entry::Load` (C4StartupScenSelDlg.cpp:440-558).
+pub fn discover_entry_with_languages_and_packs(
+    path: impl AsRef<Path>,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+) -> Result<Option<ScenarioEntry>, ScenarioDiscoveryError> {
+    discover_entry_with_languages_and_packs_with_progress(path, languages, language_packs, |_| {
+        ControlFlow::Continue(())
+    })
+}
+
+/// Progress-reporting form of [`discover_entry_with_languages_and_packs`].
+pub fn discover_entry_with_languages_and_packs_with_progress<F>(
+    path: impl AsRef<Path>,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    mut progress: F,
+) -> Result<Option<ScenarioEntry>, ScenarioDiscoveryError>
+where
+    F: FnMut(ScenarioDiscoveryProgress) -> ControlFlow<()>,
+{
+    let mut context = DiscoveryContext::new(&mut progress);
+    context.add_work(1)?;
+    let entry = collect_group_entry(path.as_ref(), "", languages, language_packs, &mut context)?;
+    context.complete_work()?;
+    context.finish()?;
+    Ok(entry)
+}
+
 /// Discovers one scenario root while reporting incremental recursive work.
 /// Returning [`ControlFlow::Break`] cancels at the next filesystem/group
 /// checkpoint and yields [`ScenarioDiscoveryError::Cancelled`].
@@ -559,12 +590,29 @@ fn collect_from_group_file(
     language_packs: &LanguagePacks,
     context: &mut DiscoveryContext<'_>,
 ) -> Result<Vec<ScenarioEntry>, ScenarioDiscoveryError> {
+    Ok(
+        collect_group_entry(path, parent_identifier, languages, language_packs, context)?
+            .into_iter()
+            .collect(),
+    )
+}
+
+fn collect_group_entry(
+    path: &Path,
+    parent_identifier: &str,
+    languages: &[String],
+    language_packs: &LanguagePacks,
+    context: &mut DiscoveryContext<'_>,
+) -> Result<Option<ScenarioEntry>, ScenarioDiscoveryError> {
     context.report()?;
     let name_os = match path.file_name() {
         Some(name) => name,
-        None => return Ok(Vec::new()),
+        None => return Ok(None),
     };
     let name = name_os.as_encoded_bytes();
+    if !is_scenario_filename_bytes(name) && !is_folder_filename_bytes(name) {
+        return Ok(None);
+    }
     let group = Group::open(path).map_err(|source| ScenarioDiscoveryError::Group {
         path: path.to_path_buf(),
         source,
@@ -575,7 +623,7 @@ fn collect_from_group_file(
     } else {
         build_folder_entry(&group, identifier, name, languages, language_packs, context)?
     };
-    Ok(vec![entry])
+    Ok(Some(entry))
 }
 
 fn legacy_core_info(group: &Group) -> Result<Option<LegacyCoreInfo>, ScenarioDiscoveryError> {

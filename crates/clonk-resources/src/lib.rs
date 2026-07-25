@@ -39,7 +39,9 @@ pub use particle::{
     ParticleDefinition, ParticleDefinitionCore, ParticleDefinitionError, ParticleFacet,
 };
 pub use scenario::{
-    discover, discover_many, discover_many_with_languages, discover_many_with_languages_and_packs,
+    discover, discover_entry_with_languages_and_packs,
+    discover_entry_with_languages_and_packs_with_progress, discover_many,
+    discover_many_with_languages, discover_many_with_languages_and_packs,
     discover_many_with_languages_and_packs_with_progress, discover_with_languages,
     discover_with_languages_and_packs, discover_with_languages_and_packs_with_progress,
     ScenarioDiscoveryError, ScenarioDiscoveryProgress, ScenarioEntry, ScenarioEntryKind,

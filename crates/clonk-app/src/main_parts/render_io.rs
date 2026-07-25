@@ -3419,22 +3419,32 @@ where
     let mut emitted_percent = 0_u8;
     for (root_index, root) in roots.iter().enumerate() {
         let root_base = root_index.saturating_mul(100);
-        let result = resource_scenario::discover_with_languages_and_packs_with_progress(
-            &root.path,
-            &languages,
-            &language_packs,
-            |progress| {
-                let combined =
-                    (root_base.saturating_add(usize::from(progress.percent()))) / root_count;
-                let combined = u8::try_from(combined.min(100)).unwrap_or(100);
-                emitted_percent = emitted_percent.max(combined);
-                if report_progress(emitted_percent) {
-                    OpsControlFlow::Continue(())
-                } else {
-                    OpsControlFlow::Break(())
-                }
-            },
-        );
+        let mut report_root_progress = |progress: resource_scenario::ScenarioDiscoveryProgress| {
+            let combined = (root_base.saturating_add(usize::from(progress.percent()))) / root_count;
+            let combined = u8::try_from(combined.min(100)).unwrap_or(100);
+            emitted_percent = emitted_percent.max(combined);
+            if report_progress(emitted_percent) {
+                OpsControlFlow::Continue(())
+            } else {
+                OpsControlFlow::Break(())
+            }
+        };
+        let result = if root.include_container {
+            resource_scenario::discover_entry_with_languages_and_packs_with_progress(
+                &root.path,
+                &languages,
+                &language_packs,
+                &mut report_root_progress,
+            )
+            .map(|entry| entry.into_iter().collect())
+        } else {
+            resource_scenario::discover_with_languages_and_packs_with_progress(
+                &root.path,
+                &languages,
+                &language_packs,
+                &mut report_root_progress,
+            )
+        };
         match result {
             Ok(entries) => combined_entries
                 .extend(entries.into_iter().map(|entry| (entry, root.label.clone()))),
@@ -4552,6 +4562,7 @@ pub(crate) fn scenario_storage_is_original(path: &Path) -> bool {
 pub(crate) struct ScenarioRoot {
     pub(crate) path: PathBuf,
     pub(crate) label: String,
+    include_container: bool,
 }
 
 pub(crate) fn scenario_roots(paths: &AppPaths) -> Vec<ScenarioRoot> {
@@ -4561,6 +4572,17 @@ pub(crate) fn scenario_roots(paths: &AppPaths) -> Vec<ScenarioRoot> {
     if let Some(content) = paths.content_dir() {
         push_root(&mut roots, &mut seen, content.to_path_buf(), "Scenarios");
     }
+    // C++ scans ExePath itself, so its configured SaveGameFolder remains one
+    // visible SubFolder before the individual save groups are loaded
+    // (C4StartupScenSelDlg.cpp:948-958, 1431-1439). Rust scans selected roots
+    // instead; retain the configured folder explicitly, including absolute
+    // locations outside the install tree.
+    push_entry_root(
+        &mut roots,
+        &mut seen,
+        configured_savegame_directory(Some(paths)),
+        "Scenarios",
+    );
     // The classic install root is a flat pack namespace. Discover its direct
     // `*.c4f` entries without recursively treating build/source directories
     // beside the executable as scenario folders.
@@ -4608,6 +4630,25 @@ fn push_root(
     path: PathBuf,
     label: &str,
 ) {
+    push_scenario_root(roots, seen, path, label, false);
+}
+
+fn push_entry_root(
+    roots: &mut Vec<ScenarioRoot>,
+    seen: &mut HashSet<String>,
+    path: PathBuf,
+    label: &str,
+) {
+    push_scenario_root(roots, seen, path, label, true);
+}
+
+fn push_scenario_root(
+    roots: &mut Vec<ScenarioRoot>,
+    seen: &mut HashSet<String>,
+    path: PathBuf,
+    label: &str,
+    include_container: bool,
+) {
     let key = scenario_root_key(&path);
     if !seen.insert(key) {
         return;
@@ -4615,6 +4656,7 @@ fn push_root(
     roots.push(ScenarioRoot {
         path,
         label: label.to_string(),
+        include_container,
     });
 }
 
