@@ -68,6 +68,7 @@ struct Link {
     /// copy sent in the same breath as the original cannot survive.
     burst_ms: u64,
     bad_until: Duration,
+    next_episode_at: Duration,
     rng: Lcg,
     queue: Vec<InFlight>,
     dropped: usize,
@@ -80,16 +81,23 @@ impl Link {
             return false;
         }
         if self.burst_ms > 0 {
-            if now < self.bad_until {
-                return true;
+            // Episodes are scheduled in TIME, not drawn per datagram. Drawing
+            // per datagram would make an extra copy of a 50-byte control packet
+            // as likely to trigger a radio fade or a queue overflow as the
+            // original, so any redundant configuration would manufacture its
+            // own extra loss and measure as worse for a reason the physical
+            // link does not share. With an absolute schedule the fraction of
+            // datagrams landing inside a bad window converges to loss_permille
+            // however many are sent, which is what makes the comparison fair.
+            while now >= self.next_episode_at {
+                self.bad_until = self.next_episode_at + Duration::from_millis(self.burst_ms);
+                let mean_period_ms = (self.burst_ms * 1000 / u64::from(self.loss_permille).max(1))
+                    .max(self.burst_ms + 1);
+                let spread = u32::try_from(mean_period_ms).unwrap_or(u32::MAX).max(1);
+                let period_ms = mean_period_ms / 2 + u64::from(self.rng.below(spread));
+                self.next_episode_at += Duration::from_millis(period_ms.max(1));
             }
-            // Scale the episode rate so mean loss still lands on loss_permille.
-            let episode_rate = (self.loss_permille as u64 * 1000 / self.burst_ms.max(1)).max(1);
-            if u64::from(self.rng.below(1_000_000)) < episode_rate {
-                self.bad_until = now + Duration::from_millis(self.burst_ms);
-                return true;
-            }
-            return false;
+            return now < self.bad_until;
         }
         self.rng.below(1000) < self.loss_permille
     }
@@ -282,6 +290,7 @@ fn main() {
         loss_permille,
         burst_ms: env_u64("LC_BURST_MS", 0),
         bad_until: Duration::ZERO,
+        next_episode_at: Duration::ZERO,
         rng: Lcg(seed),
         queue: Vec::new(),
         dropped: 0,
