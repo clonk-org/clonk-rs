@@ -771,7 +771,20 @@ pub fn reliable_udp_packet_kind(wire: &[u8]) -> Option<ReliableUdpPacketKind> {
     })
 }
 
-/// Inner-packet size at or below which a data packet is sent twice.
+/// Extra copies of a control-sized data packet to put on the wire beyond the
+/// original.
+///
+/// Chosen by measurement, not by intuition: `link_impairment` over 32 seeds
+/// with `LC_PRESEND=adaptive`. Under independent loss the third copy is where
+/// the lossy links collapse — a 250ms/10% link falls 12.22% -> 1.85% frozen
+/// time and a 200ms/5% link 2.16% -> 1.14%, because it takes losing *three*
+/// copies to cost a repair round trip. Under correlated burst loss
+/// (`LC_BURST_MS=60`) every copy count measures the same within noise, so the
+/// extra copies are never worse, only sometimes better. A fourth copy adds
+/// almost nothing over the third.
+const REDUNDANT_DATA_PACKET_COPIES: usize = 2;
+
+/// Inner-packet size at or below which a data packet is sent redundantly.
 ///
 /// Control packets are tens of bytes; a resource chunk is orders of magnitude
 /// larger and fragments into full 499-byte datagrams. Keying on the inner
@@ -796,13 +809,14 @@ const REDUNDANT_DATA_PACKET_LIMIT: u32 = 256;
 /// already stored — Rust at `ReliableUdpPartialPacket::add_fragment` and C++ at
 /// `C4NetIOUDP::Packet::AddFragment` (oracle-src-pinned src/C4NetIO.cpp:2615).
 /// A C++ peer therefore needs no knowledge of it.
-pub fn reliable_udp_sends_redundant_copy(wire: &[u8]) -> bool {
+pub fn reliable_udp_redundant_copies(wire: &[u8]) -> usize {
     if wire.first().map(|status| status & INTERNAL_PACKET_TYPE_MASK) != Some(IPID_DATA) {
-        return false;
+        return 0;
     }
     wire.get(9..13)
         .and_then(|size| size.try_into().ok())
-        .is_some_and(|size| u32::from_ne_bytes(size) <= REDUNDANT_DATA_PACKET_LIMIT)
+        .filter(|size| u32::from_ne_bytes(*size) <= REDUNDANT_DATA_PACKET_LIMIT)
+        .map_or(0, |_| REDUNDANT_DATA_PACKET_COPIES)
 }
 
 /// Splits one inner packet into packed C++ reliable-UDP data datagrams.
@@ -1527,27 +1541,28 @@ mod tests {
     }
 
     /// The redundancy discriminator must catch real control traffic and must
-    /// not double the cost of a resource transfer.
+    /// not multiply the cost of a resource transfer.
     #[test]
     fn redundant_copy_covers_control_packets_but_not_bulk_transfer() {
         // A player-control sized inner packet: one small datagram, re-sent.
         let control = encode_reliable_udp_data_fragments(7, &[0_u8; 40]).expect("encode control");
         assert_eq!(control.len(), 1);
-        assert!(reliable_udp_sends_redundant_copy(&control[0]));
+        assert_eq!(reliable_udp_redundant_copies(&control[0]), 2);
 
         // A resource chunk: many full fragments, none of them re-sent.
         let bulk = encode_reliable_udp_data_fragments(7, &[0_u8; 8_192]).expect("encode bulk");
         assert!(bulk.len() > 1);
         for fragment in &bulk {
-            assert!(
-                !reliable_udp_sends_redundant_copy(fragment),
+            assert_eq!(
+                reliable_udp_redundant_copies(fragment),
+                0,
                 "bulk transfer must not pay for redundancy"
             );
         }
 
         // Only data packets qualify; a Check carries its own retry damping.
-        assert!(!reliable_udp_sends_redundant_copy(&[IPID_CHECK, 0, 0, 0, 0]));
-        assert!(!reliable_udp_sends_redundant_copy(&[]));
+        assert_eq!(reliable_udp_redundant_copies(&[IPID_CHECK, 0, 0, 0, 0]), 0);
+        assert_eq!(reliable_udp_redundant_copies(&[]), 0);
     }
 
     /// The copy has to be byte-identical, or it would occupy a fresh packet

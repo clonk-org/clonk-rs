@@ -1445,9 +1445,9 @@ impl ReliableUdpSocketDriver {
             match result {
                 Ok(_) => {
                     // Control-sized packets go out twice. See
-                    // `reliable_udp_sends_redundant_copy` for why this is worth
+                    // `reliable_udp_redundant_copies` for why this is worth
                     // its bandwidth and why a C++ peer cannot tell.
-                    if crate::udp::reliable_udp_sends_redundant_copy(&datagram.payload) {
+                    for _ in 0..crate::udp::reliable_udp_redundant_copies(&datagram.payload) {
                         let _ = self.send_planned_datagram(&datagram).await;
                     }
                 }
@@ -2803,11 +2803,11 @@ mod tests {
         let (second_length, _) =
             recv_spy_kind(&second, &mut second_wire, ReliableUdpPacketKind::Data).await;
         assert!(statistics.generate_statistics(2_002));
-        // Both payloads are control-sized, so each went out twice. The second
-        // copy is real bandwidth and is accounted as such -- see
-        // `reliable_udp_sends_redundant_copy`.
-        let first_output = normalize(udp_accounted_bytes(first_length) * 2);
-        let second_output = normalize(udp_accounted_bytes(second_length) * 2);
+        // Both payloads are control-sized, so each went out three times. The
+        // redundant copies are real bandwidth and are accounted as such -- see
+        // `reliable_udp_redundant_copies`.
+        let first_output = normalize(udp_accounted_bytes(first_length) * 3);
+        let second_output = normalize(udp_accounted_bytes(second_length) * 3);
         assert_eq!(
             statistics
                 .connection_statistics(first_key)

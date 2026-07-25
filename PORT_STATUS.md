@@ -352,19 +352,19 @@ an ordered-map model gap.
   readiness has been established and silently drops every early datagram (it
   made 6 `udp_runtime`/`udp_session` tests time out).
 
-- **Control-sized reliable-UDP datagrams are sent twice**
-  (`crates/clonk-network/src/udp.rs`, `reliable_udp_sends_redundant_copy`;
+- **Control-sized reliable-UDP datagrams are sent three times**
+  (`crates/clonk-network/src/udp.rs`, `reliable_udp_redundant_copies`;
   C++ `C4NetIOUDP::SendDirect`, oracle-src-pinned src/C4NetIO.cpp:3128).
-  Approved 2026-07-24.
+  Approved 2026-07-24, copy count raised from 2 to 3 on 2026-07-25.
   C++ sends each data datagram once and repairs a loss with a request/resend
   round trip. Because reliable-UDP delivery is strictly ordered
   (`take_complete_direct_packets`, udp.rs:421), a single lost control datagram
   withholds every *later* control tick from the game loop until that repair
   lands, so one dropped datagram freezes the whole session for
   (control interval + 1 RTT) -- and a loss with no following traffic waits on
-  the 1 Hz check instead, up to a second. Putting a second copy of the same
+  the 1 Hz check instead, up to a second. Putting further copies of the same
   datagram on the wire immediately removes the round trip for any loss that does
-  not take both copies.
+  not take every copy.
   This is invisible to a C++ peer: the copy is byte-identical and therefore
   carries the same packet number, and both engines discard a fragment they have
   already stored -- Rust at `ReliableUdpPartialPacket::add_fragment`
@@ -373,16 +373,26 @@ an ordered-map model gap.
   its ordering and the wire format are unchanged.
   Only inner packets of <= 256 bytes qualify, which covers control (10-27 bytes
   on the wire) and excludes resource transfer, whose chunks fragment into full
-  499-byte datagrams. The cost is about 1 KB/s per peer per direction.
+  499-byte datagrams. The cost is about 1.5 KB/s per peer per direction.
   Measured as above at 80 ms RTT / +-20 ms jitter / 1% loss, holding PreSend at
   C++'s: worst hitch 231 ms -> 56 ms and frozen time 27.19% -> 18.53%; combined
-  with the entry above, 231 ms -> 31 ms and 0.18%. Staggering the copy was
-  measured and rejected: at 0/15/30 ms of delay the results were within noise
-  under independent loss, and a correlated 60 ms loss episode swallows any
-  stagger short enough to be useful, so the copy goes out immediately and needs
-  no timer. Under that bursty model redundancy contributes little on its own
-  (both copies are usually lost together) and the envelope estimator carries the
-  result: 23.32% -> 0.31% frozen at 80 ms / 1%.
+  with the entry above, 231 ms -> 31 ms and 0.18%. Staggering the copies was
+  measured and rejected: at 0/15/30 ms of delay the results were within noise,
+  and a correlated 60 ms loss episode swallows any stagger short enough to be
+  useful, so the copies go out immediately and need no timer.
+  The copy count is 3 by measurement over 32 seeds. The third copy is where the
+  lossy links collapse under independent loss, because it takes losing *three*
+  copies to cost a repair round trip: 250 ms/10% falls 12.22% -> 1.85% frozen
+  and 200 ms/5% falls 2.16% -> 1.14%. A fourth adds almost nothing.
+  Under correlated burst loss (`LC_BURST_MS`) every copy count measures the same
+  within noise -- redundancy is never worse there, only sometimes better -- and
+  the residual is the link itself: a 60 ms outage against a 55 ms control period
+  loses whole consecutive ticks that no copy count can recover, so the envelope
+  estimator carries that case instead.
+  Note for anyone re-running this: `link_impairment`'s burst model schedules
+  episodes in *time*. An earlier per-datagram draw made every redundant
+  configuration manufacture its own extra loss and measure as harmful, which was
+  an artifact of the model rather than a property of the link.
 
 - **Reliable-UDP re-ask damping, 1 s -> 250 ms** (`crates/clonk-network/src/udp.rs`,
   `RELIABLE_UDP_RECHECK_INTERVAL`; C++ `C4NetIOUDP::Peer::iReCheckInterval`,
