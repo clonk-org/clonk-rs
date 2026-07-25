@@ -319,6 +319,9 @@ fn main() -> Result<()> {
     let console_log_capture = classic
         .console
         .then(clonk_logging::ConsoleLogCapture::default);
+    // C4LogSystem installs its GuiSink for every session: the running message
+    // board draws the C4Script log stream (src/C4Log.cpp:226-240).
+    let game_log_capture = clonk_logging::GameLogCapture::default();
 
     let explicit_config = classic
         .config_file
@@ -331,6 +334,7 @@ fn main() -> Result<()> {
             classic.verbose,
             &log_path,
             console_log_capture.clone(),
+            Some(game_log_capture.clone()),
         ) {
             Ok(()) => tracing::info!(
                 path = %log_path.display(),
@@ -343,11 +347,11 @@ fn main() -> Result<()> {
             ),
         }
     } else {
-        if let Some(capture) = console_log_capture.clone() {
-            clonk_logging::init_verbose_with_capture(classic.verbose, capture);
-        } else {
-            clonk_logging::init_verbose(classic.verbose);
-        }
+        clonk_logging::init_verbose_with_capture(
+            classic.verbose,
+            console_log_capture.clone(),
+            Some(game_log_capture.clone()),
+        );
     }
     if let Some(paths) = app_paths.as_ref() {
         if let Err(err) = paths.ensure_user_dirs() {
@@ -499,6 +503,7 @@ fn main() -> Result<()> {
     .context("failed to initialise app state")?;
     app.console_mode = classic.console;
     app.console_log_capture = console_log_capture;
+    app.game_log_capture = Some(game_log_capture);
     if classic.console {
         arm_configured_engine_debug_mode(&mut app.engine, app_paths.as_deref(), true);
     }
@@ -602,6 +607,7 @@ fn main() -> Result<()> {
                     console_commands = None;
                 }
                 app.drain_console_log_capture();
+                app.drain_game_log_capture();
                 if app.sync_developer_console_view() {
                     window.set_title(&app.developer_console.view_model().caption);
                     window.request_redraw();
@@ -1569,6 +1575,7 @@ impl GameApp {
             developer_console_editing_enabled: true,
             developer_console_pointer: GuiPoint::new(0.0, 0.0),
             console_log_capture: None,
+            game_log_capture: None,
             script_created_objects: false,
             sandbox_crew_definition_paths: None,
             configured_client_player_selection: None,

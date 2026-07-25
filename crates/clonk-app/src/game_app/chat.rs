@@ -1342,6 +1342,31 @@ impl GameApp {
         }
     }
 
+    /// `C4LogSystem::GuiSink::DoLog` (`src/C4Log.cpp:226-240`): every logged
+    /// line reaches `C4MessageBoard::AddLog` plus `LogNotify` while the board
+    /// is active. `AddLog` stamps the configured timestamp and appends to the
+    /// log buffer; an inactive board discards the line
+    /// (`src/C4MessageBoard.cpp:327-347,354-366`). The board is constructed by
+    /// `C4MessageBoard::Init` for the running game and released with it, so
+    /// menu-time script logs stay in the session log and developer console.
+    pub(crate) fn drain_game_log_capture(&mut self) {
+        let Some(lines) = self
+            .game_log_capture
+            .as_ref()
+            .map(clonk_logging::GameLogCapture::take)
+            .filter(|lines| !lines.is_empty())
+        else {
+            return;
+        };
+        if !matches!(self.mode, AppMode::Running) {
+            return;
+        }
+        for line in lines {
+            let line = self.timestamp_log_line(line);
+            self.enqueue_control_message_board_line(line);
+        }
+    }
+
     pub(crate) fn scroll_message_board(&mut self, older: bool) {
         self.message_board.scroll(older);
     }

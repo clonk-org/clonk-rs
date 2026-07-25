@@ -75,3 +75,7 @@ clonk-engine = { path = "../clonk-engine", features = ["test-graph"] }
 # Tokio feature here as well so app-only and workspace test graphs share one
 # Tokio fingerprint without enabling test utilities in production builds.
 tokio = { version = "1.32", features = ["test-util"] }
+# The message-board log tests write through clonk-logging's MakeWriter sinks.
+# Request the same features clonk-logging already builds so the test graph
+# reuses one tracing-subscriber fingerprint.
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
