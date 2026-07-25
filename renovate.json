@@ -22,6 +22,17 @@
     "description": "content/ is a deliberately pinned game-data submodule, not a dependency to track.",
     "enabled": false
   },
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "description": "A security fix must reach a pull request immediately, so it overrides everything below: the monthly schedule, the compatible-update grouping, and the dashboard approval that otherwise holds major and 0.x bumps.",
+    "enabled": true,
+    "schedule": [],
+    "groupName": null,
+    "dependencyDashboardApproval": false,
+    "minimumReleaseAge": null,
+    "prCreation": "immediate",
+    "labels": ["dependencies", "security"]
+  },
   "packageRules": [
     {
       "description": "The whole workspace shares one Cargo.lock, so separate compatible-update pull requests would each invalidate the others. Collect them into one.",
