@@ -33,16 +33,19 @@
         let finder = engine
             .spawn_object(SpawnConfig::new("FNDR"))
             .expect("finder spawns");
-        // Owner 3 evaluates to 0 (falsy); owner 5 is the first truthy match
-        // in main-list order; the finder's own def has no IsHot at all.
-        let _miss = engine
-            .spawn_object(SpawnConfig::new("PROB").with_owner(3))
+        // `C4ObjectList::Add(stMain)` links a new object ahead of the first
+        // same-category/same-id entry (C4ObjectList.cpp:155-163), so the main
+        // list walks newest-first and these spawn in reverse of the walk.
+        // Owner 3 evaluates to 0 (falsy) and is met first; owner 5 is the
+        // first truthy match; the finder's own def has no IsHot at all.
+        let _late = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(9))
             .expect("probe spawns");
         let hit = engine
             .spawn_object(SpawnConfig::new("PROB").with_owner(5))
             .expect("probe spawns");
-        let _late = engine
-            .spawn_object(SpawnConfig::new("PROB").with_owner(9))
+        let _miss = engine
+            .spawn_object(SpawnConfig::new("PROB").with_owner(3))
             .expect("probe spawns");
         engine.tick_without_snapshot().expect("tick succeeds");
 
@@ -1017,11 +1020,11 @@
         assert_eq!(
             result,
             Value::Array(vec![
-                Value::Object(s1.as_u64()),
                 Value::Object(s2.as_u64()),
+                Value::Object(s1.as_u64()),
                 Value::Object(bool_probe.as_u64()),
             ]),
-            "strings rank 0 (stable, collection order); true ranks 1"
+            "strings rank 0 (stable, newest-first collection order); true ranks 1"
         );
     }
 

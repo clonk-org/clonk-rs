@@ -3960,8 +3960,19 @@ impl HostWorldContext {
         let mut cache = self.sectors.borrow_mut();
         if cache.is_none() {
             let store = self.object_store.borrow();
+            // `C4LSectors::Add` receives the live forward master list, so each
+            // sector's own list carries master-list order (C4Sector.cpp:88-101;
+            // C4ObjectList.cpp:138-205). Objects the master list does not carry
+            // (contained/inactive) keep their storage order behind it.
+            let mut seen = HashSet::with_capacity(store.order.len());
+            let ordered = self
+                .master_order
+                .iter()
+                .chain(store.order.iter())
+                .filter(|id| seen.insert(**id))
+                .filter_map(|id| store.objects.get(id));
             *cache = Some(Rc::new(build_host_sector_map(
-                store.order.iter().filter_map(|id| store.objects.get(id)),
+                ordered,
                 &self.definitions,
                 width,
                 height,

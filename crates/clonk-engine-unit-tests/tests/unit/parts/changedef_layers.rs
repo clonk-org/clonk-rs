@@ -952,7 +952,7 @@ func Probe() {
             )
             .expect("near spawns");
         // Speed keys are 0/1: both movers key 1, so the STABLE sort keeps
-        // the faster-but-first object ahead.
+        // whichever the main-list walk met first — the newest object.
         let fast_idx = engine.find_object_index(far).expect("far exists");
         engine.objects[fast_idx].fixed_velocity = FixedVec2::from_ints(5, 0);
         let near_idx = engine
@@ -975,8 +975,9 @@ func Probe() {
         );
         assert_eq!(
             locals.get("iFastFirst"),
-            Some(&Value::Int(50_000)),
-            "0/1 speed keys tie; stable sort keeps collection order"
+            Some(&Value::Int(1_000)),
+            "0/1 speed keys tie; the stable sort keeps the newest-first \
+             main-list order, so the later-spawned near object leads"
         );
         assert_eq!(
             locals.get("iHalfMass"),

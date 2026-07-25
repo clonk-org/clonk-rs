@@ -1653,11 +1653,101 @@ protected func Construction()
         assert_eq!(
             values.iter().map(object_id_from_value).collect::<Vec<_>>(),
             [
+                Some(ObjectId::new(3)),
+                Some(ObjectId::new(2)),
+                Some(ObjectId::new(1)),
+            ],
+            "an absent live snapshot rebuilds the sector lists in master-list order"
+        );
+    }
+
+    /// `C4FindObject::Find`/`FindMany` walk `Objs.First -> Next`, the forward
+    /// C4GameObjects master list (C4FindObject.cpp:188-216), never a
+    /// storage/creation order. `C4ObjectList::Add(stMain)` inserts a new
+    /// object ahead of the first same-category/same-id link
+    /// (C4ObjectList.cpp:155-163), so equal-category siblings walk
+    /// newest-first.
+    ///
+    /// Measured against the pinned oracle on EkeReloaded's Invasion: with
+    /// Stippels 719..726 alive, `FindObjects(Find_ID(ST5B))` reports
+    /// `726 725 724 723 722` in C++ while Rust reported `719 720 721 722 723`.
+    #[test]
+    fn find_objects2_boundless_walk_follows_master_list_not_storage_order() {
+        let world = sectored_find_world(
+            vec![
+                find_world_object(1, "ROCK", 10, 10, 1),
+                find_world_object(2, "ROCK", 20, 10, 1),
+                find_world_object(3, "ROCK", 30, 10, 1),
+            ],
+            HashMap::new(),
+        )
+        .with_master_order([ObjectId::new(3), ObjectId::new(2), ObjectId::new(1)]);
+        // [C4FO_ID(20), ROCK] — no bounds, so the walk is the master list.
+        let boundless = vec![Value::Array(vec![
+            Value::Int(20),
+            Value::String("ROCK".into()),
+        ])];
+        let (result, _) =
+            with_object_host_context_with_world(world.clone(), || find_objects2(&boundless));
+        let Ok(Value::Array(values)) = result else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![
+                Some(ObjectId::new(3)),
+                Some(ObjectId::new(2)),
+                Some(ObjectId::new(1)),
+            ],
+            "boundless criteria walk the master list, newest-first"
+        );
+        let (result, _) =
+            with_object_host_context_with_world(world, || find_object2(&boundless));
+        assert_eq!(
+            object_id_from_value(&result.expect("FindObject2 succeeds")),
+            Some(ObjectId::new(3)),
+            "FindObject2 returns the first object of that same walk"
+        );
+    }
+
+    /// `C4LSectors::Add` receives the live forward master list, so each
+    /// `C4LSector::Objects` list is itself in master-list order
+    /// (C4Sector.cpp:88-101; C4ObjectList.cpp:138-205). A sector-bounded
+    /// query therefore reports newest-first *within* a sector.
+    ///
+    /// Measured against the pinned oracle: for one shared sector C++ reported
+    /// `721 722 719 720` where Rust reported `721 719 722 720`.
+    #[test]
+    fn find_objects2_sector_lists_are_built_in_master_list_order() {
+        let world = sectored_find_world(
+            vec![
+                find_world_object(1, "ROCK", 10, 10, 1),
+                find_world_object(2, "ROCK", 20, 10, 1),
+                find_world_object(3, "ROCK", 30, 10, 1),
+            ],
+            HashMap::new(),
+        )
+        .with_master_order([ObjectId::new(3), ObjectId::new(1), ObjectId::new(2)]);
+        // [C4FO_InRect(10), 0, 0, 50, 50] — one sector holds all three.
+        let bounded = vec![Value::Array(vec![
+            Value::Int(10),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(50),
+            Value::Int(50),
+        ])];
+        let (result, _) = with_object_host_context_with_world(world, || find_objects2(&bounded));
+        let Ok(Value::Array(values)) = result else {
+            panic!("FindObjects returns array");
+        };
+        assert_eq!(
+            values.iter().map(object_id_from_value).collect::<Vec<_>>(),
+            vec![
+                Some(ObjectId::new(3)),
                 Some(ObjectId::new(1)),
                 Some(ObjectId::new(2)),
-                Some(ObjectId::new(3)),
             ],
-            "an absent live snapshot falls back to callback storage order"
+            "the sector's own list carries master-list order"
         );
     }
 

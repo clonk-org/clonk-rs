@@ -178,6 +178,23 @@ live comparison.
 
 ## Open
 
+- Open gap (found 2026-07-25, not closed): a DFA_FLIGHT object can land one
+  frame later than C++. Reproduce with EkeReloaded `TheStippelAge/Invasion`
+  under `LC_PIN_SEED=777` and a `#appendto ST5B` per-frame `Log` of
+  action/position/`GetXDir(0,1000)`: Stippel `o739` reaches
+  `Jump pFLIGHT x2730 y710 U400 V200` identically in both engines, then C++
+  runs `ContactAction`'s bottom-`DFA_FLIGHT` arm (`C4Object.cpp:4360-4377`,
+  `last_xdir`/`ObjectActionWalk`/restore) that frame and reports
+  `Walk pWALK x2731 y710 U-300`, while Rust stays airborne one more frame
+  (`Jump pFLIGHT x2731 y710 U400 V400`) and reconverges by the third frame.
+  Only the frame the contact fires differs, so the cause is sub-pixel `fix_y`
+  drift entering the frame rather than the transition itself; script cannot
+  observe `fix_y` (`FnGetX`/`FnGetY` return whole pixels, `C4Script.cpp:1249`),
+  so isolating it needs an oracle-side dump. Scale: 3 of 37 314 trace lines on
+  that seed; the same run is otherwise bit-exact, and `LC_PIN_SEED=12345` is
+  bit-exact over all 37 161 lines. This is independent of the FindObject
+  ordering fix landed the same day — every `Find`-driven event (all `Bite`s)
+  matches on both seeds.
 - Intentional divergence from C++ (2026-07-24), not a gap to close: the port
   ships **no trademark notice**. C++ draws `FANPROJECTTEXT " " TRADEMARKTEXT`
   (`C4Version.h:21-22`) in the main-menu and About footers

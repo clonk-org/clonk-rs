@@ -823,14 +823,21 @@ fn sector_queries_do_not_materialize_the_landscape_shell() {
 
 #[test]
 fn sector_query_ordering_is_frozen_across_rebuild_and_incremental_paths() {
-    // FREEZE, not a new behavior claim. `C4LSectors` keeps its own physical
-    // per-sector list order and refreshes only a rank oracle on SortByCategory
-    // (oracle-src-pinned src/C4Sector.cpp:107-160), so a map rebuilt from the
-    // current object set and a map mutated incrementally can legitimately
-    // disagree. FindObject ordering is determinism-critical, so pin the exact
-    // sequences the callback-local rebuild produces today. Any change to how
-    // host contexts obtain their sector map must leave every assertion here
-    // untouched.
+    // FREEZE. `C4LSectors` keeps its own physical per-sector list order and
+    // refreshes only a rank oracle on SortByCategory (oracle-src-pinned
+    // src/C4Sector.cpp:107-160), so a map rebuilt from the current object set
+    // and a map mutated incrementally can legitimately disagree. FindObject
+    // ordering is determinism-critical, so pin the exact sequences the
+    // callback-local rebuild produces.
+    //
+    // The frozen sequences are per-sector NEWEST-FIRST, because
+    // `C4LSectors::Add` receives the live forward master list and
+    // `C4ObjectList::Add(stMain)` links a new object ahead of the first
+    // same-category/same-id entry (C4Sector.cpp:88-101;
+    // C4ObjectList.cpp:155-163). Verified against the pinned oracle on
+    // EkeReloaded's Invasion: for one shared sector C++ reported
+    // `721 722 719 720`, and an earlier ascending-order rebuild here reported
+    // `721 719 722 720`.
     let mut engine = Engine::with_seed(0);
     for id in ["SCTA", "SCTB"] {
         engine
@@ -854,13 +861,33 @@ fn sector_query_ordering_is_frozen_across_rebuild_and_incremental_paths() {
         spawned.push(object);
     }
 
+    // The 15px spacing groups these 24 objects into eight sectors; each
+    // sector's own list is newest-first, so every group runs backwards.
+    // Entries are spawn indices.
+    const SECTOR_GROUPS: [&[usize]; 8] = [
+        &[2, 1, 0],
+        &[6, 5, 4, 3],
+        &[9, 8, 7],
+        &[12, 11, 10],
+        &[16, 15, 14, 13],
+        &[19, 18, 17],
+        &[22, 21, 20],
+        &[23],
+    ];
+    let expect = |groups: &[&[usize]]| -> Vec<ObjectId> {
+        groups
+            .iter()
+            .flat_map(|group| group.iter().map(|&index| spawned[index]))
+            .collect()
+    };
+
     let context = engine.host_world_context();
     let whole = context
         .object_sector_ids_in_rect(DefinitionRect::new(0, 0, 400, 200))
         .expect("a landscape-backed context has a sector map");
     assert_eq!(
         whole,
-        spawned,
+        expect(&SECTOR_GROUPS),
         "a full-extent query returns every object in master-list order"
     );
 
@@ -873,9 +900,9 @@ fn sector_query_ordering_is_frozen_across_rebuild_and_incremental_paths() {
     let window = context
         .object_sector_ids_in_rect(DefinitionRect::new(100, 0, 120, 200))
         .expect("sector map present");
-    let expected_window: Vec<_> = spawned.iter().copied().skip(7).take(10).collect();
     assert_eq!(
-        window, expected_window,
+        window,
+        expect(&SECTOR_GROUPS[2..5]),
         "a partial rect preserves master-list order within the covered sectors"
     );
 
@@ -886,7 +913,7 @@ fn sector_query_ordering_is_frozen_across_rebuild_and_incremental_paths() {
         .expect("sector map present");
     assert_eq!(
         lists.iter().flatten().copied().collect::<Vec<_>>(),
-        spawned,
+        expect(&SECTOR_GROUPS),
         "per-sector lists flatten back to master-list order"
     );
     assert!(

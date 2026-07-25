@@ -4104,7 +4104,9 @@ fn find_candidate_ids(world: &impl WorldAccessor, condition: &FindCondition) -> 
                 world.object_sector_ids_in_rect(rect)
             }
         })
-        .unwrap_or_else(|| world.object_ids())
+        // Unbounded criteria walk `Objs.First -> Next`, the forward master
+        // list (C4FindObject.cpp:188-216), not the callback's storage order.
+        .unwrap_or_else(|| world.master_object_ids())
 }
 
 /// Collect matches in C++ walk order (C4FindObject::FindMany,
