@@ -24,7 +24,9 @@ use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use clonk_network::{ReliableUdpEndpointCore, ReliableUdpEvent, ReliableUdpStep};
+use clonk_network::{
+    ControlLatencyEstimator, ReliableUdpEndpointCore, ReliableUdpEvent, ReliableUdpStep,
+};
 
 /// C++ `C4GameControlNetwork` pacing: ControlRate 2 at the 38 FPS default
 /// target is one control packet every other frame.
@@ -60,6 +62,12 @@ struct Link {
     rtt_ms: u64,
     jitter_ms: u64,
     loss_permille: u32,
+    /// Mean length of a correlated loss episode, in milliseconds. Zero gives
+    /// independent Bernoulli loss. Real links drop in bursts — a queue
+    /// overflows, a radio fades — and a burst is exactly the case a redundant
+    /// copy sent in the same breath as the original cannot survive.
+    burst_ms: u64,
+    bad_until: Duration,
     rng: Lcg,
     queue: Vec<InFlight>,
     dropped: usize,
@@ -67,10 +75,29 @@ struct Link {
 }
 
 impl Link {
+    fn drops(&mut self, now: Duration) -> bool {
+        if self.loss_permille == 0 {
+            return false;
+        }
+        if self.burst_ms > 0 {
+            if now < self.bad_until {
+                return true;
+            }
+            // Scale the episode rate so mean loss still lands on loss_permille.
+            let episode_rate = (self.loss_permille as u64 * 1000 / self.burst_ms.max(1)).max(1);
+            if u64::from(self.rng.below(1_000_000)) < episode_rate {
+                self.bad_until = now + Duration::from_millis(self.burst_ms);
+                return true;
+            }
+            return false;
+        }
+        self.rng.below(1000) < self.loss_permille
+    }
+
     /// One-way delay is half the round trip, plus a uniform jitter draw.
     fn enqueue(&mut self, now: Duration, to_host: bool, payload: Vec<u8>) {
         self.sent += 1;
-        if self.loss_permille > 0 && self.rng.below(1000) < self.loss_permille {
+        if self.drops(now) {
             self.dropped += 1;
             return;
         }
@@ -119,12 +146,129 @@ fn percentile(sorted: &[Duration], fraction: f64) -> Duration {
     sorted[index]
 }
 
+/// Lockstep playout model.
+///
+/// A client cannot execute control tick T before its packet arrives, and it
+/// paces successive ticks one control period apart. Once a late packet pushes
+/// execution past its slot the whole schedule slips, which is what a player
+/// perceives as the game running slow. `lookahead` is the PreSend horizon in
+/// milliseconds: the budget a packet has to arrive in before it stalls anyone.
+/// `catch_up` picks which of the two real client behaviors to model. With it
+/// off the schedule slips permanently once a packet is late, which is the game
+/// visibly running behind. With it on the client races back to its ideal slot
+/// after every stall, so a late packet costs a hitch instead of drift and the
+/// next late packet hitches again. The frame scheduler decides which happens.
+fn replay_lockstep(
+    arrivals: &BTreeMap<u32, Duration>,
+    ticks: usize,
+    lookahead: Lookahead,
+    catch_up: bool,
+) -> (Vec<Duration>, Duration, Vec<Duration>) {
+    let mut stalls = Vec::new();
+    let mut horizons = Vec::new();
+    let mut executed_at = Duration::ZERO;
+    let mut lookahead = lookahead;
+    for tick in 0..ticks as u32 {
+        horizons.push(lookahead.current());
+        let scheduled = CONTROL_PERIOD * tick + lookahead.current();
+        let earliest = if catch_up {
+            scheduled
+        } else {
+            scheduled.max(executed_at + CONTROL_PERIOD)
+        };
+        let Some(arrived) = arrivals.get(&tick) else {
+            continue;
+        };
+        executed_at = earliest.max(*arrived);
+        stalls.push(executed_at.saturating_sub(earliest));
+        // The engine samples delivery time and re-sizes PreSend as it goes.
+        lookahead.observe(arrived.saturating_sub(CONTROL_PERIOD * tick));
+    }
+    let last_slot = CONTROL_PERIOD * (ticks as u32 - 1) + lookahead.current();
+    let drift = executed_at.saturating_sub(last_slot);
+    (stalls, drift, horizons)
+}
+
+/// How the client sizes its PreSend horizon while the session runs.
+enum Lookahead {
+    /// A constant horizon, for isolating transport behavior from adaptation.
+    Fixed(Duration),
+    /// C++ `CalcPerformance`: a 1/150 EWMA of the mean, and nothing else.
+    CppMean { average_us: i32, target_fps: i32 },
+    /// The mean-plus-deviation budget from `ControlLatencyEstimator`.
+    Adaptive {
+        estimator: ControlLatencyEstimator,
+        target_fps: i32,
+    },
+}
+
+impl Lookahead {
+    /// Both adaptive modes convert a microsecond budget the same way C++ does:
+    /// to a whole number of frames, clamped, then back to wall-clock.
+    fn frames_to_duration(budget_us: i32, target_fps: i32) -> Duration {
+        let frames = (target_fps.saturating_mul(budget_us) / 1_000_000)
+            .saturating_add(1)
+            .clamp(1, 15);
+        Duration::from_micros((frames as u64 * 1_000_000) / target_fps.max(1) as u64)
+    }
+
+    fn current(&self) -> Duration {
+        match self {
+            Self::Fixed(lookahead) => *lookahead,
+            Self::CppMean {
+                average_us,
+                target_fps,
+            } => Self::frames_to_duration(*average_us, *target_fps),
+            Self::Adaptive {
+                estimator,
+                target_fps,
+            } => Self::frames_to_duration(estimator.budget_us(), *target_fps),
+        }
+    }
+
+    fn observe(&mut self, delivery: Duration) {
+        let sample_ms = delivery.as_millis().min(i32::MAX as u128) as i32;
+        match self {
+            Self::Fixed(_) => {}
+            Self::CppMean { average_us, .. } => {
+                *average_us = average_us
+                    .wrapping_mul(149)
+                    .wrapping_add(sample_ms.wrapping_mul(1_000))
+                    / 150;
+            }
+            Self::Adaptive { estimator, .. } => estimator.observe(sample_ms),
+        }
+    }
+}
+
 fn main() {
     let rtt_ms = env_u64("LC_RTT_MS", 60);
     let jitter_ms = env_u64("LC_JITTER_MS", 10);
     let loss_permille = env_u64("LC_LOSS_PERMILLE", 10) as u32;
     let ticks = env_u64("LC_TICKS", 400) as usize;
     let seed = env_u64("LC_SEED", 0x5eed_1234);
+    // Copies of each control datagram to put on the wire. C4NetIOUDP discards a
+    // packet number below its receive cursor, so a redundant copy is wire-legal
+    // and a C++ peer drops it without noticing. `LC_DUP_DELAY_MS` staggers the
+    // copies so one congestion burst is less likely to take all of them.
+    let duplicates = env_u64("LC_DUP", 1).max(1);
+    let duplicate_delay_ms = env_u64("LC_DUP_DELAY_MS", 0);
+    // PreSend horizon. `LC_PRESEND=cpp` replays C4GameControlNetwork's
+    // mean-only sizing, `adaptive` replays ControlLatencyEstimator, and the
+    // default holds LC_LOOKAHEAD_MS constant.
+    let target_fps = env_u64("LC_TARGET_FPS", 38) as i32;
+    let presend_mode = env::var("LC_PRESEND").unwrap_or_else(|_| "fixed".to_string());
+    let lookahead = match presend_mode.as_str() {
+        "cpp" => Lookahead::CppMean {
+            average_us: 0,
+            target_fps,
+        },
+        "adaptive" => Lookahead::Adaptive {
+            estimator: ControlLatencyEstimator::new(),
+            target_fps,
+        },
+        _ => Lookahead::Fixed(Duration::from_millis(env_u64("LC_LOOKAHEAD_MS", 0))),
+    };
 
     let host_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 40_000);
     let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 40_001);
@@ -136,6 +280,8 @@ fn main() {
         rtt_ms,
         jitter_ms,
         loss_permille,
+        burst_ms: env_u64("LC_BURST_MS", 0),
+        bad_until: Duration::ZERO,
         rng: Lcg(seed),
         queue: Vec::new(),
         dropped: 0,
@@ -166,6 +312,7 @@ fn main() {
     }
 
     let mut sent_at: BTreeMap<u32, Duration> = BTreeMap::new();
+    let mut arrivals: BTreeMap<u32, Duration> = BTreeMap::new();
     let mut latencies: Vec<Duration> = Vec::new();
     let mut next_control_at = Duration::ZERO;
     let mut tick: u32 = 0;
@@ -178,7 +325,12 @@ fn main() {
             if let Ok(step) = host.send_packet(client_addr, &payload) {
                 sent_at.insert(tick, now);
                 for datagram in step.datagrams {
-                    link.enqueue(now, false, datagram.payload);
+                    // Each copy draws loss independently, which is the property
+                    // that makes redundancy worth its bandwidth.
+                    for copy in 0..duplicates {
+                        let stagger = Duration::from_millis(duplicate_delay_ms * copy);
+                        link.enqueue(now + stagger, false, datagram.payload.clone());
+                    }
                 }
             }
             tick += 1;
@@ -200,6 +352,7 @@ fn main() {
                         let id = u32::from_le_bytes(payload[..4].try_into().expect("4 bytes"));
                         if let Some(sent) = sent_at.remove(&id) {
                             latencies.push(now.saturating_sub(sent));
+                            arrivals.insert(id, now);
                         }
                     }
                 }
@@ -226,7 +379,13 @@ fn main() {
 
     println!("rtt              {rtt_ms}ms (one-way {one_way:?})");
     println!("jitter           +0..{}ms", jitter_ms * 2);
-    println!("loss             {loss_permille} permille");
+    println!(
+        "loss             {loss_permille} permille{}",
+        match env_u64("LC_BURST_MS", 0) {
+            0 => " (independent)".to_string(),
+            burst => format!(" (bursts of ~{burst}ms)"),
+        }
+    );
     println!("seed             {seed:#x}");
     println!("control period   {CONTROL_PERIOD:?}");
     println!("controls sent    {ticks}");
@@ -249,5 +408,54 @@ fn main() {
     println!(
         "over one period  {stalls} ({:.1}%)",
         stalls as f64 / latencies.len().max(1) as f64 * 100.0
+    );
+
+    let catch_up = env_u64("LC_CATCHUP", 0) != 0;
+    let presend_label = match &lookahead {
+        Lookahead::Fixed(fixed) => format!("fixed {fixed:?}"),
+        Lookahead::CppMean { .. } => "cpp mean-only".to_string(),
+        Lookahead::Adaptive { .. } => "adaptive mean+deviation".to_string(),
+    };
+    let (lockstep_stalls, drift, horizons) = replay_lockstep(&arrivals, ticks, lookahead, catch_up);
+    let stalled: Vec<Duration> = lockstep_stalls
+        .iter()
+        .copied()
+        .filter(|stall| !stall.is_zero())
+        .collect();
+    let stalled_total: Duration = stalled.iter().sum();
+    let mut stalled_sorted = stalled.clone();
+    stalled_sorted.sort_unstable();
+    let wall_clock = CONTROL_PERIOD * ticks as u32;
+    println!();
+    let pacing = if catch_up { "catch-up" } else { "slip" };
+    println!("-- lockstep playout (presend {presend_label}, duplicates {duplicates}, {pacing}) --");
+    println!(
+        "frames stalled   {} of {ticks} ({:.1}%)",
+        stalled.len(),
+        stalled.len() as f64 / ticks as f64 * 100.0
+    );
+    println!("stall total      {stalled_total:?}");
+    println!(
+        "stall worst      {:?}",
+        stalled_sorted.last().copied().unwrap_or_default()
+    );
+    println!("stall p99        {:?}", percentile(&stalled_sorted, 0.99));
+    println!("schedule slip    {drift:?}");
+    // The price of a bigger horizon is input latency, so report it next to the
+    // stalls it buys off rather than letting the win stand on its own.
+    let horizon_total: Duration = horizons.iter().sum();
+    println!(
+        "input lag mean   {:?}",
+        horizon_total
+            .checked_div(horizons.len().max(1) as u32)
+            .unwrap_or_default()
+    );
+    println!(
+        "input lag max    {:?}",
+        horizons.iter().max().copied().unwrap_or_default()
+    );
+    println!(
+        "time lost        {:.2}% of a {wall_clock:?} session",
+        stalled_total.as_secs_f64() / wall_clock.as_secs_f64() * 100.0
     );
 }
