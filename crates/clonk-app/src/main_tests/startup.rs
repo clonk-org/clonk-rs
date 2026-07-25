@@ -2868,6 +2868,122 @@
     }
 
     #[test]
+    fn abandoning_the_network_lobby_reinitializes_the_startup_loader_screen() {
+        // A left lobby unwinds through C4Application::QuitGame, which re-enters
+        // PreInit; PreInit re-runs InitLoaderScreen(C4CFN_StartupBackgroundMain)
+        // before DoStartup reconstructs the startup dialog
+        // (src/C4Application.cpp:242-247,373-389,418-421). C4Game::Init's join
+        // branch creates a loader only when none exists
+        // (src/C4Game.cpp:371-381), so the next network join must still find
+        // the startup loader installed instead of the loader boundary.
+        let install = tempdir().expect("install root");
+        install_global_gui_and_loader_test_root(install.path());
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_CONTENT_DIR", None),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let installed = app
+            .loader_screen
+            .as_ref()
+            .expect("PreInit installs the startup background loader")
+            .selection()
+            .selected_filename()
+            .to_string();
+
+        app.replace_startup_view(StartupView::NetworkLobby);
+        app.show_main_menu();
+
+        assert_eq!(
+            app.loader_screen
+                .as_ref()
+                .map(|loader| loader.selection().selected_filename().to_string()),
+            Some(installed),
+            "returning to the startup menu re-enters PreInit, which reinstalls the loader"
+        );
+        assert!(app.loader_error.is_none());
+
+        // The join that follows draws behind that retained loader instead of
+        // taking the loader boundary and killing the process.
+        app.mode = AppMode::Loading;
+        let mut frame = vec![0_u8; 640 * 480 * 4];
+        app.render(&mut frame)
+            .expect("the next join renders the retained startup loader");
+    }
+
+    #[test]
+    fn failed_startup_network_restart_reinitializes_the_startup_loader_screen() {
+        // A failed host/join runs the same QuitGame -> PreInit -> DoStartup
+        // shortcut, so PreInit re-initializes the loader screen before the
+        // remembered dialog returns (src/C4Application.cpp:242-247,373-389).
+        let install = tempdir().expect("install root");
+        install_global_gui_and_loader_test_root(install.path());
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_CONTENT_DIR", None),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        assert!(app.loader_screen.is_some());
+
+        app.startup_restart_diagnostics.mark_quit_with_error();
+        app.startup_restart_diagnostics
+            .add_fatal_error("fixture join failure");
+        app.finish_startup_network_restart(StartupNetworkPurpose::Join)
+            .expect("failed join returns through PreInit and DoStartup");
+
+        assert_eq!(
+            app.loader_screen
+                .as_ref()
+                .map(|loader| loader.selection().selected_filename().to_string()),
+            Some("LoaderGoldmine1.png".to_string()),
+            "PreInit reinstalls the startup background loader for the next game"
+        );
+        assert!(app.loader_error.is_none());
+    }
+
+    #[test]
+    fn failed_local_scenario_load_reinitializes_the_startup_loader_screen() {
+        // C4Application::OpenGame's failed ordinary fullscreen start also
+        // unwinds through QuitGame -> PreInit, which re-initializes the loader
+        // before the startup dialog returns (src/C4Application.cpp:242-247,
+        // 373-389,442-451).
+        let install = tempdir().expect("install root");
+        install_global_gui_and_loader_test_root(install.path());
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_CONTENT_DIR", None),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        assert!(app.loader_screen.is_some());
+        app.mode = AppMode::Loading;
+
+        app.finish_scenario_loading_failure("controlled local load failure".to_string(), false)
+            .expect("failed local load returns to the startup selector");
+
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(
+            app.loader_screen
+                .as_ref()
+                .map(|loader| loader.selection().selected_filename().to_string()),
+            Some("LoaderGoldmine1.png".to_string()),
+            "PreInit reinstalls the startup background loader for the next game"
+        );
+        assert!(app.loader_error.is_none());
+    }
+
+    #[test]
     fn pathless_startup_skips_boot_worker_without_bypassing_loader_failure() {
         let mut app = GameApp::new(
             320,

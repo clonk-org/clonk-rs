@@ -2933,7 +2933,9 @@
             &format!("Unable to start network session: {reported_host_error}"),
         );
         assert!(app.staged_network_host_scenario.is_none());
-        assert!(app.loader_screen.is_none());
+        // The return through PreInit re-initializes the loader screen for the
+        // next game (src/C4Application.cpp:242-247,373-389).
+        assert!(app.loader_screen.is_some());
         assert!(app.network.is_none());
         assert!(app.network_mode.is_none());
         let mut frame = vec![0x4c; 800 * 600 * 4];

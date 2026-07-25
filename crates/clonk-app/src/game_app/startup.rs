@@ -2173,8 +2173,7 @@ impl GameApp {
         self.network_lobby = None;
         self.network_start_wait = None;
         self.staged_network_host_scenario = None;
-        self.loader_screen = None;
-        self.loader_error = None;
+        self.reinitialize_startup_loader_screen();
         self.abandon_live_masterserver_signup();
         self.clear_pending_league_player_auth();
         self.network_game_advertiser = None;
@@ -4811,7 +4810,7 @@ impl GameApp {
             self.clear_lobby_preload();
             self.host_lobby_countdown = None;
             self.pending_local_lobby_countdown_echoes.clear();
-            self.loader_screen = None;
+            self.reinitialize_startup_loader_screen();
             self.abandon_live_masterserver_signup();
             self.network = None;
             self.network_mode = None;
@@ -5447,6 +5446,35 @@ impl GameApp {
                 view: self.startup_view,
             },
         )))
+    }
+
+    /// `C4Application::PreInit` re-runs
+    /// `InitLoaderScreen(C4CFN_StartupBackgroundMain)` on every return to the
+    /// startup dialog, so an abandoned or failed game never leaves the engine
+    /// without a loader (`src/C4Application.cpp:242-247,373-389,418-421`).
+    /// `C4Game::Init` relies on that: its join branch builds one only when
+    /// `pLoaderScreen` is null (`src/C4Game.cpp:371-381`), and a joining
+    /// client otherwise loads behind the retained startup background.
+    /// `InitLoaderScreen` replaces the live screen only on success
+    /// (`src/C4GraphicsSystem.cpp:301-311`); a failure is fatal there and is
+    /// reported here through the same loader boundary the initial launch uses.
+    pub(crate) fn reinitialize_startup_loader_screen(&mut self) {
+        let Some(paths) = self.app_paths.as_ref() else {
+            // Path-less state fixtures have no install to re-init from.
+            self.loader_screen = None;
+            self.loader_error = None;
+            return;
+        };
+        match build_startup_loader(paths, self.assets.as_ref()) {
+            Ok(setup) => {
+                self.loader_screen = Some(setup.screen);
+                self.loader_error = None;
+            }
+            Err(error) => {
+                tracing::error!(%error, "classic startup loader reinitialization failed");
+                self.loader_error = Some(error.to_string());
+            }
+        }
     }
 
     pub(crate) fn loader_boundary(&self, detail: impl Into<String>) -> anyhow::Error {

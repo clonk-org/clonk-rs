@@ -1821,7 +1821,9 @@
         assert_eq!(failure.mode, AppMode::Menu);
         assert_eq!(failure.startup_view, StartupView::MainMenu);
         assert!(failure.loading_state.is_none());
-        assert!(failure.loader_screen.is_none());
+        // The return through PreInit re-initializes the loader screen for the
+        // next game (src/C4Application.cpp:242-247,373-389).
+        assert!(failure.loader_screen.is_some());
         assert!(failure.loader_error.is_none());
         assert!(failure.active_global_gui_failures.is_empty());
         assert_startup_error_log(
