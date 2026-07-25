@@ -195,6 +195,16 @@ live comparison.
   -deadline. Same family as the entry above — root-cause, do not add a retry.
 - Tutorial/UI: exact menus, HUD, evaluation, audio, and startup/options; 2×/3×
   startup-main text is native, while fractional/other scaled text remains blurred.
+- ActMap `Sound=` (C4Object.cpp:4149-4152, 4186-4190) now emits the looping,
+  object-attached start/stop pair. C++ emits it inside `SetAction`; the port
+  reconciles the frame's resulting action slot in `reconcile_action_sounds`
+  (`engine/tick.rs`) because Rust mutates action state from a dozen sites and a
+  per-site hook would leak a stuck loop wherever one was missed. Sound is
+  client-local presentation, so this costs no determinism. Residual: an
+  A→B→A round trip completed *inside* one frame is not heard, where C++ would
+  stop and restart within that same 1/36 s. Latent for shipped content — of the
+  160 actions declaring `Sound=`, the 10 that live a single frame are all either
+  self-looping (`NextAction` = own name) or `HOLD`, so none vanish intra-frame.
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
   movement/collision/attachment, vehicles, containers, and callback order;
   remaining spell effects/combo casts;

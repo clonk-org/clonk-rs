@@ -1941,6 +1941,11 @@ pub struct Object {
     #[doc(hidden)]
     pub commands: CommandStack,
     pub(crate) pending_action_events: VecDeque<ActionTransitionEvent>,
+    /// ActMap `Sound=` of the numeric action slot this object currently holds
+    /// a looping `StartSoundEffect` instance for (C4Object.cpp:4186-4190).
+    /// Client-local presentation state like the rest of C4SoundSystem: it is
+    /// neither synchronized nor save-persisted, so it stays off `ObjectState`.
+    pub(crate) active_action_sound: Option<String>,
     /// The DFA_SWIM free-fall exit `return`ed out of ExecAction this
     /// frame BEFORE any t_attach assignment — the frame's movement runs
     /// unattached (C4Object.cpp:4692,4956).
@@ -2140,6 +2145,7 @@ impl Object {
             command_queue: VecDeque::new(),
             commands: CommandStack::new(),
             pending_action_events: VecDeque::new(),
+            active_action_sound: None,
             swim_exit_this_frame: false,
             material_contents: Vec::new(),
             shape_template,

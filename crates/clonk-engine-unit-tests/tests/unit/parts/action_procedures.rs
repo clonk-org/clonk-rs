@@ -6593,3 +6593,132 @@ protected func Ejection(object item) { item->Mark(1); return 1; }
                 if name == "Trumpet" && *target == Some(fighter_id)
         )));
     }
+
+    /// `C4Object::SetAction` stops the outgoing action's ActMap sound and
+    /// starts the incoming one as an object-attached LOOP at volume 100
+    /// (C4Object.cpp:4149-4152, 4186-4190 — `StartSoundEffect(..., +1, 100,
+    /// this)`), both gated on the numeric action slot actually changing.
+    /// EkeReloaded's Uzi is the shape under test: `Shoot` declares
+    /// `Sound=UZ_Shoot` with `NextAction=Shoot`, so the burst must be one
+    /// continuous loop rather than silence or a per-frame retrigger.
+    #[test]
+    fn actmap_sound_loops_while_its_action_slot_stays_selected() {
+        let uzi_sound = |snapshot: &SimulationSnapshot, id| {
+            snapshot
+                .audio
+                .iter()
+                .filter(|command| {
+                    matches!(
+                        command,
+                        AudioCommand::PlaySound { name, target, .. } | AudioCommand::StopSound { name, target }
+                            if name == "UZ_Shoot" && *target == Some(id)
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        let mut definition = Definition::from_script("Uzi", "Uzi", "func Initialize() { }")
+            .expect("script compiles");
+        definition.configure_actions(
+            Some("Idle".to_string()),
+            HashMap::from([
+                ("Idle".to_string(), ActionSpec::default()),
+                (
+                    "Shoot".to_string(),
+                    ActionSpec::default()
+                        .with_length(1)
+                        .with_delay(1)
+                        .with_next("Shoot")
+                        .with_sound("UZ_Shoot"),
+                ),
+                (
+                    "Burst".to_string(),
+                    ActionSpec::default()
+                        .with_length(2)
+                        .with_delay(1)
+                        .with_next("Idle")
+                        .with_sound("UZ_Shoot"),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(5);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let shooter = engine
+            .spawn_object(
+                SpawnConfig::new("Uzi")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_action(ActionState::new("Shoot")),
+            )
+            .expect("shooter spawns");
+
+        // Entering the slot starts one attached loop at volume 100.
+        let started = engine.tick().expect("first tick succeeds");
+        assert!(
+            matches!(
+                uzi_sound(&started, shooter).as_slice(),
+                [AudioCommand::PlaySound {
+                    volume: 100,
+                    looped: true,
+                    // StartSoundEffect calls NewInstance unconditionally
+                    // (C4SoundSystem.cpp:54-58); only FnSound gates on
+                    // IsSoundPlaying (C4Script.cpp:2317-2319).
+                    multiple: true,
+                    ..
+                }]
+            ),
+            "entering Shoot starts exactly one looped attached sound, got {:?}",
+            uzi_sound(&started, shooter)
+        );
+
+        // NextAction=Shoot re-selects the SAME numeric slot every frame, and
+        // C++ gates both the stop and the start on `iAct != iLastAction`, so
+        // the loop must keep running untouched.
+        for frame in 0..8 {
+            let snapshot = engine.tick().expect("self-transition tick succeeds");
+            assert_eq!(
+                snapshot.object(shooter).expect("shooter present").action.name,
+                "Shoot",
+            );
+            assert!(
+                uzi_sound(&snapshot, shooter).is_empty(),
+                "frame {frame}: a same-slot NextAction must not retrigger the loop, got {:?}",
+                uzi_sound(&snapshot, shooter)
+            );
+        }
+
+        // Leaving the slot stops it, and Idle carries no sound of its own.
+        let burst = engine
+            .spawn_object(
+                SpawnConfig::new("Uzi")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_action(ActionState::new("Burst")),
+            )
+            .expect("burst shooter spawns");
+        let burst_started = engine.tick().expect("burst tick succeeds");
+        assert!(
+            matches!(
+                uzi_sound(&burst_started, burst).as_slice(),
+                [AudioCommand::PlaySound { looped: true, .. }]
+            ),
+            "entering Burst starts its loop, got {:?}",
+            uzi_sound(&burst_started, burst)
+        );
+        let stopped = engine.tick().expect("burst-to-idle tick succeeds");
+        assert_eq!(
+            stopped.object(burst).expect("burst present").action.name,
+            "Idle",
+        );
+        assert!(
+            matches!(
+                uzi_sound(&stopped, burst).as_slice(),
+                [AudioCommand::StopSound { .. }]
+            ),
+            "leaving the slot stops the loop exactly once, got {:?}",
+            uzi_sound(&stopped, burst)
+        );
+    }
