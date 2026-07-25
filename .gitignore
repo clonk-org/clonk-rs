@@ -59,8 +59,12 @@ _deps/
 *.orig
 *.rej
 *.patch
-core
-core.*
+# Unix core dumps land at the working-directory root and are named `core` or
+# `core.<pid>`. Anchoring and digit-matching keeps the rule from swallowing
+# Rust modules named `core` (an unanchored `core.*` silently excluded
+# crates/clonk-engine/src/scenario/core.rs from its own split commit).
+/core
+core.[0-9]*
 
 # Generated dependencies
 *.d
