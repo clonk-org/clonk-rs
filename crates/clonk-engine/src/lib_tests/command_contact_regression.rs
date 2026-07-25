@@ -820,3 +820,77 @@ fn sector_queries_do_not_materialize_the_landscape_shell() {
         "sector sizing must not clone the landscape shell"
     );
 }
+
+#[test]
+fn sector_query_ordering_is_frozen_across_rebuild_and_incremental_paths() {
+    // FREEZE, not a new behavior claim. `C4LSectors` keeps its own physical
+    // per-sector list order and refreshes only a rank oracle on SortByCategory
+    // (oracle-src-pinned src/C4Sector.cpp:107-160), so a map rebuilt from the
+    // current object set and a map mutated incrementally can legitimately
+    // disagree. FindObject ordering is determinism-critical, so pin the exact
+    // sequences the callback-local rebuild produces today. Any change to how
+    // host contexts obtain their sector map must leave every assertion here
+    // untouched.
+    let mut engine = Engine::with_seed(0);
+    for id in ["SCTA", "SCTB"] {
+        engine
+            .register_definition(
+                Definition::from_script(id, id, "").expect("definition compiles"),
+            )
+            .expect("definition registers");
+    }
+    engine.set_landscape(Landscape::flat(400, 200));
+
+    // Spread objects across sector boundaries and interleave the two
+    // definitions so an ordering change cannot hide behind a stable grouping.
+    let mut spawned = Vec::new();
+    for index in 0..24 {
+        let id = if index % 2 == 0 { "SCTA" } else { "SCTB" };
+        let object = engine
+            .spawn_object(
+                SpawnConfig::new(id).with_position(Vector2::new(9 + index * 15, 20 + index % 5)),
+            )
+            .expect("object spawns");
+        spawned.push(object);
+    }
+
+    let context = engine.host_world_context();
+    let whole = context
+        .object_sector_ids_in_rect(DefinitionRect::new(0, 0, 400, 200))
+        .expect("a landscape-backed context has a sector map");
+    assert_eq!(
+        whole,
+        spawned,
+        "a full-extent query returns every object in master-list order"
+    );
+
+    // A narrow rect resolves to whole overlapping sectors, so the result is a
+    // broad-phase superset of the rect: the last object returned sits at
+    // x=249, outside the 100..220 query, and comes back because its sector
+    // overlaps. That
+    // is the C4LSectors contract, and the callers filter afterwards. Freeze the
+    // exact span and its order.
+    let window = context
+        .object_sector_ids_in_rect(DefinitionRect::new(100, 0, 120, 200))
+        .expect("sector map present");
+    let expected_window: Vec<_> = spawned.iter().copied().skip(7).take(10).collect();
+    assert_eq!(
+        window, expected_window,
+        "a partial rect preserves master-list order within the covered sectors"
+    );
+
+    // Per-sector lists are the shape FindObject consumes; freeze the grouping
+    // as well as the flattening, since only the latter is order-insensitive.
+    let lists = context
+        .object_sector_id_lists_in_rect(DefinitionRect::new(0, 0, 400, 200))
+        .expect("sector map present");
+    assert_eq!(
+        lists.iter().flatten().copied().collect::<Vec<_>>(),
+        spawned,
+        "per-sector lists flatten back to master-list order"
+    );
+    assert!(
+        lists.iter().any(|list| list.len() > 1),
+        "the fixture must actually populate a shared sector, or it freezes nothing"
+    );
+}
