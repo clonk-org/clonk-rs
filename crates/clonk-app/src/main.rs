@@ -11,6 +11,15 @@
     clippy::too_many_arguments
 )]
 
+// A simulation frame makes many thousands of short-lived allocations: host
+// world contexts, per-call object materialization and script values are all
+// built and dropped inside one tick. The system allocator is the bottleneck in
+// that regime on macOS; measured -29% mean and -35% p99 tick time on MeltMe.
+// The win is allocator-relative, so platforms whose default allocator already
+// handles small-object churn well (glibc's tcache) may see much less.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod advanced_config;
 mod classic_record_stream;
 mod control_options;

@@ -5,8 +5,8 @@ Generated with cargo-about 0.9.1 from the locked, all-target release
 dependency graphs of clonk-app and clonk-game. Development dependencies are
 excluded. Duplicate entries between the two binary graphs are intentional.
 
-Cargo.lock FNV-1a 64: 4020746ad4b5b6d4
-Release dependency inputs FNV-1a 64: e51e1c57b2fddca9
+Cargo.lock FNV-1a 64: 24b6ad5f7cdb0e9c
+Release dependency inputs FNV-1a 64: 95ea7a37bc798297
 Project source: ISC (see ../COPYING).
 Game content: separate CC BY-NC terms (see clonk_content_license.txt).
 Third-party Rust crates: their respective licenses below.
@@ -774,6 +774,10 @@ libloading 0.8.9
 License expression: ISC
 Repository: https://github.com/nagisa/rust_libloading/
 
+libmimalloc-sys 0.1.49
+License expression: MIT
+Repository: https://github.com/purpleprotocol/mimalloc_rust/tree/master/libmimalloc-sys
+
 libredox 0.1.10
 License expression: MIT
 Repository: https://gitlab.redox-os.org/redox-os/libredox.git
@@ -845,6 +849,10 @@ Repository: https://github.com/gfx-rs/metal-rs
 midly 0.5.3
 License expression: Unlicense
 Repository: https://github.com/negamartin/midly
+
+mimalloc 0.1.52
+License expression: MIT
+Repository: https://github.com/purpleprotocol/mimalloc_rust
 
 minimp3 0.5.2
 License expression: MIT
@@ -12362,6 +12370,37 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ------------------------------------------------------------------------
 License: MIT — MIT License
 Used by:
+- mimalloc 0.1.52
+
+Copyright 2019 Octavian Oncescu
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+------------------------------------------------------------------------
+License: MIT — MIT License
+Used by:
 - font8x8 0.3.1
 
 MIT License
@@ -12423,6 +12462,34 @@ Used by:
 MIT License
 
 Copyright (c) 2018 diwic
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+------------------------------------------------------------------------
+License: MIT — MIT License
+Used by:
+- libmimalloc-sys 0.1.49
+
+MIT License
+
+Copyright (c) 2018-2025 Microsoft Corporation, Daan Leijen
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

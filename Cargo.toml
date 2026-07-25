@@ -43,6 +43,16 @@ publish = false
 [patch.crates-io]
 block = { path = "third_party/block" }
 
+# The shipped profile. Cargo's defaults (no LTO, 16 codegen units) leave real
+# throughput on the table for a workload dominated by the simulation loop and
+# the C4Script tree-walk, both of which cross crate boundaries constantly.
+# Thin LTO measured no worse than fat at a fraction of the link cost, so the
+# extra fat-LTO time buys nothing here. `panic` deliberately stays `unwind`:
+# the app relies on catching a panic to survive GPU device loss.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 # Keep the ordinary edit/build loop lightly optimized. Live gameplay uses the
 # `play` profile below so runtime-heavy rendering and simulation do not force
 # level-3 codegen onto every development build.

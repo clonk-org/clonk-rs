@@ -12,6 +12,9 @@ publish.workspace = true
 [dependencies]
 anyhow = "1.0"
 arboard = { version = "3.3", default-features = false }
+# Global allocator for the shipped binary; see the `global_allocator` comment in
+# main.rs. Default features off keeps the secure/debug modes out of the build.
+mimalloc = { version = "0.1", default-features = false }
 gilrs = "0.10"
 clonk-app-core = { path = "../clonk-app-core" }
 clonk-app-menus = { path = "../clonk-app-menus" }
