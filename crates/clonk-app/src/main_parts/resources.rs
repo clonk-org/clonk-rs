@@ -2166,17 +2166,6 @@ pub(crate) fn current_offline_round_random_seed(parameter_seed: Option<i32>) -> 
     resolve_offline_round_random_seed(parameter_seed, current_unix_timestamp(), pin.as_deref())
 }
 
-fn format_saved_timestamp(seconds: u64) -> String {
-    if let Ok(datetime) = OffsetDateTime::from_unix_timestamp(seconds as i64) {
-        let format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second] UTC");
-        match datetime.format(&format) {
-            Ok(value) => value,
-            Err(_) => format!("{}", seconds),
-        }
-    } else {
-        format!("{}", seconds)
-    }
-}
 
 pub(crate) fn format_startup_crew_birthday(seconds: i32) -> String {
     if seconds == 0 {
@@ -2464,76 +2453,13 @@ pub(crate) fn load_save_entry(path: &Path) -> Result<SaveEntry> {
             }
         })
         .unwrap_or_else(|| header.scenario.title.clone());
-    let saved_label = format_saved_timestamp(header.saved_at_seconds);
-    let thumbnail_path = path.with_extension("png");
-    let thumbnail = load_save_thumbnail(&thumbnail_path);
     Ok(SaveEntry {
         display_name,
-        scenario_title: header.scenario.title.clone(),
         saved_at_seconds: header.saved_at_seconds,
-        saved_label,
         path: path.to_path_buf(),
-        thumbnail,
     })
 }
 
-fn load_save_thumbnail(path: &Path) -> Option<ImageData> {
-    let file = File::open(path).ok()?;
-    let decoder = Decoder::new(file);
-    let mut reader = decoder.read_info().ok()?;
-    let palette = reader.info().palette.clone();
-    let transparency = reader.info().trns.clone();
-    let mut buf = vec![0; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).ok()?;
-    let data = &buf[..info.buffer_size()];
-    let pixels = match info.color_type {
-        ColorType::Rgba => data.to_vec(),
-        ColorType::Rgb => {
-            let mut rgba = Vec::with_capacity(data.len() / 3 * 4);
-            for chunk in data.chunks_exact(3) {
-                rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
-            }
-            rgba
-        }
-        ColorType::Grayscale => {
-            let mut rgba = Vec::with_capacity(data.len() * 4);
-            for &value in data {
-                rgba.extend_from_slice(&[value, value, value, 255]);
-            }
-            rgba
-        }
-        ColorType::GrayscaleAlpha => {
-            let mut rgba = Vec::with_capacity(data.len() / 2 * 4);
-            for chunk in data.chunks_exact(2) {
-                let value = chunk[0];
-                let alpha = chunk[1];
-                rgba.extend_from_slice(&[value, value, value, alpha]);
-            }
-            rgba
-        }
-        ColorType::Indexed => {
-            let palette = palette?;
-            let mut rgba = Vec::with_capacity(data.len() * 4);
-            for &index in data {
-                let position = (index as usize) * 3;
-                if position + 2 >= palette.len() {
-                    continue;
-                }
-                let r = palette[position];
-                let g = palette[position + 1];
-                let b = palette[position + 2];
-                let a = transparency
-                    .as_ref()
-                    .and_then(|values| values.get(index as usize))
-                    .copied()
-                    .unwrap_or(255);
-                rgba.extend_from_slice(&[r, g, b, a]);
-            }
-            rgba
-        }
-    };
-    Some(ImageData::new(info.width, info.height, pixels))
-}
 
 pub(crate) fn parse_config_bool(raw: &str) -> bool {
     matches!(

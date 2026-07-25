@@ -185,6 +185,14 @@ live comparison.
   is a real-socket reconnect test, so it is load/timing sensitive like the
   `control_sync_and_reconnect_smoke` case that already carries `retries = 2` in
   `.config/nextest.toml`. Root-cause it rather than adding another retry.
+- Flaky test (observed 2026-07-24, not fixed): `clonk-network`
+  `session::tests::sync_controls_wait_for_status_barrier_and_keep_fifo_order`
+  failed once in a full workspace run at `session.rs:13493`, asserting that no
+  client event arrives within a 50 ms `timeout`. It passed 5/5 in isolation and
+  the immediately following full run was 8834/8834. A negative assertion with a
+  50 ms budget cannot survive a loaded scheduler; the barrier it is pinning
+  should be observed by a deterministic signal rather than by absence-within-a
+  -deadline. Same family as the entry above — root-cause, do not add a retry.
 - Tutorial/UI: exact menus, HUD, evaluation, audio, and startup/options; 2×/3×
   startup-main text is native, while fractional/other scaled text remains blurred.
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
